@@ -40,7 +40,7 @@ check "③ acceptance file committed: $ACCEPTANCE_RS" \
   test -f "$ACCEPTANCE_RS"
 
 # ── (b) cargo test --list declares item_3, item_4, item_6 ────────────────────
-TESTLIST="$(cargo test -p hugit-queue --test "acceptance_${WP_ID}" -- --list 2>/dev/null || true)"
+export TESTLIST="$(cargo test -p hugit-queue --test "acceptance_${WP_ID}" -- --list 2>/dev/null || true)"
 
 check "③ item_3 test declared (force_push_recompute)" \
   bash -c "printf '%s\n' \"\$TESTLIST\" | grep -q 'item_3'"
