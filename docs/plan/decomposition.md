@@ -1,4 +1,15 @@
-# hugit — formal decomposition (v1.10 — post critic round 10)
+# hugit — formal decomposition (v1.11 — post critic round 11)
+
+> v1.11 (2026-06-05): R11 found the best first-order gap in five rounds —
+> **X10④⑤ the shared API-tenancy channel**: hugit runs its substrate INSIDE
+> CoreLink prod as a paying tenant, so the most realistic focus-gate break is
+> a noisy-neighbor hugit degrading CoreLink's launch customers through
+> CoreLink's own fairness layer — structurally outside infra isolation
+> (boxes/quotas), untested until now. Fixed two ways: the load test drives
+> hugit's real CAS/AC/R2 customer workload against CoreLink prod (④), and
+> hugit's tenant consumption is policy-capped so storms are bounded before
+> they test fairness (⑤). Critic's own words: "all other candidate seams are
+> fourth-order." Convergence: 42→23→16→4→4→3→2→1→1→2→1. R12 dispatched.
 
 > v1.10 (2026-06-05): R10's two intersection-of-intersections integrated:
 > **X7④ erasure×seal precedence** (lawful erasure of a corpus datapoint is
@@ -166,7 +177,7 @@ model, principal, sig}` · `RegenGate {optin_scope, repass, indep_verdict}`.
 | **X7 (R2)** right-to-erasure | L·opus | ① a data subject's personal data provably erased across CAS + provenance/ledger + context store + the GitHub mirror **+ the experiment corpus (R10)** · ② no orphaned provenance refs survive erasure · ③ attestation chains re-seal or fail CLOSED after erasure (never silently broken) · **④(R10) erasure × seal precedence: lawful erasure of a corpus datapoint is PERMITTED despite the seal, and the gate verdict invalidates FAIL-CLOSED (claims/regen re-pin until re-evaluation) — never blocked by the seal, never a silently broken seal** | sprint 2 |
 | **X8 (R2)** self-release attestation | M·opus | ① every hugit App/CLI/runner-image release signed + published to a verifiable transparency log · ② the running App verifies its own provenance at boot · ③ unsigned/tampered self-build fails CLOSED | sprint 2 |
 | **X9 (R2)** cross-phase object identity | S·sonnet | ① a CheckResult memoized by the phase-B App is bit-identical to the one served as evidence in a phase-D verdict panel for the same (tree,def,toolchain) · ② mismatch fails CLOSED + alerts · **③(R10) intent_id identity: the id minted by a phase-B sidecar is identical and non-colliding with the native phase-D intent for the same logical intent — one lifecycle, one id; divergence/collision fails CLOSED (link-resolution alone is insufficient — X14 covers resolution, this covers identity)** | sprint 2 |
-| **X10 (R3)** the focus gate itself | M·sonnet | ① under hugit's heaviest sustained load (runner fleet + union queue + dogfood soak): CoreLink's launch route/sessions/CI capacity show ZERO measurable degradation vs a hugit-idle baseline · ② the dogfood target set provably excludes corelink-server — enrollment during the launch window FAILS the build · ③ **🔧 X6 rescoped: X6 = intra-hugit tenant isolation (axes: CPU/IO/DO-storage/CAS-bandwidth/runner-slots, bounds stated); X10 = the adjacent-product boundary** | both SEALs |
+| **X10 (R3)** the focus gate itself | M·sonnet | ① under hugit's heaviest sustained load (runner fleet + union queue + dogfood soak): CoreLink's launch route/sessions/CI capacity show ZERO measurable degradation vs a hugit-idle baseline · ② the dogfood target set provably excludes corelink-server — enrollment during the launch window FAILS the build · ③ **🔧 X6 rescoped: X6 = intra-hugit tenant isolation; X10 = the adjacent-product boundary** · **④(R11) the SHARED API-TENANCY channel: drive hugit's full fleet-scale CAS/AC/R2 customer workload against CoreLink prod (write storms, cold-tier bursts, AC floods) and assert CoreLink's OTHER tenants' latency/availability are unaffected through CoreLink's own fairness layer — infra isolation does not reach this channel; the tenancy is shared by design** · **⑤(R11) preventive bound: hugit's own CoreLink-tenant consumption is rate/budget-capped by policy, so a hugit-side storm is structurally bounded before it ever tests CoreLink's fairness** | both SEALs |
 | **X11 (R4)** degradation composition | M·opus | ① smart-layer failure injected MID-operation (partial degradation window, not just steady-state outage): secrets broker fails CLOSED — no credential reaches any workspace during degradation · ② objects written during degradation are marked provenance-ABSENT; no synthetic intent/attestation ever fabricated by a fallback path · ③ CoreLink non-interference (X10 baseline) holds WHILE hugit is degraded, not only when healthy | sprint 2 |
 | **X12 (R4)** erasure × provenance × mirror | M·opus | ① after an erasure request the attestation chain remains independently verifiable with the erased object as a tamper-evident TOMBSTONE (never silently re-linked) · ② the mirror-side erasure obligation (data already replicated to GitHub) is discharged or explicitly surfaced as residual risk — and that disclosure is part of the export/exit proof | sprint 2 |
 | **X13 (R5)** legibility × degradation/erasure | M·opus | ① with the intelligence layer DEGRADED: the human's down-zoom (raw-commit view, deep links, `why`) still resolves via plain git OR fails HONESTLY (explicit "layer unavailable"), never a silent 404/blank · ② after an erasure cascade: following any chain reaches an honest tombstone, never a broken link — the human can ALWAYS follow, in every substrate state | sprint 2 |
@@ -211,9 +222,10 @@ test crates + red-team fixtures (`crates/hugit-invariants`).
   R1=42+8 · R2=23+8 · R3=16+10 · R4=4+2 · R5=4+2 (C,D **CLOSED**) ·
   R6=3+4 (B **CLOSED**) · R7=2+1 (E dry #1) · R8=1+0 (**E CLOSED**) ·
   R9=1+1 (corpus source-eligibility → D8⑧) · R10=2+2 (erasure×seal → X7④;
-  intent_id identity → X9③; gate-report attestation → D8⑨; regen→verdict
-  link → D12④). **Closed: B, C, D, E.** Open: X only (needs R11+R12 dry).
-  Then: WP token re-slicing (≤100k hard / 80k ideal, DoD per WP).
+  intent_id identity → X9③) · R11=1+0 (**the shared API-tenancy channel →
+  X10④⑤** — first-order; critic: "all other seams are fourth-order").
+  **Closed: B, C, D, E.** Open: X only (needs R12+R13 dry). Then: WP token
+  re-slicing (≤100k hard / 80k ideal, DoD per WP).
 - **Adjudications on record (so future critics don't re-litigate):**
   "no-fake-intents at runtime" covered by D3⑤ (steady-state raw push) +
   D4④ (mixed-altitude fixture) + E2⑤ (import boundary); bidirectional
