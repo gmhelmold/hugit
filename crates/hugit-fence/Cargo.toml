@@ -5,3 +5,9 @@ edition = "2024"
 publish = false
 
 [dependencies]
+hugit-contracts = { path = "../hugit-contracts" }
+hugit-runner = { path = "../hugit-runner" }
+anyhow = "1"
+sha2 = "0.10"
+
+[dev-dependencies]

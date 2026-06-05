@@ -228,6 +228,12 @@ version = "0.1.0"
 [[package]]
 name = "hugit-fence"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hugit-contracts",
+ "hugit-runner",
+ "sha2",
+]
 
 [[package]]
 name = "hugit-ledger"
