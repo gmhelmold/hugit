@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>hugit — o pitch · forge LLM-native, compatível com git</title>
+<style>
+  :root{
+    --bg:#0a0e14; --bg2:#0e131b; --panel:#121823; --panel2:#161d2a;
+    --line:rgba(255,255,255,.08); --line2:rgba(255,255,255,.14);
+    --tx:#e8eef5; --mut:#94a0ae; --dim:#5c6773;
+    --brand:#ff6a39; --brand2:#ff3d81;
+    --tech:#58a6ff; --shark:#f2cc60; --prag:#3fd97f; --user:#bc8cff;
+    --acc:var(--brand);
+    --mono:ui-monospace,'SF Mono','Cascadia Code','JetBrains Mono',Menlo,Consolas,monospace;
+    --sans:ui-sans-serif,-apple-system,'SF Pro Display','Segoe UI',Inter,Roboto,'Helvetica Neue',sans-serif;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html{scroll-behavior:smooth;scroll-padding-top:90px}
+  body{background:var(--bg);color:var(--tx);font-family:var(--sans);line-height:1.6;overflow-x:hidden}
+  ::selection{background:var(--brand);color:#fff}
+
+  body[data-persona="tech"]{--acc:var(--tech)}
+  body[data-persona="shark"]{--acc:var(--shark)}
+  body[data-persona="prag"]{--acc:var(--prag)}
+  body[data-persona="user"]{--acc:var(--user)}
+
+  .wrap{max-width:1120px;margin:0 auto;padding:0 28px}
+  section{padding:88px 0;position:relative}
+  h2{font-size:clamp(28px,4vw,40px);font-weight:800;letter-spacing:-.02em;line-height:1.15;margin-bottom:14px}
+  h3{font-size:20px;font-weight:700;margin-bottom:8px;letter-spacing:-.01em}
+  p{color:var(--mut)}
+  .kicker{font-family:var(--mono);font-size:12px;letter-spacing:.22em;text-transform:uppercase;color:var(--acc);margin-bottom:14px;display:flex;align-items:center;gap:10px}
+  .kicker::before{content:"";width:26px;height:1px;background:var(--acc)}
+  .lead{font-size:18px;max-width:760px}
+  strong{color:var(--tx)}
+  em{color:var(--tx);font-style:italic}
+  code{font-family:var(--mono);font-size:.92em;background:rgba(255,255,255,.06);border:1px solid var(--line);border-radius:6px;padding:1px 6px;color:var(--tx)}
+
+  /* ---------- top nav ---------- */
+  nav{position:fixed;top:0;left:0;right:0;z-index:100;background:rgba(10,14,20,.82);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
+  .nav-in{max-width:1120px;margin:0 auto;padding:0 28px;height:64px;display:flex;align-items:center;gap:18px}
+  .logo{font-family:var(--mono);font-weight:700;font-size:18px;color:var(--tx);text-decoration:none;letter-spacing:-.02em;white-space:nowrap}
+  .logo b{background:linear-gradient(90deg,var(--brand),var(--brand2));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .logo span{color:var(--dim);font-weight:400}
+  .tabs{display:flex;gap:6px;margin-left:auto;flex-wrap:wrap}
+  .tab{font-family:var(--mono);font-size:12.5px;color:var(--mut);text-decoration:none;padding:7px 13px;border:1px solid transparent;border-radius:99px;transition:.2s;white-space:nowrap}
+  .tab:hover{color:var(--tx);border-color:var(--line2)}
+  .tab.on{color:#0a0e14;font-weight:700}
+  .tab[data-p="tech"].on{background:var(--tech)}
+  .tab[data-p="shark"].on{background:var(--shark)}
+  .tab[data-p="prag"].on{background:var(--prag)}
+  .tab[data-p="user"].on{background:var(--user)}
+  .tab[data-p="all"].on{background:linear-gradient(90deg,var(--brand),var(--brand2));color:#fff}
+  .kbd-hint{font-family:var(--mono);font-size:11px;color:var(--dim);display:none}
+  @media(min-width:1000px){.kbd-hint{display:block}}
+
+  /* ---------- hero ---------- */
+  .hero{min-height:96vh;display:flex;align-items:center;padding-top:110px;position:relative}
+  .hero::before{content:"";position:absolute;inset:0;background:
+    radial-gradient(900px 480px at 75% 8%,rgba(255,106,57,.13),transparent 60%),
+    radial-gradient(700px 420px at 12% 88%,rgba(188,140,255,.09),transparent 60%);pointer-events:none}
+  .conf{font-family:var(--mono);font-size:11.5px;letter-spacing:.28em;color:var(--dim);text-transform:uppercase;margin-bottom:26px}
+  .conf i{color:var(--brand);font-style:normal}
+  h1{font-size:clamp(44px,7.4vw,86px);font-weight:850;letter-spacing:-.035em;line-height:1.04;margin-bottom:26px}
+  .grad{background:linear-gradient(90deg,var(--brand),var(--brand2));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .thesis{font-size:clamp(17px,2.1vw,22px);color:var(--mut);max-width:780px;margin-bottom:14px}
+  .thesis b{color:var(--tx)}
+  .cursor{display:inline-block;width:.55em;height:1em;background:var(--brand);vertical-align:-.12em;animation:blink 1.1s steps(1) infinite}
+  @keyframes blink{50%{opacity:0}}
+
+  .term{font-family:var(--mono);font-size:13.5px;background:#0c1118;border:1px solid var(--line2);border-radius:12px;margin-top:44px;max-width:780px;overflow:hidden;box-shadow:0 24px 60px rgba(0,0,0,.45)}
+  .term-bar{display:flex;gap:7px;padding:11px 14px;border-bottom:1px solid var(--line);background:rgba(255,255,255,.02)}
+  .term-bar i{width:11px;height:11px;border-radius:50%;background:#2c333d}
+  .term-bar i:nth-child(1){background:#ff5f57}.term-bar i:nth-child(2){background:#febc2e}.term-bar i:nth-child(3){background:#28c840}
+  .term-body{padding:18px 20px;line-height:1.85;color:var(--mut)}
+  .term-body .pr{color:var(--prag)} .term-body .cm{color:var(--dim)} .term-body .hi{color:var(--tx)} .term-body .or{color:var(--brand)}
+
+  /* ---------- stat strip ---------- */
+  .strip{border-top:1px solid var(--line);border-bottom:1px solid var(--line);background:var(--bg2)}
+  .strip-in{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line)}
+  .stat{background:var(--bg2);padding:30px 26px}
+  .stat .n{font-family:var(--mono);font-size:clamp(26px,3.4vw,38px);font-weight:700;color:var(--tx);letter-spacing:-.02em}
+  .stat .n s{font-size:.62em;color:var(--acc);text-decoration:none;vertical-align:.16em}
+  .stat .l{font-size:13px;color:var(--mut);margin-top:6px}
+  .stat .src{font-family:var(--mono);font-size:10.5px;color:var(--dim);margin-top:8px}
+  @media(max-width:880px){.strip-in{grid-template-columns:repeat(2,1fr)}}
+
+  /* ---------- cards/grids ---------- */
+  .grid{display:grid;gap:16px;margin-top:36px}
+  .g2{grid-template-columns:repeat(2,1fr)} .g3{grid-template-columns:repeat(3,1fr)} .g4{grid-template-columns:repeat(4,1fr)}
+  @media(max-width:880px){.g2,.g3,.g4{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:24px;transition:.25s}
+  .card:hover{border-color:var(--line2);transform:translateY(-2px)}
+  .card h4{font-size:15.5px;font-weight:700;margin-bottom:8px;display:flex;align-items:center;gap:9px}
+  .card p{font-size:13.8px}
+  .card .tag{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--acc);border:1px solid;border-radius:99px;padding:2px 9px;opacity:.9}
+  .ic{width:30px;height:30px;border-radius:9px;display:inline-flex;align-items:center;justify-content:center;font-size:15px;background:color-mix(in srgb,var(--acc) 14%,transparent);border:1px solid color-mix(in srgb,var(--acc) 30%,transparent);flex:none}
+
+  /* persona section headers */
+  .pers{border-top:1px solid var(--line)}
+  .pers-head{display:flex;align-items:flex-start;gap:20px;margin-bottom:10px}
+  .avatar{width:62px;height:62px;border-radius:18px;flex:none;display:flex;align-items:center;justify-content:center;font-size:28px;background:color-mix(in srgb,var(--acc) 13%,transparent);border:1px solid color-mix(in srgb,var(--acc) 36%,transparent)}
+  .pers-q{font-size:15px;color:var(--dim);font-style:italic}
+
+  /* checklist */
+  .check li{list-style:none;padding:10px 0 10px 32px;position:relative;border-bottom:1px dashed var(--line);color:var(--mut);font-size:14.5px}
+  .check li::before{content:"✓";position:absolute;left:4px;color:var(--prag);font-weight:700}
+  .check li b{color:var(--tx)}
+  .check li.todo::before{content:"○";color:var(--shark)}
+
+  /* bars */
+  .bars{margin-top:26px;display:grid;gap:14px}
+  .bar-row{display:grid;grid-template-columns:200px 1fr 86px;align-items:center;gap:14px;font-size:13.5px}
+  @media(max-width:720px){.bar-row{grid-template-columns:120px 1fr 76px}}
+  .bar-row .lab{color:var(--mut)} .bar-row .val{font-family:var(--mono);color:var(--tx);text-align:right}
+  .bar{height:12px;border-radius:99px;background:rgba(255,255,255,.05);overflow:hidden}
+  .bar i{display:block;height:100%;width:0;border-radius:99px;background:linear-gradient(90deg,color-mix(in srgb,var(--acc) 70%,transparent),var(--acc));transition:width 1.2s cubic-bezier(.2,.7,.2,1)}
+  .bar i.bad{background:linear-gradient(90deg,#7d2c3a,#e0506a)}
+
+  /* big table */
+  table{width:100%;border-collapse:collapse;margin-top:30px;font-size:14px}
+  th{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim);text-align:left;padding:0 14px 12px}
+  td{padding:13px 14px;border-top:1px solid var(--line);color:var(--mut);vertical-align:top}
+  td:first-child{color:var(--tx)}
+  tr:hover td{background:rgba(255,255,255,.02)}
+  .dead{color:#e0506a;font-family:var(--mono);font-size:12px}
+  .live{color:var(--prag);font-family:var(--mono);font-size:12px}
+
+  /* accordions (perguntas chatas) */
+  .qa{margin-top:30px;border:1px solid var(--line);border-radius:14px;overflow:hidden}
+  .qa details{border-bottom:1px solid var(--line)}
+  .qa details:last-child{border-bottom:none}
+  .qa summary{cursor:pointer;padding:18px 22px;font-weight:600;font-size:15px;list-style:none;display:flex;gap:14px;align-items:baseline;transition:.2s}
+  .qa summary::-webkit-details-marker{display:none}
+  .qa summary:hover{background:rgba(255,255,255,.025)}
+  .qa summary .q{font-family:var(--mono);color:var(--acc);flex:none;font-size:13px}
+  .qa details[open] summary{background:rgba(255,255,255,.03)}
+  .qa .a{padding:0 22px 20px 54px;color:var(--mut);font-size:14.2px}
+  .qa .a b{color:var(--tx)}
+
+  /* timeline */
+  .tl{margin-top:34px;position:relative;padding-left:26px}
+  .tl::before{content:"";position:absolute;left:7px;top:6px;bottom:6px;width:2px;background:linear-gradient(var(--acc),transparent)}
+  .tl-item{position:relative;padding:0 0 26px 18px}
+  .tl-item::before{content:"";position:absolute;left:-25px;top:7px;width:12px;height:12px;border-radius:50%;background:var(--bg);border:2.5px solid var(--acc)}
+  .tl-item .t{font-family:var(--mono);font-size:11.5px;letter-spacing:.14em;color:var(--acc);text-transform:uppercase}
+  .tl-item h4{font-size:16px;margin:4px 0 4px}
+  .tl-item p{font-size:13.8px}
+
+  /* flywheel */
+  .fly{display:flex;justify-content:center;margin-top:36px}
+  .fly svg{max-width:560px;width:100%;height:auto}
+  .fly text{font-family:var(--sans);font-size:13px;fill:var(--tx);font-weight:600}
+  .fly .sub{font-size:10.5px;fill:var(--mut);font-weight:400}
+  .fly .ring{fill:none;stroke:color-mix(in srgb,var(--shark) 45%,transparent);stroke-width:1.6;stroke-dasharray:6 7;animation:spin 30s linear infinite;transform-origin:280px 220px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .fly .core{fill:color-mix(in srgb,var(--shark) 12%,transparent);stroke:var(--shark);stroke-width:1.4}
+
+  /* day timeline (user) */
+  .day{display:grid;gap:0;margin-top:36px;border-left:2px solid color-mix(in srgb,var(--user) 50%,transparent);padding-left:0}
+  .day-row{display:grid;grid-template-columns:84px 1fr;gap:18px;padding:16px 0 16px 22px;border-bottom:1px dashed var(--line);position:relative}
+  .day-row::before{content:"";position:absolute;left:-6px;top:24px;width:10px;height:10px;border-radius:50%;background:var(--user)}
+  .day-row .h{font-family:var(--mono);color:var(--user);font-size:14px;font-weight:700}
+  .day-row p{font-size:14.2px}
+
+  /* pains (user voice) */
+  .pain{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--user);border-radius:12px;padding:18px 20px}
+  .pain q{font-size:14.6px;color:var(--tx);font-style:italic;quotes:"“" "”"}
+  .pain .who{font-family:var(--mono);font-size:11px;color:var(--dim);margin-top:8px;display:block}
+
+  /* closing / convencer */
+  .close-sec{text-align:center;padding:110px 0 70px}
+  .chips{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;margin-top:44px}
+  .chip{cursor:pointer;user-select:none;font-family:var(--mono);font-size:14px;padding:13px 22px;border-radius:14px;border:1.5px solid var(--line2);color:var(--mut);background:var(--panel);transition:.25s;display:flex;gap:10px;align-items:center}
+  .chip:hover{transform:translateY(-2px)}
+  .chip .dot{width:9px;height:9px;border-radius:50%;background:var(--dim);transition:.25s}
+  .chip.yes{color:#0a0e14;font-weight:700}
+  .chip[data-p="tech"].yes{background:var(--tech);border-color:var(--tech)} .chip[data-p="tech"].yes .dot{background:#0a0e14}
+  .chip[data-p="shark"].yes{background:var(--shark);border-color:var(--shark)} .chip[data-p="shark"].yes .dot{background:#0a0e14}
+  .chip[data-p="prag"].yes{background:var(--prag);border-color:var(--prag)} .chip[data-p="prag"].yes .dot{background:#0a0e14}
+  .chip[data-p="user"].yes{background:var(--user);border-color:var(--user)} .chip[data-p="user"].yes .dot{background:#0a0e14}
+  #verdict{margin-top:38px;font-size:clamp(22px,3.4vw,34px);font-weight:800;letter-spacing:-.02em;min-height:50px;opacity:0;transform:translateY(8px);transition:.5s}
+  #verdict.show{opacity:1;transform:none}
+  #verdict .grad{background:linear-gradient(90deg,var(--tech),var(--prag),var(--shark),var(--user));-webkit-background-clip:text;background-clip:text;color:transparent}
+
+  .confetti{position:fixed;top:-12px;border-radius:2px;pointer-events:none;z-index:999;animation:fall linear forwards}
+  @keyframes fall{to{transform:translateY(105vh) rotate(720deg);opacity:.9}}
+
+  footer{border-top:1px solid var(--line);padding:34px 0;font-family:var(--mono);font-size:11.5px;color:var(--dim);text-align:center;line-height:2}
+
+  /* reveal */
+  .rv{opacity:0;transform:translateY(22px);transition:opacity .7s ease,transform .7s ease}
+  .rv.in{opacity:1;transform:none}
+
+  .note{font-family:var(--mono);font-size:11.5px;color:var(--dim);margin-top:22px}
+  .note a{color:var(--dim)}
+</style>
+</head>
+<body data-persona="all">
+
+<nav>
+  <div class="nav-in">
+    <a class="logo" href="#top"><b>hu</b>git<span> — o pitch</span></a>
+    <div class="tabs">
+      <a class="tab on" data-p="all"  href="#top">Sala toda</a>
+      <a class="tab" data-p="tech"  href="#tecnico">① O Técnico</a>
+      <a class="tab" data-p="shark" href="#tubarao">② O Tubarão</a>
+      <a class="tab" data-p="prag"  href="#pragmatico">③ O Pragmático</a>
+      <a class="tab" data-p="user"  href="#usuario">④ O Usuário</a>
+    </div>
+    <span class="kbd-hint">teclas 1–4 trocam a cadeira</span>
+  </div>
+</nav>
+
+<!-- ════════════════ HERO ════════════════ -->
+<header class="hero" id="top">
+  <div class="wrap">
+    <div class="conf">CONFIDENCIAL · <i>PITCH</i> · JUNHO 2026 · HUMANGR LABS</div>
+    <h1>git otimizou o armazenamento.<br>GitHub, a colaboração humana.<br><span class="grad">hugit otimiza a atenção</span><span class="cursor"></span></h1>
+    <p class="thesis">O forge <b>compatível com git</b>, desenhado para a era em que software é construído por <b>frotas de agents orquestradas por um humano</b>. Versionamento, merge, CI e review — reconstruídos sobre um cache content-addressed multi-tenant <b>que já está em produção</b>.</p>
+
+    <div class="term rv">
+      <div class="term-bar"><i></i><i></i><i></i></div>
+      <div class="term-body">
+        <span class="cm"># nada para reaprender — é git</span><br>
+        $ <span class="hi">git push hugit main</span>&nbsp;&nbsp;<span class="pr">✓ ok</span> <span class="cm">(protocolo git intacto)</span><br>
+        $ <span class="hi">hugit plan apply ship-checkout.plan</span>&nbsp;&nbsp;<span class="pr">✓ 14 WPs · DAG declarado · claims cercadas</span><br>
+        $ <span class="hi">hugit ws spawn -n 14</span>&nbsp;&nbsp;<span class="pr">✓ 14 workspaces hidratados em 0.8s</span> <span class="cm">(95% bytes compartilhados)</span><br>
+        <span class="or">⚡ conflito WP-7×WP-3 detectado na ESCRITA</span> <span class="cm">— 3h antes do merge · evento → orquestradores</span><br>
+        <span class="pr">▶ landing: união A+B+C+D+E testada especulativamente · 5 landed · checks re-executados: 0</span>
+      </div>
+    </div>
+  </div>
+</header>
+
+<!-- ════════════════ STAT STRIP ════════════════ -->
+<div class="strip">
+  <div class="strip-in wrap" style="padding:0">
+    <div class="stat rv"><div class="n"><b data-count="26" data-dec="9">0</b><s>%</s></div><div class="l">do código em produção já é escrito por IA</div><div class="src">estudo 4,2M devs · nov/25–fev/26</div></div>
+    <div class="stat rv"><div class="n"><b data-count="27" data-dec="67">0</b><s>%</s></div><div class="l">dos PRs de agents têm merge conflict (média 540 linhas)</div><div class="src">AgenticFlict · 142.652 PRs</div></div>
+    <div class="stat rv"><div class="n"><b data-count="4" data-dec="6">0</b><s>×</s></div><div class="l">mais espera para um PR de agent ser aceito (32,7% vs 84,4%)</div><div class="src">codeant.ai · 2026</div></div>
+    <div class="stat rv"><div class="n"><b data-count="257">0</b><s>+</s></div><div class="l">incidentes do GitHub em 12 meses — 84,9% de uptime medido</div><div class="src">IncidentHub · mai/25–abr/26</div></div>
+  </div>
+</div>
+
+<!-- ════════════════ O PROBLEMA EM UMA FRASE ════════════════ -->
+<section>
+  <div class="wrap">
+    <div class="kicker rv">A tese · para a sala toda</div>
+    <h2 class="rv">A dor de 2026 não é <em>escrever</em> código.<br>É <span class="grad">pousar</span> código.</h2>
+    <p class="lead rv">Agents tornaram barato produzir trabalho sobreposto — e caríssimo reconciliá-lo. <em>"A verde. B verde. A+B vermelho."</em> Os orquestradores isolam a execução e <strong>param na fronteira do merge</strong>. O git não foi desenhado para concorrência; o GitHub não foi desenhado para atores-máquina. Quem resolver o <strong>landing problem</strong> fica com a camada mais valiosa do novo stack.</p>
+
+    <div class="grid g4">
+      <div class="card rv"><span class="ic">🧠</span><h4 style="margin-top:12px">O repo que se explica</h4><p>Índice semântico vivo, memoizado por tree-hash. Leitura em qualquer altitude. Dispatch packet de contexto gerado pelo forge: despachar um agent = entregar 1 URL.</p></div>
+      <div class="card rv"><span class="ic">🟢</span><h4 style="margin-top:12px">Verdade ambiente</h4><p>Shadow-checks especulativos a cada escrita. Falha chega como <strong>diagnóstico</strong> (culpado auto-bisectado, diff-vs-verde), nunca como 4.000 linhas de log.</p></div>
+      <div class="card rv"><span class="ic">🔀</span><h4 style="margin-top:12px">Merge contínuo</h4><p>Conflito detectado na <strong>escrita</strong>, não no merge. União das branches testada especulativamente. Lockfiles regenerados, nunca text-merged. Main sempre verde.</p></div>
+      <div class="card rv"><span class="ic">♻️</span><h4 style="margin-top:12px">CI que nunca se repete</h4><p>Check = função memoizada do tree-hash. Re-verificar o já-verificado vira <strong>estruturalmente impossível</strong>. O que o cliente ama (velocidade) corta nosso custo.</p></div>
+    </div>
+    <p class="note rv">Cada número deste documento tem fonte: <code>docs/research/</code> — varredura de evidência em 4 frentes, 2026-06-05.</p>
+  </div>
+</section>
+
+<!-- ════════════════ ① O TÉCNICO ════════════════ -->
+<section class="pers" id="tecnico" data-theme="tech">
+  <div class="wrap">
+    <div class="pers-head rv">
+      <div class="avatar" style="--acc:var(--tech)">🔬</div>
+      <div>
+        <div class="kicker" style="--acc:var(--tech)">Investidor ① · o técnico</div>
+        <h2>"Bonito. Mas isso é <span style="color:var(--tech)">construível</span> — ou é slide?"</h2>
+        <p class="pers-q">Ele quer: arte prévia, o que já roda em produção, o que é genuinamente novo, e onde está a física do moat.</p>
+      </div>
+    </div>
+
+    <h3 class="rv" style="margin-top:40px">1 · Nada aqui é pesquisa. É engenharia com arte prévia em produção.</h3>
+    <div class="grid g3">
+      <div class="card rv"><span class="tag" style="--acc:var(--tech)">git sobre CAS</span><h4 style="margin-top:10px">O próprio GitHub já faz</h4><p><strong>Spokes/DGit</strong> serve git da camada de aplicação, objetos indexados por content-hash, sem FS distribuído. <strong>GitLab Gitaly</strong> abstrai storage em produção. <strong>libgit2</strong> tem ODB e refs plugáveis. Servir o wire-protocol de um CAS R2 é o MESMO formato de problema — resolvido duas vezes em escala planetária.</p></div>
+      <div class="card rv"><span class="tag" style="--acc:var(--tech)">CI memoizada</span><h4 style="margin-top:10px">Provada em escala Google/Uber</h4><p><strong>Bazel action cache + TAP</strong>: resultado de check chaveado por hash de inputs, há uma década. <strong>Uber SubmitQueue</strong> (EuroSys'19): merge especulativo + análise de conflito via build-graph, milhares de commits/dia com main sempre verde. Nosso AC em produção <em>já é</em> essa primitiva.</p></div>
+      <div class="card rv"><span class="tag" style="--acc:var(--tech)">modelo validado</span><h4 style="margin-top:10px">jj prova a adoção; nós somos o forge que falta</h4><p><strong>Jujutsu</strong>: 27k stars, financiado pelo Google, conflitos first-class, change-ids — e <strong>explicitamente sem forge nativo</strong>. Mesma data-model do git, interface nova: a comunidade aceita repensar o workflow desde que o git fique intacto. Exatamente nossa tese.</p></div>
+    </div>
+
+    <h3 class="rv" style="margin-top:54px">2 · O que já está em produção hoje (CoreLink, ~71 crates Rust, Cloudflare)</h3>
+    <ul class="check rv">
+      <li><b>CAS multi-região R2</b> — chunking (SplitBlob/SpliceBlob), manifests Merkle, multipart</li>
+      <li><b>Action Cache memoizado</b> + superfícies <b>Bazel REAPI v2</b>, <b>Turborepo</b>, <b>sccache</b> (WebDAV) — multi-toolchain desde já</li>
+      <li><b>Isolamento de tenant</b> com prefixos derivados por HMAC, <b>auditoria fail-CLOSED</b>, PAT auth</li>
+      <li><b>Billing Clerk+Stripe</b> auditado, self-serve — a máquina de cobrar já existe</li>
+      <li class="todo"><b>Falta (o novo de verdade):</b> namespace mutável sobre o CAS imutável (refs transacionais), motor de merge especulativo, índice semântico incremental, broker de capabilities/secrets</li>
+    </ul>
+
+    <h3 class="rv" style="margin-top:54px">3 · O genuinamente novo — e por que acreditamos em cada peça</h3>
+    <div class="grid g2">
+      <div class="card rv"><h4><span class="ic" style="--acc:var(--tech)">⛓️</span>Refs transacionais por repo</h4><p>Durable Object por repositório = serialização natural de refs com consistência forte, sem coordenador global. O event-log do forge É o ref-store (undo universal cai de graça). Throughput de um repo quente: lote de updates por DO — o mesmo padrão dos nossos DOs de billing.</p></div>
+      <div class="card rv"><h4><span class="ic" style="--acc:var(--tech)">🔭</span>Merge especulativo contínuo</h4><p>Blueprint do SubmitQueue + nossa vantagem: o orquestrador <em>declara</em> o DAG e as claims, então o espaço de busca de conflitos é dirigido, não cego. Conflito textual via merge incremental; semântico via build-graph (REAPI já nos dá targets).</p></div>
+      <div class="card rv"><h4><span class="ic" style="--acc:var(--tech)">🗺️</span>Índice semântico incremental</h4><p>Memoizado por tree-hash como tudo aqui: re-indexa só o delta de cada change. Tree-sitter para símbolos/AST (maturidade Mergiraf-class), build-graph para impacto. Não é embedding mágico — é indexação determinística + sumários LLM cacheados para sempre por hash.</p></div>
+      <div class="card rv"><h4><span class="ic" style="--acc:var(--tech)">🔐</span>Cercas de capability</h4><p>Workspace materializa SÓ as claims do WP (sparse por construção); secrets nunca entram — broker assina operações privilegiadas (modelo write-only de secrets da CF, generalizado). Atribuição por principal no event-log. É política enforced por física, não por boa vontade do agent.</p></div>
+    </div>
+
+    <h3 class="rv" style="margin-top:54px">4 · A física do moat (não é feature — é termodinâmica de custo)</h3>
+    <p class="lead rv">Hidratação é a operação mais egress-pesada de um forge/sandbox. <strong>R2 tem egress zero</strong>; qualquer concorrente em S3 paga por byte servido — para sempre. Dedupe content-addressed: mil workspaces ≈ 1× repo + deltas. E o efeito de rede: artefato público determinístico é armazenado <em>uma vez</em> e aquece o cache de todos — <strong>agora aplicado também a resultados de check</strong>. Concorrente sem escala não consegue nem o custo, nem o hit-rate.</p>
+
+    <div class="qa rv">
+      <details><summary><span class="q">Q1</span>"Compatibilidade git é uma cauda infinita de edge cases. Vocês vão se afogar."</summary><div class="a">Por isso a escada começa <b>estreita</b>: smart-HTTP protocol v2 (negotiation + packfiles) — o subconjunto que clientes modernos usam — servido de uma implementação libgit2-class, não reescrita do zero. O fallback sempre existe: o mirror GitHub é a rota de escape durante a maturação. E o produto nº 1 (landing layer) <b>nem precisa do protocolo</b> — roda sobre o GitHub via API. A cauda longa é paga com receita, não com fé.</div></details>
+      <details><summary><span class="q">Q2</span>"Merge resolvido por LLM vai alucinar e corromper código silenciosamente."</summary><div class="a">Três camadas ANTES do LLM: regeneração de arquivos derivados (mata a classe nº 1 medida), merge estrutural AST, e só então arbitragem LLM <b>atrás de confidence gate</b> — e a resolução <b>vira uma Change revisável</b> que passa pelos mesmos checks memoizados de qualquer change. Auto-merge errado não chega à main: a união é testada especulativamente antes de pousar. Pesquisa existe (ConGra: 44.948 conflitos benchmarkados); nós produtizamos com cinto e suspensório.</div></details>
+      <details><summary><span class="q">Q3</span>"Cloudflare é single-vendor num caminho que agora é source-of-truth. Cache perdido se recomputa; repo perdido é catástrofe."</summary><div class="a">Reconhecido como o risco de classe mais alta — está escrito no brief (caveat #5). Mitigação tripla: (1) é tudo git — <b>export full-fidelity contínuo</b> + mirror GitHub como réplica viva desde o dia 1; (2) replicação cross-bucket multi-região já existe no CoreLink; (3) escrow de snapshot em provedor independente para tiers pagos. A promessa de exit não é marketing — é o plano de DR.</div></details>
+      <details><summary><span class="q">Q4</span>"Throughput: um monorepo quente com frota de 50 agents commitando a cada 30s."</summary><div class="a">Escritas de objetos são CAS — paralelas, sem contenção por natureza. O ponto quente são refs: DO por repo com batch de updates (50 agents ≈ centenas de ref-ops/min — ordens de magnitude abaixo do limite de um DO). Stacks e workspaces têm refs próprios (sharding natural). E o landing é uma fila: serializar o pouso é o <i>produto</i>, não o gargalo.</div></details>
+      <details><summary><span class="q">Q5</span>"Por que a GitHub simplesmente não constrói isso?"</summary><div class="a">Eles estão tentando a camada de cima (Agent HQ) — mas as primitivas de baixo (Actions sem memoização, webhooks fire-and-forget, rate limits humanos, billing por minuto) são <b>o modelo de negócio deles</b>. Memoizar CI canibaliza receita de Actions; egress zero exige sair do próprio datacenter pricing. O CTO deles admitiu acoplamento arquitetural em cascata (257 incidentes/ano). Incumbente reconstrói fundação E canibaliza receita ao mesmo tempo? Essa aposta tem nome: Innovator's Dilemma.</div></details>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════ ② O TUBARÃO ════════════════ -->
+<section class="pers" id="tubarao" data-theme="shark">
+  <div class="wrap">
+    <div class="pers-head rv">
+      <div class="avatar" style="--acc:var(--shark)">🦈</div>
+      <div>
+        <div class="kicker" style="--acc:var(--shark)">Investidor ② · o money-hungry</div>
+        <h2>"Tese linda eu emolduro. Eu quero <span style="color:var(--shark)">margem, moat e múltiplo</span>."</h2>
+        <p class="pers-q">Ele quer: tamanho do prêmio, estrutura de COGS, por que o moat composta, e quem paga caro por isso no fim.</p>
+      </div>
+    </div>
+
+    <h3 class="rv" style="margin-top:40px">1 · O prêmio: consolidar a conta de US$ 200–600/dev/mês</h3>
+    <p class="lead rv">Um dev agent-heavy hoje paga um stack fragmentado. Nós vendemos <strong>uma conta, flat</strong> — e nosso COGS para servi-la é estruturalmente menor que o de qualquer peça isolada do stack atual.</p>
+    <div class="bars rv">
+      <div class="bar-row"><span class="lab">Copilot agêntico (pós-junho/26)</span><div class="bar"><i class="bad" data-w="83"></i></div><span class="val">$100–500</span></div>
+      <div class="bar-row"><span class="lab">Actions + runners 3rd-party</span><div class="bar"><i class="bad" data-w="25"></i></div><span class="val">$30–120</span></div>
+      <div class="bar-row"><span class="lab">Graphite + CodeRabbit/Greptile</span><div class="bar"><i class="bad" data-w="12"></i></div><span class="val">$45–60</span></div>
+      <div class="bar-row"><span class="lab">Sandboxes + seat GitHub</span><div class="bar"><i class="bad" data-w="10"></i></div><span class="val">$25–60</span></div>
+      <div class="bar-row" style="border-top:1px dashed var(--line);padding-top:14px"><span class="lab"><b style="color:var(--tx)">hugit — uma conta, flat</b></span><div class="bar"><i data-w="14" style="--acc:var(--shark)"></i></div><span class="val" style="color:var(--shark)">fração disso</span></div>
+    </div>
+    <p class="note rv">TAM AI-code-tools: <b style="color:var(--tx)">US$ 9,5B (2026) → US$ 22B (2030)</b> · researchandmarkets. E o gatilho de mercado já disparou: bills de Copilot 10–50× maiores (jun/26), taxa de US$ 0,002/min sobre runner PRÓPRIO do cliente, 257 incidentes/ano — o êxodo (Zig, Ghostty, Fedora) já começou.</p>
+
+    <h3 class="rv" style="margin-top:54px">2 · A margem vem da física, não do markup</h3>
+    <div class="grid g3">
+      <div class="card rv"><span class="tag" style="--acc:var(--shark)">comprovado</span><h4 style="margin-top:10px">Template CoreLink</h4><p>Plano Solo $30/mês, COGS ~$5 → <strong>~80% de margem bruta</strong>, modelo já auditado. Pinning: o mesmo GB físico (dedupe perfeito em deps públicas) vendido N vezes → <strong>margem efetiva 85–90%</strong>.</p></div>
+      <div class="card rv"><span class="tag" style="--acc:var(--shark)">estrutural</span><h4 style="margin-top:10px">Egress zero (R2)</h4><p>A operação mais frequente do produto (hidratar workspaces, servir blobs) custa <strong>$0 de egress</strong>. Todo concorrente em S3 paga por byte — um imposto perpétuo que nós simplesmente não temos.</p></div>
+      <div class="card rv"><span class="tag" style="--acc:var(--shark)">o win-win</span><h4 style="margin-top:10px">Velocidade = custo</h4><p>Check memoizado é instantâneo para o cliente <em>e</em> compute que não gastamos. <strong>A feature que encanta é a mesma alavanca que engorda a margem.</strong> Não há tensão entre NPS e COGS — é o mesmo número.</p></div>
+    </div>
+
+    <h3 class="rv" style="margin-top:54px">3 · O moat que composta sozinho</h3>
+    <div class="fly rv">
+      <svg viewBox="0 0 560 440" aria-label="flywheel">
+        <circle class="ring" cx="280" cy="220" r="150"/>
+        <circle class="core" cx="280" cy="220" r="64"/>
+        <text x="280" y="214" text-anchor="middle">CAS multi-tenant</text>
+        <text x="280" y="232" text-anchor="middle" class="sub">checks + artefatos + workspaces</text>
+        <g text-anchor="middle">
+          <text x="280" y="34">+ clientes / + agents</text>
+          <text x="280" y="52" class="sub">cada tenant novo escreve no cache comum</text>
+          <text x="505" y="220">cache + quente</text>
+          <text x="505" y="238" class="sub">deps públicas: hit ~imediato</text>
+          <text x="280" y="402">+ rápido E + barato</text>
+          <text x="280" y="420" class="sub">para o cliente e para nós — simultaneamente</text>
+          <text x="62" y="220">churn ↓ · margem ↑</text>
+          <text x="62" y="238" class="sub">o produto melhora com a escala</text>
+        </g>
+        <g fill="none" stroke="var(--shark)" stroke-width="1.6" opacity=".75">
+          <path d="M 352 78 A 160 160 0 0 1 432 158" marker-end="url(#arr)"/>
+          <path d="M 432 282 A 160 160 0 0 1 352 362" marker-end="url(#arr)"/>
+          <path d="M 208 362 A 160 160 0 0 1 128 282" marker-end="url(#arr)"/>
+          <path d="M 128 158 A 160 160 0 0 1 208 78" marker-end="url(#arr)"/>
+        </g>
+        <defs><marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--shark)"/></marker></defs>
+      </svg>
+    </div>
+    <p class="lead rv" style="margin-top:10px">O cliente nº 500 entra e já encontra ~40–70% do workspace quente — porque os 499 anteriores compilaram as mesmas deps públicas. <strong>Concorrente sem escala não alcança nem o custo nem o hit-rate. O produto melhora sozinho enquanto dormimos.</strong> (Fronteira sagrada: público-determinístico compartilha; privado JAMAIS cruza tenant.)</p>
+
+    <h3 class="rv" style="margin-top:54px">4 · O mercado já está precificando exatamente esta tese</h3>
+    <div class="grid g4">
+      <div class="card rv"><h4>Cursor ⟶ Graphite</h4><p><strong>&gt;US$ 290M</strong> (dez/25) por stacked-PRs + review. Pagaram 9 dígitos por <em>um pedaço</em> da nossa camada de landing.</p></div>
+      <div class="card rv"><h4>CodeRabbit</h4><p><strong>US$ 550M</strong> de valuation por review de PR — montado em cima do GitHub, sem dono da infra.</p></div>
+      <div class="card rv"><h4>Pierre</h4><p><strong>US$ 23,5M</strong> (YC/CRV) pela tese "forge novo + mirror GitHub" — human-first, sem camada de economics.</p></div>
+      <div class="card rv"><h4>GitButler</h4><p><strong>US$ 17M</strong> Series A (a16z, fundador do GitHub) por "o que vem depois do git" — client, sem forge.</p></div>
+    </div>
+
+    <div class="qa rv">
+      <details><summary><span class="q">Q1</span>"O GitHub corta preço amanhã e te apaga."</summary><div class="a">A ferida deles não é tática, é <b>estrutural</b>: Nadella declarou publicamente que todo negócio per-user vira per-user + usage. Cortar preço de Actions = canibalizar a própria linha que sustenta o Copilot loss-leader. E nosso COGS (egress zero + dedupe + memoização) é menor que o deles em infra própria — guerra de preço é uma guerra que <b>nós</b> escolheríamos. Por fim: não dependemos de derrotá-los — o produto nº 1 fatura <i>em cima</i> deles.</div></details>
+      <details><summary><span class="q">Q2</span>"Pricing flat limita o upside. Cadê a expansão?"</summary><div class="a">Flat por <b>unidade que escala</b>: assentos de orquestrador, runners paralelos, workspaces quentes, pinning de storage, tiers de attestation/compliance. O cliente cresce a frota → compra mais unidades — expansão sem o choque de 10–50× que está queimando a confiança do mercado inteiro agora. NRR por crescimento de frota (a métrica que mais cresce no setor), não por pegadinha de metering.</div></details>
+      <details><summary><span class="q">Q3</span>"Isso é feature de alguém maior, não empresa."</summary><div class="a">Foi o que disseram de "um app de mensagens no trabalho". A resposta é o objeto: quem é dono do <b>source-of-truth + o cache + o compute</b> não é feature de ninguém — é a plataforma sob as features dos outros. CodeRabbit ($550M) e Graphite ($290M) são features <i>sem</i> a infra; nós somos a infra que torna as features triviais. E se a sala estiver certa de que é "só" uma feature — o comprador estratégico já demonstrou que paga 9 dígitos por features desta camada.</div></details>
+      <details><summary><span class="q">Q4</span>"Qual o exit?"</summary><div class="a">Três rotas, todas com comprador demonstrado: (1) <b>estratégico de AI-coding</b> — Cursor/Anysphere ($29,3B) já compra nesta camada; Cognition ($26B) precisa de chão para a frota; (2) <b>incumbente de infra</b> — Cloudflare (somos o caso de uso definitivo de R2/DO), Atlassian, GitLab; (3) <b>independência</b> — margem de 80% com efeito de rede é um negócio que se financia sozinho; IPO de dev-tools com data moat é a categoria que o mercado mais premia. O plano operacional é a rota 3; as rotas 1–2 são o piso, não o teto.</div></details>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════ ③ O PRAGMÁTICO ════════════════ -->
+<section class="pers" id="pragmatico" data-theme="prag">
+  <div class="wrap">
+    <div class="pers-head rv">
+      <div class="avatar" style="--acc:var(--prag)">⚖️</div>
+      <div>
+        <div class="kicker" style="--acc:var(--prag)">Investidor ③ · o pragmático</div>
+        <h2>"Visão não executa. <span style="color:var(--prag)">Sequência, riscos, e por que vocês</span>."</h2>
+        <p class="pers-q">Ele quer: o caminho do primeiro dólar, o registro de riscos sem maquiagem, e founder-market fit verificável.</p>
+      </div>
+    </div>
+
+    <h3 class="rv" style="margin-top:40px">1 · A sequência — cada fase financia e des-arrisca a próxima</h3>
+    <div class="tl rv">
+      <div class="tl-item"><div class="t">Fase 0 · agora · em rota</div><h4>CoreLink lança (cache + governança)</h4><p>Produto auditado, billing pronto. Nenhuma linha deste pitch toca a rota de launch — isso é mandato escrito.</p></div>
+      <div class="tl-item"><div class="t">Fase 1 · campanha #1</div><h4>Runners efêmeros + dogfood com recibos</h4><p>O compute shell (Firecracker-class em bare-metal barato). Nosso próprio CI sai do Mac do founder e vira o case público.</p></div>
+      <div class="tl-item"><div class="t">Fase 2 · o 1º SKU hugit · ~6 meses de build</div><h4>Landing Layer — EM CIMA do GitHub</h4><p>Merge queue de agents com união especulativa + checks memoizados, via API do GitHub. <strong>Zero pedido de migração, zero protocolo novo</strong> — só precisa do CAS/AC que já existe. Primeiro dólar do hugit sem construir o forge.</p></div>
+      <div class="tl-item"><div class="t">Fase 3</div><h4>Workspaces + forge git-protocol</h4><p>Snapshot/hydrate (campanha #2) + wire-protocol sobre o CAS. Suporte jj nativo: nos tornamos o forge que 27k stars esperam.</p></div>
+      <div class="tl-item"><div class="t">Fase 4</div><h4>Mirror bidirecional → autoritativo</h4><p>GitHub vira janela read-mostly. O cliente sai quando quiser — e por isso confia em ficar.</p></div>
+    </div>
+
+    <h3 class="rv" style="margin-top:54px">2 · GTM — três funis que já existem, nenhum exige criar demanda</h3>
+    <div class="grid g3">
+      <div class="card rv"><h4><span class="ic" style="--acc:var(--prag)">🐕</span>Dogfood com recibos</h4><p>Cliente #0 somos nós: frota diária real, 12+ worktrees paralelas, as dores documentadas em produção. "Nosso CI derrubava o Mac do founder; hoje roda no nosso cache. Aqui está o recibo." Honesto, técnico, verificável.</p></div>
+      <div class="card rv"><h4><span class="ic" style="--acc:var(--prag)">📈</span>Land-and-expand CoreLink</h4><p>Clientes de cache/runners são os leads mais quentes possíveis: "seu cache e seus runners já moram aqui — aponte as branches da sua frota para cá também." Upsell, não venda fria.</p></div>
+      <div class="card rv"><h4><span class="ic" style="--acc:var(--prag)">🚪</span>A porta da comunidade jj</h4><p>27k stars, Google-backed, <strong>sem forge nativo</strong> — uma comunidade inteira tecnicamente sofisticada esperando exatamente o servidor que vamos construir. Suporte a change-id de primeira classe = adoção orgânica.</p></div>
+    </div>
+
+    <h3 class="rv" style="margin-top:54px">3 · Registro de riscos — sem maquiagem</h3>
+    <table class="rv">
+      <thead><tr><th>Risco</th><th>Severidade</th><th>Mitigação (decidida, não desejada)</th></tr></thead>
+      <tbody>
+        <tr><td>Janela fecha (Cursor+Graphite ou GitHub Agent HQ chegam antes)</td><td class="dead">ALTA</td><td>O SKU rápido primeiro: landing layer roda SOBRE o GitHub, ~6 meses, sem forge. Velocidade &gt; completude. E o moat deles não inclui a camada de custo (CAS/egress) — a nossa inclui.</td></tr>
+        <tr><td>A ponte (mirror bidirecional) quebra e mata a confiança</td><td class="dead">ALTA</td><td>Forge-autoritativo com write-back limitado; GitHub App + sync por webhook idempotente; nunca replicação simétrica ingênua. Fase 4 só dispara depois da ponte provada em produção própria.</td></tr>
+        <tr><td>Source-of-truth em single-vendor (Cloudflare)</td><td class="dead">ALTA</td><td>É tudo git: export contínuo full-fidelity + mirror como réplica viva + escrow independente em tier pago. DR é a própria feature de anti-lock-in.</td></tr>
+        <tr><td>Compute não-confiável é disciplina ops pesada</td><td style="color:var(--shark);font-family:var(--mono);font-size:12px">MÉDIA</td><td>Herdada (e paga) pela campanha #1, que precisa dela de qualquer jeito: microVMs Firecracker-class, quotas, abuse-handling. hugit reusa, não reinventa.</td></tr>
+        <tr><td>Founder solo / bus factor</td><td style="color:var(--shark);font-family:var(--mono);font-size:12px">MÉDIA</td><td>A empresa já opera como frota orquestrada (este pitch foi produzido assim). O capital pedido contrata o primeiro time core — e o produto que construímos é literalmente a ferramenta que multiplica times pequenos.</td></tr>
+        <tr><td>Merge semântico erra em produção</td><td style="color:var(--prag);font-family:var(--mono);font-size:12px">CONTROLADA</td><td>Confidence gate + resolução vira Change revisável + união testada antes de pousar. Auto-merge errado não alcança a main por construção.</td></tr>
+      </tbody>
+    </table>
+
+    <h3 class="rv" style="margin-top:54px">4 · Por que ESTE founder</h3>
+    <p class="lead rv">A dor é literal e documentada: o Mac dele já registrou <strong>load average 30, 69 MB de RAM livre, 10 runners de CI e 21 processos de agent residentes</strong> — porque a máquina era onde tudo morava. A resposta dele foi construir: um CAS multi-tenant em produção (~71 crates Rust), um sistema de orquestração de frota usado diariamente (conflict-maps, DAG de merge, verificação fria — <em>o protótipo manual exato deste produto</em>), e a disciplina de repo que este pitch herda: zero debt, gates verdes, evidência antes de claim. <strong>Founder-market fit aqui não é slide de pitch — é o histórico de commits.</strong></p>
+
+    <div class="qa rv">
+      <details><summary><span class="q">Q1</span>"Quem são os primeiros 10 clientes? Nomes, não personas."</summary><div class="a">O funil concreto: (1) nós mesmos — recibo público; (2) os primeiros clientes de cache/runner do CoreLink (SMB self-serve, já pagantes); (3) os times que hoje pagam Graphite+CodeRabbit+runner de terceiro e estão com a fatura Copilot 10–50× maior — o segmento mais barulhento das discussões de backlash de dez/25–jun/26; (4) a comunidade jj (early adopters por definição). Meta honesta: 10 design partners na fase 2 beta, convertidos de funis 2–3.</div></details>
+      <details><summary><span class="q">Q2</span>"Operar um forge é fardo de suporte 24/7. Vocês são minúsculos."</summary><div class="a">Por isso a escada: fase 2 não hospeda source-of-truth de ninguém (roda sobre o GitHub). Quando o forge chega (fase 3), os primeiros tenants entram com o mirror ATIVO — a janela do GitHub é o fallback de leitura de cada cliente durante a maturação. SLA cresce com a receita, não antes dela. E multi-região + event-sourcing foram desenhados para operar com time pequeno — é a mesma stack serverless que já operamos sozinhos hoje.</div></details>
+      <details><summary><span class="q">Q3</span>"Por que não levantar mais e contratar 20 engenheiros já?"</summary><div class="a">Porque a tese do produto é a tese da empresa: <b>times pequenos comandando frotas</b>. 20 engenheiros agora = 20 pessoas sofrendo as dores que ainda não resolvemos, num produto cujo cliente é exatamente quem não quer esse modelo. Capital vai para: compute da frota, infra, 3–5 contratações core (protocolo, merge engine, devrel), e 18 meses de janela. Crescer headcount é output do PMF, não input.</div></details>
+      <details><summary><span class="q">Q4</span>"O que mata este plano? Diga você, antes que eu diga."</summary><div class="a">Três cenários, em ordem de probabilidade: (1) <b>GitHub memoiza Actions e abre as primitivas para agents</b> — improvável pelo conflito de receita, mas possível; sobreviveríamos menores, no nicho jj+custo. (2) <b>A fase 2 não converte</b> — o landing problem ser dor de early-adopter e não mainstream; o teste de 10 design partners existe para falhar barato e cedo. (3) <b>Execução: a ponte quebra em público</b> — mitigada acima, mas é o tipo de erro que não tem segunda chance. Por isso ela só ganha clientes depois de meses rodando no nosso próprio repo.</div></details>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════ ④ O USUÁRIO ════════════════ -->
+<section class="pers" id="usuario" data-theme="user">
+  <div class="wrap">
+    <div class="pers-head rv">
+      <div class="avatar" style="--acc:var(--user)">⚡</div>
+      <div>
+        <div class="kicker" style="--acc:var(--user)">Investidor ④ · o usuário (a persona do founder)</div>
+        <h2>"Esquece o deck. <span style="color:var(--user)">Me faz dizer wow</span> — e me dá garantias."</h2>
+        <p class="pers-q">Ele quer: sentir o produto na mão, ver as dores dele morrerem uma a uma, e saber o que acontece quando algo der errado.</p>
+      </div>
+    </div>
+
+    <h3 class="rv" style="margin-top:40px">1 · As sete dores — na voz de quem vive (um agent de frota, entrevistado)</h3>
+    <div class="grid g3" style="margin-top:26px">
+      <div class="pain rv"><q>Eu nasço cego, toda vez. Queimo metade do meu contexto só me orientando.</q><span class="who">— dor #1 · morta pelo índice semântico + dispatch packets</span></div>
+      <div class="pain rv"><q>Eu leio demais porque não consigo ler certo. Não existe zoom.</q><span class="who">— dor #2 · morta pela leitura por altitude, memoizada por hash</span></div>
+      <div class="pain rv"><q>Entre a minha edição e o veredito existem minutos de escuridão.</q><span class="who">— dor #3 · morta pela verdade ambiente (shadow-checks)</span></div>
+      <div class="pain rv"><q>Quando algo quebra, eu recebo 4.000 linhas de lixo em prosa.</q><span class="who">— dor #4 · morta pelo diagnóstico estruturado + auto-bisect</span></div>
+      <div class="pain rv"><q>Minha compreensão morre comigo. O próximo paga a descoberta de novo.</q><span class="who">— dor #5 · morta pelos journals: nenhum agent começa frio</span></div>
+      <div class="pain rv"><q>Eu sou perigoso, então vocês me vigiam. Edit por edit.</q><span class="who">— dores #6–7 · mortas pelas cercas de capability + máquina-janela</span></div>
+    </div>
+
+    <h3 class="rv" style="margin-top:54px">2 · O dia em que você estala o dedo</h3>
+    <div class="day rv">
+      <div class="day-row"><span class="h">09:00</span><p><strong>"Ship the checkout flow."</strong> O orquestrador declara 14 WPs ao hugit. Cada agent recebe seu <strong>dispatch packet</strong> — o contexto mínimo, montado pelo forge. Ninguém grepa por 40 minutos. Ninguém nasce cego.</p></div>
+      <div class="day-row"><span class="h">09:40</span><p>Agent 7 escreve num arquivo que o WP do agent 3 reivindica. <strong>Evento de conflito em segundos — na escrita, não 3 horas depois no merge.</strong> O conflito nunca passa de uma função.</p></div>
+      <div class="day-row"><span class="h">10:55</span><p>Um check fica vermelho. Chega como <strong>diagnóstico</strong>: change culpada (auto-bisectada), diff contra o último verde, 2 linhas suspeitas, e a falha parecida resolvida há 3 semanas. Fix pousa às 11:02. O teste flaky do mês? <strong>Em quarentena por estatística.</strong> Ninguém o perseguiu.</p></div>
+      <div class="day-row"><span class="h">11:05</span><p>A fila de landing testa a <strong>união</strong> das 6 branches verdes — acha que WP-4+WP-9 quebram juntas, avisa o agent certo com o porquê, e pousa as outras 5 em ordem de dependência. Checks re-executados: <strong>zero</strong>. O "conflito" de lockfile nunca existiu: derivados se regeneram.</p></div>
+      <div class="day-row"><span class="h">14:00</span><p>Seu celular vibra <strong>uma vez</strong>. Não são 14 PRs em prosa: é o único item que a política marca como humano-obrigatório (arquivo de auth), com charter, testes de aceitação, 3 vereditos independentes e a única pergunta que precisa de você. <strong>90 segundos.</strong></p></div>
+      <div class="day-row"><span class="h">16:00</span><p>A sessão do agent 12 morre no meio. O substituto acopla no workspace e <strong>herda o journal</strong> — hipóteses, becos sem saída, "é ESSE arquivo que importa". Retoma a compreensão, não só os bytes.</p></div>
+      <div class="day-row"><span class="h">18:00</span><p>Feature no ar. A história lê como <strong>14 intenções</strong> — cada uma com seu porquê, endereçável para sempre — não 400 micro-commits de robô. <strong>Seu Mac passou o dia em load 1.2.</strong> A conta do mês: flat, menor que o que só os minutos de CI custavam antes.</p></div>
+    </div>
+
+    <h3 class="rv" style="margin-top:54px">3 · As garantias (porque você é o mais desconfiado da sala)</h3>
+    <div class="grid g4">
+      <div class="card rv"><h4>É git.</h4><p>Nada para reaprender. <code>git push</code> funciona, todo IDE funciona, todo LLM já nasceu treinado nisso. O nome é o princípio: não desviar.</p></div>
+      <div class="card rv"><h4>A porta destrancada.</h4><p><strong>Exit garantido por escrito</strong>: export full-fidelity a qualquer momento (é tudo git + JSON documentado), mirror GitHub vivo desde o dia 1.</p></div>
+      <div class="card rv"><h4>Seu compute é seu.</h4><p>Jamais cobramos por minuto da SUA máquina. Preço flat e previsível — sem o choque de 10–50× que você acabou de ver o mercado sofrer.</p></div>
+      <div class="card rv"><h4>Privado é sagrado.</h4><p>Compartilhamento cross-tenant SÓ de artefatos públicos determinísticos. Seu código privado nunca aquece o cache de ninguém. Isolamento por construção, auditoria fail-closed.</p></div>
+    </div>
+
+    <div class="qa rv">
+      <details><summary><span class="q">Q1</span>"Mais uma ferramenta para minha frota aprender?"</summary><div class="a">Não. O agent continua fazendo <code>git commit</code> — é o chão sob ele que fica inteligente. O orquestrador ganha primitivas novas (plan, claims, landing) por API <b>opcional e incremental</b>: cada uma adotável sozinha, cada uma com valor sozinha. Curva de adoção = zero no dia 1, e cresce só onde dói.</div></details>
+      <details><summary><span class="q">Q2</span>"E quando o hugit cair no meio do meu deploy?"</summary><div class="a">Multi-região por construção, sem fate-sharing com o incidente da semana de ninguém — e o mirror GitHub é sua réplica de leitura permanente: <b>o fallback está sempre quente</b>, por design. Comparar com o status quo: 257 incidentes/ano, ~1 major por semana. Nós tratamos confiabilidade como feature de marketing porque a régua atual é constrangedora.</div></details>
+      <details><summary><span class="q">Q3</span>"Vocês vão treinar modelos no meu código?"</summary><div class="a"><b>Não.</b> Seu código é source-of-truth de cliente, não dataset. O que é compartilhado cross-tenant: hashes de artefatos públicos determinísticos (tokio compilado é tokio compilado). O que jamais cruza: bytes privados, resultados de check privados, journals. Está no contrato e na arquitetura (prefixos HMAC por tenant) — quebrar isso destruiria o moat, não só a reputação.</div></details>
+      <details><summary><span class="q">Q4</span>"E se vocês morrerem em 2 anos?"</summary><div class="a">Você perde features, não dados nem história: export contínuo + mirror vivo significam que voltar 100% para o GitHub é <code>git remote set-url</code>. Projetamos a saída ANTES da entrada — é a única forma honesta de pedir o source-of-truth de alguém. (E é por isso que a entrada acontece.)</div></details>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════ FECHAMENTO ════════════════ -->
+<section class="close-sec" id="fechamento">
+  <div class="wrap">
+    <div class="kicker rv" style="justify-content:center">O veredito da sala</div>
+    <h2 class="rv">Quatro cadeiras. Quatro exigências.<br>Uma única aposta: <span class="grad">a atenção é o novo petróleo — e o repositório é a refinaria.</span></h2>
+    <p class="lead rv" style="margin:18px auto 0;max-width:720px">Pedimos a esta sala: convicção, 10 design partners e 18 meses de janela. O técnico audita a arte prévia. O tubarão audita a margem. O pragmático audita a sequência. O usuário audita o wow. <strong>Cliquem quando estiverem convencidos.</strong></p>
+
+    <div class="chips rv">
+      <div class="chip" data-p="tech"><span class="dot"></span>① Técnico — construível e defensável</div>
+      <div class="chip" data-p="shark"><span class="dot"></span>② Tubarão — margem e moat reais</div>
+      <div class="chip" data-p="prag"><span class="dot"></span>③ Pragmático — sequência executável</div>
+      <div class="chip" data-p="user"><span class="dot"></span>④ Usuário — wow e garantias</div>
+    </div>
+    <div id="verdict"></div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    hugit · humangr-labs · pitch interno — junho 2026<br>
+    todas as métricas citadas têm fonte primária em <code>docs/research/</code> (varredura de 4 frentes, 2026-06-05) · números de mercado: AgenticFlict (arXiv), IncidentHub, EuroSys'19 (Uber SubmitQueue), researchandmarkets<br>
+    git é uma marca de Software Freedom Conservancy. GitHub é uma marca da Microsoft. usadas aqui apenas nominativamente.
+  </div>
+</footer>
+
+<script>
+// ---------- reveal on scroll ----------
+const io=new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target)}}),{threshold:.12});
+document.querySelectorAll('.rv').forEach(el=>io.observe(el));
+
+// ---------- animated counters ----------
+const cio=new IntersectionObserver(es=>es.forEach(e=>{
+  if(!e.isIntersecting)return;cio.unobserve(e.target);
+  const el=e.target,end=+el.dataset.count,dec=el.dataset.dec||null,t0=performance.now(),D=1400;
+  (function tick(t){const p=Math.min(1,(t-t0)/D),v=Math.round(end*(1-Math.pow(1-p,3)));
+    el.textContent=dec!==null?v+','+(p===1?dec:Math.floor(Math.random()*9)):v;
+    if(p<1)requestAnimationFrame(tick)})(t0);
+}),{threshold:.6});
+document.querySelectorAll('[data-count]').forEach(el=>cio.observe(el));
+
+// ---------- bars ----------
+const bio=new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting){e.target.querySelectorAll('.bar i').forEach(i=>i.style.width=i.dataset.w+'%');bio.unobserve(e.target)}}),{threshold:.4});
+document.querySelectorAll('.bars').forEach(el=>bio.observe(el));
+
+// ---------- persona tabs + scrollspy ----------
+const tabs=[...document.querySelectorAll('.tab')];
+function setPersona(p){document.body.dataset.persona=p;tabs.forEach(t=>t.classList.toggle('on',t.dataset.p===p))}
+tabs.forEach(t=>t.addEventListener('click',()=>setPersona(t.dataset.p)));
+const secMap={tecnico:'tech',tubarao:'shark',pragmatico:'prag',usuario:'user'};
+const sio=new IntersectionObserver(es=>{es.forEach(e=>{if(e.isIntersecting){setPersona(secMap[e.target.id]||'all')}})},{rootMargin:'-40% 0px -55% 0px'});
+document.querySelectorAll('section[id],header[id]').forEach(s=>sio.observe(s));
+addEventListener('keydown',e=>{
+  if(e.target.matches('input,textarea'))return;
+  const m={'1':'#tecnico','2':'#tubarao','3':'#pragmatico','4':'#usuario','0':'#top'};
+  if(m[e.key])document.querySelector(m[e.key]).scrollIntoView({behavior:'smooth'});
+});
+
+// ---------- convencer chips ----------
+const chips=[...document.querySelectorAll('.chip')],verdict=document.getElementById('verdict');
+const colors={tech:'#58a6ff',shark:'#f2cc60',prag:'#3fd97f',user:'#bc8cff',brand:'#ff6a39',brand2:'#ff3d81'};
+function confetti(){
+  const cs=Object.values(colors);
+  for(let i=0;i<140;i++){const d=document.createElement('div');d.className='confetti';
+    d.style.cssText=`left:${Math.random()*100}vw;width:${5+Math.random()*7}px;height:${8+Math.random()*10}px;background:${cs[i%cs.length]};animation-duration:${2.4+Math.random()*2.6}s;animation-delay:${Math.random()*.9}s`;
+    document.body.appendChild(d);setTimeout(()=>d.remove(),6500)}
+}
+chips.forEach(c=>c.addEventListener('click',()=>{
+  c.classList.toggle('yes');
+  const n=chips.filter(x=>x.classList.contains('yes')).length;
+  if(n===4){verdict.innerHTML='<span class="grad">Sala convencida. Agora, construímos.</span><div style="font-size:14px;font-family:var(--mono);color:var(--mut);margin-top:10px">próximo passo: decompose → white paper → specs · a janela está aberta</div>';verdict.classList.add('show');confetti();}
+  else if(n>0){verdict.innerHTML=`<span style="color:var(--mut);font-size:.6em;font-family:var(--mono)">${n}/4 convencidos — os chatos restantes têm perguntas. Role até a seção deles.</span>`;verdict.classList.add('show');}
+  else verdict.classList.remove('show');
+}));
+</script>
+</body>
+</html>
