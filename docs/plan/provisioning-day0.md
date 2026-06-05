@@ -32,14 +32,27 @@
   budget caps so a hugit-side storm is structurally bounded.
 - [ ] PAT for the tenant delivered to the broker path only.
 
-## P3 — Runner box (Hetzner-class) — gates C2a (D1 dispatch)
+## P3 — Runner box — ✅ PROVISIONED 2026-06-05 (owner-approved, downsized)
 
-- [ ] 1 dedicated box (AX-class or equiv: ≥8 cores / 64 GB / NVMe), fresh OS,
-  **zero shared infrastructure with CoreLink runners** (X6②/X10: separate
-  box, separate account ok — resource isolation asserted by config test).
-- [ ] SSH key minted for this project only; container runtime installed
-  (container-per-job v0; Firecracker upgrade path is C2 docs, not Day 0).
-- [ ] Box inventory recorded here (host, specs, OS, billing owner) once live.
+> Owner decision (2026-06-05): start on Hetzner **Cloud** (~€16/mo) instead
+> of an AX-class dedicated box (~€50+); upgrade only on measured evidence
+> (e.g. B8 dogfood saturation at D5). Firecracker needs KVM/metal — already
+> a documented-only upgrade path in the warp, unaffected. The C2 "≥8
+> concurrent jobs" item proves concurrency *mechanics* (light fixtures), not
+> raw capacity — adjudicated compatible with 4 vCPU.
+
+- [x] 1 cloud box, fresh OS, **zero shared infrastructure with CoreLink
+  runners** (X6②/X10): separate Hetzner project `hugit`, nothing else in it.
+- [x] SSH key minted for this project only (`hugit-runner-01`, ed25519,
+  key-only auth — password auth disabled); container runtime installed
+  (docker.io 29.1.3 from Ubuntu repos; container-per-job v0; Firecracker
+  upgrade path is C2 docs, not Day 0).
+- [x] Hardening: full-upgrade applied + reboot to kernel 7.0.0-22 ·
+  ufw deny-incoming/allow-OpenSSH · fail2ban · unattended-upgrades.
+- [x] Box inventory:
+  | host | IPv4 | type | specs | OS | billing |
+  |---|---|---|---|---|---|
+  | hugit-runner-01 | 91.99.11.196 | Hetzner Cloud CPX32 | 4 vCPU AMD / 8 GB / 160 GB | Ubuntu 26.04 LTS | owner (USD ~$16.49/mo, hourly) |
 
 ## Sequencing
 
