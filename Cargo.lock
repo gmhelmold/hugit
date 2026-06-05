@@ -238,6 +238,12 @@ dependencies = [
 [[package]]
 name = "hugit-refstore"
 version = "0.1.0"
+dependencies = [
+ "hex",
+ "hugit-contracts",
+ "serde_json",
+ "sha2",
+]
 
 [[package]]
 name = "hugit-runner"
