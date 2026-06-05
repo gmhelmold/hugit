@@ -1,0 +1,37 @@
+# WP-D14 golden permission matrix — the documented per-principal-class model (②).
+#
+# This is the FROZEN written-down source of truth, transcribed from the
+# whitepaper §7 product surface (per-principal command verbs) and §3 principal
+# model. The acceptance oracle (tests/acceptance_d14.rs) asserts that
+# `authz::matrix(class, endpoint)` agrees with EVERY cell here — golden, exact.
+#
+# Format: one cell per line, `<principal_class> <endpoint> <ALLOW|DENY>`.
+# Principal classes: human · orchestrator · worker · model.
+# Endpoints:         push · land · undo · policy.
+#
+# Rationale:
+#   push   — universal git verb (§7 "Everyone … every git command"); all allowed.
+#   land   — orchestrator's integration verb (§7 Orchestrator: `land`).
+#   undo   — human stakeholder control (§7 Human: `undo`).
+#   policy — human stakeholder control (§7 Human: `policy`).
+# Every non-ALLOW cell is DENY, fail-closed; unrecognized principals are DENY.
+
+human         push    ALLOW
+human         land    DENY
+human         undo    ALLOW
+human         policy  ALLOW
+
+orchestrator  push    ALLOW
+orchestrator  land    ALLOW
+orchestrator  undo    DENY
+orchestrator  policy  DENY
+
+worker        push    ALLOW
+worker        land    DENY
+worker        undo    DENY
+worker        policy  DENY
+
+model         push    ALLOW
+model         land    DENY
+model         undo    DENY
+model         policy  DENY

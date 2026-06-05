@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - feat: hugit-checks/affected — affected-target engine v0; cargo/pnpm/turbo graph adapters, root-edit full-set, fail-open policy (WP-B3)
 
+- feat(refstore): D14 — forge authz: fail-closed mutation guard over push/land/undo/policy, golden per-principal-class permission matrix (human/orchestrator/worker/model), audited denials via EventRecord (WP-D14)
+
 - feat: hugit-refstore — event-log core: append-only hash chain, deterministic replay, tamper detection (WP-D1a)
 
 - feat(refstore): D1c — serialized concurrent ops over the single-writer append point, explicit back-pressure (zero silent loss), measured p99<500ms at 100 concurrent ops (WP-D1c)
