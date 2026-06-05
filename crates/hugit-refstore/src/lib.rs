@@ -17,6 +17,8 @@
 //! build on the primitives sealed here; this crate makes no concurrency or
 //! throughput claims (single-writer append correctness only).
 
+#[path = "../authz/mod.rs"]
+pub mod authz;
 pub mod concurrency;
 pub mod log;
 pub mod replay;
