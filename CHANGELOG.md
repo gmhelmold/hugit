@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - feat: hugit-refstore — event-log core: append-only hash chain, deterministic replay, tamper detection (WP-D1a)
 
+- feat(refstore): D1b — compaction/cold-tier (replay-equivalent, hot-log bounded), hot-DO-loss recovery (cold-tier-first, mirror secondary), compensating undo (restores + preserves history) (WP-D1b)
+
 - feat(queue): hugit-queue union-queue core — batching, union-tree fold, minimal-failing-pair bisection, ordered idempotent landing, structural ordering state machine (WP-B4a)
 
 - feat(checks): C4 — regen drivers v0: lockfile/codegen/snapshot regenerate-never-merge (WP-C4)
