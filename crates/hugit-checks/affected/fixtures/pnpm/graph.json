@@ -1,0 +1,14 @@
+{
+  "ecosystem": "pnpm",
+  "workspace_root": "pnpm-workspace.yaml",
+  "packages": [
+    { "name": "pkg-ui",     "path": "pkg-ui",     "deps": ["pkg-shared"] },
+    { "name": "pkg-api",    "path": "pkg-api",    "deps": ["pkg-shared"] },
+    { "name": "pkg-shared", "path": "pkg-shared", "deps": [] }
+  ],
+  "golden_sets": {
+    "pkg-ui":     ["pkg-ui"],
+    "pkg-api":    ["pkg-api"],
+    "pkg-shared": ["pkg-api", "pkg-shared", "pkg-ui"]
+  }
+}

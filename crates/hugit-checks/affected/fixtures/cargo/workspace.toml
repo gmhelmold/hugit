@@ -1,0 +1,11 @@
+# Cargo workspace fixture for golden affected-set computation (B3 ①).
+# Represents a 3-member cargo workspace used in acceptance tests.
+[workspace]
+members = ["crate-a", "crate-b", "crate-c"]
+resolver = "2"
+
+# crate-a depends on crate-c
+# crate-b depends on crate-c
+# crate-c has no internal deps
+# Affected(crate-c changed) = {crate-a, crate-b, crate-c}
+# Affected(crate-a changed) = {crate-a}
