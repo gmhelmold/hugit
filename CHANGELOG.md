@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- feat(queue): C7 — per-tenant budgets, fairness bounds (p95 ≤ 5s, throughput share ≥ 20%), ±5% metering; exhausted→queued-not-dropped with BudgetStatus + BudgetEvent (WP-C7)
+- feat(app): hugit-app-ui — surface v0: live status page, exactly-one-edited-comment/PR (stable marker upsert), saved-minutes→CheckResult audit links, versioned auditable cost model v1-2024-H2 (WP-B7)
 
 - feat: hugit-checks/affected — affected-target engine v0; cargo/pnpm/turbo graph adapters, root-edit full-set, fail-open policy (WP-B3)
 
