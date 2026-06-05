@@ -7,13 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- feat(app): hugit-app-ui — surface v0: live status page, exactly-one-edited-comment/PR (stable marker upsert), saved-minutes→CheckResult audit links, versioned auditable cost model v1-2024-H2 (WP-B7)
-
 - feat: hugit-checks/affected — affected-target engine v0; cargo/pnpm/turbo graph adapters, root-edit full-set, fail-open policy (WP-B3)
 
 - feat: hugit-refstore — event-log core: append-only hash chain, deterministic replay, tamper detection (WP-D1a)
 
-- feat(refstore): D1b — compaction/cold-tier (replay-equivalent, hot-log bounded), hot-DO-loss recovery (cold-tier-first, mirror secondary), compensating undo (restores + preserves history) (WP-D1b)
+- feat(refstore): D1c — serialized concurrent ops over the single-writer append point, explicit back-pressure (zero silent loss), measured p99<500ms at 100 concurrent ops (WP-D1c)
 
 - feat(queue): hugit-queue union-queue core — batching, union-tree fold, minimal-failing-pair bisection, ordered idempotent landing, structural ordering state machine (WP-B4a)
 

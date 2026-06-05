@@ -17,6 +17,7 @@
 //! build on the primitives sealed here; this crate makes no concurrency or
 //! throughput claims (single-writer append correctness only).
 
+pub mod concurrency;
 pub mod log;
 pub mod replay;
 pub mod tamper;
