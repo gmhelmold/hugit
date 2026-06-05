@@ -1,0 +1,14 @@
+[package]
+name = "hugit-app-ui"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+hugit-contracts = { path = "../../hugit-contracts" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[[test]]
+name = "acceptance_wp-b7"
+path = "tests/acceptance_wp-b7.rs"

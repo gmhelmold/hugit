@@ -181,6 +181,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hugit-app-ui"
+version = "0.1.0"
+dependencies = [
+ "hugit-contracts",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "hugit-checks"
 version = "0.1.0"
 dependencies = [
