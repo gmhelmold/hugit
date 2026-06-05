@@ -172,6 +172,7 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "hmac",
+ "hugit-app-sidecar",
  "hugit-contracts",
  "serde",
  "serde_json",
@@ -188,6 +189,16 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "thiserror",
+]
+
+[[package]]
+name = "hugit-app-sidecar"
+version = "0.1.0"
+dependencies = [
+ "hugit-contracts",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 
