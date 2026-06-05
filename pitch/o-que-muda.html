@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>hugit — o que muda, na prática (explicação simples)</title>
+<style>
+  :root{
+    --bg:#0a0e14; --panel:#121823; --panel2:#0e131b;
+    --line:rgba(255,255,255,.09); --tx:#eaf0f7; --mut:#9aa7b4; --dim:#5c6773;
+    --hoje:#ff5d6c; --hojebg:#1a1014; --hugit:#3fd97f; --hugitbg:#0e1a14;
+    --brand:#ff6a39; --brand2:#ff3d81;
+    --mono:ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+    --sans:ui-sans-serif,-apple-system,'SF Pro Display','Segoe UI',Inter,sans-serif;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{background:var(--bg);color:var(--tx);font-family:var(--sans);line-height:1.6;overflow-x:hidden}
+  .wrap{max-width:1060px;margin:0 auto;padding:0 24px}
+  .grad{background:linear-gradient(90deg,var(--brand),var(--brand2));-webkit-background-clip:text;background-clip:text;color:transparent}
+
+  /* hero */
+  header{padding:84px 0 40px;text-align:center;position:relative}
+  header::before{content:"";position:absolute;inset:0;background:radial-gradient(700px 360px at 50% 0%,rgba(255,106,57,.12),transparent 65%);pointer-events:none}
+  .logo{font-family:var(--mono);font-size:15px;color:var(--dim);letter-spacing:.2em;text-transform:uppercase;margin-bottom:18px}
+  .logo b{color:var(--brand)}
+  h1{font-size:clamp(34px,6vw,58px);font-weight:850;letter-spacing:-.03em;line-height:1.08}
+  .sub{font-size:clamp(16px,2.2vw,20px);color:var(--mut);max-width:640px;margin:18px auto 0}
+  .sub b{color:var(--tx)}
+
+  /* o pedido */
+  .pedido{margin:44px auto 0;max-width:680px;background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:22px 26px;display:flex;gap:16px;align-items:center;text-align:left}
+  .pedido .face{font-size:34px;flex:none}
+  .pedido p{color:var(--mut);font-size:14px}
+  .pedido .balao{font-size:17px;color:var(--tx);font-weight:600}
+
+  /* controls */
+  .controls{display:flex;gap:12px;justify-content:center;margin:34px 0 10px;flex-wrap:wrap;position:sticky;top:0;z-index:50;padding:14px 0;background:linear-gradient(var(--bg) 75%,transparent)}
+  .btn{cursor:pointer;font-family:var(--mono);font-size:14.5px;font-weight:700;border:none;border-radius:14px;padding:14px 26px;transition:.2s;color:#0a0e14;background:linear-gradient(90deg,var(--brand),var(--brand2));box-shadow:0 8px 28px rgba(255,90,80,.25)}
+  .btn:hover{transform:translateY(-2px)}
+  .btn.ghost{background:var(--panel);color:var(--mut);border:1px solid var(--line);box-shadow:none}
+  .btn:disabled{opacity:.35;cursor:default;transform:none}
+  .clock{font-family:var(--mono);font-size:15px;color:var(--tx);background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px 20px;min-width:96px;text-align:center}
+  .clock b{color:var(--brand)}
+
+  /* board */
+  .board{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}
+  @media(max-width:760px){.board{grid-template-columns:1fr}}
+  .col-h{position:sticky;top:74px;z-index:40;border-radius:14px;padding:14px 18px;font-weight:800;font-size:16px;display:flex;align-items:center;gap:10px;backdrop-filter:blur(8px)}
+  .col-h small{font-weight:400;font-family:var(--mono);font-size:11px;opacity:.85;margin-left:auto;text-align:right}
+  .hoje-h{background:rgba(255,93,108,.12);border:1px solid rgba(255,93,108,.35);color:var(--hoje)}
+  .hugit-h{background:rgba(63,217,127,.1);border:1px solid rgba(63,217,127,.35);color:var(--hugit)}
+
+  .step{margin-top:14px;border-radius:16px;padding:18px 20px;border:1px solid var(--line);opacity:0;transform:translateY(18px);transition:.55s cubic-bezier(.2,.7,.2,1);position:relative}
+  .step.show{opacity:1;transform:none}
+  .step .hora{font-family:var(--mono);font-size:11px;letter-spacing:.16em;color:var(--dim);margin-bottom:8px;display:flex;align-items:center;gap:8px}
+  .step h4{font-size:15.5px;margin-bottom:6px;display:flex;gap:9px;align-items:center}
+  .step p{font-size:13.8px;color:var(--mut)}
+  .step p b{color:var(--tx)}
+  .step.lado-hoje{background:var(--hojebg)}
+  .step.lado-hoje .hora{color:var(--hoje)}
+  .step.lado-hugit{background:var(--hugitbg)}
+  .step.lado-hugit .hora{color:var(--hugit)}
+  .badge{display:inline-block;font-family:var(--mono);font-size:10.5px;font-weight:700;border-radius:99px;padding:3px 10px;margin-top:10px;margin-right:6px}
+  .b-dor{background:rgba(255,93,108,.15);color:var(--hoje);border:1px solid rgba(255,93,108,.4)}
+  .b-ok{background:rgba(63,217,127,.12);color:var(--hugit);border:1px solid rgba(63,217,127,.4)}
+
+  /* scoreboard */
+  .placar{margin:60px 0 0;border:1px solid var(--line);border-radius:20px;overflow:hidden;opacity:0;transform:translateY(20px);transition:.6s}
+  .placar.show{opacity:1;transform:none}
+  .placar-h{text-align:center;padding:26px 20px 6px}
+  .placar-h h2{font-size:clamp(24px,3.6vw,34px);font-weight:800;letter-spacing:-.02em}
+  .placar-grid{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line);margin-top:22px}
+  @media(max-width:760px){.placar-grid{grid-template-columns:1fr}}
+  .placar-col{padding:26px 28px}
+  .placar-col.ph{background:var(--hojebg)} .placar-col.pg{background:var(--hugitbg)}
+  .placar-col h3{font-size:15px;font-family:var(--mono);letter-spacing:.14em;text-transform:uppercase;margin-bottom:16px}
+  .ph h3{color:var(--hoje)} .pg h3{color:var(--hugit)}
+  .pi{display:flex;justify-content:space-between;align-items:baseline;padding:9px 0;border-bottom:1px dashed var(--line);font-size:14px;color:var(--mut)}
+  .pi b{font-family:var(--mono);font-size:16px;color:var(--tx)}
+  .ph .pi b{color:var(--hoje)} .pg .pi b{color:var(--hugit)}
+
+  /* seções simples */
+  section{padding:72px 0 0}
+  .kicker{font-family:var(--mono);font-size:12px;letter-spacing:.22em;text-transform:uppercase;color:var(--brand);text-align:center;margin-bottom:12px}
+  h2.t{font-size:clamp(26px,4vw,36px);font-weight:800;letter-spacing:-.02em;text-align:center;margin-bottom:10px}
+  .t-sub{text-align:center;color:var(--mut);max-width:560px;margin:0 auto}
+  .tres{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:36px}
+  @media(max-width:760px){.tres{grid-template-columns:1fr}}
+  .tcard{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:26px}
+  .tcard .emoji{font-size:30px}
+  .tcard h3{font-size:17px;margin:12px 0 8px}
+  .tcard ul{list-style:none}
+  .tcard li{font-size:13.8px;color:var(--mut);padding:7px 0 7px 24px;position:relative;border-bottom:1px dashed var(--line)}
+  .tcard li:last-child{border:none}
+  .tcard li::before{position:absolute;left:0;font-size:13px}
+  .tcard.igual li::before{content:"✓";color:var(--mut)}
+  .tcard.melhora li::before{content:"✨";font-size:11px}
+  .tcard.novo li::before{content:"＋";color:var(--hugit);font-weight:700}
+  .tcard li b{color:var(--tx)}
+  .tag-top{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;border-radius:99px;padding:4px 12px;display:inline-block}
+  .igual .tag-top{background:rgba(255,255,255,.06);color:var(--mut)}
+  .melhora .tag-top{background:rgba(255,106,57,.14);color:var(--brand)}
+  .novo .tag-top{background:rgba(63,217,127,.12);color:var(--hugit)}
+
+  /* dicionário */
+  .dict{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-top:36px}
+  @media(max-width:880px){.dict{grid-template-columns:repeat(2,1fr)}}
+  .word{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;text-align:center}
+  .word .w{font-family:var(--mono);font-weight:700;color:var(--brand);font-size:14px}
+  .word p{font-size:12.2px;color:var(--mut);margin-top:8px;line-height:1.5}
+
+  /* resumo final */
+  .final{text-align:center;padding:90px 0}
+  .final h2{font-size:clamp(26px,4.4vw,40px);font-weight:850;letter-spacing:-.02em;max-width:760px;margin:0 auto;line-height:1.25}
+  .final p{color:var(--mut);margin-top:16px}
+  footer{border-top:1px solid var(--line);padding:28px 0;text-align:center;font-family:var(--mono);font-size:11px;color:var(--dim)}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <div class="logo"><b>hu</b>git · explicação simples</div>
+    <h1>O mesmo dia de trabalho,<br><span class="grad">vivido duas vezes.</span></h1>
+    <p class="sub">Você não precisa entender nada de infraestrutura. Só aperte <b>▶ simular</b> e veja o que acontece <b>hoje</b> (com git + GitHub) e o que acontece <b>com hugit</b> — hora a hora.</p>
+
+    <div class="pedido">
+      <div class="face">🧑‍💼</div>
+      <div>
+        <p>Você, às 9 da manhã, pede uma coisa simples:</p>
+        <div class="balao">“Quero cupom de desconto no checkout.”</div>
+        <p style="margin-top:6px">Seu orquestrador (um Claude Opus) divide em <b style="color:var(--tx)">5 tarefas</b> e chama <b style="color:var(--tx)">5 agents</b>. Agora veja os dois mundos.</p>
+      </div>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="controls">
+    <button class="btn" id="play">▶ Simular o dia</button>
+    <button class="btn ghost" id="next" disabled>próxima hora →</button>
+    <div class="clock">🕘 <b id="hora">09:00</b></div>
+  </div>
+
+  <div class="board">
+    <div>
+      <div class="col-h hoje-h">😮‍💨 HOJE — git + GitHub <small>feito para humanos,<br>em ritmo humano</small></div>
+      <div id="col-hoje"></div>
+    </div>
+    <div>
+      <div class="col-h hugit-h">⚡ COM HUGIT <small>feito para frotas de agents,<br>com você no comando</small></div>
+      <div id="col-hugit"></div>
+    </div>
+  </div>
+
+  <!-- PLACAR -->
+  <div class="placar" id="placar">
+    <div class="placar-h"><h2>🏁 Fim do dia — o placar</h2></div>
+    <div class="placar-grid">
+      <div class="placar-col ph">
+        <h3>😮‍💨 Hoje</h3>
+        <div class="pi"><span>Tarefas entregues</span><b>2 de 5</b></div>
+        <div class="pi"><span>Horas SUAS gastas em revisão/arbitragem</span><b>~4h</b></div>
+        <div class="pi"><span>Conflitos que explodiram em cima de você</span><b>3</b></div>
+        <div class="pi"><span>Testes repetidos à toa</span><b>centenas</b></div>
+        <div class="pi"><span>Retrabalho amanhã (reconciliação)</span><b>sim 😩</b></div>
+        <div class="pi"><span>Seu computador</span><b>derretendo</b></div>
+      </div>
+      <div class="placar-col pg">
+        <h3>⚡ Com hugit</h3>
+        <div class="pi"><span>Tarefas entregues</span><b>5 de 5</b></div>
+        <div class="pi"><span>Horas suas</span><b>15 min</b></div>
+        <div class="pi"><span>Conflitos que chegaram em você</span><b>0</b></div>
+        <div class="pi"><span>Testes repetidos à toa</span><b>0</b></div>
+        <div class="pi"><span>Retrabalho amanhã</span><b>não 😌</b></div>
+        <div class="pi"><span>Seu computador</span><b>tranquilo</b></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- O QUE MUDA PRA VOCÊ -->
+<section>
+  <div class="wrap">
+    <div class="kicker">e pra você, o que muda?</div>
+    <h2 class="t">Quase nada para aprender.<br>Quase tudo para ganhar.</h2>
+    <div class="tres">
+      <div class="tcard igual">
+        <span class="emoji">🧱</span><br><span class="tag-top">continua igual</span>
+        <h3>O que você já conhece</h3>
+        <ul>
+          <li><b>git</b> continua git — todo comando funciona</li>
+          <li>Seus <b>arquivos e pastas</b> — iguais</li>
+          <li>Seu <b>editor/IDE</b> — igual</li>
+          <li>O repo continua visível no <b>GitHub</b> (espelho automático)</li>
+        </ul>
+      </div>
+      <div class="tcard melhora">
+        <span class="emoji">🪄</span><br><span class="tag-top">melhora sozinho</span>
+        <h3>O que fica bom sem você fazer nada</h3>
+        <ul>
+          <li><b>Conflitos</b> avisam na hora, não 3h depois</li>
+          <li><b>Testes</b> não repetem o que já foi provado</li>
+          <li><b>Lockfiles</b> nunca mais dão conflito</li>
+          <li><b>Histórico</b> legível: intenções, não 400 commits de robô</li>
+          <li>Nada se perde — <b>desfazer</b> funciona para tudo</li>
+        </ul>
+      </div>
+      <div class="tcard novo">
+        <span class="emoji">🎛️</span><br><span class="tag-top">novo — só se você quiser</span>
+        <h3>Seus 5 comandos de chefe</h3>
+        <ul>
+          <li><b>ledger</b> — o diário: o que foi pedido, feito e provado</li>
+          <li><b>review</b> — conversar com a mudança (“isso é seguro?”)</li>
+          <li><b>approve</b> — aprovar o que a política exige de você</li>
+          <li><b>watch</b> — assistir a frota ao vivo</li>
+          <li><b>why</b> — “por que esse código é assim?” → resposta</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- DICIONÁRIO -->
+<section>
+  <div class="wrap">
+    <div class="kicker">o dicionário inteiro</div>
+    <h2 class="t">5 palavras novas. Só.</h2>
+    <p class="t-sub">Todo o resto é git de sempre.</p>
+    <div class="dict">
+      <div class="word"><div class="w">intent</div><p>uma tarefa com tudo junto: o pedido, o trabalho, as provas. Substitui “commit + PR + ticket”.</p></div>
+      <div class="word"><div class="w">claim</div><p>“vou mexer AQUI.” Declarado antes de começar — por isso conflito avisa cedo.</p></div>
+      <div class="word"><div class="w">workspace</div><p>a mesa de trabalho de cada agent. Nasce em 1 segundo, isolada, descartável.</p></div>
+      <div class="word"><div class="w">ledger</div><p>o diário do repositório que um humano lê: pedido → feito → provado.</p></div>
+      <div class="word"><div class="w">landing</div><p>o pouso: a mudança entra na linha principal já testada em conjunto. Sempre verde.</p></div>
+    </div>
+  </div>
+</section>
+
+<div class="final wrap">
+  <h2>O git guarda <span style="color:var(--hoje)">o texto</span> e joga fora <span style="color:var(--hoje)">o entendimento</span>.<br>O hugit guarda <span class="grad">a intenção, o contexto e a prova</span> — e o texto vira consequência.</h2>
+  <p>git foi a revolução do desenvolvimento feito por humanos.<br><b style="color:var(--tx)">hugit é a revolução do desenvolvimento feito por LLMs — com humanos no comando.</b></p>
+</div>
+
+<footer>hugit · humangr-labs · 2026 — explicação simplificada; detalhes técnicos em docs/product/</footer>
+
+<script>
+const STEPS=[
+  {h:"09:05",hoje:{t:"🧭 Cada agent começa perdido",p:"Os 5 clonam o repo, instalam tudo, e ficam <b>~40 minutos</b> fuçando arquivos para entender onde mexer. Metade da “memória” deles é gasta só se localizando.",b:["⏳ 40 min perdidos ×5","🧠 contexto queimado"]},
+   hugit:{t:"📦 Cada agent recebe um kit pronto",p:"O hugit entrega a cada um a <b>mesa montada</b> (workspace em 1s) + um <b>resumo mastigado</b>: os arquivos certos, as regras, o que já foi tentado antes. Começam a trabalhar em 1 minuto.",b:["✅ produzindo em 1 min"]}},
+  {h:"10:30",hoje:{t:"🙈 Dois agents mexem na mesma coisa — e ninguém sabe",p:"O agent 2 e o agent 4 alteram o <b>mesmo arquivo de preços</b>, cada um na sua cópia. Nenhum aviso. A bomba está armada e só explode no fim do dia.",b:["💣 bomba armada"]},
+   hugit:{t:"📣 Aviso na hora: “vocês dois, mesmo arquivo!”",p:"Como cada tarefa <b>declarou onde ia mexer</b>, o hugit avisa <b>no momento da escrita</b>. O agent 4 ajusta a rota agora, enquanto o conflito é do tamanho de uma função.",b:["✅ conflito morto pequeno"]}},
+  {h:"12:00",hoje:{t:"🐢 Cada push re-testa TUDO, de novo",p:"Cada um dos 5 empurra código → a esteira roda a <b>suíte inteira, do zero, 5 vezes</b>. Fila de 40 minutos. Seu computador (que também é o servidor de testes…) vira uma torradeira.",b:["🔁 centenas de testes repetidos","🔥 Mac a 100%"]},
+   hugit:{t:"🧠 Só testa o que mudou. O resto, ele lembra.",p:"O hugit <b>lembra de tudo que já foi provado</b>. Mudou a tela de cupom? Roda os testes da tela de cupom. O resto: aprovado de memória, em segundos.",b:["✅ minutos, não horas","❄️ seu computador, livre"]}},
+  {h:"14:00",hoje:{t:"💥 A hora do merge: 540 linhas de conflito",p:"Hora de juntar tudo. O arquivo de dependências (lockfile) conflita <b>sozinho em 540 linhas</b>. Os agents 2 e 4 descobrem a colisão de manhã. Começa a <b>rodada de reconciliação</b> — e adivinha quem é chamado pra arbitrar? <b>Você.</b>",b:["💥 conflito gigante","🧑‍⚖️ você arbitrando 1h"]},
+   hugit:{t:"🪄 Junta sozinho — e testa o conjunto ANTES de entrar",p:"O lockfile <b>se regenera</b> (nunca dá conflito). As mudanças são <b>re-aplicadas</b> na base nova e o hugit testa <b>a soma de tudo junto</b> antes de entrar — porque A ok e B ok não garante A+B ok. Entra só o que prova que funciona em conjunto.",b:["✅ zero conflito até você","✅ linha principal sempre verde"]}},
+  {h:"16:00",hoje:{t:"📚 5 PRs gigantes esperando VOCÊ ler",p:"Cada PR tem centenas de linhas e uma descrição em prosa. Ler tudo direito levaria o dia. Você vira <b>o gargalo</b> de toda a operação — ou aprova no escuro. 😬",b:["🧍 você = gargalo","😬 ou aprova no escuro"]},
+   hugit:{t:"📱 1 toque no celular: só o que importa",p:"O diário (ledger) narrou o dia todo sozinho. A política diz: <b>“mexeu em pagamento → o chefe revisa.”</b> Chega <b>1 item</b>. Você pergunta: <i>“o que muda pro usuário? isso é seguro?”</i> — e a própria mudança responde, com provas. <b>Aprovado em 90 segundos.</b>",b:["✅ 1 decisão, com provas","⏱️ 90 segundos"]}},
+  {h:"18:00",hoje:{t:"🌙 Fim do dia: 2 de 5 entregues",p:"Duas tarefas no ar. Três presas esperando você arbitrar/revisar. O histórico virou uma sopa de 400 commits que ninguém nunca vai ler. Amanhã: recomeça a reconciliação.",b:["📉 2/5 entregues","🔁 retrabalho amanhã"]},
+   hugit:{t:"🌅 Fim do dia: 5 de 5 no ar",p:"Tudo entregue e testado em conjunto. O histórico conta a história de verdade: <b>5 intenções, cada uma com o porquê, as provas e quem fez</b>. Daqui a 6 meses, perguntou “por que isso é assim?” — o repositório responde.",b:["🏆 5/5 entregues","📖 história legível pra sempre"]}}
+];
+const colH=document.getElementById('col-hoje'),colG=document.getElementById('col-hugit');
+const horaEl=document.getElementById('hora'),play=document.getElementById('play'),next=document.getElementById('next'),placar=document.getElementById('placar');
+let i=0,auto=null;
+function card(side,s){
+  const d=document.createElement('div');
+  d.className='step lado-'+side;
+  const data=s[side==='hoje'?'hoje':'hugit'];
+  d.innerHTML=`<div class="hora">🕐 ${s.h}</div><h4>${data.t}</h4><p>${data.p}</p><div>${data.b.map(b=>`<span class="badge ${side==='hoje'?'b-dor':'b-ok'}">${b}</span>`).join('')}</div>`;
+  return d;
+}
+function step(){
+  if(i>=STEPS.length){end();return}
+  const s=STEPS[i];
+  horaEl.textContent=s.h;
+  const a=card('hoje',s),b=card('hugit',s);
+  colH.appendChild(a);colG.appendChild(b);
+  requestAnimationFrame(()=>requestAnimationFrame(()=>{a.classList.add('show');b.classList.add('show')}));
+  b.scrollIntoView({behavior:'smooth',block:'center'});
+  i++;
+  if(i>=STEPS.length){next.textContent='ver o placar 🏁'}
+}
+function end(){
+  horaEl.textContent='18:00';
+  placar.classList.add('show');
+  placar.scrollIntoView({behavior:'smooth',block:'center'});
+  next.disabled=true;play.textContent='↻ simular de novo';play.disabled=false;
+  if(auto){clearInterval(auto);auto=null}
+}
+play.addEventListener('click',()=>{
+  if(i>0){colH.innerHTML='';colG.innerHTML='';i=0;placar.classList.remove('show');next.textContent='próxima hora →'}
+  play.disabled=true;next.disabled=false;
+  step();
+  auto=setInterval(()=>{if(i>=STEPS.length){end()}else{step()}},5200);
+});
+next.addEventListener('click',()=>{
+  if(auto){clearInterval(auto);auto=null}
+  if(i>=STEPS.length){end()}else{step()}
+});
+</script>
+</body>
+</html>
