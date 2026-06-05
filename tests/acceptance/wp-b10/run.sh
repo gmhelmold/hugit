@@ -37,7 +37,7 @@ check "① acceptance file committed: $ACCEPTANCE_RS" \
   test -f "$ACCEPTANCE_RS"
 
 # ── (b) cargo test --list declares item_1, item_2 ────────────────────────────
-TESTLIST="$(cargo test -p hugit-queue --test "acceptance_${WP_ID}" -- --list 2>/dev/null || true)"
+export TESTLIST="$(cargo test -p hugit-queue --test "acceptance_${WP_ID}" -- --list 2>/dev/null || true)"
 
 check "① item_1 test declared (no_claim_lease_at_dispatch)" \
   bash -c "printf '%s\n' \"\$TESTLIST\" | grep -q 'item_1'"

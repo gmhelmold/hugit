@@ -28,7 +28,7 @@ check "① acceptance file committed: $ACCEPTANCE_RS" \
   test -f "$ACCEPTANCE_RS"
 
 # ── (b) cargo test --list declares item_1..item_4 ────────────────────────────
-TESTLIST="$(cargo test -p "$CRATE_NAME" --test "acceptance_${WP_ID}" -- --list 2>/dev/null || true)"
+export TESTLIST="$(cargo test -p "$CRATE_NAME" --test "acceptance_${WP_ID}" -- --list 2>/dev/null || true)"
 
 check "① item_1 test declared (parsed_validated_rendered)" \
   bash -c "printf '%s' \"\$TESTLIST\" | grep -q 'item_1'"
