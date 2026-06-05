@@ -1,4 +1,13 @@
-# hugit — formal decomposition (v1.8 — post critic round 8)
+# hugit — formal decomposition (v1.9 — post critic round 9)
+
+> v1.9 (2026-06-05): X's single R9 survivor integrated — **D8⑧ wires the two
+> control sets together**: the experiment corpus's source-eligibility
+> predicate IS the focus-gate exclusion (X10②), enforced fail-closed at
+> ingestion — a corelink-server change can never become a datapoint that
+> flips claims/regen. The R9 vague (gate-evaluator under degradation) is
+> pinned explicitly in D8⑥/B9⑥: degraded evaluator = "insufficient" =
+> fails CLOSED. Convergence: 42→23→16→4→4→3→2→1→1. R10 dispatched on X
+> (dry #1 candidate; R11 would confirm).
 
 > v1.8 (2026-06-05): **E CLOSED** (R7+R8 dry — row-by-row catalog mapping
 > both rounds). X's single R8 survivor integrated, and it's the symmetry
@@ -86,7 +95,7 @@ model, principal, sig}` · `RegenGate {optin_scope, repass, indep_verdict}`.
 | **B6** intent sidecar | S·sonnet | ① parsed/validated/rendered · ② malformed→actionable comment · ③ corpus→CAS by intent_id · **④(R2) negative: sidecar is non-authoritative — never gates or blocks landing** |
 | **B7** surface v0 | S·sonnet | ① live status page · ② exactly one edited comment/PR · ③ **🔧 every saved-minutes number links to its CheckResult set (auditable)** · **④(R3) the "$ saved" figure derived from minutes via a versioned, auditable cost model (rates stated), reconcilable against the minutes count** |
 | **B8** dogfood | M·sonnet | ① real 5-PR wave e2e · ② **🔧 vs defined baseline (same wave, memoization off), versioned report with formulas** · ③ 48h soak: 0 wrong-merge/lost-PR (event-audited) |
-| **B9 (+)** exit telemetry | S·sonnet | ① per-install activity → week-3 retention computable vs the ≥40% threshold (privacy-documented) · ② **🔧 feedback capture distinguishes UNPROMPTED ("I'd pay") statements from prompted responses — only unprompted count toward the ≥3 gate** · ③ exit-metric report generated from data, auditable · **④ 🔧 cohort/window guards: n=10 external teams, ≥3 weeks real use, evaluation window ANCHORED to the first-10-paying-customers event and inside 90 days — otherwise "insufficient/out-of-window", never a pass** · **⑤(R4) the ≥3 gate is ENFORCED as pass/fail: 2 correctly-counted unprompted signals → FAIL even with ≥40% retention; exactly 3 → PASS** · **⑥(R8) THE MONEY GATE BINDS: charging money for hugit is structurally blocked until the exit report = PASS; a FAIL/insufficient/out-of-window report CANNOT enable billing; the enable-billing event is itself audited (control, not dashboard — symmetric to D8⑥)** |
+| **B9 (+)** exit telemetry | S·sonnet | ① per-install activity → week-3 retention computable vs the ≥40% threshold (privacy-documented) · ② **🔧 feedback capture distinguishes UNPROMPTED ("I'd pay") statements from prompted responses — only unprompted count toward the ≥3 gate** · ③ exit-metric report generated from data, auditable · **④ 🔧 cohort/window guards: n=10 external teams, ≥3 weeks real use, evaluation window ANCHORED to the first-10-paying-customers event and inside 90 days — otherwise "insufficient/out-of-window", never a pass** · **⑤(R4) the ≥3 gate is ENFORCED as pass/fail: 2 correctly-counted unprompted signals → FAIL even with ≥40% retention; exactly 3 → PASS** · **⑥ 🔧 THE MONEY GATE BINDS: charging money for hugit is structurally blocked until the exit report = PASS; a FAIL/insufficient/out-of-window report CANNOT enable billing; a DEGRADED gate-evaluator state = "insufficient" → fails CLOSED, cannot enable; the enable-billing event is itself audited (control, not dashboard — symmetric to D8⑥)** |
 | **B10 (R3)** negative scope | S·sonnet | ① no claim/lease acquired at dispatch — conflict discovery happens ONLY at landing/union (assert mechanism absent) · ② rebase in phase B is textual-fallback only — regenerative path absent/disabled (assert) |
 
 ## 3. Phase C — Squad C (10 WPs)
@@ -115,7 +124,7 @@ model, principal, sig}` · `RegenGate {optin_scope, repass, indep_verdict}`.
 | **D5** ledger+watch+fleet | M·sonnet | ① asked→done→proven per campaign · ② **🔧 watch: EventRecord-to-display p95 <2s (measured per event class)** · ③ **🔧 deep-links resolve to golden expected targets (not just non-error)** · **④(+) planted secret renders REDACTED in ledger/verdict views** · **⑤(R2) two-zoom toggle: intent view ⇄ raw-commit view mutually consistent over the same fixture (one store)** · **⑥(R2) `hugit fleet` emits documented machine-readable schema reflecting true ws/agent state vs fixture** |
 | **D6** policy engine | M·sonnet | ① 3 ported gates local≡forge · ② engine down→landing blocks (kill-test) · ③ policy change = audited event |
 | **D7** verdict panels + review Q&A | M·opus | ① lenses isolated (prompt audit) · ② valid VerdictObject[] + evidence refs · ③ **🔧 planted bug of a NON-author-visible class (semantic/logic, demonstrably uncovered by any author test) caught by ≥1 lens** · **④(R2) human review Q&A: answers = citations to real evidence objects; no grounding → explicit refusal, never fabricated** · **⑤(R3) DIVERSITY enforced: homogeneous (same prompt+model) panel rejected/flagged; real panel dispatches distinct prompts and ≥2 distinct models** · **⑥(R3) no-self-defense negative: planted persuasive false self-justification in author-controlled fields is unreachable by reviewers; verdict identical with vs without it (no persuasion channel exists)** |
-| **D8** experiment harness | M·opus | ① every wave auto-contributes datapoints · ② dashboard: disjointness %, regen agree/disagree, n · ③ gate report generated, never hand-written · **④(R2) anti-gaming: promotion corpus pre-registered and SEALED before evaluation; sample selection auditable** · **⑤(R2) post-hoc removal detected → invalidates the verdict** · **⑥(R6) THE GATE BINDS: claims-as-oracle stays structurally pinned advisory/OFF and regen promotion stays structurally blocked until the report shows PASS; a FAIL/insufficient-n report CANNOT flip either feature; the promotion event itself is audited (the gate is a control, not a dashboard)** · **⑦(R6) degradation honesty: waves executed during a degraded window are excluded from the corpus or explicitly marked — never silently contribute biased data** |
+| **D8** experiment harness | M·opus | ① every wave auto-contributes datapoints · ② dashboard: disjointness %, regen agree/disagree, n · ③ gate report generated, never hand-written · **④(R2) anti-gaming: promotion corpus pre-registered and SEALED before evaluation; sample selection auditable** · **⑤(R2) post-hoc removal detected → invalidates the verdict** · **⑥ 🔧 THE GATE BINDS: claims-as-oracle stays structurally pinned advisory/OFF and regen promotion stays structurally blocked until the report shows PASS; a FAIL/insufficient-n report CANNOT flip either feature; a DEGRADED gate-evaluator state = "insufficient" → fails CLOSED, cannot promote; the promotion event itself is audited** · **⑦(R6) degradation honesty: waves executed during a degraded window are excluded from the corpus or explicitly marked — never silently contribute biased data** · **⑧(R9) source-eligibility WIRED to the focus gate: the experiment harness rejects focus-gate-ineligible changes (corelink-server) at INGESTION — the corpus eligibility predicate IS the X10② exclusion, fail-closed + audited (the two controls are no longer separate sets)** |
 | **D9 (+)** attention queue | M·opus | ① fixture with known policy/blast/confidence → documented composite ordering reproduced · ② perturbing one input moves entry to expected position · ③ policy-mandatory items can never be ranked out of the human's view · **④(R2) fast-approve (90s) affordance is BLOCKED for high-risk/policy-mandatory items — forced through full review; permitted for policy-low-risk** · **⑤(R7) up-zoom under degradation: with ranking inputs (blast/confidence) unavailable, policy-mandatory items STILL surface with an honest "ranking degraded" state — the queue never goes silently dark on items that must reach a human** |
 | **D10 (+)** why+impact | M·sonnet | ① `hugit why <line\|symbol>` → originating intent + charter/author/model/cost, matching event log · ② `hugit impact <path\|change>` → golden affected-set on known build graph · ③ impact feeds verdict-panel ground truth (cross-check) · **④(R6) `why` on regenerated/derived bytes resolves honestly to the regen/derivation event — never fabricates or mis-attributes a human author** |
 | **D11 (+)** journals+resume | M·sonnet | ① journal persisted as tenant-private object bound to ws/intent · ② post-crash `ctx resume` reconstructs session within supported horizon · ③ beyond-horizon resume refused/degraded as documented |
@@ -190,10 +199,11 @@ test crates + red-team fixtures (`crates/hugit-invariants`).
   profile/neverTouch + the git-hygiene guard — a standing law, not a test.
 - **Critic loop status (per-section closure = 2 consecutive dry rounds):**
   R1=42+8 · R2=23+8 · R3=16+10 · R4=4+2 · R5=4+2 (C,D **CLOSED**) ·
-  R6=3+4 (B **CLOSED**) · R7=2+1 (E dry #1) · R8=1+0 (**E CLOSED**; X:1 —
-  the money-gate binding, integrated as B9⑥). **Closed: B, C, D, E.**
-  Open: X only (needs R9+R10 dry). Then: WP token re-slicing (≤100k hard /
-  80k ideal, DoD per WP).
+  R6=3+4 (B **CLOSED**) · R7=2+1 (E dry #1) · R8=1+0 (**E CLOSED**) ·
+  R9=1+1 (X: corpus source-eligibility → D8⑧; degraded-evaluator
+  fail-closed pinned in D8⑥/B9⑥). **Closed: B, C, D, E.** Open: X only
+  (needs R10+R11 dry). Then: WP token re-slicing (≤100k hard / 80k ideal,
+  DoD per WP).
 - **Adjudications on record (so future critics don't re-litigate):**
   "no-fake-intents at runtime" covered by D3⑤ (steady-state raw push) +
   D4④ (mixed-altitude fixture) + E2⑤ (import boundary); bidirectional
