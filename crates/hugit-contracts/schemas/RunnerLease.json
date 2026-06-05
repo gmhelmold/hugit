@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RunnerLease",
+  "description": "A runner lease granting scoped filesystem access to a runner\n(decomposition §1, item 5).\n\nFrozen by WP-00.",
+  "type": "object",
+  "properties": {
+    "expiry": {
+      "description": "Unix epoch milliseconds at which this lease expires.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "lease_id": {
+      "description": "Unique lease identifier.",
+      "type": "string"
+    },
+    "net_policy": {
+      "description": "Network policy name / ref governing this runner's outbound access.",
+      "type": "string"
+    },
+    "path_set": {
+      "description": "Set of filesystem paths this lease grants access to.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "principal_chain": {
+      "description": "Ordered chain of principals (agent ids / user ids) that own this\nlease.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "state": {
+      "description": "Current lifecycle state of the lease.",
+      "$ref": "#/$defs/RunnerState"
+    },
+    "tmp_root": {
+      "description": "Temporary root directory allocated to this runner.",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "lease_id",
+    "principal_chain",
+    "path_set",
+    "expiry",
+    "net_policy",
+    "tmp_root",
+    "state"
+  ],
+  "$defs": {
+    "RunnerState": {
+      "description": "Lifecycle state of a runner lease.",
+      "oneOf": [
+        {
+          "description": "Lease is currently held and active.",
+          "type": "string",
+          "const": "held"
+        },
+        {
+          "description": "Lease expired without explicit release.",
+          "type": "string",
+          "const": "expired"
+        },
+        {
+          "description": "Runner crashed while holding the lease.",
+          "type": "string",
+          "const": "crashed"
+        },
+        {
+          "description": "Lease was explicitly released.",
+          "type": "string",
+          "const": "released"
+        }
+      ]
+    }
+  }
+}

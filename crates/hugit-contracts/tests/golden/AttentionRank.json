@@ -1,0 +1,5 @@
+{
+  "policy": "blast-radius-v1",
+  "blast_radius": 42,
+  "confidence": 8750
+}

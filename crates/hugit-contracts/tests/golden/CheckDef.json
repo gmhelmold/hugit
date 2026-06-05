@@ -1,0 +1,14 @@
+{
+  "def_digest": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+  "command": "cargo test --workspace",
+  "inputs": [
+    "src/**/*.rs",
+    "Cargo.toml"
+  ],
+  "toolchain_ref": "rust-1.96.0-x86_64-unknown-linux-gnu",
+  "env_manifest": "badc0ffee0badc0ffee0badc0ffee0badc0ffee0badc0ffee0badc0ffee0badc",
+  "glob_set": [
+    "src/**",
+    "tests/**"
+  ]
+}

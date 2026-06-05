@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AttestationChain",
+  "description": "Full provenance attestation chain (decomposition §1, item 14 (+);\nwhitepaper §9).\n\nEach field is a content-addressed ref or signature blob representing one\nlink in the provenance chain.\n\nFrozen by WP-00.",
+  "type": "object",
+  "properties": {
+    "def": {
+      "description": "Content-addressed ref / digest of the CheckDef used.",
+      "type": "string"
+    },
+    "model": {
+      "description": "Model identifier used in any AI-driven step of the pipeline.",
+      "type": "string"
+    },
+    "principal": {
+      "description": "Ordered chain of principals who triggered or approved this chain.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "runner": {
+      "description": "Content-addressed ref identifying the runner that executed the check.",
+      "type": "string"
+    },
+    "sig": {
+      "description": "Detached signature over the concatenated refs (format: base64-encoded\nEd25519 or ECDSA-P256 signature).",
+      "type": "string"
+    },
+    "tree": {
+      "description": "Content-addressed ref to the workspace tree snapshot.",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "tree",
+    "def",
+    "runner",
+    "model",
+    "principal",
+    "sig"
+  ]
+}

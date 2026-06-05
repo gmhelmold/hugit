@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DiagnosisObject",
+  "description": "Bounded structured diagnosis object (decomposition §1, item 3; B5④).\n\nNever a raw log dump — size_bytes is asserted bounded at the application\nlayer.\n\nFrozen by WP-00.",
+  "type": "object",
+  "properties": {
+    "bisect_path": {
+      "description": "Ordered sequence of tree refs representing the bisect path from the\nlast known-green tree to the culprit.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "culprit_ref": {
+      "description": "Content-addressed ref to the culprit artefact or commit.",
+      "type": "string"
+    },
+    "diff_vs_green_ref": {
+      "description": "Content-addressed ref to the diff between this state and the last\nknown-green baseline.",
+      "type": "string"
+    },
+    "size_bytes": {
+      "description": "Serialised byte size of this diagnosis object (asserted bounded by\nthe application layer).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "suspect_targets": {
+      "description": "Build/test targets suspected of being the root cause.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "culprit_ref",
+    "diff_vs_green_ref",
+    "suspect_targets",
+    "bisect_path",
+    "size_bytes"
+  ]
+}

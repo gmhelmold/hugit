@@ -1,0 +1,17 @@
+{
+  "path_set": [
+    "src/",
+    "Cargo.toml"
+  ],
+  "deny_default": true,
+  "materialized": [
+    {
+      "path": "src/lib.rs",
+      "digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "path": "Cargo.toml",
+      "digest": "0000000000000000000000000000000000000000000000000000000000000001"
+    }
+  ]
+}

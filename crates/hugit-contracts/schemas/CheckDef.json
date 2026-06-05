@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CheckDef",
+  "description": "A check-as-code definition (decomposition §1, item 1).\n\nFrozen by WP-00. The `def_digest` is the canonical digest over the\ndefinition body; it forms the second axis of the CheckResult memo key.",
+  "type": "object",
+  "properties": {
+    "command": {
+      "description": "The command to execute (argv[0] + args as a single shell string or\nstructured invocation).",
+      "type": "string"
+    },
+    "def_digest": {
+      "description": "SHA-256 hex digest of the definition body (canonical, second axis of\nmemo key).",
+      "type": "string"
+    },
+    "env_manifest": {
+      "description": "Reference to an environment manifest (content-addressed blob ref).",
+      "type": "string"
+    },
+    "glob_set": {
+      "description": "File glob patterns that scope materialization for this check.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "inputs": {
+      "description": "Declared input paths / globs that affect the check.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "toolchain_ref": {
+      "description": "Reference to the toolchain (e.g. a content-addressed toolchain digest\nor version string).",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "def_digest",
+    "command",
+    "inputs",
+    "toolchain_ref",
+    "env_manifest",
+    "glob_set"
+  ]
+}

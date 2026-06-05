@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "QueueApi",
+  "description": "Landing-queue API surface — compound root type aggregating all landing-\nqueue sub-types (decomposition §1, item 9).\n\nThe committed JSON Schema is the schema of this root type.\n\nFrozen by WP-00.",
+  "type": "object",
+  "properties": {
+    "batch_id": {
+      "description": "Batch identifier for the current or most recent batch.",
+      "type": "string"
+    },
+    "landable": {
+      "description": "Items currently landable (enqueue request body).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/LandableEntry"
+      }
+    },
+    "seal": {
+      "description": "Seal record for the current or most recent batch.",
+      "$ref": "#/$defs/BatchSeal"
+    },
+    "union_result": {
+      "description": "Union merge result for the current batch.",
+      "$ref": "#/$defs/UnionResult"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "landable",
+    "batch_id",
+    "union_result",
+    "seal"
+  ],
+  "$defs": {
+    "BatchSeal": {
+      "description": "Seal record for a completed landing batch.",
+      "type": "object",
+      "properties": {
+        "batch_id": {
+          "description": "Batch identifier.",
+          "type": "string"
+        },
+        "minimal_failing_pair": {
+          "description": "The minimal failing pair if the batch is in a failed state (absent\nwhen the batch succeeded).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MinimalFailingPair"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "order_index": {
+          "description": "Queue position / ordering index of this batch.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "state": {
+          "description": "Current state of the batch.",
+          "type": "string"
+        },
+        "union_tree": {
+          "description": "Merkle tree hash of the sealed (committed) tree.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "batch_id",
+        "union_tree",
+        "order_index",
+        "state"
+      ]
+    },
+    "LandableEntry": {
+      "description": "A single entry in the landable queue (PR / change ready to land).",
+      "type": "object",
+      "properties": {
+        "intent_id": {
+          "description": "intent_id of the associated PR sidecar.",
+          "type": "string"
+        },
+        "item_id": {
+          "description": "Unique identifier for this landable item.",
+          "type": "string"
+        },
+        "order_index": {
+          "description": "Position in the landing queue.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "tree_hash": {
+          "description": "Merkle tree hash of the change's workspace snapshot.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "item_id",
+        "intent_id",
+        "tree_hash",
+        "order_index"
+      ]
+    },
+    "MinimalFailingPair": {
+      "description": "The minimal failing pair in a batch (two items whose union fails).",
+      "type": "object",
+      "properties": {
+        "item_a": {
+          "description": "First item of the failing pair.",
+          "type": "string"
+        },
+        "item_b": {
+          "description": "Second item of the failing pair.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "item_a",
+        "item_b"
+      ]
+    },
+    "UnionResult": {
+      "description": "Union merge result for a batch.",
+      "type": "object",
+      "properties": {
+        "batch_id": {
+          "description": "Batch identifier.",
+          "type": "string"
+        },
+        "conflict_free": {
+          "description": "Whether the union merge succeeded without conflicts.",
+          "type": "boolean"
+        },
+        "union_tree": {
+          "description": "Merkle tree hash of the union-merged workspace.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "batch_id",
+        "union_tree",
+        "conflict_free"
+      ]
+    }
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EventRecord",
+  "description": "One append-only hash-chained event record (decomposition §1, item 7).\n\nHash-chain formula (FROZEN, doc-only — implementation in B2a/D1a):\n`this_hash = H(prev_hash ‖ kind ‖ principal_chain ‖ payload ‖ seq)`\nwhere H = SHA-256, ‖ = concatenation of length-prefixed UTF-8 fields\n(4-byte big-endian u32 length prefix per field), seq is encoded as\n8-byte big-endian u64, and the genesis `prev_hash` = 64 hex zeros.\n\nFrozen by WP-00.",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "description": "Event kind / type discriminator string.",
+      "type": "string"
+    },
+    "payload": {
+      "description": "Opaque JSON payload for this event (serialised as a string to keep\nthe envelope schema stable across payload evolution).",
+      "type": "string"
+    },
+    "prev_hash": {
+      "description": "SHA-256 hex digest of the preceding event (64 hex zeros for genesis).",
+      "type": "string"
+    },
+    "principal_chain": {
+      "description": "Ordered chain of principals that produced this event.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "recorded_at": {
+      "description": "Unix epoch milliseconds when this event was recorded.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "seq": {
+      "description": "Monotonically increasing sequence number within the event log.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "this_hash": {
+      "description": "SHA-256 hex digest of this event.\n\nFROZEN FORMULA: `H(prev_hash ‖ kind ‖ principal_chain ‖ payload ‖ seq)`.",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "seq",
+    "prev_hash",
+    "this_hash",
+    "kind",
+    "principal_chain",
+    "payload",
+    "recorded_at"
+  ]
+}

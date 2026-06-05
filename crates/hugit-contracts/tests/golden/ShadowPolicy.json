@@ -1,0 +1,5 @@
+{
+  "cadence": "every_push",
+  "budget": 300000,
+  "optin": "humangr/hugit"
+}

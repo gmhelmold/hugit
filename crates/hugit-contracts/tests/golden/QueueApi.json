@@ -1,0 +1,23 @@
+{
+  "landable": [
+    {
+      "item_id": "item-001",
+      "intent_id": "01900000-0000-7000-8000-000000000001",
+      "tree_hash": "cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe",
+      "order_index": 0
+    }
+  ],
+  "batch_id": "batch-20240601-001",
+  "union_result": {
+    "batch_id": "batch-20240601-001",
+    "union_tree": "4444444444444444444444444444444444444444444444444444444444444444",
+    "conflict_free": true
+  },
+  "seal": {
+    "batch_id": "batch-20240601-001",
+    "union_tree": "4444444444444444444444444444444444444444444444444444444444444444",
+    "order_index": 0,
+    "state": "sealed",
+    "minimal_failing_pair": null
+  }
+}

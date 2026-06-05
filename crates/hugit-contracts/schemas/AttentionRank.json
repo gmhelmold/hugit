@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AttentionRank",
+  "description": "Composite ordering inputs for the attention queue\n(decomposition §1, item 12 (+)).\n\nFrozen by WP-00.",
+  "type": "object",
+  "properties": {
+    "blast_radius": {
+      "description": "Estimated blast-radius score (higher = more files / systems affected).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "confidence": {
+      "description": "Model confidence in the blast-radius estimate (0.0–1.0, stored as a\nfixed-point integer in basis points: 10000 = 1.0).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "policy": {
+      "description": "Policy identifier / ref that produced this rank.",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "policy",
+    "blast_radius",
+    "confidence"
+  ]
+}

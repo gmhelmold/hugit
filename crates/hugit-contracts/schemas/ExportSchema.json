@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExportSchema",
+  "description": "Versioned, machine-validatable export envelope\n(decomposition §1, item 13 (+); E5③/⑥).\n\nFrozen by WP-00.",
+  "type": "object",
+  "properties": {
+    "object_classes": {
+      "description": "List of object class names included in this export.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "redaction_manifest": {
+      "description": "Content-addressed ref to the redaction manifest (describes which\nfields were redacted and under what policy).",
+      "type": "string"
+    },
+    "version": {
+      "description": "Schema / export format version string (semver).",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "object_classes",
+    "redaction_manifest"
+  ]
+}

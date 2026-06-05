@@ -1,0 +1,9 @@
+{
+  "version": "1.0.0",
+  "object_classes": [
+    "CheckDef",
+    "CheckResult",
+    "EventRecord"
+  ],
+  "redaction_manifest": "8888888888888888888888888888888888888888888888888888888888888888"
+}
