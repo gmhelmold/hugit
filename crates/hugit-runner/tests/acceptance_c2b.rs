@@ -192,8 +192,12 @@ fn item_4_concurrent_ge8_per_box() {
         .collect();
 
     let scheduler = Scheduler::new(boxx.clone(), DockerEngine::new(boxx.clone()));
+    // Jobs must HOLD long enough that all N provably overlap: `true` exits
+    // instantly, turning peak-concurrency into a spawn-latency race (flaked
+    // once the box went warm — exactly the C6 flake class). `sleep 5` makes
+    // the ≥N-concurrent capability proof deterministic, not timing-lucky.
     let report = scheduler
-        .run_batch(&leases, &["true"])
+        .run_batch(&leases, &["sleep", "5"])
         .expect("run concurrent batch");
 
     assert!(
