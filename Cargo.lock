@@ -231,6 +231,9 @@ version = "0.1.0"
 [[package]]
 name = "hugit-queue"
 version = "0.1.0"
+dependencies = [
+ "hugit-contracts",
+]
 
 [[package]]
 name = "hugit-refstore"
