@@ -39,11 +39,11 @@ check "cargo test -p hugit-checks --test acceptance_wp_b3 green" \
 
 # ① per-ecosystem adapters must have fixture files committed
 check "① cargo golden fixture committed" \
-  bash -c "find $AFFECTED_DIR -name '*.json' -o -name '*.toml' | xargs grep -ql 'cargo\|workspace' 2>/dev/null | grep -q ."
+  bash -c "find $AFFECTED_DIR -name '*.json' -o -name '*.toml' | xargs grep -l 'cargo\|workspace' 2>/dev/null | grep -q ."
 check "① pnpm golden fixture committed" \
-  bash -c "find $AFFECTED_DIR -name '*.json' -o -name 'pnpm*' | xargs grep -ql 'pnpm\|packages' 2>/dev/null | grep -q ."
+  bash -c "find $AFFECTED_DIR -name '*.json' -o -name 'pnpm*' | xargs grep -l 'pnpm\|packages' 2>/dev/null | grep -q ."
 check "① turbo golden fixture committed" \
-  bash -c "find $AFFECTED_DIR -name 'turbo*' -o -name '*.json' | xargs grep -ql 'turbo\|pipeline\|tasks' 2>/dev/null | grep -q ."
+  bash -c "find $AFFECTED_DIR -name 'turbo*' -o -name '*.json' | xargs grep -l 'turbo\|pipeline\|tasks' 2>/dev/null | grep -q ."
 
 # ② root-edit full-set path: root manifest handling present in src
 check "② root manifest invalidation logic present in src" \
