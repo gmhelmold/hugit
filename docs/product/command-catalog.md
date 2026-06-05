@@ -22,11 +22,15 @@
 
 ## The two standing gates (written, dated, binding)
 
-1. **The focus gate:** no hugit code before CoreLink has its first paying
-   customers. hugit is frozen at docs until then.
-2. **The experiment gate:** claims-as-oracle and regen-rebase are promoted
-   only by data — the disjointness-rate + regen-honesty experiment on ~200
-   real fleet changes (`docs/reviews/…`, "the ONE experiment").
+1. **The focus gate — REFORMED by owner decision (2026-06-05):** CoreLink and
+   hugit run **in parallel with zero interference** ("um não interfere — AT
+   ALL — no outro"). CoreLink's launch route, infra and sessions are
+   untouched by hugit work; hugit dogfood excludes `corelink-server` during
+   its launch window. The phase-B exit metric still gates *charging money*.
+   Execution: warp plan, two phases per sprint (`docs/plan/warp-10-days.md`).
+2. **The experiment gate (stands):** claims-as-oracle and regen-rebase are
+   promoted only by data — the disjointness-rate + regen-honesty experiment
+   on ~200 real fleet changes (`docs/reviews/…`, "the ONE experiment").
 
 ---
 
