@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "deny": [
+      "Edit(/Users/gustavoschneiter/Documents/HuGR/corelink-server/**)",
+      "Write(/Users/gustavoschneiter/Documents/HuGR/corelink-server/**)",
+      "NotebookEdit(/Users/gustavoschneiter/Documents/HuGR/corelink-server/**)",
+      "Edit(/Users/gustavoschneiter/Documents/HuGR/corelink-workspaces/**)",
+      "Write(/Users/gustavoschneiter/Documents/HuGR/corelink-workspaces/**)",
+      "Edit(/Users/gustavoschneiter/Documents/HuGR/hugr-wallet/**)",
+      "Write(/Users/gustavoschneiter/Documents/HuGR/hugr-wallet/**)",
+      "Edit(/Users/gustavoschneiter/Documents/HuGR/HuGR-Smith/**)",
+      "Write(/Users/gustavoschneiter/Documents/HuGR/HuGR-Smith/**)",
+      "Edit(/Users/gustavoschneiter/Documents/HuGR/HuGR_Arsenal/**)",
+      "Write(/Users/gustavoschneiter/Documents/HuGR/HuGR_Arsenal/**)",
+      "Edit(/Users/gustavoschneiter/Documents/HuGR/hugr-juiceshop/**)",
+      "Write(/Users/gustavoschneiter/Documents/HuGR/hugr-juiceshop/**)",
+      "Edit(/Users/gustavoschneiter/Documents/HuGR/_worktrees/**)",
+      "Write(/Users/gustavoschneiter/Documents/HuGR/_worktrees/**)",
+      "Edit(/Users/gustavoschneiter/Documents/HuGR/techlead/**)",
+      "Write(/Users/gustavoschneiter/Documents/HuGR/techlead/**)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/forbid-sibling-paths.py\""
+          }
+        ]
+      }
+    ]
+  }
+}

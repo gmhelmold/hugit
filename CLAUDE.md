@@ -39,6 +39,26 @@ route or campaign #1/#2 critical paths.**
 it. Never assume sole ownership of its checkout; check `git worktree list` and
 uncommitted state before touching anything there.
 
+## The session fence (owner mandate 2026-06-05 — MECHANIZED)
+
+It must be **impossible** for hugit work to cross other sessions' repos,
+especially corelink-server. Enforcement is physical, not behavioral:
+
+1. **`.claude/settings.json`** (this repo) carries `permissions.deny` rules
+   AND a `PreToolUse` hook (`.claude/hooks/forbid-sibling-paths.py`) that
+   **blocks every Edit/Write/NotebookEdit into a sibling HuGR project and
+   every Bash command referencing one unless it is provably read-only**
+   (fail-closed). Every session opened in this directory — and every
+   subagent it spawns — inherits the fence automatically.
+2. **Open hugit sessions IN `~/Documents/HuGR/hugit`** — never from a
+   sibling project's directory (a session anchored elsewhere does not load
+   this fence). The founding session was corelink-anchored by historical
+   accident; do not repeat it.
+3. The TechLead profile (`.techlead/profile`) mirrors the same `neverTouch`
+   list for fleet dispatch.
+4. Read-only inspection of siblings (cat/grep/git log) is allowed — context
+   is fine, mutation never is. Fence changes require explicit owner approval.
+
 ## Conventions
 
 - Commits: `Signed-off-by:` trailer (DCO) + `Co-Authored-By: Claude …` trailer.

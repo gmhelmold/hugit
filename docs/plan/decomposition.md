@@ -1,4 +1,13 @@
-# hugit — formal decomposition (v1.11 — post critic round 11)
+# hugit — formal decomposition (v2.0 — SUITE ACCEPTED)
+
+> **v2.0 (2026-06-05): THE CRITIC LOOP IS CLOSED.** All five sections
+> achieved two consecutive dry rounds: B (R5+R6) · C (R4+R5) · D (R4+R5) ·
+> E (R7+R8) · X (R12+R13). Thirteen rounds, 5 independent cold lenses,
+> ~120 acceptance items forged or hardened adversarially
+> (42→23→16→4→4→3→2→1→1→2→1→0→0). The suite is ACCEPTED as the demand's
+> faithful externalization. Next step per protocol: **WP token re-slicing**
+> (≤100k hard / 80k ideal per task) into SOTA contracts — charter, owned
+> items, DoD, completeness criteria, dispatch packet, zero live decisions.
 
 > v1.11 (2026-06-05): R11 found the best first-order gap in five rounds —
 > **X10④⑤ the shared API-tenancy channel**: hugit runs its substrate INSIDE
@@ -223,10 +232,10 @@ test crates + red-team fixtures (`crates/hugit-invariants`).
   R6=3+4 (B **CLOSED**) · R7=2+1 (E dry #1) · R8=1+0 (**E CLOSED**) ·
   R9=1+1 (corpus source-eligibility → D8⑧) · R10=2+2 (erasure×seal → X7④;
   intent_id identity → X9③) · R11=1+0 (the shared API-tenancy channel →
-  X10④⑤) · **R12=0 (X DRY #1** — full invariant map; the one borderline
-  seam, degradation×fence precedence, adjudicated as owned by X11①∩X1).
-  **Closed: B, C, D, E.** Open: X (R13 = closure confirmation). Then: WP
-  token re-slicing (≤100k hard / 80k ideal, DoD per WP).
+  X10④⑤) · R12=0 (X dry #1) · **R13=0 (X dry #2 — LOOP CLOSED)**.
+  **ALL SECTIONS CLOSED: B (R5+R6) · C (R4+R5) · D (R4+R5) · E (R7+R8) ·
+  X (R12+R13). Suite ACCEPTED 2026-06-05.** Next: WP token re-slicing
+  (≤100k hard / 80k ideal, DoD per WP).
 - **Adjudications on record (so future critics don't re-litigate):**
   "no-fake-intents at runtime" covered by D3⑤ (steady-state raw push) +
   D4④ (mixed-altitude fixture) + E2⑤ (import boundary); bidirectional
