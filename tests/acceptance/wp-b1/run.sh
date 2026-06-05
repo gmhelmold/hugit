@@ -55,10 +55,8 @@ check "① webhook.rejected EventRecord wired in src" \
 check "⑤ installation.revoked EventRecord wired in src" \
   bash -c "grep -rq 'installation\.revoked\|installation_revoked' $CRATE/src/"
 
-# Claims boundary: sidecar/ and ui/ must NOT be authored by this WP
-check "sidecar/ module path absent (reserved for B6)" \
-  bash -c "! test -d $CRATE/sidecar"
-check "ui/ module path absent (reserved for B7)" \
-  bash -c "! test -d $CRATE/ui"
+# Claims boundary guards RETIRED (lead, wave D1.2 integration): the
+# "sidecar//ui/ absent" asserts were B1-wave isolation fences; B6/B7 now
+# legitimately own those paths. Rationale in .techlead/state/wave-d1.md.
 
 finish
