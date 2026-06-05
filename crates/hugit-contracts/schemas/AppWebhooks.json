@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AppWebhooks",
+  "description": "GitHub App ingest/ack surface — compound root type aggregating all\nwebhook-related sub-types (decomposition §1, item 10).\n\nThe committed JSON Schema is the schema of this root type.\n\nFrozen by WP-00.",
+  "type": "object",
+  "properties": {
+    "ack": {
+      "description": "Acknowledgement receipt.",
+      "$ref": "#/$defs/AckReceipt"
+    },
+    "inbound": {
+      "description": "Inbound signed event envelope.",
+      "$ref": "#/$defs/SignedEventEnvelope"
+    },
+    "write_request": {
+      "description": "Checks API write-back request.",
+      "$ref": "#/$defs/ChecksWriteRequest"
+    },
+    "write_response": {
+      "description": "Checks API write-back response.",
+      "$ref": "#/$defs/ChecksWriteResponse"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "inbound",
+    "ack",
+    "write_request",
+    "write_response"
+  ],
+  "$defs": {
+    "AckReceipt": {
+      "description": "Acknowledgement receipt returned after processing an inbound webhook.",
+      "type": "object",
+      "properties": {
+        "acked_at": {
+          "description": "Unix epoch milliseconds when the ack was issued.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "delivery_id": {
+          "description": "Delivery GUID echoed back.",
+          "type": "string"
+        },
+        "processing_id": {
+          "description": "Opaque internal processing ID assigned to this event.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "delivery_id",
+        "processing_id",
+        "acked_at"
+      ]
+    },
+    "ChecksWriteRequest": {
+      "description": "Request to write back to GitHub Checks API.",
+      "type": "object",
+      "properties": {
+        "check_name": {
+          "description": "GitHub App check run name.",
+          "type": "string"
+        },
+        "conclusion": {
+          "description": "Conclusion (\"success\", \"failure\", \"neutral\", etc.); present when\nstatus = \"completed\".",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "head_sha": {
+          "description": "Git commit SHA this check run is attached to.",
+          "type": "string"
+        },
+        "output_ref": {
+          "description": "Content-addressed ref to the full check output blob.",
+          "type": "string"
+        },
+        "repo": {
+          "description": "GitHub repository (owner/repo).",
+          "type": "string"
+        },
+        "status": {
+          "description": "Check run status (\"queued\", \"in_progress\", \"completed\").",
+          "type": "string"
+        },
+        "summary": {
+          "description": "Short summary for the check run output.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "repo",
+        "head_sha",
+        "check_name",
+        "status",
+        "summary",
+        "output_ref"
+      ]
+    },
+    "ChecksWriteResponse": {
+      "description": "Response from the GitHub Checks API write-back.",
+      "type": "object",
+      "properties": {
+        "check_run_id": {
+          "description": "GitHub check run ID assigned by the API.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "html_url": {
+          "description": "GitHub API URL for the created/updated check run.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "check_run_id",
+        "html_url"
+      ]
+    },
+    "SignedEventEnvelope": {
+      "description": "Signed inbound webhook event envelope from GitHub App.",
+      "type": "object",
+      "properties": {
+        "delivery_id": {
+          "description": "GitHub delivery GUID.",
+          "type": "string"
+        },
+        "event_type": {
+          "description": "GitHub webhook event type (e.g. \"check_suite\", \"pull_request\").",
+          "type": "string"
+        },
+        "payload": {
+          "description": "Raw JSON payload as a string (kept opaque for signature verification).",
+          "type": "string"
+        },
+        "received_at": {
+          "description": "Unix epoch milliseconds when this envelope was received.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "signature": {
+          "description": "HMAC-SHA256 hex signature of the raw payload (from X-Hub-Signature-256\nheader).",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "delivery_id",
+        "event_type",
+        "signature",
+        "payload",
+        "received_at"
+      ]
+    }
+  }
+}

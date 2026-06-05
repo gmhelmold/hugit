@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "IntentSidecar",
+  "description": "PR-attached intent metadata sidecar (decomposition §1, item 4; B6④).\n\nNon-authoritative (`authoritative` is always `false`); never gates\nlanding.\n\nFrozen by WP-00.",
+  "type": "object",
+  "properties": {
+    "acceptance": {
+      "description": "Acceptance criteria — a list of acceptance item descriptions.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "authoritative": {
+      "description": "Whether this sidecar is authoritative. MUST always be `false`;\nnon-authoritative by design.",
+      "type": "boolean"
+    },
+    "charter": {
+      "description": "Human-readable charter / description of what the PR intends to do.",
+      "type": "string"
+    },
+    "context_ref": {
+      "description": "Content-addressed ref to the full context blob (may include diff,\nprompt, rationale).",
+      "type": "string"
+    },
+    "intent_id": {
+      "description": "Stable unique identifier for this intent (UUID or content hash).",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "intent_id",
+    "charter",
+    "acceptance",
+    "context_ref",
+    "authoritative"
+  ]
+}

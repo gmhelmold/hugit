@@ -1,0 +1,15 @@
+{
+  "intent": "01900000-0000-7000-8000-000000000001",
+  "tree_hash": "cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe",
+  "lens": "security-review-v1",
+  "model": "claude-sonnet-4-6",
+  "prompt_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+  "verdict": "approve",
+  "claims_checked": [
+    "no-credential-leak",
+    "no-rce-vector"
+  ],
+  "evidence_refs": [
+    "3333333333333333333333333333333333333333333333333333333333333333"
+  ]
+}

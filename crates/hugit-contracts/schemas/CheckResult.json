@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CheckResult",
+  "description": "Memoised result of `check(tree_root, def_digest, toolchain_digest)`\n(decomposition §1, item 2; X9①).\n\nCanonical serialization is deterministic (sorted maps, fixed field order)\nso the phase-B memo equals the phase-D evidence byte-for-byte.\n\nFrozen by WP-00.",
+  "type": "object",
+  "properties": {
+    "artifacts": {
+      "description": "Output artifacts: (path, digest) pairs.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Artifact"
+      }
+    },
+    "def_digest": {
+      "description": "SHA-256 hex digest of the CheckDef body.",
+      "type": "string"
+    },
+    "duration_ms": {
+      "description": "Wall-clock duration of the check in milliseconds.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "exit": {
+      "description": "Process exit code (0 = success).",
+      "type": "integer",
+      "format": "int32"
+    },
+    "memo_key": {
+      "description": "Memoisation key.\n\nFROZEN FORMULA (doc-only, implementation in B2a/D1a):\n`memo_key = SHA-256(len(tree_root) ‖ tree_root ‖ len(def_digest) ‖\ndef_digest ‖ len(toolchain_digest) ‖ toolchain_digest)` where each\nlength prefix is a 4-byte big-endian u32 and the inputs are UTF-8\nbytes of the respective hex strings.",
+      "type": "string"
+    },
+    "produced_at": {
+      "description": "Unix epoch milliseconds when this result was produced.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "runner_ref": {
+      "description": "Reference to the runner that executed this check.",
+      "type": "string"
+    },
+    "stderr_ref": {
+      "description": "Content-addressed ref to captured stderr blob.",
+      "type": "string"
+    },
+    "stdout_ref": {
+      "description": "Content-addressed ref to captured stdout blob.",
+      "type": "string"
+    },
+    "toolchain_digest": {
+      "description": "Content-addressed digest of the toolchain used.",
+      "type": "string"
+    },
+    "tree_hash": {
+      "description": "Merkle tree root hash of the workspace snapshot used (hex).",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "memo_key",
+    "tree_hash",
+    "def_digest",
+    "toolchain_digest",
+    "exit",
+    "artifacts",
+    "stdout_ref",
+    "stderr_ref",
+    "duration_ms",
+    "runner_ref",
+    "produced_at"
+  ],
+  "$defs": {
+    "Artifact": {
+      "description": "A (path, content-digest) pair in the artifacts list.",
+      "type": "object",
+      "properties": {
+        "digest": {
+          "description": "SHA-256 hex digest of the artifact content.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Relative output path of the artifact.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "digest"
+      ]
+    }
+  }
+}

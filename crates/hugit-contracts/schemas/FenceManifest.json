@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FenceManifest",
+  "description": "Claim-filtered sparse materialization manifest (decomposition §1, item 6;\nwhitepaper §9.1).\n\nSparse materialization IS the fence. `deny_default = true` means paths not\nlisted are denied by default.\n\nFrozen by WP-00.",
+  "type": "object",
+  "properties": {
+    "deny_default": {
+      "description": "Whether unlisted paths are denied by default (MUST be `true` in all\nproduction manifests).",
+      "type": "boolean"
+    },
+    "materialized": {
+      "description": "Actually materialised (path, digest) pairs at runtime.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/MaterializedEntry"
+      }
+    },
+    "path_set": {
+      "description": "Allowed path set (explicit allowlist of paths the claim may access).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "path_set",
+    "deny_default",
+    "materialized"
+  ],
+  "$defs": {
+    "MaterializedEntry": {
+      "description": "A (path, digest) pair for a materialised file entry.",
+      "type": "object",
+      "properties": {
+        "digest": {
+          "description": "SHA-256 hex digest of the file content.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Relative path of the materialized file.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "digest"
+      ]
+    }
+  }
+}

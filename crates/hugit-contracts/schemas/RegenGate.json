@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RegenGate",
+  "description": "Regenerative-rebase promotion gate\n(decomposition §1, item 15 (+); D12).\n\nFrozen by WP-00.",
+  "type": "object",
+  "properties": {
+    "indep_verdict": {
+      "description": "Content-addressed ref to an independent verdict that confirmed the\nrebase is safe to promote.",
+      "type": "string"
+    },
+    "optin_scope": {
+      "description": "Opt-in scope for regenerative rebase (e.g. repo slug, org slug, or\n\"*\" for all).",
+      "type": "string"
+    },
+    "repass": {
+      "description": "Whether this gate has been re-passed (promotion criterion met).",
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "optin_scope",
+    "repass",
+    "indep_verdict"
+  ]
+}

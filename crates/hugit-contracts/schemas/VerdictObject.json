@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VerdictObject",
+  "description": "Verdict object from a review lens (decomposition §1, item 8).\n\nFrozen by WP-00.",
+  "type": "object",
+  "properties": {
+    "claims_checked": {
+      "description": "List of claims checked during the review.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence_refs": {
+      "description": "Content-addressed refs to evidence blobs supporting the verdict.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "intent": {
+      "description": "The intent_id of the PR / change being reviewed.",
+      "type": "string"
+    },
+    "lens": {
+      "description": "Identifier of the review lens / policy applied.",
+      "type": "string"
+    },
+    "model": {
+      "description": "Model identifier used to produce this verdict.",
+      "type": "string"
+    },
+    "prompt_digest": {
+      "description": "SHA-256 hex digest of the prompt used to produce this verdict.",
+      "type": "string"
+    },
+    "tree_hash": {
+      "description": "Merkle tree hash of the workspace snapshot reviewed.",
+      "type": "string"
+    },
+    "verdict": {
+      "description": "The verdict outcome.",
+      "$ref": "#/$defs/Verdict"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "intent",
+    "tree_hash",
+    "lens",
+    "model",
+    "prompt_digest",
+    "verdict",
+    "claims_checked",
+    "evidence_refs"
+  ],
+  "$defs": {
+    "Verdict": {
+      "description": "The verdict outcome of a review or gate check.",
+      "oneOf": [
+        {
+          "description": "The PR/change is approved for landing.",
+          "type": "string",
+          "const": "approve"
+        },
+        {
+          "description": "The PR/change requires fixes before landing.",
+          "type": "string",
+          "const": "fix_first"
+        },
+        {
+          "description": "The PR/change is rejected.",
+          "type": "string",
+          "const": "reject"
+        }
+      ]
+    }
+  }
+}

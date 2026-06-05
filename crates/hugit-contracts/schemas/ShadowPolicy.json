@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ShadowPolicy",
+  "description": "Shadow-run policy controlling cadence, budget, and opt-in scope\n(decomposition §1, item 11 (+)).\n\nFrozen by WP-00.",
+  "type": "object",
+  "properties": {
+    "budget": {
+      "description": "Maximum compute budget for shadow runs (in milliseconds of wall-clock\nrunner time per policy period).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "cadence": {
+      "description": "Cadence descriptor (e.g. \"every_push\", \"nightly\", or a cron\nexpression string).",
+      "type": "string"
+    },
+    "optin": {
+      "description": "Opt-in scope identifier (e.g. repo slug, org slug, or \"*\" for all).",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "cadence",
+    "budget",
+    "optin"
+  ]
+}

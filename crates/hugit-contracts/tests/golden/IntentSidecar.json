@@ -1,0 +1,10 @@
+{
+  "intent_id": "01900000-0000-7000-8000-000000000001",
+  "charter": "Add fence manifest enforcement to the runner sandbox",
+  "acceptance": [
+    "Runner cannot read paths outside its path_set",
+    "FenceManifest deny_default=true is enforced"
+  ],
+  "context_ref": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "authoritative": false
+}

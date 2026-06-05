@@ -1,0 +1,27 @@
+{
+  "inbound": {
+    "delivery_id": "delivery-0001",
+    "event_type": "check_suite",
+    "signature": "sha256=5555555555555555555555555555555555555555555555555555555555555555",
+    "payload": "{\"action\":\"requested\"}",
+    "received_at": 1717000002000
+  },
+  "ack": {
+    "delivery_id": "delivery-0001",
+    "processing_id": "proc-0001",
+    "acked_at": 1717000002050
+  },
+  "write_request": {
+    "repo": "humangr/hugit",
+    "head_sha": "6666666666666666666666666666666666666666",
+    "check_name": "hugit/contracts",
+    "status": "completed",
+    "conclusion": "success",
+    "summary": "All 15 contract types verified",
+    "output_ref": "7777777777777777777777777777777777777777777777777777777777777777"
+  },
+  "write_response": {
+    "check_run_id": 987654321,
+    "html_url": "https://github.com/humangr/hugit/runs/987654321"
+  }
+}
