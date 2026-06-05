@@ -37,9 +37,9 @@ check "replay/ path not absent (D1a substrate must exist)" \
 check "tamper/ path not absent (D1a substrate must exist)" \
   test -d "$CRATE/src/tamper"
 
-# ── negative: D1c path must NOT exist (leak guard) ───────────────────────────
-check "no concurrency/ path (D1c — must not be owned by D1b)" \
-  bash -c "! test -e $CRATE/src/concurrency"
+# ── D1c leak guard RETIRED (lead, wave D1.2 integration): same class as
+# ba5a853 — wave-isolation fence expires as D1c legitimately lands
+# concurrency/. D1b's living boundary = its own modules' integrity above.
 
 # ── oracle: acceptance file committed ────────────────────────────────────────
 check "acceptance_d1b.rs oracle committed" \
