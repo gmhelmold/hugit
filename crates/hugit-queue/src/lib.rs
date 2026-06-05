@@ -5,4 +5,6 @@
 //! state machine. The GitHub API surface (B4b) and budget (C7) are layered on
 //! top in their own modules and do not exist yet.
 
+#[path = "../budget/mod.rs"]
+pub mod budget;
 pub mod core;
