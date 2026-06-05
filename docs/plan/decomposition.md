@@ -1,4 +1,13 @@
-# hugit — formal decomposition (v1.7 — post critic round 7)
+# hugit — formal decomposition (v1.8 — post critic round 8)
+
+> v1.8 (2026-06-05): **E CLOSED** (R7+R8 dry — row-by-row catalog mapping
+> both rounds). X's single R8 survivor integrated, and it's the symmetry
+> finding of the whole loop: **B9⑥ THE MONEY GATE BINDS** — by the suite's
+> own "control, not dashboard" standard (set in D8⑥ for the experiment
+> gate), the co-equal money gate now structurally blocks billing until the
+> exit report = PASS; FAIL/insufficient cannot flip billing on; the
+> enable-billing event is audited. Convergence: 42→23→16→4→4→3→2→1.
+> R9 dispatched on X only (needs R9+R10 dry to close the loop).
 
 > v1.7 (2026-06-05): **E dry #1** (clean L-by-L mapping, deferred items
 > correctly adjudicated). X survivors integrated: D13④ tournament fan-out
@@ -77,7 +86,7 @@ model, principal, sig}` · `RegenGate {optin_scope, repass, indep_verdict}`.
 | **B6** intent sidecar | S·sonnet | ① parsed/validated/rendered · ② malformed→actionable comment · ③ corpus→CAS by intent_id · **④(R2) negative: sidecar is non-authoritative — never gates or blocks landing** |
 | **B7** surface v0 | S·sonnet | ① live status page · ② exactly one edited comment/PR · ③ **🔧 every saved-minutes number links to its CheckResult set (auditable)** · **④(R3) the "$ saved" figure derived from minutes via a versioned, auditable cost model (rates stated), reconcilable against the minutes count** |
 | **B8** dogfood | M·sonnet | ① real 5-PR wave e2e · ② **🔧 vs defined baseline (same wave, memoization off), versioned report with formulas** · ③ 48h soak: 0 wrong-merge/lost-PR (event-audited) |
-| **B9 (+)** exit telemetry | S·sonnet | ① per-install activity → week-3 retention computable vs the ≥40% threshold (privacy-documented) · ② **🔧 feedback capture distinguishes UNPROMPTED ("I'd pay") statements from prompted responses — only unprompted count toward the ≥3 gate** · ③ exit-metric report generated from data, auditable · **④ 🔧 cohort/window guards: n=10 external teams, ≥3 weeks real use, evaluation window ANCHORED to the first-10-paying-customers event and inside 90 days — otherwise "insufficient/out-of-window", never a pass** · **⑤(R4) the ≥3 gate is ENFORCED as pass/fail: 2 correctly-counted unprompted signals → FAIL even with ≥40% retention; exactly 3 → PASS** |
+| **B9 (+)** exit telemetry | S·sonnet | ① per-install activity → week-3 retention computable vs the ≥40% threshold (privacy-documented) · ② **🔧 feedback capture distinguishes UNPROMPTED ("I'd pay") statements from prompted responses — only unprompted count toward the ≥3 gate** · ③ exit-metric report generated from data, auditable · **④ 🔧 cohort/window guards: n=10 external teams, ≥3 weeks real use, evaluation window ANCHORED to the first-10-paying-customers event and inside 90 days — otherwise "insufficient/out-of-window", never a pass** · **⑤(R4) the ≥3 gate is ENFORCED as pass/fail: 2 correctly-counted unprompted signals → FAIL even with ≥40% retention; exactly 3 → PASS** · **⑥(R8) THE MONEY GATE BINDS: charging money for hugit is structurally blocked until the exit report = PASS; a FAIL/insufficient/out-of-window report CANNOT enable billing; the enable-billing event is itself audited (control, not dashboard — symmetric to D8⑥)** |
 | **B10 (R3)** negative scope | S·sonnet | ① no claim/lease acquired at dispatch — conflict discovery happens ONLY at landing/union (assert mechanism absent) · ② rebase in phase B is textual-fallback only — regenerative path absent/disabled (assert) |
 
 ## 3. Phase C — Squad C (10 WPs)
@@ -180,11 +189,11 @@ test crates + red-team fixtures (`crates/hugit-invariants`).
   adjacent production repos (ex-C1 item) is enforced by the orchestrator's
   profile/neverTouch + the git-hygiene guard — a standing law, not a test.
 - **Critic loop status (per-section closure = 2 consecutive dry rounds):**
-  R1=42+8 · R2=23+8 · R3=16+10 · R4=4+2 (C,D dry #1) · R5=4+2 (C,D **CLOSED**;
-  B dry #1) · R6=3+4 (B **CLOSED**; E:1 X:2) · R7=2+1 (**E dry #1**; X:2).
-  **Closed: B, C, D.** Open: E (needs R8 dry to close), X (tournament budget
-  + attention-queue degradation + shared-hit attestation integrated; needs
-  R8+R9 dry). Then: WP token re-slicing (≤100k hard / 80k ideal, DoD per WP).
+  R1=42+8 · R2=23+8 · R3=16+10 · R4=4+2 · R5=4+2 (C,D **CLOSED**) ·
+  R6=3+4 (B **CLOSED**) · R7=2+1 (E dry #1) · R8=1+0 (**E CLOSED**; X:1 —
+  the money-gate binding, integrated as B9⑥). **Closed: B, C, D, E.**
+  Open: X only (needs R9+R10 dry). Then: WP token re-slicing (≤100k hard /
+  80k ideal, DoD per WP).
 - **Adjudications on record (so future critics don't re-litigate):**
   "no-fake-intents at runtime" covered by D3⑤ (steady-state raw push) +
   D4④ (mixed-altitude fixture) + E2⑤ (import boundary); bidirectional
