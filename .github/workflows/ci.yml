@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: fmt
+        run: cargo fmt --all --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test --workspace
+
+      - name: audit
+        run: cargo audit
+
+      - name: changelog gate
+        if: github.event_name == 'pull_request'
+        run: .github/scripts/changelog-gate.sh "${{ github.event.pull_request.base.sha }}" HEAD
