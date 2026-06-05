@@ -1,0 +1,18 @@
+[package]
+name = "hugit-app-sidecar"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+hugit-contracts = { path = "../../hugit-contracts" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+
+[dev-dependencies]
+serde_json = "1"
+
+[[test]]
+name = "acceptance_wp-b6"
+path = "tests/acceptance_wp-b6.rs"

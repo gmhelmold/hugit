@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- feat(fence): hugit-fence — C5a sparse fence materialization + path enforcement: claim-filtered hydrate by FenceManifest path_set, outside-path access returns ENOENT (physical absence, not permission denial), traversal-safe classify (WP-C5a)
+- feat(app): B6 — intent sidecar: parse/validate/render + corpus to CAS ref (WP-B6)
 
 - feat: hugit-checks/affected — affected-target engine v0; cargo/pnpm/turbo graph adapters, root-edit full-set, fail-open policy (WP-B3)
 
