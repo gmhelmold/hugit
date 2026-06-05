@@ -17,8 +17,11 @@ CRATES=(hugit-app hugit-queue hugit-checks hugit-diag hugit-runner hugit-fence
 # ── ① virtual workspace root, glob members, resolver 2 ─────────────────────
 check "workspace Cargo.toml exists" test -f Cargo.toml
 check "Cargo.toml declares [workspace]" grep -q '^\[workspace\]' Cargo.toml
-check "members use the crates/* glob (shared-file elimination)" \
-  grep -q 'members *= *\[ *"crates/\*" *\]' Cargo.toml
+# Amended (lead, wave D1.2): glob must be PRESENT; additional explicit
+# nested-sub-crate members are permitted as append-only union lines
+# (adjudication: root manifest = append-only shared file, like CHANGELOG).
+check "members include the crates/* glob (shared-file elimination)" \
+  grep -q '"crates/\*"' Cargo.toml
 check "resolver = \"2\"" grep -q 'resolver *= *"2"' Cargo.toml
 check "virtual workspace (no [package] at root)" \
   bash -c '! grep -q "^\[package\]" Cargo.toml'

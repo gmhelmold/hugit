@@ -25,15 +25,10 @@ check "replay/ module present under src/" \
 check "tamper/ module present under src/" \
   test -d "$CRATE/src/tamper"
 
-# ── negative: D1b/D1c paths must NOT exist (leak guard) ──────────────────────
-check "no compaction/ path (D1b — must not leak)" \
-  bash -c "! test -e $CRATE/src/compaction"
-check "no recovery/ path (D1b — must not leak)" \
-  bash -c "! test -e $CRATE/src/recovery"
-check "no undo/ path (D1b — must not leak)" \
-  bash -c "! test -e $CRATE/src/undo"
-check "no concurrency/ path (D1c — must not leak)" \
-  bash -c "! test -e $CRATE/src/concurrency"
+# ── D1b/D1c leak guards RETIRED (lead, wave D1.2 integration): they were
+# D1a-wave isolation fences asserting sibling modules absent; D1b/D1c now
+# legitimately own compaction//recovery//undo//concurrency/. D1a's
+# functional items (replay-identity, tamper) below remain the living suite.
 
 # ── oracle: acceptance file committed ────────────────────────────────────────
 check "acceptance_d1a.rs oracle committed" \
