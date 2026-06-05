@@ -1,237 +1,172 @@
-# hugit — command catalog (v0.1)
+# hugit — feature & command catalog (v2 — post-review, hardened)
 
-> Working backwards, step 1.5: the product surface as commands. What's new,
-> what's upgraded, what doesn't change at all (and why that's sacred), what
-> changes completely, the tradeoffs, the safety model, and how a human always
-> keeps the ability to follow.
+> **v2 (2026-06-05):** rewritten after the 3-reviewer brutal panel
+> (`docs/reviews/2026-06-05-brutal-review-panel.md`). The amputations are
+> applied, every feature now carries its **status** and its **phase**, and the
+> catalog is honest about what is core, what is opt-in, what is research-gated,
+> and what was cut from v1 (kept in the vision, removed from the build).
+> v1 of this file (the pre-review catalog) is preserved in git history.
 >
-> **Owner:** Gustavo Schneiter · **Drafted:** 2026-06-05 · status: REFINING
-> Companion to `dream-product.md` (v0.3 — the five Inversions).
+> **Owner:** Gustavo Schneiter · status: REFINING
 
----
+## Status legend
 
-## 0. The operating model (who types what)
-
-One repository. Three classes of principals, one chain of trust:
-
-```
-HUMAN STAKEHOLDER  (decides, approves, interrogates — never does ceremony)
-      │  policy, budgets, verdicts on what policy marks human-mandatory
-      ▼
-ORCHESTRATOR AGENT (e.g. Claude Opus — the tech lead seat)
-      │  owns campaigns: plans waves, declares claims, dispatches, lands
-      ▼
-AGENT SQUADS       (workers — one intent each, fenced by claims)
-      campaign "checkout"   campaign "perf"   campaign "security"
-      [agent][agent][agent] [agent][agent]    [agent]
-                    └────────── same repo ──────────┘
-```
-
-- A **campaign** is a long-running stream of work inside the repo (e.g.
-  `checkout`, `perf`, `sec-hardening`). Campaigns are the unit of *team*
-  parallelism; intents are the unit of *work* parallelism.
-- Concurrency between campaigns is arbitrated by **claims** (declared at
-  dispatch) + the **landing queue** — not by humans deconflicting in Slack.
-- Multiple orchestrators are allowed (one per campaign) under a root
-  orchestrator; permissions are per-principal, enforced by policy.
-- **The human can always follow** — every layer projects into a view the
-  human reads without learning anything new (§8).
-
----
-
-## 1. Namespace rules (is it organized? — yes, by three hard rules)
-
-1. **`git` is never shadowed.** We do not wrap, alias, or modify any git verb.
-   `git anything` behaves exactly as upstream git — forever. All new behavior
-   lives under `hugit` (alias `hu`). One namespace to learn, zero to relearn.
-2. **Refs are namespaced and auto-managed:** `refs/hugit/campaigns/<c>/<intent>`.
-   Human-visible branch lists show campaigns and active intents only; landed
-   and archived refs fold away (recoverable — CAS never forgets).
-3. **Degradation invariant:** if every intelligent layer dies, what remains is
-   a **valid, complete git repository** served over the standard wire
-   protocol. The smart layer can fail; your repo cannot.
-
----
-
-## 2. Catalog A — what does NOT change (and why that's sacred)
-
-| Command | Status | Why unchanged |
-|---|---|---|
-| `git clone / fetch / pull / push` | **identical syntax & semantics** | wire-protocol compatibility is the adoption strategy |
-| `git add / commit / status / diff / log / show` | identical | 20 years of human muscle memory |
-| `git switch / checkout / branch / tag` | identical | every IDE, script and tool keeps working |
-| `git stash / cherry-pick / revert` | identical | LLM training corpus: agents are deeply trained on git — deviation costs model accuracy (the naming principle, applied to UX) |
-| plumbing (`rev-parse`, `cat-file`, …) | identical | the projection is *real git objects*, not an emulation |
-| `.gitignore`, hooks, attributes | identical | ecosystem contracts stay intact |
-
-**Why this matters more than it looks:** the unchanged set is not
-conservatism — it is the moat of zero migration cost. A teammate (human or
-agent) who never heard of hugit can clone, commit, push, and collaborate
-without noticing anything — and everything they do is still captured by the
-intent layer above them (their pushes become anonymous intents the
-orchestrator can see in the ledger).
-
----
-
-## 3. Catalog B — same command, upgraded engine (syntax unchanged, gains real)
-
-| Command | What upgrades under the hood | Real gain (measured pain it kills) |
-|---|---|---|
-| `git push` | lands a snapshot; triggers shadow checks; "rejected, fetch first" effectively disappears (conflicts become objects, not walls) | the push-race / force-push class of loss → impossible (event-sourced refs) |
-| `git merge` | three-tier resolution server-side: derived files **regenerate**, code merges **AST-aware**, remainder goes to gated LLM arbitration; markers only as last resort | lockfile conflicts (the #1 measured git pain) → extinct; 27.67% agent-PR conflict rate → write-time events |
-| `git rebase` | safe by construction (nothing is ever lost; undo exists); `--regen` flag adds regenerative mode (§4) | rebase footguns + "dropped hours of work" → recoverable in one command |
-| `git bisect` | memoized checks make each probe ~instant; usually unnecessary — the forge auto-bisects every regression | "when did this break?" → answered before you ask |
-| `git blame` | works as-is; each line also links to its **Intent** (the why, not just the who) | archaeology → query |
-| `git worktree` | works as-is; superseded by `hugit ws` (CAS-deduped, claim-fenced, <1s) | 28 GB / 256-worktree blowup → ~1× repo + deltas |
-| `git log` | works as-is = **machine altitude**; `hugit log` shows the same history at **intent altitude** | 400 robot commits vs 14 intents — same data, two zooms |
-| `git clone` | works as-is; `hugit clone` adds lazy materialization + warm semantic index | monorepo cold-clone pain → subtree hydration in seconds |
-
----
-
-## 4. Catalog C — new commands (grouped by who types them)
-
-### 4.1 The human stakeholder (follow · interrogate · decide — never ceremony)
-
-| Command | What it does | Why / real gain |
-|---|---|---|
-| `hugit ledger [--live]` | the default human view: what was asked → done → proven, per campaign, risk-ranked | replaces reading 20 prose PRs/day with one narrated stream; the 98%-more-PRs review collapse → a 5-minute triage |
-| `hugit review <intent>` | opens an **interrogation session** on a change: ask anything — *"where does this touch the money path?" "what changes for a logged-out user?" "convince me this is safe"* — answered from intent + context + evidence | human review at LLM pace becomes possible *and pleasant*; you review meaning, not lines (lines remain one drill-down away) |
-| `hugit approve / reject <intent> [-m]` | issue a human verdict (policy decides which intents require one) | judgment is spent only where policy says it matters |
-| `hugit watch` | TUI mission control: campaigns → intents → agents, live; conflict heat-map; landing queue; spend | "trackear, controlar e acompanhar" in one screen, terminal-native |
-| `hugit why <file:line \| symbol \| intent>` | the founding intent + reasoning behind any line of the repo | tribal knowledge → durable, queryable memory |
-| `hugit undo <operation>` | forge-level universal undo (landings, policy changes, ref moves) | the fear that justifies babysitting → reversibility |
-| `hugit policy edit / test` | declarative gates (DCO, coverage, "auth needs a human", autonomy levels per risk class), locally testable | the bash-script gate museum → 30 lines of config, enforced identically everywhere |
-
-### 4.2 The orchestrator (the tech-lead seat — plans, dispatches, lands)
-
-| Command | What it does | Why / real gain |
-|---|---|---|
-| `hugit campaign new/list/status <name>` | create/inspect long-running work streams; squads attach to campaigns | many teams, one repo, zero Slack-deconfliction |
-| `hugit plan apply <plan.yaml>` | declare a wave: intents, DAG, claims, acceptance criteria. **Claim intersections are checked NOW** | conflicts surface at dispatch — before any work, instead of 3h later in a 540-line merge |
-| `hugit dispatch <intent>` | materialize a claim-fenced workspace + forge-built **context packet**; returns one URL to hand the agent | kills the 30–50% cold-start context burn; dispatching = one URL |
-| `hugit fleet` | live machine-readable status of every agent/intent/workspace | the orchestrator's situational awareness, as data |
-| `hugit land [<intent>…]` | enter the landing queue: speculative **union testing**, regenerative rebase, dependency-ordered landing, main always green | A+B-red caught pre-merge; reconciliation rounds → extinct |
-| `hugit verdict request <intent> --lens security,correctness` | fan out independent reviewer agents with surgical packets; collect structured verdicts | LLM review precision: from 24–46% (raw-diff reviewers) to claim-verification with served context |
-| `hugit tournament <intent> -n 3` | run N competing implementations; judge panel picks; losers stay addressable | exploration becomes a verb, not a mess |
-
-### 4.3 The worker agent (executes one intent inside its fence)
-
-| Command | What it does | Why / real gain |
-|---|---|---|
-| `hugit ctx snap / resume / diff / audit` | **version the context window**: snapshot understanding; resume someone else's; diff two minds; audit what info produced a change | the Inversion-2 superpowers; no agent ever starts cold; reconciliation dies at the root |
-| `hugit map "<query>"` | semantic index queries: who-calls, contracts, conventions, altitude reads (`--alt api\|contract\|sig\|src`) | reading at the right zoom instead of grepping blind |
-| `hugit impact [<change>]` | blast radius from the build/call graph before editing | "will this break something?" answered in ms, pre-edit |
-| `hugit status` | **ambient truth**: live green/red of your claims (shadow checks), conflicts, landing position — the semantic counterpart of `git status` | the minutes-of-darkness between edit and verdict → a live signal |
-| `hugit diag <failure>` | the failure as a diagnosis: culprit, diff-vs-green, suspect lines, similar past fixes | 4,000-line prose logs → structured causality; ~100× cheaper to act on |
-| `hugit check [--local]` | run checks as the same pure function the forge runs (byte-identical) | push-and-pray YAML → locally replayable truth |
-| `hugit intent seal` | declare done: evidence bundle assembled, acceptance verified, verdicts requested, enters landing — **this is the entire "ceremony"** | commit messages, branch names, PR opening, PR description: all emitted, none performed |
-| `hugit journal note "<insight>"` | append to the session journal (auto-captured too) | understanding outlives the session |
-
-### 4.4 Everyone
-
-| Command | What it does |
+| Tag | Meaning |
 |---|---|
-| `hugit ask "<question>" [--scope intent\|campaign\|repo]` | interrogate anything — the repo, a change, a campaign — answered from index + intents + evidence |
-| `hugit log` | history at intent altitude (the human-readable past); `git log` remains the machine altitude |
-| `hugit ws spawn/attach/snap/gc` | workspaces: born <1s, claim-fenced, deduped, resumable anywhere |
+| ✅ **CORE** | survived all three reviewers; load-bearing; build it |
+| 🔧 **HARDENED** | survives in a modified, stricter form (the modification is binding) |
+| 🎚️ **OPT-IN** | demoted: never the default; value must be proven per-repo |
+| 🔬 **GATED** | blocked behind the killer experiment or real usage data |
+| 🧊 **DEFERRED** | kept in the vision; cut from the build until its phase |
+| ⛔ **CUT** | removed as load-bearing claim (may survive as a demo) |
+
+## The two standing gates (written, dated, binding)
+
+1. **The focus gate:** no hugit code before CoreLink has its first paying
+   customers. hugit is frozen at docs until then.
+2. **The experiment gate:** claims-as-oracle and regen-rebase are promoted
+   only by data — the disjointness-rate + regen-honesty experiment on ~200
+   real fleet changes (`docs/reviews/…`, "the ONE experiment").
 
 ---
 
-## 5. Catalog D — what changes COMPLETELY (the absorbed ceremony)
+## Phase B — the Dev Kit: ONE GitHub App
+### "Memoized CI for agent PRs — your green checks never re-run."
 
-These stop being *acts a worker performs* and become *effects the system emits*:
+One install. One number (CI minutes/$ saved). Zero workflow religion. Rides
+L0–L2 (CAS + AC + clw), which exist. Everything else in this catalog comes
+later.
 
-| Today's act | In hugit | Why it's safe to absorb |
+| Feature | Status | What it is (hardened form) |
 |---|---|---|
-| writing commit messages | emitted from the intent (charter + trajectory) | the intent is richer than any hand-written message; `git log` readers see generated, consistent messages |
-| naming branches | auto: `campaigns/<c>/<intent-slug>` | humans browse campaigns, not branch soup |
-| opening a PR + writing its description | `hugit intent seal` — the intent IS the PR, born with charter/evidence/verdicts attached | nothing to forget, nothing to embellish; reviewers get truth, not marketing |
-| `git rebase -i` / squash to "clean history" | **history is never rewritten — it is re-projected.** Altitude folding shows 14 intents or 400 commits from the same immutable data | the single biggest git footgun (history rewriting) is eliminated, not improved |
-| hand-editing conflict markers | three-tier server-side resolution; markers only by explicit request | conflicts became objects with owners, not 11 PM emergencies |
-| writing CI YAML | checks are code, locally replayable | the "no sensible way to test CI locally" pain → gone |
-| dependabot PR floods | dep bumps = speculative pre-tested landings by policy | 200 PRs/week → silent green landings + one task when red |
+| **Memoized checks** | ✅ CORE | `check(tree, def, toolchain)` cached in the AC — `clw run`, formalized (~80% extant). Honest scope: full power on hermetic/deterministic repos (Bazel/Nix/Rust/Go); for npm/pip repos, hit-rates are partial — measured and shown, never promised |
+| **Union-testing landing queue** | ✅ CORE | batch landable PRs, run affected memoized checks on the **union** (A+B+C together), land green in order, report the minimal failing pair. **This is the conflict oracle** — discovery by speculation, not prediction |
+| **Structured diagnoses** | ✅ CORE | a red check returns: culprit PR (auto-bisect over memoized checks ≈ free), diff-vs-last-green, suspect targets — data, not 4,000-line logs |
+| **Auto-culprit on regression** | ✅ CORE | memoization makes bisect cheap → run it always, automatically |
+| **Intent sidecar** | ✅ CORE | charter + acceptance criteria + context ref **attached to PRs as metadata** — non-authoritative, builds the corpus that later phases (and the experiment gate) need |
+| **`hugit check --local`** | ✅ CORE | the same pure function locally and remote — byte-identical; kills push-and-pray |
+| Claims at dispatch as conflict prevention | 🔬 GATED | **demoted from phase B entirely.** Conflicts are discovered at landing (union testing) like SubmitQueue proved. Claims return later, advisory-only, if the disjointness experiment justifies them |
+| Regenerative rebase | ⛔ CUT from B | textual fallback only in phase B |
+
+**Phase-B exit metric (binding, from the operator review):** 10 external
+teams, 3 weeks of use, ≥40% week-3 retention, ≥3 unprompted "I'd pay for
+this" — within 90 days of CoreLink's first 10 paying customers. Fail → the
+forge thesis is re-examined before another dollar of effort.
 
 ---
 
-## 6. Tradeoffs (honest — each one named, priced, mitigated)
+## Phase C — the fabric (CoreLink runners live)
 
-| Tradeoff | Cost | Mitigation / why we accept it |
+| Feature | Status | What it is (hardened form) |
 |---|---|---|
-| **Two mental models coexist** (git view + intent view) | humans/agents must know which altitude they're reading | defaults are role-correct (humans→ledger, agents→API, git-only users→git); both views project from ONE immutable store, so they can never disagree |
-| **Regenerative rebase can produce code that differs from what was reviewed** | trust risk on the landing path | acceptance suite must re-pass; diff-beyond-threshold triggers re-verdict; ships **opt-in → default** as confidence data accumulates; every regen is itself an auditable intent |
-| **Context capture is sensitive** (prompts may contain secrets/PII) | privacy/storage liability | tenant-private always; policy-based redaction; retention policy; **never** cross-tenant; capture level configurable per repo |
-| **Everything-kept-forever storage growth** | COGS | CAS dedup + tiered eviction with pins; context/journals are tiny next to build artifacts; the value asymmetry is enormous |
-| **The forge enters the write path** (shadow checks, claims) | new failure domain | the degradation invariant (§1.3): smart layer down → plain fast git keeps working; claims enforcement degrades to advisory + post-hoc audit, never to data loss |
-| **New commands = learning curve** | onboarding cost | the curve is role-shaped: a human can operate forever with `ledger / review / approve / watch / why`; a git purist can operate with zero new commands and still be tracked |
-
-**Is it safe? — the model in five locks:** (1) claims as *physical* fences
-(capability-scoped workspaces, secrets broker — the credential never enters);
-(2) event-sourced everything → universal undo, nothing ever lost; (3) history
-immutable — re-projected, never rewritten; (4) policy gates fail-closed; (5)
-the degradation invariant: worst case is a healthy git repo.
+| **Ephemeral cache-warm runners** | ✅ CORE | campaign #1, reused verbatim — checks + sandboxes off your machine forever |
+| **Derived-file regeneration** | ✅ CORE | lockfiles/codegen/snapshots: declared derived, always regenerated, never text-merged. Deterministic — this is NOT the dangerous regen. Kills the #1 measured git pain |
+| **Flake intelligence** | ✅ CORE | statistical flake detection + quarantine by policy — needs the fabric's execution volume, hence phase C |
+| **Shadow checks** | 🔧 HARDENED | NOT "on every write" (cost/noise unbudgeted — engineer review). On workspace **snapshot cadence**, budget-capped per tenant, opt-in per repo. The ambient-truth dream, paid for honestly |
+| **Claim-fenced workspaces (SECURITY)** | ✅ CORE | sparse materialization = physical reach limits; secrets broker (credentials never enter). Claims as **fences** survived review unanimously — it's claims as *conflict oracle* that didn't |
+| **Workspace spawn/attach/resume** | ✅ CORE | `clw` + fencing; <1s, deduped, local/remote transparent |
 
 ---
 
-## 7. What stays the same — the one-line summary
+## Phase D — the forge
 
-**The repository, as a human knows it, stays the same: files, directories,
-git commands, IDE integrations, the GitHub mirror.** What changes is who
-carries the ceremony (the system, not the worker) and what gets remembered
-(intent + context + proof, not just text).
-
----
-
-## 8. Human visual navigation (o humano sempre acompanha)
-
-The human never loses the thread, at any altitude:
-
-1. **The file tree is just a file tree.** Browsing code — locally, in the web
-   UI, or on the GitHub mirror — is exactly what it is today. No new concepts
-   stand between a human and a file.
-2. **History defaults to the intent ledger** (what was asked → done → proven,
-   grouped by campaign), with a toggle to raw commits. Same data, two zooms —
-   like switching between a map and satellite view.
-3. **Live work is a dashboard, not a branch list:** campaigns → intents →
-   agents, each with progress, risk, and cost. `hugit watch` in the terminal;
-   Mission Control on the web; both read the same event stream.
-4. **Every entity deep-links:** ledger entry → trajectory → semantic diff →
-   raw lines → the exact context the agent had. Four clicks from "what
-   happened today" to "the byte that changed", with meaning preserved at
-   every step.
-5. **The attention queue is the inbox:** policy decides what needs a human;
-   everything else is narration you *can* read, never homework you *must*.
-6. **The escape hatch is permanent:** the GitHub mirror renders the whole
-   repo in the most familiar UI on earth. A stakeholder who refuses to learn
-   anything new loses live narration — but never loses the ability to see
-   the code and its history.
+| Feature | Status | What it is (hardened form) |
+|---|---|---|
+| **git wire protocol over the CAS** | ✅ CORE | the projection layer; degradation invariant binding (smart layer dies → healthy git). Budgeted honestly: pack negotiation is the hard part |
+| **Intents native** | 🔧 HARDENED | the unit of work and provenance — framed as **first-class provenance OVER git**, not "code is the projection of intent" (the metaphysics stays in the pitch, out of the spec). Raw `git push` from compat users = recorded as opaque change-events, never reverse-engineered into fake intents |
+| **The Ledger** | ✅ CORE | asked → done → proven, by campaign; the human's default history view; toggle to raw commits (two zooms, one store) |
+| **The attention queue** | ✅ CORE | policy × blast-radius × verdict-confidence ranks what needs a human |
+| **Adversarial verdict panels** | 🔧 HARDENED | review = **independent reviewer agents, different prompts/models, against served ground truth** (build-graph impact, contracts, evidence). The change **never defends itself** — evidence answers. Replaces v1's "interrogate the change" framing (sycophancy risk, red-team review) |
+| **Assisted human review** | 🔧 HARDENED | the human asks questions; answers are **citations to evidence objects** (tests, verdicts, impact queries, diffs) — grounded retrieval, not generative persuasion. Approve-in-90s is permitted only where policy says low-risk |
+| **`hugit why` / provenance** | ✅ CORE | every line → its intent → its charter/author/model/cost. The part of context-versioning that is durable |
+| **Journals + short-horizon resume** | 🔧 HARDENED (narrowed) | session journals as objects; `ctx resume` for the crashed/replaced-agent case (minutes-to-days). The honest core of "gitted context" |
+| Context replay as reproducible computation | ⛔ CUT | models deprecate quarterly; no bitwise determinism. Survives as best-effort debug tooling, never a guarantee |
+| "Diff two minds" | ⛔ CUT as load-bearing | demo, not primitive |
+| **Build-graph impact queries** | ✅ CORE | `hugit impact` — who-calls/blast-radius from the build graph (REAPI heritage). The affordable 80% of the semantic dream |
+| Full semantic index (altitude reading, summaries) | 🧊 DEFERRED | 8–14 EM research-grade (engineer review); ships after the forge has revenue; build-graph queries carry the load until then |
+| **Policy engine** | ✅ CORE | declarative gates, locally testable, fail-closed; autonomy levels per risk class |
+| **Event-sourced refs + universal undo** | 🔧 HARDENED | DO-per-repo with **compaction/cold-tiering to R2 designed in from day one** (DO storage caps are real); "nothing lost" holds at the CAS level, the hot log is bounded |
+| **jj first-class** | ✅ CORE | change-ids, stacked changes — the uncontested distribution door |
+| **One-way GitHub mirror** | ✅ CORE | the trust unlock AND the durability/DR story for single-vendor risk — continuously verified, marketed as such |
+| **GitHub import** | ✅ CORE | one command: history, issues, PRs |
+| Regenerative rebase (non-trivial intents) | 🎚️ OPT-IN **forever** | per-repo, per-intent-class opt-in; acceptance must re-pass **plus an independent adversarial verdict on every regen** (no distance-threshold hand-wave — circular-verification risk is structural). Promotion to broader use only via the experiment gate |
+| **Tournament intents** | ✅ CORE (cheap) | N competing implementations, judge panel — it's orchestration over existing primitives |
 
 ---
 
-## 9. A 60-second example (the whole model in one session)
+## Phase E — head-on (the absorption push)
 
-```text
-# ── human ──────────────────────────────────────────────
-$ hugit ledger --live
-  ▸ campaign checkout   6/14 intents landed   2 in review   0 conflicts
-  ▸ campaign perf       3/3 landed            cache hit 97%
-  ⚠ attention (1): intent#11 claims auth contract → your verdict required
+| Feature | Status |
+|---|---|
+| Bidirectional mirror (forge-authoritative, bounded write-back) | 🔧 HARDENED — only after months on our own repos; GitHub App + idempotent webhook sync; never naive symmetric |
+| Actions-YAML compat shim | ✅ CORE (migration lubricant) |
+| Status/badge API compat | ✅ CORE |
+| Packages/registry on the CAS | 🧊 DEFERRED until pulled |
+| Mission Control web (full) | 🧊 DEFERRED — `hugit watch` TUI + ledger carry phase D |
+| Issues→intents, boards→campaigns, wiki→knowledge | 🧊 DEFERRED per absorption map |
+| Social layer | 🪞 ride the mirror; not our war |
 
-$ hugit review 11
-  > where does this touch token validation?
-  …answers from intent + context + evidence, with deep links…
-$ hugit approve 11 -m "scope ok, evidence solid"
+---
 
-# ── orchestrator (Opus) ───────────────────────────────
-$ hugit plan apply wave-2.plan        # 8 intents, claims checked NOW
-  ✗ intent#17 claim overlaps #14 (payments contract) → re-slice before work
-$ hugit dispatch 15..22               # 8 workspaces + context packets, <1s each
-$ hugit land --queue                  # union-tested, regen-rebased, ordered
+## The command surface (v2 — per principal, with phase)
 
-# ── worker agent ──────────────────────────────────────
-$ hugit ctx resume intent#15          # inherits prior understanding
-$ hugit impact src/checkout/tier.rs   # blast radius before editing
-$ hugit status                        # ambient truth: 14/14 shadow checks green
-$ hugit intent seal                   # evidence + verdicts + landing: done
-```
+### Human (phase D unless noted)
+| Command | Phase | Notes |
+|---|---|---|
+| `hugit ledger [--live]` | D | default history view |
+| `hugit review <intent>` | D | 🔧 grounded-evidence answers; never self-defense |
+| `hugit approve / reject` | D | policy decides what reaches you |
+| `hugit watch` | D | TUI; web Mission Control deferred |
+| `hugit why <line\|symbol\|intent>` | D | provenance query |
+| `hugit undo <op>` | D | forge-level, event-sourced |
+| `hugit policy edit / test` | D | fail-closed, locally testable |
+| *(phase B human surface)* | B | **the GitHub App dashboard + PR comments — no new CLI for humans at all** |
 
-Three principals, one repo, zero ceremony, full human visibility.
+### Orchestrator
+| Command | Phase | Notes |
+|---|---|---|
+| `hugit land [--queue]` | **B** | the union-testing queue (on GitHub PRs in B; native in D) |
+| `hugit verdict request --lens …` | **B** (basic) / D (panels) | independent adversarial reviewers |
+| `hugit campaign / plan apply` | D | 🔧 claims advisory-only; DAG + acceptance binding |
+| `hugit dispatch <intent>` | D | workspace + context packet |
+| `hugit fleet` | D | machine-readable fleet state |
+| `hugit tournament -n N` | D | exploration as a verb |
+
+### Worker agent
+| Command | Phase | Notes |
+|---|---|---|
+| `hugit check [--local]` | **B** | memoized, byte-identical local/remote |
+| `hugit diag <failure>` | **B** | structured diagnosis |
+| `hugit impact <path\|change>` | C/D | build-graph blast radius |
+| `hugit status` | C | 🔧 snapshot-cadence shadow checks (budgeted) |
+| `hugit ws spawn/attach/snap/gc` | C | claim-fenced (security) |
+| `hugit ctx snap / resume` | D | 🔧 short-horizon; journals first-class |
+| `hugit intent seal` | D | the one ceremony verb |
+| `hugit journal note` | D | understanding outlives the session |
+
+### Unchanged forever
+**Every `git` command, byte-for-byte** (catalog A of v1 stands in full) — plus
+the three namespace laws: git never shadowed; refs auto-managed; degradation
+invariant (worst case = a healthy git repo).
+
+---
+
+## What changed from v1 of this catalog (the honest diff)
+
+| v1 claimed | v2 says | Why (review) |
+|---|---|---|
+| claims at dispatch prevent conflicts | union testing at landing is the oracle; claims = security fences + advisory hints (gated) | cross-cutting changes make claim-closures overlap → locks; SubmitQueue's real lesson is speculation, not prediction |
+| regen rebase default for orthogonal intents | opt-in forever + independent verdict per regen; derived-files regen stays default | non-determinism + circular verification = Trojan horse to main |
+| "gitted context": replay, diff-minds, resume | provenance + journals + short-horizon resume | context half-life ≈ one model rev; replay isn't reproducible |
+| review = interrogate the change | adversarial panels + evidence-grounded answers | self-defense optimizes persuasion, not correctness |
+| shadow checks on every write | snapshot cadence, budget-capped, opt-in | cost/noise were unbudgeted |
+| semantic index in the core | build-graph impact queries now; full index deferred | 8–14 EM of research-grade work |
+| one big Dev Kit (claims+CLI+queue) | ONE GitHub App: memoized CI + landing queue | painkiller test; first-dollar discipline |
+| "code is the projection of intent" | intent+context+proof as first-class provenance over git | the metaphysics overclaimed; the product stands without it |
+
+**What did NOT change:** the economic physics (memoize/dedupe/zero-rate — the
+incentive war), git compatibility as sacred, the degradation invariant, the
+human-always-follows guarantees (file tree unchanged, ledger, deep links,
+GitHub mirror as permanent escape hatch), the pricing doctrine, and the
+end-state ambition — the absorption map stands; only the order and the proof
+obligations changed.
