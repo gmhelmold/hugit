@@ -1,10 +1,14 @@
-# hugit — formal decomposition (v1.1 — post critic round 1)
+# hugit — formal decomposition (v1.2 — post critic round 2)
 
-> v1.1 (2026-06-05): integrates **round 1 of the cold suite-critic loop**
-> (5 independent critics — B, C, D, E, cross-cutting): 42 missing items added,
-> 8 vague items sharpened, new **squad X** (platform invariants). The loop
-> continues until two consecutive dry rounds. After the suite dries:
-> re-slice into ≤100k-token (80k ideal) WP contracts with DoD.
+> v1.2 (2026-06-05): integrates **round 2** of the cold suite-critic loop
+> (5 fresh critics): 23 missing items added, 8 sharpened, C1 reclassified to
+> governance. Round-2 headliners: toolchain memo-key sensitivity, broker
+> positive path, shadow non-gating + per-tenant caps, mirror one-way
+> directionality, import no-fake-intents boundary, standalone exit artifact,
+> right-to-erasure cascade, self-release attestation, B↔D CheckResult
+> identity, experiment-gate anti-gaming, pricing no-shock. (v1.1 = round 1:
+> 42 added, squad X created.) Loop continues until two consecutive dry
+> rounds; then re-slice into ≤100k-token (80k ideal) WP contracts with DoD.
 >
 > Sizing: S ≤ ½ agent-day · M ≤ 1 · L ≤ 2. Routing: `opus` = design/security,
 > `sonnet` = contract-determined build. New/changed since v1 marked **(+)** /
@@ -41,42 +45,43 @@ model, principal, sig}` · `RegenGate {optin_scope, repass, indep_verdict}`.
 | WP | Size/route | Acceptance items (each red→green) |
 |---|---|---|
 | **B1** App skeleton | M·sonnet | ① forged webhook→401+audit · ② PR event persisted, ack<1s · ③ check-run on real PR · ④ least-privilege manifest snapshot · **⑤(+) uninstall revokes access + halts processing (audited)** |
-| **B2** checks-as-code | L·opus | ① repeat tree+def→AC hit, 0 exec, <500ms · ② glob sensitivity (in→rerun, out→hit) · ③ local≡runner result · ④ **🔧 non-determinism flagged after 3 divergent runs**, honest surface · **⑤(+) npm fixture: partial hit-rate measured & displayed as-is, no full-memo claim** |
+| **B2** checks-as-code | L·opus | ① repeat tree+def→AC hit, 0 exec, <500ms · ② glob sensitivity (in→rerun, out→hit) · ③ local≡runner result · ④ **🔧 non-determinism flagged after 3 divergent runs**, honest surface · **⑤(+) npm fixture: partial hit-rate measured & displayed as-is, no full-memo claim** · **⑥(R2) toolchain sensitivity: same tree+def under different toolchain → MISS and re-execute, never a false hit** |
 | **B3** affected-targets | M·sonnet | ① golden sets cargo/pnpm/turbo · ② root edit→full set · ③ unknown ecosystem→full set fail-open |
 | **B4** union queue | L·opus | ① A+B-red pair excluded+named · ② 5 disjoint greens land, 0 re-runs · ③ force-push recompute · ④ crash idempotent (kill-test) · **⑤(+) lands in queue order; out-of-order structurally prevented** · **⑥(+) protected/required-review PR is HELD+reported, never force-merged; merge method honored** |
-| **B5** bisect+diagnosis | M·sonnet | ① culprit ≤log₂ execs · ② diff-vs-green + suspects · ③ <2min fixture · **④(+) diagnosis is bounded schema data, never raw log dump (size assert)** |
-| **B6** intent sidecar | S·sonnet | ① parsed/validated/rendered · ② malformed→actionable comment · ③ corpus→CAS by intent_id |
+| **B5** bisect+diagnosis | M·sonnet | ① culprit ≤log₂ execs · ② diff-vs-green + suspects · ③ <2min fixture · **④(+) diagnosis is bounded schema data, never raw log dump (size assert)** · **⑤(R2) bisect triggers automatically on any red — no manual invocation** |
+| **B6** intent sidecar | S·sonnet | ① parsed/validated/rendered · ② malformed→actionable comment · ③ corpus→CAS by intent_id · **④(R2) negative: sidecar is non-authoritative — never gates or blocks landing** |
 | **B7** surface v0 | S·sonnet | ① live status page · ② exactly one edited comment/PR · ③ **🔧 every saved-minutes number links to its CheckResult set (auditable)** |
 | **B8** dogfood | M·sonnet | ① real 5-PR wave e2e · ② **🔧 vs defined baseline (same wave, memoization off), versioned report with formulas** · ③ 48h soak: 0 wrong-merge/lost-PR (event-audited) |
-| **B9 (+)** exit telemetry | S·sonnet | ① per-install activity → week-N retention computable (privacy-documented) · ② explicit "I'd-pay" feedback hook (never inferred) · ③ exit-metric report generated from data, auditable |
+| **B9 (+)** exit telemetry | S·sonnet | ① per-install activity → week-3 retention computable vs the ≥40% threshold (privacy-documented) · ② **🔧 feedback capture distinguishes UNPROMPTED ("I'd pay") statements from prompted responses — only unprompted count toward the ≥3 gate** · ③ exit-metric report generated from data, auditable |
 
-## 3. Phase C — Squad C (9 WPs)
+## 3. Phase C — Squad C (10 WPs)
 
 | WP | Size/route | Acceptance items |
 |---|---|---|
-| **C1** runner inventory | S·opus | ① written inventory + reuse verdict/item; zero changes to adjacent prod repos |
-| **C2** ephemeral runner | L·opus | ① destroy leaves nothing (forensic re-scan) · ② lease isolation (tmp/net) · ③ expiry hard-kill · ④ ≥8 concurrent/box |
+| **C1** runner inventory | S·opus | ① written inventory + reuse verdict/item. **(R2: "zero changes to adjacent prod repos" reclassified → governance law §8, not a feature acceptance)** |
+| **C2** ephemeral runner | L·opus | ① destroy leaves nothing (forensic re-scan) · ② lease isolation (tmp/net) · ③ expiry hard-kill · ④ ≥8 concurrent/box · **⑤(R2) box crash mid-job (not expiry): job detected lost → requeued/surfaced, no silent drop, no false green, lease/fence cleaned up** |
 | **C3** cache-warm boot | M·sonnet | ① warm ≤10s vs cold ≥60s · ② toolchain layers shared · **③(+) CAS/AC down mid-job → fail CLOSED, zero poisoned writes, no hang, no false green** |
-| **C4** regen drivers | M·sonnet | ① lockfile union regen green, 0 markers · ② deterministic regen · ③ non-lockfile untouched |
-| **C5** fences+broker SEC | L·opus | ① outside path_set→ENOENT · ② zero secret material in job (red-team env/proc/disk) · ③ broker calls audited w/ principal chain · ④ broker down→fail CLOSED · **⑤(+) active escape red-team: traversal/symlink/out-of-fence writes/fork-bomb/disk-fill contained; cannot reach another lease or starve the box** |
-| **C6** flake stats | S·sonnet | ① every execution feeds stats · ② planted 20% flake detected <30 runs · ③ quarantine list = policy artifact, never auto-acts v0 |
-| **C7** budgets | S·sonnet | ① **🔧 exhausted→queued not dropped; surfaced as defined status field + event** · ② no tenant starvation (interleave) · **③(+) metering accuracy: accounted usage ≈ actual consumption within stated tolerance (fixture workload)** |
-| **C8 (+)** shadow checks | M·opus | ① N writes in one snapshot window → exactly ONE shadow pass at boundary (not N, not 0) · ② shadow runs decrement tenant budget; cap halts shadows, explicit jobs proceed per policy · ③ default-off; per-repo opt-in flag scoped to repo, zero runs when off |
+| **C4** regen drivers | M·sonnet | ① lockfile union regen green, 0 markers · ② deterministic regen · ③ non-lockfile untouched · **④(R2) all three derived classes exercised: codegen + snapshot files regenerate (never text-merge); hand-edits to derived files discarded+regenerated** · **⑤(R2) irreconcilable derived state (conflicting constraints) → fail CLOSED with clear status; never a silently/partially merged derived file** |
+| **C5** fences+broker SEC | L·opus | ① outside path_set→ENOENT · ② zero secret material in job (red-team env/proc/disk) · ③ broker calls audited w/ principal chain · ④ broker down→fail CLOSED · **⑤(+) active escape red-team: traversal/symlink/out-of-fence writes/fork-bomb/disk-fill contained; cannot reach another lease or starve the box** · **⑥(R2) positive path: job completes a credential-needing operation VIA the broker successfully, raw credential provably absent during and after** |
+| **C6** flake stats | S·sonnet | ① every execution feeds stats · ② planted 20% flake detected <30 runs · ③ **🔧 quarantine list = policy artifact; "auto-act" defined: any reorder/skip/block/annotation-that-gates = prohibited in v0 (annotation-only allowed)** |
+| **C7** budgets | S·sonnet | ① **🔧 exhausted→queued not dropped; surfaced as defined status field + event** · ② no tenant starvation (interleave) · **③ 🔧 metering accuracy: accounted ≈ actual within ±5% on the fixture workload** |
+| **C8 (+)** shadow checks | M·opus | ① N writes in one snapshot window → exactly ONE shadow pass at boundary (not N, not 0) · ② shadow runs decrement tenant budget; cap halts shadows, explicit jobs proceed per policy · ③ default-off; per-repo opt-in flag scoped to repo, zero runs when off · **④(R2) a failing shadow surfaces as signal/event and NEVER gates/blocks/fails any explicit job; a passing shadow produces an observable result** · **⑤(R2) per-tenant cap isolation: tenant A exhausting its shadow budget leaves tenant B's shadows unaffected** |
 | **C9 (+)** ws lifecycle | M·sonnet | ① attach joins live workspace (same fence/materialization) without respawn · ② resume restores state+fence; resumed ws cannot exceed original path_set · ③ spawn <1s; identical concurrent spawns dedup to one materialization · ④ local vs remote execution: identical observable results |
+| **C10 (R2)** pricing no-shock | S·sonnet | ① driving a tenant to budget exhaustion on EACH metered surface (runner minutes, shadow spend, storage) → system caps/degrades (pauses or falls back) with pre-exhaustion warning · ② zero overage charge generated — flat means flat (billing fixture assert) |
 
 ## 4. Phase D — Squad D (14 WPs)
 
 | WP | Size/route | Acceptance items |
 |---|---|---|
 | **D1** event refs | L·opus | ① 10k-event replay identical · ② tamper detected · ③ compaction replay-equivalent, hot log bounded · ④ undo restores + preserves history · ⑤ 100 concurrent ops: serialized, 0 loss, p99<500ms · **⑥(+) recovery: hot-DO loss → full ref state rebuilt from cold tier (and/or mirror) replay-identical** |
-| **D2** protocol read | L·opus | ① clone byte-identical to mirror · ② delta-only fetch · ③ clients: git 2.40+/jj/libgit2 · ④ **🔧 500MB fixture: p95 CPU ≤70% of platform limit, else chunked fallback implemented+tested** · **⑤(+) degradation kill-test: smart layers disabled → vanilla git clone/fetch still serves valid repo** · **⑥(+) scale ceiling defined+tested: at limit → documented bounded behavior (explicit rejection/fallback), never silent failure** |
+| **D2** protocol read | L·opus | ① clone byte-identical to mirror · ② delta-only fetch · ③ clients: git 2.40+/jj/libgit2 · ④ **🔧 500MB fixture: per-request CPU-time p95 ≤70% of the platform per-request CPU limit; beyond → chunked fallback path exercised+passing** · **⑤(+) degradation kill-test: smart layers disabled → vanilla git clone/fetch still serves valid repo** · **⑥(+) scale ceiling defined+tested: at limit → documented bounded behavior (explicit rejection/fallback), never silent failure** · **⑦(R2) jj FIRST-CLASS: stacked-changes series round-trips via jj with change-ids stable across forge ops; stack reconstructs identically** |
 | **D3** push v0 (flagged) | L·opus | ① push→clone round-trip identical · ② concurrent pushes: total order, correct stale rejection · ③ raw push = external-change w/ attribution · ④ flag off unless self-hosted-alpha · **⑤(+) negative: NO synthetic intent fabricated for a raw push (intent log clean)** |
 | **D4** intents+projection | M·opus | ① commits embed intent_id, reproducible from log · ② two altitudes consistent (50-intent fixture) · ③ sidecar corpus importable · **④(+) mixed fixture (intents + raw pushes interleaved on one ref): altitudes stay provably consistent, externals as external-change** |
-| **D5** ledger+watch | M·sonnet | ① asked→done→proven per campaign · ② watch <2s · ③ **🔧 deep-links resolve to golden expected targets (not just non-error)** · **④(+) planted secret in a change renders REDACTED in ledger/verdict views** |
+| **D5** ledger+watch+fleet | M·sonnet | ① asked→done→proven per campaign · ② **🔧 watch: EventRecord-to-display p95 <2s (measured per event class)** · ③ **🔧 deep-links resolve to golden expected targets (not just non-error)** · **④(+) planted secret renders REDACTED in ledger/verdict views** · **⑤(R2) two-zoom toggle: intent view ⇄ raw-commit view mutually consistent over the same fixture (one store)** · **⑥(R2) `hugit fleet` emits documented machine-readable schema reflecting true ws/agent state vs fixture** |
 | **D6** policy engine | M·sonnet | ① 3 ported gates local≡forge · ② engine down→landing blocks (kill-test) · ③ policy change = audited event |
-| **D7** verdict panels | M·opus | ① lenses isolated (prompt audit) · ② valid VerdictObject[] + evidence refs · ③ **🔧 planted bug: precondition verified (bug demonstrably passes author suite first), then ≥1 lens catches it** |
-| **D8** experiment harness | M·opus | ① every wave auto-contributes datapoints · ② dashboard: disjointness %, regen agree/disagree, n · ③ gate report generated, never hand-written |
-| **D9 (+)** attention queue | M·opus | ① fixture with known policy/blast/confidence → documented composite ordering reproduced · ② perturbing one input moves entry to expected position · ③ policy-mandatory items can never be ranked out of the human's view |
+| **D7** verdict panels + review Q&A | M·opus | ① lenses isolated (prompt audit) · ② valid VerdictObject[] + evidence refs · ③ **🔧 planted bug: precondition verified (bug demonstrably passes author suite first), then ≥1 lens catches it** · **④(R2) human review Q&A: every answer resolves to citations of real evidence objects (test/verdict/impact/diff refs); no grounding evidence → explicit refusal, never a fabricated/persuasive answer** |
+| **D8** experiment harness | M·opus | ① every wave auto-contributes datapoints · ② dashboard: disjointness %, regen agree/disagree, n · ③ gate report generated, never hand-written · **④(R2) anti-gaming: promotion corpus pre-registered and SEALED before evaluation; sample selection auditable** · **⑤(R2) post-hoc removal of any change from the corpus is detected and invalidates the promotion verdict** |
+| **D9 (+)** attention queue | M·opus | ① fixture with known policy/blast/confidence → documented composite ordering reproduced · ② perturbing one input moves entry to expected position · ③ policy-mandatory items can never be ranked out of the human's view · **④(R2) fast-approve (90s) affordance is BLOCKED for high-risk/policy-mandatory items — forced through full review; permitted for policy-low-risk** |
 | **D10 (+)** why+impact | M·sonnet | ① `hugit why <line\|symbol>` → originating intent + charter/author/model/cost, matching event log · ② `hugit impact <path\|change>` → golden affected-set on known build graph · ③ impact feeds verdict-panel ground truth (cross-check) |
 | **D11 (+)** journals+resume | M·sonnet | ① journal persisted as tenant-private object bound to ws/intent · ② post-crash `ctx resume` reconstructs session within supported horizon · ③ beyond-horizon resume refused/degraded as documented |
 | **D12 (+)** regen gate | M·opus | ① regen only on opt-in scope; non-opted repo never regens · ② regen lands only if acceptance re-passes AND fresh independent adversarial verdict approves · ③ missing/failing either → blocked + reported · ④ every regen auditable as its own revision |
@@ -87,13 +92,13 @@ model, principal, sig}` · `RegenGate {optin_scope, repass, indep_verdict}`.
 
 | WP | Size/route | Acceptance items |
 |---|---|---|
-| **E1** verified mirror | L·opus | ① landing on GitHub <60s hash-verified · ② divergence→alarm+repair+incident · ③ 72h soak 100% verified · **④(+) GitHub 429/5xx for N hours: durable queue, bounded backoff, no drop/reorder; on recovery drains to verified sync + incident records gap** · **⑤(+) force-push/branch-delete/tag ops replicate; deleted refs absent; no false divergence from orphans** · **⑥(+) partial divergence: repair scoped to broken ref only; webhook loss → poll fallback still detects within SLA** |
-| **E2** import | M·sonnet→**L** | ① 1k-commit public import byte-identical · ② PRs/issues→proposed intents w/ provenance · ③ idempotent re-import · **④(+) private repo via installation auth; LFS objects materialized (not pointers); >1-timeout repo resumes and completes byte-identical** |
-| **E3** status compat | S·sonnet | ① checks appear as GitHub statuses · ② live shields.io badge · **③(+) status-API 429/5xx: retry w/ backoff → eventually true state; no stuck-pending; failures observable** |
+| **E1** verified mirror | L·opus | ① landing on GitHub <60s hash-verified · ② divergence→alarm+repair+incident · ③ 72h soak 100% verified · **④(+) GitHub 429/5xx for N hours: durable queue, bounded backoff, no drop/reorder; on recovery drains to verified sync + incident records gap** · **⑤(+) force-push/branch-delete/tag ops replicate; deleted refs absent; no false divergence from orphans** · **⑥(+) partial divergence: repair scoped to broken ref only; webhook loss → poll fallback still detects within SLA** · **⑦(R2) ONE-WAY enforced: a write made directly on the GitHub mirror never propagates back/never becomes truth — treated as divergence (alarm → forge-authoritative repair → incident), zero reverse sync** |
+| **E2** import | M·sonnet→**L** | ① 1k-commit public import byte-identical · ② PRs/issues→proposed intents w/ provenance · ③ idempotent re-import · **④(+) private repo via installation auth; LFS objects materialized (not pointers); >1-timeout repo resumes and completes byte-identical** · **⑤(R2) import boundary: commit history materializes as opaque change-events — NO intent synthesized from a bare commit; PR/issue intents marked proposed/non-authoritative** |
+| **E3** status compat | S·sonnet | ① checks appear as GitHub statuses · ② **🔧 badge reflects true state within a stated staleness bound; status-API down → last-known + observable staleness, never silent wrong** · **③(+) status-API 429/5xx: retry w/ backoff → eventually true state; no stuck-pending; failures observable** |
 | **E4** Actions shim | M·sonnet | ① real simple workflow unmodified w/ env/broker mapping · ② unsupported→explicit actionable report, no silent skip · **③(+) missing/denied secret → fail CLOSED w/ named secret; material never in logs/env (red-team)** |
-| **E5** export | S·sonnet→**M** | ① one-command dump git + documented JSON · ② restore round-trip reproduces refs+intents+events · **③(🔧 was doc-presence) export validates against versioned ExportSchema (machine check)** · **④(+) export applies context/journal redaction policy (no secret material emitted); multi-GB export streams without OOM** |
+| **E5** export | S·sonnet→**M** | ① one-command dump git + documented JSON · ② restore round-trip reproduces refs+intents+events · **③(🔧 was doc-presence) export validates against versioned ExportSchema (machine check)** · **④(+) export applies context/journal redaction policy (no secret material emitted); multi-GB export streams without OOM** · **⑤(R2) THE EXIT PROOF: the exported git artifact (and the mirror) is fully usable with ZERO hugit/forge dependency — clone/log/branch/push-elsewhere all work with no hugit tooling present** |
 
-## 6. Squad X (+) — platform invariants (6 WPs, cross-cutting)
+## 6. Squad X — platform invariants (9 WPs, cross-cutting)
 
 | WP | Size/route | Acceptance items | Scheduled |
 |---|---|---|---|
@@ -103,10 +108,13 @@ model, principal, sig}` · `RegenGate {optin_scope, repass, indep_verdict}`.
 | **X4** supply chain | M·opus | ① runner images content-pinned + integrity-verified at spawn · ② App dependencies pinned + verified in CI · ③ tampered/unpinned image → fail CLOSED before any tenant work | sprint 1 |
 | **X5** namespace laws | S·sonnet | ① no hugit CLI verb shadows a git verb (mechanized check against `git help -a`) · ② managed refs (`refs/hugit/…`) never collide with arbitrary user branches/tags (property test) | sprint 2 |
 | **X6** non-interference | M·sonnet | ① hugit at full load concurrently with CoreLink workloads → CoreLink latency/availability unaffected within stated tolerance (measured, both SEALs) · ② hugit infra is resource-isolated from CoreLink runners/sessions (separate boxes/quotas, asserted by config test) | both SEALs |
+| **X7 (R2)** right-to-erasure | L·opus | ① a data subject's personal data provably erased across CAS + provenance/ledger + context store + the GitHub mirror · ② no orphaned provenance refs survive erasure · ③ attestation chains re-seal or fail CLOSED after erasure (never silently broken) | sprint 2 |
+| **X8 (R2)** self-release attestation | M·opus | ① every hugit App/CLI/runner-image release signed + published to a verifiable transparency log · ② the running App verifies its own provenance at boot · ③ unsigned/tampered self-build fails CLOSED | sprint 2 |
+| **X9 (R2)** cross-phase CheckResult identity | S·sonnet | ① a CheckResult memoized by the phase-B App is bit-identical to the one served as evidence in a phase-D verdict panel for the same (tree,def,toolchain) · ② mismatch fails CLOSED + alerts | sprint 2 |
 
 ---
 
-## 7. The dependency DAG (v1.1)
+## 7. The dependency DAG (v1.2 — additions: C10⇠C7; X7⇠{D1,X3,E1}; X8⇠X4; X9⇠{B2,D7}; D16-class items live inside D8)
 
 ```
 Day 0: contracts(+ShadowPolicy/AttentionRank/ExportSchema/AttestationChain/RegenGate)
@@ -136,7 +144,11 @@ test crates + red-team fixtures (`crates/hugit-invariants`).
 - Every WP: failing acceptance suite committed BEFORE implementation; SEAL
   with evidence; cold verification by non-author; security review at both
   SEALs; dedicated red-team passes on C5, D3, X1, X4.
-- **Critic loop status:** round 1 = 5/5 critics found gaps (42 missing,
-  8 vague) → integrated above. Round 2 pending; suite is accepted only after
-  two consecutive dry rounds. WP token re-slicing (≤100k hard / 80k ideal per
-  task) happens after the suite dries.
+- **Governance laws (reclassified from acceptance):** zero changes to
+  adjacent production repos (ex-C1 item) is enforced by the orchestrator's
+  profile/neverTouch + the git-hygiene guard — a standing law, not a test.
+- **Critic loop status:** round 1 = 5/5 wet (42 missing, 8 vague) →
+  integrated in v1.1. Round 2 = 5/5 wet but converging (23 missing, 8
+  sharpened: B:1 C:6 D:7 E:4 X:5) → integrated in v1.2. Round 3 dispatched.
+  Suite accepted only after two consecutive dry rounds. WP token re-slicing
+  (≤100k hard / 80k ideal per task, DoD per WP) happens after the suite dries.
