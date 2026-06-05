@@ -30,3 +30,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - feat: hugit-contracts — 15 frozen contract types + JSON Schemas + golden serde suite (WP-00)
 - feat: Rust workspace scaffold — 12 crates, CI gates (fmt/clippy/test/audit), DCO + changelog discipline (WP-01)
 - feat(runner): ephemeral runner v0 — container-per-job lease lifecycle + tmp/net isolation, teardown with forensic re-scan (WP-C2a)
+- feat(runner): C2b — expiry hard-kill (deterministic SIGKILL from lease expiry), ≥8 concurrent jobs/box, crash-loss recovery (lost-detection → requeue/surface, marked Crashed, never silent-drop/false-green) (WP-C2b)
