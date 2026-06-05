@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(refstore): D4 — native intents over the event log + deterministic two-altitude projection (intent/machine), generated commits embedding intent_id, sidecar-corpus import by intent_id, externals stay external-change (no fake intents) (WP-D4)
+
 - feat: hugit-checks/affected — affected-target engine v0; cargo/pnpm/turbo graph adapters, root-edit full-set, fail-open policy (WP-B3)
 
 - feat(refstore): D14 — forge authz: fail-closed mutation guard over push/land/undo/policy, golden per-principal-class permission matrix (human/orchestrator/worker/model), audited denials via EventRecord (WP-D14)
