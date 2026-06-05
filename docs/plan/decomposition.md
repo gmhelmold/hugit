@@ -1,199 +1,142 @@
-# hugit — formal decomposition (v1)
+# hugit — formal decomposition (v1.1 — post critic round 1)
 
-> The working-backwards step between the refined product (catalog v2) and the
-> specs: every work-package with a charter and **testable acceptance
-> criteria**, the **contracts to freeze** (with schemas), the **dependency
-> DAG**, the conflict map, and routing. This is the artifact Day 0 of the
-> warp plan executes against; each WP's acceptance section becomes its
-> failing acceptance suite before implementation starts.
+> v1.1 (2026-06-05): integrates **round 1 of the cold suite-critic loop**
+> (5 independent critics — B, C, D, E, cross-cutting): 42 missing items added,
+> 8 vague items sharpened, new **squad X** (platform invariants). The loop
+> continues until two consecutive dry rounds. After the suite dries:
+> re-slice into ≤100k-token (80k ideal) WP contracts with DoD.
 >
-> **Owner:** Gustavo Schneiter · 2026-06-05 · companion to
-> `warp-10-days.md` (schedule) and `command-catalog.md` v2 (the what/why).
-> Sizing: S ≤ ½ agent-day · M ≤ 1 agent-day · L ≤ 2 agent-days (24/7 agents).
-> Routing: `opus` = design-heavy/ambiguous · `sonnet` = well-specified build.
+> Sizing: S ≤ ½ agent-day · M ≤ 1 · L ≤ 2. Routing: `opus` = design/security,
+> `sonnet` = contract-determined build. New/changed since v1 marked **(+)** /
+> **(🔧)**.
+
+## 0. Capability tree (v1.1)
+
+```
+B GitHub App       C fabric             D forge                E bridge
+├ memoized checks  ├ runners (warm)     ├ event refs+undo      ├ verified 1-way mirror
+├ union landing    ├ regen derived      ├ git protocol R/W     ├ import priv/LFS/large
+├ diagnosis/bisect ├ shadow checks (+)  ├ intents/ledger/queue ├ compat status+actions
+├ intent corpus    ├ fences+broker SEC  ├ why/impact/journals(+)└ export (exit promise)
+└ exit telemetry(+)├ ws lifecycle (+)   ├ policy+verdicts
+                   └ flakes+budgets     ├ regen gated(+)·tournament(+)·auth(+)
+                                        └ experiment harness
+X invariants (+): tenant isolation · attestation · context privacy · supply
+  chain · namespace laws · resource non-interference · degradation kill-test
+```
+
+## 1. Contract freeze (Day 0)
+
+v1 set stands (CheckDef · CheckResult · DiagnosisObject · IntentSidecar ·
+RunnerLease · FenceManifest · EventRecord · VerdictObject · QueueApi ·
+AppWebhooks) **plus (+)**: `ShadowPolicy {cadence, budget, optin}` ·
+`AttentionRank {policy, blast_radius, confidence}` · `ExportSchema`
+(versioned, machine-validatable) · `AttestationChain {tree, def, runner,
+model, principal, sig}` · `RegenGate {optin_scope, repass, indep_verdict}`.
 
 ---
 
-## 0. The capability tree (catalog v2 → buildable capabilities)
+## 2. Phase B — Squad B (9 WPs)
 
-```
-PHASE B — the GitHub App                 PHASE C — the fabric
-├─ B-CAP1 memoized verification          ├─ C-CAP1 ephemeral cache-warm compute
-├─ B-CAP2 union landing                  ├─ C-CAP2 derived-file regeneration
-├─ B-CAP3 causality (diagnosis/bisect)   ├─ C-CAP3 claim fences + secret broker (SECURITY)
-└─ B-CAP4 intent corpus (sidecar)        └─ C-CAP4 fleet telemetry (flakes, budgets)
+| WP | Size/route | Acceptance items (each red→green) |
+|---|---|---|
+| **B1** App skeleton | M·sonnet | ① forged webhook→401+audit · ② PR event persisted, ack<1s · ③ check-run on real PR · ④ least-privilege manifest snapshot · **⑤(+) uninstall revokes access + halts processing (audited)** |
+| **B2** checks-as-code | L·opus | ① repeat tree+def→AC hit, 0 exec, <500ms · ② glob sensitivity (in→rerun, out→hit) · ③ local≡runner result · ④ **🔧 non-determinism flagged after 3 divergent runs**, honest surface · **⑤(+) npm fixture: partial hit-rate measured & displayed as-is, no full-memo claim** |
+| **B3** affected-targets | M·sonnet | ① golden sets cargo/pnpm/turbo · ② root edit→full set · ③ unknown ecosystem→full set fail-open |
+| **B4** union queue | L·opus | ① A+B-red pair excluded+named · ② 5 disjoint greens land, 0 re-runs · ③ force-push recompute · ④ crash idempotent (kill-test) · **⑤(+) lands in queue order; out-of-order structurally prevented** · **⑥(+) protected/required-review PR is HELD+reported, never force-merged; merge method honored** |
+| **B5** bisect+diagnosis | M·sonnet | ① culprit ≤log₂ execs · ② diff-vs-green + suspects · ③ <2min fixture · **④(+) diagnosis is bounded schema data, never raw log dump (size assert)** |
+| **B6** intent sidecar | S·sonnet | ① parsed/validated/rendered · ② malformed→actionable comment · ③ corpus→CAS by intent_id |
+| **B7** surface v0 | S·sonnet | ① live status page · ② exactly one edited comment/PR · ③ **🔧 every saved-minutes number links to its CheckResult set (auditable)** |
+| **B8** dogfood | M·sonnet | ① real 5-PR wave e2e · ② **🔧 vs defined baseline (same wave, memoization off), versioned report with formulas** · ③ 48h soak: 0 wrong-merge/lost-PR (event-audited) |
+| **B9 (+)** exit telemetry | S·sonnet | ① per-install activity → week-N retention computable (privacy-documented) · ② explicit "I'd-pay" feedback hook (never inferred) · ③ exit-metric report generated from data, auditable |
 
-PHASE D — the forge (self-hosted alpha)  PHASE E — the bridge
-├─ D-CAP1 event-sourced truth (refs)     ├─ E-CAP1 verified one-way mirror
-├─ D-CAP2 git projection (wire protocol) ├─ E-CAP2 import & compat surface
-├─ D-CAP3 intents native + ledger        └─ E-CAP3 exit guarantee (export)
-├─ D-CAP4 policy + adversarial review
-└─ D-CAP5 the experiment harness (gates claims/regen)
-```
+## 3. Phase C — Squad C (9 WPs)
 
----
+| WP | Size/route | Acceptance items |
+|---|---|---|
+| **C1** runner inventory | S·opus | ① written inventory + reuse verdict/item; zero changes to adjacent prod repos |
+| **C2** ephemeral runner | L·opus | ① destroy leaves nothing (forensic re-scan) · ② lease isolation (tmp/net) · ③ expiry hard-kill · ④ ≥8 concurrent/box |
+| **C3** cache-warm boot | M·sonnet | ① warm ≤10s vs cold ≥60s · ② toolchain layers shared · **③(+) CAS/AC down mid-job → fail CLOSED, zero poisoned writes, no hang, no false green** |
+| **C4** regen drivers | M·sonnet | ① lockfile union regen green, 0 markers · ② deterministic regen · ③ non-lockfile untouched |
+| **C5** fences+broker SEC | L·opus | ① outside path_set→ENOENT · ② zero secret material in job (red-team env/proc/disk) · ③ broker calls audited w/ principal chain · ④ broker down→fail CLOSED · **⑤(+) active escape red-team: traversal/symlink/out-of-fence writes/fork-bomb/disk-fill contained; cannot reach another lease or starve the box** |
+| **C6** flake stats | S·sonnet | ① every execution feeds stats · ② planted 20% flake detected <30 runs · ③ quarantine list = policy artifact, never auto-acts v0 |
+| **C7** budgets | S·sonnet | ① **🔧 exhausted→queued not dropped; surfaced as defined status field + event** · ② no tenant starvation (interleave) · **③(+) metering accuracy: accounted usage ≈ actual consumption within stated tolerance (fixture workload)** |
+| **C8 (+)** shadow checks | M·opus | ① N writes in one snapshot window → exactly ONE shadow pass at boundary (not N, not 0) · ② shadow runs decrement tenant budget; cap halts shadows, explicit jobs proceed per policy · ③ default-off; per-repo opt-in flag scoped to repo, zero runs when off |
+| **C9 (+)** ws lifecycle | M·sonnet | ① attach joins live workspace (same fence/materialization) without respawn · ② resume restores state+fence; resumed ws cannot exceed original path_set · ③ spawn <1s; identical concurrent spawns dedup to one materialization · ④ local vs remote execution: identical observable results |
 
-## 1. Contract freeze (Day 0 — the shared truth all WPs build against)
+## 4. Phase D — Squad D (14 WPs)
 
-Frozen = published as Rust types + JSON Schema in `crates/hugit-contracts`
-**before** any dependent WP dispatches. Owner: orchestrator. Changes after
-freeze require explicit re-freeze + re-dispatch of affected WPs.
+| WP | Size/route | Acceptance items |
+|---|---|---|
+| **D1** event refs | L·opus | ① 10k-event replay identical · ② tamper detected · ③ compaction replay-equivalent, hot log bounded · ④ undo restores + preserves history · ⑤ 100 concurrent ops: serialized, 0 loss, p99<500ms · **⑥(+) recovery: hot-DO loss → full ref state rebuilt from cold tier (and/or mirror) replay-identical** |
+| **D2** protocol read | L·opus | ① clone byte-identical to mirror · ② delta-only fetch · ③ clients: git 2.40+/jj/libgit2 · ④ **🔧 500MB fixture: p95 CPU ≤70% of platform limit, else chunked fallback implemented+tested** · **⑤(+) degradation kill-test: smart layers disabled → vanilla git clone/fetch still serves valid repo** · **⑥(+) scale ceiling defined+tested: at limit → documented bounded behavior (explicit rejection/fallback), never silent failure** |
+| **D3** push v0 (flagged) | L·opus | ① push→clone round-trip identical · ② concurrent pushes: total order, correct stale rejection · ③ raw push = external-change w/ attribution · ④ flag off unless self-hosted-alpha · **⑤(+) negative: NO synthetic intent fabricated for a raw push (intent log clean)** |
+| **D4** intents+projection | M·opus | ① commits embed intent_id, reproducible from log · ② two altitudes consistent (50-intent fixture) · ③ sidecar corpus importable · **④(+) mixed fixture (intents + raw pushes interleaved on one ref): altitudes stay provably consistent, externals as external-change** |
+| **D5** ledger+watch | M·sonnet | ① asked→done→proven per campaign · ② watch <2s · ③ **🔧 deep-links resolve to golden expected targets (not just non-error)** · **④(+) planted secret in a change renders REDACTED in ledger/verdict views** |
+| **D6** policy engine | M·sonnet | ① 3 ported gates local≡forge · ② engine down→landing blocks (kill-test) · ③ policy change = audited event |
+| **D7** verdict panels | M·opus | ① lenses isolated (prompt audit) · ② valid VerdictObject[] + evidence refs · ③ **🔧 planted bug: precondition verified (bug demonstrably passes author suite first), then ≥1 lens catches it** |
+| **D8** experiment harness | M·opus | ① every wave auto-contributes datapoints · ② dashboard: disjointness %, regen agree/disagree, n · ③ gate report generated, never hand-written |
+| **D9 (+)** attention queue | M·opus | ① fixture with known policy/blast/confidence → documented composite ordering reproduced · ② perturbing one input moves entry to expected position · ③ policy-mandatory items can never be ranked out of the human's view |
+| **D10 (+)** why+impact | M·sonnet | ① `hugit why <line\|symbol>` → originating intent + charter/author/model/cost, matching event log · ② `hugit impact <path\|change>` → golden affected-set on known build graph · ③ impact feeds verdict-panel ground truth (cross-check) |
+| **D11 (+)** journals+resume | M·sonnet | ① journal persisted as tenant-private object bound to ws/intent · ② post-crash `ctx resume` reconstructs session within supported horizon · ③ beyond-horizon resume refused/degraded as documented |
+| **D12 (+)** regen gate | M·opus | ① regen only on opt-in scope; non-opted repo never regens · ② regen lands only if acceptance re-passes AND fresh independent adversarial verdict approves · ③ missing/failing either → blocked + reported · ④ every regen auditable as its own revision |
+| **D13 (+)** tournament | S·sonnet | ① `-n N` produces N independent candidates · ② judge panel selects per documented criteria (fixture w/ known-best) · ③ losers remain addressable as evidence |
+| **D14 (+)** forge authz | M·opus | ① mutating endpoints (push/land/undo/policy) reject unauthorized principals · ② permission model documented + golden-tested per principal class · ③ authz denials audited |
 
-| Contract | Essential shape |
-|---|---|
-| `CheckDef` | `{id, cmd, input_globs[], targets[], toolchain_ref, timeout_s, env_allowlist[]}` |
-| `CheckResult` | `{def_digest, tree_root, toolchain_digest, status: Green\|Red\|Skipped, duration_ms, log_ref, artifact_refs[], runner_id, attestation_sig}` — memo key = `H(tree_root ‖ def_digest ‖ toolchain_digest)` |
-| `DiagnosisObject` | `{failure: CheckResultRef, culprit: PrRef\|IntentRef, last_green_tree, diff_ref, suspect_targets[], similar_failures[]}` |
-| `IntentSidecar` | `{intent_id (ULID), campaign, charter, acceptance[], context_ref?, principal: {actor, model?, orchestrator?}}` |
-| `RunnerLease` | `{lease_id, tenant, workspace_ref, fence: FenceManifest, budget: {cpu_s, wall_s}, expires_at}` |
-| `FenceManifest` | `{path_set[], net_policy: deny-by-default + allowlist, broker_endpoint}` — **no secret material, ever** |
-| `EventRecord` | `{seq, prev_hash, ts, principal, kind, payload_ref, sig}` — append-only, hash-chained |
-| `VerdictObject` | `{subject: PrRef\|IntentRef, tree_root, lens, model, verdict: APPROVE\|FIX-FIRST\|REJECT, claims_checked[], evidence_refs[]}` |
-| `QueueApi` | `submit(pr_set) → batch_id` · `status(batch_id) → {position, union_tree, results}` · `report(batch_id) → DiagnosisObject[]` |
-| `AppWebhooks` | consumed: `pull_request, check_suite, push, installation`; emitted: Checks-API runs + PR comments; permissions: checks RW, contents RW, PRs RW — least-privilege documented |
+## 5. Phase E — Squad E (7 WPs)
 
----
+| WP | Size/route | Acceptance items |
+|---|---|---|
+| **E1** verified mirror | L·opus | ① landing on GitHub <60s hash-verified · ② divergence→alarm+repair+incident · ③ 72h soak 100% verified · **④(+) GitHub 429/5xx for N hours: durable queue, bounded backoff, no drop/reorder; on recovery drains to verified sync + incident records gap** · **⑤(+) force-push/branch-delete/tag ops replicate; deleted refs absent; no false divergence from orphans** · **⑥(+) partial divergence: repair scoped to broken ref only; webhook loss → poll fallback still detects within SLA** |
+| **E2** import | M·sonnet→**L** | ① 1k-commit public import byte-identical · ② PRs/issues→proposed intents w/ provenance · ③ idempotent re-import · **④(+) private repo via installation auth; LFS objects materialized (not pointers); >1-timeout repo resumes and completes byte-identical** |
+| **E3** status compat | S·sonnet | ① checks appear as GitHub statuses · ② live shields.io badge · **③(+) status-API 429/5xx: retry w/ backoff → eventually true state; no stuck-pending; failures observable** |
+| **E4** Actions shim | M·sonnet | ① real simple workflow unmodified w/ env/broker mapping · ② unsupported→explicit actionable report, no silent skip · **③(+) missing/denied secret → fail CLOSED w/ named secret; material never in logs/env (red-team)** |
+| **E5** export | S·sonnet→**M** | ① one-command dump git + documented JSON · ② restore round-trip reproduces refs+intents+events · **③(🔧 was doc-presence) export validates against versioned ExportSchema (machine check)** · **④(+) export applies context/journal redaction policy (no secret material emitted); multi-GB export streams without OOM** |
 
-## 2. Work-packages — Phase B (Squad B, 8 agents)
+## 6. Squad X (+) — platform invariants (6 WPs, cross-cutting)
 
-**B1 · App skeleton** — `M · sonnet` — claims `crates/hugit-app`
-Charter: GitHub App on a CF Worker: installation auth, webhook ingest (signature-verified), Checks-API write-back.
-Accept: ① forged-signature webhook → 401 + audit event; ② valid `pull_request` event → persisted + ack <1s; ③ posts a check-run visible on a real test-repo PR; ④ App manifest pins least-privilege permissions (snapshot-tested).
-
-**B2 · checks-as-code executor** — `L · opus` — claims `crates/hugit-checks` — deps: contracts
-Charter: `CheckDef` runner generalizing `clw run`: execute, memoize in CoreLink AC under the frozen key, replay locally byte-identical.
-Accept: ① same tree+def twice → second is AC hit, 0 execution, <500ms; ② tree changed by 1 byte in inputs → re-runs; tree changed outside `input_globs` → still hits; ③ `hugit check --local` and runner produce identical `CheckResult` (modulo runner_id); ④ non-deterministic check flagged after N divergent results, surfaced honestly (no fake greens).
-
-**B3 · affected-targets v0** — `M · sonnet` — claims `crates/hugit-checks/affected` — deps: contracts
-Charter: per-package change→target mapping for cargo, pnpm workspaces, turborepo.
-Accept: ① in a 10-crate fixture, edit crate X → exactly X + reverse-deps selected (golden tests per ecosystem); ② root-file edit (Cargo.toml workspace) → full set; ③ unknown ecosystem → full set (fail-open to safety, never silent skip).
-
-**B4 · union landing queue** — `L · opus` — claims `crates/hugit-queue` — deps: contracts
-Charter: batch landable PRs, build union tree, run affected memoized checks on the union, land green in order via merge API, report minimal failing pair.
-Accept: ① fixtures A,B green alone / A+B red → batch lands neither A+B, lands the non-conflicting rest, `report` names {A,B} with the failing check; ② 5 green disjoint PRs → all land, **0 re-executed checks** (all AC hits from their PR runs); ③ mid-batch force-push → batch recomputes, no stale union ever merges; ④ crash/restart mid-batch → idempotent (no double-merge), proven by kill-test.
-
-**B5 · auto-bisect + diagnosis** — `M · sonnet` — claims `crates/hugit-diag` — deps: contracts, B2
-Charter: on any red, bisect over memoized checks to the culprit; emit `DiagnosisObject`.
-Accept: ① 8-PR fixture with 1 planted breaker → culprit named, ≤ log₂ executions (rest AC hits); ② diagnosis includes diff-vs-last-green + suspect targets; ③ end-to-end <2min on the fixture.
-
-**B6 · intent sidecar** — `S · sonnet` — claims `crates/hugit-app/sidecar` — deps: B1
-Charter: attach/validate `IntentSidecar` on PRs; render as PR comment + check summary.
-Accept: ① PR opened with sidecar (via CLI or PR-body block) → parsed, validated, rendered; ② malformed → actionable error comment, never silent drop; ③ corpus persisted to CAS keyed by intent_id (D8's input).
-
-**B7 · surface v0** — `S · sonnet` — claims `crates/hugit-app/ui` — deps: B1
-Charter: PR comments + one status page (`queue position, batch state, minutes/$ saved counter`). No new human CLI in phase B.
-Accept: ① status page renders live batch state; ② every PR gets exactly one continuously-edited comment (no spam); ③ the saved-minutes counter is computed from real AC hits (auditable), not vibes.
-
-**B8 · dogfood harness** — `M · sonnet` — claims `tests/dogfood` — deps: B1–B7
-Charter: install on `hugit`, `corelink-workspaces`, + 2 synthetic fleet repos (cargo & pnpm). **Never corelink-server** (non-interference).
-Accept: ① a real 5-PR agent wave on `hugit` lands through the queue end-to-end; ② cache hit-rate + wall-time vs baseline measured and published in the repo; ③ 48h soak: zero wrong-merge, zero lost-PR (audited from events).
-
-## 3. Work-packages — Phase C (Squad C, 7 agents)
-
-**C1 · runner inventory** — `S · opus` — claims `docs/inventory` — read-only on CoreLink ecosystem.
-Accept: written inventory of existing runner/campaign-#1 assets with reuse verdict per item; zero changes to corelink repos.
-
-**C2 · ephemeral runner v0** — `L · opus` — claims `crates/hugit-runner` — deps: contracts
-Charter: container-per-job on the Hetzner box; lease lifecycle; Firecracker upgrade path documented.
-Accept: ① lease→boot→execute→destroy, nothing persists after destroy (verified by forensic re-scan); ② concurrent leases isolated (no shared tmp/net namespaces); ③ lease expiry hard-kills; ④ throughput: ≥8 concurrent check jobs on 1 box.
-
-**C3 · cache-warm boot** — `M · sonnet` — claims `crates/hugit-runner/boot` — deps: C2
-Accept: ① warm boot (CAS-hot workspace) ≤10s to first check command vs cold ≥60s (measured fixture); ② toolchain layers content-addressed and shared across jobs.
-
-**C4 · regeneration drivers** — `M · sonnet` — claims `crates/hugit-checks/regen` — deps: contracts
-Charter: Cargo.lock + pnpm-lock declared derived; union builds regenerate instead of merge.
-Accept: ① two PRs each adding a dep (textual lockfile conflict) → union regenerates, builds green, **zero conflict markers**; ② regeneration is deterministic across two runs (byte-identical or normalized-equal); ③ non-lockfile conflicts untouched (no scope creep).
-
-**C5 · claim fences + secret broker** — `L · opus` — claims `crates/hugit-fence` — deps: C2 *(SECURITY-critical)*
-Charter: sparse workspace materialization by path-set; deny-by-default network; broker performs privileged ops, credentials never on the runner.
-Accept: ① job reads outside path_set → ENOENT (file genuinely absent, not permission-flak); ② `env`/proc/disk scan inside job finds zero secret material (red-team test); ③ broker ops are audited per-call with principal chain; ④ kill-test: broker down → jobs fail CLOSED.
-
-**C6 · flake-stats collector** — `S · sonnet` — claims `crates/hugit-diag/flake` — deps: B2
-Accept: ① every CheckResult feeds per-(def,target) stats; ② a planted 20%-flaky test is detected <30 runs; ③ quarantine list is a policy artifact (consumed later, never auto-acts in v0).
-
-**C7 · budgets/quotas** — `S · sonnet` — claims `crates/hugit-queue/budget` — deps: B4
-Accept: ① per-tenant budget exhausted → queued not dropped, surfaced on status page; ② fairness: no tenant starves another (interleave test).
-
-## 4. Work-packages — Phase D (Squad D, 9 agents)
-
-**D1 · event-sourced ref store** — `L · opus` — claims `crates/hugit-refstore` — deps: contracts
-Charter: DO-per-repo append-only hash-chained `EventRecord` log; refs derived; compaction/cold-tier to R2 from day 1; `undo` = compensating event.
-Accept: ① 10k-event log replays to identical ref state (determinism test); ② chain verification detects any tampered record; ③ compaction preserves replay-equivalence with hot log ≤ configured bound; ④ `undo` of a landing restores prior refs AND preserves full history; ⑤ 100 concurrent ref ops on one repo: serialized, zero loss, p99 <500ms.
-
-**D2 · wire protocol read path** — `L · opus` — claims `crates/hugit-proto/read` — deps: D1
-Charter: smart-HTTP protocol v2 clone/fetch with pack assembly from CoreLink CAS.
-Accept: ① `git clone` of the hugit repo from the alpha endpoint → byte-identical tree to the GitHub mirror (verified by hash); ② incremental fetch sends only delta packs; ③ clients tested: git 2.40+, jj, libgit2; ④ Workers CPU budget measured on a 500MB-repo fixture, documented with headroom or chunked fallback.
-
-**D3 · push path v0 (self-hosted flag)** — `L · opus` — claims `crates/hugit-proto/write` — deps: D1, D2
-Charter: receive-pack → CAS objects + event log. Raw pushes recorded as **opaque change-events** (never fabricated into intents).
-Accept: ① push→clone round-trip is byte-identical; ② concurrent pushes to one ref: one wins, the other gets a correct stale rejection, log totally ordered; ③ a raw push appears in the ledger as `external-change` with full attribution; ④ feature-flagged off for any repo not tagged self-hosted-alpha.
-
-**D4 · intents native + projection** — `M · opus` — claims `crates/hugit-refstore/intent` — deps: D1
-Accept: ① landing an intent emits generated commits embedding intent_id, deterministically reproducible from the event log; ② `git log` (machine altitude) and intent log (human altitude) provably consistent on a 50-intent fixture; ③ sidecar corpus from B6 importable as native intents.
-
-**D5 · ledger + watch (TUI)** — `M · sonnet` — claims `crates/hugit-ledger` — deps: D1, D4
-Accept: ① `hugit ledger` renders asked→done→proven per campaign from the event stream; ② `hugit watch` live-updates <2s after an event; ③ every entry deep-links (intent → diff → check → diagnosis ids resolvable via CLI).
-
-**D6 · policy engine v0** — `M · sonnet` — claims `crates/hugit-policy` — deps: contracts
-Charter: declarative gates, fail-closed, locally testable. Test case #1: port our own gate museum (DCO, changelog, secrets-scan).
-Accept: ① the 3 ported gates pass/fail identically local vs forge on golden fixtures; ② engine unreachable → landing blocks (fail-closed proven by kill-test); ③ policy change is itself an audited event.
-
-**D7 · adversarial verdict panels** — `M · opus` — claims `crates/hugit-cli/verdict` — deps: B6
-Charter: `verdict request --lens a,b,c` fans out independent reviewers (distinct prompts, models where available) against served ground truth (diff + affected graph + acceptance evidence). The change never defends itself.
-Accept: ① 3 lenses run isolated (no shared context contamination — verified by prompt audit); ② output = valid `VerdictObject[]` with evidence refs; ③ planted-bug fixture: ≥1 lens catches a seeded logic bug that the author-agent's own tests miss (the anti-circularity smoke test).
-
-**D8 · experiment harness** — `M · opus` — claims `crates/hugit-diag/experiment` — deps: B4, C4
-Charter: instrument real fleet waves to measure (a) claim-disjointness rate of intent pairs, (b) regen honesty (regenerate D′ on moved base; own-acceptance pass vs independent verdict disagree).
-Accept: ① every dogfood wave auto-contributes datapoints; ② dashboard: disjointness %, regen agree/disagree counts, n; ③ the gate report is generated, not hand-written (the data decides claims/regen promotion).
-
-## 5. Work-packages — Phase E (Squad E, 6 agents)
-
-**E1 · verified one-way mirror** — `L · opus` — claims `crates/hugit-mirror/out` — deps: D2
-Accept: ① every alpha-repo landing appears on GitHub <60s, content-hash-verified per push; ② divergence → alarm + auto-repair + incident event (the soak instrument); ③ 72h soak on the hugit repo: 100% verified syncs, count published.
-
-**E2 · GitHub import** — `M · sonnet` — claims `crates/hugit-mirror/import` — deps: D4
-Accept: ① import of a 1k-commit public repo: history byte-identical (re-clone proof); ② PRs/issues land as proposed-state intents with provenance; ③ idempotent re-import (no dupes).
-
-**E3 · status/badge compat** — `S · sonnet` — claims `crates/hugit-mirror/status` — deps: B1
-Accept: ① our checks appear as GitHub commit statuses (badge/bot/ecosystem-readable); ② shields.io renders a live badge off it.
-
-**E4 · Actions-YAML shim v0** — `M · sonnet` — claims `crates/hugit-runner/shim` — deps: C2
-Accept: ① a simple real-world workflow (checkout+setup+test matrix) runs unmodified on our runner with correct env/secrets-broker mapping; ② unsupported features fail with an explicit actionable report, never silent skips.
-
-**E5 · export guarantee** — `S · sonnet` — claims `crates/hugit-cli/export` — deps: D1
-Accept: ① one command dumps git-everything + all hugit objects as documented JSON; ② restore-from-export on a fresh system reproduces refs + intents + events (round-trip proof); ③ documented as the contractual exit promise.
+| WP | Size/route | Acceptance items | Scheduled |
+|---|---|---|---|
+| **X1** tenant isolation | L·opus *(red-team)* | ① tenant B requesting a key whose private bytes came from tenant A → miss/deny, never served · ② forged/collision memo-key attempts → deny + alert, no poisoning · ③ public-deterministic artifact IS shared, with proof no private bytes rode along | sprint 1 (before any external tenant) |
+| **X2** attestation e2e | M·opus | ① artifact attestation resolves full chain (tree+def+runner+model+principal) cryptographically · ② tampered/unsigned attestation rejected at promotion · ③ verification is a public, documented procedure | sprint 2 |
+| **X3** context privacy | M·opus | ① context/journals tenant-scoped (cross-tenant fetch denied) · ② redaction at capture AND export · ③ retention/deletion purges (verified absent) · ④ training/eval exclusion: documented control + audit trail | sprint 2 |
+| **X4** supply chain | M·opus | ① runner images content-pinned + integrity-verified at spawn · ② App dependencies pinned + verified in CI · ③ tampered/unpinned image → fail CLOSED before any tenant work | sprint 1 |
+| **X5** namespace laws | S·sonnet | ① no hugit CLI verb shadows a git verb (mechanized check against `git help -a`) · ② managed refs (`refs/hugit/…`) never collide with arbitrary user branches/tags (property test) | sprint 2 |
+| **X6** non-interference | M·sonnet | ① hugit at full load concurrently with CoreLink workloads → CoreLink latency/availability unaffected within stated tolerance (measured, both SEALs) · ② hugit infra is resource-isolated from CoreLink runners/sessions (separate boxes/quotas, asserted by config test) | both SEALs |
 
 ---
 
-## 6. The dependency DAG
+## 7. The dependency DAG (v1.1)
 
 ```
-Day 0: contracts ──┬─→ B2 B3 B4 B5 │ C2 C4 │ D1 D6
-                   └─→ scaffold, App registration, Hetzner box
+Day 0: contracts(+ShadowPolicy/AttentionRank/ExportSchema/AttestationChain/RegenGate)
+       ─→ B2 B3 B4 B5 | C2 C4 | D1 D6 | X4
 
-B1 ─→ B6 B7 E3          C2 ─→ C3 C5 E4         D1 ─→ D2 D3 D4 D5 E5
-B2 ─→ B5 C6             B4 ─→ C7 D8(+C4)       D2 ─→ E1
-B6 ─→ D7                B1..B7 ─→ B8           D4 ─→ E2 D5
+B1 ─→ B6 B7 B9 E3        C2 ─→ C3 C5 C8 C9 E4     D1 ─→ D2 D3 D4 D5 D14 E5
+B2 ─→ B5 C6 X1           B4 ─→ C7 D8              D2 ─→ E1 D2.⑤(kill-test)
+B6 ─→ D7 D10             C4 ─→ D8 D12             D4 ─→ E2 D5 D9
+B1..B7 ─→ B8             C5 ─→ X1 X4              D7 ─→ D12 D9
+B8 ─→ B9(report)                                  D10 ─→ D9(blast-radius input)
 
-Critical path: contracts → B2 → B4 → B8 (sprint 1) ║ contracts → D1 → D2 → E1 (sprint 2)
-Sprint barrier D5→D6 is a CHECKPOINT, not a dependency: D1/D6 may start
-against frozen contracts as soon as squad capacity frees.
+Critical path S1: contracts → B2 → B4 → B8 (+X1 before any external tenant)
+Critical path S2: contracts → D1 → D2 → E1 (+D2.⑤ degradation kill-test)
+Sprint barrier = checkpoint, not dependency (D1/D6/X-WPs may start early).
 ```
 
-**Conflict map:** every WP claims a disjoint crate/path (tables above) — zero
-overlapping write-claims by construction; shared types live only in
-`hugit-contracts` (frozen, orchestrator-owned). The two integration WPs
-(B8, and D10's final SEAL) are the only cross-claim writers, and they run at
-barriers.
+**Conflict map:** every WP claims a disjoint crate/path (tables above); shared
+types only in `hugit-contracts` (orchestrator-owned, frozen). Cross-claim
+writers remain B8 + final SEAL, at barriers. New squad X writes only its own
+test crates + red-team fixtures (`crates/hugit-invariants`).
 
-## 7. Routing & verification law
+## 8. Routing & verification law (v1.1)
 
-- `opus` WPs (B2 B4 C2 C5 D1 D2 D3 D4 D7 D8 E1, C1): ambiguity or
-  security-critical — design judgment required.
-- `sonnet` WPs (the rest): contracts make them deterministic builds.
-- **Every WP:** failing acceptance suite written and committed BEFORE
-  implementation; SEAL with evidence; cold verification by a non-author
-  agent against the suite + charter; security review at both SEALs (D5, D10)
-  with C5/D3 receiving dedicated red-team passes.
-- Merge order follows the DAG; the orchestrator is the only merger.
-```
+- `opus`: B2 B4 C2 C5 C8 D1–D4 D7 D8 D9 D12 D14 E1 X1–X4 (+C1) — design,
+  security, or adversarial judgment.
+- `sonnet`: the rest — contracts make them deterministic builds.
+- Every WP: failing acceptance suite committed BEFORE implementation; SEAL
+  with evidence; cold verification by non-author; security review at both
+  SEALs; dedicated red-team passes on C5, D3, X1, X4.
+- **Critic loop status:** round 1 = 5/5 critics found gaps (42 missing,
+  8 vague) → integrated above. Round 2 pending; suite is accepted only after
+  two consecutive dry rounds. WP token re-slicing (≤100k hard / 80k ideal per
+  task) happens after the suite dries.
