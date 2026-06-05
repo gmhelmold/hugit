@@ -1,4 +1,13 @@
-# hugit — formal decomposition (v1.6 — post critic round 6)
+# hugit — formal decomposition (v1.7 — post critic round 7)
+
+> v1.7 (2026-06-05): **E dry #1** (clean L-by-L mapping, deferred items
+> correctly adjudicated). X survivors integrated: D13④ tournament fan-out
+> budget-bounded (the one unbudgeted cost amplifier, now capped + zero
+> overage); D9⑤ attention-queue up-zoom under degradation (policy-mandatory
+> items never silently dark — honest "ranking degraded" state); X2④
+> cross-tenant-shared-hit attestation honesty (anonymized platform
+> attestation; no producer-tenant leak; no mis-attribution).
+> Convergence: 42→23→16→4→4→3→2. R8 dispatched: E confirmation + X.
 
 > v1.6 (2026-06-05): **B CLOSED** (2nd consecutive dry, R5+R6 — joins C and D,
 > closed at R4+R5). R6 survivors integrated: E1⑪ substrate-loss DR (the
@@ -98,11 +107,11 @@ model, principal, sig}` · `RegenGate {optin_scope, repass, indep_verdict}`.
 | **D6** policy engine | M·sonnet | ① 3 ported gates local≡forge · ② engine down→landing blocks (kill-test) · ③ policy change = audited event |
 | **D7** verdict panels + review Q&A | M·opus | ① lenses isolated (prompt audit) · ② valid VerdictObject[] + evidence refs · ③ **🔧 planted bug of a NON-author-visible class (semantic/logic, demonstrably uncovered by any author test) caught by ≥1 lens** · **④(R2) human review Q&A: answers = citations to real evidence objects; no grounding → explicit refusal, never fabricated** · **⑤(R3) DIVERSITY enforced: homogeneous (same prompt+model) panel rejected/flagged; real panel dispatches distinct prompts and ≥2 distinct models** · **⑥(R3) no-self-defense negative: planted persuasive false self-justification in author-controlled fields is unreachable by reviewers; verdict identical with vs without it (no persuasion channel exists)** |
 | **D8** experiment harness | M·opus | ① every wave auto-contributes datapoints · ② dashboard: disjointness %, regen agree/disagree, n · ③ gate report generated, never hand-written · **④(R2) anti-gaming: promotion corpus pre-registered and SEALED before evaluation; sample selection auditable** · **⑤(R2) post-hoc removal detected → invalidates the verdict** · **⑥(R6) THE GATE BINDS: claims-as-oracle stays structurally pinned advisory/OFF and regen promotion stays structurally blocked until the report shows PASS; a FAIL/insufficient-n report CANNOT flip either feature; the promotion event itself is audited (the gate is a control, not a dashboard)** · **⑦(R6) degradation honesty: waves executed during a degraded window are excluded from the corpus or explicitly marked — never silently contribute biased data** |
-| **D9 (+)** attention queue | M·opus | ① fixture with known policy/blast/confidence → documented composite ordering reproduced · ② perturbing one input moves entry to expected position · ③ policy-mandatory items can never be ranked out of the human's view · **④(R2) fast-approve (90s) affordance is BLOCKED for high-risk/policy-mandatory items — forced through full review; permitted for policy-low-risk** |
+| **D9 (+)** attention queue | M·opus | ① fixture with known policy/blast/confidence → documented composite ordering reproduced · ② perturbing one input moves entry to expected position · ③ policy-mandatory items can never be ranked out of the human's view · **④(R2) fast-approve (90s) affordance is BLOCKED for high-risk/policy-mandatory items — forced through full review; permitted for policy-low-risk** · **⑤(R7) up-zoom under degradation: with ranking inputs (blast/confidence) unavailable, policy-mandatory items STILL surface with an honest "ranking degraded" state — the queue never goes silently dark on items that must reach a human** |
 | **D10 (+)** why+impact | M·sonnet | ① `hugit why <line\|symbol>` → originating intent + charter/author/model/cost, matching event log · ② `hugit impact <path\|change>` → golden affected-set on known build graph · ③ impact feeds verdict-panel ground truth (cross-check) · **④(R6) `why` on regenerated/derived bytes resolves honestly to the regen/derivation event — never fabricates or mis-attributes a human author** |
 | **D11 (+)** journals+resume | M·sonnet | ① journal persisted as tenant-private object bound to ws/intent · ② post-crash `ctx resume` reconstructs session within supported horizon · ③ beyond-horizon resume refused/degraded as documented |
 | **D12 (+)** regen gate | M·opus | ① regen only on opt-in scope; non-opted repo never regens · ② regen lands only if acceptance re-passes AND fresh independent adversarial verdict approves · ③ missing/failing either → blocked + reported · ④ every regen auditable as its own revision · **⑤(R5) anti-smuggling: a file not provably derived (regeneration command must deterministically produce it from sources) CANNOT be classified derived — bypassing the regen gate via a false "derived" declaration is blocked + audited** |
-| **D13 (+)** tournament | S·sonnet | ① `-n N` produces N independent candidates · ② judge panel selects per documented criteria (fixture w/ known-best) · ③ losers remain addressable as evidence |
+| **D13 (+)** tournament | S·sonnet | ① `-n N` produces N independent candidates · ② judge panel selects per documented criteria (fixture w/ known-best) · ③ losers remain addressable as evidence · **④(R7) budget-bounded fan-out: N is policy-capped; an N-way tournament respects per-tenant caps + fairness (C7) and generates ZERO overage under a flat plan (the one cost amplifier was unbudgeted — now it isn't)** |
 | **D14 (+)** forge authz | M·opus | ① mutating endpoints (push/land/undo/policy) reject unauthorized principals · ② permission model documented + golden-tested per principal class · ③ authz denials audited |
 
 ## 5. Phase E — Squad E (7 WPs)
@@ -121,7 +130,7 @@ model, principal, sig}` · `RegenGate {optin_scope, repass, indep_verdict}`.
 | WP | Size/route | Acceptance items | Scheduled |
 |---|---|---|---|
 | **X1** tenant isolation | L·opus *(red-team)* | ① tenant B requesting a key whose private bytes came from tenant A → miss/deny, never served · ② forged/collision memo-key attempts → deny + alert, no poisoning · ③ public-deterministic artifact IS shared, with proof no private bytes rode along · **④(R6) side-channels: private artifacts produce NO cross-tenant hits (no existence/timing signal possible); the existence signal inherent to PUBLIC-deterministic sharing is documented as by-design disclosure** | sprint 1 (before any external tenant) |
-| **X2** attestation e2e | M·opus | ① artifact attestation resolves full chain (tree+def+runner+model+principal) cryptographically · ② tampered/unsigned attestation rejected at promotion · ③ verification is a public, documented procedure | sprint 2 |
+| **X2** attestation e2e | M·opus | ① artifact attestation resolves full chain (tree+def+runner+model+principal) cryptographically · ② tampered/unsigned attestation rejected at promotion · ③ verification is a public, documented procedure · **④(R7) cross-tenant-shared hit honesty: tenant B's `why`/attestation on a shared public-deterministic artifact resolves to an anonymized PLATFORM attestation — never leaks tenant A's principal/runner identity, never mis-attributes B as producer** | sprint 2 |
 | **X3** context privacy | M·opus | ① context/journals tenant-scoped (cross-tenant fetch denied) · ② redaction at capture AND export · ③ retention/deletion purges (verified absent) · ④ training/eval exclusion: documented control + audit trail | sprint 2 |
 | **X4** supply chain | M·opus | ① runner images content-pinned + integrity-verified at spawn · ② App dependencies pinned + verified in CI · ③ tampered/unpinned image → fail CLOSED before any tenant work | sprint 1 |
 | **X5** namespace laws | S·sonnet | ① no hugit CLI verb shadows a git verb (mechanized check against `git help -a`) · ② managed refs (`refs/hugit/…`) never collide with arbitrary user branches/tags (property test) | sprint 2 |
@@ -172,11 +181,10 @@ test crates + red-team fixtures (`crates/hugit-invariants`).
   profile/neverTouch + the git-hygiene guard — a standing law, not a test.
 - **Critic loop status (per-section closure = 2 consecutive dry rounds):**
   R1=42+8 · R2=23+8 · R3=16+10 · R4=4+2 (C,D dry #1) · R5=4+2 (C,D **CLOSED**;
-  B dry #1) · R6=3+4 (B **CLOSED**; E:1 X:2). **Closed: B, C, D.** Open: E
-  (substrate-loss DR integrated), X (gate-binding + corpus honesty
-  integrated). R7 dispatched on E and X only; each closes on its 2nd
-  consecutive dry. Then: WP token re-slicing (≤100k hard / 80k ideal, DoD
-  per WP).
+  B dry #1) · R6=3+4 (B **CLOSED**; E:1 X:2) · R7=2+1 (**E dry #1**; X:2).
+  **Closed: B, C, D.** Open: E (needs R8 dry to close), X (tournament budget
+  + attention-queue degradation + shared-hit attestation integrated; needs
+  R8+R9 dry). Then: WP token re-slicing (≤100k hard / 80k ideal, DoD per WP).
 - **Adjudications on record (so future critics don't re-litigate):**
   "no-fake-intents at runtime" covered by D3⑤ (steady-state raw push) +
   D4④ (mixed-altitude fixture) + E2⑤ (import boundary); bidirectional
