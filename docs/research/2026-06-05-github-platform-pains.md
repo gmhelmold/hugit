@@ -1,0 +1,60 @@
+# Research — GitHub platform pains
+
+> Lane 2 of the 4-agent evidence sweep behind the founding brief.
+> Researched 2026-06-05 (Opus web-research agent). Citations inline.
+
+## Top platform pains (ranked)
+
+1. **Reliability collapse / outage track record (2025-2026).** Who: everyone, esp. serious OSS maintainers & paying orgs. Evidence: [IncidentHub](https://blog.incidenthub.cloud/github-reliability-outage-history-2025-2026) — 257 incidents May'25-Apr'26, 48 major; Actions alone 57 outages; [LeadDev](https://leaddev.com/software-quality/whats-gone-wrong-at-github) cites 84.88% measured 90-day uptime; CTO admits "architectural coupling…cascade across critical services" ([InfoQ](https://www.infoq.com/news/2026/04/github-outages-scaling/)). **Severity: critical, frequency: ~1 major/week.**
+2. **Actions pricing — self-hosted runner $0.002/min charge.** Who: anyone running own CI hardware. Evidence: [Changelog](https://github.blog/changelog/2025-12-16-coming-soon-simpler-pricing-and-a-better-experience-for-github-actions/); backlash so strong GitHub retreated within a week ([samexpert](https://samexpert.com/github-actions-pricing-backlash-2026/)); top comment: "If it takes MY machine 30 minutes…you're going to charge me…when it places no load on YOUR services?" ([disc #182089](https://github.com/orgs/community/discussions/182089)). **Severity: high, viral.**
+3. **Copilot usage-based billing shock.** Who: 4.7M paid Copilot users, esp. agentic power users. Evidence: bills "10x to 50x" higher ([TechTimes](https://www.techtimes.com/articles/317536/20260601/github-copilot-pricing-change-drives-backlash-agentic-bills-jump-10x-50x-power-users.htm)); up to 100x hikes ([Tom's Hardware](https://www.tomshardware.com/tech-industry/artificial-intelligence/github-copilot-customers-suffer-from-sticker-shock-as-microsoft-switches-to-usage-based-pricing-customers-report-up-to-100-fold-price-hikes)); 8% of monthly credits burned in 2 hrs. **Severity: high.**
+4. **AI-agent rate-limit chaos.** Who: Copilot Pro/Pro+/Max users + agent builders. Evidence: undercounted-token bug snapped limits tight; users told to wait "5h 52m" ([Register](https://www.theregister.com/2026/04/15/github_copilot_rate_limiting_bug/)); new signups paused Apr 20 2026.
+5. **Large-PR review UI is near-unusable.** Who: reviewers of big diffs. Evidence: 307-file PR, "mark file as viewed taking ~5s, loading diffs 8-10s" ([disc #10830](https://github.com/orgs/community/discussions/10830), [#33663](https://github.com/orgs/community/discussions/33663)).
+6. **No cross-workflow memoization + cache cap.** Everything re-runs; 10GB cap starved monorepos until Nov'25 pay-as-you-go ([Changelog](https://github.blog/changelog/2025-11-20-github-actions-cache-size-can-now-exceed-10-gb-per-repository/), [disc #66699](https://github.com/orgs/community/discussions/66699)).
+
+## Actions/CI pains (detail)
+
+- **Per-minute self-hosted fee** = perverse incentive: slower hardware → bigger GitHub bill ("If I have a crappy machine I need to pay GitHub more???" [disc #182089](https://github.com/orgs/community/discussions/182089)). GitHub also charges to integrate faster third-parties (Depot/Blacksmith) — resented ([webpronews](https://www.webpronews.com/developers-ditch-github-actions-over-reliability-and-pricing-issues/)).
+- **Queue times / phantom queuing:** jobs stuck "Queued for hours" ([disc #165400](https://github.com/orgs/community/discussions/165400)); self-hosted runs queue 7-8 min while runner sits online+idle (Feb'26, [dev.to](https://dev.to/devactivity/unpacking-github-actions-delays-when-self-hosted-runners-go-idle-but-workflows-stay-queued-547n)); runners take ~1 min to start.
+- **macOS capacity:** Oct 1 2025, macOS runners hit 46% error rate for 10+ hrs ([IncidentHub](https://blog.incidenthub.cloud/github-reliability-outage-history-2025-2026)).
+- **Cache:** 10GB cap gave dependency-heavy/JS/Ruby repos effectively *no* caching; cross-branch restore restricted to current+default branch only ([docs](https://docs.github.com/en/actions/reference/limits)).
+- **YAML hell + no local testing:** "mediocre semi-turing-complete YAML bullshit"; "no sensible way to test or even lint CI config locally" → "push-and-pray"; `act` only covers a subset ([feldera](https://www.feldera.com/blog/the-pain-that-is-github-actions), [HN](https://news.ycombinator.com/item?id=43419701), [lobsters](https://lobste.rs/s/hkqnro/github_actions_is_slowly_killing_your)).
+
+## PR/merge-flow pains — stacked-PR ecosystem as demand signal
+
+- **GitHub has no native stack primitive** — the existence of ghstack (Meta), spr (eBay), and Graphite is itself the indictment. Data: <200-line PRs approved 3x faster, 40% fewer defects; 1000+ lines → 70% drop in defect detection ([awesomecodereviews](https://www.awesomecodereviews.com/best-practices/stacked-prs/), [pullnotifier](https://pullnotifier.com/tools/stacked-prs)). GitHub only shipped a `gh-stack` CLI extension in 2026, late and reactive ([InfoQ](https://www.infoq.com/news/2026/04/github-stacked-prs/)); unresolved: squash-merge incompatibility, cascading rebase conflicts, 12-PR-stack notification floods.
+- **Merge queue rigidity:** can't differentiate checks for queue-entry vs merge; path-dependent checks can't be required (they'd hang) yet if not required the queue won't wait ([disc #39933](https://github.com/orgs/community/discussions/39933), [roadmap #824](https://github.com/github/roadmap/issues/824)); PRs silently dropped "checks not reported in time" ([disc #168145](https://github.com/orgs/community/discussions/168145), [#155705](https://github.com/orgs/community/discussions/155705)); poor queue visibility/debugging.
+- **Dependabot/Renovate floods:** 200 PRs/week flooded a monorepo, "team revolted"; Dependabot noisier (separate PR per dep, every CVE = equal priority); rebase storms when many concurrent branches self-rebase ([safeguard.sh](https://safeguard.sh/resources/blog/dependabot-vs-renovate-operational-experience), [renovate docs](https://docs.renovatebot.com/updating-rebasing/)).
+
+## API/automation limits for bots & agents
+
+- **Secondary rate limits hit automation hard:** 100 concurrent requests shared across REST+GraphQL; REST 900 pts/min, GraphQL 2000 pts/min; "secondary limits are dynamic" — bots/pollers trip them, forcing token rotation, queues, exponential backoff ([docs](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api), [disc #189255](https://github.com/orgs/community/discussions/189255)). Primitives assume human-paced polling, not agent fan-out.
+- **Webhook reliability:** GitHub does NOT auto-redeliver failures; 10s timeout = dropped delivery; surges get throttled; duplicates require manual idempotency via `X-GitHub-Delivery`; docs explicitly recommend reconciliation polling to "catch missed webhooks" ([docs](https://docs.github.com/en/webhooks/using-webhooks/handling-failed-webhook-deliveries)).
+- **Fine-grained PAT friction:** can't contribute to public repos as non-member, can't span multiple orgs at once, can't call Checks API, no Packages/user-Projects access; token-generation UI silently fails ([disc #36441](https://github.com/orgs/community/discussions/36441), [#159318](https://github.com/orgs/community/discussions/159318)). Cannot do everything classic PATs can.
+- **Diff API caps:** 406 "diff too large" on big PRs ([reviewdog #1696](https://github.com/reviewdog/reviewdog/issues/1696)).
+
+## Exodus signals (who leaves, where to, why)
+
+- **Mitchell Hashimoto / Ghostty** (52k+ stars) left: GitHub "is no longer a place for serious work," near-daily outages blocking work ([LeadDev](https://leaddev.com/software-quality/whats-gone-wrong-at-github)).
+- **Zig (ziglang)** → Codeberg/Forgejo, citing "aggressive vendor lock-in," Actions bugs, and "engineering culture" ([ziglang.org](https://ziglang.org/news/migrating-from-github-to-codeberg/)).
+- **Forgejo/Codeberg momentum:** drivers = data sovereignty (EU/FISA-702 distrust), independence ("Free/Libre forever"), anti-lock-in; Fedora ran a 2025 Git Forge Initiative ([Fedora wiki](https://fedoraproject.org/wiki/Initiatives/Git_Forge_Initiative_2025), [codeberg.org/forgejo](https://codeberg.org/forgejo)). **Friction that keeps people: CI parity — Forgejo Actions differ, self-host runners required.**
+- **Leadership void:** Dohmke out Aug'25, GitHub folded into Microsoft CoreAI — "no one at the top whose job is solely to be GitHub's advocate" ([LeadDev](https://leaddev.com/software-quality/whats-gone-wrong-at-github)). Migration spike to GitLab/Bitbucket/self-hosted ([IncidentHub](https://blog.incidenthub.cloud/github-reliability-outage-history-2025-2026)).
+- **Pricing as exit fuel:** Nadella — "any per-user business…becomes per-user AND usage" — signals more consumption pricing ([GitHub blog](https://github.blog/news-insights/company-news/github-copilot-is-moving-to-usage-based-billing/)).
+
+## GitHub's own AI-agent story and its gaps
+
+- **Offers:** Copilot coding agent (async, web/PR-based), agent mode in IDE, `gh-aw` agentic workflows with rate-limiting controls ([github.blog](https://github.blog/news-insights/product-news/github-copilot-meet-the-new-coding-agent/), [gh-aw docs](https://github.github.com/gh-aw/reference/rate-limiting-controls/)).
+- **Gaps:** web agent "sluggish, 90+ s spin-up, cycle repeats 10-20x/session"; acceptance 35-40% vs Cursor 42-45% ([nxcode](https://www.nxcode.io/resources/news/github-copilot-getting-worse-2026-developers-switching)). **Agents overwhelm the platform's own primitives:** AI agents drove the capacity crisis (CTO: "agentic workflows accelerated sharply since Dec'25"); "GitHub is effectively DDoSing themselves with slop"; AI PRs introduce vulns at 3x human rate; Copilot injected promo "tips" into 1.5M+ PRs ([danilchenko.dev](https://www.danilchenko.dev/posts/2026-04-11-github-ai-agents-pull-requests/), [LeadDev](https://leaddev.com/software-quality/whats-gone-wrong-at-github)). PRs/checks/reviews are human-paced; commentators call for "mandatory bot identification, better attribution, rate limiting" — i.e., the primitives weren't designed for machine actors.
+
+## Implications for an LLM-native forge
+
+- **Content-addressed cache as the core CI primitive** directly answers the #1 functional gap: no cross-workflow memoization + Actions re-runs everything. Cache-as-moat is the wedge.
+- **Don't charge for the customer's own compute** — the self-hosted $0.002/min fee is a gift; price on cache/storage value, make BYO-hardware free. Explicit anti-pattern to avoid.
+- **Native stacked-PR / stacked-change model** (first-class, not bolted on) — the ghstack/spr/Graphite ecosystem proves unmet demand; solve squash-merge + cascading rebase natively.
+- **Agent-first API surface:** high/elastic concurrency, machine-paced rate budgets, native bot identity & attribution, push-based events with guaranteed delivery (not 10s-timeout fire-and-forget) — GitHub's polling/webhook model is agent-hostile.
+- **Reliability as a marketed feature** — 84.88% uptime and weekly outages have shattered trust; durability/multi-region is a differentiator, not table stakes.
+- **Large-diff & high-volume review UX built for machine-scale PRs** (incremental/virtualized diffs, no per-file lag, large-diff API without 406 caps) — agents will generate big and frequent changes.
+- **Local-first, testable CI config** (deterministic local replay, lint, no "push-and-pray") — the YAML-hell + no-local-testing pain is universal.
+- **Sane dependency-bot model:** grouped/batched updates and rebase-storm-proof queueing by default — flood fatigue is a known killer.
+- **Simple, predictable pricing with no usage-billing whiplash** — Copilot's 10-100x shock and per-seat resentment are open wounds; flat/transparent wins trust (matches CoreLink's $30/mo SMB self-serve thesis).
+- **Sovereignty/openness positioning** (own-your-data, no aggressive lock-in, exportable) captures the Forgejo/Codeberg migrants whose main blocker is CI parity — pair the forge with turnkey cached CI to remove that blocker.
