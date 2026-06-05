@@ -1,15 +1,16 @@
-# hugit — formal decomposition (v1.3 — post critic round 3)
+# hugit — formal decomposition (v1.4 — post critic round 4)
 
-> v1.3 (2026-06-05): integrates **round 3** (5 fresh cold critics — 16
-> missing, 10 sharpened). R3 headliners: def-key sensitivity (3rd memo-key
-> axis), binding negative scope asserted (claims/regen ABSENT in B), panel
-> DIVERSITY enforced + the no-self-defense negative, never-text-merged
-> proven by METHOD not outcome, flake false-positive guard, export
-> completeness over ALL first-class objects, export under suspended account,
-> mirror cold-seed + GitHub-side revocation DR, and X10 — the focus gate
-> itself (adjacent-product non-interference), which nothing had verified.
-> Convergence: R1=42 → R2=23 → R3=16. Loop continues until two consecutive
-> dry rounds; then re-slice into ≤100k-token (80k ideal) WP contracts.
+> v1.4 (2026-06-05): integrates **round 4** — the convergence round:
+> **C and D came back DRY ("covers")**; B:1, E:1, X:2. The four survivors
+> are composition-grade: the ≥3 willingness-to-pay gate enforced as
+> pass/fail (B9⑤), live-mutation export point-in-time consistency (E5⑨),
+> degradation×invariants composition (X11: broker fails closed DURING
+> degradation, provenance never fabricated, CoreLink unaffected while
+> degraded), and erasure×provenance×mirror reconciliation (X12: tamper-
+> evident tombstones; mirror-side obligation discharged or disclosed in the
+> exit proof). Convergence: R1=42 → R2=23 → R3=16 → R4=4. Round 5
+> dispatched; loop closes after two consecutive dry rounds; then re-slice
+> into ≤100k-token (80k ideal) WP contracts with DoD.
 >
 > Sizing: S ≤ ½ agent-day · M ≤ 1 · L ≤ 2. Routing: `opus` = design/security,
 > `sonnet` = contract-determined build. New/changed since v1 marked **(+)** /
@@ -53,7 +54,7 @@ model, principal, sig}` · `RegenGate {optin_scope, repass, indep_verdict}`.
 | **B6** intent sidecar | S·sonnet | ① parsed/validated/rendered · ② malformed→actionable comment · ③ corpus→CAS by intent_id · **④(R2) negative: sidecar is non-authoritative — never gates or blocks landing** |
 | **B7** surface v0 | S·sonnet | ① live status page · ② exactly one edited comment/PR · ③ **🔧 every saved-minutes number links to its CheckResult set (auditable)** · **④(R3) the "$ saved" figure derived from minutes via a versioned, auditable cost model (rates stated), reconcilable against the minutes count** |
 | **B8** dogfood | M·sonnet | ① real 5-PR wave e2e · ② **🔧 vs defined baseline (same wave, memoization off), versioned report with formulas** · ③ 48h soak: 0 wrong-merge/lost-PR (event-audited) |
-| **B9 (+)** exit telemetry | S·sonnet | ① per-install activity → week-3 retention computable vs the ≥40% threshold (privacy-documented) · ② **🔧 feedback capture distinguishes UNPROMPTED ("I'd pay") statements from prompted responses — only unprompted count toward the ≥3 gate** · ③ exit-metric report generated from data, auditable · **④(R3) cohort/window guards: report passes ONLY with n=10 external teams, ≥3 weeks real use, evaluation inside the 90-day window — otherwise emits "insufficient/out-of-window", never a pass** |
+| **B9 (+)** exit telemetry | S·sonnet | ① per-install activity → week-3 retention computable vs the ≥40% threshold (privacy-documented) · ② **🔧 feedback capture distinguishes UNPROMPTED ("I'd pay") statements from prompted responses — only unprompted count toward the ≥3 gate** · ③ exit-metric report generated from data, auditable · **④ 🔧 cohort/window guards: n=10 external teams, ≥3 weeks real use, evaluation window ANCHORED to the first-10-paying-customers event and inside 90 days — otherwise "insufficient/out-of-window", never a pass** · **⑤(R4) the ≥3 gate is ENFORCED as pass/fail: 2 correctly-counted unprompted signals → FAIL even with ≥40% retention; exactly 3 → PASS** |
 | **B10 (R3)** negative scope | S·sonnet | ① no claim/lease acquired at dispatch — conflict discovery happens ONLY at landing/union (assert mechanism absent) · ② rebase in phase B is textual-fallback only — regenerative path absent/disabled (assert) |
 
 ## 3. Phase C — Squad C (10 WPs)
@@ -76,7 +77,7 @@ model, principal, sig}` · `RegenGate {optin_scope, repass, indep_verdict}`.
 | WP | Size/route | Acceptance items |
 |---|---|---|
 | **D1** event refs | L·opus | ① 10k-event replay identical · ② tamper detected · ③ compaction replay-equivalent, hot log bounded · ④ undo restores + preserves history · ⑤ 100 concurrent ops: serialized, 0 loss, p99<500ms · **⑥(+) recovery: hot-DO loss → full ref state rebuilt from cold tier (and/or mirror) replay-identical** |
-| **D2** protocol read | L·opus | ① clone byte-identical to mirror · ② delta-only fetch · ③ clients: git 2.40+/jj/libgit2 · ④ **🔧 500MB fixture: per-request CPU-time p95 ≤70% of the platform per-request CPU limit; beyond → chunked fallback path exercised+passing** · **⑤(+) degradation kill-test: smart layers disabled → vanilla git clone/fetch still serves valid repo** · **⑥ 🔧 scale ceilings defined+tested per dimension (repo size, ref count, concurrent clients, pack size): at each limit → documented bounded behavior, never silent failure** · **⑦(R2) jj FIRST-CLASS: stacked-changes series round-trips via jj with change-ids stable across forge ops; stack reconstructs identically** |
+| **D2** protocol read | L·opus | ① clone byte-identical to mirror · ② delta-only fetch · ③ clients: git 2.40+/jj/libgit2 · ④ **🔧 500MB fixture: per-request CPU-time p95 ≤70% of the platform per-request CPU limit; beyond → chunked fallback path exercised+passing** · **⑤ 🔧 degradation kill-test: smart layers disabled (both steady-state AND injected mid-operation) → vanilla git clone/fetch still serves valid repo** · **⑥ 🔧 scale ceilings defined+tested per dimension (repo size, ref count, concurrent clients, pack size): at each limit → documented bounded behavior, never silent failure** · **⑦(R2) jj FIRST-CLASS: stacked-changes series round-trips via jj with change-ids stable across forge ops; stack reconstructs identically** |
 | **D3** push v0 (flagged) | L·opus | ① push→clone round-trip identical · ② concurrent pushes: total order, correct stale rejection · ③ raw push = external-change w/ attribution · ④ flag off unless self-hosted-alpha · **⑤(+) negative: NO synthetic intent fabricated for a raw push (intent log clean)** |
 | **D4** intents+projection | M·opus | ① commits embed intent_id, reproducible from log · ② two altitudes consistent (50-intent fixture) · ③ sidecar corpus importable · **④(+) mixed fixture (intents + raw pushes interleaved on one ref): altitudes stay provably consistent, externals as external-change** |
 | **D5** ledger+watch+fleet | M·sonnet | ① asked→done→proven per campaign · ② **🔧 watch: EventRecord-to-display p95 <2s (measured per event class)** · ③ **🔧 deep-links resolve to golden expected targets (not just non-error)** · **④(+) planted secret renders REDACTED in ledger/verdict views** · **⑤(R2) two-zoom toggle: intent view ⇄ raw-commit view mutually consistent over the same fixture (one store)** · **⑥(R2) `hugit fleet` emits documented machine-readable schema reflecting true ws/agent state vs fixture** |
@@ -98,9 +99,9 @@ model, principal, sig}` · `RegenGate {optin_scope, repass, indep_verdict}`.
 | **E2** import | M·sonnet→**L** | ① 1k-commit public import byte-identical · ② PRs/issues→proposed intents w/ provenance · ③ idempotent re-import · **④(+) private repo via installation auth; LFS objects materialized (not pointers); >1-timeout repo resumes and completes byte-identical** · **⑤(R2) import boundary: commit history materializes as opaque change-events — NO intent synthesized from a bare commit; PR/issue intents marked proposed/non-authoritative** · **⑥(R3) PR/issue fidelity contract: stated set (body, comment/review threads, state, labels, cross-refs) preserved with per-element provenance; non-imported elements explicitly enumerated; verified on a fixture containing each element** · **⑦ 🔧 idempotency defined: unchanged source → no-op; changed source → documented incremental re-sync (never dupes)** |
 | **E3** status compat | S·sonnet | ① checks appear as GitHub statuses · ② **🔧 badge reflects true state within a stated staleness bound; status-API down → last-known + observable staleness, never silent wrong** · **③(+) status-API 429/5xx: retry w/ backoff → eventually true state; no stuck-pending; failures observable** |
 | **E4** Actions shim | M·sonnet | ① **🔧 the SUPPORTED subset is a published contract (enumerated features: steps/env/secrets/matrix…); a workflow within it runs unmodified w/ env/broker mapping** · ② **🔧 outside the contract → explicit actionable report — falsifiable against the published boundary, no silent skip** · **③(+) missing/denied secret → fail CLOSED w/ named secret; material never in logs/env (red-team)** |
-| **E5** export | S·sonnet→**M** | ① one-command dump git + documented JSON · ② restore round-trip reproduces refs+intents+events · **③(🔧 was doc-presence) export validates against versioned ExportSchema (machine check)** · **④(+) export applies context/journal redaction policy (no secret material emitted); multi-GB export streams without OOM** · **⑤(R2) THE EXIT PROOF: the exported git artifact (and the mirror) is fully usable with ZERO hugit/forge dependency — clone/log/branch/push-elsewhere all work with no hugit tooling present** · **⑥(R3) completeness: export+restore reproduces ALL first-class object classes (refs, intents, events, ledger, verdicts, journals, policy, provenance links) object-for-object; any out-of-scope class explicitly enumerated in the ExportSchema** · **⑦(R3) redaction red-team: seeded secrets appear NOWHERE in the exported git/JSON; AND the redacted artifact still passes the exit proof, removals manifested** · **⑧(R3) exit under exit conditions: export succeeds, complete and valid, on a suspended / past-due / offboarding account (read-only terminating path)** |
+| **E5** export | S·sonnet→**M** | ① one-command dump git + documented JSON · ② restore round-trip reproduces refs+intents+events · **③(🔧 was doc-presence) export validates against versioned ExportSchema (machine check)** · **④(+) export applies context/journal redaction policy (no secret material emitted); multi-GB export streams without OOM** · **⑤(R2) THE EXIT PROOF: the exported git artifact (and the mirror) is fully usable with ZERO hugit/forge dependency — clone/log/branch/push-elsewhere all work with no hugit tooling present** · **⑥(R3) completeness: export+restore reproduces ALL first-class object classes (refs, intents, events, ledger, verdicts, journals, policy, provenance links) object-for-object; any out-of-scope class explicitly enumerated in the ExportSchema** · **⑦(R3) redaction red-team: seeded secrets appear NOWHERE in the exported git/JSON; AND the redacted artifact still passes the exit proof, removals manifested** · **⑧(R3) exit under exit conditions: export succeeds, complete and valid, on a suspended / past-due / offboarding account (read-only terminating path)** · **⑨(R4) "any moment" consistency: export on a LIVE account under concurrent mutation (landings + mirror sync + event append) yields ONE point-in-time-consistent cut — no dangling provenance link, no event referencing an absent object; restore is self-consistent** |
 
-## 6. Squad X — platform invariants (10 WPs, cross-cutting)
+## 6. Squad X — platform invariants (12 WPs, cross-cutting)
 
 | WP | Size/route | Acceptance items | Scheduled |
 |---|---|---|---|
@@ -114,6 +115,8 @@ model, principal, sig}` · `RegenGate {optin_scope, repass, indep_verdict}`.
 | **X8 (R2)** self-release attestation | M·opus | ① every hugit App/CLI/runner-image release signed + published to a verifiable transparency log · ② the running App verifies its own provenance at boot · ③ unsigned/tampered self-build fails CLOSED | sprint 2 |
 | **X9 (R2)** cross-phase CheckResult identity | S·sonnet | ① a CheckResult memoized by the phase-B App is bit-identical to the one served as evidence in a phase-D verdict panel for the same (tree,def,toolchain) · ② mismatch fails CLOSED + alerts | sprint 2 |
 | **X10 (R3)** the focus gate itself | M·sonnet | ① under hugit's heaviest sustained load (runner fleet + union queue + dogfood soak): CoreLink's launch route/sessions/CI capacity show ZERO measurable degradation vs a hugit-idle baseline · ② the dogfood target set provably excludes corelink-server — enrollment during the launch window FAILS the build · ③ **🔧 X6 rescoped: X6 = intra-hugit tenant isolation (axes: CPU/IO/DO-storage/CAS-bandwidth/runner-slots, bounds stated); X10 = the adjacent-product boundary** | both SEALs |
+| **X11 (R4)** degradation composition | M·opus | ① smart-layer failure injected MID-operation (partial degradation window, not just steady-state outage): secrets broker fails CLOSED — no credential reaches any workspace during degradation · ② objects written during degradation are marked provenance-ABSENT; no synthetic intent/attestation ever fabricated by a fallback path · ③ CoreLink non-interference (X10 baseline) holds WHILE hugit is degraded, not only when healthy | sprint 2 |
+| **X12 (R4)** erasure × provenance × mirror | M·opus | ① after an erasure request the attestation chain remains independently verifiable with the erased object as a tamper-evident TOMBSTONE (never silently re-linked) · ② the mirror-side erasure obligation (data already replicated to GitHub) is discharged or explicitly surfaced as residual risk — and that disclosure is part of the export/exit proof | sprint 2 |
 
 ---
 
@@ -150,8 +153,8 @@ test crates + red-team fixtures (`crates/hugit-invariants`).
 - **Governance laws (reclassified from acceptance):** zero changes to
   adjacent production repos (ex-C1 item) is enforced by the orchestrator's
   profile/neverTouch + the git-hygiene guard — a standing law, not a test.
-- **Critic loop status:** R1 = 42+8 (5/5 wet) → v1.1. R2 = 23+8 (5/5 wet:
-  B:1 C:6 D:7 E:4 X:5) → v1.2. R3 = 16+10 (5/5 wet but fine-grained:
-  B:5 C:2 D:2 E:6 X:1) → v1.3. Round 4 dispatched. Suite accepted only after
-  two consecutive dry rounds. WP token re-slicing (≤100k hard / 80k ideal per
-  task, DoD per WP) happens after the suite dries.
+- **Critic loop status:** R1 = 42+8 (5/5 wet) → v1.1. R2 = 23+8 (5/5 wet) →
+  v1.2. R3 = 16+10 (5/5 wet, fine-grained) → v1.3. **R4 = 4+2 (C and D DRY;
+  B:1 E:1 X:2)** → v1.4. Round 5 dispatched — first candidate for a full
+  5/5 dry round; the loop closes after two consecutive dry rounds. WP token
+  re-slicing (≤100k hard / 80k ideal per task, DoD per WP) follows.
