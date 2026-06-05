@@ -20,6 +20,7 @@
 #[path = "../authz/mod.rs"]
 pub mod authz;
 pub mod concurrency;
+pub mod intent;
 pub mod log;
 pub mod replay;
 pub mod tamper;
