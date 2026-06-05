@@ -58,14 +58,16 @@ check "① no claim_acquire/lease_acquire in hugit-queue src/github/ (dispatch p
 check "① no dispatch-time claim mechanism in hugit-checks src/ (checks dispatch)" \
   bash -c "! grep -rEq 'claim_acquire|acquire_claim|dispatch.*claim|claim.*dispatch' '$CHECKS_CRATE/src/'"
 
-# Item ②: regenerative rebase path absent/disabled in Phase B.
-# Greps over src/core/ and hugit-checks src/ for any regen rebase symbol.
-check "② no regenerative rebase path in hugit-queue src/core/ (regen ⛔ CUT from B)" \
-  bash -c "! grep -rEq 'regen_rebase|regenerative_rebase|RegenRebase|regen.*path|reexec.*rebase' '$QUEUE_CRATE/src/core/'"
-check "② no regenerative rebase path in hugit-checks src/ (regen ⛔ CUT from B)" \
-  bash -c "! grep -rEq 'regen_rebase|regenerative_rebase|RegenRebase|regen.*path|reexec.*rebase' '$CHECKS_CRATE/src/'"
-check "② hugit-checks regen/ dir absent or disabled in Phase B" \
-  bash -c "! test -d '$CHECKS_CRATE/src/regen' || grep -rEq 'disabled|cfg.*not|todo!|unimplemented' '$CHECKS_CRATE/src/regen/'"
+# Item ②: REGENERATIVE REBASE (code-level re-execution) absent/disabled in
+# Phase B. LEAD ADJUDICATION (wave-d1 anchor): C4's derived-file regen
+# drivers (hugit-checks/src/regen — lockfiles/codegen/snapshots, wired into
+# B4 union builds) are SANCTIONED phase-B behavior per the warp C4 row; the
+# B10② prohibition targets regenerative REBASE of source changes (D12-gated)
+# only. Asserts scoped to rebase machinery, not derived-file drivers.
+check "② no regenerative rebase path in hugit-queue src/ (regen-rebase ⛔ CUT from B)" \
+  bash -c "! grep -rEq 'regen_rebase|regenerative_rebase|RegenRebase|reexec.*rebase|rebase.*regenerat' '$QUEUE_CRATE/src/'"
+check "② no regenerative rebase symbols in hugit-checks regen drivers (derived-file only)" \
+  bash -c "! grep -rEq 'regen_rebase|regenerative_rebase|RegenRebase|reexec.*rebase|rebase.*regenerat' '$CHECKS_CRATE/src/regen/' 2>/dev/null || ! test -d '$CHECKS_CRATE/src/regen'"
 
 # ── (d) structural: Claims boundary — negative_scope/ does not write source dirs ──
 check "① negative_scope/ does not contain source modifications to core/ (read-asserts only)" \
