@@ -252,6 +252,11 @@ dependencies = [
 [[package]]
 name = "hugit-runner"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hugit-contracts",
+ "serde_json",
+]
 
 [[package]]
 name = "id-arena"
