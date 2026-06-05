@@ -21,6 +21,19 @@ pub mod log;
 pub mod replay;
 pub mod tamper;
 
+pub mod coldtier;
+pub mod compaction;
+pub mod recovery;
+pub mod undo;
+
 pub use log::{EventLog, GENESIS_PREV_HASH, compute_this_hash};
 pub use replay::{RefState, replay};
 pub use tamper::{TamperError, verify_chain};
+
+pub use coldtier::{ColdRange, ColdStore, InMemoryColdStore};
+pub use compaction::{CompactionError, CompactionReport, HotRemainder, compact};
+pub use recovery::{
+    MirrorSource, NoMirror, Recovered, RecoveryError, RecoverySource, recover_from_cold,
+    recover_with_mirror,
+};
+pub use undo::{Compensation, UndoError, compute_compensation, undo};
