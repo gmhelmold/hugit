@@ -222,10 +222,11 @@ test crates + red-team fixtures (`crates/hugit-invariants`).
   R1=42+8 · R2=23+8 · R3=16+10 · R4=4+2 · R5=4+2 (C,D **CLOSED**) ·
   R6=3+4 (B **CLOSED**) · R7=2+1 (E dry #1) · R8=1+0 (**E CLOSED**) ·
   R9=1+1 (corpus source-eligibility → D8⑧) · R10=2+2 (erasure×seal → X7④;
-  intent_id identity → X9③) · R11=1+0 (**the shared API-tenancy channel →
-  X10④⑤** — first-order; critic: "all other seams are fourth-order").
-  **Closed: B, C, D, E.** Open: X only (needs R12+R13 dry). Then: WP token
-  re-slicing (≤100k hard / 80k ideal, DoD per WP).
+  intent_id identity → X9③) · R11=1+0 (the shared API-tenancy channel →
+  X10④⑤) · **R12=0 (X DRY #1** — full invariant map; the one borderline
+  seam, degradation×fence precedence, adjudicated as owned by X11①∩X1).
+  **Closed: B, C, D, E.** Open: X (R13 = closure confirmation). Then: WP
+  token re-slicing (≤100k hard / 80k ideal, DoD per WP).
 - **Adjudications on record (so future critics don't re-litigate):**
   "no-fake-intents at runtime" covered by D3⑤ (steady-state raw push) +
   D4④ (mixed-altitude fixture) + E2⑤ (import boundary); bidirectional
