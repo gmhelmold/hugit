@@ -1,0 +1,27 @@
+{
+  "name": "hugit",
+  "description": "hugit — LLM-native forge GitHub App (Phase B, least-privilege)",
+  "url": "https://hugit.dev",
+  "hook_attributes": {
+    "url": "https://hugit.dev/webhook",
+    "active": true
+  },
+  "redirect_url": "https://hugit.dev/setup",
+  "callback_urls": [
+    "https://hugit.dev/auth/callback"
+  ],
+  "setup_url": "https://hugit.dev/setup",
+  "public": false,
+  "default_permissions": {
+    "checks": "write",
+    "pull_requests": "read",
+    "contents": "read",
+    "metadata": "read"
+  },
+  "default_events": [
+    "check_suite",
+    "check_run",
+    "pull_request",
+    "installation"
+  ]
+}

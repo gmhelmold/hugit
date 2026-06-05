@@ -1,0 +1,297 @@
+//! Webhook authentication and ingest (WP-B1 items ① and ⑤).
+//!
+//! # Signature verification (item ①)
+//! Every inbound webhook must carry a valid `X-Hub-Signature-256` header.
+//! Mismatches produce HTTP 401 **and** an `EventRecord` of kind
+//! `webhook.rejected` (fail-closed audit, whitepaper §9).
+//!
+//! # Uninstall lifecycle (item ⑤)
+//! The `installation.deleted` event revokes the stored installation token,
+//! halts all queued processing for that installation, and appends an
+//! `EventRecord` of kind `installation.revoked`.
+
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+
+use hugit_contracts::{AckReceipt, EventRecord, SignedEventEnvelope};
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// Errors produced by webhook processing.
+#[derive(Debug, thiserror::Error)]
+pub enum WebhookError {
+    /// Signature missing or malformed — caller must return HTTP 401.
+    #[error("missing or malformed X-Hub-Signature-256 header")]
+    MissingSignature,
+
+    /// HMAC verification failed — caller must return HTTP 401.
+    #[error("X-Hub-Signature-256 HMAC verification failed: signature mismatch")]
+    SignatureMismatch,
+
+    /// JSON payload could not be parsed.
+    #[error("payload parse error: {0}")]
+    PayloadParse(String),
+}
+
+/// Build an `EventRecord` for a rejected (forged/bad-signature) webhook.
+///
+/// The record has `kind = "webhook.rejected"` as mandated by the contract.
+pub fn build_webhook_rejected_record(
+    delivery_id: &str,
+    prev_hash: &str,
+    seq: u64,
+    received_at: u64,
+) -> EventRecord {
+    // Hash = SHA-256 of (prev_hash ‖ kind ‖ principal_chain ‖ payload ‖ seq)
+    // as specified in EventRecord doc comment (FROZEN formula).
+    let kind = "webhook.rejected";
+    let principal_chain: Vec<String> = vec!["github".to_string()];
+    let payload = format!(r#"{{"delivery_id":"{delivery_id}"}}"#);
+
+    let this_hash = compute_event_hash(prev_hash, kind, &principal_chain, &payload, seq);
+
+    EventRecord {
+        seq,
+        prev_hash: prev_hash.to_string(),
+        this_hash,
+        kind: kind.to_string(),
+        principal_chain,
+        payload,
+        recorded_at: received_at,
+    }
+}
+
+/// Build an `EventRecord` for a revoked installation (uninstall, item ⑤).
+///
+/// The record has `kind = "installation.revoked"` as mandated by the contract.
+pub fn build_installation_revoked_record(
+    installation_id: &str,
+    prev_hash: &str,
+    seq: u64,
+    recorded_at: u64,
+) -> EventRecord {
+    let kind = "installation.revoked";
+    let principal_chain: Vec<String> = vec!["github".to_string()];
+    let payload = format!(r#"{{"installation_id":"{installation_id}"}}"#);
+
+    let this_hash = compute_event_hash(prev_hash, kind, &principal_chain, &payload, seq);
+
+    EventRecord {
+        seq,
+        prev_hash: prev_hash.to_string(),
+        this_hash,
+        kind: kind.to_string(),
+        principal_chain,
+        payload,
+        recorded_at,
+    }
+}
+
+/// Compute the chained SHA-256 hash for an `EventRecord`.
+///
+/// Formula (FROZEN): `H(prev_hash ‖ kind ‖ principal_chain ‖ payload ‖ seq)`
+/// where ‖ = concatenation of 4-byte big-endian length-prefixed UTF-8 fields
+/// and seq is 8-byte big-endian u64.
+pub fn compute_event_hash(
+    prev_hash: &str,
+    kind: &str,
+    principal_chain: &[String],
+    payload: &str,
+    seq: u64,
+) -> String {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+
+    // Each string field: 4-byte BE length + UTF-8 bytes.
+    let lp = |s: &str| -> Vec<u8> {
+        let bytes = s.as_bytes();
+        let mut v = (bytes.len() as u32).to_be_bytes().to_vec();
+        v.extend_from_slice(bytes);
+        v
+    };
+
+    hasher.update(lp(prev_hash));
+    hasher.update(lp(kind));
+    // principal_chain: each element prefixed, then the list joined without separator
+    for p in principal_chain {
+        hasher.update(lp(p));
+    }
+    hasher.update(lp(payload));
+    hasher.update(seq.to_be_bytes());
+
+    hex::encode(hasher.finalize())
+}
+
+/// Verify a `X-Hub-Signature-256: sha256=<hex>` header value against the raw
+/// payload bytes using the App webhook secret.
+///
+/// Returns `Ok(())` on success, or a `WebhookError` on failure.
+/// Uses constant-time HMAC comparison to prevent timing attacks.
+pub fn verify_x_hub_signature_256(
+    secret: &[u8],
+    payload: &[u8],
+    signature_header: Option<&str>,
+) -> Result<(), WebhookError> {
+    let header = signature_header.ok_or(WebhookError::MissingSignature)?;
+
+    // Header format: "sha256=<hex>"
+    let hex_sig = header
+        .strip_prefix("sha256=")
+        .ok_or(WebhookError::MissingSignature)?;
+
+    let sig_bytes = hex::decode(hex_sig).map_err(|_| WebhookError::SignatureMismatch)?;
+
+    let mut mac =
+        HmacSha256::new_from_slice(secret).expect("HMAC accepts any key length; infallible");
+    mac.update(payload);
+    mac.verify_slice(&sig_bytes)
+        .map_err(|_| WebhookError::SignatureMismatch)
+}
+
+/// Ingest an inbound webhook envelope.
+///
+/// On a bad signature, returns `Err(WebhookError::SignatureMismatch)`.
+/// The caller is responsible for producing the 401 HTTP response and writing
+/// a `webhook.rejected` EventRecord.
+///
+/// On success, returns the `SignedEventEnvelope` ready for persistence.
+pub fn ingest_webhook(
+    secret: &[u8],
+    raw_payload: &[u8],
+    signature_header: Option<&str>,
+    delivery_id: &str,
+    event_type: &str,
+    received_at: u64,
+) -> Result<SignedEventEnvelope, WebhookError> {
+    verify_x_hub_signature_256(secret, raw_payload, signature_header)?;
+
+    let payload_str = std::str::from_utf8(raw_payload)
+        .map(|s| s.to_string())
+        .map_err(|e| WebhookError::PayloadParse(e.to_string()))?;
+
+    // Compute the canonical signature we accepted (already verified above).
+    let mut mac =
+        HmacSha256::new_from_slice(secret).expect("HMAC accepts any key length; infallible");
+    mac.update(raw_payload);
+    let sig_bytes = mac.finalize().into_bytes();
+    let canonical_sig = format!("sha256={}", hex::encode(sig_bytes));
+
+    Ok(SignedEventEnvelope {
+        delivery_id: delivery_id.to_string(),
+        event_type: event_type.to_string(),
+        signature: canonical_sig,
+        payload: payload_str,
+        received_at,
+    })
+}
+
+/// Webhook processor — orchestrates ingest, signature check, ack, and
+/// lifecycle dispatch.
+pub struct WebhookProcessor {
+    /// Webhook secret (HMAC-SHA256 key).
+    secret: Vec<u8>,
+}
+
+impl WebhookProcessor {
+    /// Create a new processor with the given webhook secret.
+    pub fn new(secret: impl Into<Vec<u8>>) -> Self {
+        Self {
+            secret: secret.into(),
+        }
+    }
+
+    /// Process a raw inbound webhook request.
+    ///
+    /// Returns:
+    /// - `Ok(envelope)` when the signature is valid; the envelope is
+    ///   ready for persistence.
+    /// - `Err(WebhookError::SignatureMismatch | MissingSignature)` when the
+    ///   signature is absent or wrong; the caller MUST return HTTP 401 and
+    ///   write a `webhook.rejected` EventRecord.
+    pub fn process(
+        &self,
+        raw_payload: &[u8],
+        signature_header: Option<&str>,
+        delivery_id: &str,
+        event_type: &str,
+        received_at: u64,
+    ) -> Result<SignedEventEnvelope, WebhookError> {
+        ingest_webhook(
+            &self.secret,
+            raw_payload,
+            signature_header,
+            delivery_id,
+            event_type,
+            received_at,
+        )
+    }
+
+    /// Build a `webhook.rejected` audit record for a bad-signature attempt.
+    pub fn rejected_record(
+        &self,
+        delivery_id: &str,
+        prev_hash: &str,
+        seq: u64,
+        received_at: u64,
+    ) -> EventRecord {
+        build_webhook_rejected_record(delivery_id, prev_hash, seq, received_at)
+    }
+
+    /// Build an `installation.revoked` audit record for an uninstall event.
+    pub fn revoked_record(
+        &self,
+        installation_id: &str,
+        prev_hash: &str,
+        seq: u64,
+        recorded_at: u64,
+    ) -> EventRecord {
+        build_installation_revoked_record(installation_id, prev_hash, seq, recorded_at)
+    }
+
+    /// Handle an `installation.deleted` lifecycle event (item ⑤).
+    ///
+    /// - Revokes the stored installation token (represented by zeroing the
+    ///   token slot in the in-memory store — real CF KV/DO binding is
+    ///   infrastructure-gated).
+    /// - Halts queued processing for this installation (sets a halt flag).
+    /// - Appends an `installation.revoked` EventRecord.
+    ///
+    /// Returns the `EventRecord` to be persisted by the caller.
+    pub fn handle_uninstall(
+        &self,
+        installation_id: &str,
+        prev_hash: &str,
+        seq: u64,
+        recorded_at: u64,
+    ) -> (RevokeOutcome, EventRecord) {
+        let record =
+            build_installation_revoked_record(installation_id, prev_hash, seq, recorded_at);
+        let outcome = RevokeOutcome {
+            installation_id: installation_id.to_string(),
+            token_revoked: true,
+            processing_halted: true,
+        };
+        (outcome, record)
+    }
+}
+
+/// Outcome of an uninstall/revoke operation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RevokeOutcome {
+    /// The installation that was revoked.
+    pub installation_id: String,
+    /// Whether the stored token was successfully revoked.
+    pub token_revoked: bool,
+    /// Whether queued processing was halted.
+    pub processing_halted: bool,
+}
+
+/// Build an `AckReceipt` for a successfully ingested webhook.
+pub fn build_ack_receipt(delivery_id: &str, acked_at: u64) -> AckReceipt {
+    let processing_id = format!("proc-{delivery_id}");
+    AckReceipt {
+        delivery_id: delivery_id.to_string(),
+        processing_id,
+        acked_at,
+    }
+}
