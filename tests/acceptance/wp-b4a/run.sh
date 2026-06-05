@@ -43,9 +43,11 @@ check "⑤ item_5 test declared (queue_order_out_of_order_prevented)" \
 check "①②⑤ cargo test -p hugit-queue --test acceptance_wp-b4a green" \
   cargo test -p hugit-queue --test "acceptance_${WP_ID}"
 
-# ── (d) structural/negative: no GitHub API in B4a (Claims boundary) ──────────
-check "① no github/ writes in core (Claims disjointness: B4a owns core only)" \
-  bash -c "! test -d '$CRATE/src/github'"
+# ── (d) Claims-boundary guard RETIRED (lead, wave D1.2 integration): the
+# "no github/" assert was a B4a-wave isolation fence; B4b legitimately owns
+# src/github/ now. The living boundary check: core/ stays GitHub-free. ──────
+check "① core/ contains no GitHub API calls (B4a engine purity)" \
+  bash -c "! grep -rEq 'api\.github\.com|octocrab|github_api' '$CRATE/src/core/'"
 
 # ── (d) structural: QueueApi.minimal_failing_pair field present in contracts ──
 check "① QueueApi.minimal_failing_pair referenced in hugit-queue src" \
