@@ -1,0 +1,12 @@
+# pnpm workspace fixture for golden affected-set computation (B3 ①).
+# Represents a 3-package pnpm workspace used in acceptance tests.
+packages:
+  - "pkg-ui"
+  - "pkg-api"
+  - "pkg-shared"
+
+# pkg-ui depends on pkg-shared
+# pkg-api depends on pkg-shared
+# pkg-shared has no internal deps
+# Affected(pkg-shared changed) = {pkg-ui, pkg-api, pkg-shared}
+# Affected(pkg-ui changed)     = {pkg-ui}

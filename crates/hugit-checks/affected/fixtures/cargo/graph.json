@@ -1,0 +1,14 @@
+{
+  "ecosystem": "cargo",
+  "workspace_root": "workspace.toml",
+  "packages": [
+    { "name": "crate-a", "path": "crate-a", "deps": ["crate-c"] },
+    { "name": "crate-b", "path": "crate-b", "deps": ["crate-c"] },
+    { "name": "crate-c", "path": "crate-c", "deps": [] }
+  ],
+  "golden_sets": {
+    "crate-a": ["crate-a"],
+    "crate-b": ["crate-b"],
+    "crate-c": ["crate-a", "crate-b", "crate-c"]
+  }
+}

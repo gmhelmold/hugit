@@ -1,0 +1,16 @@
+{
+  "ecosystem": "turbo",
+  "workspace_root": "turbo.json",
+  "packages": [
+    { "name": "app-web",  "path": "app-web",  "deps": ["lib-core", "lib-ui"] },
+    { "name": "app-api",  "path": "app-api",  "deps": ["lib-core"] },
+    { "name": "lib-ui",   "path": "lib-ui",   "deps": ["lib-core"] },
+    { "name": "lib-core", "path": "lib-core", "deps": [] }
+  ],
+  "golden_sets": {
+    "lib-core": ["app-api", "app-web", "lib-core", "lib-ui"],
+    "lib-ui":   ["app-web", "lib-ui"],
+    "app-web":  ["app-web"],
+    "app-api":  ["app-api"]
+  }
+}
