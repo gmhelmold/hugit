@@ -18,10 +18,10 @@
 - [x] App ID + private key + webhook secret at the **interim broker path**
   `~/.hugit/secrets/github-app-dev/` (mode 600, outside every repo; the
   secrets broker v0 (C5b) replaces file storage — tracked there).
-- [ ] Install on: `hugit` (owner clicking now) + 2 synthetic fleet repos
-  (created at B8/D1; `corelink-workspaces` later per B8 contract).
-  **NOT corelink-server** (X10② — enrollment during launch window fails
-  the build).
+- [x] Installed on `hugit` (owner-confirmed 2026-06-05). Still to add at
+  B8/D1: 2 synthetic fleet repos (`corelink-workspaces` later per B8
+  contract). **NOT corelink-server** (X10② — enrollment during launch
+  window fails the build).
 
 ## P2 — CoreLink prod tenancy (R2/AC namespaces) — gates B2a/C3
 
