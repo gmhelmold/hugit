@@ -8,6 +8,7 @@ publish = false
 hugit-contracts = { path = "../hugit-contracts" }
 hugit-checks = { path = "../hugit-checks" }
 hugit-queue = { path = "../hugit-queue" }
+hugit-refstore = { path = "../hugit-refstore" }
 sha2 = "0.10"
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
@@ -15,6 +16,7 @@ serde_json = "1"
 
 [dev-dependencies]
 hugit-contracts = { path = "../hugit-contracts" }
+hugit-refstore = { path = "../hugit-refstore" }
 serde_json = "1"
 
 # WP-D9: the attention-queue oracle lives under the module's own tests/ dir

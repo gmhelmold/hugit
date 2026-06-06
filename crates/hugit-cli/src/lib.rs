@@ -9,7 +9,9 @@
 //!     Claims, wired in via `#[path]`.
 //!   - `tournament/` — `hugit tournament -n N` fan-out: N candidates, judge
 //!     panel, budget-bounded (WP-D13)
+//!   - `export/`     — `hugit export` + the exit proof (WP-E5)
 
+pub mod export;
 pub mod impact;
 pub mod tournament;
 pub mod verdict;
