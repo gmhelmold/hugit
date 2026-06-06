@@ -1,7 +1,8 @@
-//! hugit-mirror — status/badge compatibility emitter (WP-E3).
+//! hugit-mirror — status/badge compatibility emitter (WP-E3) + import (WP-E2a/E2b).
 
 pub mod bootstrap;
 pub mod dr;
+pub use import::prissue;
 pub mod status;
 
 // WP-E1a — one-way mirror (hugit → GitHub): outbound sync, per-push hash
