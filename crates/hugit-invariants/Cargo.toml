@@ -1,0 +1,39 @@
+# hugit-invariants — Squad-X cross-cutting invariant test crate.
+#
+# Houses red-team / invariant suites that hold ACROSS production crates without
+# owning any production path. WP-X4 is the supply-chain invariant: runner
+# images are content-pinned + integrity-verified at spawn, App deps are pinned
+# + verified in CI, and a tampered/unpinned image fails CLOSED before any
+# tenant work. The crate consumes the spawn surface (hugit-runner / C2) and the
+# frozen RunnerLease (hugit-contracts) read-only; it modifies neither.
+#
+# Layout note: the package root is `crates/hugit-invariants/`, but every source
+# file lives under a per-WP subtree (`x4/`) so the WP-X4 claim ("only x4/ paths
+# owned") is structurally enforced — nothing is written directly under the
+# package root except this manifest.
+[package]
+name = "hugit-invariants"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "hugit_invariants"
+path = "x4/lib.rs"
+
+[dependencies]
+hugit-contracts = { path = "../hugit-contracts" }
+hugit-runner = { path = "../hugit-runner" }
+anyhow = "1"
+
+[dev-dependencies]
+hugit-contracts = { path = "../hugit-contracts" }
+hugit-runner = { path = "../hugit-runner" }
+
+# The acceptance oracle lives under the x4/ subtree (not the default
+# `tests/` dir) so all WP-X4 sources stay inside the owned claim. An explicit
+# target is required because cargo only auto-discovers `tests/*.rs` at the
+# package root.
+[[test]]
+name = "acceptance_x4"
+path = "x4/tests/acceptance_x4.rs"

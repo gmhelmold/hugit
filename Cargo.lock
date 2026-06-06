@@ -686,6 +686,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hugit-invariants"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hugit-contracts",
+ "hugit-runner",
+]
+
+[[package]]
 name = "hugit-ledger"
 version = "0.1.0"
 dependencies = [
