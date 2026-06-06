@@ -42,6 +42,7 @@ pub mod lease;
 pub mod recovery;
 pub mod shim;
 pub mod teardown;
+pub mod ws;
 
 pub use isolation::{Engine, IsolationProbe, RunningContainer};
 pub use lease::{BoxExec, ContainerSpec, SshBox};
