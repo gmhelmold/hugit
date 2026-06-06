@@ -19,8 +19,10 @@
 //! - **serve** ([`read::serve`]) — the `clone` and delta-only `fetch`
 //!   entrypoints that tie negotiation to pack assembly.
 //!
-//! The write path (D3) and the client matrix / jj / fallback / scale ceilings
-//! (D2b) are explicitly out of scope and live elsewhere.
+//! The client matrix / jj stacks / CPU-chunked fallback / scale ceilings +
+//! degradation invariant (WP-D2b — D2 items ③④⑤⑥⑦) load and prove this read
+//! path at its edges ([`read::clients`], [`read::fallback`], [`read::limits`]).
+//! The write path (D3) is out of scope and lives elsewhere.
 
 pub mod read;
 
@@ -29,3 +31,12 @@ pub use read::pack::{
     CasObjectSource, GitObject, ObjectKind, ObjectSource, PackAssembly, PackError,
 };
 pub use read::serve::{ServeError, serve_clone, serve_fetch};
+// WP-D2b — read-path edges: client matrix + jj stacks, CPU/chunked fallback,
+// scale ceilings + degradation invariant.
+pub use read::clients::{
+    ChangeId, ClientKind, Stack, StackEntry, git_version_meets_floor, served_object_ids,
+};
+pub use read::fallback::{ServePlan, cpu_budget_ms, plan_serve, within_cpu_budget};
+pub use read::limits::{
+    Admission, CeilingRow, Dimension, SmartLayers, admit, ceiling_table, serve_clone_degradable,
+};
