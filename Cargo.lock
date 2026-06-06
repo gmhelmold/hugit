@@ -735,6 +735,7 @@ dependencies = [
  "gix-object",
  "gix-pack",
  "gix-packetline",
+ "hugit-contracts",
  "hugit-refstore",
  "thiserror 1.0.69",
 ]

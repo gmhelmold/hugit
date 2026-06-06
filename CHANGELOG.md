@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - feat(proto): D2b — read-path edges: client matrix (git 2.40+/jj/libgit2), jj first-class stacked changes with change-ids stable across forge ops + identical stack reconstruction, per-request CPU budget (70% of platform limit) + chunked fallback, degradation kill-test (smart layers off, steady-state + mid-op → vanilla git still serves), per-dimension scale ceilings with documented bounded refusal (PARTIAL: jj binary absent locally → item ⑦ wire round-trip skipped, in-process model proven) (WP-D2b)
 
+- feat(proto): D3b — push concurrency: concurrent pushes serialized through the D1 single-writer point get a strict total order with compare-and-append stale rejection (no lost update); raw push = opaque external-change event with attribution (who/when/ref), never a fabricated intent; write path off unless self-hosted-alpha; intent-log-clean negative + write-path red-team (WP-D3b)
+
 - feat: hugit-invariants — X4 supply-chain: content-pinned runner images, verified deps, fail-closed before spawn (WP-X4)
 
 - feat(runner): E4 — Actions-YAML shim v0: published supported-subset contract (15 features, proven-to-execute), explicit out-of-contract actionable reports, secrets fail-CLOSED via broker (red-team asserted), execution equivalence harness with determinism-precondition gate (PARTIAL: shim lane green, live GH lane wired) (WP-E4)

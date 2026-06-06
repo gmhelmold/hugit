@@ -22,9 +22,15 @@
 //! The client matrix / jj stacks / CPU-chunked fallback / scale ceilings +
 //! degradation invariant (WP-D2b — D2 items ③④⑤⑥⑦) load and prove this read
 //! path at its edges ([`read::clients`], [`read::fallback`], [`read::limits`]).
-//! The write path (D3) is out of scope and lives elsewhere.
+//!
+//! The **write path** ([`write`]) carries the push concurrency / total-order +
+//! external-change + flag/negative halves (WP-D3b — D3 items ②③④⑤): concurrent
+//! pushes get a strict total order with stale rejection, a raw push is an opaque
+//! external-change event with attribution (never a fabricated intent), and the
+//! whole path is off unless the self-hosted-alpha flag is set.
 
 pub mod read;
+pub mod write;
 
 pub use read::negotiate::{Capabilities, NegotiationError, RefAdvertisement, RefView, WantHave};
 pub use read::pack::{
@@ -40,3 +46,11 @@ pub use read::fallback::{ServePlan, cpu_budget_ms, plan_serve, within_cpu_budget
 pub use read::limits::{
     Admission, CeilingRow, Dimension, SmartLayers, admit, ceiling_table, serve_clone_degradable,
 };
+
+// WP-D3b — write path: push concurrency/total-order, external-change, flag-gate.
+pub use write::external::{
+    Attribution, ExternalChangeError, REF_DELETE_KIND, REF_UPDATE_KIND, RawPush,
+    is_external_change_kind, record_external_change,
+};
+pub use write::flag::{FlagGate, WritePathDisabled};
+pub use write::order::{PushOutcome, RefUpdate, SerializedWriter, StaleRef};
