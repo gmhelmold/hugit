@@ -7,3 +7,8 @@ pub mod status;
 pub mod outbound;
 pub mod queue;
 pub mod verify;
+// WP-E1b — mirror failure modes (additive).
+pub mod divergence;
+pub mod outage;
+pub mod poll;
+pub mod refops;
