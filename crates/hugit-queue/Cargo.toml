@@ -19,3 +19,7 @@ ureq = "2"
 [[test]]
 name = "acceptance_wp-b4b"
 path = "tests/acceptance_wp-b4b.rs"
+
+[[test]]
+name = "acceptance_c10"
+path = "tests/acceptance_c10.rs"

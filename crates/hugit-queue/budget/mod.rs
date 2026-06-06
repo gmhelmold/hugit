@@ -1,4 +1,8 @@
-//! Budget + fairness layer for hugit-queue (WP-C7).
+//! Budget + fairness layer for hugit-queue (WP-C7 + WP-C10).
+//!
+//! `no_shock` (C10) is a disjoint sub-module that owns the pricing-no-shock
+//! guard: per-surface exhaustion drive, pre-exhaustion warnings, cap/degrade,
+//! and the zero-overage billing fixture assertion.
 //!
 //! # Overview
 //!
@@ -18,6 +22,11 @@
 //! This module is entirely disjoint from `hugit_queue::core` (B4a) and the
 //! `github` module (B4b). It consumes `QueueApi` from `hugit-contracts`
 //! through published-API surface only; it never imports internal core types.
+
+// ── Sub-modules ───────────────────────────────────────────────────────────────
+
+/// WP-C10 pricing no-shock guard (disjoint from this C7 core).
+pub mod no_shock;
 
 use std::collections::{HashMap, VecDeque};
 
