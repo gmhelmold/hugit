@@ -11,6 +11,7 @@
 
 pub mod deeplink;
 pub mod fleet;
+pub mod journal;
 pub mod ledger;
 pub mod redact;
 pub mod watch;
