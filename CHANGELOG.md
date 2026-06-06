@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - feat(checks): C4 — regen drivers v0: lockfile/codegen/snapshot regenerate-never-merge (WP-C4)
 
+- feat(checks): C8 — shadow checks: snapshot-cadence scheduler (N writes→one boundary pass), C7 budget-decrement with cap-halt, per-repo opt-in (default-off), non-gating signal/event surface, per-tenant cap isolation (WP-C8)
+
 - feat: hugit-policy — declarative gate engine v0: 3 ported gates (DCO/changelog/secrets), fail-closed enforcement, audited policy changes via EventRecord (WP-D6)
 
 - feat: hugit-app — GitHub App skeleton: X-Hub-Signature-256 webhook auth + ingest, PR-event persistence, Checks-API write-back, least-privilege manifest, uninstall revoke+halt (WP-B1)
