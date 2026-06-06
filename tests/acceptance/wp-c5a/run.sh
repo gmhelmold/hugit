@@ -42,9 +42,10 @@ check "materialize/ subtree present" \
 check "enforce/ subtree present" \
   test -d "$CRATE_ROOT/src/enforce"
 
-# ── structural negative: C5b broker subtree must be absent/untouched ──────────
-check "broker/ subtree belongs to C5b — must be absent from C5a claims" bash -c \
-  '! find '"$CRATE_ROOT"'/src/broker -name "*.rs" 2>/dev/null | grep -q .'
+# C5b broker-absence guard RETIRED (lead, wave D2 integration): a wave-isolation
+# fence that expires once C5b legitimately lands src/broker/ (same class as the
+# b1/d1a/d1b/b4a guard expiries). C5a↔C5b disjointness is enforced at integration
+# via `git diff --name-only main..HEAD` (scope-clean gate).
 
 # ── ① outside path_set → ENOENT ──────────────────────────────────────────────
 check "① item_1_outside_path_set_enoent declared in acceptance_c5a" bash -c \
