@@ -19,7 +19,10 @@ publish = false
 
 [lib]
 name = "hugit_invariants"
-path = "x4/lib.rs"
+# Root entry point wires all WP subtrees additively.
+# x4/ and x5/ source dirs are owned by their respective WPs; this root file
+# is the only cross-WP file under crates/hugit-invariants/ (not inside any WP dir).
+path = "lib.rs"
 
 [dependencies]
 hugit-contracts = { path = "../hugit-contracts" }
@@ -42,9 +45,13 @@ serde_json = "1"
 name = "acceptance_x4"
 path = "x4/tests/acceptance_x4.rs"
 
-# WP-X3 acceptance oracle — context privacy. All X3 sources live under the
-# x3/ subtree (the oracle includes x3/privacy.rs via #[path]); the crate's
-# single [lib] target stays owned by WP-X4.
+# WP-X3 acceptance oracle — context privacy (sources under x3/, oracle includes
+# x3/privacy.rs via #[path]).
 [[test]]
 name = "acceptance_x3"
 path = "x3/tests/acceptance_x3.rs"
+
+# WP-X5: namespace-law invariants (no git-verb shadow, ref-namespace non-collision).
+[[test]]
+name = "acceptance_x5"
+path = "x5/tests/acceptance_x5.rs"
