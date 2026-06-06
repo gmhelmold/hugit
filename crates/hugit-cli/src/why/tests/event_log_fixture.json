@@ -1,0 +1,63 @@
+{
+  "description": "Fixture event log for WP-D10 why-provenance tests.",
+  "entries": [
+    {
+      "seq": 1,
+      "kind": "intent.landed",
+      "principal_chain": ["alice@example.com"],
+      "payload": {
+        "intent_id": "intent-abc-001",
+        "ref": "refs/heads/main",
+        "target": "deadbeef0001",
+        "charter": "Add authentication module",
+        "path": "src/auth/mod.rs"
+      },
+      "attestation": {
+        "tree": "tree-sha-001",
+        "def": "0.00 USD",
+        "runner": "runner-001",
+        "model": "",
+        "principal": ["alice@example.com"],
+        "sig": "sig-001"
+      }
+    },
+    {
+      "seq": 2,
+      "kind": "intent.landed",
+      "principal_chain": ["bob@example.com"],
+      "payload": {
+        "intent_id": "intent-abc-002",
+        "ref": "refs/heads/main",
+        "target": "deadbeef0002",
+        "charter": "Add feature flag support",
+        "path": "src/flags/mod.rs"
+      },
+      "attestation": {
+        "tree": "tree-sha-002",
+        "def": "0.00 USD",
+        "runner": "runner-002",
+        "model": "",
+        "principal": ["bob@example.com"],
+        "sig": "sig-002"
+      }
+    },
+    {
+      "seq": 3,
+      "kind": "regen.derived",
+      "principal_chain": ["runner-regen-03"],
+      "payload": {
+        "charter": "Regenerated lockfile from Cargo.toml update",
+        "path": "Cargo.lock",
+        "source_intent": "intent-abc-002"
+      },
+      "attestation": {
+        "tree": "tree-sha-003",
+        "def": "0.00 USD",
+        "runner": "runner-regen-03",
+        "model": "claude-sonnet-4-6",
+        "principal": ["runner-regen-03"],
+        "sig": "sig-003"
+      }
+    }
+  ]
+}

@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- feat(cli): D7 — adversarial verdict panels: lens fan-out over served ground truth only, diversity-enforced (distinct prompts + ≥2 distinct models), prompt-isolation audit, grounded review Q&A with explicit refusal, structural no-self-defense invariant (WP-D7)
+- feat(cli): D7 — adversarial verdict panels: lens fan-out over served ground truth only, diversity-enforced (distinct prompts + ≥2 distinct models), prompt-isolation audit, grounded review Q## [Unreleased]A with explicit refusal, structural no-self-defense invariant (WP-D7)
+
+- feat(cli): D10 — hugit why + impact; derived-byte attribution honest; impact feeds verdict ground truth (WP-D10)
 
 - feat(app): B6 — intent sidecar: parse/validate/render + corpus to CAS ref (WP-B6)
 
@@ -20,8 +22,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - feat(queue): hugit-queue GitHub integration — ordered atomic merge API with honored merge method, force-push union recompute, branch-protection holds (never force-merged), crash-idempotent kill-test recovery; live App-JWT installations lane (WP-B4b)
 
 - feat(checks): C4 — regen drivers v0: lockfile/codegen/snapshot regenerate-never-merge (WP-C4)
-
-- feat(checks): C8 — shadow checks: snapshot-cadence scheduler (N writes→one boundary pass), C7 budget-decrement with cap-halt, per-repo opt-in (default-off), non-gating signal/event surface, per-tenant cap isolation (WP-C8)
 
 - feat: hugit-policy — declarative gate engine v0: 3 ported gates (DCO/changelog/secrets), fail-closed enforcement, audited policy changes via EventRecord (WP-D6)
 
