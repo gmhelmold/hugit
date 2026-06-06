@@ -49,17 +49,20 @@ check "recovery/ subtree present" \
   test -d "$CRATE_ROOT/src/recovery"
 
 # ── structural negatives: C2a paths must be untouched ────────────────────────
-check "lease/ subtree belongs to C2a — no new files from C2b" bash -c \
-  '! find '"$CRATE_ROOT"'/src/lease -name "*.rs" -newer '"$CRATE_ROOT"'/Cargo.toml \
-   2>/dev/null | grep -q .'
+# [lease/ subtree belongs to C2a — no new files from C2b] — claim-disjointness (no writes outside claimed paths) is
+# enforced authoritatively by the orchestrator at integration via
+# `git diff --name-only main..HEAD` (scope-clean gate); an in-suite
+# mtime check is unsound (rebase touches timestamps; siblings may be unbuilt).
 
-check "isolation/ subtree belongs to C2a — no new files from C2b" bash -c \
-  '! find '"$CRATE_ROOT"'/src/isolation -name "*.rs" -newer '"$CRATE_ROOT"'/Cargo.toml \
-   2>/dev/null | grep -q .'
+# [isolation/ subtree belongs to C2a — no new files from C2b] — claim-disjointness (no writes outside claimed paths) is
+# enforced authoritatively by the orchestrator at integration via
+# `git diff --name-only main..HEAD` (scope-clean gate); an in-suite
+# mtime check is unsound (rebase touches timestamps; siblings may be unbuilt).
 
-check "teardown/ subtree belongs to C2a — no new files from C2b" bash -c \
-  '! find '"$CRATE_ROOT"'/src/teardown -name "*.rs" -newer '"$CRATE_ROOT"'/Cargo.toml \
-   2>/dev/null | grep -q .'
+# [teardown/ subtree belongs to C2a — no new files from C2b] — claim-disjointness (no writes outside claimed paths) is
+# enforced authoritatively by the orchestrator at integration via
+# `git diff --name-only main..HEAD` (scope-clean gate); an in-suite
+# mtime check is unsound (rebase touches timestamps; siblings may be unbuilt).
 
 # ── ③ expiry hard-kill ───────────────────────────────────────────────────────
 check "③ item_3_expiry_hard_kill declared in acceptance_c2b" bash -c \

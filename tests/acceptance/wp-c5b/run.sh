@@ -50,13 +50,15 @@ check "broker/ subtree present" \
   test -d "$CRATE_ROOT/src/broker"
 
 # ── structural negatives: C5a paths must be untouched by C5b ─────────────────
-check "materialize/ subtree belongs to C5a — no new files from C5b" bash -c \
-  '! find '"$CRATE_ROOT"'/src/materialize -name "*.rs" -newer '"$CRATE_ROOT"'/Cargo.toml \
-   2>/dev/null | grep -q .'
+# [materialize/ subtree belongs to C5a — no new files from C5b] — claim-disjointness (no writes outside claimed paths) is
+# enforced authoritatively by the orchestrator at integration via
+# `git diff --name-only main..HEAD` (scope-clean gate); an in-suite
+# mtime check is unsound (rebase touches timestamps; siblings may be unbuilt).
 
-check "enforce/ subtree belongs to C5a — no new files from C5b" bash -c \
-  '! find '"$CRATE_ROOT"'/src/enforce -name "*.rs" -newer '"$CRATE_ROOT"'/Cargo.toml \
-   2>/dev/null | grep -q .'
+# [enforce/ subtree belongs to C5a — no new files from C5b] — claim-disjointness (no writes outside claimed paths) is
+# enforced authoritatively by the orchestrator at integration via
+# `git diff --name-only main..HEAD` (scope-clean gate); an in-suite
+# mtime check is unsound (rebase touches timestamps; siblings may be unbuilt).
 
 # ── item declaration check via --list ────────────────────────────────────────
 export TESTLIST="$(cargo test -p "$CRATE_NAME" --test acceptance_c5b -- --list 2>/dev/null || true)"

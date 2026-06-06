@@ -50,9 +50,8 @@ check "experiment/ subtree present" \
   test -d "$CRATE_ROOT/src/experiment"
 
 # ── structural negative: no writes outside experiment/ ──────────────────────
-check "no WP-D8 files leaked outside experiment/ subtree" bash -c \
-  '! find '"$CRATE_ROOT"'/src -maxdepth 1 -name "*.rs" -newer '"$CRATE_ROOT"'/Cargo.toml \
-   2>/dev/null | grep -q .'
+check "no WP-D8 files leaked outside experiment/ subtree (disjointness also at integration)" \
+  bash -c '! find '"$CRATE_ROOT"'/src -maxdepth 1 -name "*.rs" ! -name lib.rs ! -name main.rs 2>/dev/null | grep -q .'
 
 # ── ① wave auto-contributes datapoints ──────────────────────────────────────
 check "① item_1_wave_auto_contributes declared in acceptance_d8" bash -c \

@@ -46,9 +46,8 @@ check "x4/ subtree present" \
   test -d "$CRATE_ROOT/x4"
 
 # ── structural negative: only x4/ paths owned ───────────────────────────────
-check "no WP-X4 files written outside x4/ subtree" bash -c \
-  '! find '"$CRATE_ROOT"' -maxdepth 1 -name "*.rs" -newer '"$CRATE_ROOT"'/Cargo.toml \
-   2>/dev/null | grep -q .'
+check "no WP-X4 files written outside x4/ subtree (disjointness also at integration)" \
+  bash -c '! find '"$CRATE_ROOT"' -maxdepth 1 -name "*.rs" ! -name lib.rs ! -name main.rs 2>/dev/null | grep -q .'
 
 # ── ① image content-pinned + integrity-verified at spawn ────────────────────
 check "① item_1_image_content_pinned_verified declared in acceptance_x4" bash -c \

@@ -31,10 +31,15 @@ for c in "${CRATES[@]}"; do
   check "crate $c present (Cargo.toml + src/lib.rs)" \
     bash -c "test -f crates/$c/Cargo.toml && test -f crates/$c/src/lib.rs"
 done
-check "no crates beyond the named set (+hugit-contracts allowed)" bash -c '
+# Amended (lead, wave D2): hugit-invariants admitted — Squad-X's shared home
+# (decomposition §217; sanctioned new structure, same class as the wave-D1.2
+# nested-sub-crate amendment). Nested sub-crates (hugit-app/ui, /exit) are
+# covered by the glob and live under their parent, so the basename roster only
+# gates top-level crates/* members.
+check "no crates beyond the named set (+hugit-contracts +hugit-invariants)" bash -c '
   for d in crates/*/; do
     n=$(basename "$d")
-    case " hugit-app hugit-queue hugit-checks hugit-diag hugit-runner hugit-fence hugit-refstore hugit-proto hugit-ledger hugit-policy hugit-mirror hugit-cli hugit-contracts " in
+    case " hugit-app hugit-queue hugit-checks hugit-diag hugit-runner hugit-fence hugit-refstore hugit-proto hugit-ledger hugit-policy hugit-mirror hugit-cli hugit-contracts hugit-invariants " in
       *" $n "*) ;;
       *) exit 1 ;;
     esac
