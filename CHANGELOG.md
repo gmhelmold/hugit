@@ -7,9 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- feat(cli): D7 — adversarial verdict panels: lens fan-out over served ground truth only, diversity-enforced (distinct prompts + ≥2 distinct models), prompt-isolation audit, grounded review Q## [Unreleased]A with explicit refusal, structural no-self-defense invariant (WP-D7)
-
-- feat(cli): D10 — hugit why + impact; derived-byte attribution honest; impact feeds verdict ground truth (WP-D10)
+- feat(proto): D2a — git wire read path: protocol-v2 negotiate/ls-refs/want-have, pack assembly from CAS, byte-identical clone + delta-only fetch (WP-D2a)
 
 - feat(app): B6 — intent sidecar: parse/validate/render + corpus to CAS ref (WP-B6)
 

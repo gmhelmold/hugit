@@ -5,3 +5,12 @@ edition = "2024"
 publish = false
 
 [dependencies]
+# Refs are the D1 event-log derived view — consumed, never owned here.
+hugit-refstore = { path = "../hugit-refstore" }
+# libgit2-class git library (gitoxide): canonical object hashing + pack format.
+# We wire it to CAS-backed object access; we do NOT reimplement git's wire bits.
+gix-hash = "0.22"
+gix-object = "0.55"
+gix-pack = "0.65"
+gix-packetline = { version = "0.21", features = ["blocking-io"] }
+thiserror = "1"
