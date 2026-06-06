@@ -1,0 +1,36 @@
+{
+  "description": "Golden affected-set fixture for WP-D10 item ②: known build graph + golden set for set-equality assertion.",
+  "graph": {
+    "ecosystem": "Cargo",
+    "packages": [
+      { "name": "hugit-contracts", "path": "crates/hugit-contracts", "direct_deps": [] },
+      { "name": "hugit-checks",    "path": "crates/hugit-checks",    "direct_deps": ["hugit-contracts"] },
+      { "name": "hugit-refstore",  "path": "crates/hugit-refstore",  "direct_deps": ["hugit-contracts"] },
+      { "name": "hugit-cli",       "path": "crates/hugit-cli",       "direct_deps": ["hugit-contracts", "hugit-checks"] },
+      { "name": "hugit-app",       "path": "crates/hugit-app",       "direct_deps": ["hugit-cli", "hugit-checks"] }
+    ],
+    "root_manifests": ["Cargo.toml"]
+  },
+  "test_cases": [
+    {
+      "id": "leaf_change",
+      "changed_paths": ["crates/hugit-contracts/src/event_record.rs"],
+      "golden_affected": ["hugit-contracts", "hugit-checks", "hugit-refstore", "hugit-cli", "hugit-app"]
+    },
+    {
+      "id": "mid_change",
+      "changed_paths": ["crates/hugit-checks/src/lib.rs"],
+      "golden_affected": ["hugit-checks", "hugit-cli", "hugit-app"]
+    },
+    {
+      "id": "tip_change",
+      "changed_paths": ["crates/hugit-cli/src/lib.rs"],
+      "golden_affected": ["hugit-cli", "hugit-app"]
+    }
+  ],
+  "verdict_ground_truth_case": {
+    "change_id": "pr-42",
+    "changed_paths": ["crates/hugit-checks/src/lib.rs"],
+    "golden_affected": ["hugit-checks", "hugit-cli", "hugit-app"]
+  }
+}

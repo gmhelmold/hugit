@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 hugit-contracts = { path = "../hugit-contracts" }
+hugit-checks = { path = "../hugit-checks" }
 sha2 = "0.10"
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
