@@ -7,11 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- feat(queue): C10 — pricing no-shock: per-surface cap/degrade + pre-exhaustion warning + zero-overage billing fixture (WP-C10)
+- feat(ledger): D11 — session journals + ctx resume: tenant-private journal objects bound to ws/intent, within-horizon reconstruction, beyond-horizon documented refusal (WP-D11)
 
 - feat(proto): D2a — git wire read path: protocol-v2 negotiate/ls-refs/want-have, pack assembly from CAS, byte-identical clone + delta-only fetch (WP-D2a)
 
-- feat(ledger): D11 — session journals + ctx resume: tenant-private journal objects bound to ws/intent, within-horizon reconstruction, beyond-horizon documented refusal (WP-D11)
+- feat(queue): C10 — pricing no-shock: per-surface cap/degrade + pre-exhaustion warning + zero-overage billing fixture (WP-C10)
+
+- feat(diag): D8 — experiment harness + gate binds (claims/regen blocked until PASS) (WP-D8)
 
 - feat(app): B6 — intent sidecar: parse/validate/render + corpus to CAS ref (WP-B6)
 

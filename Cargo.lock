@@ -667,6 +667,13 @@ dependencies = [
 [[package]]
 name = "hugit-diag"
 version = "0.1.0"
+dependencies = [
+ "hex",
+ "hugit-contracts",
+ "serde",
+ "serde_json",
+ "sha2",
+]
 
 [[package]]
 name = "hugit-fence"
