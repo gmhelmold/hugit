@@ -344,6 +344,13 @@ dependencies = [
 [[package]]
 name = "hugit-ledger"
 version = "0.1.0"
+dependencies = [
+ "hugit-contracts",
+ "hugit-refstore",
+ "schemars",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "hugit-mirror"
