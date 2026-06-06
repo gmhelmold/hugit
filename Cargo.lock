@@ -693,7 +693,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "hugit-contracts",
+ "hugit-ledger",
  "hugit-runner",
+ "serde_json",
 ]
 
 [[package]]
