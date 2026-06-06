@@ -7,5 +7,11 @@ publish = false
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+hugit-contracts = { path = "../hugit-contracts" }
+hugit-queue = { path = "../hugit-queue" }
 
 [dev-dependencies]
+
+[[test]]
+name = "acceptance_c8"
+path = "tests/acceptance_c8.rs"
