@@ -7,13 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- feat(ledger): D11 — session journals + ctx resume: tenant-private journal objects bound to ws/intent, within-horizon reconstruction, beyond-horizon documented refusal (WP-D11)
+- feat(fence): C5b — secrets broker v0 (credentials never enter the runner; principal-chain audit; fail-closed) + active escape red-team harness (traversal/symlink/out-of-fence/fork-bomb/disk-fill contained, box residue 0) (WP-C5b)
 
-- feat(proto): D2a — git wire read path: protocol-v2 negotiate/ls-refs/want-have, pack assembly from CAS, byte-identical clone + delta-only fetch (WP-D2a)
+- feat(diag): D8 — experiment harness + gate binds (claims/regen blocked until PASS) (WP-D8)
 
 - feat(queue): C10 — pricing no-shock: per-surface cap/degrade + pre-exhaustion warning + zero-overage billing fixture (WP-C10)
 
-- feat(diag): D8 — experiment harness + gate binds (claims/regen blocked until PASS) (WP-D8)
+- feat(proto): D2a — git wire read path: protocol-v2 negotiate/ls-refs/want-have, pack assembly from CAS, byte-identical clone + delta-only fetch (WP-D2a)
+
+- feat(ledger): D11 — session journals + ctx resume: tenant-private journal objects bound to ws/intent, within-horizon reconstruction, beyond-horizon documented refusal (WP-D11)
+
+- feat(runner): E4 — Actions-YAML shim v0: published supported-subset contract (15 features, proven-to-execute), explicit out-of-contract actionable reports, secrets fail-CLOSED via broker (red-team asserted), execution equivalence harness with determinism-precondition gate (PARTIAL: shim lane green, live GH lane wired) (WP-E4)
 
 - feat(app): B6 — intent sidecar: parse/validate/render + corpus to CAS ref (WP-B6)
 
@@ -34,4 +38,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - feat: hugit-contracts — 15 frozen contract types + JSON Schemas + golden serde suite (WP-00)
 - feat: Rust workspace scaffold — 12 crates, CI gates (fmt/clippy/test/audit), DCO + changelog discipline (WP-01)
 - feat(runner): ephemeral runner v0 — container-per-job lease lifecycle + tmp/net isolation, teardown with forensic re-scan (WP-C2a)
-- feat(fence): C5b — secrets broker v0 (credentials never enter the runner; principal-chain audit; fail-closed) + active escape red-team harness (traversal/symlink/out-of-fence/fork-bomb/disk-fill contained, box residue 0) (WP-C5b)

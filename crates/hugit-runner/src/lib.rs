@@ -40,6 +40,7 @@ pub mod expiry;
 pub mod isolation;
 pub mod lease;
 pub mod recovery;
+pub mod shim;
 pub mod teardown;
 
 pub use isolation::{Engine, IsolationProbe, RunningContainer};
