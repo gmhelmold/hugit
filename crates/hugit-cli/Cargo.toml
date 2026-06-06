@@ -15,3 +15,10 @@ serde_json = "1"
 [dev-dependencies]
 hugit-contracts = { path = "../hugit-contracts" }
 serde_json = "1"
+
+# WP-D9: the attention-queue oracle lives under the module's own tests/ dir
+# (per WP-D9 Claims: crates/hugit-cli/attention/tests/), so it needs an explicit
+# test target — non-default path.
+[[test]]
+name = "acceptance_d9"
+path = "attention/tests/acceptance_d9.rs"
