@@ -1,1 +1,3 @@
-//! hugit-mirror — scaffold (Day 0); body lands in its owning WP.
+//! hugit-mirror — status/badge compatibility emitter (WP-E3).
+
+pub mod status;

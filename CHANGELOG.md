@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(mirror): E3 — status/badge compat emitter: CheckResult→GitHub status, staleness-bound badge, 429/5xx backoff→true-state, no stuck-pending (WP-E3)
+
 - feat(app): B6 — intent sidecar: parse/validate/render + corpus to CAS ref (WP-B6)
 
 - feat: hugit-checks/affected — affected-target engine v0; cargo/pnpm/turbo graph adapters, root-edit full-set, fail-open policy (WP-B3)
