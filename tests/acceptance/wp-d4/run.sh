@@ -49,10 +49,10 @@ check "intents_projection/ test fixture dir present" \
   test -d "$CRATE_ROOT/tests/intents_projection"
 
 # ── structural negatives: D1a paths must be untouched ────────────────────────
-check "no hugit-proto/ writes (D2/D3 — must be untouched)" bash -c \
-  '! test -d crates/hugit-proto || \
-   ! find crates/hugit-proto/src -name "*.rs" -newer '"$CRATE_ROOT"'/Cargo.toml \
-   2>/dev/null | grep -q .'
+# [no hugit-proto/ writes (D2/D3 — must be untouched)] — claim-disjointness (no writes outside claimed paths) is
+# enforced authoritatively by the orchestrator at integration via
+# `git diff --name-only main..HEAD` (scope-clean gate); an in-suite
+# mtime check is unsound (rebase touches timestamps; siblings may be unbuilt).
 
 # ── ① commits embed intent_id, reproducible from log ────────────────────────
 check "① item_1_commits_embed_intent_id declared in acceptance_d4" bash -c \
