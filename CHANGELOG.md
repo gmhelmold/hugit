@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- feat(mirror): E3 — status/badge compat emitter: CheckResult→GitHub status, staleness-bound badge, 429/5xx backoff→true-state, no stuck-pending (WP-E3)
+- feat(ledger): D5 — hugit ledger + watch TUI v0 + fleet schema (WP-D5)
 
 - feat(app): B6 — intent sidecar: parse/validate/render + corpus to CAS ref (WP-B6)
 
