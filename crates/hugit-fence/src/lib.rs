@@ -16,8 +16,9 @@
 //!   the fence, and probe the live box to prove that an access outside the
 //!   `path_set` returns ENOENT (the file isn't there).
 //!
-//! The secrets broker + escape red-team harness are **WP-C5b** (a `broker`
-//! submodule, disjoint from this crate's claims); C5a holds no credentials.
+//! The secrets broker + escape red-team harness are **WP-C5b** (the
+//! [`broker`] submodule, disjoint from C5a's `{materialize, enforce}` claims);
+//! C5a holds no credentials.
 //!
 //! # Runtime: container-per-job (consumes WP-C2a)
 //! The fence does **not** re-implement materialization or the box transport.
@@ -27,8 +28,16 @@
 //! `FenceManifest`. The C2a lease lifecycle / isolation / teardown are
 //! consumed, never rewritten.
 
+pub mod broker;
 pub mod enforce;
 pub mod materialize;
 
+pub use broker::{
+    AttackVector, ContainerLimits, ContainmentReport, RedTeamHarness, RedTeamOutcome,
+};
+pub use broker::{
+    AuditOutcome, AuditRecord, Broker, BrokerError, BrokerOp, BrokerRequest, BrokerResponse,
+    CredentialScan, SecretRef, SecretStore, scan_credential_absent,
+};
 pub use enforce::{FenceVerdict, FenceViolation, classify, probe_outside_enoent};
 pub use materialize::{CandidateEntry, MaterializeError, materialize_sparse};
