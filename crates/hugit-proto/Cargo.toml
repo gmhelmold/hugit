@@ -7,6 +7,9 @@ publish = false
 [dependencies]
 # Refs are the D1 event-log derived view — consumed, never owned here.
 hugit-refstore = { path = "../hugit-refstore" }
+# EventRecord envelope — D3b's write path appends external-change events to the
+# D1 log; consumed frozen from the contracts crate, never redefined here.
+hugit-contracts = { path = "../hugit-contracts" }
 # libgit2-class git library (gitoxide): canonical object hashing + pack format.
 # We wire it to CAS-backed object access; we do NOT reimplement git's wire bits.
 gix-hash = "0.22"
