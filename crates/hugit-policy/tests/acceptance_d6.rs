@@ -12,6 +12,7 @@ use hugit_policy::{
     Engine, EvalContext, GateOutcome, changelog, dco, emit_policy_change, landing_gate_check,
     secrets,
 };
+use hugit_refstore::{GENESIS_PREV_HASH, canonical_json, compute_this_hash};
 use std::collections::HashMap;
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -272,6 +273,31 @@ fn item_3_policy_change_audited() {
         event1.this_hash.len(),
         64,
         "this_hash must be a 64-char hex SHA-256"
+    );
+
+    // ── item③ oracle: hash must equal the canonical refstore formula ──────────
+    // Recompute the EXPECTED this_hash using hugit_refstore::compute_this_hash.
+    // The payload emitted by emit_policy_change is serde_json::json!({"old":…,"new":…}).to_string();
+    // BTreeMap key order puts "new" before "old", producing canonical JSON already.
+    // canonical_json must return the same bytes; we pin it explicitly.
+    let expected_payload_raw = serde_json::json!({
+        "old": old_gates,
+        "new": new_gates,
+    })
+    .to_string();
+    let expected_payload =
+        canonical_json(&expected_payload_raw).expect("fixture payload must be valid JSON");
+    let expected_this_hash = compute_this_hash(
+        GENESIS_PREV_HASH,
+        "policy.change",
+        &[String::from("alice@example.com")],
+        &expected_payload,
+        0,
+    );
+    assert_eq!(
+        event1.this_hash, expected_this_hash,
+        "this_hash must equal canonical refstore formula (compute_this_hash); \
+         bespoke hasher diverges — route via hugit_refstore::compute_this_hash"
     );
 
     // Payload contains old and new gate JSON
