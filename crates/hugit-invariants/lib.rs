@@ -36,3 +36,6 @@ pub mod x12;
 // ── WP-X8: self-release attestation invariants ───────────────────────────────
 #[path = "x8/lib.rs"]
 pub mod x8;
+// ── WP-X9: cross-phase object identity invariants ─────────────────────────────
+#[path = "x9/lib.rs"]
+pub mod x9;
