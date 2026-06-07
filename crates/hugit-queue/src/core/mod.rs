@@ -18,9 +18,10 @@ pub mod state;
 pub mod union;
 
 pub use affected::AffectedSet;
-pub use batch::{Batch, BatchEntry};
+pub use batch::{Batch, BatchEntry, BatchError};
 pub use order::{LandingError, LandingStep, land_in_order, landed_in_order};
 pub use state::{EntryState, TransitionError, UnionOutcome, transition};
 pub use union::{
-    CheckSource, MemoCheck, UnionEvaluation, UnionVerdict, disjoint_lanes, evaluate_union,
+    CheckSource, FailureLocus, MemoCheck, UnionEvaluation, UnionVerdict, disjoint_lanes,
+    evaluate_union,
 };

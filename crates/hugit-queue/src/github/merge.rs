@@ -104,20 +104,30 @@ pub trait MergeApi {
 ///
 /// 1. Run B4a's pure `land_in_order` to compute which entries land and in what
 ///    order (the engine is the single source of ordering truth — ⑤).
-/// 2. For each entry the engine moved to `Landed`, in queue order, call the
-///    GitHub merge API with the honored merge method (⑥).
+/// 2. For each entry the engine moved to `Landed`, in queue order, first ENFORCE
+///    stale-head at the engine — compare the union-tested `expected_head`
+///    (`head_for`) against the live head (`live_head_for`); a mismatch is a
+///    concurrent force-push under us, rejected with [`MergeError::StaleHead`]
+///    BEFORE any merge call (③) — then call the GitHub merge API with the
+///    honored merge method (⑥).
+///
+/// The stale-head check is enforced HERE, not merely delegated to the
+/// `MergeApi` implementation: even an implementation that ignores
+/// `expected_head` cannot land a stale union, because the engine refuses before
+/// `merge` is ever reached. (The trait contract still asks implementations to
+/// re-verify against the *truly* live head at merge time, closing the residual
+/// TOCTOU; the engine check is the load-bearing, testable guard.)
 ///
 /// Only engine-`Landed` entries are merged, so main stays green by
-/// construction. The merge call carries the union-tested head, so a concurrent
-/// force-push is caught as [`MergeError::StaleHead`] rather than landing a
-/// stale union (③). The whole driver is replay-safe (④): re-driving a batch
-/// whose entries are already terminal merges nothing new, and an idempotent
+/// construction. The whole driver is replay-safe (④): re-driving a batch whose
+/// entries are already terminal merges nothing new, and an idempotent
 /// `MergeApi::merge` makes a mid-land crash safe to resume.
 pub fn drive_atomic_merge<A: MergeApi>(
     batch: &mut Batch,
     outcomes: &[(&str, UnionOutcome)],
     method_for: impl Fn(&str) -> MergeMethod,
     head_for: impl Fn(&str) -> String,
+    live_head_for: impl Fn(&str) -> String,
     api: &mut A,
 ) -> Result<MergeOutcome, MergeError> {
     // Engine decides the ordered set of landed entries (B4a). A refusal here is
@@ -131,9 +141,19 @@ pub fn drive_atomic_merge<A: MergeApi>(
             // touched on GitHub. No force path exists.
             continue;
         }
+        let expected_head = head_for(&step.item_id);
+        // ENGINE-LEVEL stale-head enforcement (③): if the live head no longer
+        // matches the union-tested head, a force-push landed under us. Refuse
+        // before merging — independent of what the MergeApi impl checks.
+        let live_head = live_head_for(&step.item_id);
+        if live_head != expected_head {
+            return Err(MergeError::StaleHead {
+                item_id: step.item_id.clone(),
+            });
+        }
         let record = MergeRecord {
             item_id: step.item_id.clone(),
-            expected_head: head_for(&step.item_id),
+            expected_head,
             method: method_for(&step.item_id),
         };
         api.merge(&record)?;
@@ -182,6 +202,11 @@ mod tests {
         }
     }
 
+    /// Live head matches the union-tested head for every id (the steady state).
+    fn matching_live_head(id: &str) -> String {
+        format!("head-{id}")
+    }
+
     #[test]
     fn merge_method_round_trips() {
         for (s, m) in [
@@ -214,6 +239,7 @@ mod tests {
                 _ => MergeMethod::Merge,
             },
             |id| format!("head-{id}"),
+            matching_live_head,
             &mut api,
         )
         .unwrap();
@@ -226,15 +252,16 @@ mod tests {
     }
 
     #[test]
-    fn failing_pair_member_is_never_merged() {
+    fn failing_pair_member_is_excluded_innocent_successor_still_merges() {
+        // a is an excluded failing-pair member; b is innocent and green. With
+        // pair-exclusion semantics the engine lands b transparently (a is never
+        // merged). The driver merges only b.
         let mut b = batch(&[("a", 0), ("b", 1)]);
         let mut api = RecordingApi {
             calls: Vec::new(),
             stale: None,
         };
-        // a fails the union → engine refuses to land b out of order. The driver
-        // surfaces the engine refusal; nothing is merged.
-        let err = drive_atomic_merge(
+        let out = drive_atomic_merge(
             &mut b,
             &[
                 ("a", UnionOutcome::FailingPairMember),
@@ -242,15 +269,21 @@ mod tests {
             ],
             |_| MergeMethod::Merge,
             |id| format!("head-{id}"),
+            matching_live_head,
             &mut api,
         )
-        .unwrap_err();
-        assert!(matches!(err, MergeError::Engine(_)));
-        assert!(api.calls.is_empty(), "no PR was merged");
+        .unwrap();
+        assert_eq!(out.merged, vec!["b"], "innocent successor lands");
+        let merged_ids: Vec<&str> = api.calls.iter().map(|c| c.item_id.as_str()).collect();
+        assert_eq!(merged_ids, vec!["b"]);
+        assert!(
+            !merged_ids.contains(&"a"),
+            "the excluded failing-pair member is never merged"
+        );
     }
 
     #[test]
-    fn stale_head_blocks_merge() {
+    fn stale_head_blocks_merge_when_api_checks() {
         let mut b = batch(&[("a", 0)]);
         let mut api = RecordingApi {
             calls: Vec::new(),
@@ -261,6 +294,7 @@ mod tests {
             &[("a", UnionOutcome::Green)],
             |_| MergeMethod::Merge,
             |id| format!("head-{id}"),
+            matching_live_head,
             &mut api,
         )
         .unwrap_err();

@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(ledger): R-ledger — complete view-redaction coverage + surface malformed records (remediation): routes intent_id/campaign/deep_link_target through redact::apply in the ledger projection (previously surfaced raw); adds redaction to fleet workspace_id/agent_id and deeplink target; adds FleetState.malformed counter (malformed payloads are counted, never coalesced to "unknown"); adds EventClass::Other so unknown event kinds no longer mislabel as Landing. Oracle-first: six new acceptance assertions go RED on old code, GREEN after fix. D5/D11 preserved green.
+
 - fix(contracts,refstore): R0 — single-source + byte-exact hash-chain/memo-key/attestation formula: canonical `compute_this_hash`/`compute_memo_key`/`canonical_json`/`attestation_sig_preimage` in hugit-refstore (the one source of truth), byte-exact frozen doc-specs in contracts (LP/VEC framing, recorded_at excluded, canonical-JSON payload, 64-ASCII-'0' genesis), and an independent cross-crate hash-pin so re-transcription drift (brutal-review R1) goes RED (WP-R0)
 
-- fix(ledger): R-ledger — complete view-redaction coverage + surface malformed records (remediation): routes intent_id/campaign/deep_link_target through redact::apply in the ledger projection (previously surfaced raw); adds redaction to fleet workspace_id/agent_id and deeplink target; adds FleetState.malformed counter (malformed payloads are counted, never coalesced to "unknown"); adds EventClass::Other so unknown event kinds no longer mislabel as Landing. Oracle-first: six new acceptance assertions go RED on old code, GREEN after fix. D5/D11 preserved green.
+- fix(queue): R-queue — THE WEDGE remediation (oracle-first). Pair-exclusion now lands end-to-end: a `UnionFail` predecessor is transparent, so innocent successors behind an excluded pair actually land (was structurally blocked by the ordering gate). Recovery replay on the same batch is idempotent (no `AlreadyTerminal` hard-error). Bisection is minimal+honest: an individually-red item is a `SingleItem` failure (never a false pair), and an unlocalisable red union is an explicit `Unlocalised` (never a silent empty drop). Duplicate `order_index` is rejected at batch construction. Stale-head is enforced at the engine, not delegated — a force-pushed stale union is refused even when the `MergeApi` ignores `expected_head` (WP-R-queue)
 
 - feat(runner): C9 — workspace lifecycle: attach/resume/spawn-dedup, local≡remote (WP-C9)
 

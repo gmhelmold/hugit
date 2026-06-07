@@ -79,6 +79,23 @@ impl MergeApi for FakeMergeApi {
     }
 }
 
+/// A merge API that IGNORES `expected_head` entirely — it blindly merges
+/// whatever it is handed (modelling a buggy/old transport that forgot the
+/// stale-head check). Used to prove the ENGINE catches staleness on its own
+/// (defect 6): if the engine relied on the impl, this double would let a stale
+/// union land.
+#[derive(Default)]
+struct BlindMergeApi {
+    merged: Vec<String>,
+}
+impl MergeApi for BlindMergeApi {
+    fn merge(&mut self, record: &MergeRecord) -> Result<(), MergeError> {
+        // No expected_head verification at all.
+        self.merged.push(record.item_id.clone());
+        Ok(())
+    }
+}
+
 // ── ③ force-push recompute ────────────────────────────────────────────────────
 
 #[test]
@@ -165,15 +182,18 @@ fn item_4_crash_idempotent_kill_test_no_double_merge_no_lost_batch() {
 
 #[test]
 fn item_4_crash_idempotent_double_replay_is_a_noop() {
-    // Kill-then-restart-then-kill-then-restart: replaying a fully-landed batch
-    // merges nothing new and never produces a false green.
+    // Kill-then-restart-then-kill-then-restart, replaying the SAME in-memory
+    // batch object (defect 2): the worker re-drives recovery without rebuilding
+    // the batch from the queue. The first pass lands a,b (entries terminal); the
+    // second pass MUST tolerate already-terminal entries idempotently — NOT
+    // hard-error with AlreadyTerminal — and merge nothing new.
     let mut durable = LandLog::new();
     let outcomes = [("a", UnionOutcome::Green), ("b", UnionOutcome::Green)];
     let mut api = FakeMergeApi::default();
 
-    let mut b1 = batch(&[("a", 0), ("b", 1)]);
+    let mut b = batch(&[("a", 0), ("b", 1)]);
     let first = recover_and_replay(
-        &mut b1,
+        &mut b,
         &outcomes,
         |_| MergeMethod::Squash,
         |id| format!("head-{id}"),
@@ -183,18 +203,18 @@ fn item_4_crash_idempotent_double_replay_is_a_noop() {
     .unwrap();
     assert_eq!(first.newly_merged, vec!["a", "b"]);
 
-    // Restart with a fresh batch instance; durable log already complete.
-    let mut b2 = batch(&[("a", 0), ("b", 1)]);
+    // Replay on the SAME batch object — must be idempotent, not an error.
     let second = recover_and_replay(
-        &mut b2,
+        &mut b,
         &outcomes,
         |_| MergeMethod::Squash,
         |id| format!("head-{id}"),
         &mut durable,
         &mut api,
     )
-    .unwrap();
+    .expect("replaying the same batch is idempotent, not an AlreadyTerminal error");
     assert!(second.newly_merged.is_empty(), "replay merges nothing new");
+    assert_eq!(second.already_merged, vec!["a", "b"]);
     assert_eq!(api.counts.get("a"), Some(&1), "a merged exactly once");
     assert_eq!(api.counts.get("b"), Some(&1), "b merged exactly once");
 }
@@ -231,6 +251,8 @@ fn item_6_merge_method_is_honored_on_land() {
             _ => MergeMethod::Squash,
         },
         |id| format!("head-{id}"),
+        // Live heads match the union-tested heads (the steady state).
+        |id| format!("head-{id}"),
         &mut api,
     )
     .unwrap();
@@ -240,6 +262,60 @@ fn item_6_merge_method_is_honored_on_land() {
         methods,
         vec!["rebase", "squash"],
         "configured method honored"
+    );
+}
+
+/// Defect 6 (stale-head enforced at the ENGINE, not delegated): a force-push
+/// lands on item2's head while items 1 and 3 are unchanged. Even with a
+/// `MergeApi` that IGNORES `expected_head` entirely, the engine must catch the
+/// staleness and refuse — item2 must NOT merge against the stale union. On
+/// `main` (delegated-only) the BlindMergeApi would happily merge the stale head.
+#[test]
+fn item_6_engine_enforces_stale_head_even_when_api_ignores_it() {
+    let mut b = batch(&[("item1", 0), ("item2", 1), ("item3", 2)]);
+    let mut api = BlindMergeApi::default();
+
+    let err = drive_atomic_merge(
+        &mut b,
+        &[
+            ("item1", UnionOutcome::Green),
+            ("item2", UnionOutcome::Green),
+            ("item3", UnionOutcome::Green),
+        ],
+        |_| MergeMethod::Merge,
+        // The union-tested heads.
+        |id| format!("head-{id}"),
+        // Live heads: item2 was force-pushed under us (head differs); 1 and 3
+        // are fine.
+        |id| {
+            if id == "item2" {
+                "head-item2-FORCED".to_string()
+            } else {
+                format!("head-{id}")
+            }
+        },
+        &mut api,
+    )
+    .expect_err("a stale head must be caught by the engine");
+
+    assert_eq!(
+        err,
+        MergeError::StaleHead {
+            item_id: "item2".to_string()
+        },
+        "the engine refuses the stale union for item2"
+    );
+    // item1 merged (it preceded the stale entry and was fresh); item2 NEVER
+    // merged despite the blind API; the driver stopped at the stale head so
+    // item3 has not merged either — main never received the stale union.
+    assert_eq!(
+        api.merged,
+        vec!["item1"],
+        "only the fresh predecessor landed"
+    );
+    assert!(
+        !api.merged.contains(&"item2".to_string()),
+        "the stale entry never merged, even though the API ignores expected_head"
     );
 }
 

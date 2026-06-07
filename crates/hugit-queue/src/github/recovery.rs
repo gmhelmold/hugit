@@ -4,8 +4,9 @@
 //! invariants supplied by B4a:
 //!
 //! 1. The state machine's terminal states (`Landed` / `UnionFail`) never
-//!    transition again — replaying a transition on a terminal entry is a no-op
-//!    refusal, so re-driving a batch is idempotent.
+//!    transition again — `land_in_order` SKIPS a terminal entry as a no-op and
+//!    re-reports its state, so re-driving the SAME batch is idempotent (no
+//!    `AlreadyTerminal` hard error, even on repeated replay).
 //! 2. The merge API ([`crate::github::merge::MergeApi`]) is idempotent:
 //!    merging an already-merged PR succeeds without a second merge.
 //!
@@ -101,7 +102,10 @@ pub fn recover_and_replay<A: MergeApi>(
 ) -> Result<RecoveryOutcome, MergeError> {
     // Recompute the engine decision deterministically (B4a). Crucially, the
     // engine is a pure function of the batch + outcomes, so the post-crash
-    // replay yields the SAME ordered landed set as the pre-crash run.
+    // replay yields the SAME ordered landed set as the pre-crash run. Replaying
+    // the SAME batch object (entries already terminal) is an idempotent no-op,
+    // not an error — `land_in_order` skips terminal entries and re-reports their
+    // state, so a second recovery pass merges nothing new.
     crate::core::order::land_in_order(batch, outcomes).map_err(MergeError::Engine)?;
     let landed = landed_in_order(batch);
 
@@ -209,18 +213,21 @@ mod tests {
     }
 
     #[test]
-    fn double_replay_is_idempotent_no_false_green() {
+    fn double_replay_on_the_same_batch_is_idempotent_no_false_green() {
+        // The kill-test replays the SAME in-memory batch object twice — exactly
+        // what happens when a worker re-drives recovery without rebuilding the
+        // batch. The first pass lands a,b (entries become terminal); the second
+        // pass MUST tolerate the already-terminal entries (no AlreadyTerminal
+        // hard error) and merge nothing new.
         let mut durable = LandLog::new();
-        let mk = || batch(&[("a", 0), ("b", 1)]);
         let outcomes = [("a", UnionOutcome::Green), ("b", UnionOutcome::Green)];
         let mut api = CountingIdempotentApi {
             counts: BTreeMap::new(),
         };
 
-        // First land (fresh batch instance).
-        let mut b1 = mk();
+        let mut b = batch(&[("a", 0), ("b", 1)]);
         let first = recover_and_replay(
-            &mut b1,
+            &mut b,
             &outcomes,
             |_| MergeMethod::Merge,
             |id| format!("head-{id}"),
@@ -230,18 +237,16 @@ mod tests {
         .unwrap();
         assert_eq!(first.newly_merged, vec!["a", "b"]);
 
-        // Crash + restart: a brand-new batch instance is rebuilt from the queue,
-        // but the durable log already has both → replay merges nothing new.
-        let mut b2 = mk();
+        // Replay on the SAME batch (entries already terminal).
         let second = recover_and_replay(
-            &mut b2,
+            &mut b,
             &outcomes,
             |_| MergeMethod::Merge,
             |id| format!("head-{id}"),
             &mut durable,
             &mut api,
         )
-        .unwrap();
+        .expect("replaying the same batch is idempotent, not an error");
         assert!(second.newly_merged.is_empty(), "replay merges nothing new");
         assert_eq!(second.already_merged, vec!["a", "b"]);
 
