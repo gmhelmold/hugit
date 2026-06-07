@@ -3,6 +3,7 @@
 //! Module layout:
 //! - `driver/` — the regen driver framework + Cargo.lock + pnpm-lock drivers
 //!   (WP-C4 Claims boundary).
-//! - `gate/` — promotion gate (D12, not in this WP).
+//! - `gate/` — regenerative-rebase landing gate (WP-D12 Claims boundary).
 
 pub mod driver;
+pub mod gate;
