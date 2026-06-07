@@ -127,9 +127,15 @@ struct Inner {
     /// The one writer. Exactly one submitter holds this lock at a time; that is
     /// the serialization point.
     log: Mutex<EventLog>,
-    /// Operations currently admitted but not yet returned from the critical
-    /// section. The admission gate keeps this `<= capacity`.
-    in_flight: AtomicUsize,
+    /// Admission gate. A non-blocking counting semaphore of `capacity` permits:
+    /// every accepted submission holds exactly one permit from *before* it takes
+    /// the writer lock until *after* that lock drops, so the number of admitted
+    /// in-flight operations is, by construction, the number of permits checked
+    /// out — and that can never exceed `capacity`. Over-capacity submissions are
+    /// refused (no permit) rather than queued or dropped. Pairing the permit's
+    /// lifetime with the lock's is what makes the bound hold under concurrent
+    /// admission: there is no window where admission is granted but uncounted.
+    gate: Semaphore,
     /// Admission bound for back-pressure. `usize::MAX` means unbounded admission
     /// (pure serialization with no rejection).
     capacity: usize,
@@ -154,11 +160,12 @@ impl Serializer {
 
     /// Wrap an existing (possibly rehydrated) log with the given admission bound.
     pub fn from_log(log: EventLog, capacity: usize) -> Self {
+        let capacity = capacity.max(1);
         Self {
             inner: Arc::new(Inner {
                 log: Mutex::new(log),
-                in_flight: AtomicUsize::new(0),
-                capacity: capacity.max(1),
+                gate: Semaphore::new(capacity),
+                capacity,
             }),
         }
     }
@@ -166,6 +173,22 @@ impl Serializer {
     /// The admission capacity (max in-flight operations before back-pressure).
     pub fn capacity(&self) -> usize {
         self.inner.capacity
+    }
+
+    /// The number of operations currently admitted (holding an admission permit):
+    /// granted before the writer lock and released after it drops. Invariant:
+    /// `in_flight() <= capacity()` at every instant. Exposed for load-test
+    /// instrumentation of the back-pressure bound.
+    pub fn in_flight(&self) -> usize {
+        self.inner.gate.in_use()
+    }
+
+    /// The peak number of simultaneously-admitted operations observed so far
+    /// (high-water mark of [`Serializer::in_flight`]). A correct admission gate
+    /// keeps this `<= capacity()`; a load test asserts exactly that to catch any
+    /// transient breach of the bound under contention.
+    pub fn peak_in_flight(&self) -> usize {
+        self.inner.gate.peak()
     }
 
     /// Number of records on the chain (taken under the writer lock).
@@ -204,31 +227,26 @@ impl Serializer {
     /// Otherwise the operation is counted in-flight, appended, then counted out,
     /// guaranteeing `records_appended == submissions_accepted`.
     pub fn submit(&self, op: Op) -> Result<EventRecord, SubmitError> {
-        // ── Admission gate: reserve an in-flight slot or refuse (back-pressure).
-        // CAS loop so the bound is honoured exactly under contention.
-        let cap = self.inner.capacity;
-        loop {
-            let cur = self.inner.in_flight.load(Ordering::Acquire);
-            if cur >= cap {
-                return Err(SubmitError::Backpressure { capacity: cap });
+        // ── Admission gate: take one permit or refuse (back-pressure).
+        // The permit is the *only* way to be in-flight, and it is held until the
+        // end of this call — see below. Because a permit cannot be checked out
+        // beyond `capacity`, the in-flight count is bounded by construction with
+        // no admit/lock split for an interleaving to slip through.
+        let _permit = match self.inner.gate.try_acquire() {
+            Some(permit) => permit,
+            None => {
+                return Err(SubmitError::Backpressure {
+                    capacity: self.inner.capacity,
+                });
             }
-            if self
-                .inner
-                .in_flight
-                .compare_exchange_weak(cur, cur + 1, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                break;
-            }
-        }
-
-        // From here the slot is reserved; release it on every path so a refused
-        // or panicking writer cannot leak admission capacity.
-        let _slot = InFlightSlot {
-            counter: &self.inner.in_flight,
         };
 
-        // ── The single serialization point: one writer at a time.
+        // The permit is now held for the whole critical section and is released
+        // (`Drop`) only *after* the writer lock below has dropped, because `log`
+        // is declared after `_permit` and locals drop in reverse declaration
+        // order. So "permit held" ⊇ "lock held": admission can never be granted
+        // for an operation that is not yet counted, nor released for one still at
+        // the writer. The bound therefore holds under concurrent admission.
         let mut log = self
             .inner
             .log
@@ -236,7 +254,8 @@ impl Serializer {
             .map_err(|_| SubmitError::WriterPoisoned)?;
         let record = log.append(op.kind, op.principal_chain, op.payload, op.recorded_at);
         Ok(record)
-        // `log` then `_slot` drop here: lock released, in-flight decremented.
+        // `log` drops first (lock released), then `_permit` (in-flight count
+        // decremented) — every path, including the `?` error and any panic.
     }
 
     /// Run `f` against the chain's records under the writer lock — e.g. to verify
@@ -269,15 +288,143 @@ impl Default for Serializer {
     }
 }
 
-/// RAII guard that decrements the in-flight admission counter when a submission
-/// leaves the critical section by any path (success, error, or panic), so the
-/// back-pressure bound can never be permanently consumed by a lost op.
-struct InFlightSlot<'a> {
-    counter: &'a AtomicUsize,
+/// A non-blocking counting semaphore: the admission gate for back-pressure.
+///
+/// `try_acquire` either checks out one of `capacity` permits or returns `None`
+/// (caller turns that into [`SubmitError::Backpressure`]) — it never blocks and
+/// never over-issues. A checked-out [`Permit`] returns its count on `Drop`, so
+/// the live permit count (`in_use`) is exactly the number of admitted in-flight
+/// operations and is bounded by `capacity` at every instant.
+struct Semaphore {
+    /// Permits currently checked out. Bounded in `[0, capacity]` by the
+    /// compare-exchange in [`Semaphore::try_acquire`].
+    in_use: AtomicUsize,
+    /// High-water mark of `in_use`, for load-test instrumentation of the bound.
+    peak: AtomicUsize,
+    /// Total permits. `usize::MAX` means effectively unbounded admission.
+    capacity: usize,
 }
 
-impl Drop for InFlightSlot<'_> {
+impl Semaphore {
+    fn new(capacity: usize) -> Self {
+        Self {
+            in_use: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+            capacity,
+        }
+    }
+
+    /// Check out one permit, or `None` if all `capacity` are already in use.
+    ///
+    /// The bound is enforced atomically: the increment only commits while
+    /// `cur < capacity`, so the live count can never exceed `capacity` — there
+    /// is no read-then-act window for an interleaving to exploit.
+    fn try_acquire(&self) -> Option<Permit<'_>> {
+        let mut cur = self.in_use.load(Ordering::Acquire);
+        loop {
+            if cur >= self.capacity {
+                return None;
+            }
+            match self.in_use.compare_exchange_weak(
+                cur,
+                cur + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    // Record the high-water mark for the bound assertion. `cur + 1`
+                    // is the count this acquisition just established.
+                    self.peak.fetch_max(cur + 1, Ordering::AcqRel);
+                    return Some(Permit { sem: self });
+                }
+                Err(observed) => cur = observed,
+            }
+        }
+    }
+
+    /// Permits currently checked out (= admitted in-flight operations).
+    fn in_use(&self) -> usize {
+        self.in_use.load(Ordering::Acquire)
+    }
+
+    /// High-water mark of [`Semaphore::in_use`] observed since construction.
+    fn peak(&self) -> usize {
+        self.peak.load(Ordering::Acquire)
+    }
+}
+
+/// RAII permit: returns its count to the [`Semaphore`] when a submission leaves
+/// the critical section by any path (success, error, or panic), so the
+/// back-pressure bound can never be permanently consumed by a lost op.
+struct Permit<'a> {
+    sem: &'a Semaphore,
+}
+
+impl Drop for Permit<'_> {
     fn drop(&mut self) {
-        self.counter.fetch_sub(1, Ordering::AcqRel);
+        // Saturating: a permit is returned exactly once, but guard the counter
+        // so a (bug-induced) double return can never underflow `in_use` to
+        // `usize::MAX` and wedge admission shut.
+        let mut cur = self.sem.in_use.load(Ordering::Acquire);
+        loop {
+            let next = cur.saturating_sub(1);
+            match self.sem.in_use.compare_exchange_weak(
+                cur,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(observed) => cur = observed,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Defect 2 regression: an extra/double permit return must NOT underflow the
+    /// in-flight counter to `usize::MAX` (which would wedge admission shut). The
+    /// saturating decrement clamps at 0. A naive `fetch_sub(1)` would have made
+    /// this assert `usize::MAX`.
+    #[test]
+    fn permit_return_saturates_never_underflows() {
+        let sem = Semaphore::new(2);
+        // One genuine permit out, then dropped: count back to 0.
+        drop(sem.try_acquire().expect("permit available"));
+        assert_eq!(sem.in_use(), 0);
+
+        // Simulate a spurious extra return on the already-empty counter (the
+        // double-drop the original `fetch_sub` would have underflowed on).
+        let phantom = Permit { sem: &sem };
+        drop(phantom);
+        assert_eq!(
+            sem.in_use(),
+            0,
+            "an over-return must saturate at 0, never wrap to usize::MAX"
+        );
+
+        // Admission still works after the would-be underflow.
+        assert!(
+            sem.try_acquire().is_some(),
+            "admission must remain open — counter not wedged at usize::MAX"
+        );
+    }
+
+    /// The atomic bound holds: never more than `capacity` permits checked out at
+    /// once, and the surplus acquisition is refused.
+    #[test]
+    fn try_acquire_bounds_at_capacity() {
+        let sem = Semaphore::new(2);
+        let p1 = sem.try_acquire().expect("1st permit");
+        let p2 = sem.try_acquire().expect("2nd permit");
+        assert_eq!(sem.in_use(), 2);
+        assert!(sem.try_acquire().is_none(), "3rd over capacity is refused");
+        assert_eq!(sem.peak(), 2, "peak high-water mark equals capacity");
+        drop(p1);
+        drop(p2);
+        assert_eq!(sem.in_use(), 0, "all permits returned");
     }
 }
