@@ -1,0 +1,292 @@
+//! The real `hugit` binary (WP-R-cli defect #1).
+//!
+//! A thin clap dispatch shell over the existing `hugit_cli` library verbs. The
+//! binary OWNS no behavior — it parses arguments, calls the library, prints the
+//! result, and maps success/failure to the process exit code (0 on success,
+//! non-zero on any error). The wired verbs (`why`, `impact`, `tournament`,
+//! `export`) run end-to-end against the real library functions.
+//!
+//! Git-proximate by mandate: every verb token is drawn from
+//! [`hugit_cli::HUGIT_VERBS`], the single canonical registry the namespace-law
+//! invariant (WP-X5) also consumes, so the CLI surface and the invariant can
+//! never drift.
+
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use clap::{Parser, Subcommand};
+
+use hugit_cli::export::{self, AccountState, Corpus};
+use hugit_cli::impact::{ImpactQuery, compute_impact};
+use hugit_cli::tournament::{MAX_N_POLICY, produce_candidates};
+use hugit_cli::why::resolver::LogEntry;
+use hugit_cli::why::{WhyQuery, resolve_why};
+
+use hugit_checks::affected::{BuildGraph, Ecosystem, PackageNode};
+use hugit_contracts::{AttestationChain, EventRecord, IntentSidecar};
+
+use serde::Deserialize;
+
+/// `hugit` — the git-compatible, LLM-native forge CLI.
+#[derive(Parser, Debug)]
+#[command(name = "hugit", version, about = "hugit — the git-native LLM forge", long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+/// The hugit verb surface. Token names MUST stay in lockstep with
+/// [`hugit_cli::HUGIT_VERBS`] (asserted by the bin's own oracle).
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Resolve a line/symbol to its originating intent + provenance.
+    Why(WhyArgs),
+    /// Compute the build-graph blast radius of changed paths.
+    Impact(ImpactArgs),
+    /// Fan an intent out into N candidates (budget-bounded).
+    Tournament(TournamentArgs),
+    /// Dump a git artifact + JSON envelope (anti-lock-in exit proof).
+    Export(ExportArgs),
+}
+
+// ── why ────────────────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Debug)]
+struct WhyArgs {
+    /// Path to a JSON file holding the event-log entries to resolve against.
+    #[arg(long)]
+    log: PathBuf,
+    /// The file path to attribute.
+    #[arg(long)]
+    path: String,
+    /// Optional 1-based line number within the file.
+    #[arg(long)]
+    line: Option<u64>,
+    /// Optional symbol name to attribute.
+    #[arg(long)]
+    symbol: Option<String>,
+}
+
+/// The on-disk JSON shape for a single `why` log entry (the CLI's input
+/// contract — mirrors the library [`LogEntry`] without re-exporting it).
+#[derive(Deserialize)]
+struct WhyLogEntryInput {
+    record: EventRecord,
+    #[serde(default)]
+    attestation: Option<AttestationChain>,
+    #[serde(default)]
+    sidecar: Option<IntentSidecar>,
+}
+
+fn run_why(args: WhyArgs) -> Result<(), String> {
+    let bytes = std::fs::read(&args.log).map_err(|e| format!("read log {:?}: {e}", args.log))?;
+    let raw: Vec<WhyLogEntryInput> =
+        serde_json::from_slice(&bytes).map_err(|e| format!("parse log: {e}"))?;
+    let entries: Vec<LogEntry> = raw
+        .into_iter()
+        .map(|r| LogEntry {
+            record: r.record,
+            attestation: r.attestation,
+            sidecar: r.sidecar,
+        })
+        .collect();
+
+    let query = WhyQuery {
+        path: args.path,
+        line: args.line,
+        symbol: args.symbol,
+    };
+    let answer = resolve_why(&query, &entries).map_err(|e| e.to_string())?;
+    let json = serde_json::to_string_pretty(&answer).map_err(|e| e.to_string())?;
+    println!("{json}");
+    Ok(())
+}
+
+// ── impact ───────────────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Debug)]
+struct ImpactArgs {
+    /// Path to a JSON file describing the build graph.
+    #[arg(long)]
+    graph: PathBuf,
+    /// One or more changed paths (repeatable).
+    #[arg(long = "path", required = true)]
+    paths: Vec<String>,
+}
+
+/// The on-disk JSON shape for the build graph (the CLI input contract; the
+/// library `BuildGraph` is not itself `Deserialize`, so we own this seam).
+#[derive(Deserialize)]
+struct GraphInput {
+    ecosystem: String,
+    root_manifests: Vec<String>,
+    packages: Vec<PackageInput>,
+}
+
+#[derive(Deserialize)]
+struct PackageInput {
+    name: String,
+    path: String,
+    #[serde(default)]
+    direct_deps: Vec<String>,
+}
+
+fn run_impact(args: ImpactArgs) -> Result<(), String> {
+    let bytes =
+        std::fs::read(&args.graph).map_err(|e| format!("read graph {:?}: {e}", args.graph))?;
+    let input: GraphInput =
+        serde_json::from_slice(&bytes).map_err(|e| format!("parse graph: {e}"))?;
+
+    let ecosystem = match input.ecosystem.as_str() {
+        "cargo" | "Cargo" => Ecosystem::Cargo,
+        "pnpm" | "Pnpm" => Ecosystem::Pnpm,
+        "turbo" | "Turbo" => Ecosystem::Turbo,
+        other => Ecosystem::Unknown(other.to_string()),
+    };
+    let graph = BuildGraph {
+        ecosystem,
+        root_manifests: input.root_manifests,
+        packages: input
+            .packages
+            .into_iter()
+            .map(|p| PackageNode {
+                name: p.name,
+                path: p.path,
+                direct_deps: p.direct_deps,
+            })
+            .collect(),
+    };
+
+    let query = ImpactQuery {
+        changed_paths: args.paths,
+    };
+    let result = compute_impact(&query, &graph).map_err(|e| e.to_string())?;
+    let json = serde_json::to_string_pretty(&result).map_err(|e| e.to_string())?;
+    println!("{json}");
+    Ok(())
+}
+
+// ── tournament ────────────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Debug)]
+struct TournamentArgs {
+    /// Number of candidates to fan out (policy-capped).
+    #[arg(short = 'n', long = "candidates")]
+    n: usize,
+    /// The intent id to fan out.
+    #[arg(long)]
+    intent: String,
+}
+
+fn run_tournament(args: TournamentArgs) -> Result<(), String> {
+    if args.n == 0 {
+        return Err("tournament requires -n >= 1".to_string());
+    }
+    if args.n > MAX_N_POLICY {
+        return Err(format!(
+            "tournament -n {} exceeds policy cap {MAX_N_POLICY}",
+            args.n
+        ));
+    }
+    let intent = IntentSidecar {
+        intent_id: args.intent,
+        charter: String::new(),
+        acceptance: vec![],
+        context_ref: String::new(),
+        authoritative: false,
+    };
+    // Deterministic strategy labels: strat-0..strat-(n-1).
+    let labels: Vec<String> = (0..args.n).map(|i| format!("strat-{i}")).collect();
+    let strategies: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let candidates = produce_candidates(&intent, &strategies);
+    // Candidate is not a serde type; emit a deterministic plain-text summary.
+    println!(
+        "intent={} candidates={}",
+        intent.intent_id,
+        candidates.len()
+    );
+    for c in &candidates {
+        println!(
+            "  #{} strategy={} ref={} selected={}",
+            c.index, c.strategy, c.candidate_ref, c.selected
+        );
+    }
+    Ok(())
+}
+
+// ── export ────────────────────────────────────────────────────────────────────
+
+#[derive(clap::Args, Debug)]
+struct ExportArgs {
+    /// Path to a JSON file holding the corpus's event log (`{"events": [...]}`).
+    #[arg(long)]
+    log: PathBuf,
+    /// Output directory for the artifact + envelope.
+    #[arg(long)]
+    out: PathBuf,
+}
+
+/// The on-disk JSON input shape for an export corpus's event log.
+///
+/// Events are given as un-hashed *intents to append* — the hash chain is
+/// computed by [`hugit_refstore::EventLog::append`], so a caller never
+/// hand-authors (and never has to forge) the `this_hash`/`prev_hash` chain.
+#[derive(Deserialize)]
+struct ExportLogInput {
+    events: Vec<ExportEventInput>,
+}
+
+#[derive(Deserialize)]
+struct ExportEventInput {
+    kind: String,
+    #[serde(default)]
+    principal_chain: Vec<String>,
+    /// Opaque JSON payload, carried as a string.
+    payload: String,
+    #[serde(default)]
+    recorded_at: u64,
+}
+
+fn run_export(args: ExportArgs) -> Result<(), String> {
+    let bytes = std::fs::read(&args.log).map_err(|e| format!("read log {:?}: {e}", args.log))?;
+    let input: ExportLogInput =
+        serde_json::from_slice(&bytes).map_err(|e| format!("parse log: {e}"))?;
+
+    let mut event_log = hugit_refstore::EventLog::new();
+    for e in input.events {
+        // append computes the hash chain — no forged hashes accepted.
+        event_log.append(e.kind, e.principal_chain, e.payload, e.recorded_at);
+    }
+    let corpus = Corpus {
+        event_log,
+        ..Corpus::default()
+    };
+    let artifact =
+        export::export(&corpus, &args.out, AccountState::Active).map_err(|e| e.to_string())?;
+    println!(
+        "exported: git_dir={} json={} peak_buffered={}",
+        artifact.git_dir.display(),
+        artifact.json_path.display(),
+        artifact.peak_buffered
+    );
+    Ok(())
+}
+
+// ── dispatch ──────────────────────────────────────────────────────────────────
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    let result = match cli.command {
+        Command::Why(a) => run_why(a),
+        Command::Impact(a) => run_impact(a),
+        Command::Tournament(a) => run_tournament(a),
+        Command::Export(a) => run_export(a),
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(msg) => {
+            eprintln!("hugit: error: {msg}");
+            ExitCode::FAILURE
+        }
+    }
+}

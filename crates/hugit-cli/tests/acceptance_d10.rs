@@ -362,3 +362,108 @@ fn item_4_why_derived_bytes_honest() {
         "regen event must carry the model that produced the derivation"
     );
 }
+
+// ---------------------------------------------------------------------------
+// ① (line/symbol precision) two different lines on the SAME file resolve to
+//    DIFFERENT events — `why` is line/symbol-attributed, not file-level only.
+//    (Remediation R-cli defect #3.)
+// ---------------------------------------------------------------------------
+
+/// Event log where ONE file (`src/handler.rs`) is touched by two distinct
+/// intents claiming disjoint line ranges + symbols.
+fn line_attributed_log() -> Vec<LogEntry> {
+    // seq=1: lines 1..=20, symbol `parse_request`.
+    let e1 = fixture_event(
+        1,
+        INTENT_LANDED_KIND,
+        vec!["alice@example.com".to_string()],
+        serde_json::json!({
+            "intent_id": "intent-parse",
+            "charter": "Add request parser",
+            "path": "src/handler.rs",
+            "ranges": [{ "start": 1, "end": 20 }],
+            "symbols": ["parse_request"]
+        }),
+    );
+    // seq=2: lines 40..=60, symbol `write_response`.
+    let e2 = fixture_event(
+        2,
+        INTENT_LANDED_KIND,
+        vec!["bob@example.com".to_string()],
+        serde_json::json!({
+            "intent_id": "intent-respond",
+            "charter": "Add response writer",
+            "path": "src/handler.rs",
+            "ranges": [{ "start": 40, "end": 60 }],
+            "symbols": ["write_response"]
+        }),
+    );
+    vec![
+        LogEntry {
+            record: e1,
+            attestation: None,
+            sidecar: None,
+        },
+        LogEntry {
+            record: e2,
+            attestation: None,
+            sidecar: None,
+        },
+    ]
+}
+
+#[test]
+fn item_1b_why_line_symbol_attribution() {
+    let entries = line_attributed_log();
+
+    // Line 5 lives in seq=1's range — must resolve to the parser intent.
+    let q_line5 = WhyQuery {
+        path: "src/handler.rs".to_string(),
+        line: Some(5),
+        symbol: None,
+    };
+    let a5 = resolve_why(&q_line5, &entries).expect("line 5 must resolve");
+    assert_eq!(a5.event_seq, 1, "line 5 → seq=1 (parser)");
+    assert_eq!(a5.intent_id.as_deref(), Some("intent-parse"));
+
+    // Line 50 lives in seq=2's range — must resolve to the responder intent.
+    let q_line50 = WhyQuery {
+        path: "src/handler.rs".to_string(),
+        line: Some(50),
+        symbol: None,
+    };
+    let a50 = resolve_why(&q_line50, &entries).expect("line 50 must resolve");
+    assert_eq!(a50.event_seq, 2, "line 50 → seq=2 (responder)");
+    assert_eq!(a50.intent_id.as_deref(), Some("intent-respond"));
+
+    // THE invariant: two different lines on the SAME file return DIFFERENT events.
+    assert_ne!(
+        a5.event_seq, a50.event_seq,
+        "different lines on the same file MUST resolve to different events"
+    );
+
+    // Symbol attribution discriminates the same way.
+    let q_sym = WhyQuery {
+        path: "src/handler.rs".to_string(),
+        line: None,
+        symbol: Some("write_response".to_string()),
+    };
+    let a_sym = resolve_why(&q_sym, &entries).expect("symbol must resolve");
+    assert_eq!(a_sym.event_seq, 2, "symbol write_response → seq=2");
+
+    // A line that NO event range claims is REJECTED, not silently widened to a
+    // file-level answer (mis-attribution is worse than admitting unknown).
+    let q_gap = WhyQuery {
+        path: "src/handler.rs".to_string(),
+        line: Some(30),
+        symbol: None,
+    };
+    let err = resolve_why(&q_gap, &entries).expect_err("unattributed line must be rejected");
+    assert!(
+        matches!(
+            err,
+            hugit_cli::why::WhyError::LineUnresolved { line: 30, .. }
+        ),
+        "line 30 (in no range) must be LineUnresolved, got {err:?}"
+    );
+}

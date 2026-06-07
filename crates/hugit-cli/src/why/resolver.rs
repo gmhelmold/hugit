@@ -94,6 +94,14 @@ pub enum WhyError {
     NotFound { path: String },
     /// An event payload could not be parsed.
     BadPayload { seq: u64 },
+    /// The path is known, but the requested line could not be attributed to any
+    /// specific event range. A line/symbol query that cannot resolve to a
+    /// concrete event range is REJECTED, never silently widened to file level —
+    /// answering the wrong event is worse than admitting "unknown".
+    LineUnresolved { path: String, line: u64 },
+    /// The path is known, but the requested symbol is not attributed to any
+    /// event. Rejected rather than mis-attributed.
+    SymbolUnresolved { path: String, symbol: String },
 }
 
 impl std::fmt::Display for WhyError {
@@ -102,6 +110,15 @@ impl std::fmt::Display for WhyError {
             WhyError::NotFound { path } => write!(f, "no provenance found for `{path}`"),
             WhyError::BadPayload { seq } => {
                 write!(f, "malformed event payload at seq {seq}")
+            }
+            WhyError::LineUnresolved { path, line } => {
+                write!(f, "line {line} of `{path}` resolves to no specific event")
+            }
+            WhyError::SymbolUnresolved { path, symbol } => {
+                write!(
+                    f,
+                    "symbol `{symbol}` in `{path}` resolves to no specific event"
+                )
             }
         }
     }
@@ -151,22 +168,79 @@ pub const REGEN_DERIVED_KIND: &str = "regen.derived";
 ///    `author_kind = AuthorKind::Derived` — NEVER fabricate a human author
 ///    (item ④ / R6).
 ///
+/// ## Line + symbol attribution (the precise-`why` contract)
+///
+/// When `query.line` or `query.symbol` is set, an event matches the queried
+/// path ONLY when its payload attributes that specific line range or symbol.
+/// Two different lines on the same file therefore resolve to DIFFERENT events
+/// (each owns its own range), and a line/symbol that no event range claims is
+/// REJECTED ([`WhyError::LineUnresolved`] / [`WhyError::SymbolUnresolved`]) —
+/// never silently widened to a file-level answer, which would mis-attribute.
+///
+/// File-level back-compat: a payload that names the path but carries NO range /
+/// symbol attribution still matches a path-only query (and a line/symbol query
+/// falls back to it only when NO event in the log carries precise attribution
+/// for that path — i.e. the corpus simply has no line granularity yet).
+///
 /// ## Fixture contract
 ///
 /// `entries` is the complete log slice.  In production this would come from the
 /// refstore; in tests it is a hand-crafted fixture that doubles as the oracle.
 pub fn resolve_why(query: &WhyQuery, entries: &[LogEntry]) -> Result<ProvenanceAnswer, WhyError> {
+    // Does ANY event carry precise (range/symbol) attribution for this path?
+    // If so, a line/symbol query MUST resolve precisely or be rejected — it
+    // may not fall back to a file-level match (which would mis-attribute).
+    let path_has_precise_attribution = entries
+        .iter()
+        .any(|e| payload_attribution(&e.record.payload, &query.path).is_some_and(|a| a.precise()));
+
     // Walk in reverse so we get the most-recent (=originating for the current
-    // state) event.  For a file that was modified N times we return the latest
-    // event that touches it — which is correct: `why` answers "what last
-    // produced these bytes", not the full history.
+    // state) event among the candidates that match the query precision.
+    let mut file_level_fallback: Option<&LogEntry> = None;
+
     for entry in entries.iter().rev() {
-        if payload_references_path(&entry.record.payload, &query.path) {
+        let Some(attr) = payload_attribution(&entry.record.payload, &query.path) else {
+            continue;
+        };
+
+        // Precise match: this event's ranges/symbols claim the queried line/symbol.
+        if attr.matches(query.line, query.symbol.as_deref()) {
             return build_answer(entry).map_err(|_| WhyError::BadPayload {
                 seq: entry.record.seq,
             });
         }
+
+        // Remember the first (most-recent) file-level path match for fallback.
+        if !attr.precise() && file_level_fallback.is_none() {
+            file_level_fallback = Some(entry);
+        }
     }
+
+    // No precise match. If the query was line/symbol-specific AND the path has
+    // precise attribution somewhere, reject — answering the wrong event is worse
+    // than admitting the line/symbol is unattributed.
+    if path_has_precise_attribution {
+        if let Some(line) = query.line {
+            return Err(WhyError::LineUnresolved {
+                path: query.path.clone(),
+                line,
+            });
+        }
+        if let Some(symbol) = &query.symbol {
+            return Err(WhyError::SymbolUnresolved {
+                path: query.path.clone(),
+                symbol: symbol.clone(),
+            });
+        }
+    }
+
+    // File-level fallback (path-only query, or a path with no line granularity).
+    if let Some(entry) = file_level_fallback {
+        return build_answer(entry).map_err(|_| WhyError::BadPayload {
+            seq: entry.record.seq,
+        });
+    }
+
     Err(WhyError::NotFound {
         path: query.path.clone(),
     })
@@ -176,23 +250,105 @@ pub fn resolve_why(query: &WhyQuery, entries: &[LogEntry]) -> Result<ProvenanceA
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn payload_references_path(payload: &str, path: &str) -> bool {
-    // Parse the payload as JSON and look for a "path" or "files" key.
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) {
-        if let Some(p) = v.get("path").and_then(|x| x.as_str())
-            && p == path
-        {
+/// One event's attribution for a single queried path: the line ranges and
+/// symbols it claims. An empty attribution (path named, no ranges/symbols) is a
+/// file-level match only.
+struct PathAttribution {
+    ranges: Vec<(u64, u64)>,
+    symbols: Vec<String>,
+}
+
+impl PathAttribution {
+    /// Whether this attribution is precise (claims specific lines or symbols).
+    fn precise(&self) -> bool {
+        !self.ranges.is_empty() || !self.symbols.is_empty()
+    }
+
+    /// Whether this attribution satisfies the query's line/symbol constraints.
+    ///
+    /// - A path-only query (no line, no symbol) matches any attribution.
+    /// - A line query matches iff some range covers the line.
+    /// - A symbol query matches iff the symbol is among the claimed symbols.
+    /// - When both are set, BOTH must hold.
+    fn matches(&self, line: Option<u64>, symbol: Option<&str>) -> bool {
+        if line.is_none() && symbol.is_none() {
+            // Path-only query: a non-precise (file-level) attribution matches.
+            // A precise attribution also matches at file level.
             return true;
         }
-        if let Some(files) = v.get("files").and_then(|x| x.as_array()) {
-            for f in files {
-                if f.as_str() == Some(path) {
-                    return true;
-                }
+        let line_ok = match line {
+            None => true,
+            Some(l) => self
+                .ranges
+                .iter()
+                .any(|(start, end)| l >= *start && l <= *end),
+        };
+        let symbol_ok = match symbol {
+            None => true,
+            Some(s) => self.symbols.iter().any(|sym| sym == s),
+        };
+        line_ok && symbol_ok
+    }
+}
+
+/// Extract this payload's attribution for `path`, or `None` if the payload does
+/// not reference the path at all.
+///
+/// Supported payload shapes:
+/// - `{ "path": "<p>", "ranges": [{"start":N,"end":M}], "symbols": ["foo"] }`
+/// - `{ "files": [ "<p>", { "path":"<p>", "ranges":[…], "symbols":[…] } ] }`
+fn payload_attribution(payload: &str, path: &str) -> Option<PathAttribution> {
+    let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+
+    // Top-level single-path form.
+    if v.get("path").and_then(|x| x.as_str()) == Some(path) {
+        return Some(PathAttribution {
+            ranges: parse_ranges(v.get("ranges")),
+            symbols: parse_symbols(v.get("symbols")),
+        });
+    }
+
+    // `files` array: either bare strings or per-file objects.
+    if let Some(files) = v.get("files").and_then(|x| x.as_array()) {
+        for f in files {
+            if f.as_str() == Some(path) {
+                return Some(PathAttribution {
+                    ranges: vec![],
+                    symbols: vec![],
+                });
+            }
+            if f.get("path").and_then(|x| x.as_str()) == Some(path) {
+                return Some(PathAttribution {
+                    ranges: parse_ranges(f.get("ranges")),
+                    symbols: parse_symbols(f.get("symbols")),
+                });
             }
         }
     }
-    false
+
+    None
+}
+
+fn parse_ranges(v: Option<&serde_json::Value>) -> Vec<(u64, u64)> {
+    let Some(arr) = v.and_then(|x| x.as_array()) else {
+        return vec![];
+    };
+    arr.iter()
+        .filter_map(|r| {
+            let start = r.get("start").and_then(|x| x.as_u64())?;
+            let end = r.get("end").and_then(|x| x.as_u64())?;
+            Some((start, end))
+        })
+        .collect()
+}
+
+fn parse_symbols(v: Option<&serde_json::Value>) -> Vec<String> {
+    let Some(arr) = v.and_then(|x| x.as_array()) else {
+        return vec![];
+    };
+    arr.iter()
+        .filter_map(|s| s.as_str().map(String::from))
+        .collect()
 }
 
 fn build_answer(entry: &LogEntry) -> Result<ProvenanceAnswer, ()> {

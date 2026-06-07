@@ -37,6 +37,10 @@ pub enum CutError {
         /// The event sequence that is absent from the cut.
         event_seq: u64,
     },
+    /// Replaying the cut's refs failed — a malformed ref payload in the chain.
+    /// Propagated as a HARD export failure, never swallowed into an empty
+    /// ref-set (which would silently export zero refs with exit 0).
+    RefReplay(String),
 }
 
 impl std::fmt::Display for CutError {
@@ -50,6 +54,7 @@ impl std::fmt::Display for CutError {
                 f,
                 "cut: provenance link for '{object_id}' references absent event seq {event_seq}"
             ),
+            CutError::RefReplay(e) => write!(f, "cut: ref replay failed (malformed payload): {e}"),
         }
     }
 }
@@ -100,17 +105,23 @@ impl Cut {
     }
 
     /// Project the cut's refs (re-uses D1's deterministic [`replay`]).
-    pub fn ref_state(&self) -> RefState {
+    ///
+    /// Returns [`CutError::RefReplay`] on a malformed ref payload — a hard
+    /// export failure. NEVER swallows the error into an empty ref-set: a
+    /// silent-empty export with exit 0 would ship a corpus that drops every
+    /// branch/tag without warning.
+    pub fn ref_state(&self) -> Result<RefState, CutError> {
         // Build a fresh log over the cut's records, then replay. The cut is
         // already chain-verified, so replay cannot fail on tamper here; an
-        // internal malformed payload still fails closed.
+        // internal malformed payload still fails closed (propagated, not eaten).
         let mut log = EventLog::new();
         for r in &self.records {
             // push_record only fails on non-monotonic seq; a verified prefix is
             // gap-free by construction.
-            let _ = log.push_record(r.clone());
+            log.push_record(r.clone())
+                .map_err(|e| CutError::RefReplay(e.to_string()))?;
         }
-        replay(&log).unwrap_or_default()
+        replay(&log).map_err(|e| CutError::RefReplay(e.to_string()))
     }
 
     /// Assert that every provided provenance link references an event inside the
