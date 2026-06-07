@@ -7,6 +7,7 @@
 //! - `x2/` — attestation e2e: full chain resolves cryptographically, tampered/unsigned rejected, public verification, cross-tenant honesty (WP-X2).
 //! - `x4/` — supply-chain invariants: pinned images, verified deps, fail-closed (WP-X4).
 //! - `x5/` — namespace-law invariants: no git-verb shadow, ref-namespace non-collision (WP-X5).
+//! - `x12/` — erasure × provenance × mirror: post-erasure chain stays verifiable over a tamper-evident tombstone (no silent re-link), mirror-obligation discharged-or-disclosed in the export/exit proof (WP-X12).
 
 // ── WP-X2: attestation end-to-end invariants ─────────────────────────────────
 #[path = "x2/lib.rs"]
@@ -23,3 +24,7 @@ pub use x4_root::pin;
 // ── WP-X5: namespace-law invariants ──────────────────────────────────────────
 #[path = "x5/lib.rs"]
 pub mod x5;
+
+// ── WP-X12: erasure × provenance × mirror invariants ─────────────────────────
+#[path = "x12/lib.rs"]
+pub mod x12;

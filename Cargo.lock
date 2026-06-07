@@ -880,7 +880,9 @@ dependencies = [
  "hugit-cli",
  "hugit-contracts",
  "hugit-ledger",
+ "hugit-refstore",
  "hugit-runner",
+ "serde",
  "serde_json",
 ]
 
