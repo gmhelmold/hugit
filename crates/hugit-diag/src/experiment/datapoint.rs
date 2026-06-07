@@ -147,6 +147,7 @@ pub fn ingest(
             ExperimentEvent::IngestionRejected,
             "experiment-harness",
             &payload,
+            0,
         );
         return Err(IngestError::IneligibleSource(dp.source.label().to_string()));
     }
