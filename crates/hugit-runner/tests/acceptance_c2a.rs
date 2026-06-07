@@ -17,7 +17,46 @@ use hugit_runner::isolation::{DockerEngine, Engine};
 use hugit_runner::lease::{BoxExec, ContainerSpec, SshBox};
 use hugit_runner::teardown::teardown;
 
-const IMAGE: &str = "alpine:3.20";
+/// Tag used only to *resolve* a real content digest from the box; the spawn
+/// surface now requires a content-pinned `repo@sha256:…` reference (WP-X4 on
+/// the real path), so the tag itself is never passed to `from_lease`.
+const RESOLVE_TAG: &str = "alpine:3.20";
+
+/// Pull `RESOLVE_TAG` on the box and resolve it to a real, servable
+/// `repo@sha256:<digest>` pin. This is how a floating tag is turned into a
+/// content-pinned reference in practice.
+fn pinned_image(boxx: &SshBox) -> String {
+    let pull = boxx
+        .run(&["docker", "pull", RESOLVE_TAG])
+        .expect("docker pull failed to spawn");
+    assert!(
+        pull.ok(),
+        "docker pull {RESOLVE_TAG} failed: {}",
+        pull.stderr.trim()
+    );
+    let inspect = boxx
+        .run(&[
+            "docker",
+            "image",
+            "inspect",
+            RESOLVE_TAG,
+            "--format",
+            "{{range .RepoDigests}}{{.}}\n{{end}}",
+        ])
+        .expect("docker inspect failed to spawn");
+    inspect
+        .stdout
+        .lines()
+        .map(str::trim)
+        .find(|l| l.contains("@sha256:"))
+        .unwrap_or_else(|| {
+            panic!(
+                "no RepoDigest resolved for {RESOLVE_TAG}: {:?}",
+                inspect.stdout
+            )
+        })
+        .to_string()
+}
 
 /// Build a fresh, unique, C2a-conformant lease.
 fn fresh_lease(slug: &str) -> RunnerLease {
@@ -70,18 +109,6 @@ fn live_box() -> SshBox {
     boxx
 }
 
-/// Ensure the job image is present on the box.
-fn ensure_image(boxx: &SshBox) {
-    let pull = boxx
-        .run(&["docker", "pull", IMAGE])
-        .expect("docker pull failed to spawn");
-    assert!(
-        pull.ok(),
-        "docker pull {IMAGE} failed: {}",
-        pull.stderr.trim()
-    );
-}
-
 // ── ① destroy leaves nothing (forensic re-scan) ─────────────────────────────
 #[test]
 fn item_1_destroy_leaves_nothing() {
@@ -89,9 +116,9 @@ fn item_1_destroy_leaves_nothing() {
         return;
     }
     let boxx = live_box();
-    ensure_image(&boxx);
+    let image = pinned_image(&boxx);
     let lease = fresh_lease("destroy");
-    let spec = ContainerSpec::from_lease(&lease, IMAGE).expect("derive spec");
+    let spec = ContainerSpec::from_lease(&lease, &image).expect("derive spec");
     let engine = DockerEngine::new(boxx.clone());
 
     // Spawn + run one job, proving the container was really live.
@@ -134,9 +161,9 @@ fn item_2_lease_isolation() {
         return;
     }
     let boxx = live_box();
-    ensure_image(&boxx);
+    let image = pinned_image(&boxx);
     let lease = fresh_lease("isolation");
-    let spec = ContainerSpec::from_lease(&lease, IMAGE).expect("derive spec");
+    let spec = ContainerSpec::from_lease(&lease, &image).expect("derive spec");
     let engine = DockerEngine::new(boxx.clone());
 
     let container = engine.spawn(&spec).expect("spawn isolated container");

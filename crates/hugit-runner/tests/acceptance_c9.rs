@@ -37,7 +37,10 @@ use hugit_runner::ws::{
     resume_workspace, run_local, run_remote, spawn_timed, spawn_workspace,
 };
 
-const IMAGE: &str = "alpine:3.20";
+/// Tag used only to *resolve* a real content digest from the box; the spawn
+/// surface now requires a content-pinned `repo@sha256:…` reference (WP-X4 on
+/// the real path), so the tag itself is never passed to a spawn.
+const RESOLVE_TAG: &str = "alpine:3.20";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -94,16 +97,40 @@ fn live_box() -> SshBox {
     boxx
 }
 
-/// Ensure the image is present on the box (warm cache → sub-second spawns).
-fn ensure_image(boxx: &SshBox) {
+/// Pull `RESOLVE_TAG` on the box (warm cache → sub-second spawns) and resolve
+/// it to a real, servable `repo@sha256:<digest>` pin — the only kind the spawn
+/// surface accepts now.
+fn pinned_image(boxx: &SshBox) -> String {
     let pull = boxx
-        .run(&["docker", "pull", IMAGE])
+        .run(&["docker", "pull", RESOLVE_TAG])
         .expect("docker pull failed to spawn");
     assert!(
         pull.ok(),
-        "docker pull {IMAGE} failed: {}",
+        "docker pull {RESOLVE_TAG} failed: {}",
         pull.stderr.trim()
     );
+    let inspect = boxx
+        .run(&[
+            "docker",
+            "image",
+            "inspect",
+            RESOLVE_TAG,
+            "--format",
+            "{{range .RepoDigests}}{{.}}\n{{end}}",
+        ])
+        .expect("docker inspect failed to spawn");
+    inspect
+        .stdout
+        .lines()
+        .map(str::trim)
+        .find(|l| l.contains("@sha256:"))
+        .unwrap_or_else(|| {
+            panic!(
+                "no RepoDigest resolved for {RESOLVE_TAG}: {:?}",
+                inspect.stdout
+            )
+        })
+        .to_string()
 }
 
 /// Best-effort sweep of C9-prefix containers only. Scoped to `hugit-c9-`.
@@ -133,7 +160,7 @@ fn item_1_attach_joins_live_workspace_no_respawn() {
         return;
     }
     let boxx = live_box();
-    ensure_image(&boxx);
+    let image = pinned_image(&boxx);
     sweep_c9(&boxx);
 
     let lease = fresh_lease("attach");
@@ -142,7 +169,7 @@ fn item_1_attach_joins_live_workspace_no_respawn() {
 
     // Step 1: Spawn the workspace. This creates one container.
     let spawned =
-        spawn_workspace(&engine, &lease, &fence, IMAGE).expect("spawn workspace for attach test");
+        spawn_workspace(&engine, &lease, &fence, &image).expect("spawn workspace for attach test");
     assert_eq!(spawned.origin, WorkspaceOrigin::Spawned);
 
     // Extract the workspace_id from the lease_id (matches the container name).
@@ -233,7 +260,7 @@ fn item_2_resume_restores_state_fence_path_set_ceiling() {
         return;
     }
     let boxx = live_box();
-    ensure_image(&boxx);
+    let image = pinned_image(&boxx);
     sweep_c9(&boxx);
 
     let lease = fresh_lease("resume");
@@ -241,7 +268,7 @@ fn item_2_resume_restores_state_fence_path_set_ceiling() {
     let engine = DockerEngine::new(boxx.clone());
 
     // Step 1: Spawn an original workspace and snapshot its state.
-    let original = spawn_workspace(&engine, &lease, &original_fence, IMAGE)
+    let original = spawn_workspace(&engine, &lease, &original_fence, &image)
         .expect("spawn original workspace for resume test");
     let state = WorkspaceState::snapshot(&lease.lease_id, original_fence.clone());
 
@@ -251,7 +278,7 @@ fn item_2_resume_restores_state_fence_path_set_ceiling() {
     // Step 2: Resume with the SAME fence (not exceeding the ceiling) — must succeed.
     let same_fence = src_fence(); // src/ only
     let lease2 = fresh_lease("resume-r");
-    let resumed = resume_workspace(&boxx, &engine, &state, &same_fence, &lease2, IMAGE)
+    let resumed = resume_workspace(&boxx, &engine, &state, &same_fence, &lease2, &image)
         .expect("resume with same fence must succeed");
     assert_eq!(
         resumed.origin,
@@ -290,7 +317,7 @@ fn item_2_resume_restores_state_fence_path_set_ceiling() {
         materialized: vec![],
     };
     let lease3 = fresh_lease("resume-w");
-    let widen_result = resume_workspace(&boxx, &engine, &state, &wider_fence, &lease3, IMAGE);
+    let widen_result = resume_workspace(&boxx, &engine, &state, &wider_fence, &lease3, &image);
     assert!(
         widen_result.is_err(),
         "resume with wider path_set must FAIL (ceiling enforced — cannot_exceed original path_set)"
@@ -320,7 +347,7 @@ fn item_3_spawn_lt_1s_concurrent_dedup_one_materialization() {
         return;
     }
     let boxx = live_box();
-    ensure_image(&boxx);
+    let image = pinned_image(&boxx);
     sweep_c9(&boxx);
 
     let engine = DockerEngine::new(boxx.clone());
@@ -337,7 +364,7 @@ fn item_3_spawn_lt_1s_concurrent_dedup_one_materialization() {
     let lease_timed = fresh_lease("timed");
     let fence = src_fence();
     let (handle_timed, _elapsed_e2e) =
-        spawn_timed(&engine, &lease_timed, &fence, IMAGE).expect("timed spawn");
+        spawn_timed(&engine, &lease_timed, &fence, &image).expect("timed spawn");
 
     // Probe box-side spawn latency: time a `docker run --rm` for a trivial
     // container on the box. This is the warm-CAS contract check — the box
@@ -381,6 +408,7 @@ fn item_3_spawn_lt_1s_concurrent_dedup_one_materialization() {
     let lease_t2 = lease_dedup.clone();
     let fence_t2 = fence_dedup.clone();
     let ws_id2 = workspace_id.clone();
+    let image2 = image.clone();
 
     let t1 = thread::spawn({
         let spawner = Arc::clone(&spawner);
@@ -389,10 +417,11 @@ fn item_3_spawn_lt_1s_concurrent_dedup_one_materialization() {
         let lease = lease_dedup.clone();
         let fence = fence_dedup.clone();
         let wid = workspace_id.clone();
+        let image = image.clone();
         move || {
             let _ = boxx; // keep boxx alive in thread for DockerEngine lifetime
             spawner
-                .spawn_or_join(&wid, &engine, &lease, &fence, IMAGE)
+                .spawn_or_join(&wid, &engine, &lease, &fence, &image)
                 .expect("thread-1 spawn_or_join")
         }
     });
@@ -405,7 +434,7 @@ fn item_3_spawn_lt_1s_concurrent_dedup_one_materialization() {
     let t2 = thread::spawn(move || {
         let _ = boxx2; // keep boxx2 alive in thread for DockerEngine lifetime
         spawner2
-            .spawn_or_join(&ws_id2, &engine2, &lease_t2, &fence_t2, IMAGE)
+            .spawn_or_join(&ws_id2, &engine2, &lease_t2, &fence_t2, &image2)
             .expect("thread-2 spawn_or_join")
     });
 
@@ -464,14 +493,14 @@ fn item_4_local_remote_identical_observable_results() {
         return;
     }
     let boxx = live_box();
-    ensure_image(&boxx);
+    let image = pinned_image(&boxx);
     sweep_c9(&boxx);
 
     let lease = fresh_lease("local-eq-remote");
     let fence = src_fence();
     let engine = DockerEngine::new(boxx.clone());
 
-    let handle = spawn_workspace(&engine, &lease, &fence, IMAGE)
+    let handle = spawn_workspace(&engine, &lease, &fence, &image)
         .expect("spawn workspace for local≡remote test");
 
     // Deterministic pure command: `echo` with a fixed string. Both local and
