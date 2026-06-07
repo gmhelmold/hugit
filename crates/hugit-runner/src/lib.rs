@@ -35,6 +35,7 @@
 //! [`teardown`] forensic re-scan. The acceptance contract (destroy leaves
 //! nothing; tmp/net isolated) is unchanged across engines.
 
+pub mod boot;
 pub mod concurrency;
 pub mod expiry;
 pub mod isolation;
