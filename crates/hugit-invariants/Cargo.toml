@@ -27,6 +27,12 @@ path = "lib.rs"
 [dependencies]
 hugit-contracts = { path = "../hugit-contracts" }
 hugit-runner = { path = "../hugit-runner" }
+# WP-X5 (namespace law) consumes the REAL CLI verb registry
+# (`hugit_cli::HUGIT_VERBS`) read-only — never a hand-copied list (which would
+# rot). Deriving the no-shadow oracle from the single canonical registry makes
+# "the oracle tests the real surface" structurally true: a git-shadowing verb
+# added to hugit-cli turns the X5① oracle red automatically.
+hugit-cli = { path = "../hugit-cli" }
 anyhow = "1"
 # WP-X2 (attestation e2e). Real ASYMMETRIC signature so verification is
 # genuinely PUBLIC (item ③): the public key verifies, only the private key can
