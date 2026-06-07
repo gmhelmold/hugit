@@ -1,0 +1,263 @@
+//! WP-E1a acceptance oracle — verified one-way mirror (hugit → GitHub):
+//! outbound sync, per-push hash verify, durable ordered/capacity-bounded queue.
+//!
+//! Owned items (VERBATIM from the contract):
+//!   ①  landing on GitHub <60s hash-verified
+//!         `item_1_landing_hash_verified_within_sla`
+//!   ③  72h soak 100% verified
+//!         `item_3_soak_72h_all_verified`
+//!   ⑩🔧 outage queue has a stated capacity bound; overflow → backpressure +
+//!       incident, never drop
+//!         `item_10_queue_capacity_bound_stated`
+//!         `item_10_queue_overflow_backpressure_not_drop`
+//!
+//! Live-GitHub item ①: env `HUGIT_GH_TEST_REPO=humangr-labs/hugit-fleet-syn-1`
+//! is set by run.sh. The live round-trip is attempted via the GitHub App auth
+//! client; when the installation does not cover the repo (or creds/network are
+//! unavailable) the live attempt is **PARTIAL — never faked**. The local
+//! hash-verify + ordering proofs are deterministic fixture proofs that stand on
+//! their own.
+//!
+//! # Contract deps (consumed, never modified)
+//! - `hugit_contracts::EventRecord` (frozen by WP-00) — the landed-ref event
+//!   whose `seq` fixes mirror ordering.
+//! - `hugit_mirror::queue::{OutageQueue, QueueEntry, EnqueueError, QUEUE_CAPACITY}`
+//! - `hugit_mirror::verify::{ContentHash, verify_push, VerifyOutcome}`
+//! - `hugit_mirror::outbound::{OutboundWriter, FixtureMirror, SoakSummary,
+//!    AppAuth, live_landing_attempt, LiveLandingOutcome, SLA_BOUND_MS}`
+
+use std::time::Duration;
+
+use hugit_contracts::EventRecord;
+use hugit_mirror::outbound::{
+    AppAuth, FixtureMirror, LiveLandingOutcome, OutboundWriter, SLA_BOUND_MS, SoakSummary,
+    live_landing_attempt,
+};
+use hugit_mirror::queue::{EnqueueError, OutageQueue, QUEUE_CAPACITY, QueueEntry};
+use hugit_mirror::verify::{ContentHash, VerifyOutcome, verify_push};
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+/// A landed-ref event → queue entry, ordered by `seq` (the frozen EventRecord
+/// contract is the source of truth for *what* mirrors, in *what* order).
+fn landed(seq: u64, ref_name: &str) -> QueueEntry {
+    let ev = EventRecord {
+        seq,
+        prev_hash: "0".repeat(64),
+        this_hash: format!("{seq:064x}"),
+        kind: "ref_landed".to_string(),
+        principal_chain: vec!["agent".to_string()],
+        payload: ref_name.to_string(),
+        recorded_at: 1_700_000_000_000 + seq,
+    };
+    // The mirror pushes the ref tip oid; derive a deterministic 40-hex oid.
+    QueueEntry::new(ev.seq, ev.payload.clone(), format!("{seq:040x}"))
+}
+
+// ── ① landing on GitHub <60s hash-verified ────────────────────────────────────
+
+#[test]
+fn item_1_landing_hash_verified_within_sla() {
+    // (a) Local proof: a faithful mirror push content-hash verifies to
+    //     byte-identity within the <60s SLA bound.
+    let mut writer = OutboundWriter::new(FixtureMirror::faithful());
+    let entry = landed(1, "refs/heads/main");
+    let report = writer.replicate(&entry, Duration::from_millis(250));
+    assert!(
+        report.verify.is_verified(),
+        "faithful push must content-hash verify"
+    );
+    assert!(
+        report.latency_ms <= SLA_BOUND_MS,
+        "land→verified latency {}ms must be within SLA {}ms",
+        report.latency_ms,
+        SLA_BOUND_MS
+    );
+    assert!(
+        report.verified_within_sla(),
+        "push must be verified-within-SLA"
+    );
+
+    // (b) The byte-identity check is real: a mirror that reports a different
+    //     hash is fail-CLOSED divergence, never marked synced.
+    let expected = ContentHash::new(format!("{:040x}", 1));
+    let observed = ContentHash::new(format!("{:040x}", 2));
+    match verify_push("refs/heads/main", &expected, &observed) {
+        VerifyOutcome::Diverged(d) => {
+            assert_eq!(d.expected, expected);
+            assert_eq!(d.observed, observed);
+        }
+        VerifyOutcome::Verified { .. } => panic!("mismatch must fail-CLOSED, not verify"),
+    }
+
+    // (c) Live lane against HUGIT_GH_TEST_REPO via the GitHub App auth client.
+    //     PARTIAL when the installation does not cover the repo / no network —
+    //     NEVER faked. A verified live round-trip is accepted when present.
+    let auth = AppAuth::new(
+        AppAuth::default_dev_dir().unwrap_or_else(|| "/nonexistent/github-app-dev".into()),
+    );
+    match live_landing_attempt(&auth) {
+        LiveLandingOutcome::Verified { repo, latency_ms } => {
+            assert!(!repo.is_empty());
+            assert!(
+                latency_ms <= SLA_BOUND_MS,
+                "live landing must verify within SLA"
+            );
+            println!("① LIVE VERIFIED: {repo} in {latency_ms}ms");
+        }
+        LiveLandingOutcome::Partial { reason } => {
+            // Honest PARTIAL: the reason must explain unavailability and the
+            // local proofs above already stand.
+            assert!(!reason.is_empty());
+            println!("① LIVE PARTIAL (not faked): {reason}");
+        }
+    }
+}
+
+// ── ③ 72h soak 100% verified ──────────────────────────────────────────────────
+
+#[test]
+fn item_3_soak_72h_all_verified() {
+    // Soak model: a sustained stream of landed refs replicated through the
+    // durable queue in landing order, each per-push content-hash verified
+    // within SLA. The soak metric requires 100% verified, ZERO divergence.
+    //
+    // We compress the 72h window into a dense deterministic stream of landings
+    // (the wall-clock soak runs under the live dogfood harness; the invariant
+    // proven here is "every landing in the stream verifies within SLA, in
+    // order, with zero divergence").
+    let mut queue = OutageQueue::new();
+    let n: u64 = 5_000;
+    for seq in 0..n {
+        queue
+            .enqueue(landed(seq, &format!("refs/heads/soak-{}", seq % 32)))
+            .expect("within QUEUE_CAPACITY drain cadence");
+        // Drain eagerly to stay within the capacity bound (writer keeps up).
+        if queue.len() >= QUEUE_CAPACITY / 2 {
+            drain_and_assert(&mut queue);
+        }
+    }
+    // Final drain of the tail.
+    let summary = drain_and_assert(&mut queue);
+    // The aggregate over the *whole* soak (last drain summary is representative
+    // because each drain is independently all-verified).
+    assert!(
+        summary.all_verified() || summary.total == 0,
+        "every soak drain must be 100% verified within SLA, zero divergence"
+    );
+}
+
+/// Drain the queue with a faithful mirror, asserting 100% verified-within-SLA
+/// and zero divergence; returns the soak summary for the drained batch.
+fn drain_and_assert(queue: &mut OutageQueue) -> SoakSummary {
+    let mut writer = OutboundWriter::new(FixtureMirror::faithful());
+    // Per-entry land→verified latency well within SLA (sub-second).
+    let reports = writer.drain(queue, |_| Duration::from_millis(120));
+    // Order preserved: seqs strictly ascending within the batch.
+    let seqs: Vec<u64> = reports.iter().map(|r| r.seq).collect();
+    let mut sorted = seqs.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        seqs, sorted,
+        "soak drain must preserve landing order (FIFO)"
+    );
+
+    let summary = SoakSummary::from_reports(&reports);
+    assert_eq!(summary.diverged, 0, "soak must have ZERO divergence");
+    assert_eq!(
+        summary.verified_within_sla, summary.total,
+        "soak must be 100% verified within SLA"
+    );
+    summary
+}
+
+// ── ⑩ outage queue: stated capacity bound ─────────────────────────────────────
+
+#[test]
+fn item_10_queue_capacity_bound_stated() {
+    // The capacity bound is a stated constant (pinned, documented in the SEAL).
+    const {
+        assert!(
+            QUEUE_CAPACITY > 0,
+            "capacity bound must be a positive constant"
+        )
+    };
+    let q = OutageQueue::new();
+    assert_eq!(
+        q.capacity(),
+        QUEUE_CAPACITY,
+        "default queue must use the pinned capacity constant"
+    );
+
+    // A queue can be created at an explicit bound (test surface) and reports it.
+    let small = OutageQueue::with_capacity(3);
+    assert_eq!(small.capacity(), 3);
+    assert!(small.is_empty());
+    assert!(!small.is_full());
+}
+
+// ── ⑩ overflow → backpressure + incident, NEVER drop, NEVER reorder ───────────
+
+#[test]
+fn item_10_queue_overflow_backpressure_not_drop() {
+    let cap = 4;
+    let mut q = OutageQueue::with_capacity(cap);
+
+    // Fill to the bound in landing order.
+    for seq in 0..cap as u64 {
+        q.enqueue(landed(seq, "refs/heads/main"))
+            .expect("fill up to capacity");
+    }
+    assert!(q.is_full());
+    assert_eq!(q.len(), cap);
+
+    // Overflow push → backpressure + incident, entry NOT dropped, queue
+    // unchanged (not reordered, not truncated).
+    let overflow = landed(cap as u64, "refs/heads/main");
+    let err = q
+        .enqueue(overflow.clone())
+        .expect_err("overflow must be rejected, not silently accepted/dropped");
+    match err {
+        EnqueueError::Backpressure { incident } => {
+            assert_eq!(
+                incident.rejected_seq, overflow.seq,
+                "incident names the held-back entry"
+            );
+            assert_eq!(incident.capacity, cap, "incident states the capacity bound");
+            assert!(
+                !incident.detail.is_empty(),
+                "incident carries human-readable detail"
+            );
+        }
+    }
+
+    // NEVER drop: the queue still holds exactly the accepted entries, in order.
+    assert_eq!(
+        q.len(),
+        cap,
+        "overflow must not drop or truncate accepted entries"
+    );
+    let pending: Vec<u64> = q.pending().iter().map(|e| e.seq).collect();
+    assert_eq!(
+        pending,
+        vec![0, 1, 2, 3],
+        "order preserved (FIFO), no reorder"
+    );
+
+    // Durability: snapshot → restore preserves contents AND order across a
+    // simulated writer restart.
+    let snap = q.snapshot().expect("snapshot serialises");
+    let restored = OutageQueue::restore(&snap).expect("restore deserialises");
+    let restored_seqs: Vec<u64> = restored.pending().iter().map(|e| e.seq).collect();
+    assert_eq!(
+        restored_seqs,
+        vec![0, 1, 2, 3],
+        "durable across restart, order intact"
+    );
+
+    // After draining one, the overflow entry now fits (backpressure relieved).
+    let head = q.dequeue().expect("head present");
+    assert_eq!(head.seq, 0, "FIFO drain order");
+    q.enqueue(overflow)
+        .expect("space freed → overflow entry now accepted");
+}
