@@ -41,7 +41,9 @@ const PULL_BACKOFF_BASE: Duration = Duration::from_millis(150);
 fn digest_lock(digest_hex: &str) -> Arc<Mutex<()>> {
     static LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
     let map = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut guard = map.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut guard = map
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     Arc::clone(
         guard
             .entry(digest_hex.to_string())
@@ -62,10 +64,10 @@ fn is_permanent_pull_failure(stderr: &str) -> bool {
     let s = stderr.to_ascii_lowercase();
     const PERMANENT: &[&str] = &[
         "manifest unknown",
-        "manifest for",          // "manifest for X not found"
+        "manifest for", // "manifest for X not found"
         "no such manifest",
         "not found",
-        "does not match",        // digest mismatch
+        "does not match", // digest mismatch
         "unauthorized",
         "denied",
         "forbidden",
@@ -194,7 +196,9 @@ impl PinnedImageRef {
         // time, eliminating the 8×-concurrent-pull race. Distinct digests use
         // distinct locks, so independent jobs are never serialized behind us.
         let lock = digest_lock(&self.digest_hex);
-        let _guard = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         self.pull_with_retry(boxx)?;
 
@@ -416,7 +420,11 @@ mod tests {
         let boxx = ScriptedBox::transient(2);
         pin.verify_on_box(&boxx)
             .expect("a transient pull error must be retried, not failed closed");
-        assert_eq!(boxx.pulls.load(Ordering::SeqCst), 3, "2 retries then success");
+        assert_eq!(
+            boxx.pulls.load(Ordering::SeqCst),
+            3,
+            "2 retries then success"
+        );
     }
 
     #[test]
@@ -494,7 +502,9 @@ mod tests {
             }));
         }
         for h in handles {
-            h.join().unwrap().expect("every concurrent same-digest verify must succeed");
+            h.join()
+                .unwrap()
+                .expect("every concurrent same-digest verify must succeed");
         }
     }
 }
