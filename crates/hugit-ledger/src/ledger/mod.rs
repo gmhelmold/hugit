@@ -77,23 +77,40 @@ impl Ledger {
     /// `verdict.recorded` events as "proven".
     pub fn from_records(records: &[EventRecord]) -> Self {
         let mut entries: Vec<LedgerEntry> = Vec::new();
+        // Internal index: raw (unredacted) intent_id → entry index.
+        // Used in the verdict pass so linking survives view-boundary redaction.
+        let mut raw_id_to_idx: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
 
         // First pass: collect all intent.landed events.
         for r in records {
             if r.kind == "intent.landed"
                 && let Ok(v) = serde_json::from_str::<serde_json::Value>(&r.payload)
             {
-                let intent_id = string_field(&v, "intent_id").unwrap_or_default();
-                let campaign =
+                let raw_intent_id = string_field(&v, "intent_id").unwrap_or_default();
+                let raw_campaign =
                     string_field(&v, "campaign").unwrap_or_else(|| "default".to_string());
-                let charter = string_field(&v, "charter").unwrap_or_default();
-                let deep_link_target =
-                    string_field(&v, "deep_link_target").unwrap_or_else(|| intent_id.clone());
+                let raw_charter = string_field(&v, "charter").unwrap_or_default();
+                let raw_deep_link =
+                    string_field(&v, "deep_link_target").unwrap_or_else(|| raw_intent_id.clone());
+
+                // Route every surfaced string through the view-boundary redaction
+                // filter (④). intent_id/campaign/deep_link_target were previously
+                // surfaced raw — this closes that gap.
+                let intent_id = redact::apply(&raw_intent_id);
+                let campaign = redact::apply(&raw_campaign);
+                let charter = redact::apply(&raw_charter);
+                let deep_link_target = redact::apply(&raw_deep_link);
+
+                let idx = entries.len();
+                // Register the raw id so the verdict pass can link correctly even
+                // when the surfaced intent_id is "[REDACTED]".
+                raw_id_to_idx.insert(raw_intent_id, idx);
 
                 entries.push(LedgerEntry {
                     campaign,
-                    intent_id: intent_id.clone(),
-                    charter: redact::apply(&charter),
+                    intent_id,
+                    charter,
                     seq: r.seq,
                     recorded_at: r.recorded_at,
                     deep_link_target,
@@ -104,13 +121,15 @@ impl Ledger {
         }
 
         // Second pass: attach verdicts.
+        // Match by raw intent id (via the internal index) so that redaction
+        // of the surfaced field does not break the verdict linkage.
         for r in records {
             if r.kind == "verdict.recorded"
                 && let Ok(vo) = serde_json::from_str::<VerdictObject>(&r.payload)
-                && let Some(entry) = entries.iter_mut().find(|e| e.intent_id == vo.intent)
+                && let Some(&idx) = raw_id_to_idx.get(&vo.intent)
             {
-                entry.proven = true;
-                entry.verdict = Some(VerdictView::from_verdict_object(&vo));
+                entries[idx].proven = true;
+                entries[idx].verdict = Some(VerdictView::from_verdict_object(&vo));
             }
         }
 

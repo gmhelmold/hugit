@@ -9,6 +9,7 @@
 //! - `verdict`      — `verdict.recorded` events.
 //! - `policy-change` — `policy.changed` events.
 //! - `ws-state`     — `ws.state.*` events (workspace state transitions).
+//! - `other`        — any event kind not covered by the four primary classes.
 //!
 //! # Latency measurement (②)
 //! For each event class, a `LatencyMeasurement` holds a sample of observed
@@ -22,17 +23,22 @@ use hugit_contracts::event_record::EventRecord;
 
 use crate::redact;
 
-/// The four event classes tracked for latency.
+/// The event classes tracked for latency; `Other` catches unknown kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum EventClass {
     Landing,
     Verdict,
     PolicyChange,
     WsState,
+    /// Any event kind not covered by the four primary classes.
+    Other,
 }
 
 impl EventClass {
     /// Classify an EventRecord by its `kind` field.
+    ///
+    /// Returns `Some(Other)` for unknown kinds instead of `None`, so the
+    /// caller never has to default-to-Landing on the unhappy path.
     pub fn classify(kind: &str) -> Option<Self> {
         if kind == "intent.landed" {
             Some(EventClass::Landing)
@@ -43,7 +49,7 @@ impl EventClass {
         } else if kind.starts_with("ws.state") {
             Some(EventClass::WsState)
         } else {
-            None
+            Some(EventClass::Other)
         }
     }
 
@@ -54,6 +60,7 @@ impl EventClass {
             EventClass::Verdict => "verdict",
             EventClass::PolicyChange => "policy-change",
             EventClass::WsState => "ws-state",
+            EventClass::Other => "other",
         }
     }
 }
@@ -135,19 +142,20 @@ impl WatchDisplay {
         let text = render_record(record);
         let elapsed = start.elapsed();
 
+        // classify() now returns Some(Other) for unknown kinds — never defaults to Landing.
+        let class = EventClass::classify(&record.kind).unwrap_or(EventClass::Other);
+
         let line = WatchLine {
-            class: EventClass::classify(&record.kind).unwrap_or(EventClass::Landing), // fallback for unknown kinds
+            class,
             seq: record.seq,
             text,
             render_duration: elapsed,
         };
 
-        if let Some(class) = EventClass::classify(&record.kind) {
-            self.latency
-                .entry(class)
-                .or_default()
-                .record(line.render_duration);
-        }
+        self.latency
+            .entry(class)
+            .or_default()
+            .record(line.render_duration);
 
         self.lines.push(line.clone());
         line
