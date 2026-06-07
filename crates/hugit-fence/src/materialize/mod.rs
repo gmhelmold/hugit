@@ -19,7 +19,7 @@ use hugit_contracts::fence_manifest::MaterializedEntry;
 use hugit_runner::isolation::RunningContainer;
 use hugit_runner::lease::BoxExec;
 
-use crate::enforce::{FenceVerdict, classify};
+use crate::enforce::is_admitted;
 
 /// A candidate workspace entry offered to the fence for materialization.
 ///
@@ -49,6 +49,14 @@ pub enum MaterializeError {
     /// The manifest is not production-safe: `deny_default` must be `true`, else
     /// unlisted paths would not be denied and the fence would not hold.
     DenyDefaultRequired,
+    /// The manifest carries a `path_set` entry that normalizes to empty (e.g.
+    /// `"."`, `"./"`, or `""`) — a root-cover allow-all that admits every
+    /// candidate and defeats the fence. Rejected **fail-closed**: an allow-all
+    /// manifest may never materialize.
+    AllowAllEntry {
+        /// The offending entry as written in the manifest.
+        entry: String,
+    },
     /// A box command failed (placement of an in-fence file or root setup).
     Box(anyhow::Error),
 }
@@ -60,6 +68,11 @@ impl fmt::Display for MaterializeError {
                 f,
                 "FenceManifest.deny_default must be true; a fence with default-allow \
                  cannot enforce ENOENT outside the path_set"
+            ),
+            MaterializeError::AllowAllEntry { entry } => write!(
+                f,
+                "FenceManifest path_set entry {entry:?} normalizes to root-cover \
+                 (allow-all); refusing to materialize an allow-all fence (fail-closed)"
             ),
             MaterializeError::Box(e) => write!(f, "box command failed: {e}"),
         }
@@ -80,11 +93,42 @@ fn content_digest(bytes: &[u8]) -> String {
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// A `path_set` entry that normalizes to **empty** (e.g. `"."`, `"./"`, `"/"`,
+/// or `""`) is a root-cover allow-all — it would admit every candidate and
+/// defeat the fence. This detects such an entry so the materializer can refuse
+/// it fail-closed.
+fn entry_is_allow_all(entry: &str) -> bool {
+    // Reuse the same normalization the classifier uses. An entry that escapes
+    // (absolute / `..`) is *not* allow-all (it simply matches nothing); only an
+    // entry whose normalized segment list is empty covers the whole root.
+    crate::enforce::normalize_segments_pub(entry).is_some_and(|segs| segs.is_empty())
+}
+
+/// Validate a manifest before any materialization. **Fail-closed:** rejects an
+/// allow-all `path_set` entry (root-cover) that would defeat the fence.
+fn validate_manifest(manifest: &FenceManifest) -> Result<(), MaterializeError> {
+    if !manifest.deny_default {
+        return Err(MaterializeError::DenyDefaultRequired);
+    }
+    for entry in &manifest.path_set {
+        if entry_is_allow_all(entry) {
+            return Err(MaterializeError::AllowAllEntry {
+                entry: entry.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Filter `candidates` by the fence, returning only the in-fence entries paired
 /// with their content digest. Pure; no box access.
 ///
 /// This is the heart of "sparse materialization = the fence": out-of-fence
-/// candidates are dropped here and never reach the box.
+/// candidates are dropped here and never reach the box. Admission routes through
+/// the **named enforcement gate** [`is_admitted`] — the *same* predicate
+/// [`crate::enforce::check_access`] uses — so there is exactly one place the
+/// fence boundary is decided, and the materialize filter cannot diverge from
+/// the enforcement API.
 #[must_use]
 pub fn select_in_fence<'a>(
     manifest: &FenceManifest,
@@ -92,7 +136,7 @@ pub fn select_in_fence<'a>(
 ) -> Vec<(&'a CandidateEntry, MaterializedEntry)> {
     candidates
         .iter()
-        .filter(|c| classify(manifest, &c.path) == FenceVerdict::Inside)
+        .filter(|c| is_admitted(manifest, &c.path))
         .map(|c| {
             let entry = MaterializedEntry {
                 path: c.path.clone(),
@@ -114,6 +158,8 @@ pub fn select_in_fence<'a>(
 /// # Errors
 /// - [`MaterializeError::DenyDefaultRequired`] if the manifest is not
 ///   default-deny.
+/// - [`MaterializeError::AllowAllEntry`] if any `path_set` entry is a root-cover
+///   allow-all (fail-closed).
 /// - [`MaterializeError::Box`] if any box command fails.
 pub fn materialize_sparse<B: BoxExec>(
     boxx: &B,
@@ -122,9 +168,7 @@ pub fn materialize_sparse<B: BoxExec>(
     manifest: &FenceManifest,
     candidates: &[CandidateEntry],
 ) -> Result<FenceManifest, MaterializeError> {
-    if !manifest.deny_default {
-        return Err(MaterializeError::DenyDefaultRequired);
-    }
+    validate_manifest(manifest)?;
 
     let root = workspace_root.trim_end_matches('/');
     let selected = select_in_fence(manifest, candidates);
@@ -155,6 +199,13 @@ fn place_file<B: BoxExec>(
     rel_path: &str,
     content: &[u8],
 ) -> Result<()> {
+    // Defense-in-depth re-guard: an in-fence candidate must already be
+    // traversal-free (the gate rejects any `..` / absolute path), but re-assert
+    // here so a future caller that bypasses `select_in_fence` cannot place a
+    // path that escapes the workspace root. Fail-closed.
+    if path_escapes_root(rel_path) {
+        bail!("refusing to place candidate with traversal/absolute path: {rel_path:?}");
+    }
     let rel = rel_path.trim_start_matches("./").trim_start_matches('/');
     if rel.is_empty() {
         bail!("in-fence candidate has empty path");
@@ -175,6 +226,14 @@ fn place_file<B: BoxExec>(
         bail!("placing {full} failed: {}", out.stderr.trim());
     }
     Ok(())
+}
+
+/// `true` iff `path` escapes the workspace root — absolute, or containing any
+/// `..` component. Uses the same normalization as the classifier (a path that
+/// cannot be normalized is an escape). The materialize re-guard refuses such a
+/// path even if it somehow reached `place_file`.
+fn path_escapes_root(path: &str) -> bool {
+    crate::enforce::normalize_segments_pub(path).is_none()
 }
 
 /// POSIX single-quote for safe interpolation into a remote `sh -c`.
@@ -253,5 +312,67 @@ mod tests {
     #[test]
     fn shell_quote_escapes_single_quotes() {
         assert_eq!(shell_quote("a'b"), r"'a'\''b'");
+    }
+
+    #[test]
+    fn validate_rejects_allow_all_entries_fail_closed() {
+        for bad in ["./", ".", ""] {
+            let m = manifest(&[bad], true);
+            let err = validate_manifest(&m).unwrap_err();
+            assert!(
+                matches!(err, MaterializeError::AllowAllEntry { .. }),
+                "entry {bad:?} must be rejected as allow-all, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rejects_default_allow() {
+        let m = manifest(&["src/"], false);
+        assert!(matches!(
+            validate_manifest(&m).unwrap_err(),
+            MaterializeError::DenyDefaultRequired
+        ));
+    }
+
+    #[test]
+    fn validate_accepts_a_real_fence() {
+        let m = manifest(&["src/", "Cargo.toml"], true);
+        assert!(validate_manifest(&m).is_ok());
+    }
+
+    #[test]
+    fn allow_all_entry_detection() {
+        assert!(entry_is_allow_all("./"));
+        assert!(entry_is_allow_all("."));
+        assert!(entry_is_allow_all(""));
+        assert!(!entry_is_allow_all("src/"));
+        assert!(!entry_is_allow_all("/")); // absolute → matches nothing, not allow-all
+        assert!(!entry_is_allow_all("Cargo.toml"));
+    }
+
+    #[test]
+    fn path_escapes_root_catches_traversal_and_absolute() {
+        assert!(path_escapes_root("../x"));
+        assert!(path_escapes_root("src/../../x"));
+        assert!(path_escapes_root("/etc/passwd"));
+        assert!(!path_escapes_root("src/main.rs"));
+        assert!(!path_escapes_root("./src/main.rs"));
+    }
+
+    #[test]
+    fn select_routes_through_named_gate() {
+        // The materialize filter must agree with the enforcement gate exactly:
+        // anything `is_admitted` denies is dropped, anything it admits is kept.
+        let m = manifest(&["src/"], true);
+        let cands = vec![
+            CandidateEntry::new("src/a.rs", b"a".to_vec()),
+            CandidateEntry::new("../escape", b"e".to_vec()),
+            CandidateEntry::new("/abs", b"x".to_vec()),
+            CandidateEntry::new("secret.env", b"s".to_vec()),
+        ];
+        let sel = select_in_fence(&m, &cands);
+        let paths: Vec<_> = sel.iter().map(|(c, _)| c.path.as_str()).collect();
+        assert_eq!(paths, vec!["src/a.rs"]);
     }
 }

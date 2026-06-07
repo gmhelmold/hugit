@@ -60,6 +60,16 @@ fn normalize_segments(path: &str) -> Option<Vec<&str>> {
     Some(out)
 }
 
+/// Normalize a path into canonical segments, exposed for the materialize layer
+/// so it can detect an empty-normalizing (allow-all) `path_set` entry using the
+/// exact same rules the classifier uses. Returns `None` for an escaping path
+/// (absolute or containing `..`); `Some(vec![])` for a path that collapses to
+/// the root (`"."`, `"./"`, `""`).
+#[must_use]
+pub fn normalize_segments_pub(path: &str) -> Option<Vec<&str>> {
+    normalize_segments(path)
+}
+
 /// Classify `path` against the fence `manifest`.
 ///
 /// A path is **inside** iff, after normalization, it is covered by some
@@ -110,6 +120,13 @@ pub fn classify(manifest: &FenceManifest, path: &str) -> FenceVerdict {
 /// Validate an access request against the fence, returning the violation if the
 /// path is out-of-fence.
 ///
+/// This is the **named enforcement gate**, and it is *live*: it is the single
+/// predicate the materialize seam ([`crate::materialize::select_in_fence`])
+/// routes every candidate through, so a path that this function rejects can
+/// never be placed into the workspace. Enforcement is therefore *physical* —
+/// a rejected path is never written, so a later access returns ENOENT — and the
+/// API is not a side door but the gate the runtime path actually calls.
+///
 /// # Errors
 /// Never errors; returns `Ok(None)` when in-fence, `Ok(Some(_))` otherwise.
 /// (Result-typed for symmetry with the box-backed probe and forward
@@ -124,15 +141,31 @@ pub fn check_access(manifest: &FenceManifest, path: &str) -> Result<Option<Fence
     }
 }
 
+/// `true` iff `path` is admitted by the fence (the enforced gate says Inside).
+///
+/// This is the boolean form of [`check_access`] used by the materialize seam:
+/// the materializer admits a candidate **iff** `is_admitted` returns `true`, so
+/// out-of-fence candidates are dropped at exactly this gate and never reach the
+/// box. Keeping a single admission predicate means there is one — and only one
+/// — place the fence boundary is decided at runtime.
+#[must_use]
+pub fn is_admitted(manifest: &FenceManifest, path: &str) -> bool {
+    // The enforced gate: a candidate is admitted iff `check_access` finds no
+    // violation. (`check_access` is infallible today; treat any future error as
+    // fail-closed — a path we cannot prove in-fence is denied.)
+    matches!(check_access(manifest, path), Ok(None))
+}
+
 /// The result of an in-container access probe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnoentProof {
     /// The probed path (joined under the workspace root).
     pub path: String,
-    /// `true` iff opening the path inside the container failed with ENOENT.
+    /// `true` iff the path does not exist inside the container (ENOENT — the
+    /// file was never materialized, so any access fails with "No such file").
     pub enoent: bool,
-    /// The raw stderr/stdout token observed from the probe (for the evidence
-    /// bundle).
+    /// The stable token observed from the probe (`ABSENT` / `PRESENT_FILE` /
+    /// `PRESENT_DIR`) — locale-independent, for the evidence bundle.
     pub observed: String,
 }
 
@@ -141,10 +174,16 @@ pub struct EnoentProof {
 /// materialized.
 ///
 /// `workspace_root` is the in-container root the fence materialized into; the
-/// probe attempts to read `<workspace_root>/<outside_path>` and confirms the OS
-/// reports "No such file or directory". This is the box-backed counterpart to
-/// [`classify`]: the path must be out-of-fence per [`classify`] *and* the OS
-/// must agree it is absent.
+/// probe checks `<workspace_root>/<outside_path>` for **physical absence**.
+/// This is the box-backed counterpart to [`classify`]: the path must be
+/// out-of-fence per [`classify`] *and* the OS must agree it is absent.
+///
+/// Detection is by **exit code**, not by parsing libc's stderr text: we run
+/// `test ! -e <path>` (true iff the path does not exist for *any* type — file,
+/// directory, symlink, …). This is locale-independent and correctly classifies
+/// a directory-at-path as PRESENT (a breach) rather than misreading it. A
+/// present file/dir is reported with a stable token so a materialized
+/// (breaching) entry is unambiguous.
 ///
 /// # Errors
 /// Fails if the box itself is unreachable (the caller asserts on the returned
@@ -156,22 +195,32 @@ pub fn probe_outside_enoent<B: BoxExec>(
     outside_path: &str,
 ) -> Result<EnoentProof> {
     let full = join_under_root(workspace_root, outside_path);
-    // Use `cat` and capture stderr: a missing file yields the libc ENOENT
-    // string "No such file or directory". `printf` a stable token on the
-    // success branch so a materialized (breaching) file is unambiguous.
+    // Exit-code probe (locale-independent). `test -e` is true for any existing
+    // path type; `test ! -e` is true iff the path is physically absent. We also
+    // distinguish dir vs file in the PRESENT branch so a directory-at-path is
+    // recognized as a breach, not silently treated as absent.
     let script = format!(
-        "if cat -- {q} >/dev/null 2>err.$$; then printf PRESENT; \
-         else if grep -qi 'No such file' err.$$ 2>/dev/null; then printf ENOENT; \
-         else printf 'OTHER:'; cat err.$$ 2>/dev/null; fi; fi; rm -f err.$$",
+        "if test ! -e {q}; then printf ABSENT; \
+         elif test -d {q}; then printf PRESENT_DIR; \
+         else printf PRESENT_FILE; fi",
         q = shell_quote(&full),
     );
     let out = boxx
         .run(&["docker", "exec", &container.name, "sh", "-c", &script])
         .with_context(|| format!("probing {full} inside {}", container.name))?;
+    if !out.ok() {
+        // The probe shell itself failed — fail closed: we cannot prove absence.
+        anyhow::bail!(
+            "ENOENT probe shell failed for {full} in {} (code={:?} stderr={:?})",
+            container.name,
+            out.code,
+            out.stderr.trim()
+        );
+    }
     let observed = out.stdout.trim().to_string();
     Ok(EnoentProof {
         path: full,
-        enoent: observed == "ENOENT",
+        enoent: observed == "ABSENT",
         observed,
     })
 }
@@ -257,6 +306,66 @@ mod tests {
         assert!(check_access(&m, "src/lib.rs").unwrap().is_none());
         let v = check_access(&m, "secret.env").unwrap().unwrap();
         assert_eq!(v.path, "secret.env");
+    }
+
+    #[test]
+    fn is_admitted_is_the_enforced_gate() {
+        // `is_admitted` is the single predicate the materialize seam routes
+        // through; it must agree with `classify`/`check_access` exactly.
+        let m = manifest(&["src/", "Cargo.toml"]);
+        assert!(is_admitted(&m, "src/main.rs"));
+        assert!(is_admitted(&m, "Cargo.toml"));
+        assert!(!is_admitted(&m, "secret.env"));
+        assert!(!is_admitted(&m, "../escape"));
+        assert!(!is_admitted(&m, "/etc/passwd"));
+    }
+
+    #[test]
+    fn absolute_path_injection_is_outside() {
+        // An absolute path must never be admitted even if a same-named relative
+        // entry is in the fence (no `/src/main.rs` smuggling past `src/`).
+        let m = manifest(&["src/", "src/main.rs"]);
+        assert_eq!(classify(&m, "/src/main.rs"), FenceVerdict::Outside);
+        assert_eq!(classify(&m, "/etc/passwd"), FenceVerdict::Outside);
+        assert!(!is_admitted(&m, "/src/main.rs"));
+    }
+
+    #[test]
+    fn prefix_collision_rejected_segmentwise() {
+        // `src` (exact file) must not admit `srcfoo`; `src/` (dir) must not
+        // admit `srcfoo/...`. Prefix matching is segment-wise, not substring.
+        let m = manifest(&["src/", "lib"]);
+        assert_eq!(classify(&m, "srcfoo/x.rs"), FenceVerdict::Outside);
+        assert_eq!(classify(&m, "libfoo"), FenceVerdict::Outside);
+        assert_eq!(classify(&m, "lib"), FenceVerdict::Inside);
+    }
+
+    #[test]
+    fn dotdot_escaping_root_is_outside_even_when_renormalizing_inside() {
+        // A path that uses `..` to climb above root and then dives back into an
+        // in-fence dir must still be rejected: any `..` is an escape, because
+        // segment-collapse is NOT applied across `..` (that would let a symlink
+        // or a real parent dir be traversed). `src/../src/main.rs` resolves to
+        // `src/main.rs` lexically but is denied — `..` is fail-closed.
+        let m = manifest(&["src/"]);
+        assert_eq!(classify(&m, "src/../src/main.rs"), FenceVerdict::Outside);
+        assert_eq!(classify(&m, "a/../../src/main.rs"), FenceVerdict::Outside);
+        assert!(!is_admitted(&m, "src/../src/main.rs"));
+    }
+
+    #[test]
+    fn empty_normalizing_entry_does_not_allow_all() {
+        // A path_set entry that normalizes to empty (e.g. "./") is a directory
+        // prefix covering everything in-root — that is an allow-all and is the
+        // antithesis of a fence. `classify` treats such an entry as root-cover
+        // (Inside-everything); the *materialize* layer rejects such manifests
+        // fail-closed (see materialize::reject_empty_normalizing_path_set). Here
+        // we pin the classify behaviour so the materialize guard is the single
+        // place the allow-all is refused, and document it.
+        let m = manifest(&["./"]);
+        // "./" → empty prefix → root cover. Pinned so the materialize guard,
+        // not classify, is responsible for refusing allow-all manifests.
+        assert_eq!(classify(&m, "anything.rs"), FenceVerdict::Inside);
     }
 
     #[test]
