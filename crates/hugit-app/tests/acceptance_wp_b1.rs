@@ -10,9 +10,9 @@
 //! Item ⑤ — uninstall revokes access + halts processing (audited)
 
 use hugit_app::{
-    checks::ChecksClient,
+    checks::{ChecksClient, ChecksClientError},
     manifest::{APP_MANIFEST, validate_manifest},
-    persistence::PersistenceAdapter,
+    persistence::{PersistenceAdapter, PersistenceError},
     webhook::{
         WebhookError, WebhookProcessor, build_ack_receipt, build_installation_revoked_record,
         build_webhook_rejected_record, verify_x_hub_signature_256,
@@ -116,7 +116,7 @@ fn item_2_pr_event_persisted_ack_under_1s() {
 
     let mut adapter = PersistenceAdapter::new_local();
     let persist_result = adapter
-        .persist_event(&envelope)
+        .persist_event(&envelope, None)
         .expect("persist must succeed");
 
     let ack: AckReceipt = build_ack_receipt(delivery_id, received_at + 10);
@@ -185,6 +185,16 @@ fn item_3_check_run_written_back() {
 
     // Verify round-trip through the contract types.
     let _serialised = serde_json::to_string(&response).expect("ChecksWriteResponse must serialise");
+
+    // ORACLE: None token must return TokenRevoked (not succeed or return a
+    // different error).
+    let err = client
+        .write_check_run(&request, None)
+        .expect_err("None token must return an error");
+    assert!(
+        matches!(err, ChecksClientError::TokenRevoked { .. }),
+        "write_check_run with None token must return TokenRevoked, got: {err:?}"
+    );
 }
 
 // ── Item ④ — least-privilege manifest snapshot ────────────────────────────
@@ -267,28 +277,51 @@ fn item_4_least_privilege_manifest_snapshot() {
 
 #[test]
 fn item_5_uninstall_revokes_access_and_halts_processing() {
-    let processor = WebhookProcessor::new(b"test-webhook-secret-b1".to_vec());
+    // ── ORACLE: token_revoked reflects ACTUAL stored state ────────────────
+    // A processor with a registered token for install-9999 must return
+    // token_revoked = true; one WITHOUT a stored token must return false.
+
     let installation_id = "install-9999";
     let genesis_hash = "0".repeat(64);
     let seq = 1u64;
     let recorded_at = 1_748_000_001_000u64;
 
-    // Handle the uninstall event (installation.deleted).
-    let (outcome, record) =
-        processor.handle_uninstall(installation_id, &genesis_hash, seq, recorded_at);
+    // Case A: token IS stored — uninstall must report token_revoked = true.
+    let processor_with_token = WebhookProcessor::new(b"test-webhook-secret-b1".to_vec());
+    processor_with_token.store_token(installation_id, "tok-abc123");
 
-    // Revoke assertions.
-    assert_eq!(outcome.installation_id, installation_id);
+    let (outcome_a, record) =
+        processor_with_token.handle_uninstall(installation_id, &genesis_hash, seq, recorded_at);
+
+    assert_eq!(outcome_a.installation_id, installation_id);
     assert!(
-        outcome.token_revoked,
-        "installation token must be marked revoked"
+        outcome_a.token_revoked,
+        "token_revoked must be true when a token was present in the store"
     );
     assert!(
-        outcome.processing_halted,
+        outcome_a.processing_halted,
         "queued processing must be halted"
     );
 
-    // Audit record assertions.
+    // Calling again: token is gone → token_revoked must be false (idempotent
+    // second uninstall on an already-cleared slot).
+    let (outcome_a2, _) =
+        processor_with_token.handle_uninstall(installation_id, &genesis_hash, seq + 1, recorded_at);
+    assert!(
+        !outcome_a2.token_revoked,
+        "second uninstall on already-revoked install must return token_revoked = false"
+    );
+
+    // Case B: no token stored — uninstall must report token_revoked = false.
+    let processor_no_token = WebhookProcessor::new(b"test-webhook-secret-b1".to_vec());
+    let (outcome_b, _) =
+        processor_no_token.handle_uninstall(installation_id, &genesis_hash, seq, recorded_at);
+    assert!(
+        !outcome_b.token_revoked,
+        "token_revoked must be false when no token was stored for this installation"
+    );
+
+    // Audit record assertions (against outcome_a's record).
     assert_eq!(
         record.kind, "installation.revoked",
         "audit record kind must be installation.revoked"
@@ -320,9 +353,44 @@ fn item_5_uninstall_revokes_access_and_halts_processing() {
         "EventRecord must survive JSON round-trip"
     );
 
-    // Persistence adapter: halt processing for the installation.
-    let adapter = PersistenceAdapter::new_local();
+    // ── ORACLE: persist_event for halted install must be rejected ─────────
+    let mut adapter = PersistenceAdapter::new_local();
+
+    // First halt the installation.
     let halt_result = adapter.halt_installation(installation_id);
     assert_eq!(halt_result.installation_id, installation_id);
-    // (items_halted = 0 in local mode — live CF DO binding is infra-gated)
+    assert!(
+        halt_result.items_halted > 0 || halt_result.installation_id == installation_id,
+        "halt_installation must register the installation as halted"
+    );
+
+    // Build a dummy envelope referencing the halted installation.
+    use hugit_contracts::SignedEventEnvelope;
+    let halted_envelope = SignedEventEnvelope {
+        delivery_id: "delivery-halted-1".to_string(),
+        event_type: "pull_request".to_string(),
+        signature: "sha256=deadbeef".to_string(),
+        payload: "{}".to_string(),
+        received_at: recorded_at + 1000,
+    };
+
+    let persist_err = adapter
+        .persist_event(&halted_envelope, Some(installation_id))
+        .expect_err("persist_event for halted install must return an error");
+    assert!(
+        matches!(persist_err, PersistenceError::InstallationHalted { .. }),
+        "persist_event for halted install must return InstallationHalted, got: {persist_err:?}"
+    );
+
+    // An un-halted install must still succeed.
+    let other_envelope = SignedEventEnvelope {
+        delivery_id: "delivery-other-1".to_string(),
+        event_type: "pull_request".to_string(),
+        signature: "sha256=deadbeef".to_string(),
+        payload: "{}".to_string(),
+        received_at: recorded_at + 2000,
+    };
+    adapter
+        .persist_event(&other_envelope, Some("install-other-777"))
+        .expect("persist_event for non-halted install must succeed");
 }

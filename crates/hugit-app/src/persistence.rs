@@ -19,6 +19,10 @@ pub enum PersistenceError {
     /// Storage write failed.
     #[error("storage write failed: {0}")]
     Write(String),
+
+    /// Processing for this installation has been halted (uninstall received).
+    #[error("installation {installation_id} is halted; event rejected")]
+    InstallationHalted { installation_id: String },
 }
 
 /// Outcome of persisting a webhook event.
@@ -37,6 +41,9 @@ pub struct PersistResult {
 pub struct PersistenceAdapter {
     /// In-memory store for local/test usage (keyed by delivery_id).
     store: std::collections::HashMap<String, String>,
+    /// Set of halted installation IDs. `persist_event` rejects events for
+    /// any installation in this set.
+    halted: std::collections::HashSet<String>,
 }
 
 impl PersistenceAdapter {
@@ -44,17 +51,31 @@ impl PersistenceAdapter {
     pub fn new_local() -> Self {
         Self {
             store: std::collections::HashMap::new(),
+            halted: std::collections::HashSet::new(),
         }
     }
 
     /// Persist a `SignedEventEnvelope` and enqueue heavy work.
+    ///
+    /// If `installation_id` is `Some` and that installation has been halted,
+    /// returns `Err(PersistenceError::InstallationHalted)` immediately.
     ///
     /// Must complete in <1s (GitHub 10-second fire-and-forget limit, §1.5).
     /// Returns the CAS key and enqueue status.
     pub fn persist_event(
         &mut self,
         envelope: &SignedEventEnvelope,
+        installation_id: Option<&str>,
     ) -> Result<PersistResult, PersistenceError> {
+        // Fail-closed: reject events for halted installations.
+        if let Some(iid) = installation_id
+            && self.halted.contains(iid)
+        {
+            return Err(PersistenceError::InstallationHalted {
+                installation_id: iid.to_string(),
+            });
+        }
+
         let value = serde_json::to_string(envelope)
             .map_err(|e| PersistenceError::Serialise(e.to_string()))?;
 
@@ -79,13 +100,16 @@ impl PersistenceAdapter {
 
     /// Halt all queued processing for a given installation ID.
     ///
-    /// In production, this signals the Durable Object queue to drain/reject
-    /// pending tasks for the installation. Locally, returns the count halted.
-    pub fn halt_installation(&self, installation_id: &str) -> HaltResult {
-        // Local implementation: no actual queue to drain.
+    /// Inserts `installation_id` into the halted set. Subsequent calls to
+    /// `persist_event` with this installation_id will return
+    /// `PersistenceError::InstallationHalted`.
+    ///
+    /// Returns `items_halted = 1` when newly halted, `0` if already halted.
+    pub fn halt_installation(&mut self, installation_id: &str) -> HaltResult {
+        let newly_halted = self.halted.insert(installation_id.to_string());
         HaltResult {
             installation_id: installation_id.to_string(),
-            items_halted: 0,
+            items_halted: if newly_halted { 1 } else { 0 },
         }
     }
 }
