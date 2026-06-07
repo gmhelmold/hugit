@@ -650,6 +650,7 @@ dependencies = [
  "hex",
  "hugit-checks",
  "hugit-contracts",
+ "hugit-queue",
  "serde",
  "serde_json",
  "sha2",
