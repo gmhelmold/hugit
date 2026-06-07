@@ -117,9 +117,34 @@ pub fn recover_from_cold<S: ColdStore>(cold: &S) -> Result<Recovered, RecoveryEr
 ///
 /// Reconstructs the chain from `[0, max_seq)`, re-verifies it (fail-closed), and
 /// replays it into a [`RefState`] that is replay-identical to the pre-loss state.
+///
+/// Equivalent to [`recover_with_sources`] with an empty hot tail.
 pub fn recover_with_mirror<S: ColdStore, M: MirrorSource>(
     cold: &S,
     mirror: &M,
+) -> Result<Recovered, RecoveryError> {
+    recover_with_sources(cold, mirror, &[])
+}
+
+/// Recover ref state after hot-DO loss from **cold tier + mirror + a surviving
+/// hot tail**.
+///
+/// Compaction only ever seals a *prefix* to the cold tier; the most-recent
+/// records live hot. A partial hot-DO loss can lose the Durable Object while its
+/// unsealed tail is still recoverable (re-read from the storage edge, replayed
+/// by the client, or held by a sibling). Those `hot_tail` records — a contiguous
+/// suffix beyond the sealed prefix — are spliced in **after** the cold/mirror
+/// span and before chain verification, so recovery includes them instead of
+/// rebuilding a silently-stale state that omits the tail.
+///
+/// Precedence is unchanged: cold tier first, mirror second for any prefix gap,
+/// then the hot tail for the suffix. `max_seq` is one past the highest seq seen
+/// across **all** sources, so a hot tail extends the recovered span. The
+/// recombined chain is re-verified (fail-closed) before any ref state is served.
+pub fn recover_with_sources<S: ColdStore, M: MirrorSource>(
+    cold: &S,
+    mirror: &M,
+    hot_tail: &[EventRecord],
 ) -> Result<Recovered, RecoveryError> {
     // 1. Gather every cold-tier record, keyed by seq (cold tier FIRST).
     let mut by_seq: std::collections::BTreeMap<u64, EventRecord> =
@@ -132,8 +157,19 @@ pub fn recover_with_mirror<S: ColdStore, M: MirrorSource>(
         }
     }
 
+    // 1b. Splice the surviving hot tail in. It is authoritative for its own
+    // seqs (the unsealed records the DO held); it never overwrites a sealed cold
+    // record at the same seq (cold is the canonical seal), so insert only where
+    // vacant. Crucially this extends `max_seq` below so the suffix is recovered
+    // instead of silently dropped (a stale rebuild).
+    for r in hot_tail {
+        by_seq.entry(r.seq).or_insert_with(|| r.clone());
+    }
+
     let mut used_mirror = false;
-    // The chain runs [0, max_seq); max_seq is one past the highest seq seen.
+    // The chain runs [0, max_seq); max_seq is one past the highest seq seen
+    // across cold + hot tail (the hot tail can extend the span past the sealed
+    // prefix — without this, a partial-hot-loss recovery would be stale).
     let max_seq = by_seq.keys().next_back().map(|s| s + 1).unwrap_or(0);
 
     // 2. Fill any gap from the mirror (secondary source).

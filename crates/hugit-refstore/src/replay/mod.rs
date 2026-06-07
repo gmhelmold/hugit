@@ -12,16 +12,26 @@
 //!
 //! # Ref event grammar (the deterministic fold)
 //!
-//! The projection reads two event kinds; every other kind is inert (it advances
-//! the chain but does not touch ref state — forward-compatible by construction):
+//! The projection reads the **ref-mutating** event kinds; every other kind is
+//! inert (it advances the chain but does not touch ref state — forward-
+//! compatible by construction):
 //!
 //! - `ref.update` — payload is canonical JSON `{"ref": <name>, "target": <oid>}`;
 //!   sets `name -> oid` (insert or overwrite).
 //! - `ref.delete` — payload is canonical JSON `{"ref": <name>}`; removes `name`.
+//! - `intent.landed` — payload is canonical JSON
+//!   `{"intent_id": <id>, "ref": <name>, "target": <oid>, "charter": <text>}`; it
+//!   *also* advances `name -> oid` (it is the kind D4's land/import path emits and
+//!   the kind the machine altitude projects as a ref-advancing commit). A landed
+//!   intent is a ref mutation, so it MUST fold like a `ref.update` — folding it as
+//!   inert silently lost intent-set refs from the projection (the 2026-06-07
+//!   review's undo-compensator defect). The extra payload fields are ignored here;
+//!   the intent altitude ([`crate::intent`]) reads them.
 //!
-//! A malformed payload for one of these kinds is a [`ReplayError::BadPayload`]
+//! A malformed payload for any ref-mutating kind is a [`ReplayError::BadPayload`]
 //! (fail-closed: a corrupt instruction is never silently dropped).
 
+use crate::intent::model::INTENT_LANDED_KIND;
 use crate::log::EventLog;
 use crate::tamper::{TamperError, verify_chain};
 use hugit_contracts::event_record::EventRecord;
@@ -125,7 +135,12 @@ pub fn replay_unchecked(records: &[EventRecord]) -> Result<RefState, ReplayError
     let mut state = RefState::new();
     for record in records {
         match record.kind.as_str() {
-            "ref.update" => {
+            // A landed intent advances `ref -> target` exactly like a ref.update
+            // (it carries extra intent fields the intent altitude reads, ignored
+            // here). Unifying it with ref.update is the fix for the undo-
+            // compensator defect: a ref last set by a landed intent must survive
+            // into the prior-state projection.
+            "ref.update" | INTENT_LANDED_KIND => {
                 let v: serde_json::Value = parse_payload(record)?;
                 let name = field_str(&v, "ref").ok_or_else(|| bad(record))?;
                 let target = field_str(&v, "target").ok_or_else(|| bad(record))?;

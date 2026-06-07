@@ -41,6 +41,6 @@ pub use coldtier::{ColdRange, ColdStore, InMemoryColdStore};
 pub use compaction::{CompactionError, CompactionReport, HotRemainder, compact};
 pub use recovery::{
     MirrorSource, NoMirror, Recovered, RecoveryError, RecoverySource, recover_from_cold,
-    recover_with_mirror,
+    recover_with_mirror, recover_with_sources,
 };
 pub use undo::{Compensation, UndoError, compute_compensation, undo};
