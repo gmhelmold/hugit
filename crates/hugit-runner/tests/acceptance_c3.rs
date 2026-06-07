@@ -381,8 +381,7 @@ fn item_2_toolchain_layers_shared_across_jobs() {
     let plan_a = sample_plan(&lease_a);
     let cold_cas = FakeCas::cold();
 
-    let outcome_a =
-        cold_hydrate(&cold_cas, &plan_a).expect("first job hydrate must succeed");
+    let outcome_a = cold_hydrate(&cold_cas, &plan_a).expect("first job hydrate must succeed");
     let fetches_after_a = cold_cas.total_fetches();
     assert!(
         matches!(
