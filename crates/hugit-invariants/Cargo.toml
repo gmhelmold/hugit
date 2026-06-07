@@ -97,6 +97,14 @@ path = "x2/tests/acceptance_x2.rs"
 [[test]]
 name = "acceptance_x6"
 path = "x6/tests/acceptance_x6.rs"
+# WP-X10: focus gate — adjacent-product boundary (dogfood excludes
+# corelink-server build-enforced, shared CoreLink API-tenancy non-interference,
+# policy cap, fleet-scale load non-interference). Structural lane always runs;
+# live lane (items ①④) gated behind HUGIT_CORELINK_PROD_URL + HUGIT_X10_LIVE.
+[[test]]
+name = "acceptance_x10"
+path = "x10/tests/acceptance_x10.rs"
+
 # WP-X12: erasure × provenance × mirror — post-erasure chain stays verifiable
 # over a tamper-evident tombstone (no silent re-link), mirror obligation
 # discharged-or-disclosed in the export/exit proof (sources under x12/, oracle
