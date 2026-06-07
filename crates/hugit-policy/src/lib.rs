@@ -13,8 +13,8 @@
 //! Every policy change emits a hash-chained [`EventRecord`] (③).
 
 use hugit_contracts::EventRecord;
+use hugit_refstore::{GENESIS_PREV_HASH, canonical_json, compute_this_hash};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
 // ─── public re-exports ───────────────────────────────────────────────────────
@@ -228,15 +228,24 @@ pub fn emit_policy_change(
     let prev_hash = log
         .last()
         .map(|e| e.this_hash.clone())
-        .unwrap_or_else(|| "0".repeat(64));
+        .unwrap_or_else(|| GENESIS_PREV_HASH.to_string());
 
-    let payload = serde_json::json!({
+    let payload_raw = serde_json::json!({
         "old": old_gates_json,
         "new": new_gates_json,
     })
     .to_string();
+    // Payload MUST be canonical JSON before chaining — verifiers re-canonicalise
+    // and compare bytes; a non-canonical payload would produce a different hash.
+    let payload = canonical_json(&payload_raw).unwrap_or(payload_raw);
 
-    let this_hash = compute_event_hash(&prev_hash, "policy.change", principal, &payload, seq);
+    let this_hash = compute_this_hash(
+        &prev_hash,
+        "policy.change",
+        &[principal.to_string()],
+        &payload,
+        seq,
+    );
 
     let event = EventRecord {
         seq,
@@ -250,31 +259,6 @@ pub fn emit_policy_change(
 
     log.push(event.clone());
     event
-}
-
-/// Compute the event hash per the frozen formula:
-/// `H(prev_hash ‖ kind ‖ principal_chain ‖ payload ‖ seq)`
-/// where each field is length-prefixed (4-byte big-endian u32), seq is 8-byte big-endian u64.
-fn compute_event_hash(
-    prev_hash: &str,
-    kind: &str,
-    principal: &str,
-    payload: &str,
-    seq: u64,
-) -> String {
-    let mut hasher = Sha256::new();
-
-    // Each string field: 4-byte BE u32 length prefix + UTF-8 bytes
-    for field in &[prev_hash, kind, principal, payload] {
-        let bytes = field.as_bytes();
-        let len = bytes.len() as u32;
-        hasher.update(len.to_be_bytes());
-        hasher.update(bytes);
-    }
-    // seq: 8-byte BE u64
-    hasher.update(seq.to_be_bytes());
-
-    hex::encode(hasher.finalize())
 }
 
 /// Landing-path enforcement adapter.
