@@ -377,6 +377,277 @@ fn item_4_planted_secret_renders_redacted() {
     );
 }
 
+/// ④-extended: secret planted in intent_id, campaign, AND deep_link_target —
+/// ALL must render [REDACTED], not raw.
+///
+/// This is the gamed-by-omission defect: the original oracle only planted in
+/// `charter` and verdict `claims_checked`. These three fields were surfaced raw.
+#[test]
+fn item_4b_secret_in_intent_id_campaign_deep_link_redacted() {
+    let secret_intent_id = "SECRET:intent-token-abc";
+    let secret_campaign = "SECRET:campaign-key-xyz";
+    let secret_deep_link = "SECRET:deep-link-target-secret";
+
+    // Build the payload manually so we can control all three fields.
+    let payload = serde_json::json!({
+        "intent_id": secret_intent_id,
+        "campaign": secret_campaign,
+        "charter": "normal-charter",
+        "ref": "refs/heads/main",
+        "target": "sha:abc",
+        "deep_link_target": secret_deep_link,
+    })
+    .to_string();
+
+    let events: &[(&str, Vec<&str>, String)] = &[("intent.landed", vec!["agent-a"], payload)];
+
+    let records = build_log(events);
+    let ledger = Ledger::from_records(&records);
+
+    // The entry will be found under the (redacted) campaign name — but the
+    // ledger stores whatever came from the payload, so we get all entries.
+    let entries = ledger.entries();
+    assert_eq!(entries.len(), 1, "one entry must be present");
+    let entry = &entries[0];
+
+    // intent_id must be REDACTED.
+    assert_eq!(
+        entry.intent_id,
+        hugit_ledger::REDACTED,
+        "intent_id must be [REDACTED] when it contains a secret; got {:?}",
+        entry.intent_id
+    );
+    assert!(
+        !entry.intent_id.contains("SECRET:"),
+        "SECRET: must not appear in surfaced intent_id"
+    );
+
+    // campaign must be REDACTED.
+    assert_eq!(
+        entry.campaign,
+        hugit_ledger::REDACTED,
+        "campaign must be [REDACTED] when it contains a secret; got {:?}",
+        entry.campaign
+    );
+    assert!(
+        !entry.campaign.contains("SECRET:"),
+        "SECRET: must not appear in surfaced campaign"
+    );
+
+    // deep_link_target must be REDACTED.
+    assert_eq!(
+        entry.deep_link_target,
+        hugit_ledger::REDACTED,
+        "deep_link_target must be [REDACTED] when it contains a secret; got {:?}",
+        entry.deep_link_target
+    );
+    assert!(
+        !entry.deep_link_target.contains("SECRET:"),
+        "SECRET: must not appear in surfaced deep_link_target"
+    );
+
+    // charter (non-secret) must pass through unchanged.
+    assert_eq!(
+        entry.charter, "normal-charter",
+        "non-secret charter must pass through unredacted"
+    );
+}
+
+/// ④-fleet: secret planted in workspace_id and agent_id — must render [REDACTED].
+///
+/// fleet/mod.rs applied zero redaction on surfaced workspace_id / agent_id.
+#[test]
+fn item_4c_fleet_redacts_workspace_and_agent_ids() {
+    use hugit_ledger::fleet::FleetState;
+
+    let secret_ws = "SECRET:ws-key-abc123";
+    let secret_agent = "SECRET:agent-token-xyz";
+
+    let events: &[(&str, Vec<&str>, String)] = &[
+        (
+            "ws.state.active",
+            vec!["system"],
+            serde_json::json!({"workspace_id": secret_ws}).to_string(),
+        ),
+        (
+            "agent.assigned",
+            vec!["dispatch"],
+            serde_json::json!({"agent_id": secret_agent, "workspace_id": secret_ws}).to_string(),
+        ),
+    ];
+
+    let records = build_log(events);
+    let fleet = FleetState::from_records(&records);
+
+    // workspace_id must not be raw secret.
+    for ws in &fleet.workspaces {
+        assert!(
+            !ws.workspace_id.contains("SECRET:"),
+            "SECRET: must not appear in surfaced workspace_id; got {:?}",
+            ws.workspace_id
+        );
+        assert_eq!(
+            ws.workspace_id,
+            hugit_ledger::REDACTED,
+            "workspace_id containing a secret must be [REDACTED]"
+        );
+    }
+
+    // agent_id and workspace_id in agent entries must not be raw secret.
+    for agent in &fleet.agents {
+        assert!(
+            !agent.agent_id.contains("SECRET:"),
+            "SECRET: must not appear in surfaced agent_id; got {:?}",
+            agent.agent_id
+        );
+        assert_eq!(
+            agent.agent_id,
+            hugit_ledger::REDACTED,
+            "agent_id containing a secret must be [REDACTED]"
+        );
+        assert!(
+            !agent.workspace_id.contains("SECRET:"),
+            "SECRET: must not appear in surfaced workspace_id in agent entry; got {:?}",
+            agent.workspace_id
+        );
+        assert_eq!(
+            agent.workspace_id,
+            hugit_ledger::REDACTED,
+            "workspace_id containing a secret in agent entry must be [REDACTED]"
+        );
+    }
+}
+
+/// ④-deeplink: secret planted in deep_link target — must render [REDACTED] in
+/// ResolveResult::Found::target.
+///
+/// deeplink.rs applied zero redaction on the returned target.
+#[test]
+fn item_4d_deeplink_redacts_secret_target() {
+    use hugit_ledger::deeplink::{ResolveResult, resolve};
+
+    let secret_target = "SECRET:deep-link-content-addr";
+
+    let payload = serde_json::json!({
+        "intent_id": "id-dl-secret",
+        "campaign": "wave-test",
+        "charter": "some charter",
+        "ref": "refs/heads/main",
+        "target": secret_target,
+        "deep_link_target": secret_target,
+    })
+    .to_string();
+
+    let events: &[(&str, Vec<&str>, String)] = &[("intent.landed", vec!["agent-a"], payload)];
+
+    let records = build_log(events);
+
+    match resolve("id-dl-secret", &records) {
+        ResolveResult::Found { target, .. } => {
+            assert!(
+                !target.contains("SECRET:"),
+                "SECRET: must not appear in resolved deep-link target; got {:?}",
+                target
+            );
+            assert_eq!(
+                target,
+                hugit_ledger::REDACTED,
+                "resolved target containing a secret must be [REDACTED]"
+            );
+        }
+        ResolveResult::NotFound { .. } => panic!("deep-link must resolve"),
+    }
+}
+
+/// Defect 3: malformed payload must increment a `malformed` counter rather
+/// than silently coalescing to "unknown"/dropping the record.
+#[test]
+fn item_4e_malformed_fleet_payload_counted_not_swallowed() {
+    use hugit_ledger::fleet::FleetState;
+
+    // Valid event first, then a malformed ws.state.active (payload is not JSON).
+    let valid_ws_payload = serde_json::json!({"workspace_id": "ws-ok"}).to_string();
+    let malformed_payload = "not-valid-json{{{{".to_string();
+
+    let events: &[(&str, Vec<&str>, String)] = &[
+        ("ws.state.active", vec!["system"], valid_ws_payload),
+        // malformed: payload is not JSON — should NOT produce a "unknown" workspace.
+        ("ws.state.active", vec!["system"], malformed_payload),
+    ];
+
+    let records = build_log(events);
+    let fleet = FleetState::from_records(&records);
+
+    // The malformed record must be COUNTED, not silently normalized to "unknown".
+    assert_eq!(
+        fleet.malformed, 1,
+        "one malformed record must be counted; got {}",
+        fleet.malformed
+    );
+
+    // The valid workspace must still be present.
+    assert_eq!(
+        fleet.workspaces.len(),
+        1,
+        "only the well-formed workspace must appear"
+    );
+    assert_eq!(
+        fleet.workspaces[0].workspace_id, "ws-ok",
+        "valid workspace id must be surfaced"
+    );
+
+    // No "unknown" workspace must be fabricated from the malformed payload.
+    assert!(
+        !fleet.workspaces.iter().any(|w| w.workspace_id == "unknown"),
+        "malformed payload must not create an 'unknown' workspace"
+    );
+}
+
+/// LOW defect: unknown event kinds must be classified as Other, not Landing.
+#[test]
+fn item_4f_unknown_event_class_is_other_not_landing() {
+    use hugit_ledger::watch::{EventClass, WatchDisplay};
+
+    let events: &[(&str, Vec<&str>, String)] = &[
+        // Known kind.
+        (
+            "intent.landed",
+            vec!["agent"],
+            r#"{"intent_id":"i1"}"#.to_string(),
+        ),
+        // Unknown kind — must NOT be classified as Landing.
+        (
+            "some.unknown.event.kind",
+            vec!["system"],
+            r#"{"data":"x"}"#.to_string(),
+        ),
+    ];
+
+    let records = build_log(events);
+    let mut display = WatchDisplay::new();
+    let lines = display.process_batch(&records);
+
+    // The known landing event is Landing.
+    assert_eq!(
+        lines[0].class,
+        EventClass::Landing,
+        "intent.landed must be Landing"
+    );
+
+    // The unknown event must be Other, not Landing.
+    assert_ne!(
+        lines[1].class,
+        EventClass::Landing,
+        "unknown event kind must NOT be classified as Landing; got {:?}",
+        lines[1].class
+    );
+    assert_eq!(
+        lines[1].class,
+        EventClass::Other,
+        "unknown event kind must be classified as Other"
+    );
+}
+
 // ── ⑤ two-zoom toggle mutually consistent (one store) ────────────────────────
 
 #[test]

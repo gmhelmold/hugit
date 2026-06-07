@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 
 use hugit_contracts::event_record::EventRecord;
 
+use crate::redact;
+
 /// The schema version for fleet state output.
 pub const FLEET_SCHEMA_VERSION: &str = "1";
 
@@ -72,6 +74,11 @@ pub struct FleetState {
     pub last_seq: u64,
     /// Total number of events consumed.
     pub event_count: u64,
+    /// Number of records whose payload could not be parsed as valid JSON.
+    ///
+    /// These are counted and surfaced rather than silently coalesced to
+    /// "unknown".  A non-zero value indicates data quality issues upstream.
+    pub malformed: u64,
 }
 
 /// One workspace entry in the fleet state.
@@ -87,6 +94,10 @@ impl FleetState {
     /// Derive fleet state from a slice of EventRecords.
     ///
     /// Pure projection: equal records yield equal FleetState.
+    ///
+    /// Malformed records (non-JSON payloads) are counted in `malformed` rather
+    /// than silently coalesced to "unknown".  Surfaced strings are routed
+    /// through the view-boundary redaction filter (④).
     pub fn from_records(records: &[EventRecord]) -> Self {
         let mut workspaces: std::collections::HashMap<String, WorkspaceState> =
             std::collections::HashMap::new();
@@ -94,19 +105,27 @@ impl FleetState {
             std::collections::HashMap::new();
         let mut last_seq = 0u64;
         let event_count = records.len() as u64;
+        let mut malformed = 0u64;
 
         for r in records {
             last_seq = r.seq;
-            let payload: serde_json::Value =
-                serde_json::from_str(&r.payload).unwrap_or(serde_json::Value::Null);
+
+            // Parse the payload; count malformed records instead of swallowing.
+            let payload = match serde_json::from_str::<serde_json::Value>(&r.payload) {
+                Ok(v) => v,
+                Err(_) => {
+                    malformed += 1;
+                    continue; // skip — do not fabricate "unknown" entries.
+                }
+            };
 
             match r.kind.as_str() {
                 kind if kind.starts_with("ws.state.") => {
-                    let ws_id = payload
+                    let raw_ws_id = payload
                         .get("workspace_id")
                         .and_then(serde_json::Value::as_str)
-                        .unwrap_or("unknown")
-                        .to_string();
+                        .unwrap_or("unknown");
+                    let ws_id = redact::apply(raw_ws_id);
                     let new_state = match kind {
                         "ws.state.active" => WorkspaceState::Active,
                         "ws.state.closed" => WorkspaceState::Closed,
@@ -115,16 +134,16 @@ impl FleetState {
                     workspaces.insert(ws_id, new_state);
                 }
                 "agent.assigned" => {
-                    let agent_id = payload
+                    let raw_agent_id = payload
                         .get("agent_id")
                         .and_then(serde_json::Value::as_str)
-                        .unwrap_or("unknown")
-                        .to_string();
-                    let ws_id = payload
+                        .unwrap_or("unknown");
+                    let raw_ws_id = payload
                         .get("workspace_id")
                         .and_then(serde_json::Value::as_str)
-                        .unwrap_or("unknown")
-                        .to_string();
+                        .unwrap_or("unknown");
+                    let agent_id = redact::apply(raw_agent_id);
+                    let ws_id = redact::apply(raw_ws_id);
                     agents.insert(
                         agent_id.clone(),
                         AgentEntry {
@@ -135,21 +154,21 @@ impl FleetState {
                     );
                 }
                 "agent.completed" => {
-                    let agent_id = payload
+                    let raw_agent_id = payload
                         .get("agent_id")
                         .and_then(serde_json::Value::as_str)
-                        .unwrap_or("unknown")
-                        .to_string();
+                        .unwrap_or("unknown");
+                    let agent_id = redact::apply(raw_agent_id);
                     if let Some(entry) = agents.get_mut(&agent_id) {
                         entry.state = AgentState::Completed;
                     }
                 }
                 "agent.failed" => {
-                    let agent_id = payload
+                    let raw_agent_id = payload
                         .get("agent_id")
                         .and_then(serde_json::Value::as_str)
-                        .unwrap_or("unknown")
-                        .to_string();
+                        .unwrap_or("unknown");
+                    let agent_id = redact::apply(raw_agent_id);
                     if let Some(entry) = agents.get_mut(&agent_id) {
                         entry.state = AgentState::Failed;
                     }
@@ -177,6 +196,7 @@ impl FleetState {
             agents: agent_vec,
             last_seq,
             event_count,
+            malformed,
         }
     }
 
@@ -212,6 +232,9 @@ impl FleetState {
         }
         if reparsed.get("event_count").is_none() {
             return Err("missing event_count in output".to_string());
+        }
+        if reparsed.get("malformed").is_none() {
+            return Err("missing malformed in output".to_string());
         }
         Ok(())
     }
