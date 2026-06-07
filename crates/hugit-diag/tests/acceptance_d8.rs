@@ -10,6 +10,7 @@ use hugit_diag::experiment::{
     IngestError, Promotion, PromotionAttempt, RegenOutcome, ReportError, ReportVerdict,
     SourceOrigin, WaveContribution, ingest,
 };
+use hugit_refstore::compute_this_hash;
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 
@@ -477,5 +478,111 @@ fn item_9_report_attested_tamper_evident() {
         log.last().unwrap().kind,
         "experiment.promotion.refused",
         "refusal audited"
+    );
+}
+
+// ── REMEDIATION ORACLE TESTS (RED → GREEN) ───────────────────────────────────
+
+/// (a) Audit hash must match canonical hugit_refstore formula exactly.
+///
+/// RED on the bespoke hasher (which omits the VEC count prefix for
+/// principal_chain).  GREEN once audit.rs routes through compute_this_hash.
+#[test]
+fn rdiag_a_audit_hash_matches_canonical_formula() {
+    // Emit an ingestion-rejected event so log has one entry.
+    let mut buffer = Vec::new();
+    let mut log: Vec<EventRecord> = Vec::new();
+    let rejected = WaveContribution::from_wave(
+        "wave-ineligible",
+        SourceOrigin::CorelinkServer,
+        true,
+        RegenOutcome::Agree,
+        false,
+    );
+    ingest(&mut buffer, &mut log, rejected).unwrap_err();
+
+    // Also emit a refused-promotion event to get two chain links.
+    let (small_corpus, _) = {
+        let mut buf2 = Vec::new();
+        let mut lg2: Vec<EventRecord> = Vec::new();
+        let c = WaveContribution::from_wave(
+            "wave-small",
+            SourceOrigin::Hugit,
+            true,
+            RegenOutcome::Agree,
+            false,
+        );
+        ingest(&mut buf2, &mut lg2, c).unwrap();
+        (Corpus::from_buffer(buf2), lg2)
+    };
+    let sealed_small = small_corpus.seal();
+    let insuff = GateReport::generate(&sealed_small, attestation());
+    let mut gate = ExperimentGate::new();
+    gate.attempt_promotion(
+        &mut log,
+        PromotionAttempt {
+            promotion: Promotion::RegenPromotion,
+            report: &insuff,
+            corpus: &sealed_small,
+            evaluator: EvaluatorHealth::Healthy,
+            principal: "test-principal",
+        },
+    )
+    .unwrap_err();
+
+    assert!(log.len() >= 2, "need at least two entries to test chain");
+
+    // For every record: this_hash must equal the canonical formula's output.
+    let genesis = "0".repeat(64);
+    for (i, record) in log.iter().enumerate() {
+        let expected = compute_this_hash(
+            &record.prev_hash,
+            &record.kind,
+            &record.principal_chain,
+            &record.payload,
+            record.seq,
+        );
+        assert_eq!(
+            record.this_hash, expected,
+            "record {i}: this_hash diverges from canonical formula"
+        );
+
+        // Chain continuity: prev_hash must chain to predecessor's this_hash.
+        let expected_prev = if i == 0 {
+            genesis.clone()
+        } else {
+            log[i - 1].this_hash.clone()
+        };
+        assert_eq!(
+            record.prev_hash, expected_prev,
+            "record {i}: chain continuity broken"
+        );
+    }
+}
+
+/// (b) A corpus-swap (different corpus presented to verify) must return
+/// CorpusTampered, not Forged.
+///
+/// RED on the current report.rs line 140 which returns Forged for this case.
+/// GREEN once report.rs returns CorpusTampered for corpus_seal mismatch.
+#[test]
+fn rdiag_b_corpus_swap_yields_corpus_tampered() {
+    // Report generated from corpus A (30-point PASS corpus).
+    let (corpus_a, _) = passing_corpus(30);
+    let sealed_a = corpus_a.seal();
+    let report = GateReport::generate(&sealed_a, attestation());
+    assert_eq!(report.verdict(), ReportVerdict::Pass);
+
+    // Corpus B: a different sealed corpus (different seal digest).
+    let (corpus_b, _) = passing_corpus(31);
+    let sealed_b = corpus_b.seal();
+
+    // The report's body_digest is intact (no forgery), but the report was
+    // generated from corpus A and the presented corpus is B → seal mismatch.
+    // Contract: must return CorpusTampered (not Forged).
+    assert_eq!(
+        report.verify(&sealed_b),
+        Err(ReportError::CorpusTampered),
+        "corpus swap must return CorpusTampered, not Forged"
     );
 }

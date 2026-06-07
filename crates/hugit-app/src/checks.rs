@@ -62,14 +62,23 @@ impl ChecksClient {
 
     /// Write a check-run to GitHub (item ③).
     ///
-    /// In local mode, returns a synthetic `ChecksWriteResponse`.
-    /// In production mode, would issue an authenticated HTTPS POST to the
-    /// Checks API (infrastructure-gated).
+    /// `installation_token` must be `Some(&str)` — a valid installation access
+    /// token minted by the GitHub App. When `None` (token absent or revoked),
+    /// returns `ChecksClientError::TokenRevoked` immediately (fail-closed).
+    ///
+    /// In local mode with a valid token, returns a synthetic
+    /// `ChecksWriteResponse`. In production mode, would issue an authenticated
+    /// HTTPS POST to the Checks API (infrastructure-gated).
     pub fn write_check_run(
         &self,
         request: &ChecksWriteRequest,
-        _installation_token: Option<&str>,
+        installation_token: Option<&str>,
     ) -> Result<ChecksWriteResponse, ChecksClientError> {
+        // Fail-closed: token must be present before any work.
+        let _token = installation_token.ok_or_else(|| ChecksClientError::TokenRevoked {
+            installation_id: request.repo.clone(),
+        })?;
+
         // Validate the request is well-formed.
         if request.repo.is_empty() {
             return Err(ChecksClientError::Api("repo is empty".to_string()));
@@ -79,6 +88,7 @@ impl ChecksClient {
         }
 
         if self.local_mode {
+            // In production this would be: Authorization: Bearer {_token}
             let id = self
                 .next_id
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
