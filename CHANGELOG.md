@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(invariants): X2 — attestation e2e with ed25519 public verification: full provenance chain (tree+def+runner+model+principal) resolves cryptographically, tampered/unsigned/forged rejected fail-closed at promotion (with audit), PUBLIC verification procedure provable with the public key alone (signing key never needed/present — replaces the prior HMAC keyed-MAC), cross-tenant shared-hit honesty via anonymized PLATFORM attestation (no producer-tenant leak, no mis-attribution) (WP-X2)
+
 - feat(invariants): X3 — context privacy: tenant-scoped journals (cross-tenant fetch denied + audited), redaction at capture AND export (ExportSchema-validated), retention/deletion purge verified-absent, training/eval exclusion documented control + audit trail (WP-X3)
 
 - feat(mirror): E2a — git history import: byte-identity (OID round-trip via SHA-1), LFS object materialization (SHA-256 verified, not pointer), resumable across timeouts (cursor-based, no restart-from-zero), idempotency (unchanged→no-op, changed→incremental, no dupes), import boundary (bare commit→opaque EventRecord, no intent synthesized) (WP-E2a)

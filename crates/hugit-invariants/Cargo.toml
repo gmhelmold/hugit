@@ -28,6 +28,16 @@ path = "lib.rs"
 hugit-contracts = { path = "../hugit-contracts" }
 hugit-runner = { path = "../hugit-runner" }
 anyhow = "1"
+# WP-X2 (attestation e2e). Real ASYMMETRIC signature so verification is
+# genuinely PUBLIC (item ③): the public key verifies, only the private key can
+# sign — an HMAC keyed-MAC would fail this. ed25519-dalek is the audited,
+# pure-Rust Ed25519 implementation; the frozen AttestationChain.sig field
+# documents its format as a base64-encoded Ed25519 signature. The "no new
+# external deps" rule is WAIVED by the lead specifically for this vetted crypto.
+# Pinned exact. base64 (0.22) is already in the workspace lockfile (transitive);
+# pinning it here adds no new supply-chain surface, only the documented encoding.
+ed25519-dalek = "=2.1.1"
+base64 = "0.22"
 
 [dev-dependencies]
 hugit-contracts = { path = "../hugit-contracts" }
@@ -55,3 +65,8 @@ path = "x3/tests/acceptance_x3.rs"
 [[test]]
 name = "acceptance_x5"
 path = "x5/tests/acceptance_x5.rs"
+
+# WP-X2: attestation end-to-end (sources under x2/, wired via #[path] in lib.rs).
+[[test]]
+name = "acceptance_x2"
+path = "x2/tests/acceptance_x2.rs"
