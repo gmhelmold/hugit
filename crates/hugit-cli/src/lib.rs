@@ -24,47 +24,65 @@ pub mod attention;
 // The canonical command registry (WP-R-cli defect #1)
 // ---------------------------------------------------------------------------
 
-/// The canonical set of top-level `hugit` CLI verbs, in catalog order.
+/// The LIVE dispatched top-level `hugit` CLI verbs — the actual binary surface.
 ///
-/// This is the SINGLE source of truth for hugit's verb surface. The real
-/// `hugit` binary ([`main`](../bin/hugit)) dispatches exactly these tokens, and
-/// the namespace-law invariant (hugit-invariants WP-X5 item ①) consumes THIS
-/// constant — not a hand-copied list — so any verb added to the CLI is
-/// automatically checked against `git help -a` for shadowing. Keeping the bin
-/// and the invariant on one list makes "the oracle tests the real surface"
-/// structurally true: the list cannot rot relative to the binary.
+/// **This constant contains ONLY verbs that `main.rs` actually wires and
+/// dispatches.** It is the single source of truth for the *live* CLI surface:
+///
+/// - `main.rs` MUST dispatch every verb listed here (no phantom entries).
+/// - The namespace-law invariant (hugit-invariants WP-X5 item ①) consumes THIS
+///   constant to check that no live hugit verb shadows a `git` verb.  Testing
+///   phantom (unwired) verbs here produces false positives in X5 and a false
+///   sense of coverage.
+/// - The cli oracle (`acceptance_rcli` item ⑥) asserts EQUALITY between this
+///   list and the binary's real `Subcommand` enum, so the registry cannot drift
+///   from the binary in either direction.
 ///
 /// Sub-subcommands (`ws spawn`, `ctx snap`, …) are NOT verbs; only the
 /// top-level token is namespace-law-relevant.
+///
+/// For planned-but-not-yet-dispatched verbs see [`HUGIT_RESERVED_VERBS`].
 pub const HUGIT_VERBS: &[&str] = &[
-    // Phase B — Orchestrator / Worker (the GitHub-App-riding commands)
+    "why",        // hugit why <line|symbol>  — provenance query
+    "impact",     // hugit impact <path|change>   — build-graph blast radius
+    "tournament", // hugit tournament -n N    — exploration as a verb
+    "export",     // hugit export             — anti-lock-in dump + exit proof
+];
+
+/// Planned hugit verb tokens that are RESERVED but NOT yet dispatched.
+///
+/// These verbs are on the product roadmap and are reserved so that they cannot
+/// be accidentally taken by `git` (or another tool) before hugit claims them.
+/// They are **not** part of the live binary surface: they do not appear in
+/// `main.rs` dispatch, `hugit --help`, or the WP-X5 no-shadow oracle.
+///
+/// When a verb graduates to a live dispatch, move it from here to
+/// [`HUGIT_VERBS`] and wire it in `main.rs`.
+pub const HUGIT_RESERVED_VERBS: &[&str] = &[
+    // Phase B — Orchestrator / Worker (planned)
     "land",    // hugit land [--queue]        — union-testing landing queue
     "verdict", // hugit verdict request …     — adversarial reviewer panels
     "check",   // hugit check [--local]       — memoized CI check
     "diag",    // hugit diag <failure>        — structured diagnosis
-    // Phase C/D — Workspace + context
-    "ws",     // hugit ws spawn/attach/snap/gc — claim-fenced workspaces
-    "ctx",    // hugit ctx snap / resume      — short-horizon session resume
-    "impact", // hugit impact <path|change>   — build-graph blast radius
-    // Phase D — The forge verbs
-    "ledger",     // hugit ledger [--live]    — default history view
-    "review",     // hugit review <intent>    — grounded-evidence answers
-    "approve",    // hugit approve            — policy-gated approval
-    "reject",     // hugit reject             — policy-gated rejection
-    "watch",      // hugit watch              — TUI forge monitoring
-    "why",        // hugit why <line|symbol>  — provenance query
-    "undo",       // hugit undo <op>          — event-sourced undo
-    "policy",     // hugit policy edit / test — declarative gate management
-    "campaign",   // hugit campaign / plan    — DAG + acceptance binding
-    "dispatch",   // hugit dispatch <intent>  — workspace + context packet
-    "fleet",      // hugit fleet              — machine-readable fleet state
-    "tournament", // hugit tournament -n N    — exploration as a verb
-    "intent",     // hugit intent seal        — the one ceremony verb
-    "journal",    // hugit journal note       — session note
-    "export",     // hugit export             — anti-lock-in dump + exit proof
+    // Phase C — Workspace + context (planned)
+    "ws",  // hugit ws spawn/attach/snap/gc — claim-fenced workspaces
+    "ctx", // hugit ctx snap / resume      — short-horizon session resume
+    // Phase D — The forge verbs (planned)
+    "ledger",   // hugit ledger [--live]    — default history view
+    "review",   // hugit review <intent>    — grounded-evidence answers
+    "approve",  // hugit approve            — policy-gated approval
+    "reject",   // hugit reject             — policy-gated rejection
+    "watch",    // hugit watch              — TUI forge monitoring
+    "undo",     // hugit undo <op>          — event-sourced undo
+    "policy",   // hugit policy edit / test — declarative gate management
+    "campaign", // hugit campaign / plan    — DAG + acceptance binding
+    "dispatch", // hugit dispatch <intent>  — workspace + context packet
+    "fleet",    // hugit fleet              — machine-readable fleet state
+    "intent",   // hugit intent seal        — the one ceremony verb
+    "journal",  // hugit journal note       — session note
 ];
 
-/// The canonical verb registry as an owned, sorted-stable accessor.
+/// The live verb registry as a stable accessor for downstream consumers.
 ///
 /// Returns [`HUGIT_VERBS`] verbatim. Provided as a function so downstream
 /// consumers (e.g. WP-X5) can depend on a stable call shape even if the backing
