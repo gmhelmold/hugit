@@ -56,3 +56,6 @@ pub mod x13;
 // ── WP-X14: deep-link referential integrity (lifecycle) ───────────────────────
 #[path = "x14/lib.rs"]
 pub mod x14;
+// ── WP-X7: right-to-erasure cascade invariants ───────────────────────────────
+#[path = "x7/lib.rs"]
+pub mod x7;
