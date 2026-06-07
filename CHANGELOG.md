@@ -7,17 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- feat(cli): E5 — export + exit proof: one-command git+JSON dump validated against the versioned ExportSchema (machine check), object-for-object restore round-trip, redaction-at-export with manifest, bounded-memory streaming, point-in-time-consistent cut over D1, terminating-account read-only path, and THE EXIT PROOF — exported artifact clone/log/branch/push with ZERO hugit tooling on PATH; redaction red-team asserts seeded secrets nowhere (WP-E5)
-
-- feat: D9 — attention queue: documented composite ranking (policy × blast-radius × confidence), policy-mandatory floor, fast-approve (90s) gating (blocked for high-risk/mandatory, permitted for low-risk), honest "ranking degraded" up-zoom under missing inputs (WP-D9)
-
-- feat(proto): D2b — read-path edges: client matrix (git 2.40+/jj/libgit2), jj first-class stacked changes with change-ids stable across forge ops + identical stack reconstruction, per-request CPU budget (70% of platform limit) + chunked fallback, degradation kill-test (smart layers off, steady-state + mid-op → vanilla git still serves), per-dimension scale ceilings with documented bounded refusal (PARTIAL: jj binary absent locally → item ⑦ wire round-trip skipped, in-process model proven) (WP-D2b)
-
-- feat(proto): D3b — push concurrency: concurrent pushes serialized through the D1 single-writer point get a strict total order with compare-and-append stale rejection (no lost update); raw push = opaque external-change event with attribution (who/when/ref), never a fabricated intent; write path off unless self-hosted-alpha; intent-log-clean negative + write-path red-team (WP-D3b)
+- feat(checks): D12 — regen gate: opt-in scope only, lands only on acceptance re-pass + fresh independent verdict (fail-closed), per-regen attestation records the authorizing gate-verdict ref, anti-smuggling blocks+audits false "derived" declarations (WP-D12)
 
 - feat(cli): D13 — tournament: N-candidate fan-out, judge-panel selection per documented criteria, losers addressable as evidence, policy-capped + C7 budget-bounded (zero overage) (WP-D13)
 
-- feat(checks): D12 — regen gate: opt-in scope only, lands only on acceptance re-pass + fresh independent verdict (fail-closed), per-regen attestation records the authorizing gate-verdict ref, anti-smuggling blocks+audits false "derived" declarations (WP-D12)
+- feat(proto): D3b — push concurrency: concurrent pushes serialized through the D1 single-writer point get a strict total order with compare-and-append stale rejection (no lost update); raw push = opaque external-change event with attribution (who/when/ref), never a fabricated intent; write path off unless self-hosted-alpha; intent-log-clean negative + write-path red-team (WP-D3b)
+
+- feat(proto): D2b — read-path edges: client matrix (git 2.40+/jj/libgit2), jj first-class stacked changes with change-ids stable across forge ops + identical stack reconstruction, per-request CPU budget (70% of platform limit) + chunked fallback, degradation kill-test (smart layers off, steady-state + mid-op → vanilla git still serves), per-dimension scale ceilings with documented bounded refusal (PARTIAL: jj binary absent locally → item ⑦ wire round-trip skipped, in-process model proven) (WP-D2b)
+
+- feat: D9 — attention queue: documented composite ranking (policy × blast-radius × confidence), policy-mandatory floor, fast-approve (90s) gating (blocked for high-risk/mandatory, permitted for low-risk), honest "ranking degraded" up-zoom under missing inputs (WP-D9)
+
+- feat(cli): E5 — export + exit proof: one-command git+JSON dump validated against the versioned ExportSchema (machine check), object-for-object restore round-trip, redaction-at-export with manifest, bounded-memory streaming, point-in-time-consistent cut over D1, terminating-account read-only path, and THE EXIT PROOF — exported artifact clone/log/branch/push with ZERO hugit tooling on PATH; redaction red-team asserts seeded secrets nowhere (WP-E5)
+
+- feat(mirror): E1a — one-way mirror (hugit→GitHub): outbound sync writer + GitHub App installation-token auth, per-push content-hash verify (byte-identity, fail-CLOSED → divergence), durable ordered/capacity-bounded outage queue (stated bound, overflow → backpressure + incident, never drop/reorder), <60s SLA + soak metric; live GH lane PARTIAL when installation uncovered, never faked (WP-E1a)
 
 - feat: hugit-invariants — X4 supply-chain: content-pinned runner images, verified deps, fail-closed before spawn (WP-X4)
 

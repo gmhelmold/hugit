@@ -14,3 +14,7 @@ serde_json = "1"
 [[test]]
 name = "acceptance_e3"
 path = "tests/acceptance_e3.rs"
+
+[[test]]
+name = "acceptance_e1a"
+path = "tests/acceptance_e1a.rs"
