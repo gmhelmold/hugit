@@ -14,3 +14,6 @@ pub mod divergence;
 pub mod outage;
 pub mod poll;
 pub mod refops;
+// WP-E2a: git history import (byte-identity, LFS, resumable, idempotency).
+// Submodules: import::history, import::lfs, import::resume, import::auth.
+pub mod import;
