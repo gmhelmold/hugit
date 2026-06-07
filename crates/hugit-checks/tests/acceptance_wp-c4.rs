@@ -9,8 +9,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use hugit_checks::regen::driver::{
-    CargoLockDriver, DerivedClass, DriverRegistry, PnpmLockDriver, RegenDriver, RegenError,
-    classify,
+    CargoLockDriver, DerivedClass, DriverRegistry, PNPM_REGEN_ARGS, PnpmLockDriver, RegenDriver,
+    RegenError, classify,
 };
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -33,8 +33,21 @@ impl RegenDriver for MockDriver {
             .unwrap_or(false)
     }
 
-    fn regenerate(&self, workspace_root: &Path, _path: &Path) -> Result<PathBuf, RegenError> {
-        let out = workspace_root.join(self.filename);
+    fn regenerate(&self, workspace_root: &Path, path: &Path) -> Result<PathBuf, RegenError> {
+        // Resolve the target relative to the REAL workspace root: an absolute
+        // `path` is honoured as-is, otherwise it is joined under the root. The
+        // driver must write the file the caller asked for — not a path it
+        // reconstructs from the root, which previously let a test pass the
+        // snapshot DIR as the "workspace root" and still hit the right file
+        // (brutal-review §hugit-checks gamed snapshot test).
+        let out = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            workspace_root.join(path)
+        };
+        if let Some(parent) = out.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
         fs::write(&out, self.output_bytes).unwrap();
         Ok(out)
     }
@@ -173,6 +186,30 @@ fn item_2_deterministic_regen() {
     );
 }
 
+// ── Item ② — pnpm regen is DETERMINISTIC (lockfile-only, not a bare install) ───
+
+/// ② The pnpm driver regenerates with `pnpm install --lockfile-only` — the
+/// deterministic, store-independent mode that rewrites ONLY the lockfile from
+/// the manifests. A bare `pnpm install` (the previous command, despite the
+/// docstring) can mutate the lockfile against an already-installed store, i.e.
+/// nondeterministic regen. This pins the exact command WITHOUT spawning pnpm.
+#[test]
+fn item_2_pnpm_regen_command_is_deterministic_lockfile_only() {
+    assert_eq!(
+        PNPM_REGEN_ARGS,
+        &["install", "--lockfile-only", "--dir"],
+        "pnpm regen must be lockfile-only (deterministic), not a bare install"
+    );
+    assert!(
+        PNPM_REGEN_ARGS.contains(&"--lockfile-only"),
+        "the determinism flag must be present in the command actually run"
+    );
+    assert!(
+        !PNPM_REGEN_ARGS.contains(&"--no-frozen-lockfile"),
+        "regen must never disable lockfile integrity"
+    );
+}
+
 // ── Item ③ — non-derived files are untouched ─────────────────────────────────
 
 /// ③ Files not owned by any driver are not touched by the registry.
@@ -269,7 +306,14 @@ fn item_4_three_derived_classes_exercised() {
     let snap_path = snap_dir.join("test_output.snap");
     fs::write(&snap_path, b"HAND EDIT - must be discarded\n").unwrap();
 
-    reg3.regenerate(&snap_dir, &snap_path).unwrap();
+    // Pass the REAL workspace root (`tmp`), not the snapshot subdir — the driver
+    // must regenerate the snapshot at its true nested location, not at a path it
+    // re-derives from a workspace_root that was bent to match.
+    let regen_out = reg3.regenerate(&tmp, &snap_path).unwrap();
+    assert_eq!(
+        regen_out, snap_path,
+        "driver must regenerate the requested nested snapshot path under the real root"
+    );
     let snap_content = fs::read(&snap_path).unwrap();
     assert_eq!(
         snap_content, SNAP_BYTES,
@@ -491,6 +535,108 @@ checksum = \"b97ed7a9823b74f99c7742f5336af7be5ecd3eeafcb1507d1fa93347b1d589b0\"\
         fixture_path.exists(),
         "method-proof fixture must be committed at {fixture_path:?}"
     );
+}
+
+// ── Item ⑥ — STRUCTURAL method proof: no driver ⇒ FailClosed, no merge fallback ─
+
+/// ⑥ Real structural proof (not prose / file-exists): a derived-classified path
+/// for which NO driver is registered must FAIL CLOSED. There is no text-merge
+/// fallback branch in `DriverRegistry::regenerate` — the only outcomes are a
+/// driver-produced regen or a `FailClosed`. A merge can never silently happen.
+#[test]
+fn item_6_no_driver_fails_closed_no_merge_fallback() {
+    let tmp = make_tmpdir("item6_nodriver");
+
+    // EMPTY registry — no driver owns Cargo.lock.
+    let reg = DriverRegistry::empty();
+
+    let lock_path = tmp.join("Cargo.lock");
+    // A would-be 3-way text-merge result sits on disk; a fail-OPEN gate would
+    // leave it in place (treated as "merged"). Fail-CLOSED must reject.
+    fs::write(&lock_path, b"<<<<<<< HEAD\nmerged\n>>>>>>> branch\n").unwrap();
+
+    // The path IS derived (classify), so this is a real regen request — yet no
+    // driver owns it.
+    assert_eq!(classify(&lock_path), Some(DerivedClass::Lockfile));
+    assert!(reg.driver_for(&lock_path).is_none());
+
+    let result = reg.regenerate(&tmp, &lock_path);
+    match result {
+        Err(RegenError::FailClosed { message, .. }) => {
+            assert!(!message.is_empty(), "FailClosed must carry a clear reason");
+        }
+        Err(other) => panic!("expected FailClosed for an unregistered derived path, got {other}"),
+        Ok(_) => panic!(
+            "no driver registered → must FAIL CLOSED, never silently accept/merge the derived path"
+        ),
+    }
+}
+
+// ── Item ⑤ — ToolNotFound / Io are FUNNELLED into FailClosed at the boundary ────
+
+/// A driver that surfaces a non-FailClosed error (ToolNotFound).
+struct ToolMissingDriver;
+impl RegenDriver for ToolMissingDriver {
+    fn class(&self) -> DerivedClass {
+        DerivedClass::Lockfile
+    }
+    fn owns(&self, path: &Path) -> bool {
+        path.file_name().map(|n| n == "Cargo.lock").unwrap_or(false)
+    }
+    fn regenerate(&self, _root: &Path, _path: &Path) -> Result<PathBuf, RegenError> {
+        Err(RegenError::ToolNotFound {
+            tool: "cargo".to_owned(),
+        })
+    }
+    fn tool_available(&self) -> bool {
+        false
+    }
+}
+
+/// A driver that surfaces an Io error.
+struct IoErrDriver;
+impl RegenDriver for IoErrDriver {
+    fn class(&self) -> DerivedClass {
+        DerivedClass::Lockfile
+    }
+    fn owns(&self, path: &Path) -> bool {
+        path.file_name().map(|n| n == "Cargo.lock").unwrap_or(false)
+    }
+    fn regenerate(&self, _root: &Path, _path: &Path) -> Result<PathBuf, RegenError> {
+        Err(RegenError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "workspace not writable",
+        )))
+    }
+    fn tool_available(&self) -> bool {
+        true
+    }
+}
+
+/// ⑤ A driver-internal `ToolNotFound`/`Io` error must NOT escape the registry
+/// boundary as its own variant — a caller that matches only `FailClosed` would
+/// otherwise treat it as non-fatal and fall back to a text-merge. Both are
+/// funnelled into `FailClosed`.
+#[test]
+fn item_5_tool_and_io_errors_funnel_to_fail_closed() {
+    let tmp = make_tmpdir("item5_funnel");
+    let lock_path = tmp.join("Cargo.lock");
+
+    let mut reg_tool = DriverRegistry::empty();
+    reg_tool.register(Box::new(ToolMissingDriver));
+    match reg_tool.regenerate(&tmp, &lock_path) {
+        Err(RegenError::FailClosed { message, .. }) => {
+            assert!(message.contains("cargo"), "message should name the tool");
+        }
+        other => panic!("ToolNotFound must funnel to FailClosed, got {other:?}"),
+    }
+
+    let mut reg_io = DriverRegistry::empty();
+    reg_io.register(Box::new(IoErrDriver));
+    match reg_io.regenerate(&tmp, &lock_path) {
+        Err(RegenError::FailClosed { .. }) => {}
+        other => panic!("Io error must funnel to FailClosed, got {other:?}"),
+    }
 }
 
 // ── Driver-struct-level tests ─────────────────────────────────────────────────

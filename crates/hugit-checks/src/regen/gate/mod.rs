@@ -26,7 +26,11 @@
 
 use std::path::Path;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as B64;
+use ed25519_dalek::{Signer, SigningKey};
 use hugit_contracts::{AttestationChain, EventRecord, RegenGate, Verdict, VerdictObject};
+use hugit_refstore::{attestation_sig_preimage, canonical_json, compute_this_hash};
 
 use crate::regen::driver::{DerivedClass, classify};
 
@@ -217,22 +221,37 @@ impl Gate {
     /// The verdict (`indep`) is the FRESH INDEPENDENT adversarial verdict from a
     /// D7 panel; `None` models a missing verdict (③).
     ///
+    /// `prev_hash` is the chain head this decision's audit event extends (the
+    /// `this_hash` of the previous event, or
+    /// [`hugit_refstore::GENESIS_PREV_HASH`] for the first). The audit event's
+    /// `this_hash` is computed via the canonical
+    /// [`hugit_refstore::compute_this_hash`] over the canonical-JSON payload, so
+    /// gate events chain and verify against the D1 log like every other emitter
+    /// (R1). `signing_key` signs the per-regen attestation (item ④) over the
+    /// frozen [`hugit_refstore::attestation_sig_preimage`]; a verifier checks it
+    /// with the public key alone.
+    ///
     /// Evaluation order (each defect short-circuits to a [`BlockReason`]):
     /// 1. ① opt-in scope — non-opted → `NotOptedIn`.
-    /// 2. ⑤ anti-smuggling — every declared-derived file must be provably
-    ///    derived, else `FalseDerivedDeclaration`.
+    /// 2. ⑤ anti-smuggling — at least one derived claim is REQUIRED, and every
+    ///    declared-derived file must be provably derived, else
+    ///    `FalseDerivedDeclaration` (an empty claim set can no longer bypass the
+    ///    anti-smuggling check).
     /// 3. ② acceptance re-pass — `repass == false` → `RepassFailed`.
     /// 4. ② independent verdict present, independent, and APPROVE — else
     ///    `VerdictMissing` / `VerdictNotIndependent` / `VerdictNotApproved`.
     ///
-    /// On success: ④ a per-regen [`AttestationChain`] whose principal-chain
-    /// RECORDS the authorising gate-verdict ref, plus a land [`EventRecord`].
+    /// On success: ④ a per-regen SIGNED [`AttestationChain`] whose principal-chain
+    /// RECORDS the authorising gate-verdict ref, plus a chained land
+    /// [`EventRecord`].
     pub fn decide(
         &self,
         req: &RegenRequest<'_>,
         indep: Option<&VerdictObject>,
         seq: u64,
         recorded_at: u64,
+        prev_hash: &str,
+        signing_key: &SigningKey,
     ) -> GateDecision {
         // ── ① opt-in scope only ────────────────────────────────────────────
         if !self.is_opted_in(&req.requested_scope) {
@@ -243,33 +262,35 @@ impl Gate {
                 },
                 seq,
                 recorded_at,
+                prev_hash,
             );
         }
 
         // ── ⑤ anti-smuggling: every declared-derived file must be provably so ─
         if let Some(reason) = self.anti_smuggling(req) {
-            return self.block(reason, seq, recorded_at);
+            return self.block(reason, seq, recorded_at, prev_hash);
         }
 
         // ── ② acceptance re-pass (fail-closed) ──────────────────────────────
         if !self.gate.repass {
-            return self.block(BlockReason::RepassFailed, seq, recorded_at);
+            return self.block(BlockReason::RepassFailed, seq, recorded_at, prev_hash);
         }
 
         // ── ② fresh INDEPENDENT adversarial verdict, APPROVE ────────────────
         let verdict = match indep {
             Some(v) => v,
-            None => return self.block(BlockReason::VerdictMissing, seq, recorded_at),
+            None => return self.block(BlockReason::VerdictMissing, seq, recorded_at, prev_hash),
         };
         // An empty `indep_verdict` ref means the gate has no verdict bound.
         if self.gate.indep_verdict.trim().is_empty() {
-            return self.block(BlockReason::VerdictMissing, seq, recorded_at);
+            return self.block(BlockReason::VerdictMissing, seq, recorded_at, prev_hash);
         }
         if let Some(detail) = self.independence_defect(req, verdict) {
             return self.block(
                 BlockReason::VerdictNotIndependent { detail },
                 seq,
                 recorded_at,
+                prev_hash,
             );
         }
         if verdict.verdict != Verdict::Approve {
@@ -279,11 +300,12 @@ impl Gate {
                 },
                 seq,
                 recorded_at,
+                prev_hash,
             );
         }
 
         // ── ④ provenance closure: land as its own auditable revision ────────
-        self.land(req, verdict, seq, recorded_at)
+        self.land(req, verdict, seq, recorded_at, prev_hash, signing_key)
     }
 
     // ── ⑤ anti-smuggling predicate ──────────────────────────────────────────
@@ -292,7 +314,20 @@ impl Gate {
     /// [`DerivedClass`] (via C4's `classify`) AND its regeneration is witnessed
     /// to deterministically reproduce it. Any other "derived" declaration is a
     /// smuggling attempt → block + audit (⑤).
+    ///
+    /// An EMPTY claim set is itself a smuggling attempt: a regen with no proven-
+    /// derived file has nothing the gate is entitled to land via the regen path,
+    /// so it must NOT slip through with the anti-smuggling check vacuously
+    /// satisfied (brutal-review §hugit-checks empty-claims bypass).
     fn anti_smuggling(&self, req: &RegenRequest<'_>) -> Option<BlockReason> {
+        if req.derived_claims.is_empty() {
+            return Some(BlockReason::FalseDerivedDeclaration {
+                path: "<none>".to_string(),
+                detail: "regen declared no derived files — an empty claim set cannot \
+                         satisfy the anti-smuggling check (nothing is provably derived)"
+                    .to_string(),
+            });
+        }
         for claim in &req.derived_claims {
             let class: Option<DerivedClass> = classify(claim.path);
             if class.is_none() {
@@ -336,12 +371,15 @@ impl Gate {
                 verdict.tree_hash, req.regen_tree
             ));
         }
-        // The gate's bound ref must address this very verdict (its tree_hash is
-        // the verdict's content anchor in this model).
-        if self.gate.indep_verdict != verdict.tree_hash && self.gate.indep_verdict != verdict.intent
-        {
+        // The gate's bound ref must address this very verdict via its content
+        // anchor (`tree_hash`). The `intent` field is an unauthenticated,
+        // regen-controlled label — resolving on it would let a regen point the
+        // gate's bound ref at a verdict that judges a DIFFERENT tree, defeating
+        // independence (brutal-review §hugit-checks intent-resolution bypass).
+        // Resolution is by `tree_hash` ONLY.
+        if self.gate.indep_verdict != verdict.tree_hash {
             return Some(format!(
-                "gate.indep_verdict ref `{}` does not resolve to the supplied verdict",
+                "gate.indep_verdict ref `{}` does not resolve to the supplied verdict (by tree_hash)",
                 self.gate.indep_verdict
             ));
         }
@@ -356,11 +394,16 @@ impl Gate {
         verdict: &VerdictObject,
         seq: u64,
         recorded_at: u64,
+        prev_hash: &str,
+        signing_key: &SigningKey,
     ) -> GateDecision {
         // The authorising gate-verdict ref — "this regen was permitted because
         // report-vX passed" (provenance closure, ④).
         let verdict_ref = self.gate.indep_verdict.clone();
-        let attestation = AttestationChain {
+        // Build the unsigned attestation, then SIGN it over the frozen
+        // pre-image so a verifier can confirm provenance with the public key
+        // alone (an empty `sig` is no longer accepted, item ④).
+        let unsigned = AttestationChain {
             tree: req.regen_tree.clone(),
             def: "regen.gate".to_string(),
             runner: "hugit-checks/regen/gate".to_string(),
@@ -373,47 +416,102 @@ impl Gate {
             ],
             sig: String::new(),
         };
-        let payload = format!(
-            r#"{{"scope":"{}","tree":"{}","verdict_ref":"{}","verdict_outcome":"approve"}}"#,
-            json_escape(&req.requested_scope),
-            json_escape(&req.regen_tree),
-            json_escape(&verdict_ref),
-        );
+        let attestation = sign_attestation(signing_key, unsigned);
+
+        let payload = canonical_payload(&serde_json::json!({
+            "scope": req.requested_scope,
+            "tree": req.regen_tree,
+            "verdict_ref": verdict_ref,
+            "verdict_outcome": "approve",
+        }));
         let _ = verdict; // independence already verified upstream.
-        let audit = EventRecord {
+        let audit = self.audit_event(
             seq,
-            prev_hash: "0".repeat(64),
-            this_hash: String::new(),
-            kind: KIND_REGEN_LANDED.to_string(),
-            principal_chain: vec!["regen.gate".to_string()],
+            prev_hash,
+            KIND_REGEN_LANDED,
+            vec!["regen.gate".to_string()],
             payload,
             recorded_at,
-        };
+        );
         GateDecision::Land { attestation, audit }
     }
 
     // ── ③⑤ block: auditable refusal ──────────────────────────────────────────
 
-    fn block(&self, reason: BlockReason, seq: u64, recorded_at: u64) -> GateDecision {
-        let payload = format!(
-            r#"{{"reason":"{}","scope":"{}"}}"#,
-            reason.code(),
-            json_escape(&self.gate.optin_scope),
-        );
-        let audit = EventRecord {
+    fn block(
+        &self,
+        reason: BlockReason,
+        seq: u64,
+        recorded_at: u64,
+        prev_hash: &str,
+    ) -> GateDecision {
+        let payload = canonical_payload(&serde_json::json!({
+            "reason": reason.code(),
+            "scope": self.gate.optin_scope,
+        }));
+        let audit = self.audit_event(
             seq,
-            prev_hash: "0".repeat(64),
-            this_hash: String::new(),
-            kind: KIND_REGEN_BLOCKED.to_string(),
-            principal_chain: vec!["regen.gate".to_string()],
+            prev_hash,
+            KIND_REGEN_BLOCKED,
+            vec!["regen.gate".to_string()],
             payload,
             recorded_at,
-        };
+        );
         GateDecision::Blocked { reason, audit }
+    }
+
+    /// Build a fully-chained [`EventRecord`] whose `this_hash` is the canonical
+    /// [`compute_this_hash`] over `(prev_hash, kind, principal_chain, payload,
+    /// seq)` — the single source of truth (R1). The producer and any verifier
+    /// recompute the identical digest; gate events therefore chain and verify
+    /// against the D1 log like every other emitter.
+    fn audit_event(
+        &self,
+        seq: u64,
+        prev_hash: &str,
+        kind: &str,
+        principal_chain: Vec<String>,
+        payload: String,
+        recorded_at: u64,
+    ) -> EventRecord {
+        let this_hash = compute_this_hash(prev_hash, kind, &principal_chain, &payload, seq);
+        EventRecord {
+            seq,
+            prev_hash: prev_hash.to_string(),
+            this_hash,
+            kind: kind.to_string(),
+            principal_chain,
+            payload,
+            recorded_at,
+        }
     }
 }
 
-/// Minimal JSON string escaping for the audit payload (quotes + backslashes).
-fn json_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
+/// Sign an [`AttestationChain`] over the frozen
+/// [`attestation_sig_preimage`] (`LP(tree) ‖ LP(def) ‖ LP(runner) ‖ LP(model) ‖
+/// VEC(principal)`), returning a chain whose `sig` is the base64 Ed25519
+/// signature. The input `sig` is ignored and replaced. Only the producer holds
+/// the private key; a verifier checks `sig` with the public key alone (item ④).
+fn sign_attestation(signing_key: &SigningKey, chain: AttestationChain) -> AttestationChain {
+    let preimage = attestation_sig_preimage(
+        &chain.tree,
+        &chain.def,
+        &chain.runner,
+        &chain.model,
+        &chain.principal,
+    );
+    let sig = signing_key.sign(&preimage);
+    AttestationChain {
+        sig: B64.encode(sig.to_bytes()),
+        ..chain
+    }
+}
+
+/// Render `value` as canonical JSON (sorted keys, no insignificant whitespace)
+/// for an audit payload, so equal logical events hash identically (R1). The
+/// `serde_json::json!` value is already valid JSON, so canonicalisation never
+/// fails; the unreachable fallback emits the compact form rather than panic.
+fn canonical_payload(value: &serde_json::Value) -> String {
+    let compact = value.to_string();
+    canonical_json(&compact).unwrap_or(compact)
 }

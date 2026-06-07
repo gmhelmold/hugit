@@ -14,7 +14,7 @@ mod cargo_lock;
 mod pnpm_lock;
 
 pub use cargo_lock::CargoLockDriver;
-pub use pnpm_lock::PnpmLockDriver;
+pub use pnpm_lock::{PNPM_REGEN_ARGS, PnpmLockDriver};
 
 use std::path::{Path, PathBuf};
 
@@ -208,19 +208,50 @@ impl DriverRegistry {
 
     /// Regenerate the derived file at `path` inside `workspace_root`.
     ///
-    /// Returns `Err(RegenError::FailClosed { … })` if:
-    /// - the regen command fails (item ⑤), or
+    /// **Always** returns [`RegenError::FailClosed`] on any failure — the
+    /// registry is the fail-closed boundary (item ⑤). A driver may surface a
+    /// `ToolNotFound` or `Io` error from its own internals, but those MUST NOT
+    /// escape the boundary as non-`FailClosed` variants: a caller that pattern-
+    /// matches only `FailClosed` would otherwise treat a missing tool / I/O
+    /// fault as non-fatal and fall back to a text-merge. They are therefore
+    /// funnelled into `FailClosed` here (the original error is preserved in the
+    /// message). Returns `FailClosed` if:
+    /// - the regen command fails (item ⑤),
+    /// - the regen tool is missing or an I/O fault occurs (funnelled), or
     /// - no driver owns the path (caller tried to regen a non-derived file).
     ///
     /// The text-merge code-path is **never** entered for any path handled by
     /// a registered driver (item ⑥).
     pub fn regenerate(&self, workspace_root: &Path, path: &Path) -> Result<PathBuf, RegenError> {
         match self.driver_for(path) {
-            Some(driver) => driver.regenerate(workspace_root, path),
+            Some(driver) => driver
+                .regenerate(workspace_root, path)
+                .map_err(fail_closed_boundary),
             None => Err(RegenError::FailClosed {
                 message: format!("no driver registered for derived path `{}`", path.display()),
                 exit_code: None,
             }),
         }
+    }
+}
+
+/// Funnel any [`RegenError`] into a [`RegenError::FailClosed`] at the registry
+/// boundary (item ⑤). `FailClosed` passes through unchanged; `ToolNotFound` and
+/// `Io` — which a caller could otherwise misread as non-fatal — are wrapped so
+/// the only error a [`DriverRegistry::regenerate`] caller can observe is the
+/// hard-failure variant.
+fn fail_closed_boundary(err: RegenError) -> RegenError {
+    match err {
+        fc @ RegenError::FailClosed { .. } => fc,
+        RegenError::ToolNotFound { ref tool } => RegenError::FailClosed {
+            message: format!(
+                "regen tool `{tool}` not found — refusing to merge derived file (fail-closed)"
+            ),
+            exit_code: None,
+        },
+        RegenError::Io(e) => RegenError::FailClosed {
+            message: format!("regen I/O error — refusing to merge derived file (fail-closed): {e}"),
+            exit_code: None,
+        },
     }
 }
