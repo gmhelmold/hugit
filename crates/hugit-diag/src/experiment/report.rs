@@ -138,7 +138,7 @@ impl GateReport {
             return Err(ReportError::Forged);
         }
         if self.corpus_seal != corpus.seal_digest() {
-            return Err(ReportError::Forged);
+            return Err(ReportError::CorpusTampered);
         }
         if corpus.verify().is_err() {
             return Err(ReportError::CorpusTampered);

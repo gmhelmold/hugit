@@ -215,6 +215,7 @@ impl ExperimentGate {
             ExperimentEvent::PromotionAuthorized,
             attempt.principal,
             &payload,
+            0,
         );
 
         Ok(Verdict {
@@ -256,7 +257,13 @@ impl ExperimentGate {
             promotion.label(),
             reason
         );
-        emit_event(log, ExperimentEvent::PromotionRefused, principal, &payload)
+        emit_event(
+            log,
+            ExperimentEvent::PromotionRefused,
+            principal,
+            &payload,
+            0,
+        )
     }
 }
 
