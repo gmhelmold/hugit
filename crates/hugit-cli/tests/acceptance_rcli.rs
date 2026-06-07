@@ -251,28 +251,94 @@ fn item_5_export_runs_end_to_end() {
     assert!(out_dir.join("repo.git").is_dir(), "git artifact written");
 }
 
-// ── ⑥ the binary's verb surface IS the canonical registry (X5 seam) ───────────
-
+// ── ⑥ HUGIT_VERBS == the binary's dispatched surface (equality, not subset) ────
+//
+// Load-bearing: this test goes RED if HUGIT_VERBS contains a verb that is NOT
+// dispatched in the binary (phantom entry), OR if the binary dispatches a verb
+// that is NOT in HUGIT_VERBS (silent gap). Both directions are checked:
+//
+//   (a) HUGIT_VERBS → help: every entry in HUGIT_VERBS must appear in
+//       `hugit --help` (registry → binary).
+//   (b) help → HUGIT_VERBS: every verb listed in `hugit --help` must be in
+//       HUGIT_VERBS (binary → registry). Detected via count equality + per-verb
+//       membership.
+//
+// The dispatched surface is exactly: why, impact, tournament, export.
+// Changing HUGIT_VERBS without wiring the verb in main.rs (or vice-versa) turns
+// this test RED immediately.
 #[test]
-fn item_6_canonical_registry_drives_help() {
-    // The wired verbs are members of the canonical registry WP-X5 consumes.
-    for verb in ["why", "impact", "tournament", "export"] {
-        assert!(
-            hugit_cli::HUGIT_VERBS.contains(&verb),
-            "wired verb '{verb}' must be in the canonical registry"
-        );
-    }
-    // `hugit --help` enumerates the wired verbs (the help text is generated from
-    // the same Subcommand enum the registry mirrors).
+fn item_6_canonical_registry_equals_dispatched_surface() {
+    // ── (a) registry → binary: every HUGIT_VERBS entry must appear in --help ──
     let help = Command::new(hugit_bin())
         .arg("--help")
         .output()
         .expect("hugit --help runs");
     assert!(help.status.success(), "hugit --help exits 0");
-    let text = String::from_utf8_lossy(&help.stdout);
-    for verb in ["why", "impact", "tournament", "export"] {
-        assert!(text.contains(verb), "help must list the '{verb}' verb");
+    let help_text = String::from_utf8_lossy(&help.stdout);
+
+    for verb in hugit_cli::HUGIT_VERBS {
+        assert!(
+            help_text.contains(verb),
+            "REGISTRY→BINARY gap: '{verb}' is in HUGIT_VERBS but NOT in `hugit --help`. \
+             Either wire it in main.rs or remove it from HUGIT_VERBS."
+        );
     }
+
+    // ── (b) binary → registry: count the verbs that appear in --help and
+    //    confirm every one is in HUGIT_VERBS (no silent binary-only verb) ────────
+    //
+    // We enumerate the Subcommands by parsing the subcommand lines from
+    // `hugit --help` (clap emits one line per subcommand under "Commands:").
+    // Each dispatched verb is a word that also appears in HUGIT_VERBS; any
+    // word in the help block that is NOT in HUGIT_VERBS is a binary-only gap.
+    //
+    // Clap help format: the Commands: block has lines like
+    //   "  why       Resolve a line/symbol ..."
+    // We extract the first token of each indented line in the Commands block.
+    let dispatched_in_help: Vec<&str> = help_text
+        .lines()
+        // Take only lines that look like subcommand entries (two leading spaces,
+        // then a lowercase word).
+        .filter_map(|line| {
+            let trimmed = line.trim_start();
+            if line.starts_with("  ")
+                && !line.starts_with("   ")
+                && trimmed.starts_with(|c: char| c.is_ascii_lowercase())
+            {
+                trimmed.split_whitespace().next()
+            } else {
+                None
+            }
+        })
+        // Keep only tokens that appear in the live verb set (excludes "help").
+        .filter(|tok| hugit_cli::HUGIT_VERBS.contains(tok))
+        .collect();
+
+    // Every dispatched verb visible in --help must be in HUGIT_VERBS.
+    for verb in &dispatched_in_help {
+        assert!(
+            hugit_cli::HUGIT_VERBS.contains(verb),
+            "BINARY→REGISTRY gap: '{verb}' appears in `hugit --help` but NOT in HUGIT_VERBS. \
+             Add it to HUGIT_VERBS or stop dispatching it."
+        );
+    }
+
+    // The count of dispatched verbs visible in --help must equal HUGIT_VERBS.
+    // If HUGIT_VERBS has more entries than --help shows, there are phantom
+    // (unwired) verbs in the registry.
+    assert_eq!(
+        dispatched_in_help.len(),
+        hugit_cli::HUGIT_VERBS.len(),
+        "EQUALITY VIOLATION: HUGIT_VERBS has {} entries but `hugit --help` shows {} \
+         dispatched verbs matching the registry. \
+         Phantom verbs in HUGIT_VERBS (not wired in main.rs) or dispatched verbs \
+         missing from HUGIT_VERBS are both failures. \
+         HUGIT_VERBS = {:?}, dispatched = {:?}",
+        hugit_cli::HUGIT_VERBS.len(),
+        dispatched_in_help.len(),
+        hugit_cli::HUGIT_VERBS,
+        dispatched_in_help,
+    );
 
     // hugit_verbs() returns the same canonical list (stable accessor for X5).
     assert_eq!(hugit_cli::hugit_verbs(), hugit_cli::HUGIT_VERBS);
