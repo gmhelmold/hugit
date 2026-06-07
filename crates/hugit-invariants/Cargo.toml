@@ -44,6 +44,16 @@ anyhow = "1"
 # pinning it here adds no new supply-chain surface, only the documented encoding.
 ed25519-dalek = "=2.1.1"
 base64 = "0.22"
+# WP-X12 (erasure × provenance × mirror) consumes the canonical
+# attestation/hash surface read-only — `compute_this_hash`, `verify_chain`,
+# `canonical_json`, `EventLog` — so the post-erasure chain-verifiability oracle
+# tests the REAL production hasher, never a re-transcribed copy (the divergence
+# the 2026-06-07 brutal review R1 caught). serde derives the X12 tombstone +
+# mirror-obligation + exit-proof types so the export/exit proof is a
+# machine-validatable artifact.
+hugit-refstore = { path = "../hugit-refstore" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [dev-dependencies]
 hugit-contracts = { path = "../hugit-contracts" }
@@ -51,6 +61,9 @@ hugit-runner = { path = "../hugit-runner" }
 # WP-X3 (context privacy) consumes the D11 journal + redaction surfaces and the
 # frozen ExportSchema read-only. Dev-only: used by the x3 acceptance oracle.
 hugit-ledger = { path = "../hugit-ledger" }
+# WP-X12 acceptance oracle re-includes x12/erasure.rs via #[path] and drives the
+# canonical refstore surface directly (verify_chain / compute_this_hash / EventLog).
+hugit-refstore = { path = "../hugit-refstore" }
 serde_json = "1"
 
 # The acceptance oracle lives under the x4/ subtree (not the default
@@ -76,3 +89,11 @@ path = "x5/tests/acceptance_x5.rs"
 [[test]]
 name = "acceptance_x2"
 path = "x2/tests/acceptance_x2.rs"
+
+# WP-X12: erasure × provenance × mirror — post-erasure chain stays verifiable
+# over a tamper-evident tombstone (no silent re-link), mirror obligation
+# discharged-or-disclosed in the export/exit proof (sources under x12/, oracle
+# includes x12/erasure.rs via #[path]).
+[[test]]
+name = "acceptance_x12"
+path = "x12/tests/acceptance_x12.rs"
