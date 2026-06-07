@@ -104,3 +104,14 @@ path = "x6/tests/acceptance_x6.rs"
 [[test]]
 name = "acceptance_x12"
 path = "x12/tests/acceptance_x12.rs"
+
+# WP-X9: cross-phase object identity — a CheckResult memoized by phase-B is
+# bit-identical to the one served as phase-D verdict evidence for the same
+# (tree,def,toolchain); mismatch fails CLOSED + alerts; and the intent_id minted
+# by a phase-B sidecar is identical+non-colliding with the native phase-D intent
+# (one lifecycle, one id), divergence/collision fails CLOSED. Sources under x9/;
+# the oracle includes x9/identity.rs via #[path] and drives the canonical
+# refstore surface (canonical_json / compute_memo_key / compute_this_hash).
+[[test]]
+name = "acceptance_x9"
+path = "x9/tests/acceptance_x9.rs"

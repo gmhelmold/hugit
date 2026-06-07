@@ -32,3 +32,6 @@ pub mod x6;
 // ── WP-X12: erasure × provenance × mirror invariants ─────────────────────────
 #[path = "x12/lib.rs"]
 pub mod x12;
+// ── WP-X9: cross-phase object identity invariants ─────────────────────────────
+#[path = "x9/lib.rs"]
+pub mod x9;
