@@ -79,9 +79,17 @@ fn item_1_checks_appear_as_github_statuses() {
 
     assert_eq!(payload_fail.request.conclusion.as_deref(), Some("failure"));
 
-    // emit() must succeed in local mode (no real HTTP).
+    // emit() must succeed in local mode (no real HTTP). An installation token is
+    // required even in local mode: the checks client fail-closes on an absent
+    // token (None → TokenRevoked) per the app-uninstall security fix, so a valid
+    // token must be supplied — passing None here previously relied on the old
+    // silently-accept-None behavior that the fix correctly removed.
     let emitted = emitter
-        .emit(&result_ok, Some(&"a".repeat(40)), None)
+        .emit(
+            &result_ok,
+            Some(&"a".repeat(40)),
+            Some("ghs_local_test_installation_token"),
+        )
         .expect("emit must succeed in local mode");
     assert_eq!(emitted.request.status, "completed");
 }

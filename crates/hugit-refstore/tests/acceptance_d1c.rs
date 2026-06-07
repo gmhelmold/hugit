@@ -262,7 +262,12 @@ fn admit_lock_split_never_exceeds_capacity_deterministic() {
     // Spin until the admission gate is saturated: with the writer lock pinned,
     // exactly CAPACITY submitters can hold a permit at once. The bound says this
     // value must NEVER exceed CAPACITY at any instant.
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    // Deadline is generous (60s) because saturation is a LIVENESS guard, not the
+    // invariant under test: under heavy parallel `cargo test` CPU contention the
+    // CAPACITY submitters can be slow to all reach the gate. The real bound
+    // (in_flight <= CAPACITY) is asserted on every spin regardless; only the
+    // "never saturated in time" liveness check needs slack to avoid CI flakiness.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
     while serializer.in_flight() < CAPACITY {
         assert!(
             serializer.in_flight() <= CAPACITY,
