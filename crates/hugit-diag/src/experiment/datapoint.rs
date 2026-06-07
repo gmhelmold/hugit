@@ -132,6 +132,7 @@ pub fn ingest(
     buffer: &mut Vec<Datapoint>,
     log: &mut Vec<EventRecord>,
     contribution: WaveContribution,
+    now_ms: u64,
 ) -> Result<(), IngestError> {
     let dp = contribution.datapoint;
 
@@ -147,7 +148,7 @@ pub fn ingest(
             ExperimentEvent::IngestionRejected,
             "experiment-harness",
             &payload,
-            0,
+            now_ms,
         );
         return Err(IngestError::IneligibleSource(dp.source.label().to_string()));
     }
