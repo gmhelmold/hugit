@@ -54,6 +54,14 @@ base64 = "0.22"
 hugit-refstore = { path = "../hugit-refstore" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# WP-X13 (legibility × degradation/erasure) consumes the human-facing down-zoom
+# surfaces read-only: deep links (D5 — `hugit_ledger::deeplink::resolve`) and
+# `why` (D10 — `hugit_cli::why::resolver::resolve_why`, hugit-cli already a dep).
+# Driving the REAL canonical resolvers makes "the oracle tests the real surface"
+# structurally true: a regression in deep-link/`why` resolution turns the X13
+# down-zoom oracle red automatically. hugit-ledger is promoted from a dev-only
+# dep because x13/legibility.rs (production surface) links it.
+hugit-ledger = { path = "../hugit-ledger" }
 
 [dev-dependencies]
 hugit-contracts = { path = "../hugit-contracts" }
@@ -133,3 +141,12 @@ path = "x8/tests/acceptance_x8.rs"
 [[test]]
 name = "acceptance_x9"
 path = "x9/tests/acceptance_x9.rs"
+# WP-X13: legibility × degradation/erasure — under a DEGRADED intelligence layer
+# the human's down-zoom resolves via plain git OR fails honestly ("layer
+# unavailable", never a silent 404/blank), and after an erasure cascade following
+# any chain reaches an honest tombstone (never a broken link). Sources under
+# x13/; the oracle includes x13/legibility.rs via #[path] and drives the real
+# canonical deep-link / `why` / verify_chain surfaces.
+[[test]]
+name = "acceptance_x13"
+path = "x13/tests/acceptance_x13.rs"
