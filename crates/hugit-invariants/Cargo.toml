@@ -104,3 +104,14 @@ path = "x6/tests/acceptance_x6.rs"
 [[test]]
 name = "acceptance_x12"
 path = "x12/tests/acceptance_x12.rs"
+
+# WP-X7: right-to-erasure cascade — a data subject's personal data provably
+# erased across CAS + provenance/ledger + context store + the GitHub mirror +
+# the experiment corpus, with no orphaned provenance refs, attestation chains
+# that re-seal OR fail CLOSED, and the erasure×seal precedence resolved
+# (lawful corpus erasure permitted despite the seal, gate verdict invalidated
+# fail-closed). Sources under x7/; oracle includes x7/cascade.rs via #[path].
+# Closes the X3③ context-store-purge PARTIAL (the cross-store cascade it awaited).
+[[test]]
+name = "acceptance_x7"
+path = "x7/tests/acceptance_x7.rs"
