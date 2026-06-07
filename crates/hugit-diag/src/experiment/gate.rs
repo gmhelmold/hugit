@@ -159,6 +159,7 @@ impl ExperimentGate {
         &mut self,
         log: &mut Vec<EventRecord>,
         attempt: PromotionAttempt<'_>,
+        now_ms: u64,
     ) -> Result<Verdict, GateError> {
         // 1 — degraded evaluator = insufficient = fail-closed.
         if attempt.evaluator == EvaluatorHealth::Degraded {
@@ -167,6 +168,7 @@ impl ExperimentGate {
                 attempt.promotion,
                 attempt.principal,
                 "evaluator-degraded",
+                now_ms,
             );
             return Err(refusal_error(GateError::EvaluatorDegraded, event));
         }
@@ -175,12 +177,23 @@ impl ExperimentGate {
         match attempt.report.verify(attempt.corpus) {
             Ok(()) => {}
             Err(ReportError::Forged) => {
-                let event = self.refuse(log, attempt.promotion, attempt.principal, "forged-report");
+                let event = self.refuse(
+                    log,
+                    attempt.promotion,
+                    attempt.principal,
+                    "forged-report",
+                    now_ms,
+                );
                 return Err(refusal_error(GateError::ForgedReport, event));
             }
             Err(ReportError::CorpusTampered) => {
-                let event =
-                    self.refuse(log, attempt.promotion, attempt.principal, "corpus-tampered");
+                let event = self.refuse(
+                    log,
+                    attempt.promotion,
+                    attempt.principal,
+                    "corpus-tampered",
+                    now_ms,
+                );
                 return Err(refusal_error(GateError::CorpusTampered, event));
             }
         }
@@ -188,7 +201,13 @@ impl ExperimentGate {
         // 3 — only a genuine PASS authorizes.
         let verdict = attempt.report.verdict();
         if verdict != ReportVerdict::Pass {
-            let event = self.refuse(log, attempt.promotion, attempt.principal, "not-pass");
+            let event = self.refuse(
+                log,
+                attempt.promotion,
+                attempt.principal,
+                "not-pass",
+                now_ms,
+            );
             return Err(refusal_error(GateError::NotPass(verdict), event));
         }
 
@@ -215,7 +234,7 @@ impl ExperimentGate {
             ExperimentEvent::PromotionAuthorized,
             attempt.principal,
             &payload,
-            0,
+            now_ms,
         );
 
         Ok(Verdict {
@@ -251,6 +270,7 @@ impl ExperimentGate {
         promotion: Promotion,
         principal: &str,
         reason: &str,
+        now_ms: u64,
     ) -> EventRecord {
         let payload = format!(
             r#"{{"feature":"{}","reason":"{}","action":"refused"}}"#,
@@ -262,7 +282,7 @@ impl ExperimentGate {
             ExperimentEvent::PromotionRefused,
             principal,
             &payload,
-            0,
+            now_ms,
         )
     }
 }

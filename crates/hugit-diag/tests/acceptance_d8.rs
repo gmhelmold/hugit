@@ -40,7 +40,7 @@ fn passing_corpus(n: usize) -> (Corpus, Vec<EventRecord>) {
             RegenOutcome::Agree,
             false,
         );
-        ingest(&mut buffer, &mut log, c).expect("eligible hugit wave ingests");
+        ingest(&mut buffer, &mut log, c, 0).expect("eligible hugit wave ingests");
     }
     (Corpus::from_buffer(buffer), log)
 }
@@ -68,8 +68,8 @@ fn item_1_wave_auto_contributes() {
         false,
     );
 
-    ingest(&mut buffer, &mut log, w1).unwrap();
-    ingest(&mut buffer, &mut log, w2).unwrap();
+    ingest(&mut buffer, &mut log, w1, 0).unwrap();
+    ingest(&mut buffer, &mut log, w2, 0).unwrap();
 
     // Both waves auto-contributed; the buffer reflects the real outcomes.
     assert_eq!(buffer.len(), 2, "every wave auto-contributes a datapoint");
@@ -96,6 +96,7 @@ fn item_2_dashboard_fields() {
             &mut buffer,
             &mut log,
             WaveContribution::from_wave(id, SourceOrigin::Hugit, disj, regen, false),
+            0,
         )
         .unwrap();
     }
@@ -184,6 +185,7 @@ fn item_5_posthoc_removal_invalidates() {
             evaluator: EvaluatorHealth::Healthy,
             principal: "operator",
         },
+        0,
     );
     assert_eq!(
         res,
@@ -222,6 +224,7 @@ fn item_6_gate_binds_fail_closed() {
                 evaluator: EvaluatorHealth::Healthy,
                 principal: "operator",
             },
+            0,
         )
         .expect("genuine PASS authorizes regen promotion");
     assert!(!gate.is_regen_blocked(), "regen promoted on genuine PASS");
@@ -249,6 +252,7 @@ fn item_6_gate_binds_fail_closed() {
             &mut fbuf,
             &mut flog,
             WaveContribution::from_wave(format!("f{i}"), SourceOrigin::Hugit, true, regen, false),
+            0,
         )
         .unwrap();
     }
@@ -266,6 +270,7 @@ fn item_6_gate_binds_fail_closed() {
             evaluator: EvaluatorHealth::Healthy,
             principal: "operator",
         },
+        0,
     );
     assert_eq!(res, Err(GateError::NotPass(ReportVerdict::Fail)));
     assert!(
@@ -290,6 +295,7 @@ fn item_6_gate_binds_fail_closed() {
             evaluator: EvaluatorHealth::Healthy,
             principal: "operator",
         },
+        0,
     );
     assert_eq!(res, Err(GateError::NotPass(ReportVerdict::Insufficient)));
     assert!(gate_c.is_regen_blocked(), "insufficient-n cannot promote");
@@ -306,6 +312,7 @@ fn item_6_gate_binds_fail_closed() {
             evaluator: EvaluatorHealth::Degraded,
             principal: "operator",
         },
+        0,
     );
     assert_eq!(res, Err(GateError::EvaluatorDegraded));
     assert!(
@@ -353,6 +360,7 @@ fn item_7_degradation_honesty() {
                 RegenOutcome::Agree,
                 false,
             ),
+            0,
         )
         .unwrap();
     }
@@ -368,6 +376,7 @@ fn item_7_degradation_honesty() {
                 RegenOutcome::Disagree,
                 true,
             ),
+            0,
         )
         .unwrap();
     }
@@ -411,7 +420,7 @@ fn item_8_ineligible_source_rejected() {
         RegenOutcome::Agree,
         false,
     );
-    let res = ingest(&mut buffer, &mut log, attempt);
+    let res = ingest(&mut buffer, &mut log, attempt, 0);
 
     // Rejected at INGESTION, fail-closed + audited; never becomes a datapoint.
     assert_eq!(
@@ -467,6 +476,7 @@ fn item_9_report_attested_tamper_evident() {
             evaluator: EvaluatorHealth::Healthy,
             principal: "attacker",
         },
+        0,
     );
     assert_eq!(
         res,
@@ -499,7 +509,7 @@ fn rdiag_a_audit_hash_matches_canonical_formula() {
         RegenOutcome::Agree,
         false,
     );
-    ingest(&mut buffer, &mut log, rejected).unwrap_err();
+    ingest(&mut buffer, &mut log, rejected, 0).unwrap_err();
 
     // Also emit a refused-promotion event to get two chain links.
     let (small_corpus, _) = {
@@ -512,7 +522,7 @@ fn rdiag_a_audit_hash_matches_canonical_formula() {
             RegenOutcome::Agree,
             false,
         );
-        ingest(&mut buf2, &mut lg2, c).unwrap();
+        ingest(&mut buf2, &mut lg2, c, 0).unwrap();
         (Corpus::from_buffer(buf2), lg2)
     };
     let sealed_small = small_corpus.seal();
@@ -527,37 +537,153 @@ fn rdiag_a_audit_hash_matches_canonical_formula() {
             evaluator: EvaluatorHealth::Healthy,
             principal: "test-principal",
         },
+        0,
     )
     .unwrap_err();
 
-    assert!(log.len() >= 2, "need at least two entries to test chain");
+    assert_eq!(log.len(), 2, "exactly two events in log");
 
-    // For every record: this_hash must equal the canonical formula's output.
+    // ── Hard-coded expected values for both events (from known test inputs) ──
+    //
+    // Record 0: ingest rejection for "wave-ineligible" (CorelinkServer)
+    //   principal = "experiment-harness" (hardcoded in emit_event for ingest)
+    //   kind      = "experiment.ingestion.rejected"
+    //   seq       = 0
+    //   prev_hash = genesis (no predecessor)
+    //
+    // Record 1: promotion refused for "test-principal" (insufficient-n)
+    //   principal = "test-principal"
+    //   kind      = "experiment.promotion.refused"
+    //   seq       = 1
+    //   prev_hash = record[0].this_hash
+
     let genesis = "0".repeat(64);
-    for (i, record) in log.iter().enumerate() {
-        let expected = compute_this_hash(
-            &record.prev_hash,
-            &record.kind,
-            &record.principal_chain,
-            &record.payload,
-            record.seq,
-        );
-        assert_eq!(
-            record.this_hash, expected,
-            "record {i}: this_hash diverges from canonical formula"
-        );
 
-        // Chain continuity: prev_hash must chain to predecessor's this_hash.
-        let expected_prev = if i == 0 {
-            genesis.clone()
-        } else {
-            log[i - 1].this_hash.clone()
-        };
-        assert_eq!(
-            record.prev_hash, expected_prev,
-            "record {i}: chain continuity broken"
-        );
-    }
+    // Record 0 — ingest rejection.
+    let r0_principal_chain = vec!["experiment-harness".to_string()];
+    let r0_kind = "experiment.ingestion.rejected";
+    assert_eq!(
+        log[0].principal_chain, r0_principal_chain,
+        "record 0: principal_chain must be [experiment-harness]"
+    );
+    assert_eq!(log[0].kind, r0_kind, "record 0: kind mismatch");
+    assert_eq!(log[0].seq, 0, "record 0: seq must be 0");
+    assert_eq!(
+        log[0].prev_hash, genesis,
+        "record 0: prev_hash must be genesis"
+    );
+    let r0_expected_hash =
+        compute_this_hash(&genesis, r0_kind, &r0_principal_chain, &log[0].payload, 0);
+    assert_eq!(
+        log[0].this_hash, r0_expected_hash,
+        "record 0: this_hash diverges from canonical formula"
+    );
+
+    // Record 1 — promotion refused.
+    let r1_principal_chain = vec!["test-principal".to_string()];
+    let r1_kind = "experiment.promotion.refused";
+    assert_eq!(
+        log[1].principal_chain, r1_principal_chain,
+        "record 1: principal_chain must be [test-principal]"
+    );
+    assert_eq!(log[1].kind, r1_kind, "record 1: kind mismatch");
+    assert_eq!(log[1].seq, 1, "record 1: seq must be 1");
+    assert_eq!(
+        log[1].prev_hash, log[0].this_hash,
+        "record 1: prev_hash must chain to record 0"
+    );
+    let r1_expected_hash = compute_this_hash(
+        &log[0].this_hash,
+        r1_kind,
+        &r1_principal_chain,
+        &log[1].payload,
+        1,
+    );
+    assert_eq!(
+        log[1].this_hash, r1_expected_hash,
+        "record 1: this_hash diverges from canonical formula"
+    );
+}
+
+/// (rdiag_c) recorded_at must be the caller-supplied value, not the hardcoded 0.
+///
+/// RED on the current always-0 call sites. GREEN once recorded_at (now_ms) is
+/// plumbed from the caller (attempt_promotion / ingest) down to emit_event.
+#[test]
+fn rdiag_c_recorded_at_is_caller_supplied() {
+    const NOW: u64 = 1_700_000_000_000; // non-zero fixed epoch-ms
+
+    // ── gate path: authorized promotion ─────────────────────────────────────
+    let (corpus, _) = passing_corpus(30);
+    let sealed = corpus.seal();
+    let pass_report = GateReport::generate(&sealed, attestation());
+
+    let mut gate = ExperimentGate::new();
+    let mut log: Vec<EventRecord> = Vec::new();
+
+    let verdict = gate
+        .attempt_promotion(
+            &mut log,
+            PromotionAttempt {
+                promotion: Promotion::RegenPromotion,
+                report: &pass_report,
+                corpus: &sealed,
+                evaluator: EvaluatorHealth::Healthy,
+                principal: "operator",
+            },
+            NOW,
+        )
+        .expect("genuine PASS authorizes");
+    assert_eq!(
+        verdict.event.recorded_at, NOW,
+        "authorized event recorded_at must equal caller-supplied NOW (not 0)"
+    );
+    assert_ne!(verdict.event.recorded_at, 0, "recorded_at must not be 0");
+
+    // ── gate path: refused promotion ─────────────────────────────────────────
+    let (small_c, _) = passing_corpus(5);
+    let small_sealed = small_c.seal();
+    let insuff = GateReport::generate(&small_sealed, attestation());
+    let mut gate2 = ExperimentGate::new();
+    let mut log2: Vec<EventRecord> = Vec::new();
+    gate2
+        .attempt_promotion(
+            &mut log2,
+            PromotionAttempt {
+                promotion: Promotion::RegenPromotion,
+                report: &insuff,
+                corpus: &small_sealed,
+                evaluator: EvaluatorHealth::Healthy,
+                principal: "operator",
+            },
+            NOW,
+        )
+        .unwrap_err();
+    assert_eq!(
+        log2[0].recorded_at, NOW,
+        "refused event recorded_at must equal caller-supplied NOW"
+    );
+    assert_ne!(log2[0].recorded_at, 0, "refused recorded_at must not be 0");
+
+    // ── ingest path: rejection audit ─────────────────────────────────────────
+    let mut buf = Vec::new();
+    let mut ilog: Vec<EventRecord> = Vec::new();
+    let ineligible = WaveContribution::from_wave(
+        "wave-bad",
+        SourceOrigin::CorelinkServer,
+        true,
+        RegenOutcome::Agree,
+        false,
+    );
+    ingest(&mut buf, &mut ilog, ineligible, NOW).unwrap_err();
+    assert_eq!(
+        ilog[0].recorded_at, NOW,
+        "ingestion-rejected event recorded_at must equal caller-supplied NOW"
+    );
+    assert_ne!(
+        ilog[0].recorded_at, 0,
+        "ingestion recorded_at must not be 0"
+    );
 }
 
 /// (b) A corpus-swap (different corpus presented to verify) must return
