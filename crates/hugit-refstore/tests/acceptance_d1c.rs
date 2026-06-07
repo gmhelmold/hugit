@@ -257,14 +257,28 @@ fn admit_lock_split_never_exceeds_capacity_deterministic() {
     // Wait until the writer lock is provably held before launching submitters.
     lock_held_rx.recv().unwrap();
 
+    // Surplus-rejection rendezvous: each submitter that is refused at the gate
+    // (returns `Err(Backpressure)`) signals here. The test awaits exactly SURPLUS
+    // of these BEFORE releasing the hook, which is what closes the straggler
+    // window: a surplus thread that is slow to reach the gate must still arrive,
+    // be refused while the CAPACITY permits are held, and signal — only once all
+    // SURPLUS have done so (and all CAPACITY are parked in the hook) does the test
+    // proceed. Without this, the test released the gate the instant CAPACITY were
+    // admitted, so a straggler could reach the gate after the admitted ops drained
+    // their permits, be wrongly admitted into a hook with no release left, and
+    // block forever (a join-time deadlock).
+    let (rejected_tx, rejected_rx) = mpsc::channel::<()>();
+
     // Launch `total` submitters at once. CAPACITY will be admitted (fire the hook
     // and block on the held writer lock); the SURPLUS will be refused at the gate
-    // (never reach the hook) and return `Err(Backpressure)` immediately.
+    // (never reach the hook) and return `Err(Backpressure)` immediately, then
+    // signal `rejected_tx`.
     let ready = Arc::new(AtomicUsize::new(0));
     let mut handles = Vec::with_capacity(total);
     for i in 0..total {
         let s = serializer.clone();
         let ready = Arc::clone(&ready);
+        let rejected_tx = rejected_tx.clone();
         handles.push(thread::spawn(move || {
             ready.fetch_add(1, Ordering::AcqRel);
             while ready.load(Ordering::Acquire) < total {
@@ -276,9 +290,17 @@ fn admit_lock_split_never_exceeds_capacity_deterministic() {
                 format!(r#"{{"ref":"refs/heads/probe-{i:03}","target":"oid-{i:08x}"}}"#),
                 1_717_000_000_000 + i as u64,
             );
-            s.submit(op).is_ok()
+            let ok = s.submit(op).is_ok();
+            if !ok {
+                // Refused by back-pressure: account for this surplus op so the
+                // test knows it has attempted-and-failed (permit never granted).
+                rejected_tx.send(()).ok();
+            }
+            ok
         }));
     }
+    // Drop the test's own sender so only the submitter clones remain.
+    drop(rejected_tx);
 
     // Deterministic saturation: block until exactly CAPACITY admitted submitters
     // have each fired the admit/lock-split hook. Each is holding a permit (counted
@@ -286,6 +308,13 @@ fn admit_lock_split_never_exceeds_capacity_deterministic() {
     // simultaneously — saturation is proven by rendezvous, not by polling a clock.
     for _ in 0..CAPACITY {
         admitted_rx.recv().expect("an admitted submitter signalled");
+    }
+    // Then block until every SURPLUS submitter has been refused at the gate. After
+    // this, all `total` submitters have made their single attempt — CAPACITY are
+    // parked in the hook (permits held), SURPLUS have returned without a permit —
+    // so no straggler can still be admitted when the gate is released below.
+    for _ in 0..SURPLUS {
+        rejected_rx.recv().expect("a surplus submitter was refused");
     }
 
     // Now provably saturated with CAPACITY simultaneous permits. The gate must
