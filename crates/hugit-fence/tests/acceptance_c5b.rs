@@ -10,9 +10,12 @@
 //!      the operation **fails CLOSED**; there is no credential-on-runner
 //!      fallback.
 //!   ⑤ `item_5_escape_redteam_all_attacks_contained` — the active escape
-//!      red-team (traversal / symlink / out-of-fence / fork-bomb / disk-fill)
-//!      is run against live containers and **every** vector is contained; none
-//!      can reach another lease or starve the box; box residue is **0**.
+//!      red-team (traversal / symlink / out-of-fence / fork-bomb / disk-fill /
+//!      fence-materialized-escape) is run against live containers and **every**
+//!      vector is contained; none can reach another lease or starve the box;
+//!      box residue is **0**. The fence-materialized-escape vector is the one
+//!      where the fence itself (classify + sparse materialize), not the Docker
+//!      namespace, is the control — it would escape under a no-op classifier.
 //!   ⑥ `item_6_positive_path_via_broker_credential_absent` — a job completes a
 //!      credential-needing operation **via the broker** successfully, and the
 //!      raw credential is **provably absent** during AND after (env/proc/disk
@@ -245,12 +248,20 @@ fn item_5_escape_redteam_all_attacks_contained() {
     // Genuinely attempt every escape against live containers.
     let result = (|| {
         let reports = harness.run_all().map_err(|e| format!("run_all: {e}"))?;
-        // Every one of the five vectors must be contained.
+        // Every one of the six vectors must be contained.
         let covered: Vec<AttackVector> = reports.iter().map(|r| r.vector).collect();
         for v in AttackVector::all() {
             if !covered.contains(&v) {
                 return Err(format!("attack vector {} was not exercised", v.slug()));
             }
+        }
+        // The fence-as-the-control vector MUST be exercised: it materializes a
+        // real FenceManifest and reads an out-of-fence path in the SAME
+        // container. This is the only vector that would ESCAPE if classify()
+        // were a no-op constant Inside, so its presence + containment is the
+        // honest proof the fence (not just the Docker namespace) holds.
+        if !covered.contains(&AttackVector::FenceMaterializedEscape) {
+            return Err("fence_materialized_escape vector must be exercised".to_string());
         }
         for r in &reports {
             if r.outcome != RedTeamOutcome::Contained {

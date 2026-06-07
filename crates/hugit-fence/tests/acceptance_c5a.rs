@@ -19,7 +19,7 @@
 
 use hugit_contracts::FenceManifest;
 use hugit_fence::enforce::{FenceVerdict, classify, probe_outside_enoent};
-use hugit_fence::materialize::{CandidateEntry, materialize_sparse};
+use hugit_fence::materialize::{CandidateEntry, MaterializeError, materialize_sparse};
 use hugit_runner::isolation::RunningContainer;
 use hugit_runner::lease::{BoxExec, SshBox};
 
@@ -149,6 +149,27 @@ fn item_1_outside_path_set_enoent() {
         classify(&manifest, "config/prod.toml"),
         FenceVerdict::Outside
     );
+    // Adversarial classification: absolute-path injection, prefix-collision,
+    // and `..`-escaping-root must all be Outside — no host content may cross.
+    assert_eq!(
+        classify(&manifest, "/src/main.rs"),
+        FenceVerdict::Outside,
+        "absolute-path injection must not be admitted"
+    );
+    assert_eq!(
+        classify(&manifest, "srcfoo/x.rs"),
+        FenceVerdict::Outside,
+        "prefix-collision (srcfoo vs src/) must not be admitted"
+    );
+    assert_eq!(
+        classify(&manifest, "src/../secret.env"),
+        FenceVerdict::Outside,
+        "`..`-escaping-root must not be admitted"
+    );
+    assert_eq!(
+        classify(&manifest, "src/../../etc/passwd"),
+        FenceVerdict::Outside
+    );
 
     // Sparse-materialize into the live container, then prove ENOENT on the box.
     let result = (|| {
@@ -206,10 +227,88 @@ fn item_1_outside_path_set_enoent() {
                 escape.observed
             ));
         }
+
+        // Symlink-into-fence: plant a symlink *inside* the fenced src/ dir that
+        // points at a host-only path which the container does NOT have (a
+        // stand-in for a host secret the fence never materialized). Reading
+        // through the link must yield NO content — the link is dead because its
+        // target was never materialized into the container. This proves a
+        // symlink cannot smuggle in content that is outside the fence: the fence
+        // is physical (absence), and a dangling link to an unmaterialized target
+        // reads as empty/error, never as host content.
+        //
+        // (We deliberately do NOT point at the container's own /etc/passwd: that
+        // is the base image's file, present by construction, and is not a fence
+        // breach — the fence governs the *materialized workspace view*, not the
+        // image's read-only base layers.)
+        let link = format!("{WORKSPACE_ROOT}/src/escape-link");
+        let read_through = boxx
+            .run(&[
+                "docker",
+                "exec",
+                &container.name,
+                "sh",
+                "-c",
+                &format!(
+                    "ln -sf /hugit-host-only-secret-xyz {link}; \
+                     if c=$(cat {link} 2>/dev/null) && [ -n \"$c\" ]; then printf LEAK; \
+                     else printf DEAD; fi"
+                ),
+            ])
+            .map_err(|e| format!("plant+read symlink: {e}"))?;
+        if read_through.stdout.trim() != "DEAD" {
+            return Err(format!(
+                "symlink to an unmaterialized target must be a dead link; observed {:?}",
+                read_through.stdout.trim()
+            ));
+        }
         Ok(())
     })();
 
     // Always clean up the box, regardless of outcome (prefix-scoped).
     teardown_fenced(&boxx, &name);
     result.expect("fence ENOENT acceptance");
+}
+
+/// A `BoxExec` that panics if ever called — proves the fence rejected the
+/// manifest **before** any box command (the guard is structural, not box-side).
+struct NeverBox;
+impl BoxExec for NeverBox {
+    fn run(&self, _argv: &[&str]) -> anyhow::Result<hugit_runner::lease::CmdOutput> {
+        panic!(
+            "box must not be touched: an allow-all manifest must be rejected before materialization"
+        );
+    }
+}
+
+// ── ① (deterministic) allow-all manifest is rejected fail-closed ─────────────
+// Runs in the bare gate lane too: a path_set entry that normalizes to root-cover
+// ("./", ".", "") would admit every candidate and defeat the fence. The
+// materializer must refuse it BEFORE any box command — proving the fence cannot
+// be turned into an allow-all by a crafted manifest entry.
+#[test]
+fn item_1_allow_all_manifest_rejected_fail_closed() {
+    for bad in ["./", ".", ""] {
+        let manifest = FenceManifest {
+            path_set: vec![bad.to_string()],
+            deny_default: true,
+            materialized: vec![],
+        };
+        let container = RunningContainer {
+            name: "unused".to_string(),
+        };
+        let candidates = vec![CandidateEntry::new("secret.env", b"TOKEN".to_vec())];
+        let err = materialize_sparse(
+            &NeverBox,
+            &container,
+            WORKSPACE_ROOT,
+            &manifest,
+            &candidates,
+        )
+        .expect_err("allow-all manifest must be rejected");
+        assert!(
+            matches!(err, MaterializeError::AllowAllEntry { .. }),
+            "entry {bad:?} must be rejected as allow-all, got {err}"
+        );
+    }
 }

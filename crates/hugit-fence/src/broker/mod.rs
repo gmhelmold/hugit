@@ -26,7 +26,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use hugit_contracts::RunnerLease;
+use hugit_contracts::{RunnerLease, RunnerState};
 use hugit_runner::isolation::RunningContainer;
 use hugit_runner::lease::BoxExec;
 
@@ -177,6 +177,13 @@ pub enum BrokerError {
     },
     /// A box command failed while performing the privileged op.
     Box(anyhow::Error),
+    /// The lease does not authorize the call: it is not in the `Held` state
+    /// (expired / released / crashed), so the broker refuses to act on it.
+    /// Fail-closed.
+    LeaseNotHeld {
+        /// The lease id that was rejected.
+        lease_id: String,
+    },
 }
 
 impl fmt::Display for BrokerError {
@@ -194,6 +201,11 @@ impl fmt::Display for BrokerError {
                 write!(f, "unknown secret {secret_name:?}; operation fails closed")
             }
             BrokerError::Box(e) => write!(f, "broker box command failed: {e}"),
+            BrokerError::LeaseNotHeld { lease_id } => write!(
+                f,
+                "lease {lease_id:?} is not Held; broker refuses to act on a \
+                 non-active lease (operation fails closed)"
+            ),
         }
     }
 }
@@ -294,10 +306,22 @@ impl<S: SecretStore> Broker<S> {
     /// never leaves it. On a down store it **fails closed**.
     ///
     /// # Errors
+    /// - [`BrokerError::LeaseNotHeld`] if the lease is not in the `Held` state
+    ///   (an expired / released / crashed lease cannot authorize a privileged
+    ///   op; fail-closed).
     /// - [`BrokerError::BrokerDown`] if the secret store is unreachable
     ///   (fail-closed; **④**).
     /// - [`BrokerError::UnknownSecret`] if the store lacks the secret.
     pub fn execute(&self, req: &BrokerRequest<'_>) -> Result<BrokerResponse, BrokerError> {
+        // Lease authorization: the broker only acts under an active (`Held`)
+        // lease. An expired / released / crashed lease must not be able to mint
+        // a signature. This is the lease→op authz gate; it is enforced before
+        // the secret is ever resolved.
+        if req.lease.state != RunnerState::Held {
+            return Err(BrokerError::LeaseNotHeld {
+                lease_id: req.lease.lease_id.clone(),
+            });
+        }
         let secret_name = req.op.secret_ref().name.clone();
         let material = match self.store.resolve(&secret_name) {
             Ok(Some(m)) => m,
@@ -332,9 +356,21 @@ impl<S: SecretStore> Broker<S> {
     /// container's env/proc/disk for the raw credential is clean (**②**) — see
     /// [`scan_credential_absent`].
     ///
+    /// # Lease ↔ container trust boundary
+    /// [`execute`](Self::execute) enforces the lease→op authz gate (the lease
+    /// must be `Held`). The binding between *this `RunnerLease`* and *this
+    /// `RunningContainer`* — i.e. that the container the result is delivered into
+    /// is the one the lease provisioned — is established by the **caller** (the
+    /// runner lifecycle that spawned the container under the lease and holds both
+    /// handles). The broker does not independently re-derive the container name
+    /// from the lease; it trusts the caller-supplied pair. This is the documented
+    /// trust boundary: the broker authorizes the *operation* under the lease and
+    /// the *secrecy* of the credential; container provenance is the runner's.
+    ///
     /// # Errors
     /// Propagates [`BrokerError`] from [`execute`](Self::execute) (fail-closed
-    /// on a down store), or [`BrokerError::Box`] if delivering the result fails.
+    /// on a non-`Held` lease or a down store), or [`BrokerError::Box`] if
+    /// delivering the result fails.
     pub fn execute_into_container<B: BoxExec>(
         &self,
         boxx: &B,
@@ -466,14 +502,56 @@ pub fn scan_credential_absent<B: BoxExec>(
     let out = boxx
         .run(&["docker", "exec", &container.name, "sh", "-c", &script])
         .with_context(|| format!("scanning {} for credential", container.name))?;
+    if !out.ok() {
+        // The scan shell itself failed: we cannot prove absence → fail closed.
+        anyhow::bail!(
+            "credential scan shell failed in {} (code={:?} stderr={:?}); \
+             refusing to report a clean scan",
+            container.name,
+            out.code,
+            out.stderr.trim()
+        );
+    }
     let report = out.stdout.trim().to_string();
-    // Any non-`=0` count means a hit; the credential leaked.
-    let found = report.split_whitespace().any(|kv| {
-        kv.split_once('=')
-            .and_then(|(_, v)| v.parse::<u64>().ok())
-            .is_some_and(|n| n > 0)
-    });
+    // FAIL CLOSED: the report MUST be exactly the three expected `key=N` counts.
+    // An unparseable / truncated / unexpected report is treated as a HIT (the
+    // credential might have leaked and we could not prove otherwise) rather than
+    // defaulting to "clean". A clean scan requires all three counts present and
+    // each equal to zero.
+    let found = !report_is_clean(&report);
     Ok(CredentialScan { found, report })
+}
+
+/// A scan report is **clean** iff it is exactly the three expected counts
+/// (`env`, `proc`, `disk`) and every one is zero. Anything else — a missing
+/// key, an extra token, a non-numeric value, a truncated line — is **not**
+/// clean (fail-closed): we only declare the credential absent when the report
+/// is fully parseable and unambiguous.
+fn report_is_clean(report: &str) -> bool {
+    let mut env = false;
+    let mut proc = false;
+    let mut disk = false;
+    let mut count = 0usize;
+    for tok in report.split_whitespace() {
+        count += 1;
+        let Some((k, v)) = tok.split_once('=') else {
+            return false; // malformed token → not clean
+        };
+        let Ok(n) = v.parse::<u64>() else {
+            return false; // non-numeric count → not clean
+        };
+        if n != 0 {
+            return false; // a hit → not clean
+        }
+        match k {
+            "env" => env = true,
+            "proc" => proc = true,
+            "disk" => disk = true,
+            _ => return false, // unexpected key → not clean
+        }
+    }
+    // Exactly the three expected keys, each present once and zero.
+    count == 3 && env && proc && disk
 }
 
 /// Result of a [`scan_credential_absent`] sweep.
@@ -706,5 +784,68 @@ mod tests {
     fn base64_known_vectors() {
         assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
         assert_eq!(base64_encode(b"f"), "Zg==");
+    }
+
+    #[test]
+    fn report_is_clean_only_for_exact_three_zero_counts() {
+        assert!(report_is_clean("env=0 proc=0 disk=0"));
+        // A hit on any axis → not clean.
+        assert!(!report_is_clean("env=1 proc=0 disk=0"));
+        assert!(!report_is_clean("env=0 proc=0 disk=2"));
+        // FAIL CLOSED on an unparseable / truncated / unexpected report.
+        assert!(!report_is_clean(""), "empty report must NOT be clean");
+        assert!(!report_is_clean("env=0 proc=0"), "missing disk → not clean");
+        assert!(
+            !report_is_clean("env=x proc=0 disk=0"),
+            "non-numeric → not clean"
+        );
+        assert!(!report_is_clean("garbage output"), "garbage → not clean");
+        assert!(
+            !report_is_clean("env=0 proc=0 disk=0 extra=0"),
+            "extra key → not clean"
+        );
+        assert!(
+            !report_is_clean("foo=0 proc=0 disk=0"),
+            "unexpected key → not clean"
+        );
+    }
+
+    #[test]
+    fn lease_not_held_fails_closed() {
+        let broker = Broker::new(store_with("k", b"x"));
+        for state in [
+            RunnerState::Expired,
+            RunnerState::Released,
+            RunnerState::Crashed,
+        ] {
+            let mut l = lease();
+            l.state = state.clone();
+            let req = BrokerRequest {
+                lease: &l,
+                op: BrokerOp::Sign {
+                    secret: SecretRef::new("k"),
+                    message: b"m".to_vec(),
+                },
+            };
+            let err = broker.execute(&req).unwrap_err();
+            assert!(
+                matches!(err, BrokerError::LeaseNotHeld { .. }),
+                "lease state {state:?} must fail closed, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn held_lease_is_authorized() {
+        let broker = Broker::new(store_with("k", b"x"));
+        let l = lease(); // Held
+        let req = BrokerRequest {
+            lease: &l,
+            op: BrokerOp::Sign {
+                secret: SecretRef::new("k"),
+                message: b"m".to_vec(),
+            },
+        };
+        assert!(broker.execute(&req).is_ok());
     }
 }
