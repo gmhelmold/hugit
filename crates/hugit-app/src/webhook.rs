@@ -135,6 +135,12 @@ pub fn verify_x_hub_signature_256(
     payload: &[u8],
     signature_header: Option<&str>,
 ) -> Result<(), WebhookError> {
+    // An empty secret is a misconfiguration: any payload could be verified
+    // with a trivially computed HMAC, making the gate forgeable. Fail closed.
+    if secret.is_empty() {
+        return Err(WebhookError::MissingSignature);
+    }
+
     let header = signature_header.ok_or(WebhookError::MissingSignature)?;
 
     // Header format: "sha256=<hex>"
@@ -166,23 +172,20 @@ pub fn ingest_webhook(
     event_type: &str,
     received_at: u64,
 ) -> Result<SignedEventEnvelope, WebhookError> {
-    verify_x_hub_signature_256(secret, raw_payload, signature_header)?;
+    // Capture the header value before consuming it into verify — the header
+    // IS the canonical signature GitHub sent; we store it verbatim for
+    // auditability rather than re-computing our own copy.
+    let verified_header = signature_header.ok_or(WebhookError::MissingSignature)?;
+    verify_x_hub_signature_256(secret, raw_payload, Some(verified_header))?;
 
     let payload_str = std::str::from_utf8(raw_payload)
         .map(|s| s.to_string())
         .map_err(|e| WebhookError::PayloadParse(e.to_string()))?;
 
-    // Compute the canonical signature we accepted (already verified above).
-    let mut mac =
-        HmacSha256::new_from_slice(secret).expect("HMAC accepts any key length; infallible");
-    mac.update(raw_payload);
-    let sig_bytes = mac.finalize().into_bytes();
-    let canonical_sig = format!("sha256={}", hex::encode(sig_bytes));
-
     Ok(SignedEventEnvelope {
         delivery_id: delivery_id.to_string(),
         event_type: event_type.to_string(),
-        signature: canonical_sig,
+        signature: verified_header.to_string(),
         payload: payload_str,
         received_at,
     })
