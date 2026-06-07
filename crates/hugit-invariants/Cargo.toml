@@ -54,6 +54,16 @@ base64 = "0.22"
 hugit-refstore = { path = "../hugit-refstore" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# WP-X1 (tenant isolation red-team) models the CoreLink HMAC-derived-prefix
+# tenant boundary (whitepaper §9). The namespaced storage key is
+# HMAC-SHA256(tenant_secret, base_memo_key); the base key itself comes from the
+# single-source `hugit_refstore::compute_memo_key` (never re-transcribed).
+# hmac (0.12) + sha2 (0.10) + hex (0.4) are already in the workspace lockfile
+# (used by hugit-app + transitively by the hash chain), so pinning them here
+# adds NO new supply-chain surface — only the documented HMAC namespace model.
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
 
 [dev-dependencies]
 hugit-contracts = { path = "../hugit-contracts" }
@@ -104,3 +114,11 @@ path = "x6/tests/acceptance_x6.rs"
 [[test]]
 name = "acceptance_x12"
 path = "x12/tests/acceptance_x12.rs"
+
+# WP-X1: tenant-isolation red-team — cross-tenant private lookup denied,
+# forged/collision memo keys denied+alerted with no poisoning, public-
+# deterministic artifacts shared leak-free, no private-artifact side-channel
+# (sources under x1/, oracle includes x1/isolation.rs via #[path]).
+[[test]]
+name = "acceptance_x1"
+path = "x1/tests/acceptance_x1.rs"

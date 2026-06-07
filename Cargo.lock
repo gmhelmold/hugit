@@ -877,6 +877,8 @@ dependencies = [
  "anyhow",
  "base64",
  "ed25519-dalek",
+ "hex",
+ "hmac",
  "hugit-cli",
  "hugit-contracts",
  "hugit-ledger",
@@ -884,6 +886,7 @@ dependencies = [
  "hugit-runner",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
