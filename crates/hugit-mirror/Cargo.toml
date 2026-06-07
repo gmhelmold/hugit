@@ -22,3 +22,7 @@ path = "tests/acceptance_e1a.rs"
 [[test]]
 name = "acceptance_e1b"
 path = "tests/acceptance_e1b.rs"
+
+[[test]]
+name = "acceptance_e1c"
+path = "tests/acceptance_e1c.rs"
