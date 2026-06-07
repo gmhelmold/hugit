@@ -9,6 +9,7 @@
 //! - `x5/` — namespace-law invariants: no git-verb shadow, ref-namespace non-collision (WP-X5).
 //! - `x6/` — resource non-interference: infra isolation config + accounting model + latency measurement (WP-X6).
 //! - `x12/` — erasure × provenance × mirror: post-erasure chain stays verifiable over a tamper-evident tombstone (no silent re-link), mirror-obligation discharged-or-disclosed in the export/exit proof (WP-X12).
+//! - `x8/` — self-release attestation: every App/CLI/runner-image release signed + published to a verifiable transparency log, the running App verifies its own provenance at boot, unsigned/tampered self-build fails CLOSED (WP-X8).
 
 // ── WP-X2: attestation end-to-end invariants ─────────────────────────────────
 #[path = "x2/lib.rs"]
@@ -32,3 +33,6 @@ pub mod x6;
 // ── WP-X12: erasure × provenance × mirror invariants ─────────────────────────
 #[path = "x12/lib.rs"]
 pub mod x12;
+// ── WP-X8: self-release attestation invariants ───────────────────────────────
+#[path = "x8/lib.rs"]
+pub mod x8;

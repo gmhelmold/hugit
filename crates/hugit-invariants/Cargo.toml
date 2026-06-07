@@ -104,3 +104,13 @@ path = "x6/tests/acceptance_x6.rs"
 [[test]]
 name = "acceptance_x12"
 path = "x12/tests/acceptance_x12.rs"
+# WP-X8: self-release attestation — every App/CLI/runner-image release signed +
+# published to a verifiable transparency log, the running App verifies its own
+# provenance at boot, unsigned/tampered self-build fails CLOSED. Sources under
+# x8/; wired via #[path] in lib.rs. Release signatures are real ed25519 over the
+# contract-frozen canonical preimage (hugit_refstore::attestation_sig_preimage);
+# the live public transparency log (e.g. Rekor) is the documented P2 seam behind
+# the same TransparencyLog trait. Fully hermetic: no network, no env.
+[[test]]
+name = "acceptance_x8"
+path = "x8/tests/acceptance_x8.rs"
