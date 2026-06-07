@@ -394,3 +394,129 @@ fn item_5_uninstall_revokes_access_and_halts_processing() {
         .persist_event(&other_envelope, Some("install-other-777"))
         .expect("persist_event for non-halted install must succeed");
 }
+
+// ── Remediation oracles ────────────────────────────────────────────────────
+
+/// ORACLE (defect 1): empty webhook secret must be REJECTED, not silently accepted.
+///
+/// An empty secret means any payload could be verified with a trivially computed
+/// HMAC — this is a security misconfiguration that must be caught at the gate.
+#[test]
+fn remed_1_empty_secret_rejected() {
+    let payload = b"{\"action\":\"opened\"}";
+
+    // Compute a valid HMAC over the payload using an empty key — this is what
+    // an attacker would send if the server silently accepts an empty secret.
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    type HmacSha256 = Hmac<Sha256>;
+    let mut mac = HmacSha256::new_from_slice(b"").unwrap();
+    mac.update(payload);
+    let attacker_sig = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+
+    // Empty secret must produce an error — the exact variant is MissingSignature
+    // (misconfigured) rather than silently accepting a trivially-forged payload.
+    let result = verify_x_hub_signature_256(b"", payload, Some(attacker_sig.as_str()));
+    assert!(
+        result.is_err(),
+        "empty webhook secret must be rejected — got Ok, which means forgeable"
+    );
+}
+
+/// ORACLE (defect 2): ingest_webhook must store the verified HEADER value as
+/// `signature`, not a server-recomputed copy.
+///
+/// The header value IS the canonical identifier GitHub sends.  We verify that
+/// the envelope captures *exactly* what came in the header, byte-for-byte —
+/// including any upper-case hex digits that a future GitHub variant might send.
+/// A server-recomputed value always uses lower-case hex and would diverge.
+#[test]
+fn remed_2_stored_signature_is_header_value() {
+    let secret = b"test-webhook-secret-b1";
+    let payload = b"{\"action\":\"synchronize\"}";
+
+    // Build the canonical lower-case hex sig (what GitHub sends today).
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    type HmacSha256 = Hmac<Sha256>;
+    let mut mac = HmacSha256::new_from_slice(secret).unwrap();
+    mac.update(payload);
+    let raw_bytes = mac.finalize().into_bytes();
+
+    // Construct the header value with UPPER-CASE hex — still valid per the
+    // spec (hex is case-insensitive); a server that re-computes will produce
+    // lower-case and the assertion below will catch the divergence.
+    let header_value = format!("sha256={}", hex::encode(raw_bytes).to_uppercase());
+
+    let processor = WebhookProcessor::new(secret.to_vec());
+    let envelope = processor
+        .process(
+            payload,
+            Some(header_value.as_str()),
+            "delivery-sig-check",
+            "pull_request",
+            9_000_000,
+        )
+        .expect("valid signature must be accepted (hex comparison is case-insensitive)");
+
+    assert_eq!(
+        envelope.signature, header_value,
+        "stored signature must equal the X-Hub-Signature-256 header GitHub sent, \
+         not a server-recomputed lower-case copy"
+    );
+}
+
+/// ORACLE (defect 3): validate_manifest must reject over-privileged scopes.
+///
+/// pull_requests or contents at "write" level exceeds least privilege. The
+/// OverPrivileged variant must be returned, not Ok.
+#[test]
+fn remed_3_over_privileged_manifest_rejected() {
+    use hugit_app::manifest::{ManifestError, validate_manifest};
+
+    // Manifest with pull_requests: write — exceeds least privilege.
+    let over_priv_pr = r#"{
+        "default_permissions": {
+            "checks": "write",
+            "pull_requests": "write",
+            "contents": "read"
+        }
+    }"#;
+    let err = validate_manifest(over_priv_pr)
+        .expect_err("pull_requests:write must be rejected as over-privileged");
+    assert!(
+        matches!(err, ManifestError::OverPrivileged(_)),
+        "expected OverPrivileged for pull_requests:write, got: {err:?}"
+    );
+
+    // Manifest with contents: write — exceeds least privilege.
+    let over_priv_contents = r#"{
+        "default_permissions": {
+            "checks": "write",
+            "pull_requests": "read",
+            "contents": "write"
+        }
+    }"#;
+    let err2 = validate_manifest(over_priv_contents)
+        .expect_err("contents:write must be rejected as over-privileged");
+    assert!(
+        matches!(err2, ManifestError::OverPrivileged(_)),
+        "expected OverPrivileged for contents:write, got: {err2:?}"
+    );
+
+    // Manifest without default_permissions (only permissions fallback) must be
+    // rejected — default_permissions is required.
+    let fallback_only = r#"{
+        "permissions": {
+            "checks": "write",
+            "pull_requests": "read",
+            "contents": "read"
+        }
+    }"#;
+    let err3 = validate_manifest(fallback_only)
+        .expect_err("manifest with only 'permissions' (no default_permissions) must be rejected");
+    assert!(
+        matches!(err3, ManifestError::MissingPermissions),
+        "expected MissingPermissions when default_permissions absent, got: {err3:?}"
+    );
+}

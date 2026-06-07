@@ -24,13 +24,15 @@ pub fn validate_manifest(manifest_json: &str) -> Result<(), ManifestError> {
     let v: serde_json::Value =
         serde_json::from_str(manifest_json).map_err(|e| ManifestError::Parse(e.to_string()))?;
 
-    // The manifest must declare permissions.
+    // The manifest must declare `default_permissions` — the `permissions`
+    // fallback is not accepted because it bypasses GitHub App install-time
+    // prompts and can silently grant broader access.
     let perms = v
         .get("default_permissions")
-        .or_else(|| v.get("permissions"))
         .ok_or(ManifestError::MissingPermissions)?;
 
-    // Checks: read or write is required (write implies read).
+    // Checks: read or write is required (write is allowed — write-back is the
+    // whole point of the Checks API integration).
     let checks = perms
         .get("checks")
         .and_then(|v| v.as_str())
@@ -39,21 +41,29 @@ pub fn validate_manifest(manifest_json: &str) -> Result<(), ManifestError> {
         return Err(ManifestError::ScopeMissing("checks".to_string()));
     }
 
-    // Pull requests: read minimum.
+    // Pull requests: read only — write would allow creating/closing PRs which
+    // is beyond the current least-privilege contract.
     let prs = perms
         .get("pull_requests")
         .and_then(|v| v.as_str())
         .unwrap_or("none");
-    if prs != "read" && prs != "write" {
+    if prs == "write" {
+        return Err(ManifestError::OverPrivileged("pull_requests".to_string()));
+    }
+    if prs != "read" {
         return Err(ManifestError::ScopeMissing("pull_requests".to_string()));
     }
 
-    // Contents: read minimum.
+    // Contents: read only — write would allow pushing commits which is beyond
+    // the current least-privilege contract.
     let contents = perms
         .get("contents")
         .and_then(|v| v.as_str())
         .unwrap_or("none");
-    if contents != "read" && contents != "write" {
+    if contents == "write" {
+        return Err(ManifestError::OverPrivileged("contents".to_string()));
+    }
+    if contents != "read" {
         return Err(ManifestError::ScopeMissing("contents".to_string()));
     }
 
