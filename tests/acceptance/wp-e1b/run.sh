@@ -140,9 +140,18 @@ check "② divergence/ is fail-CLOSED (undecidable → divergent)" \
   bash -c "grep -rEq 'fail_closed|FailClosed|degraded|Degraded|undecidable|Undecidable' '$DIVERGENCE_DIR/' 2>/dev/null"
 
 # ── structural: no reverse-sync codepath anywhere in E1b Claims ───────────────
-check "⑦ Claims paths contain no reverse-sync import or entry point" \
+# Lead adjudication (remediation): divergence/ is EXCLUDED from this crude token
+# grep because it now hosts the architecture oracle `reverse_sync_surface_count`
+# — a strictly-stronger structural check that scans the shipped one-way sources
+# and asserts ZERO reverse-sync sinks, WITH a positive-control test proving it
+# detects an injected reverse-sync path (divergence/mod.rs, run under cargo via
+# item_7 + architecture_oracle_*). The oracle legitimately names the patterns it
+# detects, which this token grep cannot distinguish from a real sink (retro
+# finding: text-greps conflate detector code with sinks). The behavioral oracle
+# is authoritative for divergence/; the crude grep still guards outage/refops/poll.
+check "⑦ Claims paths (outage/refops/poll) contain no reverse-sync import or entry point" \
   bash -c "! grep -rEq 'reverse_sync|ReverseSync|sync_from_github|from_mirror' \
-    '$DIVERGENCE_DIR/' '$OUTAGE_DIR/' '$REFOPS_DIR/' '$POLL_DIR/' 2>/dev/null"
+    '$OUTAGE_DIR/' '$REFOPS_DIR/' '$POLL_DIR/' 2>/dev/null"
 
 # ── full acceptance suite green ───────────────────────────────────────────────
 check "②④⑤⑥⑦ cargo test -p hugit-mirror --test acceptance_e1b green" \
