@@ -62,6 +62,16 @@ serde_json = "1"
 # down-zoom oracle red automatically. hugit-ledger is promoted from a dev-only
 # dep because x13/legibility.rs (production surface) links it.
 hugit-ledger = { path = "../hugit-ledger" }
+# WP-X1 (tenant isolation red-team) models the CoreLink HMAC-derived-prefix
+# tenant boundary (whitepaper §9). The namespaced storage key is
+# HMAC-SHA256(tenant_secret, base_memo_key); the base key itself comes from the
+# single-source `hugit_refstore::compute_memo_key` (never re-transcribed).
+# hmac (0.12) + sha2 (0.10) + hex (0.4) are already in the workspace lockfile
+# (used by hugit-app + transitively by the hash chain), so pinning them here
+# adds NO new supply-chain surface — only the documented HMAC namespace model.
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
 
 [dev-dependencies]
 hugit-contracts = { path = "../hugit-contracts" }
@@ -159,3 +169,11 @@ path = "x13/tests/acceptance_x13.rs"
 [[test]]
 name = "acceptance_x14"
 path = "x14/tests/acceptance_x14.rs"
+
+# WP-X1: tenant-isolation red-team — cross-tenant private lookup denied,
+# forged/collision memo keys denied+alerted with no poisoning, public-
+# deterministic artifacts shared leak-free, no private-artifact side-channel
+# (sources under x1/, oracle includes x1/isolation.rs via #[path]).
+[[test]]
+name = "acceptance_x1"
+path = "x1/tests/acceptance_x1.rs"
