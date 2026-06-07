@@ -32,6 +32,12 @@ pub use gates::{changelog, dco, secrets};
 pub struct EvalContext {
     /// Commit messages in the range being evaluated (e.g. BASE..HEAD).
     pub commit_messages: Vec<String>,
+    /// Parent counts for each commit, parallel to `commit_messages`.
+    ///
+    /// A value ≥ 2 means the commit is a real merge commit (equivalent to the
+    /// `--no-merges` git filter).  When the slice is shorter than
+    /// `commit_messages` the missing entries are treated as 1 (regular commit).
+    pub commit_parent_counts: Vec<usize>,
     /// File paths changed in the range.
     pub changed_files: Vec<String>,
     /// Full text content of changed files, keyed by path.
@@ -45,6 +51,7 @@ impl EvalContext {
     pub fn new() -> Self {
         Self {
             commit_messages: Vec::new(),
+            commit_parent_counts: Vec::new(),
             changed_files: Vec::new(),
             file_contents: HashMap::new(),
             metadata: HashMap::new(),

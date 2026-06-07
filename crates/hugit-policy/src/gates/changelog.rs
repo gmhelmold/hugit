@@ -5,15 +5,26 @@
 
 use crate::{EvalContext, GateOutcome};
 
-/// Subject pattern for feat/fix commits: starts with `feat`, `fix` followed
-/// by `(`, `:`, or `!`.
+/// Subject pattern for feat/fix commits: starts with `feat` or `fix` followed
+/// immediately by `(`, `:`, or `!`.
+///
+/// "feat" is 4 chars → delimiter at index 4.
+/// "fix"  is 3 chars → delimiter at index 3.
 fn is_feat_or_fix(subject: &str) -> bool {
     let s = subject.trim();
-    (s.starts_with("feat") || s.starts_with("fix"))
-        && s.chars()
+    if s.starts_with("feat") {
+        s.chars()
             .nth(4)
             .map(|c| matches!(c, '(' | ':' | '!'))
             .unwrap_or(false)
+    } else if s.starts_with("fix") {
+        s.chars()
+            .nth(3)
+            .map(|c| matches!(c, '(' | ':' | '!'))
+            .unwrap_or(false)
+    } else {
+        false
+    }
 }
 
 /// Evaluate the changelog gate.
@@ -145,5 +156,45 @@ mod tests {
             &[("CHANGELOG.md", CHANGELOG_EMPTY)],
         );
         assert!(matches!(eval(&ctx), GateOutcome::Fail { .. }));
+    }
+
+    // ── Oracle: "fix:" commits are recognized as fix → gate is enforced ────────
+    // Off-by-one at index 4 causes "fix:" to be mis-detected (the char at index 4
+    // of "fix: x" is ' ', not ':'), so the changelog gate silently no-ops on fixes.
+    #[test]
+    fn fix_colon_is_feat_or_fix() {
+        assert!(
+            is_feat_or_fix("fix: correct a bug"),
+            "'fix: ...' must be detected as a fix commit"
+        );
+    }
+
+    #[test]
+    fn fix_scope_is_feat_or_fix() {
+        assert!(
+            is_feat_or_fix("fix(scope): correct a bug"),
+            "'fix(scope): ...' must be detected as a fix commit"
+        );
+    }
+
+    #[test]
+    fn fix_breaking_is_feat_or_fix() {
+        assert!(
+            is_feat_or_fix("fix!: breaking fix"),
+            "'fix!: ...' must be detected as a fix commit"
+        );
+    }
+
+    #[test]
+    fn fix_commit_missing_changelog_fails() {
+        let ctx = ctx(
+            &["fix: correct a bug\n\nSigned-off-by: A <a@b.com>"],
+            &[],
+            &[],
+        );
+        assert!(
+            matches!(eval(&ctx), GateOutcome::Fail { .. }),
+            "fix commit without CHANGELOG.md update must fail the changelog gate"
+        );
     }
 }
