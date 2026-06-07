@@ -284,6 +284,8 @@ mod tests {
     #[test]
     fn spec_reuses_c2a_validation() {
         use hugit_contracts::{RunnerLease, RunnerState};
+        const PIN: &str =
+            "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc";
         let l = RunnerLease {
             lease_id: "z1".to_string(),
             principal_chain: vec![],
@@ -293,12 +295,17 @@ mod tests {
             tmp_root: "/t".to_string(),
             state: RunnerState::Held,
         };
-        let spec = c2b_spec(&l, "alpine:3.20").unwrap();
+        let spec = c2b_spec(&l, PIN).unwrap();
         assert_eq!(spec.name, "hugit-c2b-z1");
         assert!(spec.no_network);
 
+        // C2a validation is reused, incl. the supply-chain pin floor.
         let mut bad = l.clone();
         bad.net_policy = "egress".to_string();
-        assert!(c2b_spec(&bad, "alpine:3.20").is_err());
+        assert!(c2b_spec(&bad, PIN).is_err());
+        assert!(
+            c2b_spec(&l, "alpine:3.20").is_err(),
+            "c2b must reject an unpinned image (inherits the X4 floor)"
+        );
     }
 }

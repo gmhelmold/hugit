@@ -33,7 +33,45 @@ use hugit_runner::lease::{BoxExec, SshBox};
 use hugit_runner::recovery::{LostDisposition, detect_and_recover};
 use hugit_runner::teardown::teardown;
 
-const IMAGE: &str = "alpine:3.20";
+/// Tag used only to *resolve* a real content digest from the box; the spawn
+/// surface now requires a content-pinned `repo@sha256:…` reference (WP-X4 on
+/// the real path), so the tag itself is never passed to a spec.
+const RESOLVE_TAG: &str = "alpine:3.20";
+
+/// Pull `RESOLVE_TAG` on the box and resolve it to a real, servable
+/// `repo@sha256:<digest>` pin.
+fn pinned_image(boxx: &SshBox) -> String {
+    let pull = boxx
+        .run(&["docker", "pull", RESOLVE_TAG])
+        .expect("docker pull failed to spawn");
+    assert!(
+        pull.ok(),
+        "docker pull {RESOLVE_TAG} failed: {}",
+        pull.stderr.trim()
+    );
+    let inspect = boxx
+        .run(&[
+            "docker",
+            "image",
+            "inspect",
+            RESOLVE_TAG,
+            "--format",
+            "{{range .RepoDigests}}{{.}}\n{{end}}",
+        ])
+        .expect("docker inspect failed to spawn");
+    inspect
+        .stdout
+        .lines()
+        .map(str::trim)
+        .find(|l| l.contains("@sha256:"))
+        .unwrap_or_else(|| {
+            panic!(
+                "no RepoDigest resolved for {RESOLVE_TAG}: {:?}",
+                inspect.stdout
+            )
+        })
+        .to_string()
+}
 
 /// Build a fresh, unique, C2b-conformant lease with the given expiry.
 fn fresh_lease(slug: &str, expiry: u64) -> RunnerLease {
@@ -78,18 +116,6 @@ fn live_box() -> SshBox {
     boxx
 }
 
-/// Ensure the job image is present on the box.
-fn ensure_image(boxx: &SshBox) {
-    let pull = boxx
-        .run(&["docker", "pull", IMAGE])
-        .expect("docker pull failed to spawn");
-    assert!(
-        pull.ok(),
-        "docker pull {IMAGE} failed: {}",
-        pull.stderr.trim()
-    );
-}
-
 /// Best-effort sweep of **only** `hugit-c2b-*` containers, so a prior aborted
 /// run never poisons a census. Never touches other WPs' containers.
 fn sweep_c2b(boxx: &SshBox) {
@@ -112,12 +138,12 @@ fn item_3_expiry_hard_kill() {
         return;
     }
     let boxx = live_box();
-    ensure_image(&boxx);
+    let image = pinned_image(&boxx);
     sweep_c2b(&boxx);
 
     // An already-expired lease (expiry in the past relative to "now").
     let lease = fresh_lease("expiry", 1);
-    let spec = c2b_spec(&lease, IMAGE).expect("derive C2b spec");
+    let spec = c2b_spec(&lease, &image).expect("derive C2b spec");
     let engine = DockerEngine::new(boxx.clone());
     let container = engine.spawn(&spec).expect("spawn container for expiry");
 
@@ -178,17 +204,12 @@ fn item_4_concurrent_ge8_per_box() {
         return;
     }
     let boxx = live_box();
-    ensure_image(&boxx);
+    let image = pinned_image(&boxx);
     sweep_c2b(&boxx);
 
     const N: usize = 8;
     let leases: Vec<(RunnerLease, String)> = (0..N)
-        .map(|i| {
-            (
-                fresh_lease(&format!("conc{i}"), u64::MAX),
-                IMAGE.to_string(),
-            )
-        })
+        .map(|i| (fresh_lease(&format!("conc{i}"), u64::MAX), image.clone()))
         .collect();
 
     let scheduler = Scheduler::new(boxx.clone(), DockerEngine::new(boxx.clone()));
@@ -232,12 +253,12 @@ fn item_5_crash_recovery_lost_detected() {
         return;
     }
     let boxx = live_box();
-    ensure_image(&boxx);
+    let image = pinned_image(&boxx);
     sweep_c2b(&boxx);
 
     // Spawn a long-running job (the "in-flight" job).
     let lease = fresh_lease("crash", u64::MAX);
-    let spec = c2b_spec(&lease, IMAGE).expect("derive C2b spec");
+    let spec = c2b_spec(&lease, &image).expect("derive C2b spec");
     let engine = DockerEngine::new(boxx.clone());
     let container = engine.spawn(&spec).expect("spawn in-flight container");
     let _ = c2b_container_name(&lease.lease_id); // exercised name helper

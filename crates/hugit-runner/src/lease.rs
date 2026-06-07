@@ -48,8 +48,13 @@ impl ContainerSpec {
     /// Derive a per-job container spec from a frozen lease.
     ///
     /// # Errors
-    /// Fails if the lease id is empty, `tmp_root` is empty, or the lease's
-    /// `net_policy` is not a C2a-supported isolated policy.
+    /// Fails if the lease id is empty, `tmp_root` is empty or unsafe, the
+    /// `net_policy` is not a C2a-supported isolated policy, or `image` is not
+    /// content-(digest)-pinned (`repo@sha256:<64-hex>`). The pin requirement is
+    /// the supply-chain floor (WP-X4): an unpinned image is rejected here,
+    /// before the box is ever touched (fail-closed). Integrity verification of
+    /// the pin against the box happens at [`Engine::spawn`](crate::isolation::Engine::spawn)
+    /// time, before `docker run`.
     pub fn from_lease(lease: &RunnerLease, image: &str) -> Result<Self> {
         if lease.lease_id.trim().is_empty() {
             bail!("RunnerLease.lease_id is empty");
@@ -57,6 +62,11 @@ impl ContainerSpec {
         if lease.tmp_root.trim().is_empty() {
             bail!("RunnerLease.tmp_root is empty");
         }
+        // `tmp_root` is interpolated into `--tmpfs <root>:…` and into `sh -c`
+        // probe scripts on the box. An unsanitized value (e.g.
+        // `"/x' ; touch /pwned ; echo '"`) is a root RCE on the runner box.
+        // Restrict to an absolute path over a conservative, shell-inert charset.
+        validate_tmp_root(&lease.tmp_root)?;
         if !requires_no_network(&lease.net_policy) {
             bail!(
                 "net_policy {:?} is not isolated; C2a v0 supports only \
@@ -64,6 +74,9 @@ impl ContainerSpec {
                 lease.net_policy
             );
         }
+        // Supply-chain floor: reject any non-content-pinned image at spec-build
+        // time so the unpinned/tag path can never reach `docker run`.
+        crate::pin::require_pinned(image)?;
         Ok(Self {
             name: container_name(&lease.lease_id),
             image: image.to_string(),
@@ -72,6 +85,34 @@ impl ContainerSpec {
             path_set: lease.path_set.clone(),
         })
     }
+}
+
+/// Validate that `tmp_root` is an absolute path over a shell-inert charset.
+///
+/// Accepts `^/[A-Za-z0-9._/-]+$` only: a leading `/` then any of
+/// alphanumeric, `.`, `_`, `/`, `-`. Every shell metacharacter (space, quote,
+/// `;`, `|`, `&`, `$`, backtick, `(`, `)`, newline, …) is excluded, so the
+/// value cannot break out of `--tmpfs` or a `sh -c` probe on the box.
+///
+/// # Errors
+/// Fails if `tmp_root` is not absolute or contains a disallowed character.
+fn validate_tmp_root(tmp_root: &str) -> Result<()> {
+    if !tmp_root.starts_with('/') {
+        bail!("RunnerLease.tmp_root {tmp_root:?} must be an absolute path (start with `/`)");
+    }
+    if tmp_root.len() < 2 {
+        bail!("RunnerLease.tmp_root {tmp_root:?} is too short to be a real path");
+    }
+    if !tmp_root
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'/' | b'-'))
+    {
+        bail!(
+            "RunnerLease.tmp_root {tmp_root:?} contains characters outside \
+             ^/[A-Za-z0-9._/-]+$ — refused (shell-injection guard, fail CLOSED)"
+        );
+    }
+    Ok(())
 }
 
 /// Sanitize a lease id into a Docker-safe container name. Docker names must
@@ -101,6 +142,20 @@ pub trait BoxExec {
     /// shell-quoted and joined). A `None` exit code means the command was
     /// killed by a signal.
     fn run(&self, argv: &[&str]) -> Result<CmdOutput>;
+
+    /// Run `argv` on the box with `stdin` piped to the remote process.
+    ///
+    /// This is the safe channel for **untrusted bytes** (e.g. a serialized
+    /// state payload): the bytes flow over stdin and are never interpolated
+    /// into the command string, so no value can break out of the shell. The
+    /// default implementation refuses (a transport that cannot stream stdin
+    /// must not be handed untrusted payloads).
+    ///
+    /// # Errors
+    /// Fails if the transport cannot stream stdin or the process cannot spawn.
+    fn run_with_stdin(&self, _argv: &[&str], _stdin: &[u8]) -> Result<CmdOutput> {
+        bail!("this BoxExec transport does not support stdin streaming");
+    }
 }
 
 /// Captured result of a command run on the box.
@@ -183,19 +238,59 @@ impl BoxExec for SshBox {
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         })
     }
+
+    fn run_with_stdin(&self, argv: &[&str], stdin: &[u8]) -> Result<CmdOutput> {
+        use std::io::Write;
+        use std::process::Stdio;
+
+        let remote = shell_join(argv);
+        let mut cmd = Command::new("ssh");
+        if let Some(id) = &self.identity {
+            cmd.arg("-i").arg(id);
+        }
+        cmd.arg("-o")
+            .arg("BatchMode=yes")
+            .arg("-o")
+            .arg("StrictHostKeyChecking=no")
+            .arg("-o")
+            .arg("ConnectTimeout=15")
+            .arg(&self.target)
+            .arg(&remote)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd
+            .spawn()
+            .with_context(|| format!("failed to spawn ssh to {}", self.target))?;
+        // Write the untrusted payload over stdin (never via the command string).
+        child
+            .stdin
+            .take()
+            .context("ssh child has no stdin pipe")?
+            .write_all(stdin)
+            .context("writing payload to ssh stdin")?;
+        let out = child
+            .wait_with_output()
+            .with_context(|| format!("waiting on ssh to {}", self.target))?;
+        Ok(CmdOutput {
+            code: out.status.code(),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        })
+    }
 }
 
 /// POSIX single-quote a command vector into one remote shell string.
+///
+/// Every argument is **always** single-quoted (no "looks-safe" allowlist
+/// passthrough): an allowlist is one missed character away from an injection,
+/// so the only safe rule is to quote unconditionally. Embedded single quotes
+/// are escaped via the standard `'\''` idiom.
 fn shell_join(argv: &[&str]) -> String {
     argv.iter()
         .map(|a| {
             if a.is_empty() {
                 "''".to_string()
-            } else if a
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-' | b'/' | b':'))
-            {
-                (*a).to_string()
             } else {
                 format!("'{}'", a.replace('\'', r"'\''"))
             }
@@ -208,6 +303,10 @@ fn shell_join(argv: &[&str]) -> String {
 mod tests {
     use super::*;
     use hugit_contracts::RunnerState;
+
+    /// A content-pinned image reference (the only kind `from_lease` accepts).
+    const PIN: &str =
+        "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc";
 
     fn lease() -> RunnerLease {
         RunnerLease {
@@ -223,30 +322,68 @@ mod tests {
 
     #[test]
     fn spec_sanitizes_name_and_forces_no_network() {
-        let spec = ContainerSpec::from_lease(&lease(), "alpine:3.20").unwrap();
+        let spec = ContainerSpec::from_lease(&lease(), PIN).unwrap();
         assert_eq!(spec.name, "hugit-job-lease_abc_123");
         assert!(spec.no_network);
         assert_eq!(spec.tmp_root, "/work/tmp");
-        assert_eq!(spec.image, "alpine:3.20");
+        assert_eq!(spec.image, PIN);
     }
 
     #[test]
     fn spec_rejects_non_isolated_policy() {
         let mut l = lease();
         l.net_policy = "egress-allow".to_string();
-        assert!(ContainerSpec::from_lease(&l, "alpine:3.20").is_err());
+        assert!(ContainerSpec::from_lease(&l, PIN).is_err());
     }
 
     #[test]
     fn spec_rejects_empty_ids() {
         let mut l = lease();
         l.lease_id = "  ".to_string();
-        assert!(ContainerSpec::from_lease(&l, "alpine:3.20").is_err());
+        assert!(ContainerSpec::from_lease(&l, PIN).is_err());
     }
 
     #[test]
-    fn shell_join_quotes_spaces() {
-        assert_eq!(shell_join(&["echo", "a b"]), "echo 'a b'");
-        assert_eq!(shell_join(&["ls", "/tmp"]), "ls /tmp");
+    fn spec_rejects_unpinned_image() {
+        // The supply-chain floor: a floating tag is refused at spec-build time,
+        // before any box contact (WP-X4 on the real spawn surface).
+        assert!(ContainerSpec::from_lease(&lease(), "alpine:3.20").is_err());
+        assert!(ContainerSpec::from_lease(&lease(), "alpine").is_err());
+        let tampered = "alpine@sha256:\
+                        0000000000000000000000000000000000000000000000000000000000000000";
+        // (tampered digest is *syntactically* pinned; integrity is caught at
+        // spawn-time verify, not here — see the spawn-path tests.)
+        assert!(ContainerSpec::from_lease(&lease(), tampered).is_ok());
+    }
+
+    #[test]
+    fn spec_rejects_tmp_root_injection() {
+        // tmp_root RCE guard (brutal review R4): a value that escapes `sh -c`
+        // must be refused at from_lease before it can reach the box.
+        let mut l = lease();
+        l.tmp_root = "/x' ; touch /pwned ; echo '".to_string();
+        let err = ContainerSpec::from_lease(&l, PIN).unwrap_err().to_string();
+        assert!(
+            err.contains("tmp_root"),
+            "tmp_root injection must be rejected at from_lease; got: {err}"
+        );
+        // relative path also refused
+        l.tmp_root = "relative/tmp".to_string();
+        assert!(ContainerSpec::from_lease(&l, PIN).is_err());
+        // command substitution refused
+        l.tmp_root = "/$(reboot)".to_string();
+        assert!(ContainerSpec::from_lease(&l, PIN).is_err());
+        // a clean absolute path is accepted
+        l.tmp_root = "/hugit/tmp".to_string();
+        assert!(ContainerSpec::from_lease(&l, PIN).is_ok());
+    }
+
+    #[test]
+    fn shell_join_always_quotes() {
+        assert_eq!(shell_join(&["echo", "a b"]), "'echo' 'a b'");
+        // Even "looks-safe" tokens are quoted — no allowlist passthrough.
+        assert_eq!(shell_join(&["ls", "/tmp"]), "'ls' '/tmp'");
+        // An injection attempt is fully neutralized by quoting.
+        assert_eq!(shell_join(&["echo", "; rm -rf /"]), "'echo' '; rm -rf /'");
     }
 }

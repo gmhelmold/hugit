@@ -25,10 +25,10 @@
 //! documented upgrade path, not built here.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use hugit_contracts::{FenceManifest, RunnerLease};
 
 use crate::isolation::{Engine, RunningContainer};
@@ -130,30 +130,45 @@ where
 
 // ── dedup spawn ───────────────────────────────────────────────────────────────
 
-/// A workspace-id → single in-progress spawn entry.
-#[derive(Clone)]
-struct SpawnEntry {
-    handle: WorkspaceHandle,
+/// The state of a per-workspace dedup slot.
+enum SpawnEntry {
+    /// A spawn was claimed by some thread and is in progress. Concurrent
+    /// callers for the same id wait on the condvar rather than starting a
+    /// second materialization or blocking everyone else's *unrelated* spawns.
+    Pending,
+    /// A spawn completed; the handle is cached until the dedup window expires.
+    /// Boxed to keep the enum small (the handle dwarfs the other variants).
+    Ready {
+        handle: Box<WorkspaceHandle>,
+        at: Instant,
+    },
+    /// The in-progress spawn failed; the claim is released so a later caller
+    /// can take over and retry. The failing caller already received the real
+    /// error, so the marker itself carries no payload.
+    Failed,
 }
 
 /// Deduplicating workspace spawner.
 ///
 /// Concurrent identical spawns (same `workspace_id`) are coalesced to ONE
-/// materialization: the first caller does the real spawn; all later callers for
-/// the same id during the `dedup_window` get the SAME handle back without
-/// re-spawning, even if the first spawn is still in progress.
+/// materialization: the first caller claims the slot and does the real spawn
+/// **outside** the lock; later callers for the same id wait for that single
+/// materialization and get the SAME handle. Crucially the global lock is held
+/// only to *claim/observe* a slot, never across the `docker run` itself, so a
+/// spawn for workspace A never serializes an unrelated spawn for workspace B.
+///
+/// A cached handle is liveness-probed before reuse: if its container has since
+/// died/been reaped, the corpse is discarded and a fresh spawn is performed
+/// (no dead-container handle is ever handed back).
 ///
 /// After the window expires the entry is evicted so future spawns create a
 /// fresh container.
-///
-/// This is the C9 warm-CAS-economics contract: identical concurrent spawns
-/// dedup to one materialization.
 pub struct DedupSpawner {
-    /// In-progress/recent spawns, keyed by workspace id.
-    ///
-    /// Arc+Mutex so the spawner can be shared across threads (C9 item ③ uses
-    /// concurrent callers from multiple threads).
-    entries: Arc<Mutex<HashMap<String, (SpawnEntry, Instant)>>>,
+    /// In-progress/recent spawns, keyed by workspace id, guarded for the
+    /// claim/observe critical section only (never across a spawn).
+    entries: Arc<Mutex<HashMap<String, SpawnEntry>>>,
+    /// Signalled whenever a `Pending` slot transitions to `Ready`/`Failed`.
+    ready: Arc<Condvar>,
     /// How long a completed spawn is held for deduplication.
     dedup_window: Duration,
 }
@@ -167,19 +182,22 @@ impl DedupSpawner {
     pub fn new(dedup_window: Duration) -> Self {
         Self {
             entries: Arc::new(Mutex::new(HashMap::new())),
+            ready: Arc::new(Condvar::new()),
             dedup_window,
         }
     }
 
     /// Spawn or return an existing workspace for `workspace_id`.
     ///
-    /// Thread-safe: if two threads call this simultaneously with the same id,
-    /// one does the real spawn and the other gets the same handle (one
-    /// materialization). The spawn is done under the lock so the second caller
-    /// always gets a fully-initialized handle (no "spawn in progress" window).
+    /// Thread-safe and non-serializing: if two threads call this simultaneously
+    /// with the SAME id, one claims the slot and materializes; the other waits
+    /// for that single materialization and gets the same handle. Two threads
+    /// with DIFFERENT ids never block each other (the lock is not held across
+    /// the spawn). A cached handle is liveness-checked before reuse.
     ///
     /// # Errors
-    /// Fails if the underlying spawn fails.
+    /// Fails if the underlying spawn fails (the failure is propagated to every
+    /// waiter of that attempt; the slot is then released for retry).
     pub fn spawn_or_join<E>(
         &self,
         workspace_id: &str,
@@ -191,35 +209,91 @@ impl DedupSpawner {
     where
         E: Engine,
     {
-        let mut map = self.entries.lock().unwrap();
-
-        // Evict stale entries first.
-        let now = Instant::now();
-        map.retain(|_, (_, ts)| now.duration_since(*ts) < self.dedup_window);
-
-        // Return the existing entry if one is live within the dedup window.
-        if let Some((entry, _)) = map.get(workspace_id) {
-            return Ok(entry.handle.clone());
+        // ── Phase 1: claim or observe the slot (lock held briefly) ────────────
+        {
+            let mut map = self.entries.lock().unwrap();
+            loop {
+                match map.get(workspace_id) {
+                    Some(SpawnEntry::Ready { handle, at }) if at.elapsed() < self.dedup_window => {
+                        // Liveness-probe the cached container BEFORE reuse so a
+                        // dead/reaped corpse is never handed back.
+                        let handle = (**handle).clone();
+                        drop(map);
+                        match engine.is_alive(&handle.container) {
+                            Ok(true) => return Ok(handle),
+                            Ok(false) => {
+                                // Corpse: discard the slot and fall through to a
+                                // fresh claim below.
+                                let mut m = self.entries.lock().unwrap();
+                                // Only remove if it is still the same dead entry.
+                                if matches!(m.get(workspace_id), Some(SpawnEntry::Ready { .. })) {
+                                    m.remove(workspace_id);
+                                }
+                                map = m;
+                                continue;
+                            }
+                            Err(e) => {
+                                // Box unreachable for the probe: fail rather than
+                                // return a possibly-dead handle (fail-closed).
+                                return Err(e.context(
+                                    "liveness probe of cached workspace container failed",
+                                ));
+                            }
+                        }
+                    }
+                    Some(SpawnEntry::Ready { .. }) => {
+                        // Stale: evict and claim fresh.
+                        map.remove(workspace_id);
+                        map.insert(workspace_id.to_string(), SpawnEntry::Pending);
+                        break;
+                    }
+                    Some(SpawnEntry::Pending) => {
+                        // Another thread is materializing this id — wait for it.
+                        map = self.ready.wait(map).unwrap();
+                        continue;
+                    }
+                    Some(SpawnEntry::Failed) => {
+                        // A prior attempt failed; take over the claim and retry.
+                        map.insert(workspace_id.to_string(), SpawnEntry::Pending);
+                        break;
+                    }
+                    None => {
+                        map.insert(workspace_id.to_string(), SpawnEntry::Pending);
+                        break;
+                    }
+                }
+            }
         }
 
-        // No live entry — do the real spawn (still under the lock so concurrent
-        // callers wait for the single materialization to complete).
-        let handle = spawn_workspace(engine, lease, fence, image)?;
-        map.insert(
-            workspace_id.to_string(),
-            (
-                SpawnEntry {
-                    handle: handle.clone(),
-                },
-                now,
-            ),
-        );
-        Ok(handle)
+        // ── Phase 2: materialize OUTSIDE the lock (no global serialization) ───
+        let result = spawn_workspace(engine, lease, fence, image);
+
+        // ── Phase 3: publish the outcome and wake any waiters ─────────────────
+        let mut map = self.entries.lock().unwrap();
+        match result {
+            Ok(handle) => {
+                map.insert(
+                    workspace_id.to_string(),
+                    SpawnEntry::Ready {
+                        handle: Box::new(handle.clone()),
+                        at: Instant::now(),
+                    },
+                );
+                self.ready.notify_all();
+                Ok(handle)
+            }
+            Err(e) => {
+                map.insert(workspace_id.to_string(), SpawnEntry::Failed);
+                self.ready.notify_all();
+                Err(anyhow!("workspace spawn for {workspace_id:?} failed: {e}"))
+            }
+        }
     }
 
     /// Evict the entry for `workspace_id` (e.g. after teardown).
     pub fn evict(&self, workspace_id: &str) {
         self.entries.lock().unwrap().remove(workspace_id);
+        self.ready.notify_all();
     }
 }
 
@@ -385,24 +459,38 @@ fn path_covered_by(path: &str, ceiling: &[String]) -> bool {
     false
 }
 
-/// Restore a state payload into the container (no-op in v0; forward-compat).
+/// In-container destination for a restored state payload. A FIXED literal —
+/// never derived from untrusted input — so it cannot itself carry an injection.
+const STATE_RESTORE_PATH: &str = "/hugit/tmp/state_restore_marker";
+
+/// Restore a state payload into the container by **streaming the bytes over
+/// stdin**, never shell-constructing them.
 ///
-/// In v0 no state_payload is written, so this is never called. The seam is here
-/// so future implementations can hydrate the container from serialized state.
+/// The payload (arbitrary bytes, potentially attacker-influenced) is piped to
+/// `docker exec -i <name> sh -c 'cat > <fixed-path>'` via
+/// [`BoxExec::run_with_stdin`]. Only the FIXED destination path appears in the
+/// command string; the payload itself touches no shell, closing the
+/// shell-construction hole (brutal review R4 / item 6). The earlier
+/// base64-into-`sh -c` approach is gone.
 fn restore_state_payload<B: BoxExec>(
     boxx: &B,
     container: &RunningContainer,
     payload: &[u8],
 ) -> Result<()> {
-    // Write the payload as a marker file into the container's tmp root so the
-    // acceptance test can confirm state_restore was invoked (forward-compat).
-    let b64 = minimal_base64(payload);
-    let script = format!(
-        "printf %s {bq} | base64 -d > /hugit/tmp/state_restore_marker",
-        bq = shell_quote(&b64),
-    );
+    let redirect = format!("cat > {STATE_RESTORE_PATH}");
     let out = boxx
-        .run(&["docker", "exec", &container.name, "sh", "-c", &script])
+        .run_with_stdin(
+            &[
+                "docker",
+                "exec",
+                "-i",
+                &container.name,
+                "sh",
+                "-c",
+                &redirect,
+            ],
+            payload,
+        )
         .context("restoring state payload into workspace container")?;
     if !out.ok() {
         bail!(
@@ -522,38 +610,6 @@ where
     let handle = spawn_workspace(engine, lease, fence, image)?;
     let elapsed = t0.elapsed();
     Ok((handle, elapsed))
-}
-
-// ── helpers ───────────────────────────────────────────────────────────────────
-
-/// POSIX single-quote for safe interpolation into a remote `sh -c`.
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
-}
-
-/// Minimal base64 (standard alphabet, padded) — no dep.
-fn minimal_base64(bytes: &[u8]) -> String {
-    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0] as usize;
-        let b1 = chunk.get(1).copied().unwrap_or(0) as usize;
-        let b2 = chunk.get(2).copied().unwrap_or(0) as usize;
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        out.push(A[(n >> 18) & 63] as char);
-        out.push(A[(n >> 12) & 63] as char);
-        out.push(if chunk.len() > 1 {
-            A[(n >> 6) & 63] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            A[n & 63] as char
-        } else {
-            '='
-        });
-    }
-    out
 }
 
 // ── unit tests ────────────────────────────────────────────────────────────────

@@ -39,6 +39,7 @@ pub mod concurrency;
 pub mod expiry;
 pub mod isolation;
 pub mod lease;
+pub mod pin;
 pub mod recovery;
 pub mod shim;
 pub mod teardown;
@@ -46,4 +47,5 @@ pub mod ws;
 
 pub use isolation::{Engine, IsolationProbe, RunningContainer};
 pub use lease::{BoxExec, ContainerSpec, SshBox};
+pub use pin::{PinnedImageRef, require_pinned};
 pub use teardown::{ForensicReport, teardown};

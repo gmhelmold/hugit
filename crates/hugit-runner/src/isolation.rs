@@ -51,6 +51,15 @@ pub trait Engine {
 
     /// Run one job command inside the container, returning its exit code.
     fn exec(&self, c: &RunningContainer, argv: &[&str]) -> Result<Option<i32>>;
+
+    /// `true` iff the container `c` is still live on the box.
+    ///
+    /// Used by the dedup spawner to avoid handing back a cached handle for a
+    /// container that has since exited/been reaped (a dead-container corpse).
+    ///
+    /// # Errors
+    /// Fails only if the box is unreachable.
+    fn is_alive(&self, c: &RunningContainer) -> Result<bool>;
 }
 
 /// Docker-backed [`Engine`], driving the box via a [`BoxExec`].
@@ -72,6 +81,26 @@ impl<B: BoxExec> Engine for DockerEngine<B> {
         if !spec.no_network {
             bail!("ContainerSpec.no_network must be true for C2a isolation");
         }
+        // ── Supply-chain gate (WP-X4) — verify BEFORE docker run ──────────────
+        // The real spawn surface enforces the pin itself, so no caller can
+        // reach `docker run` with an unpinned or tampered image. The ordering is
+        // load-bearing: (1) re-parse the pin (no box), (2) integrity-verify the
+        // digest against the box (still no container), and ONLY then (3) run.
+        // A spec built directly (bypassing `from_lease`) is caught here too.
+        let pinned = crate::pin::PinnedImageRef::parse(&spec.image).with_context(|| {
+            format!(
+                "refusing to spawn {}: image {:?} is not content-pinned — fail CLOSED",
+                spec.name, spec.image
+            )
+        })?;
+        pinned.verify_on_box(&self.boxx).with_context(|| {
+            format!(
+                "refusing to spawn {}: image {:?} failed integrity verification \
+                 against the box — fail CLOSED (no container spawned)",
+                spec.name, spec.image
+            )
+        })?;
+
         let tmpfs = format!("{}:rw,size=64m", spec.tmp_root);
         let argv = vec![
             "docker",
@@ -167,5 +196,22 @@ impl<B: BoxExec> Engine for DockerEngine<B> {
             .run(&full)
             .with_context(|| format!("docker exec in {}", c.name))?;
         Ok(out.code)
+    }
+
+    fn is_alive(&self, c: &RunningContainer) -> Result<bool> {
+        // `docker ps` (running only) filtered to the exact name. A dead/reaped
+        // container does not appear, so the cached handle is not reused.
+        let out = self
+            .boxx
+            .run(&[
+                "docker",
+                "ps",
+                "--filter",
+                &format!("name={}", c.name),
+                "--format",
+                "{{.Names}}",
+            ])
+            .with_context(|| format!("liveness probe for {}", c.name))?;
+        Ok(out.stdout.lines().any(|l| l.trim() == c.name))
     }
 }
