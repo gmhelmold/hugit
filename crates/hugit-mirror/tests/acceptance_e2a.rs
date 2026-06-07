@@ -69,17 +69,43 @@ impl Drop for TmpDir {
     }
 }
 
-/// Run `git` in `cwd`, asserting success; return trimmed stdout.
-fn git(cwd: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
+/// Configure a `git` invocation deterministically and hermetically.
+///
+/// CI runners have NO global/system git config and may run a different git
+/// version than a dev box, so the test must never depend on ambient config.
+/// We pin identity + dates, neutralise global/system config, and disable every
+/// background maintenance path (auto-gc, the commit-graph) that could otherwise
+/// race the object DB into a transient state during a large commit build and
+/// surface as `fatal: Failed to traverse parents of commit <oid>`.
+fn git_command(cwd: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(cwd)
+        // Hermetic: ignore any ambient global/system git config.
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        // Deterministic identity + timestamps (matches a fixed-date history).
         .env("GIT_AUTHOR_NAME", "hugit")
         .env("GIT_AUTHOR_EMAIL", "bot@hugit.dev")
         .env("GIT_COMMITTER_NAME", "hugit")
         .env("GIT_COMMITTER_EMAIL", "bot@hugit.dev")
         .env("GIT_AUTHOR_DATE", "1717000000 +0000")
         .env("GIT_COMMITTER_DATE", "1717000000 +0000")
+        // No background maintenance that could race object writes.
+        .args([
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "maintenance.auto=false",
+            "-c",
+            "core.commitGraph=false",
+        ]);
+    cmd
+}
+
+/// Run `git` in `cwd`, asserting success; return trimmed stdout.
+fn git(cwd: &Path, args: &[&str]) -> String {
+    let out = git_command(cwd)
+        .args(args)
         .output()
         .expect("git must be on PATH");
     assert!(
@@ -92,15 +118,69 @@ fn git(cwd: &Path, args: &[&str]) -> String {
 }
 
 /// Build a real source repo with `n` commits on `main`; return its dir.
+///
+/// The history is built through a single `git fast-import` stream rather than
+/// `n` separate `git add`/`git commit` process pairs. This is faithful — every
+/// commit, tree, and blob is a real git object written to the object DB with an
+/// explicit parent chain — but it is built in ONE atomic process. That removes
+/// both the ~2000-process overhead AND the per-commit `git gc --auto`/
+/// maintenance background races that, on a fresh CI runner with no global git
+/// config, could leave a parent object briefly unwritten and surface as
+/// `fatal: Failed to traverse parents of commit <oid>`. After the import we run
+/// `git fsck` to prove the DB is complete and the parent chain is intact before
+/// any traversal (`git rev-list`) runs.
 fn build_source_repo(tmp: &TmpDir, n: usize) -> PathBuf {
+    use std::io::Write as _;
+
     let repo = tmp.path().join("source");
     std::fs::create_dir_all(&repo).unwrap();
     git(&repo, &["init", "-q", "-b", "main"]);
+
+    // Construct a deterministic fast-import stream: commit `i` modifies `f.txt`
+    // to "line {i}\n" and parents off commit `i-1` (via the `:i` mark).
+    let mut stream: Vec<u8> = Vec::new();
     for i in 0..n {
-        std::fs::write(repo.join("f.txt"), format!("line {i}\n")).unwrap();
-        git(&repo, &["add", "f.txt"]);
-        git(&repo, &["commit", "-q", "-m", &format!("commit {i}")]);
+        let msg = format!("commit {i}\n");
+        let blob = format!("line {i}\n");
+        // mark indices are 1-based so commit `i` is mark `:(i+1)`.
+        writeln!(stream, "commit refs/heads/main").unwrap();
+        writeln!(stream, "mark :{}", i + 1).unwrap();
+        writeln!(stream, "author hugit <bot@hugit.dev> 1717000000 +0000").unwrap();
+        writeln!(stream, "committer hugit <bot@hugit.dev> 1717000000 +0000").unwrap();
+        write!(stream, "data {}\n{}", msg.len(), msg).unwrap();
+        if i > 0 {
+            writeln!(stream, "from :{}", i).unwrap();
+        }
+        writeln!(stream, "M 100644 inline f.txt").unwrap();
+        write!(stream, "data {}\n{}", blob.len(), blob).unwrap();
+        stream.push(b'\n');
     }
+    writeln!(stream, "done").unwrap();
+
+    let mut child = git_command(&repo)
+        .args(["fast-import", "--quiet", "--done"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("git fast-import must spawn");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&stream)
+        .expect("write fast-import stream");
+    let out = child.wait_with_output().expect("git fast-import must run");
+    assert!(
+        out.status.success(),
+        "git fast-import failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Integrity gate: prove the object DB is complete and every parent is
+    // present BEFORE any traversal. Fails loudly here (not later, opaquely).
+    git(&repo, &["fsck", "--no-progress", "--strict"]);
+
     repo
 }
 
