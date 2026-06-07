@@ -17,6 +17,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
 use hugit_contracts::{AckReceipt, EventRecord, SignedEventEnvelope};
+use hugit_refstore::{canonical_json, compute_this_hash};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -49,9 +50,12 @@ pub fn build_webhook_rejected_record(
     // as specified in EventRecord doc comment (FROZEN formula).
     let kind = "webhook.rejected";
     let principal_chain: Vec<String> = vec!["github".to_string()];
-    let payload = format!(r#"{{"delivery_id":"{delivery_id}"}}"#);
+    let raw_payload = format!(r#"{{"delivery_id":"{delivery_id}"}}"#);
+    // The chain hashes canonical-JSON bytes (sorted keys, no insignificant
+    // whitespace); canonicalise before chaining so producer ≡ verifier.
+    let payload = canonical_json(&raw_payload).unwrap_or(raw_payload);
 
-    let this_hash = compute_event_hash(prev_hash, kind, &principal_chain, &payload, seq);
+    let this_hash = compute_this_hash(prev_hash, kind, &principal_chain, &payload, seq);
 
     EventRecord {
         seq,
@@ -75,9 +79,10 @@ pub fn build_installation_revoked_record(
 ) -> EventRecord {
     let kind = "installation.revoked";
     let principal_chain: Vec<String> = vec!["github".to_string()];
-    let payload = format!(r#"{{"installation_id":"{installation_id}"}}"#);
+    let raw_payload = format!(r#"{{"installation_id":"{installation_id}"}}"#);
+    let payload = canonical_json(&raw_payload).unwrap_or(raw_payload);
 
-    let this_hash = compute_event_hash(prev_hash, kind, &principal_chain, &payload, seq);
+    let this_hash = compute_this_hash(prev_hash, kind, &principal_chain, &payload, seq);
 
     EventRecord {
         seq,
@@ -88,41 +93,6 @@ pub fn build_installation_revoked_record(
         payload,
         recorded_at,
     }
-}
-
-/// Compute the chained SHA-256 hash for an `EventRecord`.
-///
-/// Formula (FROZEN): `H(prev_hash ‖ kind ‖ principal_chain ‖ payload ‖ seq)`
-/// where ‖ = concatenation of 4-byte big-endian length-prefixed UTF-8 fields
-/// and seq is 8-byte big-endian u64.
-pub fn compute_event_hash(
-    prev_hash: &str,
-    kind: &str,
-    principal_chain: &[String],
-    payload: &str,
-    seq: u64,
-) -> String {
-    use sha2::Digest;
-    let mut hasher = sha2::Sha256::new();
-
-    // Each string field: 4-byte BE length + UTF-8 bytes.
-    let lp = |s: &str| -> Vec<u8> {
-        let bytes = s.as_bytes();
-        let mut v = (bytes.len() as u32).to_be_bytes().to_vec();
-        v.extend_from_slice(bytes);
-        v
-    };
-
-    hasher.update(lp(prev_hash));
-    hasher.update(lp(kind));
-    // principal_chain: each element prefixed, then the list joined without separator
-    for p in principal_chain {
-        hasher.update(lp(p));
-    }
-    hasher.update(lp(payload));
-    hasher.update(seq.to_be_bytes());
-
-    hex::encode(hasher.finalize())
 }
 
 /// Verify a `X-Hub-Signature-256: sha256=<hex>` header value against the raw

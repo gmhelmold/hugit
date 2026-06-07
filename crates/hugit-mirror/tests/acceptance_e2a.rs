@@ -367,6 +367,27 @@ fn item_1_public_import_byte_identical() {
         );
     }
 
+    // R1 ORACLE: every imported event's this_hash MUST be byte-identical to the
+    // canonical single-source formula (hugit_refstore::compute_this_hash) over
+    // its (non-empty) principal_chain, AND the whole chain MUST verify against
+    // the canonical verify_chain. Anchoring on the canonical fn (not just
+    // non-empty / contiguous) is what makes any future divergence visible.
+    for (i, ev) in events.iter().enumerate() {
+        let expected = hugit_refstore::compute_this_hash(
+            &ev.prev_hash,
+            &ev.kind,
+            &ev.principal_chain,
+            &ev.payload,
+            ev.seq,
+        );
+        assert_eq!(
+            ev.this_hash, expected,
+            "commit {i}: this_hash must equal the canonical compute_this_hash"
+        );
+    }
+    hugit_refstore::verify_chain(&events)
+        .expect("imported chain must verify against the canonical verify_chain");
+
     // A corrupted oid (one byte flipped) must fail byte-identity hard — the
     // importer never accepts a non-matching object.
     let mut bad = oids[0].clone();
