@@ -7,10 +7,18 @@
 //!   redteam_malformed_pack_rejected
 //!   redteam_oversized_pack_rejected
 //!   redteam_ref_update_tamper_rejected
+//!   redteam_unreachable_target_rejected   (target present in odb but not
+//!     reachable from the pushed pack — present ≠ delivered)
+//!   redteam_decompression_bomb_rejected   (tiny compressed pack inflates huge)
 //!
 //! Plus the structural no-fake-intent proof (the D3⑤ leg that lives in D3a's
 //! source-of-truth bar): a raw push records a `ref.update` external-change and
 //! the intent altitude stays empty — no synthetic intent is fabricated.
+//!
+//! Every ingest is admitted through the **flag gate** (the write path is OFF
+//! unless `self-hosted-alpha`) and applies the ref move as **compare-and-append**
+//! (the pusher declares the tip it expects; a stale expectation is rejected with
+//! no lost update).
 //!
 //! Driven by `tests/acceptance/wp-d3a/run.sh`. The push side is built with the
 //! system git binary (the libgit2-class pack engine the write path wires to);
@@ -20,6 +28,7 @@
 #[path = "push_core/mod.rs"]
 mod push_core;
 
+use hugit_proto::write::flag::FlagGate;
 use hugit_proto::write::receive::{
     DEFAULT_MAX_PACK_BYTES, ReceiveError, ReceiveRequest, RecvLimits, RefUpdate,
     materialize_bare_repo, receive_pack,
@@ -28,6 +37,12 @@ use hugit_proto::write::store::{InMemoryCas, REF_UPDATE_KIND};
 use hugit_refstore::intent::{INTENT_LANDED_KIND, intents_from_log};
 use hugit_refstore::log::EventLog;
 use push_core::Fixture;
+
+/// The gate every push in D3a runs under: the self-hosted-alpha flag IS set, so
+/// the write path is reachable. (The flag-off refusal is its own oracle below.)
+fn enabled_gate() -> FlagGate {
+    FlagGate::self_hosted_alpha()
+}
 
 /// ① push→clone round-trip identical.
 ///
@@ -49,14 +64,22 @@ fn item_1_push_clone_roundtrip_identical() {
         pack: fx.pack.clone(),
         update: RefUpdate {
             ref_name: fx.ref_name.clone(),
+            // create: the ref is currently absent (compare-and-append create).
+            expected: None,
             new_oid: fx.head_oid.clone(),
         },
         principal_chain: vec!["user:gustavo".into()],
         recorded_at: 1_717_000_000_000,
     };
 
-    let receipt =
-        receive_pack(&req, &mut cas, &mut log, RecvLimits::default()).expect("ingest succeeds");
+    let receipt = receive_pack(
+        &enabled_gate(),
+        &req,
+        &mut cas,
+        &mut log,
+        RecvLimits::default(),
+    )
+    .expect("ingest succeeds");
 
     // every pushed object landed in CAS.
     assert!(!cas.is_empty(), "CAS received objects");
@@ -95,6 +118,53 @@ fn item_1_push_clone_roundtrip_identical() {
     );
 }
 
+/// Red-team / DEFECT-1 oracle: with the write-path flag OFF, the REAL ingest
+/// (`receive_pack`) REFUSES the push — no object reaches CAS, no event reaches
+/// the log. (Before the fix `receive_pack` never consulted the flag at all, so a
+/// flag-off push was wrongly accepted; this turns that RED.)
+#[test]
+fn flag_off_real_ingest_refuses_push() {
+    let fx = Fixture::build_repo(&[("f", "x\n")]);
+    let mut cas = InMemoryCas::new();
+    let mut log = EventLog::new();
+    let req = ReceiveRequest {
+        pack: fx.pack.clone(),
+        update: RefUpdate {
+            ref_name: fx.ref_name.clone(),
+            expected: None,
+            new_oid: fx.head_oid.clone(),
+        },
+        principal_chain: vec!["user:gustavo".into()],
+        recorded_at: 1,
+    };
+
+    // Flag OFF (the production default): the real ingest must refuse fail-closed.
+    let off = FlagGate::default();
+    let err = receive_pack(&off, &req, &mut cas, &mut log, RecvLimits::default())
+        .expect_err("flag-off push must be refused by the real ingest");
+    assert!(
+        matches!(err, ReceiveError::WritePathDisabled),
+        "expected WritePathDisabled, got {err:?}"
+    );
+    // Fail-closed: the gate is step 0 — nothing was unpacked, stored, or logged.
+    assert!(cas.is_empty(), "flag off ⇒ NO object committed to CAS");
+    assert_eq!(log.len(), 0, "flag off ⇒ NO event appended to the log");
+
+    // Sanity: the SAME push succeeds once the flag is on (the gate is the only
+    // difference — proves the refusal is the flag, not a broken pack).
+    let receipt = receive_pack(
+        &enabled_gate(),
+        &req,
+        &mut cas,
+        &mut log,
+        RecvLimits::default(),
+    )
+    .expect("flag-on push succeeds");
+    assert!(!cas.is_empty(), "flag on ⇒ objects committed");
+    assert_eq!(log.len(), 1, "flag on ⇒ one event appended");
+    assert!(receipt.stored_oids.contains(&fx.head_oid));
+}
+
 /// Red-team: a malformed (truncated / corrupt) pack is rejected; nothing is
 /// committed to CAS or the log.
 #[test]
@@ -110,14 +180,21 @@ fn redteam_malformed_pack_rejected() {
         pack: bad,
         update: RefUpdate {
             ref_name: fx.ref_name.clone(),
+            expected: None,
             new_oid: fx.head_oid.clone(),
         },
         principal_chain: vec!["user:gustavo".into()],
         recorded_at: 1,
     };
 
-    let err = receive_pack(&req, &mut cas, &mut log, RecvLimits::default())
-        .expect_err("malformed pack must be rejected");
+    let err = receive_pack(
+        &enabled_gate(),
+        &req,
+        &mut cas,
+        &mut log,
+        RecvLimits::default(),
+    )
+    .expect_err("malformed pack must be rejected");
     assert!(
         matches!(err, ReceiveError::MalformedPack { .. }),
         "expected MalformedPack, got {err:?}"
@@ -137,17 +214,20 @@ fn redteam_oversized_pack_rejected() {
         pack: fx.pack.clone(),
         update: RefUpdate {
             ref_name: fx.ref_name.clone(),
+            expected: None,
             new_oid: fx.head_oid.clone(),
         },
         principal_chain: vec!["user:gustavo".into()],
         recorded_at: 1,
     };
-    // set the ceiling below the real pack size.
+    // set the COMPRESSED ceiling below the real pack size; keep the inflated/count
+    // ceilings at their defaults so the rejection is unambiguously about size.
     let tiny = RecvLimits {
         max_pack_bytes: fx.pack.len().saturating_sub(1),
+        ..RecvLimits::default()
     };
-    let err =
-        receive_pack(&req, &mut cas, &mut log, tiny).expect_err("oversized pack must be rejected");
+    let err = receive_pack(&enabled_gate(), &req, &mut cas, &mut log, tiny)
+        .expect_err("oversized pack must be rejected");
     assert!(
         matches!(err, ReceiveError::OversizedPack { .. }),
         "expected OversizedPack, got {err:?}"
@@ -172,13 +252,20 @@ fn redteam_ref_update_tamper_rejected() {
         pack: fx.pack.clone(),
         update: RefUpdate {
             ref_name: fx.ref_name.clone(),
+            expected: None,
             new_oid: bogus.clone(),
         },
         principal_chain: vec!["user:gustavo".into()],
         recorded_at: 1,
     };
-    let err = receive_pack(&req, &mut cas, &mut log, RecvLimits::default())
-        .expect_err("tampered ref update must be rejected");
+    let err = receive_pack(
+        &enabled_gate(),
+        &req,
+        &mut cas,
+        &mut log,
+        RecvLimits::default(),
+    )
+    .expect_err("tampered ref update must be rejected");
     assert!(
         matches!(err, ReceiveError::RefUpdateTampered { .. }),
         "expected RefUpdateTampered, got {err:?}"
@@ -189,4 +276,91 @@ fn redteam_ref_update_tamper_rejected() {
         "no objects committed on tampered ref update"
     );
     assert_eq!(log.len(), 0, "no event appended on tampered ref update");
+}
+
+/// Red-team / DEFECT-4 oracle: a pack whose declared ref target IS present in the
+/// scratch odb but is NOT reachable from the pushed objects (its closure is
+/// incomplete — the blob is missing) must be rejected. A "present anywhere in the
+/// odb" check would wrongly accept it; reachability validation rejects it.
+#[test]
+fn redteam_unreachable_target_rejected() {
+    let fx = Fixture::build_incomplete_pack();
+    let mut cas = InMemoryCas::new();
+    let mut log = EventLog::new();
+    let req = ReceiveRequest {
+        pack: fx.pack.clone(),
+        update: RefUpdate {
+            ref_name: fx.ref_name.clone(),
+            expected: None,
+            // the head commit IS in the pack (present), but its tree's blob is NOT
+            // → the target is present-but-not-reachable.
+            new_oid: fx.head_oid.clone(),
+        },
+        principal_chain: vec!["user:gustavo".into()],
+        recorded_at: 1,
+    };
+    let err = receive_pack(
+        &enabled_gate(),
+        &req,
+        &mut cas,
+        &mut log,
+        RecvLimits::default(),
+    )
+    .expect_err("unreachable (present-but-incomplete) target must be rejected");
+    assert!(
+        matches!(err, ReceiveError::UnreachableTarget { .. }),
+        "expected UnreachableTarget, got {err:?}"
+    );
+    // fail-closed: rejected before any write.
+    assert!(cas.is_empty(), "no objects committed on unreachable target");
+    assert_eq!(log.len(), 0, "no event appended on unreachable target");
+}
+
+/// Red-team / DEFECT-5 oracle: a decompression bomb — a pack that is small on the
+/// wire (under the compressed ceiling) yet inflates far beyond the inflated
+/// ceiling — is rejected fail-closed. An uncapped unpack would inflate it to disk
+/// and accept; the inflated cap rejects it before any CAS write.
+#[test]
+fn redteam_decompression_bomb_rejected() {
+    // 8 MiB of zeros: compresses to a few KiB, inflates to 8 MiB.
+    let inflated = 8 * 1024 * 1024usize;
+    let fx = Fixture::build_bomb_pack(inflated);
+    // The compressed pack is tiny — it passes the (default) compressed ceiling.
+    assert!(
+        fx.pack.len() < 1024 * 1024,
+        "the bomb is small on the wire ({} bytes)",
+        fx.pack.len()
+    );
+
+    let mut cas = InMemoryCas::new();
+    let mut log = EventLog::new();
+    let req = ReceiveRequest {
+        pack: fx.pack.clone(),
+        update: RefUpdate {
+            ref_name: fx.ref_name.clone(),
+            expected: None,
+            new_oid: fx.head_oid.clone(),
+        },
+        principal_chain: vec!["user:gustavo".into()],
+        recorded_at: 1,
+    };
+    // Compressed ceiling is generous (the bomb fits); the INFLATED ceiling (1 MiB)
+    // is what catches the 8 MiB expansion.
+    let limits = RecvLimits {
+        max_pack_bytes: DEFAULT_MAX_PACK_BYTES,
+        max_inflated_bytes: 1024 * 1024,
+        ..RecvLimits::default()
+    };
+    let err = receive_pack(&enabled_gate(), &req, &mut cas, &mut log, limits)
+        .expect_err("decompression bomb must be rejected");
+    assert!(
+        matches!(err, ReceiveError::DecompressionBomb { .. }),
+        "expected DecompressionBomb, got {err:?}"
+    );
+    // fail-closed: the bomb committed nothing.
+    assert!(
+        cas.is_empty(),
+        "no objects committed on a decompression bomb"
+    );
+    assert_eq!(log.len(), 0, "no event appended on a decompression bomb");
 }

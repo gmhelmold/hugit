@@ -8,7 +8,11 @@
 //! every assertion rides real git oids and the real D2a serve path — never a
 //! mock of pack assembly.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use gix_hash::ObjectId;
 use hugit_proto::read::pack::{CasObjectSource, GitObject, ObjectKind};
@@ -113,4 +117,137 @@ pub fn build_chain(n: usize) -> (CasObjectSource, BTreeMap<String, String>, Vec<
         refs.insert("refs/heads/main".to_string(), tip.to_string());
     }
     (cas, refs, tips)
+}
+
+// ─── DEFECT-8: REAL client round-trip (clone via real git, diff vs source) ────
+//
+// The client-matrix conformance must not compare the serve to itself. These
+// helpers feed the ACTUAL assembled pack to a real client (`git`), clone it back,
+// and return the object closure the client reconstructed — so the oracle can diff
+// the cloned set against the served set on a genuine wire round-trip.
+
+/// Whether a local binary is on PATH.
+pub fn have_binary(name: &str) -> bool {
+    Command::new(name)
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Reconstruct, with REAL git, the object closure a client gets from `pack_bytes`
+/// (the actual assembled serve pack) when the ref `ref_name` points at `tip`:
+/// unpack the pack into a bare repo, set the ref, then `git clone` it and read the
+/// cloned repo's full object set. Returns the cloned object oids — what a real
+/// client actually reconstructed off the wire, for diffing against the served set.
+///
+/// Panics (FAIL-not-skip) if `git` is missing — `git` is a contracted client.
+pub fn clone_object_set_via_git(
+    pack_bytes: &[u8],
+    ref_name: &str,
+    tip: &ObjectId,
+) -> BTreeSet<String> {
+    assert!(
+        have_binary("git"),
+        "git is a CONTRACTED client (item ③); refusing to skip — install git"
+    );
+    let server = ScratchDir::new("hugit-d2b-srv");
+    git(server.path(), &["init", "-q", "--bare", "."]);
+    // Feed the ACTUAL served pack to real git (unpack-objects accepts a real V2
+    // pack on stdin), proving the assembled pack is genuine git on the wire.
+    git_stdin(server.path(), &["unpack-objects", "-q"], pack_bytes);
+    git(server.path(), &["update-ref", ref_name, &tip.to_string()]);
+    git(server.path(), &["symbolic-ref", "HEAD", ref_name]);
+
+    // Real client clone.
+    let dst = ScratchDir::new("hugit-d2b-clone");
+    let work = dst.path().join("work");
+    let status = Command::new("git")
+        .arg("clone")
+        .arg("-q")
+        .arg(server.path())
+        .arg(&work)
+        .status()
+        .expect("spawn git clone");
+    assert!(status.success(), "real git clone of the served pack failed");
+
+    // Read the cloned repo's full object set.
+    let listing = git(
+        &work,
+        &[
+            "cat-file",
+            "--batch-all-objects",
+            "--batch-check=%(objectname)",
+        ],
+    );
+    listing.split_whitespace().map(|s| s.to_string()).collect()
+}
+
+fn git(cwd: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("spawn git {args:?}: {e}"));
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn git_stdin(cwd: &Path, args: &[&str], stdin: &[u8]) {
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("spawn git {args:?}: {e}"));
+    child
+        .stdin
+        .take()
+        .expect("git stdin")
+        .write_all(stdin)
+        .expect("write git stdin");
+    let out = child.wait_with_output().expect("git wait");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A unique self-cleaning scratch directory.
+struct ScratchDir {
+    path: PathBuf,
+}
+
+impl ScratchDir {
+    fn new(prefix: &str) -> Self {
+        static CTR: AtomicU64 = AtomicU64::new(0);
+        let n = CTR.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path =
+            std::env::temp_dir().join(format!("{prefix}-{}-{n}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&path).expect("create scratch dir");
+        ScratchDir { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
 }

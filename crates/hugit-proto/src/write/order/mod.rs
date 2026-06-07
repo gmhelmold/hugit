@@ -131,11 +131,13 @@ impl SerializedWriter {
     /// event. A mismatch is a [`StaleRef`] rejection (no append, no lost update).
     /// The returned [`PushOutcome::Landed`] carries the total-order `seq`.
     ///
-    /// # Panics
-    /// If the mutex is poisoned (a prior push panicked mid-critical-section); the
-    /// single-writer invariant is unrecoverable past that point.
+    /// If the mutex was poisoned by a prior panic, the inner [`EventLog`] is
+    /// RECOVERED (`into_inner`) rather than re-panicking: the append-only log is
+    /// internally consistent (the append primitive never leaves it half-written),
+    /// so the single-writer point keeps serving instead of becoming a permanent
+    /// DoS for every later push.
     pub fn push(&self, update: RefUpdate) -> PushOutcome {
-        let mut log = self.log.lock().expect("single-writer mutex poisoned");
+        let mut log = self.log.lock().unwrap_or_else(|p| p.into_inner());
 
         // Derive the current ref view from the log (D1 derived view, never owned).
         let state: RefState = replay(&log).expect("own appended log replays cleanly");
@@ -171,22 +173,25 @@ impl SerializedWriter {
 
     /// The current number of records (also the next total-order seq).
     pub fn len(&self) -> usize {
-        self.log.lock().expect("mutex").len()
+        self.log.lock().unwrap_or_else(|p| p.into_inner()).len()
     }
 
     /// Whether the log is empty.
     pub fn is_empty(&self) -> bool {
-        self.log.lock().expect("mutex").is_empty()
+        self.log
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_empty()
     }
 
     /// Snapshot the underlying log (clone) for assertions / replay.
     pub fn snapshot(&self) -> EventLog {
-        self.log.lock().expect("mutex").clone()
+        self.log.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     /// The current derived ref view.
     pub fn ref_view(&self) -> RefState {
-        let log = self.log.lock().expect("mutex");
+        let log = self.log.lock().unwrap_or_else(|p| p.into_inner());
         replay(&log).expect("own log replays cleanly")
     }
 }

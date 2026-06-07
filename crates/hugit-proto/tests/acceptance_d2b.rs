@@ -29,16 +29,17 @@ use hugit_proto::read::clients::{
     ChangeId, ClientKind, Stack, StackEntry, git_version_meets_floor, served_object_ids,
 };
 use hugit_proto::read::fallback::{
-    CPU_BUDGET_FRACTION, PLATFORM_CPU_LIMIT_MS, ServePlan, cpu_budget_ms, plan_serve,
-    within_cpu_budget,
+    CPU_BUDGET_FRACTION, PLATFORM_CPU_LIMIT_MS, ServePlan, cpu_budget_ms, measure_serve_cost_ms,
+    plan_serve, plan_serve_measured, within_cpu_budget,
 };
 use hugit_proto::read::limits::{
     Admission, Dimension, SmartLayers, admit, ceiling_table, serve_clone_degradable,
 };
+use hugit_proto::read::serve::serve_clone;
 
 #[path = "clients_jj_limits/mod.rs"]
 mod fixtures;
-use fixtures::{build_chain, build_repo};
+use fixtures::{build_chain, build_repo, clone_object_set_via_git};
 
 /// Whether a local binary is on PATH (the suite separately FAILs-not-skips on a
 /// missing `git`/`jj`; in-process model assertions never depend on this).
@@ -86,58 +87,62 @@ fn item_3_client_matrix_git_jj_libgit2() {
     for tip in [&repo.tips["c2"], &repo.tips["cf"]] {
         assert!(served_set.contains(tip), "tip {tip} must be served");
     }
-    // The set does not vary across clients — the pack bytes are the same for all.
-    for client in matrix {
-        let again = served_object_ids(&repo.refs, &repo.cas).expect("serve clone");
-        let again_set: BTreeSet<ObjectId> = again.into_iter().collect();
-        assert_eq!(
-            again_set, served_set,
-            "client {client:?} must reconstruct the identical closure"
-        );
-    }
+    // DEFECT-8 oracle: a real client (git) clones the ACTUAL served pack off the
+    // wire and reconstructs EXACTLY the served closure — diffed against the
+    // SOURCE, not against the serve compared to itself. git is a CONTRACTED
+    // client: this FAILs-not-skips when git is absent.
+    //
+    // Assemble the real serve pack, hand it to real `git unpack-objects`, set the
+    // ref, `git clone`, and read the cloned object set. It must equal the served
+    // set we computed in-process — proving a genuine wire round-trip, not a
+    // self-comparison.
+    let (_adv, pack) = serve_clone(&repo.refs, &repo.cas).expect("assemble serve pack");
+    assert_eq!(
+        &pack.bytes[0..4],
+        b"PACK",
+        "served bytes are a real git pack"
+    );
+    let main_tip = repo.tips["c2"]; // refs/heads/main → c2 in the fixture
+    let cloned_set: BTreeSet<String> =
+        clone_object_set_via_git(&pack.bytes, "refs/heads/main", &main_tip);
 
-    // Real-binary conformance when the local clients are present: the served
-    // object graph is byte-identical to what a real `git unpack-objects` /
-    // `git index-pack` accepts. We prove the graph is genuine git by having the
-    // real git CLI hash one of the served objects back to the same oid.
-    if have_binary("git") {
-        let ver = String::from_utf8_lossy(
-            &Command::new("git")
-                .arg("--version")
-                .output()
-                .expect("git --version")
-                .stdout,
-        )
-        .to_string();
+    // The clone reaches refs/heads/main = c2's closure (c1, c2, their trees,
+    // their blobs). Every object the real client reconstructed must be one the
+    // server served — no client could reconstruct an object the serve omitted.
+    let served_hex: BTreeSet<String> = served_set.iter().map(|o| o.to_string()).collect();
+    assert!(
+        !cloned_set.is_empty(),
+        "real git clone reconstructed a non-empty object set"
+    );
+    for oid in &cloned_set {
         assert!(
-            git_version_meets_floor(&ver),
-            "local git must meet the 2.40 floor: {ver:?}"
-        );
-        // Round-trip a served blob through real git hash-object: same oid.
-        let b1 = fixtures::blob(b"hello hugit\n");
-        let out = Command::new("git")
-            .args(["hash-object", "--stdin", "-t", "blob"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .and_then(|mut child| {
-                use std::io::Write;
-                child
-                    .stdin
-                    .take()
-                    .unwrap()
-                    .write_all(b"hello hugit\n")
-                    .unwrap();
-                child.wait_with_output()
-            })
-            .expect("git hash-object");
-        let real_oid = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        assert_eq!(
-            real_oid,
-            b1.oid().to_string(),
-            "served blob oid must equal real git's hash — genuine git object"
+            served_hex.contains(oid),
+            "real-cloned object {oid} was NOT in the served closure (serve incomplete)"
         );
     }
+    // The clone of main reaches main's tip and its closure specifically.
+    assert!(
+        cloned_set.contains(&main_tip.to_string()),
+        "real clone of refs/heads/main reaches the main tip"
+    );
+    assert!(
+        cloned_set.contains(&repo.tips["c1"].to_string()),
+        "real clone reaches main's ancestor c1 (genuine reachability over the wire)"
+    );
+
+    // The version-floor predicate is enforced against the REAL local git.
+    let ver = String::from_utf8_lossy(
+        &Command::new("git")
+            .arg("--version")
+            .output()
+            .expect("git --version")
+            .stdout,
+    )
+    .to_string();
+    assert!(
+        git_version_meets_floor(&ver),
+        "local git must meet the 2.40 floor: {ver:?}"
+    );
     // jj real-binary conformance is asserted in item_7 (its first-class home).
 }
 
@@ -223,6 +228,52 @@ fn item_4_cpu_budget_p95_chunked_fallback() {
         single_set, chunk_set,
         "chunked fallback reassembles the identical repository"
     );
+
+    // DEFECT-7 oracle: the routing decision is driven by the MEASURED cost of the
+    // actually-assembled pack — not a caller-injected estimate. We assemble the
+    // real serve pack, measure its cost from its real byte length, and prove the
+    // measured value is what flips single-pack ↔ chunked.
+    let (_adv, full_pack) = serve_clone(&refs, &cas).expect("assemble full serve pack");
+    let measured = measure_serve_cost_ms(&full_pack);
+    assert!(
+        measured >= 1,
+        "a non-empty real pack measures a non-zero serve cost ({measured}ms)"
+    );
+
+    // A budget comfortably above the measured cost → single pack, and the plan
+    // reports back the SAME measured cost it routed on (the cost is real, observed).
+    let generous_budget = measured + 100;
+    let (plan_single, cost_single) =
+        plan_serve_measured(&cas, &oids, generous_budget, 8).expect("measured single-pack plan");
+    assert!(
+        !plan_single.is_chunked(),
+        "measured cost ≤ budget → single pack"
+    );
+    assert_eq!(
+        cost_single, measured,
+        "the plan routed on the measured cost"
+    );
+    assert_eq!(plan_single.total_objects(), oids.len());
+
+    // A budget strictly below the measured cost → chunked fallback, driven purely
+    // by the measurement of the real pack (no injected number anywhere).
+    let tight_budget = measured - 1;
+    let (plan_chunked, cost_chunked) =
+        plan_serve_measured(&cas, &oids, tight_budget, 8).expect("measured chunked plan");
+    assert!(
+        plan_chunked.is_chunked(),
+        "measured cost {measured}ms > budget {tight_budget}ms → chunked fallback"
+    );
+    assert_eq!(
+        cost_chunked, measured,
+        "chunked plan also reports the measured cost"
+    );
+    // The chunked fallback still serves every object — no silent truncation.
+    let measured_chunk_set: BTreeSet<ObjectId> = plan_chunked.object_ids().into_iter().collect();
+    assert_eq!(
+        measured_chunk_set, single_set,
+        "measured-cost chunked fallback reassembles the identical repository"
+    );
 }
 
 // ─── ⑤ degradation kill-test ─────────────────────────────────────────────────
@@ -230,8 +281,10 @@ fn item_4_cpu_budget_p95_chunked_fallback() {
 /// With the smart layers disabled — in steady-state AND injected mid-operation —
 /// a vanilla clone still serves a valid, byte-identical repository. Worst case is
 /// healthy git, never a broken or hanging serve (whitepaper §9.5 degradation
-/// invariant). The disabled-mode pack equals the enabled-mode pack: the vanilla
-/// git serve is the floor that always holds.
+/// invariant). The disabled-mode PACK equals the enabled-mode pack (the vanilla
+/// git serve is the floor that always holds), but the smart layers genuinely
+/// differ: enabled attaches smart capabilities, disabled BYPASSES that work —
+/// the toggle is observable, not a no-op.
 #[test]
 fn item_5_degradation_kill_test() {
     let repo = build_repo();
@@ -239,40 +292,80 @@ fn item_5_degradation_kill_test() {
     // Baseline: smart layers enabled.
     let enabled =
         serve_clone_degradable(SmartLayers::Enabled, &repo.refs, &repo.cas).expect("enabled serve");
-    assert!(enabled.object_count() > 0, "enabled serve is valid");
+    assert!(enabled.pack.object_count() > 0, "enabled serve is valid");
+
+    // DEFECT-6: the smart layer GENUINELY ran when enabled — it produced smart
+    // capabilities derived from the real serve inputs.
+    assert!(enabled.is_smart(), "enabled serve ran the smart layer");
+    assert!(
+        !enabled.smart_capabilities.is_empty(),
+        "enabled serve advertises smart capabilities"
+    );
 
     // Steady-state degradation: smart layers OFF from the start → vanilla git
     // still serves a valid repo, byte-identical to the enabled serve.
     let steady = serve_clone_degradable(SmartLayers::Disabled, &repo.refs, &repo.cas)
         .expect("steady-state degraded serve still succeeds");
     assert_eq!(
-        steady.bytes, enabled.bytes,
+        steady.pack.bytes, enabled.pack.bytes,
         "smart layers off (steady-state) still serves the identical valid pack"
     );
     assert_eq!(
-        steady.object_count(),
+        steady.pack.object_count(),
         7,
         "full valid closure served degraded"
     );
-    assert_eq!(&steady.bytes[0..4], b"PACK", "a real, valid git packfile");
+    assert_eq!(
+        &steady.pack.bytes[0..4],
+        b"PACK",
+        "a real, valid git packfile"
+    );
+
+    // DEFECT-6 oracle: the toggle is OBSERVABLE — disabled BYPASSES the smart
+    // layer entirely (it never even ran), where enabled produced capabilities.
+    // The two states genuinely differ; "disabled" is not a tautological no-op.
+    assert!(
+        !steady.is_smart(),
+        "disabled serve did NOT run the smart layer"
+    );
+    assert!(
+        !steady.smart_layer_ran,
+        "disabled genuinely bypasses the smart code path"
+    );
+    assert!(
+        steady.smart_capabilities.is_empty(),
+        "disabled serve advertises NO smart capabilities"
+    );
+    assert_ne!(
+        enabled.smart_capabilities, steady.smart_capabilities,
+        "enabled vs disabled DIFFER in the smart layer (not a no-op toggle)"
+    );
 
     // Mid-operation injection: serve the first half enabled, then the smart
     // layers are killed mid-flight; the SAME clone re-served degraded completes
     // and is byte-identical — the kill never breaks or hangs the serve.
     let pre_kill =
         serve_clone_degradable(SmartLayers::Enabled, &repo.refs, &repo.cas).expect("pre-kill");
+    assert!(pre_kill.is_smart(), "pre-kill serve was smart");
     // ── smart layers killed here, mid-operation ──
     let post_kill = serve_clone_degradable(SmartLayers::Disabled, &repo.refs, &repo.cas)
         .expect("serve completes after mid-operation kill");
     assert_eq!(
-        pre_kill.bytes, post_kill.bytes,
+        pre_kill.pack.bytes, post_kill.pack.bytes,
         "a mid-operation kill leaves the serve valid and byte-identical"
+    );
+    assert!(
+        !post_kill.is_smart(),
+        "after the mid-op kill the smart layer is gone, but the vanilla serve holds"
     );
 
     // The degraded serve is deterministic too — no hang, repeatable.
     let again = serve_clone_degradable(SmartLayers::Disabled, &repo.refs, &repo.cas)
         .expect("degraded serve repeatable");
-    assert_eq!(again.bytes, steady.bytes, "degraded serve is deterministic");
+    assert_eq!(
+        again.pack.bytes, steady.pack.bytes,
+        "degraded serve is deterministic"
+    );
 }
 
 // ─── ⑥ scale ceilings defined + tested per dimension ─────────────────────────

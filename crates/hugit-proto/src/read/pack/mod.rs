@@ -68,12 +68,23 @@ impl GitObject {
         }
     }
 
-    /// The git object id (SHA-1 over the loose-object pre-image) for this object.
+    /// The git object id (SHA-1 over the loose-object pre-image) for this object,
+    /// propagating any hashing failure as a [`PackError`].
     ///
     /// Delegates to the git library's canonical hash so the id matches git
-    /// byte-for-byte; never reimplemented here.
-    pub fn oid(&self) -> ObjectId {
+    /// byte-for-byte; never reimplemented here. The internal CAS paths (insert /
+    /// content-address check / pack assembly) use this fallible form so a hashing
+    /// failure surfaces as a real error rather than a panic.
+    pub fn try_oid(&self) -> Result<ObjectId, PackError> {
         gix_object::compute_hash(HashKind::Sha1, self.kind.to_gix(), &self.data)
+            .map_err(|e| PackError::Hash(e.to_string()))
+    }
+
+    /// The git object id, panicking only on the (in practice unreachable) hashing
+    /// failure. Convenience for callers that already hold a well-formed object;
+    /// prefer [`GitObject::try_oid`] on any path that can return a [`PackError`].
+    pub fn oid(&self) -> ObjectId {
+        self.try_oid()
             .expect("sha1 hashing of an in-memory object is infallible")
     }
 }
@@ -97,6 +108,9 @@ pub enum PackError {
         /// The id its bytes actually hash to.
         actual: ObjectId,
     },
+    /// Computing an object's content address (SHA-1) failed.
+    #[error("object hashing failed: {0}")]
+    Hash(String),
     /// The git library failed to encode an object into a pack entry.
     #[error("pack entry encoding failed: {0}")]
     Encode(String),
@@ -170,8 +184,9 @@ impl ObjectSource for CasObjectSource {
             Some(obj) => {
                 // Fail-closed content-addressing check: the bytes filed under
                 // `oid` must hash to `oid`. A mismatch means the store is
-                // corrupt; never serve mislabeled bytes into a clone.
-                let actual = obj.oid();
+                // corrupt; never serve mislabeled bytes into a clone. A hashing
+                // failure propagates as a PackError rather than panicking.
+                let actual = obj.try_oid()?;
                 if &actual != oid {
                     return Err(PackError::AddressMismatch {
                         stored: *oid,

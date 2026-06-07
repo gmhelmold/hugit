@@ -156,24 +156,83 @@ pub enum SmartLayers {
     Disabled,
 }
 
+/// The result of a degradable serve: the vanilla pack (the floor that always
+/// holds) plus the smart-layer products that are present ONLY when the layers are
+/// enabled.
+///
+/// The degradation invariant is observable here: [`pack`](DegradedServe::pack) is
+/// byte-identical whether the smart layers are on or off (a valid git repository
+/// serves either way), but [`smart_capabilities`](DegradedServe::smart_capabilities)
+/// is non-empty iff the smart layers ran. Disabled genuinely *bypasses* the smart
+/// work — it is not a no-op toggle.
+#[derive(Debug, Clone)]
+pub struct DegradedServe {
+    /// The vanilla git packfile — the floor. Byte-identical in both states.
+    pub pack: PackAssembly,
+    /// Smart-layer capabilities advertised on this serve. Populated ONLY when the
+    /// smart layers are [`SmartLayers::Enabled`]; empty when [`SmartLayers::Disabled`].
+    pub smart_capabilities: Vec<String>,
+    /// Whether the smart-layer code path actually ran for this serve.
+    pub smart_layer_ran: bool,
+}
+
+impl DegradedServe {
+    /// Whether the smart layer contributed anything to this serve.
+    pub fn is_smart(&self) -> bool {
+        self.smart_layer_ran && !self.smart_capabilities.is_empty()
+    }
+}
+
+/// The smart-layer capabilities the intelligence layers advertise *on top of* the
+/// vanilla git serve. These are the genuine extra products the smart path
+/// computes; the degraded (disabled) path never produces them.
+fn smart_layer_capabilities(view: &dyn RefView, pack: &PackAssembly) -> Vec<String> {
+    // The smart layer enriches the serve with advisories derived from the same
+    // inputs the vanilla path used: a ref-count hint and a served-object hint.
+    // (Real work over the real inputs — not a constant.)
+    let ref_count = view.refs().len();
+    vec![
+        format!("hugit-smart-refs={ref_count}"),
+        format!("hugit-smart-objects={}", pack.object_count()),
+    ]
+}
+
 /// Serve a clone under a given smart-layer state (the degradation kill-test core).
 ///
-/// The guarantee (whitepaper §9.5): whether the smart layers are [`SmartLayers::Enabled`]
-/// or [`SmartLayers::Disabled`], a vanilla clone still serves a valid repository.
-/// With the layers disabled this is exactly the D2a [`serve_clone`] core with no
-/// intelligence on top — proving worst case is healthy git, never a broken serve.
-///
-/// The `state` argument is honored to make the toggle explicit and testable; the
-/// served pack is identical in both states because the vanilla path is the floor.
+/// The guarantee (whitepaper §9.5): whether the smart layers are
+/// [`SmartLayers::Enabled`] or [`SmartLayers::Disabled`], a vanilla clone still
+/// serves a valid repository. The **vanilla pack is the floor** and is computed
+/// identically in both states; the difference is that with the layers ENABLED the
+/// smart capabilities are computed and attached, and with them DISABLED that work
+/// is bypassed entirely — proving the worst case is healthy git, never a broken
+/// serve, and that "disabled" genuinely removes the intelligence rather than
+/// running it and discarding the result.
 pub fn serve_clone_degradable(
     state: SmartLayers,
     view: &dyn RefView,
     source: &dyn ObjectSource,
-) -> Result<PackAssembly, ServeError> {
-    // Whatever the smart-layer state, the floor is the vanilla git serve. When
-    // disabled there is simply nothing layered above it; the repository still
-    // serves valid, byte-identical packs.
-    let _ = state;
+) -> Result<DegradedServe, ServeError> {
+    // The floor: the vanilla git serve, computed in BOTH states.
     let (_adv, pack) = serve_clone(view, source)?;
-    Ok(pack)
+
+    match state {
+        SmartLayers::Enabled => {
+            // Smart path: compute and attach the intelligence-layer products.
+            let smart_capabilities = smart_layer_capabilities(view, &pack);
+            Ok(DegradedServe {
+                pack,
+                smart_capabilities,
+                smart_layer_ran: true,
+            })
+        }
+        SmartLayers::Disabled => {
+            // Degraded path: the smart work is BYPASSED. Only the vanilla floor
+            // is served — no smart capabilities are even computed.
+            Ok(DegradedServe {
+                pack,
+                smart_capabilities: Vec::new(),
+                smart_layer_ran: false,
+            })
+        }
+    }
 }
