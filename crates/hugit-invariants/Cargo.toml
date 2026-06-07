@@ -90,6 +90,13 @@ path = "x5/tests/acceptance_x5.rs"
 name = "acceptance_x2"
 path = "x2/tests/acceptance_x2.rs"
 
+# WP-X6: resource non-interference — infra isolation config assertions +
+# structural resource-accounting model + (live-gated) latency/availability
+# measurement. Sources under x6/; the live lane is gated behind
+# HUGIT_RUNNER_HOST + HUGIT_CORELINK_PROBE_URL; structural proof always runs.
+[[test]]
+name = "acceptance_x6"
+path = "x6/tests/acceptance_x6.rs"
 # WP-X12: erasure × provenance × mirror — post-erasure chain stays verifiable
 # over a tamper-evident tombstone (no silent re-link), mirror obligation
 # discharged-or-disclosed in the export/exit proof (sources under x12/, oracle
