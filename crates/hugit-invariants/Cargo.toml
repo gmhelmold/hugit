@@ -73,6 +73,7 @@ hugit-ledger = { path = "../hugit-ledger" }
 # canonical refstore surface directly (verify_chain / compute_this_hash / EventLog).
 hugit-refstore = { path = "../hugit-refstore" }
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
 
 # The acceptance oracle lives under the x4/ subtree (not the default
 # `tests/` dir) so all WP-X4 sources stay inside the owned claim. An explicit
@@ -150,3 +151,11 @@ path = "x9/tests/acceptance_x9.rs"
 [[test]]
 name = "acceptance_x13"
 path = "x13/tests/acceptance_x13.rs"
+
+# WP-X14: deep-link referential integrity (lifecycle) — property test and
+# standing fixture proving every ledger/intent deep link resolves to its target
+# or to a tamper-evident tombstone across the full object lifecycle (compaction,
+# mirror round-trip, tombstoning) with ZERO dangling links, ever.
+[[test]]
+name = "acceptance_x14"
+path = "x14/tests/acceptance_x14.rs"
