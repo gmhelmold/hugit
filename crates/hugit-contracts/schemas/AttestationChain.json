@@ -24,7 +24,7 @@
       "type": "string"
     },
     "sig": {
-      "description": "Detached signature over the concatenated refs (format: base64-encoded\nEd25519 or ECDSA-P256 signature).",
+      "description": "Detached signature over the canonical pre-image below (base64-encoded\nEd25519 signature).\n\n# FROZEN signature pre-image (BYTE-EXACT, single-sourced)\n\nThe exact bytes signed/verified are built only by\n`hugit_refstore::attestation_sig_preimage` — import and call it, never\nre-transcribe.\n\n```text\npreimage = LP(tree) ‖ LP(def) ‖ LP(runner) ‖ LP(model) ‖ VEC(principal)\n```\n\nwhere `LP(s)` = `u32_be(byte_len(s)) ‖ utf8_bytes(s)` and\n`VEC(v)` = `u32_be(elem_count(v)) ‖ LP(v[0]) ‖ LP(v[1]) ‖ …` (the same\nvector framing as `EventRecord::principal_chain`). Fields appear in struct\norder: `tree`, `def`, `runner`, `model`, `principal`. The result is the\nraw ed25519 message — signed/verified directly, with no extra hashing.",
       "type": "string"
     },
     "tree": {

@@ -30,7 +30,23 @@ pub struct AttestationChain {
     /// Ordered chain of principals who triggered or approved this chain.
     pub principal: Vec<String>,
 
-    /// Detached signature over the concatenated refs (format: base64-encoded
-    /// Ed25519 or ECDSA-P256 signature).
+    /// Detached signature over the canonical pre-image below (base64-encoded
+    /// Ed25519 signature).
+    ///
+    /// # FROZEN signature pre-image (BYTE-EXACT, single-sourced)
+    ///
+    /// The exact bytes signed/verified are built only by
+    /// `hugit_refstore::attestation_sig_preimage` — import and call it, never
+    /// re-transcribe.
+    ///
+    /// ```text
+    /// preimage = LP(tree) ‖ LP(def) ‖ LP(runner) ‖ LP(model) ‖ VEC(principal)
+    /// ```
+    ///
+    /// where `LP(s)` = `u32_be(byte_len(s)) ‖ utf8_bytes(s)` and
+    /// `VEC(v)` = `u32_be(elem_count(v)) ‖ LP(v[0]) ‖ LP(v[1]) ‖ …` (the same
+    /// vector framing as `EventRecord::principal_chain`). Fields appear in struct
+    /// order: `tree`, `def`, `runner`, `model`, `principal`. The result is the
+    /// raw ed25519 message — signed/verified directly, with no extra hashing.
     pub sig: String,
 }

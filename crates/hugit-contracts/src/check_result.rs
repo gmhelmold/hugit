@@ -26,22 +26,35 @@ pub struct Artifact {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CheckResult {
-    /// Memoisation key.
+    /// Memoisation key (64-char lowercase hex).
     ///
-    /// FROZEN FORMULA (doc-only, implementation in B2a/D1a):
-    /// `memo_key = SHA-256(len(tree_root) ‖ tree_root ‖ len(def_digest) ‖
-    /// def_digest ‖ len(toolchain_digest) ‖ toolchain_digest)` where each
-    /// length prefix is a 4-byte big-endian u32 and the inputs are UTF-8
-    /// bytes of the respective hex strings.
+    /// # FROZEN FORMULA (BYTE-EXACT, single-sourced)
+    ///
+    /// Computed only by `hugit_refstore::compute_memo_key` — import and call it,
+    /// never re-transcribe.
+    ///
+    /// ```text
+    /// memo_key = lower_hex( SHA-256(
+    ///     LP(tree_hash) ‖ LP(def_digest) ‖ LP(toolchain_digest)
+    /// ) )
+    /// ```
+    ///
+    /// where `LP(s)` = `u32_be(byte_len(s)) ‖ utf8_bytes(s)` (4-byte big-endian
+    /// `u32` length prefix then the raw UTF-8 bytes). Each input is the
+    /// **lowercase-hex** UTF-8 string of the respective digest. The three axes
+    /// appear in struct field order: `tree_hash`, then `def_digest`, then
+    /// `toolchain_digest`. Output is 64-char lowercase hex.
     pub memo_key: String,
 
-    /// Merkle tree root hash of the workspace snapshot used (hex).
+    /// Merkle tree root hash of the workspace snapshot used (lowercase hex).
+    /// First memo axis (see `memo_key`).
     pub tree_hash: String,
 
-    /// SHA-256 hex digest of the CheckDef body.
+    /// SHA-256 hex digest of the CheckDef body (lowercase hex). Second memo axis.
     pub def_digest: String,
 
-    /// Content-addressed digest of the toolchain used.
+    /// Content-addressed digest of the toolchain used (lowercase hex). Third
+    /// memo axis.
     pub toolchain_digest: String,
 
     /// Process exit code (0 = success).

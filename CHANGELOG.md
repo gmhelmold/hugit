@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(contracts,refstore): R0 — single-source + byte-exact hash-chain/memo-key/attestation formula: canonical `compute_this_hash`/`compute_memo_key`/`canonical_json`/`attestation_sig_preimage` in hugit-refstore (the one source of truth), byte-exact frozen doc-specs in contracts (LP/VEC framing, recorded_at excluded, canonical-JSON payload, 64-ASCII-'0' genesis), and an independent cross-crate hash-pin so re-transcription drift (brutal-review R1) goes RED (WP-R0)
+
 - feat(runner): C9 — workspace lifecycle: attach/resume/spawn-dedup, local≡remote (WP-C9)
 
 - feat(fence): C5b — secrets broker v0 (credentials never enter the runner; principal-chain audit; fail-closed) + active escape red-team harness (traversal/symlink/out-of-fence/fork-bomb/disk-fill contained, box residue 0) (WP-C5b)

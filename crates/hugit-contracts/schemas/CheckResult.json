@@ -12,7 +12,7 @@
       }
     },
     "def_digest": {
-      "description": "SHA-256 hex digest of the CheckDef body.",
+      "description": "SHA-256 hex digest of the CheckDef body (lowercase hex). Second memo axis.",
       "type": "string"
     },
     "duration_ms": {
@@ -27,7 +27,7 @@
       "format": "int32"
     },
     "memo_key": {
-      "description": "Memoisation key.\n\nFROZEN FORMULA (doc-only, implementation in B2a/D1a):\n`memo_key = SHA-256(len(tree_root) ‖ tree_root ‖ len(def_digest) ‖\ndef_digest ‖ len(toolchain_digest) ‖ toolchain_digest)` where each\nlength prefix is a 4-byte big-endian u32 and the inputs are UTF-8\nbytes of the respective hex strings.",
+      "description": "Memoisation key (64-char lowercase hex).\n\n# FROZEN FORMULA (BYTE-EXACT, single-sourced)\n\nComputed only by `hugit_refstore::compute_memo_key` — import and call it,\nnever re-transcribe.\n\n```text\nmemo_key = lower_hex( SHA-256(\n    LP(tree_hash) ‖ LP(def_digest) ‖ LP(toolchain_digest)\n) )\n```\n\nwhere `LP(s)` = `u32_be(byte_len(s)) ‖ utf8_bytes(s)` (4-byte big-endian\n`u32` length prefix then the raw UTF-8 bytes). Each input is the\n**lowercase-hex** UTF-8 string of the respective digest. The three axes\nappear in struct field order: `tree_hash`, then `def_digest`, then\n`toolchain_digest`. Output is 64-char lowercase hex.",
       "type": "string"
     },
     "produced_at": {
@@ -49,11 +49,11 @@
       "type": "string"
     },
     "toolchain_digest": {
-      "description": "Content-addressed digest of the toolchain used.",
+      "description": "Content-addressed digest of the toolchain used (lowercase hex). Third\nmemo axis.",
       "type": "string"
     },
     "tree_hash": {
-      "description": "Merkle tree root hash of the workspace snapshot used (hex).",
+      "description": "Merkle tree root hash of the workspace snapshot used (lowercase hex).\nFirst memo axis (see `memo_key`).",
       "type": "string"
     }
   },

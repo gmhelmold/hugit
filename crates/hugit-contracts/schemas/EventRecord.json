@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "EventRecord",
-  "description": "One append-only hash-chained event record (decomposition §1, item 7).\n\nHash-chain formula (FROZEN, doc-only — implementation in B2a/D1a):\n`this_hash = H(prev_hash ‖ kind ‖ principal_chain ‖ payload ‖ seq)`\nwhere H = SHA-256, ‖ = concatenation of length-prefixed UTF-8 fields\n(4-byte big-endian u32 length prefix per field), seq is encoded as\n8-byte big-endian u64, and the genesis `prev_hash` = 64 hex zeros.\n\nFrozen by WP-00.",
+  "description": "One append-only hash-chained event record (decomposition §1, item 7).\n\n# Hash-chain formula (FROZEN — BYTE-EXACT, single-sourced)\n\nThe canonical, executable realisation of this formula is\n`hugit_refstore::compute_this_hash` — **do NOT re-transcribe it**; import and\ncall it. This doc is the spec; that function is the ground truth (if they ever\ndisagree, the function wins). Three crates previously re-transcribed and\ndiverged (brutal review 2026-06-07, R1); the only safe pattern is to call the\none canonical fn.\n\n```text\nthis_hash = lower_hex( SHA-256(\n    LP(prev_hash) ‖ LP(kind) ‖ VEC(principal_chain) ‖ LP(payload) ‖ u64_be(seq)\n) )\n```\n\nPrimitives (used identically across every hugit pre-image):\n- `LP(s)` = `u32_be(byte_len(s)) ‖ utf8_bytes(s)` — a 4-byte big-endian `u32`\n  byte-length prefix then the raw UTF-8 bytes (makes `‖` unambiguous).\n- `VEC(v)` = `u32_be(elem_count(v)) ‖ LP(v[0]) ‖ LP(v[1]) ‖ …` — a 4-byte\n  big-endian `u32` element count then each element `LP`-framed. The count is\n  load-bearing: without it `[\"a\",\"b\"]` and `[\"ab\"]` would collide.\n\nDetails:\n- `H` = SHA-256, emitted as a **64-char lowercase** hex digest.\n- Field order is `prev_hash, kind, principal_chain, payload, seq`.\n- `prev_hash`, `kind`, `payload` are `LP` UTF-8 fields; `principal_chain` is\n  `VEC(...)`; `seq` is `u64_be` (8 bytes, big-endian, NOT length-prefixed —\n  the one fixed-width exception).\n- `payload` MUST be **canonical JSON** before chaining (sorted object keys, no\n  insignificant whitespace — see `hugit_refstore::canonical_json`). The chain\n  hashes the payload bytes verbatim, so non-canonical JSON would produce a\n  producer/verifier mismatch.\n- `recorded_at` is **deliberately EXCLUDED** from the pre-image: it is an\n  unauthenticated observability annotation. Authenticated ordering comes from\n  `seq` plus the `prev_hash` linkage, never a wall clock.\n- genesis `prev_hash` = **64 ASCII `'0'` characters** (the literal hex-zero\n  string, `hugit_refstore::GENESIS_PREV_HASH`).\n\nFrozen by WP-00; byte-exact spec re-stated under owner authorisation (R0).",
   "type": "object",
   "properties": {
     "kind": {
@@ -9,7 +9,7 @@
       "type": "string"
     },
     "payload": {
-      "description": "Opaque JSON payload for this event (serialised as a string to keep\nthe envelope schema stable across payload evolution).",
+      "description": "Opaque JSON payload for this event (serialised as a string to keep\nthe envelope schema stable across payload evolution).\n\nMUST be **canonical JSON** (sorted object keys, no insignificant\nwhitespace — `hugit_refstore::canonical_json`) before it is chained into\n`this_hash`, since the hash covers these bytes verbatim.",
       "type": "string"
     },
     "prev_hash": {
@@ -24,7 +24,7 @@
       }
     },
     "recorded_at": {
-      "description": "Unix epoch milliseconds when this event was recorded.",
+      "description": "Unix epoch milliseconds when this event was recorded.\n\nUNAUTHENTICATED observability annotation: **excluded** from the\n`this_hash` pre-image. Authenticated ordering is `seq` + `prev_hash`.",
       "type": "integer",
       "format": "uint64",
       "minimum": 0
@@ -36,7 +36,7 @@
       "minimum": 0
     },
     "this_hash": {
-      "description": "SHA-256 hex digest of this event.\n\nFROZEN FORMULA: `H(prev_hash ‖ kind ‖ principal_chain ‖ payload ‖ seq)`.",
+      "description": "SHA-256 hex digest of this event (64-char lowercase hex).\n\nFROZEN, BYTE-EXACT: see the type-level doc; computed only by\n`hugit_refstore::compute_this_hash`. Pre-image is\n`LP(prev_hash) ‖ LP(kind) ‖ VEC(principal_chain) ‖ LP(payload) ‖\nu64_be(seq)` — `recorded_at` is excluded; `payload` is canonical JSON.",
       "type": "string"
     }
   },

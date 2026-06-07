@@ -30,7 +30,10 @@ pub mod compaction;
 pub mod recovery;
 pub mod undo;
 
-pub use log::{EventLog, GENESIS_PREV_HASH, compute_this_hash};
+pub use log::{
+    EventLog, GENESIS_PREV_HASH, attestation_sig_preimage, canonical_json, compute_memo_key,
+    compute_this_hash,
+};
 pub use replay::{RefState, replay};
 pub use tamper::{TamperError, verify_chain};
 
