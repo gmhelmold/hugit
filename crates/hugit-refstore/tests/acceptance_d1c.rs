@@ -17,9 +17,9 @@ use harness::run_concurrent;
 use hugit_refstore::concurrency::{Op, Serializer};
 use hugit_refstore::tamper::verify_chain;
 use std::collections::BTreeSet;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -214,13 +214,32 @@ fn admit_lock_split_never_exceeds_capacity_deterministic() {
     const SURPLUS: usize = 6; // CAPACITY + SURPLUS submitters contend at once.
     let total = CAPACITY + SURPLUS;
 
-    let serializer = Serializer::with_capacity(CAPACITY);
+    // ── Admission observer: the deterministic saturation seam. ───────────────
+    // Each submitter that is *admitted* (holds a permit, counted in-flight) fires
+    // this hook at the admit/lock split — permit held, writer lock not yet taken
+    // — before it blocks on the pinned writer below. The test awaits exactly
+    // CAPACITY of these signals, so saturation is proven by rendezvous, never by
+    // spin-sampling `in_flight()` against a timing deadline. The hook fires while
+    // the permit is genuinely held, so when CAPACITY signals have arrived the
+    // gate is provably saturated with CAPACITY simultaneous permits.
+    let (admitted_tx, admitted_rx) = mpsc::channel::<()>();
+    // The hook also blocks each admitted submitter until released, so all
+    // CAPACITY permits are held *simultaneously* (not admitted-then-drained one
+    // at a time) when we sample the peak — this is what pins saturation open
+    // independently of the writer-lock holder's scheduling.
+    let (hook_release_tx, hook_release_rx) = mpsc::channel::<()>();
+    let hook_release_rx = Arc::new(Mutex::new(hook_release_rx));
+    let serializer = Serializer::with_capacity_and_admission_hook(CAPACITY, move || {
+        admitted_tx.send(()).unwrap();
+        // Block here, permit held + in-flight counted, until the test releases.
+        hook_release_rx.lock().unwrap().recv().ok();
+    });
 
     // Pin the single writer lock open on a helper thread: it enters the critical
-    // section (via `with_records`) and blocks there until released. While it
-    // holds the lock, every admitted submitter is forced to wait *after* taking
-    // its admission permit but *before* the append — exactly the admit/lock split
-    // where a TOCTOU bound breach would show up as peak > capacity.
+    // section (via `with_records`) and blocks there until released. With the lock
+    // held, even after the admission hook releases, every admitted submitter
+    // stalls *after* taking its permit but *before* the append — the admit/lock
+    // split where a TOCTOU bound breach would show up as peak > capacity.
     let (lock_held_tx, lock_held_rx) = mpsc::channel::<()>();
     let (release_tx, release_rx) = mpsc::channel::<()>();
     let holder = {
@@ -237,8 +256,9 @@ fn admit_lock_split_never_exceeds_capacity_deterministic() {
     // Wait until the writer lock is provably held before launching submitters.
     lock_held_rx.recv().unwrap();
 
-    // Launch `total` submitters at once. CAPACITY will be admitted and block on
-    // the (held) writer lock; the SURPLUS will be refused at the gate.
+    // Launch `total` submitters at once. CAPACITY will be admitted (fire the hook
+    // and block on the held writer lock); the SURPLUS will be refused at the gate
+    // (never reach the hook) and return `Err(Backpressure)` immediately.
     let ready = Arc::new(AtomicUsize::new(0));
     let mut handles = Vec::with_capacity(total);
     for i in 0..total {
@@ -259,29 +279,23 @@ fn admit_lock_split_never_exceeds_capacity_deterministic() {
         }));
     }
 
-    // Spin until the admission gate is saturated: with the writer lock pinned,
-    // exactly CAPACITY submitters can hold a permit at once. The bound says this
-    // value must NEVER exceed CAPACITY at any instant.
-    // Deadline is generous (60s) because saturation is a LIVENESS guard, not the
-    // invariant under test: under heavy parallel `cargo test` CPU contention the
-    // CAPACITY submitters can be slow to all reach the gate. The real bound
-    // (in_flight <= CAPACITY) is asserted on every spin regardless; only the
-    // "never saturated in time" liveness check needs slack to avoid CI flakiness.
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    while serializer.in_flight() < CAPACITY {
-        assert!(
-            serializer.in_flight() <= CAPACITY,
-            "in-flight {} exceeded capacity {} while admission was pinned — TOCTOU bound breach",
-            serializer.in_flight(),
-            CAPACITY
-        );
-        assert!(
-            std::time::Instant::now() < deadline,
-            "admission never saturated to capacity within the deadline"
-        );
-        std::hint::spin_loop();
+    // Deterministic saturation: block until exactly CAPACITY admitted submitters
+    // have each fired the admit/lock-split hook. Each is holding a permit (counted
+    // in-flight) and is parked in the hook, so all CAPACITY permits are held
+    // simultaneously — saturation is proven by rendezvous, not by polling a clock.
+    for _ in 0..CAPACITY {
+        admitted_rx.recv().expect("an admitted submitter signalled");
     }
-    // Now saturated. The bound must hold and the peak must be exactly CAPACITY.
+
+    // Now provably saturated with CAPACITY simultaneous permits. The gate must
+    // hold the bound, and the peak must be exactly CAPACITY — never more (the
+    // SURPLUS was refused without a permit) and never less (all CAPACITY are
+    // parked in the hook right now).
+    assert_eq!(
+        serializer.in_flight(),
+        CAPACITY,
+        "exactly CAPACITY {CAPACITY} permits held at saturation — gate bound exact"
+    );
     assert!(
         serializer.in_flight() <= CAPACITY,
         "in-flight {} exceeded capacity {} at saturation",
@@ -294,7 +308,13 @@ fn admit_lock_split_never_exceeds_capacity_deterministic() {
         "peak in-flight must reach exactly capacity {CAPACITY} with the lock pinned, never more"
     );
 
-    // Release the writer; the CAPACITY admitted ops drain and complete.
+    // Release the admitted submitters from the hook; they proceed to block on the
+    // still-pinned writer lock. Then release the writer; the CAPACITY admitted
+    // ops drain and complete. (Sending more than CAPACITY is harmless — the
+    // surplus were refused and never entered the hook, so they ignore these.)
+    for _ in 0..CAPACITY {
+        hook_release_tx.send(()).unwrap();
+    }
     release_tx.send(()).unwrap();
     holder.join().expect("holder thread completes");
 

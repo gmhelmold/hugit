@@ -123,10 +123,26 @@ pub struct Serializer {
     inner: Arc<Inner>,
 }
 
+/// A callback invoked by [`Serializer::submit`] *after* a submission has taken
+/// its admission permit but *before* it attempts the writer lock — i.e. exactly
+/// at the admit/lock split, with the permit provably held and counted in-flight.
+///
+/// This is the seam a deterministic test uses to *observe* saturation without
+/// timing: each admitted submitter signals through this hook the instant it is
+/// counted in-flight, so a test can await exactly `capacity` such signals (and
+/// know the surplus was refused) instead of spin-sampling [`Serializer::in_flight`].
+/// Production never installs a hook, so [`Serializer::submit`] is unchanged on
+/// the real path.
+type AdmissionHook = dyn Fn() + Send + Sync;
+
 struct Inner {
     /// The one writer. Exactly one submitter holds this lock at a time; that is
     /// the serialization point.
     log: Mutex<EventLog>,
+    /// Optional observer fired at the admit/lock split (permit held, lock not yet
+    /// taken). `None` in production; a test installs one to make saturation
+    /// deterministically observable. See [`AdmissionHook`].
+    on_admitted: Option<Box<AdmissionHook>>,
     /// Admission gate. A non-blocking counting semaphore of `capacity` permits:
     /// every accepted submission holds exactly one permit from *before* it takes
     /// the writer lock until *after* that lock drops, so the number of admitted
@@ -164,6 +180,29 @@ impl Serializer {
         Self {
             inner: Arc::new(Inner {
                 log: Mutex::new(log),
+                on_admitted: None,
+                gate: Semaphore::new(capacity),
+                capacity,
+            }),
+        }
+    }
+
+    /// A serializer with a bounded admission gate and an observer fired at the
+    /// admit/lock split (permit held + counted in-flight, writer lock not yet
+    /// taken). Test-only: lets a test deterministically await exactly `capacity`
+    /// admitted-and-blocked submitters instead of spin-sampling [`in_flight`].
+    ///
+    /// [`in_flight`]: Serializer::in_flight
+    #[doc(hidden)]
+    pub fn with_capacity_and_admission_hook(
+        capacity: usize,
+        on_admitted: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        let capacity = capacity.max(1);
+        Self {
+            inner: Arc::new(Inner {
+                log: Mutex::new(EventLog::new()),
+                on_admitted: Some(Box::new(on_admitted)),
                 gate: Semaphore::new(capacity),
                 capacity,
             }),
@@ -240,6 +279,14 @@ impl Serializer {
                 });
             }
         };
+
+        // Admit/lock split observer: the permit is held and counted in-flight,
+        // the writer lock is not yet taken. A test installs a hook here to make
+        // saturation deterministically observable (await exactly `capacity`
+        // signals); production installs none, so this is a no-op on the real path.
+        if let Some(hook) = self.inner.on_admitted.as_deref() {
+            hook();
+        }
 
         // The permit is now held for the whole critical section and is released
         // (`Drop`) only *after* the writer lock below has dropped, because `log`
