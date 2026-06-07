@@ -651,6 +651,7 @@ dependencies = [
  "hugit-checks",
  "hugit-contracts",
  "hugit-queue",
+ "hugit-refstore",
  "serde",
  "serde_json",
  "sha2",
