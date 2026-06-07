@@ -71,17 +71,39 @@ impl Drop for TmpDir {
     }
 }
 
-/// Run `git` in `cwd`, asserting success; return trimmed stdout.
-fn git(cwd: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
+/// Configure a `git` invocation deterministically and hermetically.
+///
+/// CI runners have NO global/system git config and may run a different git
+/// version than a dev box, so the test must never depend on ambient config
+/// (e.g. a global `init.defaultBranch`, checkout/LFS filters, or auto-gc). We
+/// pin identity + dates, neutralise global/system config, and disable every
+/// background maintenance path (auto-gc, the commit-graph).
+fn git_command(cwd: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(cwd)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .env("GIT_AUTHOR_NAME", "hugit")
         .env("GIT_AUTHOR_EMAIL", "bot@hugit.dev")
         .env("GIT_COMMITTER_NAME", "hugit")
         .env("GIT_COMMITTER_EMAIL", "bot@hugit.dev")
         .env("GIT_AUTHOR_DATE", "1717000000 +0000")
         .env("GIT_COMMITTER_DATE", "1717000000 +0000")
+        .args([
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "maintenance.auto=false",
+            "-c",
+            "core.commitGraph=false",
+        ]);
+    cmd
+}
+
+/// Run `git` in `cwd`, asserting success; return trimmed stdout.
+fn git(cwd: &Path, args: &[&str]) -> String {
+    let out = git_command(cwd)
+        .args(args)
         .output()
         .expect("git must be on PATH");
     assert!(
@@ -95,9 +117,8 @@ fn git(cwd: &Path, args: &[&str]) -> String {
 
 /// `git` allowing failure; return (success, stdout, stderr).
 fn git_try(cwd: &Path, args: &[&str]) -> (bool, String, String) {
-    let out = Command::new("git")
+    let out = git_command(cwd)
         .args(args)
-        .current_dir(cwd)
         .output()
         .expect("git must be on PATH");
     (
@@ -108,6 +129,11 @@ fn git_try(cwd: &Path, args: &[&str]) -> (bool, String, String) {
 }
 
 /// Build a real source repo with `n` commits on `main`; return its dir.
+///
+/// All `git` calls go through `git_command`, so the build is hermetic (no
+/// ambient global/system config) and has no background auto-gc/maintenance that
+/// could race object writes. `git fsck` proves the object DB and parent chain
+/// are complete before any traversal/clone runs.
 fn build_source_repo(tmp: &TmpDir, n: usize) -> PathBuf {
     let repo = tmp.path().join("source");
     std::fs::create_dir_all(&repo).unwrap();
@@ -117,6 +143,7 @@ fn build_source_repo(tmp: &TmpDir, n: usize) -> PathBuf {
         git(&repo, &["add", "f.txt"]);
         git(&repo, &["commit", "-q", "-m", &format!("commit {i}")]);
     }
+    git(&repo, &["fsck", "--no-progress", "--strict"]);
     repo
 }
 

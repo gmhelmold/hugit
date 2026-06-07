@@ -9,8 +9,25 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hugit-contracts = { path = "../hugit-contracts" }
 hugit-queue = { path = "../hugit-queue" }
+# R0 single-source: the canonical hash-chain / attestation-preimage formulas
+# live ONLY in hugit-refstore (compute_this_hash + attestation_sig_preimage).
+# The D12 gate routes through them so its events verify against the D1 chain and
+# its attestations sign over the byte-exact frozen pre-image — never a bespoke
+# re-transcription (brutal-review R1).
+hugit-refstore = { path = "../hugit-refstore" }
+# Real ASYMMETRIC signature for the D12 attestation (item ④ provenance closure):
+# the private key signs, the public key alone verifies — a keyed-MAC would let
+# any verifier forge. Pinned exact; already a workspace dep via hugit-invariants/x2.
+ed25519-dalek = "=2.1.1"
+base64 = "0.22"
 
 [dev-dependencies]
+# The D12 acceptance oracle (acceptance_d12) independently recomputes the
+# canonical this_hash and verifies the attestation signature with the PUBLIC
+# key — so it needs the same crypto/canonical-formula crates as the gate.
+hugit-refstore = { path = "../hugit-refstore" }
+ed25519-dalek = "=2.1.1"
+base64 = "0.22"
 
 [[test]]
 name = "acceptance_c8"

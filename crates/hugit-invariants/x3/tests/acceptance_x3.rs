@@ -38,8 +38,25 @@ use privacy::{
     export_validates, redact_captured, secret_absent,
 };
 
-/// A planted secret used across the redaction proofs.
+/// A planted secret used across the redaction proofs. It carries both the
+/// canonical marker (`SECRET:`) AND a distinct secret VALUE; the oracle asserts
+/// the *value* is absent, not merely the marker (a degenerate redactor that
+/// drops only the marker would still leak the value).
 const PLANTED_SECRET: &str = "SECRET:hugit-api-key-9f3a2b";
+
+/// The bare secret VALUE (no marker). Redaction must remove THIS from the
+/// exported bytes — asserting only the marker's absence is insufficient.
+const SECRET_VALUE: &str = "hugit-api-key-9f3a2b";
+
+/// A non-secret note planted in the SAME journal as the secret. Per-field
+/// redaction must leave this field INTACT in the export; a degenerate whole-blob
+/// redactor (replace the entire serialized journal with one `[REDACTED]` token)
+/// destroys it and turns the oracle RED.
+const SURVIVING_NOTE: &str = "non-secret-operational-note-keep-me";
+
+/// A non-secret principal on a surviving entry — a second structural field that
+/// must outlive redaction (proves redaction is per-field, not whole-blob).
+const SURVIVING_PRINCIPAL: &str = "agent:keeper";
 
 /// Build a one-tenant store holding tenant A's journal, plus the binding triple.
 fn seed_tenant_a_journal() -> (JournalStore, &'static str, &'static str, &'static str) {
@@ -106,11 +123,19 @@ fn item_2_redaction_at_capture_and_export() {
         "captured field must not be stored verbatim"
     );
 
-    // Build a captured journal that embeds the secret in a recorded note, then
-    // assert the EXPORTED artifact is redacted (export-time) AND validates
-    // against the frozen ExportSchema.
+    // Build a captured journal that embeds the secret in ONE recorded note, and
+    // ALSO carries non-secret structural fields (a binding key, a surviving
+    // non-secret note, a surviving principal). The EXPORTED artifact must:
+    //   (a) be redacted at export-time — the secret VALUE absent, not just the
+    //       marker (a degenerate marker-only strip would leak the value), AND
+    //   (b) preserve every NON-secret field — per-field redaction, not a
+    //       whole-blob collapse to one `[REDACTED]` token, AND
+    //   (c) validate against the frozen ExportSchema.
     let mut journal = Journal::new(JournalKey::new("tenant-a", "ws-alpha", "intent-i1"));
-    journal.append(1_749_081_600_000, "agent:worker", PLANTED_SECRET);
+    // A non-secret entry that MUST survive redaction intact.
+    journal.append(1_749_081_600_000, SURVIVING_PRINCIPAL, SURVIVING_NOTE);
+    // The secret-bearing entry (only THIS field's value is redacted).
+    journal.append(1_749_081_600_001, "agent:worker", PLANTED_SECRET);
 
     let export: RedactedExport = export_redacted(
         &journal,
@@ -118,12 +143,72 @@ fn item_2_redaction_at_capture_and_export() {
         "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
     );
 
-    // Export-time ABSENCE scan over the serialized payload bytes.
+    // (a) Export-time ABSENCE scan: the secret MARKER is gone …
     assert!(
         secret_absent(&export.payload),
-        "export-time redaction must remove the secret from the exported bytes; \
-         found `{SECRET_MARKER}` in: {payload:?}",
+        "export-time redaction must remove the secret marker from the exported \
+         bytes; found `{SECRET_MARKER}` in: {payload:?}",
         payload = export.payload
+    );
+    // … AND the bare secret VALUE is gone (the load-bearing check: a redactor
+    // that only drops the `SECRET:` marker would still leak the key value).
+    assert!(
+        !export.payload.contains(SECRET_VALUE),
+        "export-time redaction must remove the secret VALUE ({SECRET_VALUE:?}) \
+         from the exported bytes, not merely the marker; found it in: {payload:?}",
+        payload = export.payload
+    );
+
+    // (b) Per-field survival: every NON-secret field is still present in the
+    //     exported payload. A degenerate whole-blob `[REDACTED]` collapse fails
+    //     here because it destroys these fields too.
+    assert!(
+        export.payload.contains(SURVIVING_NOTE),
+        "non-secret note must SURVIVE export redaction (per-field, not \
+         whole-blob); missing from: {payload:?}",
+        payload = export.payload
+    );
+    assert!(
+        export.payload.contains(SURVIVING_PRINCIPAL),
+        "non-secret principal must SURVIVE export redaction; missing from: \
+         {payload:?}",
+        payload = export.payload
+    );
+    assert!(
+        export.payload.contains("intent-i1"),
+        "the binding intent_id (non-secret) must SURVIVE export redaction; \
+         missing from: {payload:?}",
+        payload = export.payload
+    );
+    assert!(
+        export.payload.contains("tenant-a"),
+        "the binding tenant_id (non-secret) must SURVIVE export redaction; \
+         missing from: {payload:?}",
+        payload = export.payload
+    );
+
+    // (c) The exported payload is still structured JSON the consumer can parse
+    //     back into a Journal (redaction preserved the SHAPE, only scrubbed the
+    //     secret-bearing field's value) — proves it is not a flattened token.
+    let parsed: Journal = serde_json::from_str(&export.payload)
+        .expect("redacted payload must remain valid Journal JSON");
+    assert_eq!(
+        parsed.entries.len(),
+        2,
+        "both entries survive (only the secret VALUE is scrubbed)"
+    );
+    assert_eq!(parsed.key.tenant_id, "tenant-a");
+    assert_eq!(
+        parsed.entries[0].note, SURVIVING_NOTE,
+        "non-secret note byte-identical"
+    );
+    assert_ne!(
+        parsed.entries[1].note, PLANTED_SECRET,
+        "the secret-bearing note must be redacted in place"
+    );
+    assert!(
+        !parsed.entries[1].note.contains(SECRET_VALUE),
+        "the secret VALUE must not survive in the redacted note"
     );
 
     // The envelope is machine-validatable against the frozen ExportSchema.
