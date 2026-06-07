@@ -19,41 +19,20 @@
 //! Everything here is verification logic over the *consumed* surfaces — there
 //! is no production behavior to ship from this module.
 
-/// The canonical hugit CLI verb set, sourced from the command catalog
-/// (`docs/product/command-catalog.md`, "The command surface (v2)").
+/// The canonical hugit CLI verb set — **re-exported from the single source of
+/// truth** [`hugit_cli::HUGIT_VERBS`], never a hand-copied list.
 ///
-/// This list is the namespace-law oracle. Any verb added to hugit-cli that
-/// also appears in `git help -a` output will cause item ① to turn RED,
-/// which is the correct, load-bearing signal.
+/// This is the load-bearing fix for the X5 defect (brutal review R3): a local
+/// hardcoded copy rots silently relative to the real CLI surface, so the
+/// no-shadow oracle could pass while the binary actually dispatches a
+/// git-shadowing verb the local copy never saw. By deriving the verb set from
+/// the real registry the `hugit` binary dispatches on, "the oracle tests the
+/// real surface" is structurally true: any git-shadowing verb added to
+/// hugit-cli turns the X5① oracle red automatically — no manual sync required.
 ///
-/// Verbs are the top-level subcommand tokens (before any sub-subcommands
-/// like `ws spawn` or `ctx snap`).
-pub const HUGIT_VERBS: &[&str] = &[
-    // Phase B — Orchestrator / Worker (the GitHub-App-riding commands)
-    "land",    // hugit land [--queue]       — union-testing landing queue
-    "verdict", // hugit verdict request …    — adversarial reviewer panels
-    "check",   // hugit check [--local]       — memoized CI check
-    "diag",    // hugit diag <failure>        — structured diagnosis
-    // Phase C/D — Workspace + context
-    "ws",     // hugit ws spawn/attach/snap/gc — claim-fenced workspaces
-    "ctx",    // hugit ctx snap / resume    — short-horizon session resume
-    "impact", // hugit impact <path|change> — build-graph blast radius
-    // Phase D — The forge verbs
-    "ledger",     // hugit ledger [--live]       — default history view
-    "review",     // hugit review <intent>       — grounded-evidence answers
-    "approve",    // hugit approve               — policy-gated approval
-    "reject",     // hugit reject                — policy-gated rejection
-    "watch",      // hugit watch                 — TUI forge monitoring
-    "why",        // hugit why <line|symbol>     — provenance query
-    "undo",       // hugit undo <op>             — event-sourced undo
-    "policy",     // hugit policy edit / test    — declarative gate management
-    "campaign",   // hugit campaign / plan apply — DAG + acceptance binding
-    "dispatch",   // hugit dispatch <intent>     — workspace + context packet
-    "fleet",      // hugit fleet                 — machine-readable fleet state
-    "tournament", // hugit tournament -n N     — exploration as a verb
-    "intent",     // hugit intent seal           — the one ceremony verb
-    "journal",    // hugit journal note          — session note
-];
+/// Verbs are the top-level subcommand tokens (before any sub-subcommands like
+/// `ws spawn` or `ctx snap`).
+pub use hugit_cli::HUGIT_VERBS;
 
 /// The reserved managed-ref prefix. All hugit-internal refs live under this
 /// path and ONLY under this path. User branches and tags MUST NOT start with

@@ -19,6 +19,24 @@ use hugit_invariants::x5::{
 use std::collections::HashSet;
 use std::process::Command;
 
+// ── ① the verb set under test is the REAL CLI registry, not a local copy ─────
+//
+// Load-bearing for the no-shadow law: the no-shadow oracle must check the verbs
+// the `hugit` binary ACTUALLY dispatches, derived from the single canonical
+// registry (`hugit_cli::HUGIT_VERBS`). A hand-copied list rots silently — the
+// binary could grow a git-shadowing verb the local copy never sees. This test
+// fails RED if the X5 verb surface ever diverges from the real CLI registry.
+#[test]
+fn item_1a_verb_set_is_the_real_cli_registry() {
+    assert_eq!(
+        HUGIT_VERBS,
+        hugit_cli::HUGIT_VERBS,
+        "X5's verb surface MUST be the real hugit-cli registry, not a local \
+         hand-copied list — a divergent copy can hide a git-shadowing verb the \
+         binary actually dispatches"
+    );
+}
+
 // ── ① no hugit CLI verb shadows a git verb ───────────────────────────────────
 //
 // Load-bearing: git verb set generated at test time via `git help -a`.

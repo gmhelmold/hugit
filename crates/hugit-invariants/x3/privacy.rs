@@ -141,17 +141,43 @@ pub struct RedactedExport {
     pub payload: String,
 }
 
-/// Build a `RedactedExport` from a captured journal: serialize it, apply
-/// export-time redaction to the serialized bytes, and wrap it in an
-/// `ExportSchema` envelope. The redaction at export is the same rule E5④/E5⑦
-/// require; X3 owns the capture+export privacy proof.
+/// Apply export-time redaction to the structured journal, **per field**, then
+/// return the redacted journal. The capture-time rule ([`redact_apply`]) is
+/// applied to each free-text, secret-bearing field of the journal — the entry
+/// `note` and `principal` — leaving every NON-secret structural field (the
+/// binding `tenant_id`/`workspace_id`/`intent_id`, `seq`, `recorded_at`, and any
+/// non-secret note/principal) **intact**.
+///
+/// This is deliberately NOT a whole-blob scrub: serializing first and running
+/// [`redact_apply`] over the entire JSON string would collapse the WHOLE payload
+/// to a single `[REDACTED]` token the instant any field carried a secret,
+/// destroying all data (the X3 defect). Per-field redaction is the correct rule:
+/// only the secret-bearing field's value is replaced; the rest survives.
+fn redact_journal_fields(journal: &Journal) -> Journal {
+    let mut out = journal.clone();
+    for entry in &mut out.entries {
+        entry.note = redact_apply(&entry.note);
+        entry.principal = redact_apply(&entry.principal);
+    }
+    out
+}
+
+/// Build a `RedactedExport` from a captured journal: apply export-time,
+/// **per-field** redaction to the structured journal, serialize the redacted
+/// object, and wrap it in an `ExportSchema` envelope. The redaction at export is
+/// the same rule E5④/E5⑦ require; X3 owns the capture+export privacy proof.
+///
+/// The post-conditions the oracle asserts are (1) the secret VALUE is absent
+/// from `payload`, and (2) every non-secret field SURVIVES — both of which hold
+/// only because redaction is applied per-field on the structured object before
+/// serialization, never to the serialized blob wholesale.
 pub fn export_redacted(journal: &Journal, redaction_manifest: impl Into<String>) -> RedactedExport {
-    // Serialize the captured object as it would be exported.
-    let raw = serde_json::to_string(journal).expect("journal serializes");
-    // Export-time redaction: any value carrying the secret marker is replaced.
-    // (A line-wise scan mirrors the field-wise capture rule over serialized
-    // bytes; the post-condition asserted by the oracle is byte-absence.)
-    let payload = redact_apply(&raw);
+    // Export-time, per-FIELD redaction on the structured object — non-secret
+    // fields survive; only secret-bearing field values are replaced.
+    let redacted = redact_journal_fields(journal);
+    // Serialize the redacted object as it would be exported. The shape is
+    // preserved (still valid Journal JSON), only secret field values scrubbed.
+    let payload = serde_json::to_string(&redacted).expect("redacted journal serializes");
     RedactedExport {
         envelope: ExportSchema {
             version: "1.0.0".to_string(),
@@ -183,6 +209,19 @@ pub fn export_validates(export: &RedactedExport) -> bool {
 /// A minimal content store standing in for the context-store leg of the
 /// erasure cascade. Retention/deletion actually removes the bytes (purge, not
 /// tombstone-with-bytes) so a post-purge byte scan finds the datum ABSENT.
+///
+/// # Why this is a stand-in (documented gap)
+///
+/// As of this remediation **no production context-store purge surface exists**
+/// to drive: the D11 [`JournalStore`] exposes only `put`/`open` (no delete API),
+/// and the App `exit/retention` surface computes analytics retention, not object
+/// erasure. The X3 ③ requirement ("drive purge against the real context-store
+/// surface if available, else document") therefore lands on this explicit
+/// stand-in: it models the *property* under test — bytes are removed, not
+/// tombstoned, and unrelated data survives — over a byte-image scan. When a real
+/// context-store erasure API ships (the X7 cascade owner), this leg should be
+/// re-pointed at it; until then this is a PARTIAL proof of the property, not a
+/// proof against the production surface.
 #[derive(Debug, Default)]
 pub struct ContextStore {
     objects: std::collections::HashMap<String, String>,
