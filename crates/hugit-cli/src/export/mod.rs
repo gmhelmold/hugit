@@ -103,6 +103,13 @@ pub struct ExportArtifact {
     pub manifest_path: PathBuf,
     /// Peak bytes the streaming dumper ever buffered (bounded-memory proof).
     pub peak_buffered: usize,
+    /// The largest single `serde_json` scratch buffer allocated while streaming
+    /// the envelope — the honest OOM bound (remediation #2). In the streamed
+    /// field-by-field path this equals the largest SINGLE element; the old
+    /// `serde_json::to_vec(whole envelope)` path would make it equal the entire
+    /// envelope size. An oracle asserting this is `<< envelope_bytes` proves the
+    /// full-vec path is gone.
+    pub peak_serialize_scratch: usize,
 }
 
 /// Why an export failed.
@@ -118,6 +125,9 @@ pub enum ExportError {
     Schema(SchemaError),
     /// An I/O error writing the artifact to disk.
     Io(String),
+    /// A git object id was not path-safe — it would escape the object directory
+    /// (path traversal). Refused before any write (fail-closed).
+    UnsafeOid(String),
 }
 
 impl std::fmt::Display for ExportError {
@@ -127,6 +137,12 @@ impl std::fmt::Display for ExportError {
             ExportError::Intent(e) => write!(f, "export: intent read failed: {e}"),
             ExportError::Schema(e) => write!(f, "export: {e}"),
             ExportError::Io(e) => write!(f, "export: io: {e}"),
+            ExportError::UnsafeOid(oid) => {
+                write!(
+                    f,
+                    "export: refusing unsafe (path-traversing) git oid: {oid:?}"
+                )
+            }
         }
     }
 }
@@ -174,7 +190,9 @@ pub fn export(
     let cut = Cut::take(&corpus.event_log)?;
 
     // (2) project refs + intents from the cut; assemble first-class classes.
-    let ref_state = cut.ref_state();
+    // A malformed ref payload is a HARD failure (E5 fail-closed) — never an
+    // empty ref-set with exit 0.
+    let ref_state = cut.ref_state()?;
     let refs: Vec<RefEntry> = ref_state
         .iter()
         .map(|(name, target)| RefEntry {
@@ -246,7 +264,9 @@ pub fn export(
         })
         .collect();
 
-    let manifest_ref = manifest.content_ref();
+    let manifest_ref = manifest
+        .content_ref()
+        .map_err(|e| ExportError::Io(e.to_string()))?;
 
     // (4) build + machine-validate the envelope against the frozen schema.
     // The cut's links must resolve first (⑨), then the envelope validate (③⑥).
@@ -276,7 +296,7 @@ pub fn export(
     let manifest_path = out_dir.join("redaction-manifest.json");
     let git_dir = out_dir.join("repo.git");
 
-    let peak_buffered = stream_envelope_json(&envelope, &json_path)?;
+    let (peak_buffered, peak_serialize_scratch) = stream_envelope_json(&envelope, &json_path)?;
     std::fs::write(
         &manifest_path,
         serde_json::to_vec_pretty(&manifest).map_err(|e| ExportError::Io(e.to_string()))?,
@@ -293,31 +313,145 @@ pub fn export(
         json_path,
         manifest_path,
         peak_buffered,
+        peak_serialize_scratch,
     })
 }
 
 /// Stream the envelope to `path` through the bounded-memory dumper. The large
 /// `events`/`journals` lanes are written element-by-element so peak RAM is
 /// bounded by the chunk size, not the corpus. Returns peak buffered bytes.
-fn stream_envelope_json(envelope: &ExportEnvelope, path: &Path) -> Result<usize, ExportError> {
+/// Returns `(peak_buffered, peak_serialize_scratch)`.
+fn stream_envelope_json(
+    envelope: &ExportEnvelope,
+    path: &Path,
+) -> Result<(usize, usize), ExportError> {
     use dump::StreamingDumper;
     use std::io::Write;
 
     let file = std::fs::File::create(path)?;
     let mut dumper = StreamingDumper::new(std::io::BufWriter::new(file));
 
-    // Whole-envelope serialization is itself streamed in chunks: serialize to a
-    // bounded scratch and feed it through the dumper. The events/journals lanes
-    // are serialized element-wise into the SAME bounded scratch (drained per
-    // element) so the resident set never holds the full corpus.
-    let bytes = serde_json::to_vec(envelope).map_err(|e| ExportError::Io(e.to_string()))?;
-    for chunk in bytes.chunks(dump::CHUNK_BYTES) {
-        dumper.write_chunk(chunk)?;
-    }
+    let io = |e: serde_json::Error| ExportError::Io(e.to_string());
+    // Tracks the largest single serde scratch buffer ever allocated — the OOM
+    // bound. With field-by-field streaming this equals the largest single
+    // element; the old to_vec(whole-envelope) path would make it the full size.
+    let mut scratch = 0usize;
+
+    // CRITICAL (remediation #2): the whole envelope is NEVER serialized to one
+    // Vec<u8> first — that makes peak RAM scale with the corpus and defeats the
+    // OOM bound. Instead the JSON object is emitted field-by-field, and every
+    // large collection is streamed element-by-element: each element is
+    // serialized into a small scratch, pushed through the dumper, and dropped
+    // before the next. The byte output is identical to
+    // serde_json::to_vec(envelope) (fields in declaration order, arrays in
+    // element order, no whitespace), so restore() round-trips it unchanged.
+    dumper.write_chunk(b"{")?;
+    write_json_field(&mut dumper, "schema", &envelope.schema, io, &mut scratch)?;
+    stream_json_array_field(&mut dumper, ",\"refs\":", &envelope.refs, io, &mut scratch)?;
+    stream_json_array_field(
+        &mut dumper,
+        ",\"intents\":",
+        &envelope.intents,
+        io,
+        &mut scratch,
+    )?;
+    stream_json_array_field(
+        &mut dumper,
+        ",\"events\":",
+        &envelope.events,
+        io,
+        &mut scratch,
+    )?;
+    stream_json_array_field(
+        &mut dumper,
+        ",\"ledger\":",
+        &envelope.ledger,
+        io,
+        &mut scratch,
+    )?;
+    stream_json_array_field(
+        &mut dumper,
+        ",\"verdicts\":",
+        &envelope.verdicts,
+        io,
+        &mut scratch,
+    )?;
+    stream_json_array_field(
+        &mut dumper,
+        ",\"journals\":",
+        &envelope.journals,
+        io,
+        &mut scratch,
+    )?;
+    stream_json_array_field(
+        &mut dumper,
+        ",\"policy\":",
+        &envelope.policy,
+        io,
+        &mut scratch,
+    )?;
+    stream_json_array_field(
+        &mut dumper,
+        ",\"provenance_links\":",
+        &envelope.provenance_links,
+        io,
+        &mut scratch,
+    )?;
+    stream_json_array_field(
+        &mut dumper,
+        ",\"attestations\":",
+        &envelope.attestations,
+        io,
+        &mut scratch,
+    )?;
+    dumper.write_chunk(b"}")?;
+
     let peak = dumper.peak_buffered();
     let mut w = dumper.finish()?;
     w.flush()?;
-    Ok(peak)
+    Ok((peak, scratch))
+}
+
+/// Emit `"key":<value>` for a small, bounded value (the schema header).
+fn write_json_field<W: std::io::Write, T: serde::Serialize>(
+    dumper: &mut dump::StreamingDumper<W>,
+    key: &str,
+    value: &T,
+    io: impl Fn(serde_json::Error) -> ExportError,
+    scratch: &mut usize,
+) -> Result<(), ExportError> {
+    dumper.write_chunk(format!("\"{key}\":").as_bytes())?;
+    let bytes = serde_json::to_vec(value).map_err(&io)?;
+    *scratch = (*scratch).max(bytes.len());
+    dumper.write_chunk(&bytes)?;
+    Ok(())
+}
+
+/// Stream a JSON array field `prefix[elem,elem,…]` element-by-element so the
+/// resident set never holds the whole collection. `prefix` is the literal
+/// `,"<field>":` separator (the leading comma closes the previous field).
+fn stream_json_array_field<W: std::io::Write, T: serde::Serialize>(
+    dumper: &mut dump::StreamingDumper<W>,
+    prefix: &str,
+    items: &[T],
+    io: impl Fn(serde_json::Error) -> ExportError,
+    scratch: &mut usize,
+) -> Result<(), ExportError> {
+    dumper.write_chunk(prefix.as_bytes())?;
+    dumper.write_chunk(b"[")?;
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 {
+            dumper.write_chunk(b",")?;
+        }
+        // Serialize ONE element at a time into a small scratch, stream it, drop
+        // it — peak memory is bounded by the largest single element, never the
+        // whole array.
+        let bytes = serde_json::to_vec(item).map_err(&io)?;
+        *scratch = (*scratch).max(bytes.len());
+        dumper.write_chunk(&bytes)?;
+    }
+    dumper.write_chunk(b"]")?;
+    Ok(())
 }
 
 /// Write a plain **bare** git repository at `git_dir` from the exported git
@@ -350,6 +484,10 @@ fn write_git_artifact(
     let objdir = work.join("objects");
     std::fs::create_dir_all(&objdir)?;
     for (oid, bytes) in git_objects {
+        // Path-traversal guard (remediation #4): an attacker-controlled oid like
+        // "../../../tmp/evil" or "/etc/passwd" would escape objdir. Reject any
+        // non-path-safe oid BEFORE writing — fail-closed, no out-of-dir write.
+        validate_oid_path_safe(oid)?;
         std::fs::write(objdir.join(oid), bytes)?;
     }
     // Also emit a refs manifest so the exit-proof artifact is self-describing in
@@ -383,6 +521,28 @@ fn write_git_artifact(
     run_git(git_dir, &["symbolic-ref", "HEAD", "refs/heads/main"])?;
 
     Ok(())
+}
+
+/// Reject any git object id that is not safe to use as a single filename under
+/// the objects directory (remediation #4 — path traversal).
+///
+/// A safe oid is non-empty and contains ONLY `[0-9A-Za-z._-]`, with no `..`
+/// component. This excludes `/`, `\`, leading `/` (absolute), `..`, NUL, and any
+/// other separator or control character — so `objdir.join(oid)` can never
+/// escape `objdir`.
+pub fn validate_oid_path_safe(oid: &str) -> Result<(), ExportError> {
+    let safe = !oid.is_empty()
+        && oid != ".."
+        && oid != "."
+        && oid
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        && !oid.contains("..");
+    if safe {
+        Ok(())
+    } else {
+        Err(ExportError::UnsafeOid(oid.to_string()))
+    }
 }
 
 /// Run a local `git` command in `cwd`, erroring on non-zero status. Uses ONLY

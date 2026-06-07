@@ -480,7 +480,10 @@ fn item_7_redaction_redteam() {
     );
     assert_eq!(
         artifact.envelope.schema.redaction_manifest,
-        artifact.manifest.content_ref(),
+        artifact
+            .manifest
+            .content_ref()
+            .expect("manifest serializes"),
         "schema's redaction_manifest ref binds the actual manifest"
     );
     // The manifest carries no plaintext — only digests.
@@ -615,4 +618,196 @@ fn item_9_live_consistency_cut() {
         target: "aaaa1111".into(),
     };
     let _ = RedactionManifest::new();
+}
+
+// ── remediation #2: real export streams field-by-field, bounded memory ─────────
+
+/// The REAL `export()` path must stream the JSON envelope without ever holding
+/// the whole corpus in RAM. We drive export with a large events corpus and
+/// assert `peak_buffered` is bounded by ~one chunk (CHUNK_BYTES) — NOT by the
+/// envelope size. Under the old `serde_json::to_vec(whole envelope)` path the
+/// peak equals the full serialized envelope, which is far larger than a chunk,
+/// turning this RED.
+#[test]
+fn item_4b_real_export_bounded_memory() {
+    use hugit_cli::export::dump::CHUNK_BYTES;
+
+    let out = scratch("bounded");
+
+    // Build a corpus whose events lane alone dwarfs one chunk: many events, each
+    // carrying a payload, so the full envelope is >> CHUNK_BYTES.
+    let mut log = EventLog::new();
+    let big_payload = serde_json::json!({
+        "intent_id": "I",
+        "ref": "refs/heads/main",
+        "target": "deadbeef",
+        "charter": "x".repeat(2048)
+    })
+    .to_string();
+    for i in 0..400 {
+        log.append(
+            "intent.landed",
+            vec![format!("author-{i}")],
+            big_payload.clone(),
+            1000 + i,
+        );
+    }
+
+    let corpus = Corpus {
+        event_log: log,
+        ledger: vec![],
+        verdicts: vec![],
+        journals: vec![],
+        policy: vec![],
+        provenance_links: vec![],
+        attestations: vec![],
+        git_objects: vec![],
+    };
+
+    let artifact = export(&corpus, &out, AccountState::Active).expect("large export");
+
+    // The serialized envelope is much larger than one chunk...
+    let envelope_bytes = serde_json::to_vec(&artifact.envelope).unwrap().len();
+    assert!(
+        envelope_bytes > 4 * CHUNK_BYTES,
+        "corpus must dwarf one chunk for the bound to be meaningful (got {envelope_bytes} bytes)"
+    );
+
+    // ...yet the largest single serde scratch buffer allocated while streaming
+    // is bounded by the largest SINGLE element — far below the whole envelope.
+    // The OLD `serde_json::to_vec(whole envelope)` path would make this equal
+    // `envelope_bytes`; asserting it is a small fraction proves the full-vec
+    // path is GONE. This is the RED→GREEN tripwire for #2.
+    let scratch = artifact.peak_serialize_scratch;
+    assert!(
+        scratch * 4 < envelope_bytes,
+        "largest serialize scratch {scratch} must be << envelope {envelope_bytes} \
+         (bounded by one element) — the whole-envelope to_vec path must be gone"
+    );
+    // The streaming dumper buffer also stays bounded.
+    let peak = artifact.peak_buffered;
+    assert!(
+        peak < 2 * CHUNK_BYTES,
+        "export dumper peak {peak} bounded by ~CHUNK_BYTES ({CHUNK_BYTES})"
+    );
+
+    // Round-trips: the streamed bytes are valid, restorable JSON.
+    let restored = restore(&artifact.json_path).expect("streamed export restores");
+    assert_eq!(
+        restored.envelope.events.len(),
+        400,
+        "every streamed event survives the round-trip"
+    );
+}
+
+// ── remediation #4: unsanitized OID path-traversal is rejected ────────────────
+
+/// A git object whose oid is a path-traversal string MUST be refused before any
+/// write — no out-of-dir file is created. Under the old unsanitized
+/// `fs::write(objdir.join(oid))` the bytes land at the traversed path.
+#[test]
+fn item_5b_oid_path_traversal_rejected() {
+    use hugit_cli::export::validate_oid_path_safe;
+
+    let out = scratch("traversal");
+
+    // A canary path OUTSIDE the export dir that an attacker oid would target.
+    let evil_target = out.join("EVIL_ESCAPED");
+    let rel_escape = format!(
+        "../../{}/EVIL_ESCAPED",
+        out.file_name().unwrap().to_str().unwrap()
+    );
+
+    let mut corpus = fixture_corpus();
+    corpus
+        .git_objects
+        .push((rel_escape.clone(), b"pwned".to_vec()));
+
+    let err = export(&corpus, &out, AccountState::Active)
+        .expect_err("export must REFUSE a path-traversing oid");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("unsafe") || msg.contains("oid"),
+        "error must name the unsafe oid, got: {msg}"
+    );
+
+    // Fail-closed: nothing was written to the escaped location.
+    assert!(
+        !evil_target.exists(),
+        "no out-of-dir write may occur for a traversing oid"
+    );
+
+    // The unit guard rejects the classic vectors and accepts plain hex/ids.
+    for bad in ["../../../tmp/evil", "/etc/passwd", "..", "a/b", "x\0y", ""] {
+        assert!(
+            validate_oid_path_safe(bad).is_err(),
+            "oid {bad:?} must be rejected"
+        );
+    }
+    for good in [
+        "obj-readme",
+        "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        "a.b_c-1",
+    ] {
+        assert!(
+            validate_oid_path_safe(good).is_ok(),
+            "oid {good:?} must be accepted"
+        );
+    }
+}
+
+// ── remediation #5: malformed ref payload → hard export failure ───────────────
+
+/// A `ref.update` event with a malformed (missing-target) payload makes ref
+/// replay fail. The export MUST surface that as a hard error, never swallow it
+/// into an empty ref-set + exit 0. Under the old `replay().unwrap_or_default()`
+/// this exported silently with zero refs.
+#[test]
+fn item_5c_malformed_ref_payload_fails_export() {
+    let out = scratch("malformed");
+
+    let mut log = EventLog::new();
+    // A real landed intent first (so a naive empty-refs export would still look
+    // "successful").
+    log.append(
+        "intent.landed",
+        vec!["alice".into()],
+        serde_json::json!({"intent_id":"I-1","ref":"refs/heads/main","target":"aaaa","charter":"c"})
+            .to_string(),
+        1000,
+    );
+    // A ref.update whose payload is valid JSON but MISSING the `target` field —
+    // a malformed ref payload. The hash chain stays valid; replay must reject it.
+    log.append(
+        "ref.update",
+        vec!["ci".into()],
+        serde_json::json!({ "ref": "refs/heads/broken" }).to_string(),
+        2000,
+    );
+
+    let corpus = Corpus {
+        event_log: log,
+        ledger: vec![],
+        verdicts: vec![],
+        journals: vec![],
+        policy: vec![],
+        provenance_links: vec![],
+        attestations: vec![],
+        git_objects: vec![],
+    };
+
+    let err = export(&corpus, &out, AccountState::Active)
+        .expect_err("malformed ref payload must FAIL the export, not silent-empty");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("ref replay") || msg.contains("malformed") || msg.contains("payload"),
+        "export error must name the ref-replay failure, got: {msg}"
+    );
+
+    // Direct cut-level proof: ref_state() returns Err, never Ok(empty).
+    let cut = Cut::take(&corpus.event_log).expect("cut (chain is valid)");
+    assert!(
+        cut.ref_state().is_err(),
+        "ref_state must propagate the malformed payload, not unwrap_or_default to empty"
+    );
 }

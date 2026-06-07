@@ -71,10 +71,15 @@ impl RedactionManifest {
 
     /// The content-addressed ref for this manifest: `redaction-<sha256>` over
     /// the canonical JSON of the manifest. Stable and secret-free.
-    pub fn content_ref(&self) -> String {
-        let bytes = serde_json::to_vec(self).unwrap_or_default();
+    ///
+    /// Returns the serialization error rather than swallowing it: a fixed hash
+    /// on serialize-failure (the old `unwrap_or_default()`) would make a
+    /// corrupt/empty manifest indistinguishable from a real one and pass schema
+    /// validation with a meaningless ref.
+    pub fn content_ref(&self) -> Result<String, serde_json::Error> {
+        let bytes = serde_json::to_vec(self)?;
         let digest = Sha256::digest(&bytes);
-        format!("redaction-{}", hex::encode(digest))
+        Ok(format!("redaction-{}", hex::encode(digest)))
     }
 
     /// Whether anything was redacted.
