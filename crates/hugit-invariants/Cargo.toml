@@ -76,3 +76,11 @@ path = "x5/tests/acceptance_x5.rs"
 [[test]]
 name = "acceptance_x2"
 path = "x2/tests/acceptance_x2.rs"
+
+# WP-X6: resource non-interference — infra isolation config assertions +
+# structural resource-accounting model + (live-gated) latency/availability
+# measurement. Sources under x6/; the live lane is gated behind
+# HUGIT_RUNNER_HOST + HUGIT_CORELINK_PROBE_URL; structural proof always runs.
+[[test]]
+name = "acceptance_x6"
+path = "x6/tests/acceptance_x6.rs"

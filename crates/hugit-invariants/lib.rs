@@ -7,6 +7,7 @@
 //! - `x2/` — attestation e2e: full chain resolves cryptographically, tampered/unsigned rejected, public verification, cross-tenant honesty (WP-X2).
 //! - `x4/` — supply-chain invariants: pinned images, verified deps, fail-closed (WP-X4).
 //! - `x5/` — namespace-law invariants: no git-verb shadow, ref-namespace non-collision (WP-X5).
+//! - `x6/` — resource non-interference: infra isolation config + accounting model + latency measurement (WP-X6).
 
 // ── WP-X2: attestation end-to-end invariants ─────────────────────────────────
 #[path = "x2/lib.rs"]
@@ -23,3 +24,7 @@ pub use x4_root::pin;
 // ── WP-X5: namespace-law invariants ──────────────────────────────────────────
 #[path = "x5/lib.rs"]
 pub mod x5;
+
+// ── WP-X6: resource non-interference invariants ───────────────────────────────
+#[path = "x6/lib.rs"]
+pub mod x6;
