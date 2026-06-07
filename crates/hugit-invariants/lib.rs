@@ -8,6 +8,7 @@
 //! - `x4/` — supply-chain invariants: pinned images, verified deps, fail-closed (WP-X4).
 //! - `x5/` — namespace-law invariants: no git-verb shadow, ref-namespace non-collision (WP-X5).
 //! - `x6/` — resource non-interference: infra isolation config + accounting model + latency measurement (WP-X6).
+//! - `x10/` — focus gate: adjacent-product boundary (dogfood excludes corelink-server build-enforced, shared CoreLink API-tenancy non-interference, policy cap) (WP-X10).
 //! - `x12/` — erasure × provenance × mirror: post-erasure chain stays verifiable over a tamper-evident tombstone (no silent re-link), mirror-obligation discharged-or-disclosed in the export/exit proof (WP-X12).
 
 // ── WP-X2: attestation end-to-end invariants ─────────────────────────────────
@@ -29,6 +30,10 @@ pub mod x5;
 // ── WP-X6: resource non-interference invariants ───────────────────────────────
 #[path = "x6/lib.rs"]
 pub mod x6;
+// ── WP-X10: focus gate — adjacent-product boundary + shared API-tenancy ──────
+#[path = "x10/lib.rs"]
+pub mod x10;
+
 // ── WP-X12: erasure × provenance × mirror invariants ─────────────────────────
 #[path = "x12/lib.rs"]
 pub mod x12;
