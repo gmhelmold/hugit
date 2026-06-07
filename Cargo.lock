@@ -815,11 +815,13 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
+ "hex",
  "hugit-contracts",
  "hugit-queue",
  "hugit-refstore",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

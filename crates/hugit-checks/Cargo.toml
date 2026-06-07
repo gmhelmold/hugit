@@ -20,6 +20,12 @@ hugit-refstore = { path = "../hugit-refstore" }
 # any verifier forge. Pinned exact; already a workspace dep via hugit-invariants/x2.
 ed25519-dalek = "=2.1.1"
 base64 = "0.22"
+# B2a (checks client): the three-axis memo key derives its tree_root/def_digest
+# axes with the SAME SHA-256 + lowercase-hex the canonical formula uses; the
+# final key is single-sourced via hugit_refstore::compute_memo_key. Already a
+# workspace dep via hugit-refstore — no new transitive surface.
+sha2 = "0.10"
+hex = "0.4"
 
 [dev-dependencies]
 # The D12 acceptance oracle (acceptance_d12) independently recomputes the
@@ -32,3 +38,7 @@ base64 = "0.22"
 [[test]]
 name = "acceptance_c8"
 path = "tests/acceptance_c8.rs"
+
+[[test]]
+name = "acceptance_b2a"
+path = "tests/acceptance_b2a.rs"
