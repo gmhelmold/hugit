@@ -23,6 +23,10 @@ pub struct LoadRun {
     pub rejected: usize,
     /// Operations launched (one per submitter thread).
     pub launched: usize,
+    /// Peak simultaneously-admitted in-flight operations observed during the run
+    /// (the serializer's high-water mark). The back-pressure bound requires this
+    /// to never exceed `serializer.capacity()`.
+    pub peak_in_flight: usize,
 }
 
 impl LoadRun {
@@ -106,10 +110,12 @@ pub fn run_concurrent(concurrency: usize, serializer: Serializer) -> LoadRun {
         }
     }
 
+    let peak_in_flight = serializer.peak_in_flight();
     LoadRun {
         serializer,
         latencies,
         rejected,
         launched: concurrency,
+        peak_in_flight,
     }
 }
