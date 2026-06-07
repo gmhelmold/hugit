@@ -589,6 +589,219 @@ fn outcome(contained: bool) -> RedTeamOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hugit_runner::lease::CmdOutput;
+    use std::cell::RefCell;
+    use std::collections::BTreeSet;
+
+    /// A hermetic, in-memory fake of the box filesystem — **no network, no
+    /// Docker, no box**. It interprets the *exact* shell scripts the production
+    /// fence emits:
+    ///   - `place_file` (via `materialize_sparse`): `mkdir -p '<dir>' && printf
+    ///     %s '<b64>' | base64 -d > '<full>'` — we record `<full>` (and its
+    ///     ancestor dirs) as present.
+    ///   - `probe_outside_enoent`: `if test ! -e '<p>'; then printf ABSENT;
+    ///     elif test -d '<p>'; then printf PRESENT_DIR; else printf
+    ///     PRESENT_FILE; fi` — we answer from the recorded set.
+    ///
+    /// Because the test drives the REAL `materialize_sparse` (which routes every
+    /// candidate through `select_in_fence` → `is_admitted` → `classify`) and the
+    /// REAL `probe_outside_enoent`, the only thing deciding whether the
+    /// out-of-fence file gets "written" is `classify`. If `classify` were
+    /// replaced by a constant `Inside`, `select_in_fence` would admit
+    /// `secret.env`, this fake would record it as present, and the probe would
+    /// observe PRESENT_FILE → the assertion that it is ENOENT goes RED. The test
+    /// is therefore LOAD-BEARING on the fence core, in the BARE `cargo test`
+    /// gate, with no box.
+    struct FakeFsBox {
+        /// Absolute in-container paths that "exist" (files and their dirs).
+        files: RefCell<BTreeSet<String>>,
+        dirs: RefCell<BTreeSet<String>>,
+    }
+
+    impl FakeFsBox {
+        fn new() -> Self {
+            Self {
+                files: RefCell::new(BTreeSet::new()),
+                dirs: RefCell::new(BTreeSet::new()),
+            }
+        }
+
+        /// Extract the i-th single-quoted token from a `sh -c` script. The fence
+        /// scripts single-quote every interpolated path via `shell_quote`.
+        fn quoted(script: &str) -> Vec<String> {
+            let mut out = Vec::new();
+            let bytes = script.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                if bytes[i] == b'\'' {
+                    let start = i + 1;
+                    let mut j = start;
+                    while j < bytes.len() && bytes[j] != b'\'' {
+                        j += 1;
+                    }
+                    out.push(script[start..j].to_string());
+                    i = j + 1;
+                } else {
+                    i += 1;
+                }
+            }
+            out
+        }
+
+        fn add_dirs_for(&self, full: &str) {
+            // Record every ancestor directory of `full` as present (excluding
+            // the file itself).
+            let parts: Vec<&str> = full.trim_start_matches('/').split('/').collect();
+            let mut cur = String::new();
+            for p in &parts[..parts.len().saturating_sub(1)] {
+                cur.push('/');
+                cur.push_str(p);
+                self.dirs.borrow_mut().insert(cur.clone());
+            }
+        }
+    }
+
+    impl BoxExec for FakeFsBox {
+        fn run(&self, argv: &[&str]) -> Result<CmdOutput> {
+            // The fence always invokes `docker exec <name> sh -c <script>`.
+            let script = argv.last().copied().unwrap_or("");
+            let toks = Self::quoted(script);
+
+            // A `place_file` write: contains "base64 -d >" and the redirect
+            // target is the LAST quoted token (the full path).
+            if script.contains("base64 -d >") {
+                if let Some(full) = toks.last() {
+                    self.add_dirs_for(full);
+                    self.files.borrow_mut().insert(full.clone());
+                }
+                return Ok(CmdOutput {
+                    code: Some(0),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+            }
+
+            // A `probe_outside_enoent` probe: `test ! -e '<p>' ...`. The probed
+            // path is the (single, repeated) quoted token.
+            if script.contains("test ! -e") {
+                let p = toks.first().cloned().unwrap_or_default();
+                let observed = if self.files.borrow().contains(&p) {
+                    "PRESENT_FILE"
+                } else if self.dirs.borrow().contains(&p) {
+                    "PRESENT_DIR"
+                } else {
+                    "ABSENT"
+                };
+                return Ok(CmdOutput {
+                    code: Some(0),
+                    stdout: observed.to_string(),
+                    stderr: String::new(),
+                });
+            }
+
+            // Any other command (none expected) succeeds with no output.
+            Ok(CmdOutput {
+                code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    /// HERMETIC fence-materialized-escape — the box-gated `item_5` vector's
+    /// property, proven in the BARE `cargo test` gate (no box, no network).
+    ///
+    /// Drives the REAL `materialize_sparse` + `probe_outside_enoent` against a
+    /// fake in-memory FS. The fence (`classify` + `select_in_fence`) is the only
+    /// control: the in-fence file is materialized (PRESENT) and the out-of-fence
+    /// candidate is dropped (ENOENT). FAIL-not-skip; LOAD-BEARING: a
+    /// constant-`Inside` classifier would admit `secret.env`, the fake would
+    /// record it present, and `secret_absent` would be false → RED.
+    #[test]
+    fn fence_materialized_escape_is_contained_hermetically_no_box() {
+        let boxx = FakeFsBox::new();
+        let c = RunningContainer {
+            name: "hermetic-fence".to_string(),
+        };
+
+        // A REAL fence: only `src/` is in the path_set; `secret.env` is offered
+        // as an out-of-fence candidate the fence must drop.
+        let manifest = FenceManifest {
+            path_set: vec!["src/".to_string()],
+            deny_default: true,
+            materialized: vec![],
+        };
+        let candidates = vec![
+            CandidateEntry::new("src/in.txt", b"in-fence-content".to_vec()),
+            CandidateEntry::new("secret.env", b"OUT-OF-FENCE-TOKEN".to_vec()),
+        ];
+
+        let filled = materialize_sparse(&boxx, &c, WORKDIR, &manifest, &candidates)
+            .expect("hermetic materialize must succeed");
+
+        // The materialized record must contain ONLY the in-fence file.
+        let mat: Vec<&str> = filled
+            .materialized
+            .iter()
+            .map(|m| m.path.as_str())
+            .collect();
+        assert_eq!(
+            mat,
+            ["src/in.txt"],
+            "fence must materialize ONLY the in-fence file; got {mat:?}"
+        );
+
+        // In-container truth via the REAL probe: in-fence present, out-of-fence
+        // ENOENT, traversal ENOENT.
+        let in_present = !probe_outside_enoent(&boxx, &c, WORKDIR, "src/in.txt")
+            .expect("probe in-fence")
+            .enoent;
+        let secret_absent = probe_outside_enoent(&boxx, &c, WORKDIR, "secret.env")
+            .expect("probe out-of-fence")
+            .enoent;
+        let traversal_absent = probe_outside_enoent(&boxx, &c, WORKDIR, "src/../secret.env")
+            .expect("probe traversal")
+            .enoent;
+
+        assert!(
+            in_present,
+            "the in-fence file must be materialized (present)"
+        );
+        assert!(
+            secret_absent,
+            "the out-of-fence file MUST be ENOENT (never materialized) — \
+             this is the property a no-op classifier would break"
+        );
+        assert!(traversal_absent, "a traversal escape must be ENOENT");
+    }
+
+    /// Guards the guard: prove the hermetic test above would actually CATCH a
+    /// broken (constant-`Inside`) classifier. We simulate that failure directly
+    /// — admitting the out-of-fence candidate — and assert the fake records it
+    /// as PRESENT (i.e. `secret_absent` would be false). This pins that the
+    /// hermetic oracle is load-bearing, not a tautology.
+    #[test]
+    fn hermetic_oracle_would_go_red_if_out_of_fence_were_materialized() {
+        let boxx = FakeFsBox::new();
+        let c = RunningContainer {
+            name: "hermetic-fence-red".to_string(),
+        };
+        // Simulate a broken classifier by placing the out-of-fence file the same
+        // way `place_file` would (the exact script shape).
+        let full = format!("{WORKDIR}/secret.env");
+        let dir = full.rsplit_once('/').map_or("/", |(d, _)| d);
+        let script = format!("mkdir -p '{dir}' && printf %s 'eA==' | base64 -d > '{full}'");
+        boxx.run(&["docker", "exec", &c.name, "sh", "-c", &script])
+            .unwrap();
+        let secret_absent = probe_outside_enoent(&boxx, &c, WORKDIR, "secret.env")
+            .unwrap()
+            .enoent;
+        assert!(
+            !secret_absent,
+            "if the out-of-fence file IS materialized, the probe must observe it \
+             present — proving the hermetic oracle goes RED under a broken fence"
+        );
+    }
 
     #[test]
     fn all_vectors_distinct() {
