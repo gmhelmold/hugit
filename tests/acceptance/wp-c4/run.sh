@@ -55,9 +55,10 @@ check "⑥ item_6 test declared (method_proof_merge_path_never_entered)" \
 check "①…⑥ cargo test -p hugit-checks --test acceptance_wp-c4 green" \
   cargo test -p hugit-checks --test "acceptance_${WP_ID}"
 
-# ── (d) structural: no writes outside regen/driver/ (Claims disjointness) ────
-check "③ regen/gate/ not present in hugit-checks/src (D12 boundary respected)" \
-  bash -c "! test -d '$CRATE/src/regen/gate'"
+# C4↔D12 boundary guard RETIRED (lead, wave D3 integration): regen/gate/ was a
+# wave-isolation fence; D12 legitimately lands it now (same class as the
+# b1/d1a/c5a guard expiries). C4↔D12 disjointness is enforced at integration
+# via `git diff --name-only main..HEAD` (scope-clean gate).
 
 # ── (d) structural: Cargo.lock + pnpm-lock drivers present (impl notes v0) ───
 check "① Cargo.lock driver src file present" \
