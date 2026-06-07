@@ -10,6 +10,9 @@
 //! halts all queued processing for that installation, and appends an
 //! `EventRecord` of kind `installation.revoked`.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
@@ -187,9 +190,17 @@ pub fn ingest_webhook(
 
 /// Webhook processor — orchestrates ingest, signature check, ack, and
 /// lifecycle dispatch.
+///
+/// Holds a real token store: `Arc<Mutex<HashMap<installation_id, Option<String>>>>`.
+/// `None` in the map means the slot exists but has been revoked/zeroed.
+/// Absent from the map means no token was ever registered.
 pub struct WebhookProcessor {
     /// Webhook secret (HMAC-SHA256 key).
     secret: Vec<u8>,
+    /// In-memory installation token store.
+    /// Key: installation_id string.
+    /// Value: `Some(token)` while active, `None` after revocation.
+    token_store: Arc<Mutex<HashMap<String, Option<String>>>>,
 }
 
 impl WebhookProcessor {
@@ -197,7 +208,20 @@ impl WebhookProcessor {
     pub fn new(secret: impl Into<Vec<u8>>) -> Self {
         Self {
             secret: secret.into(),
+            token_store: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Register (or update) the installation token for an installation.
+    pub fn store_token(&self, installation_id: &str, token: &str) {
+        let mut store = self.token_store.lock().expect("token_store lock poisoned");
+        store.insert(installation_id.to_string(), Some(token.to_string()));
+    }
+
+    /// Retrieve the installation token, if present and not revoked.
+    pub fn get_token(&self, installation_id: &str) -> Option<String> {
+        let store = self.token_store.lock().expect("token_store lock poisoned");
+        store.get(installation_id).and_then(|v| v.clone())
     }
 
     /// Process a raw inbound webhook request.
@@ -250,13 +274,13 @@ impl WebhookProcessor {
 
     /// Handle an `installation.deleted` lifecycle event (item ⑤).
     ///
-    /// - Revokes the stored installation token (represented by zeroing the
-    ///   token slot in the in-memory store — real CF KV/DO binding is
-    ///   infrastructure-gated).
-    /// - Halts queued processing for this installation (sets a halt flag).
-    /// - Appends an `installation.revoked` EventRecord.
-    ///
-    /// Returns the `EventRecord` to be persisted by the caller.
+    /// - Revokes the stored installation token: removes the entry from the
+    ///   in-memory store and zeros the slot (sets to `None`). Returns
+    ///   `token_revoked = true` iff a `Some(token)` was present before
+    ///   revocation; `false` if the slot was already absent or already `None`.
+    /// - Sets `processing_halted = true` unconditionally (the caller is
+    ///   responsible for calling `PersistenceAdapter::halt_installation`).
+    /// - Builds and returns an `installation.revoked` EventRecord.
     pub fn handle_uninstall(
         &self,
         installation_id: &str,
@@ -266,9 +290,29 @@ impl WebhookProcessor {
     ) -> (RevokeOutcome, EventRecord) {
         let record =
             build_installation_revoked_record(installation_id, prev_hash, seq, recorded_at);
+
+        // Remove/zero the token slot; token_revoked = true only if there was
+        // an active (Some) token.
+        let token_revoked = {
+            let mut store = self.token_store.lock().expect("token_store lock poisoned");
+            match store.remove(installation_id) {
+                Some(Some(_)) => {
+                    // Zero the slot after removal (tombstone).
+                    store.insert(installation_id.to_string(), None);
+                    true
+                }
+                Some(None) => {
+                    // Already revoked — re-insert tombstone, return false.
+                    store.insert(installation_id.to_string(), None);
+                    false
+                }
+                None => false,
+            }
+        };
+
         let outcome = RevokeOutcome {
             installation_id: installation_id.to_string(),
-            token_revoked: true,
+            token_revoked,
             processing_halted: true,
         };
         (outcome, record)
