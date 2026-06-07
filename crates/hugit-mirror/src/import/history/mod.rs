@@ -15,6 +15,7 @@
 //! This module does NOT reference the PR/issue (E2b) module or any intent-synthesis path.
 
 use hugit_contracts::EventRecord;
+use hugit_refstore::{canonical_json, compute_this_hash};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod object_hash;
@@ -109,13 +110,18 @@ pub fn project_commit_to_event(
         "parents": commit.parents,
         "tree_oid": commit.tree_oid,
     });
-    let payload = serde_json::to_string(&payload_obj)
+    let serialized = serde_json::to_string(&payload_obj)
         .map_err(|e| ImportError::PayloadSerialize(e.to_string()))?;
+    // Chain canonical-JSON bytes (sorted keys, no insignificant whitespace) so
+    // the producer hashes exactly what a verifier re-canonicalises.
+    let payload = canonical_json(&serialized)
+        .ok_or_else(|| ImportError::PayloadSerialize("payload is not valid JSON".to_string()))?;
 
     let principal_chain = vec![principal.to_string()];
 
-    // Compute this_hash using the frozen formula from hugit-contracts.
-    let this_hash = compute_event_hash(
+    // Single-source the chain hash via the canonical formula
+    // (hugit_refstore::compute_this_hash) — never re-transcribe the byte-format.
+    let this_hash = compute_this_hash(
         prev_hash,
         COMMIT_EVENT_KIND,
         &principal_chain,
@@ -156,38 +162,6 @@ pub fn verify_byte_identity(
         });
     }
     Ok(())
-}
-
-/// Compute an EventRecord `this_hash` using the frozen formula from hugit-contracts.
-///
-/// `H(prev_hash ‖ kind ‖ principal_chain ‖ payload ‖ seq)` — SHA-256, length-prefixed.
-fn compute_event_hash(
-    prev_hash: &str,
-    kind: &str,
-    principal_chain: &[String],
-    payload: &str,
-    seq: u64,
-) -> String {
-    use sha2::{Digest, Sha256};
-
-    let mut buf: Vec<u8> = Vec::new();
-
-    fn push_lp(buf: &mut Vec<u8>, s: &str) {
-        let b = s.as_bytes();
-        buf.extend_from_slice(&(b.len() as u32).to_be_bytes());
-        buf.extend_from_slice(b);
-    }
-
-    push_lp(&mut buf, prev_hash);
-    push_lp(&mut buf, kind);
-    buf.extend_from_slice(&(principal_chain.len() as u32).to_be_bytes());
-    for p in principal_chain {
-        push_lp(&mut buf, p);
-    }
-    push_lp(&mut buf, payload);
-    buf.extend_from_slice(&seq.to_be_bytes());
-
-    hex::encode(Sha256::digest(&buf))
 }
 
 /// Import a batch of commits from a local git repository path, yielding

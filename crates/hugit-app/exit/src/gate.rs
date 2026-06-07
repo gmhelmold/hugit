@@ -11,6 +11,7 @@
 
 use crate::report::{ExitReport, ExitReportStatus};
 use hugit_contracts::EventRecord;
+use hugit_refstore::{canonical_json, compute_this_hash};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -123,8 +124,10 @@ impl MoneyGate {
         match decision {
             MoneyGateDecision::Block(reason) => Err(EnableBillingError::Blocked(reason)),
             MoneyGateDecision::Allow => {
-                // Construct the audited enable-billing event.
-                let payload = serde_json::json!({
+                // Construct the audited enable-billing event. The payload is
+                // canonical JSON (sorted keys, no insignificant whitespace) so
+                // the chained bytes match what any verifier re-canonicalises.
+                let raw_payload = serde_json::json!({
                     "action": "enable_billing",
                     "exit_report_status": "PASS",
                     "retention_rate": report.retention_rate,
@@ -133,20 +136,20 @@ impl MoneyGate {
                     "gate_evaluator_state": "Healthy",
                 })
                 .to_string();
+                let payload = canonical_json(&raw_payload).unwrap_or(raw_payload);
 
-                // Compute this_hash per the frozen formula in EventRecord:
-                // H(prev_hash ‖ kind ‖ principal_chain ‖ payload ‖ seq)
+                // Single-source the chain hash via the canonical formula
+                // (hugit_refstore::compute_this_hash) — never re-transcribe.
                 let kind = "hugit.billing.enable";
-                let principal_chain_str = principal.to_string();
-                let this_hash =
-                    compute_event_hash(prev_hash, kind, &principal_chain_str, &payload, seq);
+                let principal_chain = vec![principal.to_string()];
+                let this_hash = compute_this_hash(prev_hash, kind, &principal_chain, &payload, seq);
 
                 Ok(EventRecord {
                     seq,
                     prev_hash: prev_hash.to_string(),
                     this_hash,
                     kind: kind.to_string(),
-                    principal_chain: vec![principal.to_string()],
+                    principal_chain,
                     payload,
                     recorded_at: current_epoch_ms(),
                 })
@@ -159,35 +162,6 @@ impl Default for MoneyGate {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Compute the event hash per the frozen formula:
-/// H(prev_hash ‖ kind ‖ principal_chain ‖ payload ‖ seq)
-/// where H = SHA-256 (stubbed as a hex string for the non-crypto dependency version).
-///
-/// In production this would use sha2; for the gate module we compute it
-/// deterministically using the length-prefixed concatenation spec.
-fn compute_event_hash(
-    prev_hash: &str,
-    kind: &str,
-    principal_chain: &str,
-    payload: &str,
-    seq: u64,
-) -> String {
-    use sha2::{Digest, Sha256};
-
-    // FROZEN formula (EventRecord doc, WP-00): SHA-256 over length-prefixed
-    // fields (4-byte BE u32 prefixes), seq as 8-byte BE u64.
-    // (Lead FIX-FIRST at integration: DefaultHasher stub → real SHA-256;
-    // digest convention is contract-frozen, not deferrable.)
-    let mut buf: Vec<u8> = Vec::new();
-    for field in [prev_hash, kind, principal_chain, payload] {
-        buf.extend_from_slice(&(field.len() as u32).to_be_bytes());
-        buf.extend_from_slice(field.as_bytes());
-    }
-    buf.extend_from_slice(&seq.to_be_bytes());
-    let digest = Sha256::digest(&buf);
-    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Return current Unix epoch milliseconds (stub for no-std compat).

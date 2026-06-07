@@ -382,6 +382,32 @@ fn item_6_money_gate_blocks_billing_until_pass() {
         "event must have principal chain"
     );
 
+    // R1 ORACLE: the enable-billing this_hash MUST be byte-identical to the
+    // canonical single-source formula (hugit_refstore::compute_this_hash) over
+    // the (non-empty) principal_chain. RED on the old hand-rolled hash that
+    // hashed the principal as one plain LP field with no VEC element-count
+    // prefix; GREEN once routed to canonical.
+    let expected_hash = hugit_refstore::compute_this_hash(
+        &event.prev_hash,
+        &event.kind,
+        &event.principal_chain,
+        &event.payload,
+        event.seq,
+    );
+    assert_eq!(
+        event.this_hash, expected_hash,
+        "enable-billing this_hash must equal the canonical compute_this_hash"
+    );
+    // ...and a genesis-slot copy MUST verify against the canonical verifier.
+    let genesis_event = gate
+        .try_enable_billing(&pass_report, "gustavo@humangr.com", &"0".repeat(64), 0)
+        .expect("genesis-seq enable-billing event must build");
+    let mut log = hugit_refstore::EventLog::new();
+    log.push_record(genesis_event)
+        .expect("genesis-seq enable-billing record must push");
+    hugit_refstore::verify_chain(log.records())
+        .expect("enable-billing record must verify against the canonical chain");
+
     // (b) FAIL report → gate blocks billing.
     let two_unprompted = vec![
         mk_signal("a", FeedbackKind::Unprompted),

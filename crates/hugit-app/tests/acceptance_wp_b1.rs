@@ -66,6 +66,31 @@ fn item_1_forged_webhook_rejected() {
         "payload must reference the delivery_id"
     );
 
+    // R1 ORACLE: the emitted this_hash MUST be byte-identical to the canonical
+    // single-source formula (hugit_refstore::compute_this_hash) over the
+    // canonical-JSON payload. This is RED on the old hand-rolled
+    // compute_event_hash (which omitted the VEC element-count prefix on the
+    // non-empty principal_chain) and GREEN once routed to canonical.
+    let expected_hash = hugit_refstore::compute_this_hash(
+        &record.prev_hash,
+        &record.kind,
+        &record.principal_chain,
+        &record.payload,
+        record.seq,
+    );
+    assert_eq!(
+        record.this_hash, expected_hash,
+        "webhook.rejected this_hash must equal the canonical compute_this_hash"
+    );
+    // ...and the record (rebuilt at the genesis slot) MUST verify against the
+    // canonical verifier — proving producer ≡ verify_chain end to end.
+    let mut log = hugit_refstore::EventLog::new();
+    let genesis_record = build_webhook_rejected_record("delivery-abc", &genesis_hash, 0, 1_000_000);
+    log.push_record(genesis_record)
+        .expect("genesis-seq webhook.rejected record must push");
+    hugit_refstore::verify_chain(log.records())
+        .expect("webhook.rejected record must verify against the canonical chain");
+
     // Verify the WebhookProcessor also produces the correct error path.
     let processor = WebhookProcessor::new(secret.to_vec());
     let proc_result = processor.process(
@@ -334,6 +359,21 @@ fn item_5_uninstall_revokes_access_and_halts_processing() {
         "audit payload must reference the installation_id"
     );
     assert_eq!(record.recorded_at, recorded_at);
+
+    // R1 ORACLE: installation.revoked this_hash must equal the canonical
+    // compute_this_hash over its (non-empty) principal_chain — RED on the old
+    // count-prefix-less hand-rolled hash, GREEN on canonical routing.
+    let expected_revoked_hash = hugit_refstore::compute_this_hash(
+        &record.prev_hash,
+        &record.kind,
+        &record.principal_chain,
+        &record.payload,
+        record.seq,
+    );
+    assert_eq!(
+        record.this_hash, expected_revoked_hash,
+        "installation.revoked this_hash must equal the canonical compute_this_hash"
+    );
 
     // Verify the direct builder function also produces correct records.
     let record2 =

@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 hugit-contracts = { path = "../hugit-contracts" }
+hugit-refstore = { path = "../hugit-refstore" }
 hugit-app-sidecar = { path = "sidecar" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -17,6 +18,7 @@ thiserror = "1"
 
 [dev-dependencies]
 serde_json = "1"
+hugit-refstore = { path = "../hugit-refstore" }
 
 [[test]]
 name = "acceptance_wp_b1"
