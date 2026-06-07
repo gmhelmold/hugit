@@ -15,3 +15,7 @@ hex = "0.4"
 [[test]]
 name = "acceptance_d8"
 path = "tests/acceptance_d8.rs"
+
+[[test]]
+name = "acceptance_c6"
+path = "tests/acceptance_c6.rs"
