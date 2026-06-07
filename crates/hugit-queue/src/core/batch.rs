@@ -7,6 +7,32 @@
 use crate::core::affected::AffectedSet;
 use crate::core::state::EntryState;
 use hugit_contracts::LandableEntry;
+use std::collections::BTreeSet;
+
+/// Why a batch could not be constructed from a set of entries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BatchError {
+    /// Two (or more) entries share the same `order_index`. Queue order is the
+    /// load-bearing ⑤ invariant; a duplicate index makes the order ambiguous
+    /// (a sort would pick an arbitrary winner), so it is rejected rather than
+    /// silently tolerated. Carries the duplicated index.
+    DuplicateOrderIndex(u64),
+}
+
+impl std::fmt::Display for BatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BatchError::DuplicateOrderIndex(i) => {
+                write!(
+                    f,
+                    "duplicate order_index {i} — queue order would be ambiguous"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for BatchError {}
 
 /// One landable change inside a batch: its frozen contract identity, its
 /// affected check-keys (B3), and its current state-machine state.
@@ -60,23 +86,50 @@ impl Batch {
         }
     }
 
-    /// Build a batch from landable entries paired with their affected-sets.
-    /// Entries are sorted into strict `order_index` order on construction so
-    /// that iteration order *is* queue order — there is no later opportunity
-    /// to land out of order.
-    pub fn from_entries(
+    /// Build a batch from landable entries paired with their affected-sets,
+    /// rejecting a duplicate `order_index`.
+    ///
+    /// Entries are sorted into strict `order_index` order so that iteration
+    /// order *is* queue order — there is no later opportunity to land out of
+    /// order. A duplicate `order_index` is refused with
+    /// [`BatchError::DuplicateOrderIndex`]: two entries at the same position
+    /// make the queue order ambiguous, which would silently undermine ⑤.
+    pub fn try_from_entries(
         batch_id: impl Into<String>,
         entries: impl IntoIterator<Item = (LandableEntry, AffectedSet)>,
-    ) -> Self {
+    ) -> Result<Self, BatchError> {
         let mut entries: Vec<BatchEntry> = entries
             .into_iter()
             .map(|(l, a)| BatchEntry::new(l, a))
             .collect();
+        // Reject duplicate order_index before sorting — a duplicate would let a
+        // stable sort pick an arbitrary winner and bury the ambiguity.
+        let mut seen = BTreeSet::new();
+        for e in &entries {
+            if !seen.insert(e.order_index()) {
+                return Err(BatchError::DuplicateOrderIndex(e.order_index()));
+            }
+        }
         entries.sort_by_key(|e| e.order_index());
-        Self {
+        Ok(Self {
             batch_id: batch_id.into(),
             entries,
-        }
+        })
+    }
+
+    /// Build a batch, panicking on a duplicate `order_index`.
+    ///
+    /// Convenience over [`Batch::try_from_entries`] for call sites that have
+    /// already established unique queue positions (tests, fixtures). A duplicate
+    /// is a contract violation, so it panics rather than silently picking a
+    /// winner — production paths that accept untrusted ordering should use
+    /// [`Batch::try_from_entries`] and handle the error.
+    pub fn from_entries(
+        batch_id: impl Into<String>,
+        entries: impl IntoIterator<Item = (LandableEntry, AffectedSet)>,
+    ) -> Self {
+        Self::try_from_entries(batch_id, entries)
+            .expect("from_entries: duplicate order_index (use try_from_entries to handle)")
     }
 
     /// The entries in strict queue order.
@@ -135,5 +188,31 @@ mod tests {
         let ids: Vec<&str> = batch.entries().iter().map(|e| e.item_id()).collect();
         assert_eq!(ids, vec!["a", "b", "c"]);
         assert!(batch.is_queue_ordered());
+    }
+
+    #[test]
+    fn try_from_entries_rejects_duplicate_order_index() {
+        let res = Batch::try_from_entries(
+            "dup",
+            [
+                (landable("a", 0), AffectedSet::new(["x"])),
+                (landable("b", 1), AffectedSet::new(["y"])),
+                // Same order_index as "b" → ambiguous queue position.
+                (landable("c", 1), AffectedSet::new(["z"])),
+            ],
+        );
+        assert_eq!(res.unwrap_err(), BatchError::DuplicateOrderIndex(1));
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate order_index")]
+    fn from_entries_panics_on_duplicate_order_index() {
+        let _ = Batch::from_entries(
+            "dup",
+            [
+                (landable("a", 0), AffectedSet::new(["x"])),
+                (landable("b", 0), AffectedSet::new(["y"])),
+            ],
+        );
     }
 }
