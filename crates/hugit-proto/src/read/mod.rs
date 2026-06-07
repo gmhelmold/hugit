@@ -16,3 +16,11 @@
 pub mod negotiate;
 pub mod pack;
 pub mod serve;
+
+// WP-D2b — the read path at the edges (D2 items ③④⑤⑥⑦): client matrix + jj
+// stacked changes, the per-request CPU budget + chunked fallback, and the scale
+// ceilings + degradation invariant. These load and prove the D2a core above;
+// they never modify negotiate/pack/serve.
+pub mod clients;
+pub mod fallback;
+pub mod limits;
