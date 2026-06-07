@@ -119,3 +119,55 @@ pub fn plan_serve(
     }
     Ok(ServePlan::Chunked(packs))
 }
+
+/// A deterministic per-byte CPU cost proxy: how many *serialized pack bytes* the
+/// platform packs per millisecond. Encoding a pack is bounded by the bytes it
+/// emits, so the serialized pack size is a stable, real proxy for the serve CPU
+/// cost — unlike a caller-injected estimate, it is *measured from the actual
+/// assembled pack*. Fixed by contract so the gate is deterministic.
+pub const PACK_BYTES_PER_MS: u64 = 64 * 1024;
+
+/// The **measured** CPU cost (ms) of serving `pack` — derived from the real
+/// assembled pack's serialized byte length, not an injected guess. This is what
+/// drives the single-pack-vs-chunked decision in [`plan_serve_measured`].
+pub fn measure_serve_cost_ms(pack: &PackAssembly) -> u64 {
+    // ceil(bytes / per_ms): at least 1ms for any non-empty pack.
+    let bytes = pack.bytes.len() as u64;
+    bytes.div_ceil(PACK_BYTES_PER_MS)
+}
+
+/// Assemble a serve plan for `oids`, choosing single-pack vs chunked fallback by
+/// the **measured** cost of the actually-assembled pack — no injected estimate.
+///
+/// The whole closure is packed once; its serialized byte length is mapped to a
+/// real CPU-cost proxy via [`measure_serve_cost_ms`] and compared against
+/// `budget_ms` (production passes [`cpu_budget_ms`]; the budget is a parameter so
+/// the routing can be proven against real, modestly-sized fixtures). Within budget
+/// → that single pack is returned (already assembled). Over budget → the closure
+/// is split into chunks of at most `chunk_size` objects, each packed separately,
+/// so no single request runs unbounded. The decision is driven by what the serve
+/// *actually costs*, closing the "cost was whatever the caller injected" gap.
+pub fn plan_serve_measured(
+    source: &dyn ObjectSource,
+    oids: &[ObjectId],
+    budget_ms: u64,
+    chunk_size: usize,
+) -> Result<(ServePlan, u64), PackError> {
+    // Measure by ASSEMBLING the real single pack and sizing it.
+    let full = assemble_pack(source, oids)?;
+    let measured_cost_ms = measure_serve_cost_ms(&full);
+
+    if measured_cost_ms <= budget_ms {
+        return Ok((ServePlan::SinglePack(full), measured_cost_ms));
+    }
+
+    let chunk_size = chunk_size.max(1);
+    let mut packs = Vec::new();
+    for chunk in oids.chunks(chunk_size) {
+        packs.push(assemble_pack(source, chunk)?);
+    }
+    if packs.is_empty() {
+        packs.push(assemble_pack(source, &[])?);
+    }
+    Ok((ServePlan::Chunked(packs), measured_cost_ms))
+}

@@ -42,9 +42,13 @@ pub use read::serve::{ServeError, serve_clone, serve_fetch};
 pub use read::clients::{
     ChangeId, ClientKind, Stack, StackEntry, git_version_meets_floor, served_object_ids,
 };
-pub use read::fallback::{ServePlan, cpu_budget_ms, plan_serve, within_cpu_budget};
+pub use read::fallback::{
+    PACK_BYTES_PER_MS, ServePlan, cpu_budget_ms, measure_serve_cost_ms, plan_serve,
+    plan_serve_measured, within_cpu_budget,
+};
 pub use read::limits::{
-    Admission, CeilingRow, Dimension, SmartLayers, admit, ceiling_table, serve_clone_degradable,
+    Admission, CeilingRow, DegradedServe, Dimension, SmartLayers, admit, ceiling_table,
+    serve_clone_degradable,
 };
 
 // WP-D3b — write path: push concurrency/total-order, external-change, flag-gate.
@@ -54,3 +58,7 @@ pub use write::external::{
 };
 pub use write::flag::{FlagGate, WritePathDisabled};
 pub use write::order::{PushOutcome, RefUpdate, SerializedWriter, StaleRef};
+// The real receive-pack ingest single-writer point (compare-and-append + total
+// order across concurrent pushes). Its `RefUpdate`/`ReceiveError`/… are reached
+// via `write::receive::` to avoid colliding with the order module's `RefUpdate`.
+pub use write::receive::SerializedReceiver;

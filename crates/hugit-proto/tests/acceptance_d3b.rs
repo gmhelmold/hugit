@@ -19,6 +19,10 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use hugit_proto::write::receive::{
+    ReceiveError, ReceiveRequest, RecvLimits, RefUpdate as RecvRefUpdate, SerializedReceiver,
+};
+use hugit_proto::write::store::InMemoryCas;
 use hugit_proto::{
     Attribution, ExternalChangeError, FlagGate, PushOutcome, RawPush, RefUpdate, SerializedWriter,
     WritePathDisabled, is_external_change_kind, record_external_change,
@@ -29,7 +33,9 @@ use hugit_refstore::intent::{INTENT_LANDED_KIND, RAW_PUSH_KINDS, intents_from_lo
 
 #[path = "push_concurrency_negatives/mod.rs"]
 mod fixtures;
-use fixtures::{advance, create, drive_overlapping, oid};
+use fixtures::{
+    advance, create, drive_overlapping, drive_receivers, oid, real_advance_pack, real_pack,
+};
 
 // ─── ② concurrent pushes: total order + correct stale rejection ──────────────
 
@@ -147,6 +153,151 @@ fn item_2_concurrent_pushes_total_order_stale_rejection() {
     assert!(
         tip == oid("winA") || tip == oid("winB"),
         "the surviving tip is one of the two racers' targets"
+    );
+}
+
+// ─── ② DEFECT-2/3: total order + stale rejection on the REAL ingest path ──────
+
+/// The previous test proves the order *module*. This one proves the REAL ingest
+/// (`receive_pack` via the single-writer `SerializedReceiver`) routes through
+/// compare-and-append: concurrent REAL pushes (genuine packs, overlapping
+/// threads) get a strict contiguous total order, and two racers advancing the
+/// SAME ref from the same expected tip yield exactly one winner + one stale
+/// rejection — no lost update. Before the fix `receive_pack` ignored the expected
+/// tip entirely, so both racers would have "succeeded" (lost-update); that makes
+/// this RED on main.
+#[test]
+fn item_2_real_ingest_concurrent_total_order_stale_rejection() {
+    let gate = FlagGate::self_hosted_alpha();
+
+    // --- total order: N concurrent CREATES of distinct refs all land at
+    //     distinct, contiguous, monotonically increasing log seqs. ---
+    let n = 5usize;
+    let receiver = Arc::new(SerializedReceiver::new(
+        InMemoryCas::new(),
+        gate,
+        RecvLimits::default(),
+    ));
+    let packs: Vec<_> = (0..n).map(|i| real_pack(&format!("c{i}"))).collect();
+    let requests: Vec<ReceiveRequest> = packs
+        .iter()
+        .enumerate()
+        .map(|(i, rp)| ReceiveRequest {
+            pack: rp.pack.clone(),
+            update: RecvRefUpdate {
+                ref_name: format!("refs/heads/b{i}"),
+                expected: None,
+                new_oid: rp.head_oid.clone(),
+            },
+            principal_chain: vec![format!("agent-{i}")],
+            recorded_at: 1_000 + i as u64,
+        })
+        .collect();
+
+    let results = drive_receivers(Arc::clone(&receiver), requests);
+    // Every distinct-ref create landed.
+    let seqs: BTreeSet<u64> = results
+        .iter()
+        .map(|r| r.as_ref().expect("distinct-ref create must land").event.seq)
+        .collect();
+    assert_eq!(
+        seqs.len(),
+        n,
+        "every concurrent push got a DISTINCT total-order seq"
+    );
+    assert_eq!(
+        seqs,
+        (0..n as u64).collect::<BTreeSet<u64>>(),
+        "concurrent real pushes occupy a contiguous, gap-free total order"
+    );
+    assert_eq!(
+        receiver.log_len(),
+        n,
+        "log holds exactly the N landed pushes"
+    );
+    // Spine is strictly monotonic in seq.
+    let log = receiver.snapshot_log();
+    for (i, rec) in log.records().iter().enumerate() {
+        assert_eq!(rec.seq, i as u64, "record {i} out of total order");
+    }
+
+    // --- stale rejection: two pushes RACE the SAME ref from the same base. ---
+    let receiver = Arc::new(SerializedReceiver::new(
+        InMemoryCas::new(),
+        gate,
+        RecvLimits::default(),
+    ));
+    // Seed `main` at a base commit.
+    let base = real_pack("base");
+    let seed = receiver
+        .receive(&ReceiveRequest {
+            pack: base.pack.clone(),
+            update: RecvRefUpdate {
+                ref_name: "refs/heads/main".to_string(),
+                expected: None,
+                new_oid: base.head_oid.clone(),
+            },
+            principal_chain: vec!["seed".to_string()],
+            recorded_at: 1,
+        })
+        .expect("seed create lands");
+    assert_eq!(seed.event.seq, 0);
+
+    // Two agents both believe main is at `base` and advance it — a real race.
+    let adv_a = real_advance_pack("base", "winA");
+    let adv_b = real_advance_pack("base", "winB");
+    let racers = vec![
+        ReceiveRequest {
+            pack: adv_a.pack.clone(),
+            update: RecvRefUpdate {
+                ref_name: "refs/heads/main".to_string(),
+                expected: Some(base.head_oid.clone()),
+                new_oid: adv_a.head_oid.clone(),
+            },
+            principal_chain: vec!["agentA".to_string()],
+            recorded_at: 10,
+        },
+        ReceiveRequest {
+            pack: adv_b.pack.clone(),
+            update: RecvRefUpdate {
+                ref_name: "refs/heads/main".to_string(),
+                expected: Some(base.head_oid.clone()),
+                new_oid: adv_b.head_oid.clone(),
+            },
+            principal_chain: vec!["agentB".to_string()],
+            recorded_at: 11,
+        },
+    ];
+    let results = drive_receivers(Arc::clone(&receiver), racers);
+    let landed = results.iter().filter(|r| r.is_ok()).count();
+    let stale = results
+        .iter()
+        .filter(|r| matches!(r, Err(ReceiveError::StaleRef { .. })))
+        .count();
+    assert_eq!(landed, 1, "exactly one racer wins the contended ref");
+    assert_eq!(
+        stale, 1,
+        "the loser is correctly rejected as STALE (no lost update)"
+    );
+
+    // The winner is durable; the log grew by exactly one (loser appended nothing).
+    assert_eq!(
+        receiver.log_len(),
+        2,
+        "seed + one winner; the stale push appended NOTHING"
+    );
+    let tip = receiver
+        .ref_view()
+        .get("refs/heads/main")
+        .unwrap()
+        .to_string();
+    assert!(
+        tip == adv_a.head_oid || tip == adv_b.head_oid,
+        "the surviving tip is one of the two racers' targets"
+    );
+    assert_ne!(
+        tip, base.head_oid,
+        "the ref genuinely advanced off the base"
     );
 }
 

@@ -67,6 +67,91 @@ impl Fixture {
             _src: src,
         }
     }
+
+    /// Build an **incomplete** pack: a one-file repo whose pack carries only the
+    /// commit + tree objects but NOT the blob the tree references. The commit oid
+    /// is present in the pushed objects, yet its reachable closure is missing the
+    /// blob — so the ref target is *present-but-not-reachable*. The write path
+    /// must reject it (reachability validation), where a present-anywhere check
+    /// would wrongly accept it.
+    pub fn build_incomplete_pack() -> Self {
+        let src = ScratchDir::new("hugit-fx-incomplete");
+        let p = src.path();
+        git(p, &["init", "-q", "-b", "main", "."]);
+        git(p, &["config", "user.email", "test@hugit.dev"]);
+        git(p, &["config", "user.name", "hugit-test"]);
+        git(p, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(p.join("a"), "incomplete\n").expect("write fixture file");
+        git(p, &["add", "a"]);
+        let env_date = "2026-06-05T00:00:00 +0000";
+        git_env(
+            p,
+            &["commit", "-q", "-m", "incomplete commit"],
+            &[
+                ("GIT_AUTHOR_DATE", env_date),
+                ("GIT_COMMITTER_DATE", env_date),
+            ],
+        );
+        let head_oid = git(p, &["rev-parse", "HEAD"]).trim().to_string();
+        let tree_oid = git(p, &["rev-parse", "HEAD^{tree}"]).trim().to_string();
+        let head_commit_bytes = git_bytes(p, &["cat-file", "commit", &head_oid]);
+
+        // Pack ONLY the commit + tree by feeding their explicit oids (no --revs),
+        // so the blob is deliberately excluded → an incomplete closure.
+        let pack = git_bytes_stdin(
+            p,
+            &["pack-objects", "--stdout"],
+            format!("{head_oid}\n{tree_oid}\n").as_bytes(),
+        );
+
+        Fixture {
+            pack,
+            ref_name: "refs/heads/main".to_string(),
+            head_oid,
+            head_commit_bytes,
+            _src: src,
+        }
+    }
+
+    /// Build a **decompression-bomb** pack: a one-commit repo whose single blob is
+    /// `inflated_bytes` of highly-compressible zeros. The pack is small on the wire
+    /// (well under any compressed ceiling) yet inflates to `inflated_bytes` — the
+    /// classic decompression bomb the write path must reject by the inflated cap.
+    pub fn build_bomb_pack(inflated_bytes: usize) -> Self {
+        let src = ScratchDir::new("hugit-fx-bomb");
+        let p = src.path();
+        git(p, &["init", "-q", "-b", "main", "."]);
+        git(p, &["config", "user.email", "test@hugit.dev"]);
+        git(p, &["config", "user.name", "hugit-test"]);
+        git(p, &["config", "commit.gpgsign", "false"]);
+        // A highly-compressible payload: a run of zero bytes.
+        std::fs::write(p.join("big"), vec![0u8; inflated_bytes]).expect("write bomb blob");
+        git(p, &["add", "big"]);
+        let env_date = "2026-06-05T00:00:00 +0000";
+        git_env(
+            p,
+            &["commit", "-q", "-m", "bomb commit"],
+            &[
+                ("GIT_AUTHOR_DATE", env_date),
+                ("GIT_COMMITTER_DATE", env_date),
+            ],
+        );
+        let head_oid = git(p, &["rev-parse", "HEAD"]).trim().to_string();
+        let head_commit_bytes = git_bytes(p, &["cat-file", "commit", &head_oid]);
+        let pack = git_bytes_stdin(
+            p,
+            &["pack-objects", "--revs", "--stdout"],
+            format!("{head_oid}\n").as_bytes(),
+        );
+
+        Fixture {
+            pack,
+            ref_name: "refs/heads/main".to_string(),
+            head_oid,
+            head_commit_bytes,
+            _src: src,
+        }
+    }
 }
 
 /// The head of a clone: its oid and its raw commit object bytes.
