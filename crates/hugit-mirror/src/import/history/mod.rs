@@ -294,16 +294,71 @@ pub fn read_git_object(
         )));
     }
 
-    // Parse batch output: "<oid> <type> <size>\n<bytes>\n"
+    // Parse batch output: "<oid> <type> <size>\n<bytes>\n".
+    // The header is VALIDATED — `<oid>` must match the requested oid, `<type>`
+    // must match the verified kind, `<size>` must parse — and the body is sliced
+    // to EXACTLY `<size>` bytes (never "everything after the first newline",
+    // which would over-read past the object into the trailing framing).
     let output = &batch_out.stdout;
-    let header_end = output.iter().position(|&b| b == b'\n').unwrap_or(0);
-    let object_bytes = output.get(header_end + 1..).unwrap_or(&[]).to_vec();
-    // Strip the trailing newline added by --batch.
-    let object_bytes = if object_bytes.ends_with(b"\n") {
-        object_bytes[..object_bytes.len() - 1].to_vec()
-    } else {
-        object_bytes
-    };
+    let header_end = output
+        .iter()
+        .position(|&b| b == b'\n')
+        .ok_or_else(|| ImportError::GitCommand(format!("cat-file --batch: no header for {oid}")))?;
+    let header = std::str::from_utf8(&output[..header_end]).map_err(|e| {
+        ImportError::GitCommand(format!("cat-file --batch: non-UTF8 header for {oid}: {e}"))
+    })?;
+
+    // A missing object yields "<oid> missing" — surface as ObjectNotFound.
+    if header.ends_with(" missing") || header == "missing" {
+        return Err(ImportError::ObjectNotFound {
+            oid: oid.to_string(),
+        });
+    }
+
+    let mut parts = header.split(' ');
+    let hdr_oid = parts.next().unwrap_or_default();
+    let hdr_type = parts.next().ok_or_else(|| {
+        ImportError::GitCommand(format!("cat-file --batch: malformed header {header:?}"))
+    })?;
+    let hdr_size_str = parts.next().ok_or_else(|| {
+        ImportError::GitCommand(format!("cat-file --batch: header missing size {header:?}"))
+    })?;
+    if parts.next().is_some() {
+        return Err(ImportError::GitCommand(format!(
+            "cat-file --batch: header has trailing fields {header:?}"
+        )));
+    }
+
+    if hdr_oid != oid {
+        return Err(ImportError::GitCommand(format!(
+            "cat-file --batch: header oid {hdr_oid} != requested {oid}"
+        )));
+    }
+    if hdr_type != kind {
+        return Err(ImportError::GitCommand(format!(
+            "cat-file --batch: header type {hdr_type} != verified kind {kind} for {oid}"
+        )));
+    }
+    let size: usize = hdr_size_str.parse().map_err(|e| {
+        ImportError::GitCommand(format!(
+            "cat-file --batch: invalid size {hdr_size_str:?}: {e}"
+        ))
+    })?;
+
+    // Slice EXACTLY `size` bytes of body, starting right after the header
+    // newline. The body must be present in full (git appends a trailing '\n'
+    // after it, so there must be at least `size + 1` bytes available).
+    let body_start = header_end + 1;
+    let body_end = body_start.checked_add(size).ok_or_else(|| {
+        ImportError::GitCommand(format!("cat-file --batch: size overflow for {oid}"))
+    })?;
+    if output.len() < body_end {
+        return Err(ImportError::GitCommand(format!(
+            "cat-file --batch: truncated body for {oid} (have {}, need {body_end})",
+            output.len()
+        )));
+    }
+    let object_bytes = output[body_start..body_end].to_vec();
 
     Ok(GitObject {
         oid: oid.to_string(),

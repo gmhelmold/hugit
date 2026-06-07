@@ -26,15 +26,139 @@
 //! - `hugit_mirror::outbound::{OutboundWriter, FixtureMirror, SoakSummary,
 //!    AppAuth, live_landing_attempt, LiveLandingOutcome, SLA_BOUND_MS}`
 
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 use hugit_contracts::EventRecord;
 use hugit_mirror::outbound::{
-    AppAuth, FixtureMirror, LiveLandingOutcome, OutboundWriter, SLA_BOUND_MS, SoakSummary,
-    live_landing_attempt,
+    AppAuth, FixtureMirror, LiveLandingOutcome, MirrorPushTarget, OutboundWriter, PushError,
+    SLA_BOUND_MS, SoakSummary, live_landing_attempt,
 };
 use hugit_mirror::queue::{EnqueueError, OutageQueue, QUEUE_CAPACITY, QueueEntry};
 use hugit_mirror::verify::{ContentHash, VerifyOutcome, verify_push};
+
+// ── real-git mirror harness (drives the readback through actual git) ──────────
+
+/// A unique temp dir, removed on drop.
+struct TmpDir(PathBuf);
+
+impl TmpDir {
+    fn new(tag: &str) -> Self {
+        let mut p = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        p.push(format!("hugit-e1a-{tag}-{nanos}-{}", std::process::id()));
+        std::fs::create_dir_all(&p).unwrap();
+        TmpDir(p)
+    }
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TmpDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn git(cwd: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("git must be on PATH");
+    assert!(
+        out.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+/// A `MirrorPushTarget` backed by a REAL bare git repository.
+///
+/// `push_ref` writes the supplied object into the real repo and points the ref
+/// at it, then reads the ref's tip back via `git rev-parse` — the observed hash
+/// is git's OWN computed oid, NOT the pushed value echoed. This is the genuine
+/// end-to-end readback the soak/landing proof needs (item ①/③).
+struct RealGitMirror {
+    repo: PathBuf,
+    pushed: Vec<String>,
+}
+
+impl RealGitMirror {
+    /// Initialise a real bare repo to act as the mirror.
+    fn new(dir: &Path) -> Self {
+        std::fs::create_dir_all(dir).unwrap();
+        git(dir, &["init", "-q", "--bare"]);
+        Self {
+            repo: dir.to_path_buf(),
+            pushed: Vec::new(),
+        }
+    }
+
+    /// Write `content` as a real git blob and return its real git oid.
+    /// Callers use this so the *expected* oid is git's own — a real round-trip.
+    fn hash_object(&self, content: &str) -> String {
+        use std::io::Write as _;
+        let mut child = Command::new("git")
+            .args([
+                "-C",
+                self.repo.to_str().unwrap(),
+                "hash-object",
+                "-w",
+                "--stdin",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(content.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    fn pushed_order(&self) -> &[String] {
+        &self.pushed
+    }
+}
+
+impl MirrorPushTarget for RealGitMirror {
+    fn push_ref(&mut self, ref_name: &str, oid: &ContentHash) -> Result<ContentHash, PushError> {
+        // Point the ref at the supplied (real) object oid in the real repo.
+        let res = Command::new("git")
+            .args([
+                "-C",
+                self.repo.to_str().unwrap(),
+                "update-ref",
+                ref_name,
+                oid.as_str(),
+            ])
+            .output()
+            .expect("git update-ref");
+        if !res.status.success() {
+            return Err(PushError::Rejected {
+                ref_name: ref_name.to_string(),
+                detail: String::from_utf8_lossy(&res.stderr).trim().to_string(),
+            });
+        }
+        self.pushed.push(ref_name.to_string());
+        // READ BACK the real tip oid from git — never echo the input.
+        let observed = git(&self.repo, &["rev-parse", ref_name]);
+        Ok(ContentHash::new(observed))
+    }
+}
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -76,6 +200,59 @@ fn item_1_landing_hash_verified_within_sla() {
     assert!(
         report.verified_within_sla(),
         "push must be verified-within-SLA"
+    );
+
+    // (a2) REAL readback: push to an actual bare git repo and verify against the
+    //      oid git itself reports — not an echo. This is the genuine end-to-end
+    //      landing proof (no FixtureMirror echo-by-construction).
+    let tmp = TmpDir::new("land-real");
+    let mut mirror = RealGitMirror::new(&tmp.path().join("mirror.git"));
+    let real_oid = mirror.hash_object("landed blob content for refs/mirror/real\n");
+    let other_oid = mirror.hash_object("a different blob\n");
+
+    // Fail-CLOSED first, while we still hold the mirror directly: push the
+    // OTHER object to a ref, then verify it against the WRONG expected oid. The
+    // observed value comes from `git rev-parse` (a real readback), so the
+    // mismatch is genuine, not constructed. (`refs/mirror/...` so update-ref
+    // accepts arbitrary objects, not only commits.)
+    let observed_other = mirror
+        .push_ref("refs/mirror/real2", &ContentHash::new(other_oid.clone()))
+        .expect("real push must succeed");
+    assert_eq!(
+        observed_other.as_str(),
+        other_oid,
+        "observed oid must be git's own readback"
+    );
+    match verify_push(
+        "refs/mirror/real2",
+        &ContentHash::new(real_oid.clone()),
+        &observed_other,
+    ) {
+        VerifyOutcome::Diverged(d) => assert_eq!(d.observed.as_str(), other_oid),
+        VerifyOutcome::Verified { .. } => {
+            panic!("a wrong expected oid must fail-CLOSED against the real readback")
+        }
+    }
+
+    // Now the verified path through the writer, end-to-end against real git.
+    let real_entry = QueueEntry::new(7, "refs/mirror/real", real_oid.clone());
+    let mut real_writer = OutboundWriter::new(mirror);
+    let real_report = real_writer.replicate(&real_entry, Duration::from_millis(30));
+    assert!(
+        real_report.verify.is_verified(),
+        "push to a REAL git repo must verify against git's own re-read oid"
+    );
+    assert!(real_report.verified_within_sla());
+    match &real_report.verify {
+        VerifyOutcome::Verified { hash, .. } => assert_eq!(hash.as_str(), real_oid),
+        VerifyOutcome::Diverged(_) => panic!("real readback must verify"),
+    }
+    // The push really went through the real repo (recorded in push order).
+    assert!(
+        real_writer
+            .target()
+            .pushed_order()
+            .contains(&"refs/mirror/real".to_string())
     );
 
     // (b) The byte-identity check is real: a mirror that reports a different
@@ -144,6 +321,37 @@ fn item_3_soak_72h_all_verified() {
     assert!(
         summary.all_verified() || summary.total == 0,
         "every soak drain must be 100% verified within SLA, zero divergence"
+    );
+
+    // REAL-GIT readback slice of the soak: drain a batch through an actual bare
+    // git repo so item ③ is genuinely verified end-to-end (not echo-by-FixtureMirror).
+    let tmp = TmpDir::new("soak-real");
+    let mirror = RealGitMirror::new(&tmp.path().join("mirror.git"));
+    let mut real_q = OutageQueue::new();
+    for i in 0..16u64 {
+        let ref_name = format!("refs/mirror/soak-real-{i}");
+        let oid = mirror.hash_object(&format!("soak object {i}\n"));
+        real_q
+            .enqueue(QueueEntry::new(i, &ref_name, oid))
+            .expect("within capacity");
+    }
+    let mut real_writer = OutboundWriter::new(mirror);
+    let reports = real_writer.drain(&mut real_q, |_| Duration::from_millis(50));
+    let real_summary = SoakSummary::from_reports(&reports);
+    assert_eq!(
+        real_summary.diverged, 0,
+        "real-git soak slice must have ZERO divergence"
+    );
+    assert!(
+        real_summary.all_verified(),
+        "real-git soak slice must be 100% verified within SLA against git's own readback"
+    );
+    // Order preserved through the real drain.
+    let order: Vec<u64> = reports.iter().map(|r| r.seq).collect();
+    assert_eq!(
+        order,
+        (0..16).collect::<Vec<_>>(),
+        "real soak preserves FIFO"
     );
 }
 

@@ -16,10 +16,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// A short-lived GitHub App installation token.
 ///
 /// Tokens are valid for 1 hour; callers should re-mint before expiry.
-#[derive(Debug, Clone)]
+///
+/// # Secret hygiene
+/// The bearer value is held in a **private** field and is NEVER printed: the
+/// [`std::fmt::Debug`] impl redacts it (mirroring
+/// [`crate::outbound::auth::InstallationToken`]). Read it only via
+/// [`InstallationToken::expose`], and never log the result.
+#[derive(Clone)]
 pub struct InstallationToken {
-    /// The bearer token value.
-    pub token: String,
+    /// PRIVATE bearer token value — accessible only via [`Self::expose`].
+    token: String,
     /// Unix epoch seconds when this token expires.
     pub expires_at: u64,
     /// The installation ID this token was minted for.
@@ -27,6 +33,22 @@ pub struct InstallationToken {
 }
 
 impl InstallationToken {
+    /// Construct an installation token from its (secret) bearer value and
+    /// non-secret coordinates.
+    pub fn new(token: impl Into<String>, expires_at: u64, installation_id: u64) -> Self {
+        Self {
+            token: token.into(),
+            expires_at,
+            installation_id,
+        }
+    }
+
+    /// Borrow the bearer token for an authenticated call. Callers must NEVER
+    /// log, print, or embed the returned value in an error.
+    pub fn expose(&self) -> &str {
+        &self.token
+    }
+
     /// Returns `true` if the token has not yet expired (with a 60-second
     /// safety margin).
     pub fn is_valid(&self) -> bool {
@@ -35,6 +57,17 @@ impl InstallationToken {
             .unwrap_or_default()
             .as_secs();
         self.expires_at > now + 60
+    }
+}
+
+impl std::fmt::Debug for InstallationToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // NEVER print the secret. Non-secret coordinates only; token redacted.
+        f.debug_struct("InstallationToken")
+            .field("token", &"<redacted>")
+            .field("expires_at", &self.expires_at)
+            .field("installation_id", &self.installation_id)
+            .finish()
     }
 }
 
@@ -116,11 +149,11 @@ impl InstallationAuthClient {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            return Ok(InstallationToken {
-                token: format!("synthetic-install-token-{installation_id}"),
-                expires_at: now + 3600,
+            return Ok(InstallationToken::new(
+                format!("synthetic-install-token-{installation_id}"),
+                now + 3600,
                 installation_id,
-            });
+            ));
         }
 
         // Production: read installation token from env (FAIL-not-skip if absent).
@@ -136,11 +169,11 @@ impl InstallationAuthClient {
             .unwrap_or_default()
             .as_secs();
 
-        Ok(InstallationToken {
-            token: env_token,
-            expires_at: now + 3600,
+        Ok(InstallationToken::new(
+            env_token,
+            now + 3600,
             installation_id,
-        })
+        ))
     }
 }
 
@@ -155,7 +188,27 @@ mod tests {
         assert_eq!(token.installation_id, 99);
         assert!(token.is_valid());
         // Must be installation-scoped, not a PAT.
-        assert!(token.token.contains("install"));
+        assert!(token.expose().contains("install"));
+    }
+
+    #[test]
+    fn token_debug_redacts_and_never_leaks_secret() {
+        // A custom redacting Debug must NOT render the bearer value (mirrors
+        // outbound/auth.rs). This is the oracle for the cleartext-leak defect.
+        let token = InstallationToken::new("super-secret-bearer-value", 0, 7);
+        let shown = format!("{token:?}");
+        assert!(
+            !shown.contains("super-secret-bearer-value"),
+            "Debug must NOT contain the secret token: {shown}"
+        );
+        assert!(
+            shown.contains("redacted"),
+            "Debug must mark the secret redacted"
+        );
+        // Non-secret coordinates may still appear.
+        assert!(shown.contains('7'));
+        // expose() is the only way to read the secret.
+        assert_eq!(token.expose(), "super-secret-bearer-value");
     }
 
     #[test]
@@ -165,7 +218,7 @@ mod tests {
         assert_eq!(client.app_id, 42);
         let token = client.installation_token(1).unwrap();
         // A PAT would not contain "install" in its name.
-        assert!(token.token.contains("install-token"));
+        assert!(token.expose().contains("install-token"));
     }
 
     #[test]

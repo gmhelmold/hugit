@@ -469,14 +469,24 @@ fn item_2_idempotency_same_source_same_id() {
         "modified PR must produce the same intent_id for re-sync"
     );
 
-    // Batch import of two identical fixtures produces two intents (the
-    // deduplication responsibility is on the *caller*, not the importer).
+    // Batch import of two identical fixtures DEDUPS to a single intent — the
+    // importer never emits a duplicate intent_id (4b fix).
     let batch = import_prissue_batch(&[fixture_pr(), fixture_pr()]);
-    assert_eq!(batch.len(), 2, "batch returns both; caller deduplicates");
     assert_eq!(
-        batch[0].sidecar.intent_id, batch[1].sidecar.intent_id,
-        "both entries share the same intent_id"
+        batch.len(),
+        1,
+        "two identical PR fixtures must dedup to ONE intent (no duplicate intent_id)"
     );
+    assert_eq!(
+        batch[0].sidecar.intent_id, intent1.sidecar.intent_id,
+        "the deduped intent keeps the stable source-derived intent_id"
+    );
+
+    // Distinct PRs are not collapsed.
+    let mut other = fixture_pr();
+    other.source_url = "https://github.com/humangr-labs/hugit/pull/2".to_string();
+    let two = import_prissue_batch(&[fixture_pr(), other]);
+    assert_eq!(two.len(), 2, "distinct PRs must remain distinct intents");
 }
 
 // ── ⑥ Structural: IntentSidecar is the output sidecar type ──────────────────

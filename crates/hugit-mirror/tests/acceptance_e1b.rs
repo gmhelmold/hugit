@@ -21,7 +21,8 @@
 //! - `hugit_mirror::{divergence, outage, refops, poll}` (this WP's Claims)
 
 use hugit_mirror::divergence::{
-    RefClass, RefState, RepairStrategy, ReversePropagation, apply_repair, classify, resolve,
+    MirrorMutation, MutationOrigin, ONE_WAY_SOURCES, RefClass, RefState, Repair, RepairStrategy,
+    apply_repair, classify, resolve, reverse_sync_surface_count,
 };
 use hugit_mirror::outage::{
     BackoffSchedule, DurableQueue, EnqueueResult, QueuedWrite, drain_to_verified,
@@ -270,11 +271,14 @@ fn item_6_webhook_loss_poll_fallback_detects_within_sla() {
 fn item_7_reverse_write_treated_as_divergence() {
     // A write made directly on the GitHub mirror moves the mirror tip away from
     // the forge tip. This is detected as divergence — NOT propagated back — and
-    // resolved forge-authoritative, with an alarm and an incident.
-    let reverse_write = RefState::new(
+    // resolved forge-authoritative, with an alarm and an incident. The
+    // mirror-write flag is charged ONLY because an actual mirror-side mutation
+    // was OBSERVED (MutationOrigin::MirrorSide), not inferred from tip-inequality.
+    let reverse_write = RefState::with_observed_mutation(
         "refs/heads/main",
         forge_tip(),    // forge unchanged (truth)
-        "e".repeat(40), // mirror moved by a direct write
+        "e".repeat(40), // mirror moved by a direct, observed write
+        MutationOrigin::MirrorSide,
     );
     assert_eq!(classify(&reverse_write), RefClass::Divergent);
 
@@ -288,22 +292,63 @@ fn item_7_reverse_write_treated_as_divergence() {
         "mirror write never becomes truth"
     );
 
+    // The only mutation primitive carries the FORGE tip — a reverse-sync value
+    // is structurally unrepresentable (no constructor takes the mirror tip).
+    let mutation = MirrorMutation::overwrite_to_forge(&res.repair);
+    assert_eq!(mutation.new_tip(), forge_tip());
+    assert_ne!(
+        mutation.new_tip(),
+        "e".repeat(40),
+        "the mirror mutation can only adopt the forge tip"
+    );
+
     // Incident records that the divergent write originated on the mirror.
     assert!(
         res.incident.mirror_write,
-        "reverse write recorded in incident"
+        "observed reverse write recorded in incident"
+    );
+
+    // False-positive guard: ordinary replication lag (tips differ, NO observed
+    // mirror mutation) is NOT charged as a mirror write.
+    let lag = RefState::new("refs/heads/main", forge_tip(), "0".repeat(40));
+    let lag_res = resolve(&lag).expect("lag is still divergence");
+    assert!(
+        !lag_res.incident.mirror_write,
+        "lag must not be falsely charged as a mirror-side write"
     );
 }
 
-// ── ⑦ zero reverse-sync codepath exists ──────────────────────────────────────
+// ── ⑦ zero reverse-sync codepath — proven STRUCTURALLY ───────────────────────
 #[test]
 fn item_7_zero_reverse_sync_codepath_absent() {
-    // The reverse-propagation codepath is structurally absent: the marker is a
-    // compile-time false, and no API reads the mirror value as authoritative.
-    const {
-        assert!(
-            !ReversePropagation::CODEPATH_PRESENT,
-            "there must be zero reverse-sync codepath"
-        )
+    // (a) Architecture oracle: the crate's OWN shipped source has zero sinks
+    //     that adopt the mirror tip as an authoritative value. This is not a
+    //     flag — it scans the real code and would go non-zero if anyone wired a
+    //     reverse-sync path.
+    assert_eq!(
+        reverse_sync_surface_count(ONE_WAY_SOURCES),
+        0,
+        "there must be zero reverse-sync sinks in the shipped one-way surface"
+    );
+
+    // (b) The oracle is not vacuous: an injected reverse-sync fragment IS caught,
+    //     so a real reverse write would turn this suite RED.
+    let injected = "fn reverse_sync() { forge_tip = state.mirror_tip; }";
+    assert!(
+        reverse_sync_surface_count(&[("injected", injected)]) >= 1,
+        "the architecture oracle must detect an injected reverse-sync path"
+    );
+
+    // (c) Type-level direction: the only mirror mutation is built from a Repair
+    //     (forge tip) and exposes only the forge tip — mirror→forge is
+    //     unrepresentable.
+    let repair = Repair {
+        ref_name: "refs/heads/main".into(),
+        forge_tip: forge_tip(),
+        strategy: RepairStrategy::ForgeAuthoritative,
     };
+    assert_eq!(
+        MirrorMutation::overwrite_to_forge(&repair).new_tip(),
+        forge_tip()
+    );
 }
