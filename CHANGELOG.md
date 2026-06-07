@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- fix(app): remediation — reject empty webhook secret (fail-closed, empty secret → MissingSignature); preserve GitHub X-Hub-Signature-256 header value verbatim in SignedEventEnvelope.signature (was server-recomputed HMAC bytes); validate_manifest rejects write-level on pull_requests/contents (OverPrivileged) and requires default_permissions (no fallback to permissions); three oracle tests confirm RED→GREEN per defect (WP-rapp-webhook)
+- fix(policy): DCO parent-count + changelog fix-detection + secrets fail-closed (remediation): merge exemption now driven by `commit_parent_counts` (≥2) not message prefix — a non-merge commit whose subject starts "Merge " is no longer exempt; `is_feat_or_fix` checks char at index 3 for "fix" (was index 4, causing all "fix:" commits to silently bypass the changelog gate); a changed file with no content entry in the eval context now returns `Blocked` instead of silently passing (fail-closed scanning). Oracle-first: each defect was confirmed RED before the fix, GREEN after. (WP-rpolicy-gates)
 
 - fix(policy): route audit-event hash to canonical `hugit_refstore::compute_this_hash` (VEC-framed principal_chain, LP-framed fields); delete bespoke hasher that diverged on principal as scalar with no u32 count prefix; strengthen acceptance_d6 item③ oracle to pin `this_hash` against the refstore formula (WP-rpolicy-hash)
 
