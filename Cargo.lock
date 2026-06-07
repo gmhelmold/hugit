@@ -740,9 +740,11 @@ dependencies = [
 name = "hugit-contracts"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "schemars",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

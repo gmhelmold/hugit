@@ -132,6 +132,88 @@ fn golden_regen_gate() {
     roundtrip::<RegenGate>("RegenGate");
 }
 
+// ── independent hash-pin (R0: lock the frozen formula byte-exactly) ────────────
+//
+// These pins are computed by an INDEPENDENT implementation (a hand-written
+// Python reference, see the R0 SEAL) over a FIXED fixture, then hardcoded here.
+// They guard the frozen byte-format itself: if anyone changes the LP/VEC framing,
+// the field order, the seq width, or the digest, this test goes RED — and so does
+// the cross-consistency test in hugit-refstore that pins `compute_this_hash` /
+// `compute_memo_key` to these SAME literals. Re-serialization cannot launder a
+// formula change past a hardcoded digest.
+//
+// Fixed `this_hash` fixture (genesis event):
+//   prev_hash       = 64 ASCII '0'
+//   kind            = "ref.update"
+//   principal_chain = ["agent:runner-01", "user:gustavo"]
+//   payload         = {"ref":"refs/heads/main","target":"abc123"}  (canonical)
+//   seq             = 0
+pub const PIN_THIS_HASH_FIXTURE_PREV: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
+pub const PIN_THIS_HASH_FIXTURE_KIND: &str = "ref.update";
+pub const PIN_THIS_HASH_FIXTURE_PAYLOAD: &str = r#"{"ref":"refs/heads/main","target":"abc123"}"#;
+pub const PIN_THIS_HASH_FIXTURE_SEQ: u64 = 0;
+pub const PIN_THIS_HASH_EXPECTED: &str =
+    "b53e6bd85641955c36a04eecc060691eb7f888b60f250358418b569ec6735416";
+
+// Fixed `memo_key` fixture:
+//   tree_hash        = "cafebabe" * 8
+//   def_digest       = "a1b2c3d4" * 8
+//   toolchain_digest = "12345678" * 8
+pub const PIN_MEMO_TREE: &str = "cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe";
+pub const PIN_MEMO_DEF: &str = "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4";
+pub const PIN_MEMO_TOOLCHAIN: &str =
+    "1234567812345678123456781234567812345678123456781234567812345678";
+pub const PIN_MEMO_KEY_EXPECTED: &str =
+    "de0d40a5e86f64a15ebe5d6227d9fc30ecf1bd7c95edbb8b98f9e92bffebda84";
+
+pub fn principal_chain_fixture() -> Vec<String> {
+    vec!["agent:runner-01".to_string(), "user:gustavo".to_string()]
+}
+
+/// SHA-256 over the spec'd pre-image, recomputed here with a SECOND independent
+/// implementation (not refstore's) so the pin is double-anchored: hardcoded
+/// literal == this in-test recomputation == refstore::compute_this_hash.
+fn lp(buf: &mut Vec<u8>, s: &str) {
+    let b = s.as_bytes();
+    buf.extend_from_slice(&(b.len() as u32).to_be_bytes());
+    buf.extend_from_slice(b);
+}
+
+#[test]
+fn pin_this_hash_matches_independent_recompute() {
+    use sha2::{Digest, Sha256};
+    let mut buf = Vec::new();
+    lp(&mut buf, PIN_THIS_HASH_FIXTURE_PREV);
+    lp(&mut buf, PIN_THIS_HASH_FIXTURE_KIND);
+    let pc = principal_chain_fixture();
+    buf.extend_from_slice(&(pc.len() as u32).to_be_bytes());
+    for e in &pc {
+        lp(&mut buf, e);
+    }
+    lp(&mut buf, PIN_THIS_HASH_FIXTURE_PAYLOAD);
+    buf.extend_from_slice(&PIN_THIS_HASH_FIXTURE_SEQ.to_be_bytes());
+    let got = hex::encode(Sha256::digest(&buf));
+    assert_eq!(
+        got, PIN_THIS_HASH_EXPECTED,
+        "this_hash byte-format drifted from the hardcoded R0 pin"
+    );
+}
+
+#[test]
+fn pin_memo_key_matches_independent_recompute() {
+    use sha2::{Digest, Sha256};
+    let mut buf = Vec::new();
+    lp(&mut buf, PIN_MEMO_TREE);
+    lp(&mut buf, PIN_MEMO_DEF);
+    lp(&mut buf, PIN_MEMO_TOOLCHAIN);
+    let got = hex::encode(Sha256::digest(&buf));
+    assert_eq!(
+        got, PIN_MEMO_KEY_EXPECTED,
+        "memo_key byte-format drifted from the hardcoded R0 pin"
+    );
+}
+
 // ── schema drift test ─────────────────────────────────────────────────────────
 
 macro_rules! check_schema {

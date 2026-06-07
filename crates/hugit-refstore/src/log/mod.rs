@@ -4,35 +4,96 @@
 //! Each appended [`EventRecord`] carries the hash of its predecessor; the chain
 //! is the integrity spine. Nothing is ever rewritten.
 //!
-//! # Frozen hash-chain formula (transcribed from `hugit-contracts`, never chosen here)
+//! # THE canonical hash/memo/attestation byte-format (single source of truth)
+//!
+//! This module is the **one** place the hugit hash-chain, memo-key, and
+//! attestation pre-images are realised in bytes. `hugit-contracts` froze the
+//! *spec* (see the doc-comments on `EventRecord`, `CheckResult`,
+//! `AttestationChain`); this module is the spec made executable, and is the
+//! ground truth: if a doc and this code ever disagree, **this code wins** and the
+//! doc is the bug. Every emitter (refstore, policy, diag, checks, app, …) MUST
+//! call these functions rather than re-transcribe the format — re-transcription
+//! is exactly the divergence that the 2026-06-07 brutal review (R1) caught.
+//!
+//! ## Primitive: length-prefixed field — `LP(s)`
+//!
+//! `LP(s)` = `u32_be(byte_len(s)) ‖ utf8_bytes(s)`. A 4-byte big-endian `u32`
+//! byte-length prefix, then the raw UTF-8 bytes. This makes `‖` unambiguous
+//! (WP-00): without the prefix `"ab" ‖ "c"` and `"a" ‖ "bc"` would collide.
+//!
+//! ## Primitive: vector framing — `VEC([e0, e1, …])`
+//!
+//! `VEC(v)` = `u32_be(len(v)) ‖ LP(e0) ‖ LP(e1) ‖ …`. A 4-byte big-endian
+//! `u32` **element count**, then each element as an `LP` field. The count is
+//! load-bearing: without it `["a","b"]`, `["ab"]`, and `["a"]` followed by a
+//! trailing `"b"` field would all collide on the spine.
+//!
+//! ## `this_hash` (the event hash-chain)
 //!
 //! ```text
-//! this_hash = H(prev_hash ‖ kind ‖ principal_chain ‖ payload ‖ seq)
+//! this_hash = lower_hex( SHA-256(
+//!     LP(prev_hash) ‖ LP(kind) ‖ VEC(principal_chain) ‖ LP(payload) ‖ u64_be(seq)
+//! ) )
 //! ```
 //!
-//! where (per the doc comments on [`EventRecord`] and WP-00 §"Hash chain"):
+//! Field order is `prev_hash, kind, principal_chain, payload, seq` (matching the
+//! `EventRecord` spec). Notes:
 //!
-//! - `H` = SHA-256, emitted as a 64-char lowercase hex digest.
-//! - `‖`  = concatenation of **length-prefixed** fields, "length-prefix to make
-//!   `‖` unambiguous" (WP-00). Each variable-length field is preceded by a
-//!   4-byte big-endian `u32` byte-length prefix.
-//! - `prev_hash`, `kind`, `payload` are length-prefixed UTF-8 strings.
-//! - `principal_chain` is a sequence: a 4-byte big-endian `u32` **element count**
-//!   followed by each principal as a 4-byte big-endian `u32` length-prefixed
-//!   UTF-8 field. The count is mandated by the "unambiguous" rule — without it
-//!   `["a","b"]`, `["ab"]` and `["a"] + payload "b"` would collide on the spine.
-//! - `seq` is encoded as an 8-byte big-endian `u64` (the explicit exception to
-//!   length-prefixing called out in the frozen doc).
-//! - genesis `prev_hash` = 64 hex zeros ([`GENESIS_PREV_HASH`]).
+//! - `H` = SHA-256, emitted as a **64-char lowercase** hex digest.
+//! - `prev_hash`, `kind`, `payload` are `LP` UTF-8 fields.
+//! - `principal_chain` is `VEC(...)` — count-prefixed then per-element `LP`.
+//! - `seq` is `u64_be` (an 8-byte big-endian integer, NOT length-prefixed — the
+//!   one explicit exception, since its width is fixed).
+//! - `payload` MUST already be **canonical JSON** when chained (see
+//!   [`canonical_json`]); the chain hashes the payload bytes verbatim, so a
+//!   producer that emits non-canonical JSON would hash differently from a
+//!   verifier that re-canonicalised. Canonicalise before calling.
+//! - `recorded_at` is **deliberately excluded** from the pre-image. It is an
+//!   unauthenticated observability annotation; authenticated ordering comes from
+//!   `seq` + the `prev_hash` linkage, not from a wall clock.
+//! - genesis `prev_hash` = 64 ASCII `'0'` characters ([`GENESIS_PREV_HASH`]).
+//!
+//! ## `memo_key` (the check memoisation key)
+//!
+//! ```text
+//! memo_key = lower_hex( SHA-256(
+//!     LP(tree_hash) ‖ LP(def_digest) ‖ LP(toolchain_digest)
+//! ) )
+//! ```
+//!
+//! Field order is `tree_hash, def_digest, toolchain_digest` (the three memo axes
+//! of `CheckResult`, in struct order). Each input is the **lowercase-hex** UTF-8
+//! string of the respective digest (`LP` framed). Output is a 64-char lowercase
+//! hex digest. See [`compute_memo_key`].
+//!
+//! ## attestation `sig` pre-image (ed25519)
+//!
+//! The bytes an [`AttestationChain`](hugit_contracts::AttestationChain) signature
+//! is computed over (the message handed to ed25519 sign/verify) are:
+//!
+//! ```text
+//! attestation_preimage =
+//!     LP(tree) ‖ LP(def) ‖ LP(runner) ‖ LP(model) ‖ VEC(principal)
+//! ```
+//!
+//! Field order is `tree, def, runner, model, principal` (matching the
+//! `AttestationChain` struct order). `principal` uses `VEC(...)` framing
+//! identical to `principal_chain` above. The result is the raw message; ed25519
+//! is computed over it directly (no extra hashing). See
+//! [`attestation_sig_preimage`].
 
 use hugit_contracts::event_record::EventRecord;
 use sha2::{Digest, Sha256};
 
-/// Genesis predecessor hash: 64 hex zeros (the chain's anchor).
+/// Genesis predecessor hash: 64 ASCII `'0'` characters (the chain's anchor).
+///
+/// This is the literal 64-byte ASCII string `"000…0"`, NOT 32 zero bytes — the
+/// first event's `prev_hash` field carries these 64 hex-zero characters and they
+/// are `LP`-framed into its pre-image like any other `prev_hash`.
 pub const GENESIS_PREV_HASH: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
 
-/// Append a single length-prefixed UTF-8 field to the hash pre-image.
+/// Append a single length-prefixed UTF-8 field — `LP(s)` — to a pre-image.
 ///
 /// 4-byte big-endian `u32` byte-length prefix, then the raw UTF-8 bytes.
 fn push_lp_field(buf: &mut Vec<u8>, field: &str) {
@@ -41,12 +102,28 @@ fn push_lp_field(buf: &mut Vec<u8>, field: &str) {
     buf.extend_from_slice(bytes);
 }
 
+/// Append a vector-framed field — `VEC(v)` — to a pre-image.
+///
+/// 4-byte big-endian `u32` element count, then each element as an `LP` field.
+fn push_vec_field(buf: &mut Vec<u8>, elems: &[String]) {
+    buf.extend_from_slice(&(elems.len() as u32).to_be_bytes());
+    for e in elems {
+        push_lp_field(buf, e);
+    }
+}
+
 /// Compute `this_hash` for an event from the four chained inputs, exactly per
-/// the frozen formula. Returns a 64-char lowercase hex SHA-256 digest.
+/// the canonical byte-format documented at the module level. Returns a 64-char
+/// lowercase hex SHA-256 digest.
+///
+/// Pre-image: `LP(prev_hash) ‖ LP(kind) ‖ VEC(principal_chain) ‖ LP(payload) ‖
+/// u64_be(seq)`. `recorded_at` is excluded by design; `payload` must already be
+/// canonical JSON ([`canonical_json`]).
 ///
 /// This is the *only* place the formula is realised; [`EventLog::append`] and
 /// [`crate::tamper::verify_chain`] both route through it so the producer and the
-/// verifier can never drift.
+/// verifier can never drift. Every other crate that emits events MUST call this
+/// (re-import: `hugit_refstore::compute_this_hash`) rather than re-transcribe.
 pub fn compute_this_hash(
     prev_hash: &str,
     kind: &str,
@@ -56,24 +133,79 @@ pub fn compute_this_hash(
 ) -> String {
     let mut buf: Vec<u8> = Vec::new();
 
-    // prev_hash ‖ kind   (length-prefixed UTF-8 fields)
+    // prev_hash ‖ kind   (LP UTF-8 fields)
     push_lp_field(&mut buf, prev_hash);
     push_lp_field(&mut buf, kind);
 
-    // principal_chain    (u32 element count, then each element length-prefixed)
-    buf.extend_from_slice(&(principal_chain.len() as u32).to_be_bytes());
-    for principal in principal_chain {
-        push_lp_field(&mut buf, principal);
-    }
+    // principal_chain    (VEC: u32 count, then each element LP)
+    push_vec_field(&mut buf, principal_chain);
 
-    // payload            (length-prefixed UTF-8 field)
+    // payload            (LP UTF-8 field — caller canonicalises JSON)
     push_lp_field(&mut buf, payload);
 
-    // seq                (8-byte big-endian u64 — the frozen exception)
+    // seq                (u64 big-endian — the fixed-width exception)
     buf.extend_from_slice(&seq.to_be_bytes());
 
     let digest = Sha256::digest(&buf);
     hex::encode(digest)
+}
+
+/// Compute the `CheckResult` `memo_key` from its three memo axes, exactly per
+/// the canonical byte-format. Returns a 64-char lowercase hex SHA-256 digest.
+///
+/// Pre-image: `LP(tree_hash) ‖ LP(def_digest) ‖ LP(toolchain_digest)`. Each
+/// input is the lowercase-hex UTF-8 string of the respective digest, in
+/// `CheckResult` struct field order. This is the single canonical realisation
+/// of the `CheckResult::memo_key` doc — call it, never re-transcribe.
+pub fn compute_memo_key(tree_hash: &str, def_digest: &str, toolchain_digest: &str) -> String {
+    let mut buf: Vec<u8> = Vec::new();
+    push_lp_field(&mut buf, tree_hash);
+    push_lp_field(&mut buf, def_digest);
+    push_lp_field(&mut buf, toolchain_digest);
+    let digest = Sha256::digest(&buf);
+    hex::encode(digest)
+}
+
+/// Build the ed25519 signing/verification pre-image for an
+/// [`AttestationChain`](hugit_contracts::AttestationChain).
+///
+/// Pre-image: `LP(tree) ‖ LP(def) ‖ LP(runner) ‖ LP(model) ‖ VEC(principal)`,
+/// in `AttestationChain` struct field order. The returned bytes are the message
+/// handed directly to ed25519 (no extra hashing layer). This is the single
+/// canonical realisation of the `AttestationChain::sig` doc.
+pub fn attestation_sig_preimage(
+    tree: &str,
+    def: &str,
+    runner: &str,
+    model: &str,
+    principal: &[String],
+) -> Vec<u8> {
+    let mut buf: Vec<u8> = Vec::new();
+    push_lp_field(&mut buf, tree);
+    push_lp_field(&mut buf, def);
+    push_lp_field(&mut buf, runner);
+    push_lp_field(&mut buf, model);
+    push_vec_field(&mut buf, principal);
+    buf
+}
+
+/// Canonicalise a JSON string: parse then re-serialise with **sorted object
+/// keys** and **no insignificant whitespace**, so equal JSON values map to
+/// identical bytes regardless of authoring key-order/spacing.
+///
+/// `payload` on an [`EventRecord`] MUST be run through this before it is chained
+/// via [`compute_this_hash`]; otherwise a producer and a verifier that disagree
+/// on key-order/whitespace would compute different `this_hash` for the same
+/// logical event. Returns `None` if the input is not valid JSON (the caller
+/// decides whether to reject or to chain the raw bytes — but a chained payload
+/// is by contract canonical JSON).
+pub fn canonical_json(input: &str) -> Option<String> {
+    // serde_json::Value uses a BTreeMap for objects under the
+    // `preserve_order` feature being OFF (default), giving sorted keys; compact
+    // `to_string` emits no insignificant whitespace. We do not enable
+    // `preserve_order`, so this is deterministic + sorted.
+    let value: serde_json::Value = serde_json::from_str(input).ok()?;
+    serde_json::to_string(&value).ok()
 }
 
 /// The append-only, hash-chained event log for one repository.
