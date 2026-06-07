@@ -32,3 +32,6 @@ pub mod x6;
 // ── WP-X12: erasure × provenance × mirror invariants ─────────────────────────
 #[path = "x12/lib.rs"]
 pub mod x12;
+// ── WP-X14: deep-link referential integrity (lifecycle) ───────────────────────
+#[path = "x14/lib.rs"]
+pub mod x14;
