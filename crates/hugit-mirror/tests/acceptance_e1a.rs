@@ -65,10 +65,37 @@ impl Drop for TmpDir {
     }
 }
 
+/// Configure a `git` invocation deterministically and hermetically.
+///
+/// CI runners have NO global/system git config and may run a different git
+/// version than a dev box, so the test must never depend on ambient config. We
+/// pin identity + dates, neutralise global/system config, and disable every
+/// background maintenance path (auto-gc, the commit-graph).
+fn git_command(cwd: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(cwd)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "hugit")
+        .env("GIT_AUTHOR_EMAIL", "bot@hugit.dev")
+        .env("GIT_COMMITTER_NAME", "hugit")
+        .env("GIT_COMMITTER_EMAIL", "bot@hugit.dev")
+        .env("GIT_AUTHOR_DATE", "1717000000 +0000")
+        .env("GIT_COMMITTER_DATE", "1717000000 +0000")
+        .args([
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "maintenance.auto=false",
+            "-c",
+            "core.commitGraph=false",
+        ]);
+    cmd
+}
+
 fn git(cwd: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
+    let out = git_command(cwd)
         .args(args)
-        .current_dir(cwd)
         .output()
         .expect("git must be on PATH");
     assert!(
@@ -106,14 +133,8 @@ impl RealGitMirror {
     /// Callers use this so the *expected* oid is git's own — a real round-trip.
     fn hash_object(&self, content: &str) -> String {
         use std::io::Write as _;
-        let mut child = Command::new("git")
-            .args([
-                "-C",
-                self.repo.to_str().unwrap(),
-                "hash-object",
-                "-w",
-                "--stdin",
-            ])
+        let mut child = git_command(&self.repo)
+            .args(["hash-object", "-w", "--stdin"])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()
@@ -137,14 +158,8 @@ impl RealGitMirror {
 impl MirrorPushTarget for RealGitMirror {
     fn push_ref(&mut self, ref_name: &str, oid: &ContentHash) -> Result<ContentHash, PushError> {
         // Point the ref at the supplied (real) object oid in the real repo.
-        let res = Command::new("git")
-            .args([
-                "-C",
-                self.repo.to_str().unwrap(),
-                "update-ref",
-                ref_name,
-                oid.as_str(),
-            ])
+        let res = git_command(&self.repo)
+            .args(["update-ref", ref_name, oid.as_str()])
             .output()
             .expect("git update-ref");
         if !res.status.success() {
