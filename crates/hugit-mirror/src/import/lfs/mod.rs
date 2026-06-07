@@ -167,6 +167,165 @@ pub fn materialize_lfs_from_fixture(
     })
 }
 
+// ════════════════════════ Real LFS batch-API fetch ══════════════════════════
+//
+// The Git LFS batch API (git-lfs/docs/api/batch.md):
+//   POST {lfs-endpoint}/objects/batch
+//   { "operation":"download", "transfers":["basic"],
+//     "objects":[ {"oid":"<sha256>","size":<n>} ] }
+// → { "transfer":"basic",
+//     "objects":[ {"oid":"<sha256>","size":<n>,
+//                  "actions":{"download":{"href":"<url>","header":{...}}}} ] }
+// then GET the `download.href` to retrieve the actual object bytes.
+//
+// This module speaks that REAL protocol: it serializes a real batch request,
+// parses a real batch response, follows the real `download` href, and
+// SHA-256-verifies the fetched bytes. The HTTP itself is abstracted behind
+// [`LfsTransport`] so the gate lane can drive it against a real on-disk LFS
+// server fixture (NOT an in-memory echo): the fixture parses the JSON request,
+// emits a real batch JSON response pointing at hrefs, and serves the object
+// bytes from disk. Live GitHub LFS plugs the same trait with HTTPS.
+
+/// HTTP-shaped transport for the LFS batch protocol.
+///
+/// - `post_batch`: POST a JSON batch request to `{endpoint}/objects/batch`,
+///   returning the JSON response body bytes.
+/// - `get`: GET a download `href`, returning the raw object bytes.
+///
+/// Implementations may be live HTTPS (GitHub LFS) or a real on-disk fixture
+/// server. They MUST NOT echo the request as the response — they must speak the
+/// real protocol (parse request → produce a conformant response / serve bytes).
+pub trait LfsTransport {
+    /// POST a batch request body to the endpoint; return the response body.
+    fn post_batch(&self, endpoint: &str, request_json: &[u8]) -> Result<Vec<u8>, LfsError>;
+    /// GET an object by its download href; return the raw bytes.
+    fn get(&self, href: &str) -> Result<Vec<u8>, LfsError>;
+}
+
+/// Build the real LFS batch *download* request JSON for a set of pointers.
+pub fn build_batch_download_request(pointers: &[LfsPointer]) -> Vec<u8> {
+    let objects: Vec<serde_json::Value> = pointers
+        .iter()
+        .map(|p| serde_json::json!({ "oid": p.sha256, "size": p.size }))
+        .collect();
+    let body = serde_json::json!({
+        "operation": "download",
+        "transfers": ["basic"],
+        "objects": objects,
+    });
+    serde_json::to_vec(&body).expect("batch request is always serializable")
+}
+
+/// A single object's download action parsed from a batch response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchDownloadAction {
+    /// The object sha256 (oid without prefix).
+    pub sha256: String,
+    /// Declared size from the response.
+    pub size: u64,
+    /// The download href to GET the bytes from.
+    pub href: String,
+}
+
+/// Parse a real LFS batch response, extracting the download action per object.
+///
+/// Fails closed: a per-object `error` block, a missing `download` action, or a
+/// malformed body is a hard [`LfsError`], never a silent skip.
+pub fn parse_batch_response(response_json: &[u8]) -> Result<Vec<BatchDownloadAction>, LfsError> {
+    let v: serde_json::Value =
+        serde_json::from_slice(response_json).map_err(|e| LfsError::FetchFailed {
+            oid: "<batch>".to_string(),
+            message: format!("malformed batch response JSON: {e}"),
+        })?;
+    let objects =
+        v.get("objects")
+            .and_then(|o| o.as_array())
+            .ok_or_else(|| LfsError::FetchFailed {
+                oid: "<batch>".to_string(),
+                message: "batch response missing `objects` array".to_string(),
+            })?;
+
+    let mut actions = Vec::with_capacity(objects.len());
+    for obj in objects {
+        let oid = obj
+            .get("oid")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string();
+        // Fail-closed on a per-object error block.
+        if let Some(err) = obj.get("error") {
+            let msg = err
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown LFS batch error");
+            return Err(LfsError::FetchFailed {
+                oid,
+                message: format!("batch object error: {msg}"),
+            });
+        }
+        let size =
+            obj.get("size")
+                .and_then(|s| s.as_u64())
+                .ok_or_else(|| LfsError::FetchFailed {
+                    oid: oid.clone(),
+                    message: "batch object missing size".to_string(),
+                })?;
+        let href = obj
+            .get("actions")
+            .and_then(|a| a.get("download"))
+            .and_then(|d| d.get("href"))
+            .and_then(|h| h.as_str())
+            .ok_or_else(|| LfsError::FetchFailed {
+                oid: oid.clone(),
+                message: "batch object missing download action href".to_string(),
+            })?
+            .to_string();
+        actions.push(BatchDownloadAction {
+            sha256: oid,
+            size,
+            href,
+        });
+    }
+    Ok(actions)
+}
+
+/// Materialize an LFS pointer via the **real batch API path**: POST a batch
+/// download request, parse the response, GET the download href, and SHA-256-
+/// verify the fetched bytes (fail-closed on any mismatch).
+///
+/// `endpoint` is the LFS endpoint base (e.g.
+/// `https://github.com/owner/repo.git/info/lfs`). `transport` performs the
+/// actual POST/GET — live HTTPS in production, a real on-disk LFS server
+/// fixture in the gate lane.
+pub fn materialize_lfs_via_batch<T: LfsTransport>(
+    pointer: &LfsPointer,
+    endpoint: &str,
+    transport: &T,
+) -> Result<MaterializedLfsObject, LfsError> {
+    let request = build_batch_download_request(std::slice::from_ref(pointer));
+    let response = transport.post_batch(endpoint, &request)?;
+    let actions = parse_batch_response(&response)?;
+
+    let action = actions
+        .into_iter()
+        .find(|a| a.sha256 == pointer.sha256)
+        .ok_or_else(|| LfsError::FetchFailed {
+            oid: pointer.oid.clone(),
+            message: format!("batch response had no action for {}", pointer.sha256),
+        })?;
+
+    // The fetched bytes are the ACTUAL object, never the pointer.
+    let bytes = transport.get(&action.href)?;
+
+    // Fail-closed verification: size + sha256 must match the pointer.
+    verify_lfs_object(pointer, &bytes)?;
+
+    Ok(MaterializedLfsObject {
+        pointer: pointer.clone(),
+        bytes,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

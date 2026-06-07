@@ -64,17 +64,74 @@ pub fn import_prissue(pr: &ImportedPrIssue) -> Result<ProposedIntent, PrIssueImp
     Ok(pr.to_proposed_intent())
 }
 
-/// Import a batch of PR/issue fixtures, skipping any with empty source URLs.
+/// Import a batch of PR/issue fixtures, skipping any with empty source URLs and
+/// **deduplicating by `intent_id`**.
 ///
-/// Returns only the successfully projected intents. Each returned intent is
-/// non-authoritative and carries per-element provenance for every preserved
-/// fidelity element.
+/// Returns only the successfully projected intents, with at most one intent per
+/// distinct `intent_id`. Because `intent_id` is derived from `source_url`, two
+/// fixtures for the same PR/issue collapse to a single intent — the importer
+/// itself never emits a duplicate `intent_id` (re-sync of *changed* metadata is
+/// still the caller's job via the same id, but a single batch never persists the
+/// same intent twice). The **first** occurrence wins; later duplicates drop.
 ///
-/// **Idempotency**: duplicate entries (same `source_url`) produce the same
-/// `intent_id` — the caller deduplicates before persisting (unchanged → no-op,
-/// changed → incremental re-sync via the same `intent_id`).
+/// Each returned intent is non-authoritative and carries per-element provenance
+/// for every preserved fidelity element.
 pub fn import_prissue_batch(prs: &[ImportedPrIssue]) -> Vec<ProposedIntent> {
-    prs.iter()
-        .filter_map(|pr| import_prissue(pr).ok())
-        .collect()
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out: Vec<ProposedIntent> = Vec::new();
+    for pr in prs {
+        if let Ok(intent) = import_prissue(pr) {
+            // Dedup by intent_id: never emit the same intent twice.
+            if seen.insert(intent.sidecar.intent_id.clone()) {
+                out.push(intent);
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::import::prissue::model::{ElementProvenance, PrIssueState, SourceKind};
+
+    fn fixture(url: &str) -> ImportedPrIssue {
+        ImportedPrIssue {
+            kind: SourceKind::PullRequest,
+            source_id: 1,
+            source_url: url.to_string(),
+            body: "b".to_string(),
+            body_provenance: ElementProvenance::new(url, "body"),
+            state: PrIssueState::Open,
+            state_provenance: ElementProvenance::new(url, "state"),
+            labels: vec![],
+            comments: vec![],
+            cross_refs: vec![],
+        }
+    }
+
+    #[test]
+    fn batch_dedups_identical_fixtures_to_one_intent() {
+        let url = "https://github.com/o/r/pull/1";
+        let batch = import_prissue_batch(&[fixture(url), fixture(url)]);
+        assert_eq!(
+            batch.len(),
+            1,
+            "two identical PR fixtures must yield ONE intent"
+        );
+    }
+
+    #[test]
+    fn batch_keeps_distinct_intents() {
+        let a = fixture("https://github.com/o/r/pull/1");
+        let b = fixture("https://github.com/o/r/pull/2");
+        let batch = import_prissue_batch(&[a, b]);
+        assert_eq!(batch.len(), 2, "distinct PRs must yield distinct intents");
+    }
+
+    #[test]
+    fn batch_skips_empty_source_url() {
+        let batch = import_prissue_batch(&[fixture("")]);
+        assert!(batch.is_empty());
+    }
 }

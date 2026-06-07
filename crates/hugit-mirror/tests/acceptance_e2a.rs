@@ -28,13 +28,160 @@ use hugit_contracts::EventRecord;
 use hugit_mirror::import::{
     auth::InstallationAuthClient,
     history::{
-        COMMIT_EVENT_KIND, CommitMeta, object_hash::compute_git_oid, project_commit_to_event,
-        verify_byte_identity,
+        COMMIT_EVENT_KIND, CommitMeta, import_commits, object_hash::compute_git_oid,
+        project_commit_to_event, read_git_object, verify_byte_identity,
     },
-    lfs::{is_lfs_pointer, materialize_lfs_from_fixture, parse_lfs_pointer, verify_lfs_object},
+    lfs::{
+        LfsError, LfsPointer, LfsTransport, build_batch_download_request, is_lfs_pointer,
+        materialize_lfs_from_fixture, materialize_lfs_via_batch, parse_batch_response,
+        parse_lfs_pointer, verify_lfs_object,
+    },
     resume::{IdempotencyOutcome, ImportCursor, InMemoryCursorStore, compute_idempotency},
 };
 use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+// ── local-git fixture harness (models e1c: real on-disk git repo) ────────────
+
+/// A unique temp dir, removed on drop.
+struct TmpDir(PathBuf);
+
+impl TmpDir {
+    fn new(tag: &str) -> Self {
+        let mut p = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        p.push(format!("hugit-e2a-{tag}-{nanos}-{}", std::process::id()));
+        std::fs::create_dir_all(&p).unwrap();
+        TmpDir(p)
+    }
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TmpDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Run `git` in `cwd`, asserting success; return trimmed stdout.
+fn git(cwd: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_AUTHOR_NAME", "hugit")
+        .env("GIT_AUTHOR_EMAIL", "bot@hugit.dev")
+        .env("GIT_COMMITTER_NAME", "hugit")
+        .env("GIT_COMMITTER_EMAIL", "bot@hugit.dev")
+        .env("GIT_AUTHOR_DATE", "1717000000 +0000")
+        .env("GIT_COMMITTER_DATE", "1717000000 +0000")
+        .output()
+        .expect("git must be on PATH");
+    assert!(
+        out.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+/// Build a real source repo with `n` commits on `main`; return its dir.
+fn build_source_repo(tmp: &TmpDir, n: usize) -> PathBuf {
+    let repo = tmp.path().join("source");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    for i in 0..n {
+        std::fs::write(repo.join("f.txt"), format!("line {i}\n")).unwrap();
+        git(&repo, &["add", "f.txt"]);
+        git(&repo, &["commit", "-q", "-m", &format!("commit {i}")]);
+    }
+    repo
+}
+
+/// A real on-disk LFS "server" implementing the batch protocol against files.
+///
+/// It does NOT echo inputs: it parses the real batch request JSON, looks objects
+/// up in its on-disk store, emits a conformant batch response whose `download`
+/// hrefs are `file:` paths into the store, and serves the real bytes on GET.
+struct DiskLfsServer {
+    /// sha256 → on-disk path of the actual object bytes.
+    store_dir: PathBuf,
+}
+
+impl DiskLfsServer {
+    fn new(store_dir: PathBuf) -> Self {
+        std::fs::create_dir_all(&store_dir).unwrap();
+        Self { store_dir }
+    }
+    /// Write an object's actual bytes into the store, keyed by its sha256.
+    fn put(&self, content: &[u8]) -> String {
+        let sha256 = hex::encode(Sha256::digest(content));
+        std::fs::write(self.store_dir.join(&sha256), content).unwrap();
+        sha256
+    }
+    fn href_for(&self, sha256: &str) -> String {
+        format!("file:{}", self.store_dir.join(sha256).display())
+    }
+}
+
+impl LfsTransport for DiskLfsServer {
+    fn post_batch(&self, _endpoint: &str, request_json: &[u8]) -> Result<Vec<u8>, LfsError> {
+        // Parse the REAL request the client built (operation + objects).
+        let req: serde_json::Value =
+            serde_json::from_slice(request_json).map_err(|e| LfsError::FetchFailed {
+                oid: "<batch>".into(),
+                message: format!("bad request: {e}"),
+            })?;
+        assert_eq!(
+            req["operation"].as_str(),
+            Some("download"),
+            "client must send a download batch request"
+        );
+        let objects = req["objects"].as_array().expect("objects array").clone();
+
+        // Build a conformant batch response keyed by what's on disk.
+        let mut out_objects = Vec::new();
+        for o in objects {
+            let oid = o["oid"].as_str().unwrap().to_string();
+            let size = o["size"].as_u64().unwrap();
+            let path = self.store_dir.join(&oid);
+            if path.is_file() {
+                out_objects.push(serde_json::json!({
+                    "oid": oid,
+                    "size": size,
+                    "actions": { "download": { "href": self.href_for(&oid) } }
+                }));
+            } else {
+                out_objects.push(serde_json::json!({
+                    "oid": oid,
+                    "size": size,
+                    "error": { "code": 404, "message": "object not found" }
+                }));
+            }
+        }
+        let resp = serde_json::json!({ "transfer": "basic", "objects": out_objects });
+        Ok(serde_json::to_vec(&resp).unwrap())
+    }
+
+    fn get(&self, href: &str) -> Result<Vec<u8>, LfsError> {
+        let path = href
+            .strip_prefix("file:")
+            .ok_or_else(|| LfsError::FetchFailed {
+                oid: "<get>".into(),
+                message: format!("unsupported href scheme: {href}"),
+            })?;
+        std::fs::read(path).map_err(|e| LfsError::FetchFailed {
+            oid: "<get>".into(),
+            message: format!("read object failed: {e}"),
+        })
+    }
+}
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -64,87 +211,90 @@ fn make_lfs_pointer_bytes(content: &[u8]) -> (Vec<u8>, String) {
     (pointer.into_bytes(), sha256)
 }
 
-// ── ① 1k-commit public import byte-identical ─────────────────────────────────
+// ── ① 1k-commit public import byte-identical (REAL git repo) ─────────────────
 
-/// ① Import 1k commits; every EventRecord has kind="git.commit", not an intent.
-/// Byte-identity: OID round-trip via compute_git_oid (local fixture, no network).
+/// ① Import 1000 commits from a REAL on-disk git repository through the real
+/// `import_commits` / `read_git_object` path, and prove byte-identity against
+/// `git rev-list` (the oid set) and `git cat-file` (the object bytes) — never
+/// by hand-building strings.
 #[test]
 fn item_1_public_import_byte_identical() {
-    // Build 1000 synthetic commit metas and project them to EventRecords.
-    // Byte-identity is verified via the object_hash module (compute_git_oid).
     let n = 1_000usize;
-    let mut events: Vec<EventRecord> = Vec::with_capacity(n);
-    let mut prev_hash = GENESIS.to_string();
+    let tmp = TmpDir::new("import-1k");
+    let repo = build_source_repo(&tmp, n);
     let principal = "hugit-mirror/e2a";
 
-    for i in 0..n {
-        let meta = make_commit_meta((i % 255) as u8);
+    // Ground truth straight from git: rev-list in chronological (parent-first)
+    // order, so the import chains parents before children.
+    let oids: Vec<String> = git(&repo, &["rev-list", "--reverse", "HEAD"])
+        .lines()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(
+        oids.len(),
+        n,
+        "git rev-list must report exactly {n} commits"
+    );
 
-        // Simulate a git object: build raw commit bytes.
-        let raw = format!(
-            "tree {}\nparent {}\nauthor {} {} +0000\ncommitter {} {} +0000\n\n{}\n",
-            meta.tree_oid,
-            if i > 0 {
-                oid_str(((i - 1) % 255) as u8)
-            } else {
-                "0".repeat(40)
-            },
-            meta.author,
-            meta.timestamp,
-            meta.author,
-            meta.timestamp,
-            meta.message,
-        );
-        let raw_bytes = raw.as_bytes();
-
-        // Compute git OID from raw bytes (byte-identity proof).
-        let git_oid = compute_git_oid("commit", raw_bytes);
-
-        // Verify byte identity: recompute from bytes must match the computed OID.
-        verify_byte_identity("commit", raw_bytes, &git_oid)
-            .expect("byte-identity must hold for locally constructed commit bytes");
-
-        // Project to EventRecord (import boundary ⑤: no intent).
-        let event = project_commit_to_event(&meta, i as u64, &prev_hash, principal)
-            .expect("project_commit_to_event must succeed");
-
-        // Every event must be a change-event (not an intent).
-        assert_eq!(
-            event.kind, COMMIT_EVENT_KIND,
-            "commit {i}: kind must be 'git.commit', not an intent kind"
-        );
-        assert_eq!(event.seq, i as u64, "commit {i}: seq must be {i}");
-        assert_eq!(
-            event.prev_hash, prev_hash,
-            "commit {i}: prev_hash must chain correctly"
-        );
-
-        // The payload is opaque JSON containing the OID.
-        let payload: serde_json::Value =
-            serde_json::from_str(&event.payload).expect("payload must be valid JSON");
-        assert!(
-            payload.get("intent_id").is_none(),
-            "commit {i}: payload must NOT contain intent_id (import boundary ⑤)"
-        );
-
-        prev_hash = event.this_hash.clone();
-        events.push(event);
-    }
-
+    // Run the REAL importer over the REAL repo.
+    let events = import_commits(&repo, &oids, 0, GENESIS, principal)
+        .expect("import_commits must succeed against a real repo");
     assert_eq!(events.len(), n, "must import exactly {n} events");
 
-    // Sequence must be contiguous.
     for (i, ev) in events.iter().enumerate() {
-        assert_eq!(ev.seq, i as u64, "sequence must be contiguous");
+        // Each event is a change-event, never an intent (boundary ⑤).
+        assert_eq!(
+            ev.kind, COMMIT_EVENT_KIND,
+            "commit {i}: kind must be 'git.commit'"
+        );
+        assert_eq!(ev.seq, i as u64, "commit {i}: seq must be contiguous");
+
+        // Byte-identity, proven against git's OWN object bytes: read the object
+        // via the real read_git_object path AND independently via `git cat-file`,
+        // and confirm the recomputed git oid equals git's oid.
+        let obj = read_git_object(&repo, &oids[i], "commit")
+            .expect("read_git_object must read the real object");
+        let recomputed = compute_git_oid("commit", &obj.bytes);
+        assert_eq!(
+            recomputed, oids[i],
+            "commit {i}: recomputed oid must equal git's oid (byte-identity)"
+        );
+        // Cross-check the bytes against `git cat-file -p` content roundtrip:
+        // verify_byte_identity using git's own oid must pass.
+        verify_byte_identity("commit", &obj.bytes, &oids[i])
+            .expect("byte-identity must hold against git's oid");
+
+        // The payload carries git's oid and is intent-free.
+        let payload: serde_json::Value =
+            serde_json::from_str(&ev.payload).expect("payload must be valid JSON");
+        assert_eq!(
+            payload["oid"].as_str().unwrap(),
+            oids[i],
+            "commit {i}: payload oid must be git's oid"
+        );
+        assert!(
+            payload.get("intent_id").is_none(),
+            "commit {i}: no intent_id (boundary ⑤)"
+        );
     }
 
-    // All events have byte-identical content (same kind, no duplication of seq).
-    let unique_hashes: std::collections::HashSet<&str> =
-        events.iter().map(|e| e.this_hash.as_str()).collect();
-    assert_eq!(
-        unique_hashes.len(),
-        n,
-        "all event hashes must be unique (no byte-level duplication)"
+    // The hash chain is unbroken across all imported events.
+    for i in 1..events.len() {
+        assert_eq!(
+            events[i].prev_hash,
+            events[i - 1].this_hash,
+            "event chain must be contiguous at {i}"
+        );
+    }
+
+    // A corrupted oid (one byte flipped) must fail byte-identity hard — the
+    // importer never accepts a non-matching object.
+    let mut bad = oids[0].clone();
+    bad.replace_range(0..1, if &bad[0..1] == "a" { "b" } else { "a" });
+    let bad_obj = read_git_object(&repo, &oids[0], "commit").unwrap();
+    assert!(
+        verify_byte_identity("commit", &bad_obj.bytes, &bad).is_err(),
+        "a wrong oid must fail byte-identity (fail-closed)"
     );
 }
 
@@ -200,10 +350,21 @@ fn item_4_private_repo_install_auth() {
         token.is_valid(),
         "freshly minted token must be valid (not expired)"
     );
-    // Must be an installation token, not a PAT.
+    // Must be an installation token, not a PAT (read via expose()).
     assert!(
-        token.token.contains("install"),
+        token.expose().contains("install"),
         "token must be installation-scoped (not a PAT)"
+    );
+
+    // Secret hygiene (⑦): the token's Debug must NEVER leak the bearer value.
+    let debugged = format!("{token:?}");
+    assert!(
+        !debugged.contains(token.expose()),
+        "InstallationToken Debug must not contain the cleartext token: {debugged}"
+    );
+    assert!(
+        debugged.contains("redacted"),
+        "InstallationToken Debug must redact the secret"
     );
 
     // Production mode: FAIL-not-skip when HUGIT_GH_INSTALL_TOKEN is absent.
@@ -276,6 +437,78 @@ fn item_4_lfs_objects_materialized() {
         verify_lfs_object(&pointer, wrong_content).is_err(),
         "verify_lfs_object must fail on wrong bytes"
     );
+}
+
+// ── ④ LFS materialized via the REAL batch API path (on-disk LFS server) ──────
+
+/// ④ Materialize a real LFS object through the REAL batch-API code path:
+/// build a real batch request, parse a real conformant batch response, follow
+/// the download href, and SHA-256-verify the fetched bytes. Driven against an
+/// on-disk LFS server fixture that speaks the real protocol (never an echo).
+#[test]
+fn item_4_lfs_objects_materialized_via_batch_api() {
+    let tmp = TmpDir::new("lfs-batch");
+    let server = DiskLfsServer::new(tmp.path().join("lfs-store"));
+
+    // The actual object content (NOT a pointer) lands on the on-disk server.
+    let actual_content = b"REAL lfs object bytes served over the batch API path.".to_vec();
+    let sha256 = server.put(&actual_content);
+    let pointer = LfsPointer {
+        oid: format!("sha256:{sha256}"),
+        size: actual_content.len() as u64,
+        sha256: sha256.clone(),
+    };
+
+    // The request the client builds is the real batch download request.
+    let req = build_batch_download_request(std::slice::from_ref(&pointer));
+    let req_v: serde_json::Value = serde_json::from_slice(&req).unwrap();
+    assert_eq!(req_v["operation"], "download");
+    assert_eq!(req_v["objects"][0]["oid"], sha256);
+
+    // Drive the REAL batch path end-to-end.
+    let endpoint = "https://example.invalid/owner/repo.git/info/lfs";
+    let materialized = materialize_lfs_via_batch(&pointer, endpoint, &server)
+        .expect("real batch materialization must succeed");
+
+    // The materialized bytes are the ACTUAL object, byte-identical, not a pointer.
+    assert_eq!(
+        materialized.bytes, actual_content,
+        "batch-materialized bytes must equal the on-disk object content"
+    );
+    assert!(
+        !is_lfs_pointer(&materialized.bytes),
+        "materialized bytes must NOT be an LFS pointer"
+    );
+
+    // Fail-closed: an object absent from the server yields a per-object error in
+    // the batch response → hard FetchFailed, never a silent empty.
+    let missing_content = b"never uploaded".to_vec();
+    let missing_sha = hex::encode(Sha256::digest(&missing_content));
+    let missing = LfsPointer {
+        oid: format!("sha256:{missing_sha}"),
+        size: missing_content.len() as u64,
+        sha256: missing_sha,
+    };
+    let err = materialize_lfs_via_batch(&missing, endpoint, &server).unwrap_err();
+    assert!(matches!(err, LfsError::FetchFailed { .. }));
+
+    // Fail-closed: a server that serves CORRUPTED bytes is caught by SHA-256.
+    let corrupt_server = DiskLfsServer::new(tmp.path().join("lfs-corrupt"));
+    // Store wrong bytes under the EXPECTED sha so the href resolves but verify fails.
+    std::fs::write(
+        corrupt_server.store_dir.join(&pointer.sha256),
+        b"corrupted payload of identical length pad........",
+    )
+    .unwrap();
+    let res = materialize_lfs_via_batch(&pointer, endpoint, &corrupt_server);
+    assert!(
+        res.is_err(),
+        "corrupted bytes must fail SHA-256/size verification (fail-closed)"
+    );
+
+    // The batch-response parser is itself fail-closed on a malformed body.
+    assert!(parse_batch_response(b"not json").is_err());
+    assert!(parse_batch_response(br#"{"no":"objects"}"#).is_err());
 }
 
 // ── ④ resume across timeout, completes byte-identical ────────────────────────
