@@ -177,6 +177,14 @@ pub enum BrokerError {
     },
     /// A box command failed while performing the privileged op.
     Box(anyhow::Error),
+    /// The caller-supplied `result_path` is absolute or contains a `..`
+    /// component, so it could write the delivered result outside the workspace
+    /// root. The op is refused **before** any remote write — fail-closed. The
+    /// secret is never resolved when this fires.
+    ResultPathEscapes {
+        /// The offending result path, as supplied by the caller.
+        result_path: String,
+    },
     /// The lease does not authorize the call: it is not in the `Held` state
     /// (expired / released / crashed), so the broker refuses to act on it.
     /// Fail-closed.
@@ -201,6 +209,12 @@ impl fmt::Display for BrokerError {
                 write!(f, "unknown secret {secret_name:?}; operation fails closed")
             }
             BrokerError::Box(e) => write!(f, "broker box command failed: {e}"),
+            BrokerError::ResultPathEscapes { result_path } => write!(
+                f,
+                "result_path {result_path:?} is absolute or contains '..'; \
+                 broker refuses to deliver outside the workspace root \
+                 (operation fails closed)"
+            ),
             BrokerError::LeaseNotHeld { lease_id } => write!(
                 f,
                 "lease {lease_id:?} is not Held; broker refuses to act on a \
@@ -351,10 +365,16 @@ impl<S: SecretStore> Broker<S> {
     ///
     /// This is the positive path (**⑥**): the broker resolves and uses the
     /// secret entirely on the orchestrator side ([`execute`](Self::execute)),
-    /// then writes only the public `output` into `result_path` inside the job
-    /// container via the [`BoxExec`] seam. After this returns, a scan of the
-    /// container's env/proc/disk for the raw credential is clean (**②**) — see
-    /// [`scan_credential_absent`].
+    /// then writes only the public `output` to `result_rel` **under**
+    /// `workspace_root` inside the job container via the [`BoxExec`] seam. After
+    /// this returns, a scan of the container's env/proc/disk for the raw
+    /// credential is clean (**②**) — see [`scan_credential_absent`].
+    ///
+    /// `result_rel` is **fence-relative**: it is joined under `workspace_root`
+    /// exactly as the materialize layer joins an in-fence candidate, and it must
+    /// be a relative, traversal-free path (no leading `/`, no `..`). This is the
+    /// same root+relative split [`crate::materialize`]'s `place_file` uses, so a
+    /// delivered result can never land outside the workspace root.
     ///
     /// # Lease ↔ container trust boundary
     /// [`execute`](Self::execute) enforces the lease→op authz gate (the lease
@@ -368,31 +388,61 @@ impl<S: SecretStore> Broker<S> {
     /// the *secrecy* of the credential; container provenance is the runner's.
     ///
     /// # Errors
-    /// Propagates [`BrokerError`] from [`execute`](Self::execute) (fail-closed
-    /// on a non-`Held` lease or a down store), or [`BrokerError::Box`] if
-    /// delivering the result fails.
+    /// - [`BrokerError::ResultPathEscapes`] if the caller-supplied `result_rel`
+    ///   is absolute or contains a `..` component — such a path could write the
+    ///   delivered result OUTSIDE `workspace_root`, so it is rejected **before**
+    ///   the secret is resolved and before any remote write is constructed
+    ///   (fail-closed). The guard is the *same* normalize rule the materialize
+    ///   layer's `place_file` re-guard uses
+    ///   ([`crate::enforce::normalize_segments_pub`]), so the broker delivery
+    ///   path cannot diverge from the fence's traversal policy.
+    /// - Propagates [`BrokerError`] from [`execute`](Self::execute) (fail-closed
+    ///   on a non-`Held` lease or a down store), or [`BrokerError::Box`] if
+    ///   delivering the result fails.
     pub fn execute_into_container<B: BoxExec>(
         &self,
         boxx: &B,
         container: &RunningContainer,
-        result_path: &str,
+        workspace_root: &str,
+        result_rel: &str,
         req: &BrokerRequest<'_>,
     ) -> Result<BrokerResponse, BrokerError> {
+        // Result-path traversal guard (fail-closed, BEFORE the op runs and
+        // before any remote write is constructed). `shell_quote` blocks shell
+        // injection but NOT traversal: an absolute `result_rel` or one bearing
+        // `..` would be faithfully quoted and then deliver the result OUTSIDE
+        // the workspace root. Reuse the exact normalize/guard `place_file` uses
+        // so the broker delivery path cannot diverge from the fence's traversal
+        // policy: a path is rejected iff it is absolute or contains any `..`
+        // (i.e. it does not normalize to a fence-relative segment list). The
+        // result is then joined under `workspace_root` here, never supplied as a
+        // pre-joined absolute path the caller controls.
+        if result_path_escapes(result_rel) {
+            return Err(BrokerError::ResultPathEscapes {
+                result_path: result_rel.to_string(),
+            });
+        }
+        let rel = result_rel.trim_start_matches("./").trim_start_matches('/');
+        if rel.is_empty() {
+            return Err(BrokerError::ResultPathEscapes {
+                result_path: result_rel.to_string(),
+            });
+        }
+        let root = workspace_root.trim_end_matches('/');
+        let full = format!("{root}/{rel}");
+
         // The credential is consumed entirely inside `execute`; only `output`
         // (a signature) survives.
         let resp = self.execute(req)?;
 
         // Deliver ONLY the public output into the container. The container's
         // command line carries the signature, never the key.
-        let dir = result_path
-            .rsplit_once('/')
-            .map_or(".", |(d, _)| d)
-            .to_string();
+        let dir = full.rsplit_once('/').map_or(root, |(d, _)| d).to_string();
         let script = format!(
             "mkdir -p {dq} && printf %s {oq} > {pq}",
             dq = shell_quote(&dir),
             oq = shell_quote(&resp.output),
-            pq = shell_quote(result_path),
+            pq = shell_quote(&full),
         );
         let out = boxx
             .run(&["docker", "exec", &container.name, "sh", "-c", &script])
@@ -576,6 +626,18 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+/// `true` iff `result_path` escapes the workspace root — absolute, or containing
+/// any `..` component. This is the **same** rule the materialize layer's
+/// `place_file` re-guard uses (it delegates to the classifier's
+/// [`crate::enforce::normalize_segments_pub`]): a path that cannot be normalized
+/// to a fence-relative segment list (absolute or `..`-bearing) is an escape.
+///
+/// `shell_quote` defeats shell injection but not traversal; this is the broker
+/// delivery path's traversal guard, applied before any remote write.
+fn result_path_escapes(result_path: &str) -> bool {
+    crate::enforce::normalize_segments_pub(result_path).is_none()
+}
+
 /// Minimal, dependency-free standard base64 (padded).
 fn base64_encode(bytes: &[u8]) -> String {
     const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -652,6 +714,37 @@ impl SecretStore for InMemoryStore {
 mod tests {
     use super::*;
     use hugit_contracts::RunnerState;
+    use hugit_runner::lease::CmdOutput;
+    use std::cell::Cell;
+
+    /// A fake [`BoxExec`] that performs NO real I/O and records whether `run`
+    /// was ever invoked. Used to prove the broker rejects a traversing
+    /// `result_path` BEFORE it ever constructs/issues a remote write — i.e. the
+    /// guard is upstream of the box, not a post-write cleanup. Every `run`
+    /// returns success, so if the guard were absent the call would "succeed"
+    /// (and `ran` would flip) — making the rejection test load-bearing.
+    struct SpyBox {
+        ran: Cell<bool>,
+    }
+
+    impl SpyBox {
+        fn new() -> Self {
+            Self {
+                ran: Cell::new(false),
+            }
+        }
+    }
+
+    impl BoxExec for SpyBox {
+        fn run(&self, _argv: &[&str]) -> anyhow::Result<CmdOutput> {
+            self.ran.set(true);
+            Ok(CmdOutput {
+                code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
 
     fn lease() -> RunnerLease {
         RunnerLease {
@@ -847,5 +940,82 @@ mod tests {
             },
         };
         assert!(broker.execute(&req).is_ok());
+    }
+
+    // ── result_path traversal guard (oracle for defect 1) ────────────────────
+    //
+    // A caller-supplied `result_path` that is absolute or contains `..` could
+    // deliver the broker result OUTSIDE the workspace root. `shell_quote` blocks
+    // injection but NOT traversal, so `execute_into_container` MUST reject such a
+    // path fail-closed BEFORE any remote write. This is RED on baseline (no
+    // guard → the SpyBox's `run` succeeds and `ran` flips) and GREEN after.
+    #[test]
+    fn result_path_traversal_and_absolute_are_rejected_before_any_box_write() {
+        let broker = Broker::new(store_with("k", b"super-secret-key"));
+        let l = lease(); // Held — so only the result_path guard can reject.
+        let container = RunningContainer {
+            name: "hugit-test-ctr".to_string(),
+        };
+        let mk_req = || BrokerRequest {
+            lease: &l,
+            op: BrokerOp::Sign {
+                secret: SecretRef::new("k"),
+                message: b"m".to_vec(),
+            },
+        };
+
+        let root = "/job-ws";
+        // Every one of these escapes the workspace root and MUST be rejected.
+        for bad in [
+            "../escape.hex",            // climb above root
+            "ws/../../etc/cron.d/evil", // climb out via ..
+            "/etc/passwd",              // absolute
+            "/abs/result.hex",          // absolute, plausible-looking
+            "a/b/../../../outside",     // multi-.. climb
+        ] {
+            let spy = SpyBox::new();
+            let req = mk_req();
+            let err = broker
+                .execute_into_container(&spy, &container, root, bad, &req)
+                .expect_err("traversing/absolute result_path must be rejected");
+            assert!(
+                matches!(err, BrokerError::ResultPathEscapes { .. }),
+                "result_path {bad:?} must fail closed with ResultPathEscapes, got {err:?}"
+            );
+            // LOAD-BEARING: the guard fires BEFORE any remote write is issued.
+            assert!(
+                !spy.ran.get(),
+                "no box command may run for a rejected result_path {bad:?}"
+            );
+            // The error is secret-free.
+            assert!(
+                !format!("{err}").contains("super-secret-key"),
+                "error must not carry the credential"
+            );
+        }
+    }
+
+    #[test]
+    fn fence_relative_result_path_is_accepted_and_delivered() {
+        // The positive counterpart: a legitimate fence-relative path passes the
+        // guard and the result is delivered (SpyBox `run` is invoked once).
+        let broker = Broker::new(store_with("k", b"x"));
+        let l = lease();
+        let container = RunningContainer {
+            name: "hugit-test-ctr".to_string(),
+        };
+        let req = BrokerRequest {
+            lease: &l,
+            op: BrokerOp::Sign {
+                secret: SecretRef::new("k"),
+                message: b"m".to_vec(),
+            },
+        };
+        let spy = SpyBox::new();
+        let resp = broker
+            .execute_into_container(&spy, &container, "/job-ws", "out/signature.hex", &req)
+            .expect("a fence-relative result_path must be accepted");
+        assert_eq!(resp.output.len(), 64);
+        assert!(spy.ran.get(), "the result must be delivered to the box");
     }
 }

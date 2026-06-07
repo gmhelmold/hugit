@@ -318,10 +318,13 @@ fn item_6_positive_path_via_broker_credential_absent() {
         }
 
         // The broker completes the credential-needing op and delivers ONLY the
-        // signature into the job container.
-        let result_path = format!("{WORKSPACE_ROOT}/signature.hex");
+        // signature into the job container. The result path is FENCE-RELATIVE;
+        // the broker joins it under WORKSPACE_ROOT (and rejects any `..`/absolute
+        // result path before resolving the secret — see the traversal guard).
+        let result_rel = "signature.hex";
+        let result_path = format!("{WORKSPACE_ROOT}/{result_rel}");
         let resp = broker
-            .execute_into_container(&boxx, &container, &result_path, &req)
+            .execute_into_container(&boxx, &container, WORKSPACE_ROOT, result_rel, &req)
             .map_err(|e| format!("broker execute_into_container: {e}"))?;
 
         // The job CAN use the result: the signature file is present & non-empty.
@@ -350,6 +353,34 @@ fn item_6_positive_path_via_broker_credential_absent() {
         let secret_str = String::from_utf8_lossy(secret);
         if resp.output.contains(secret_str.as_ref()) {
             return Err("delivered output contains the credential".to_string());
+        }
+
+        // NEGATIVE (box-lane): a `..`/absolute result path that would deliver
+        // OUTSIDE the workspace root is refused fail-closed, with NO file written
+        // anywhere — the broker rejects before resolving the secret or touching
+        // the box. Probe a would-be escape target and confirm it is absent.
+        for evil_rel in ["../escaped.hex", "/tmp/escaped.hex"] {
+            let err = broker
+                .execute_into_container(&boxx, &container, WORKSPACE_ROOT, evil_rel, &req)
+                .err()
+                .ok_or_else(|| format!("escaping result_rel {evil_rel:?} must be rejected"))?;
+            if !format!("{err}").contains("outside the workspace root") {
+                return Err(format!("unexpected error for {evil_rel:?}: {err}"));
+            }
+        }
+        // The most dangerous absolute target must not exist on the box.
+        let leaked = boxx
+            .run(&[
+                "docker",
+                "exec",
+                &container.name,
+                "sh",
+                "-c",
+                "test -e /tmp/escaped.hex && echo LEAKED || echo SAFE",
+            ])
+            .map_err(|e| format!("probe escape target: {e}"))?;
+        if leaked.stdout.trim() != "SAFE" {
+            return Err("a rejected escape result path leaked a file".to_string());
         }
         Ok(())
     })();
