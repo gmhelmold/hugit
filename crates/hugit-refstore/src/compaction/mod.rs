@@ -63,16 +63,39 @@ impl HotRemainder {
 }
 
 /// Outcome of a compaction pass.
+///
+/// The sealed interval `[sealed_start_seq, sealed_end_seq)` is half-open and
+/// **empty exactly when the pass sealed nothing** — but a no-op's empty interval
+/// is anchored at the log tail (`len`), never at a false `[0, 0)` that a real
+/// head-seal of a zero-length window would also produce. Use [`is_noop`] to test
+/// "sealed nothing" rather than comparing the interval to `[0, 0)`.
+///
+/// [`is_noop`]: CompactionReport::is_noop
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompactionReport {
-    /// `seq` of the first record sealed to the cold tier (inclusive).
+    /// `seq` of the first record sealed to the cold tier (inclusive). For a
+    /// no-op pass this is the log length (the empty interval sits at the tail).
     pub sealed_start_seq: u64,
-    /// One past the last `seq` sealed (exclusive).
+    /// One past the last `seq` sealed (exclusive). Equals `sealed_start_seq` for
+    /// a no-op (an empty interval).
     pub sealed_end_seq: u64,
     /// Records moved to the cold tier in this pass.
     pub sealed_count: usize,
     /// The records remaining hot after compaction.
     pub hot: HotRemainder,
+}
+
+impl CompactionReport {
+    /// Whether this pass sealed nothing (the log was already within the bound).
+    ///
+    /// A no-op is reported with an **empty interval anchored at the log tail**
+    /// (`sealed_start_seq == sealed_end_seq == len`), so it is distinguishable
+    /// from a real compaction whose sealed interval legitimately starts at
+    /// `seq 0` — the false-zero-interval defect. This is the canonical test for
+    /// "nothing was sealed".
+    pub fn is_noop(&self) -> bool {
+        self.sealed_count == 0
+    }
 }
 
 /// Error from a compaction pass.
@@ -124,9 +147,16 @@ pub fn compact<S: ColdStore>(
     let all = log.records().to_vec();
 
     if total <= hot_bound {
+        // No-op: nothing to seal. Report an EMPTY interval anchored at the log
+        // tail (`len`), not a false `[0, 0)`. A real compaction's sealed window
+        // always starts at seq 0, so `[len, len)` can never collide with a real
+        // seal — "sealed nothing" is now distinguishable from "sealed a zero-
+        // length window at the head". Prefer [`CompactionReport::is_noop`] over
+        // comparing the interval.
+        let tail = total as u64;
         return Ok(CompactionReport {
-            sealed_start_seq: 0,
-            sealed_end_seq: 0,
+            sealed_start_seq: tail,
+            sealed_end_seq: tail,
             sealed_count: 0,
             hot: HotRemainder { records: all },
         });

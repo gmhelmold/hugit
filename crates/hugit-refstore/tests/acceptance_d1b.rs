@@ -136,6 +136,42 @@ fn item_3_compaction_replay_equivalent() {
     assert_eq!(rep2.sealed_count, 0, "nothing sealed when within bound");
     assert!(cold2.is_empty(), "cold tier untouched on no-op");
     assert_eq!(rep2.hot.len(), 100);
+
+    // (defect-3 remediation) A NO-OP compaction must be DISTINGUISHABLE from a
+    // real compaction whose sealed interval legitimately starts at seq 0.
+    //
+    // RED before the fix: a no-op reported `sealed_start_seq == sealed_end_seq
+    // == 0` — a false zero interval indistinguishable from "sealed exactly the
+    // record at seq 0..0". A consumer offloading the reported [start, end) range
+    // to durable storage could not tell "I sealed nothing" from "I sealed a
+    // zero-length window at the head", and the no-op masquerades as a real seal
+    // of the empty prefix.
+    assert!(
+        rep2.is_noop(),
+        "a within-bound compaction is a no-op and must report itself as one"
+    );
+    assert_eq!(
+        rep2.sealed_start_seq, rep2.sealed_end_seq,
+        "no-op interval is empty"
+    );
+    assert_eq!(
+        rep2.sealed_start_seq, 100,
+        "the no-op empty interval sits at the log tail (len), NOT a false [0,0) at the head"
+    );
+
+    // Contrast: a REAL compaction that seals from seq 0 reports a non-empty
+    // [0, k) interval and is NOT a no-op — the two are now distinguishable.
+    let real_log = build_log(300);
+    let mut cold3 = InMemoryColdStore::new();
+    let real = compact(&real_log, 100, &mut cold3).expect("real compaction");
+    assert!(!real.is_noop(), "a sealing compaction is not a no-op");
+    assert_eq!(real.sealed_start_seq, 0, "real seal starts at the head");
+    assert_eq!(real.sealed_end_seq, 200);
+    assert_ne!(
+        (real.sealed_start_seq, real.sealed_end_seq),
+        (rep2.sealed_start_seq, rep2.sealed_end_seq),
+        "a real head-seal and a no-op now report distinct intervals"
+    );
 }
 
 /// ④ undo restores + preserves history.
@@ -260,6 +296,107 @@ fn item_4_undo_restores_preserves_history() {
     );
 }
 
+/// ④ (defect-1 remediation) undo folds `intent.landed` ref mutations.
+///
+/// An `intent.landed` event mutates `ref → target` just like a raw `ref.update`
+/// (it is the kind D3b's land path and D4's import emit, and the machine
+/// altitude projects it as a ref-advancing commit). The undo projection MUST
+/// account for it: a ref whose live value was last set by a landed intent, when
+/// undone, must restore the *prior* oid — never degenerate to `ref.delete`
+/// because the projection pretended the intent never touched the ref.
+///
+/// RED before the fix: `replay_unchecked` treated `intent.landed` as inert, so
+/// the prior-state projection used by `compute_compensation` lost every
+/// intent-set ref and the compensator wrongly came out as `ref.delete`.
+#[test]
+fn item_4_undo_folds_intent_landed_ref_mutations() {
+    let pc = vec!["user:gustavo".to_string()];
+
+    // (1) A landed intent ADVANCES a ref that an earlier event had set, then we
+    //     undo the landing → must RESTORE the prior oid, not delete the ref.
+    let mut log = EventLog::new();
+    // seq 0: raw update sets refs/heads/main -> oid-A.
+    log.append(
+        "ref.update",
+        pc.clone(),
+        r#"{"ref":"refs/heads/main","target":"oid-A"}"#,
+        1,
+    );
+    // seq 1: a landed intent advances refs/heads/main -> oid-B.
+    log.append(
+        "intent.landed",
+        pc.clone(),
+        r#"{"intent_id":"I1","ref":"refs/heads/main","target":"oid-B","charter":"land"}"#,
+        2,
+    );
+
+    // The intent.landed actually mutated the live ref state.
+    let live = replay(&log).unwrap();
+    assert_eq!(
+        live.get("refs/heads/main"),
+        Some("oid-B"),
+        "intent.landed must advance the ref in the projection (not be inert)"
+    );
+
+    // Undo the landing (seq 1) → compensator must RESTORE oid-A, not delete.
+    let comp = undo(&mut log, 1, pc.clone(), 3).expect("undo a landed intent");
+    assert_eq!(
+        comp.kind, "ref.update",
+        "undoing a landed intent that advanced an existing ref must restore the prior oid, not delete the ref"
+    );
+    let restored = replay(&log).unwrap();
+    assert_eq!(
+        restored.get("refs/heads/main"),
+        Some("oid-A"),
+        "undo of the landed intent restored the prior oid"
+    );
+
+    // (2) Undo of a RAW update whose ref was previously set BY a landed intent
+    //     must restore the intent's oid (the prior state includes the intent).
+    let mut log2 = EventLog::new();
+    log2.append(
+        "intent.landed",
+        pc.clone(),
+        r#"{"intent_id":"I2","ref":"refs/heads/x","target":"oid-1","charter":"land"}"#,
+        1,
+    );
+    log2.append(
+        "ref.update",
+        pc.clone(),
+        r#"{"ref":"refs/heads/x","target":"oid-2"}"#,
+        2,
+    );
+    let comp2 = undo(&mut log2, 1, pc.clone(), 3).expect("undo raw over an intent-set ref");
+    assert_eq!(
+        comp2.kind, "ref.update",
+        "the prior state set by a landed intent must survive into the compensator"
+    );
+    assert_eq!(
+        replay(&log2).unwrap().get("refs/heads/x"),
+        Some("oid-1"),
+        "undo restored the oid the landed intent had set"
+    );
+
+    // (3) A landed intent is itself directly undoable (it is a ref mutation).
+    let mut log3 = EventLog::new();
+    log3.append(
+        "intent.landed",
+        pc.clone(),
+        r#"{"intent_id":"I3","ref":"refs/heads/feat","target":"oid-Z","charter":"land"}"#,
+        1,
+    );
+    let comp3 = undo(&mut log3, 0, pc.clone(), 2).expect("a landed intent is undoable");
+    assert_eq!(
+        comp3.kind, "ref.delete",
+        "undoing the create of a ref by a landed intent deletes it (no prior value)"
+    );
+    assert_eq!(
+        replay(&log3).unwrap().get("refs/heads/feat"),
+        None,
+        "ref restored to absent"
+    );
+}
+
 /// ⑥ recovery: hot-DO loss → full ref state rebuilt from cold tier
 ///   (and/or mirror) replay-identical.
 #[test]
@@ -365,4 +502,76 @@ fn item_6_recovery_hot_do_loss_rebuild() {
 
     // A trivial sanity that RefState type is what we think.
     let _: &RefState = &recovered.state;
+}
+
+/// ⑥ (defect-2 remediation) recovery splices a surviving HOT TAIL.
+///
+/// Compaction only seals a *prefix* to cold; the most-recent records live hot.
+/// A **partial** hot-DO loss can lose the DO while its in-flight writes are
+/// still recoverable (re-read from the edge / replayed by the client / held in
+/// a sibling). Recovery MUST be able to splice that surviving hot suffix after
+/// the cold/mirror prefix before re-verifying — otherwise it rebuilds a
+/// silently STALE ref state that omits the tail.
+///
+/// RED before the fix: recovery derived `max_seq` from the cold tier alone, so
+/// a hot suffix beyond the sealed prefix was ignored and the recovered state
+/// was stale.
+#[test]
+fn item_6_recovery_splices_hot_tail() {
+    use hugit_refstore::recovery::recover_with_sources;
+
+    let n = 2_000u64;
+    let log = build_log(n);
+    let full = replay(&log).expect("intact log replays");
+
+    // Steady state: only the prefix [0, seal) was sealed to cold; the suffix
+    // [seal, n) is still HOT and is NOT in the cold tier.
+    let seal = 1_500u64;
+    let mut cold = InMemoryColdStore::new();
+    {
+        use hugit_refstore::coldtier::{ColdRange, ColdStore};
+        let prefix: Vec<EventRecord> = log
+            .records()
+            .iter()
+            .filter(|r| r.seq < seal)
+            .cloned()
+            .collect();
+        cold.put(ColdRange::from_records(prefix));
+    }
+    // The surviving hot tail [seal, n) — the records the DO had not yet sealed.
+    let hot_tail: Vec<EventRecord> = log
+        .records()
+        .iter()
+        .filter(|r| r.seq >= seal)
+        .cloned()
+        .collect();
+    assert!(!hot_tail.is_empty(), "there is a non-trivial hot tail");
+
+    // Recovery WITHOUT the hot tail rebuilds only the sealed prefix → STALE.
+    let stale = recover_from_cold(&cold).expect("cold-only recovery succeeds");
+    assert_ne!(
+        stale.state.canonical_bytes(),
+        full.canonical_bytes(),
+        "cold-only recovery is stale: it omits the unsealed hot tail (defect-2 condition)"
+    );
+    assert_eq!(stale.records.len() as u64, seal);
+
+    // Recovery WITH the surviving hot tail spliced in → full, non-stale state.
+    let recovered =
+        recover_with_sources(&cold, &NoMirror, &hot_tail).expect("recovery with hot tail succeeds");
+    assert_eq!(
+        recovered.records.len() as u64,
+        n,
+        "recovery reconstructs the full chain including the hot tail"
+    );
+    verify_chain(&recovered.records).expect("spliced chain re-verifies");
+    assert_eq!(
+        recovered.state.canonical_bytes(),
+        full.canonical_bytes(),
+        "recovery with the hot tail is replay-identical to the pre-loss state"
+    );
+
+    // An empty hot tail is the existing cold-only behaviour (back-compat).
+    let none = recover_with_sources(&cold, &NoMirror, &[]).expect("empty hot tail = cold-only");
+    assert_eq!(none.state.canonical_bytes(), stale.state.canonical_bytes());
 }

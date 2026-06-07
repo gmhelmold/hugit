@@ -14,6 +14,7 @@
 mod harness;
 
 use harness::run_concurrent;
+use hugit_contracts::intent_sidecar::IntentSidecar;
 use hugit_refstore::concurrency::{Op, Serializer};
 use hugit_refstore::tamper::verify_chain;
 use std::collections::BTreeSet;
@@ -343,5 +344,136 @@ fn admit_lock_split_never_exceeds_capacity_deterministic() {
     assert_eq!(
         chain_len, CAPACITY,
         "exactly the admitted ops landed on the chain (zero loss under back-pressure)"
+    );
+}
+
+/// (defect-4 remediation) undo + import_sidecar are SERIALIZED through the one
+/// writer.
+///
+/// The single-writer invariant is only real if EVERY append-emitting path goes
+/// through the [`Serializer`]'s one mutex. `undo` and `import_sidecar` both
+/// append to the log; if they take `&mut EventLog` directly, two of them can run
+/// concurrently outside the writer lock and the "exactly one Durable Object
+/// writer" guarantee is false. This drives many concurrent undos + imports
+/// through the serializer at once and proves the chain stays a single gap-free,
+/// hash-linked total order with exactly one record per accepted op.
+///
+/// RED before the fix: there was no serializer-routed undo / import — the only
+/// way to call them was the raw `&mut EventLog` API, reachable outside the
+/// mutex.
+#[test]
+fn undo_and_import_are_serialized_through_the_writer() {
+    // Seed: land N distinct refs so each has something to undo. Kept modest so
+    // this heavy concurrent test does not starve the CPU out from under the
+    // timing-sensitive `admit_lock_split_*` neighbour that runs in parallel in
+    // the same test binary (the serialization invariant holds at any N>1; a
+    // smaller fan-out proves it just as well while keeping the suite stable).
+    let n = 16usize;
+    let serializer = Serializer::new();
+    for i in 0..n {
+        serializer
+            .submit(Op::new(
+                "ref.update",
+                vec![format!("agent:seed-{i:03}")],
+                format!(r#"{{"ref":"refs/heads/seed-{i:03}","target":"oid-{i:08x}"}}"#),
+                1_717_000_000_000 + i as u64,
+            ))
+            .expect("seed accepted");
+    }
+    let seeded_len = serializer.len().expect("not poisoned");
+    assert_eq!(seeded_len, n);
+
+    // Concurrently: half the threads UNDO a distinct seed, half IMPORT a distinct
+    // sidecar — all fanning into the one writer at the same instant.
+    let ready = Arc::new(AtomicUsize::new(0));
+    let total = n; // n undos + n imports launched
+    let mut handles = Vec::new();
+
+    // n undo threads (each undoes the seed it owns, by seq).
+    for i in 0..n {
+        let s = serializer.clone();
+        let ready = Arc::clone(&ready);
+        handles.push(thread::spawn(move || {
+            ready.fetch_add(1, Ordering::AcqRel);
+            while ready.load(Ordering::Acquire) < total {
+                std::hint::spin_loop();
+            }
+            s.undo(
+                i as u64,
+                vec![format!("agent:undoer-{i:03}")],
+                1_800_000_000_000,
+            )
+            .expect("serialized undo succeeds")
+        }));
+    }
+    // n import threads (each imports a distinct sidecar id onto a distinct ref).
+    for i in 0..n {
+        let s = serializer.clone();
+        let ready = Arc::clone(&ready);
+        handles.push(thread::spawn(move || {
+            ready.fetch_add(1, Ordering::AcqRel);
+            // total counts only the first n adds; just spin until everyone's up.
+            while ready.load(Ordering::Acquire) < total {
+                std::hint::spin_loop();
+            }
+            let sidecar = IntentSidecar {
+                intent_id: format!("import-{i:03}"),
+                charter: format!("imported charter {i}"),
+                acceptance: vec!["does the thing".into()],
+                context_ref: format!("cas://ctx/{i:03}"),
+                authoritative: false,
+            };
+            s.import_sidecar(
+                &sidecar,
+                &format!("refs/heads/imported-{i:03}"),
+                &format!("oid-imp-{i:08x}"),
+                vec![format!("agent:importer-{i:03}")],
+                1_900_000_000_000,
+            )
+            .expect("serialized import succeeds")
+        }));
+    }
+
+    // Every thread completed without a poisoned writer or a torn append.
+    let mut undo_records = Vec::new();
+    let mut import_records = Vec::new();
+    for (idx, h) in handles.into_iter().enumerate() {
+        let rec = h.join().expect("op thread must not panic");
+        if idx < n {
+            undo_records.push(rec);
+        } else {
+            import_records.push(rec);
+        }
+    }
+
+    // SERIALIZED: the chain is one gap-free, monotonic, hash-intact total order.
+    let log = serializer.snapshot().expect("snapshot under lock");
+    verify_chain(log.records()).expect("concurrent undo+import form one intact hash chain");
+    for (i, rec) in log.records().iter().enumerate() {
+        assert_eq!(
+            rec.seq, i as u64,
+            "seqs are exactly 0..len with no gaps/dups — a single total order"
+        );
+    }
+
+    // EXACTLY ONCE: every undo and every import produced exactly one record.
+    // seeds (n) + undos (n compensators) + imports (n landings) = 3n records.
+    assert_eq!(
+        log.len(),
+        3 * n,
+        "exactly one record per accepted undo/import — none lost, none doubled"
+    );
+    // The assigned seqs are all distinct (no two ops grabbed the same slot).
+    let undo_seqs: BTreeSet<u64> = undo_records.iter().map(|r| r.seq).collect();
+    let import_seqs: BTreeSet<u64> = import_records.iter().map(|r| r.seq).collect();
+    assert_eq!(undo_seqs.len(), n, "every undo got a distinct chain slot");
+    assert_eq!(
+        import_seqs.len(),
+        n,
+        "every import got a distinct chain slot"
+    );
+    assert!(
+        undo_seqs.is_disjoint(&import_seqs),
+        "undo and import slots never collide — serialized, not interleaved torn writes"
     );
 }

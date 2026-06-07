@@ -35,8 +35,11 @@
 //! append/hash-chain primitive D1a sealed. Any correctness regression observed
 //! here is a defect in those primitives, fixed at root, never bypassed here.
 
+use crate::intent::import::{ImportError, import_sidecar};
 use crate::log::EventLog;
+use crate::undo::{UndoError, compute_compensation};
 use hugit_contracts::event_record::EventRecord;
+use hugit_contracts::intent_sidecar::IntentSidecar;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -110,6 +113,79 @@ impl std::fmt::Display for SubmitError {
 }
 
 impl std::error::Error for SubmitError {}
+
+/// Why a serialized [`Serializer::undo`] did not append a compensator.
+///
+/// Either the operation was not admitted / the writer was poisoned
+/// ([`SubmitError`]), or the undo itself was rejected by its own logic
+/// ([`UndoError`] — out of range, nothing to compensate, tamper, …). Both are
+/// surfaced explicitly; an undo is never silently dropped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UndoSubmitError {
+    /// Admission/writer-level failure routing the undo through the serializer.
+    Submit(SubmitError),
+    /// The undo computation itself failed.
+    Undo(UndoError),
+}
+
+impl std::fmt::Display for UndoSubmitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UndoSubmitError::Submit(e) => write!(f, "serialized undo: {e}"),
+            UndoSubmitError::Undo(e) => write!(f, "serialized undo: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for UndoSubmitError {}
+
+impl From<SubmitError> for UndoSubmitError {
+    fn from(e: SubmitError) -> Self {
+        UndoSubmitError::Submit(e)
+    }
+}
+
+impl From<UndoError> for UndoSubmitError {
+    fn from(e: UndoError) -> Self {
+        UndoSubmitError::Undo(e)
+    }
+}
+
+/// Why a serialized [`Serializer::import_sidecar`] did not append a landing.
+///
+/// Either the operation was not admitted / the writer was poisoned
+/// ([`SubmitError`]), or the import itself was rejected ([`ImportError`] — empty
+/// or duplicate `intent_id`). Both are surfaced explicitly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImportSubmitError {
+    /// Admission/writer-level failure routing the import through the serializer.
+    Submit(SubmitError),
+    /// The import itself failed.
+    Import(ImportError),
+}
+
+impl std::fmt::Display for ImportSubmitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ImportSubmitError::Submit(e) => write!(f, "serialized import: {e}"),
+            ImportSubmitError::Import(e) => write!(f, "serialized import: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ImportSubmitError {}
+
+impl From<SubmitError> for ImportSubmitError {
+    fn from(e: SubmitError) -> Self {
+        ImportSubmitError::Submit(e)
+    }
+}
+
+impl From<ImportError> for ImportSubmitError {
+    fn from(e: ImportError) -> Self {
+        ImportSubmitError::Import(e)
+    }
+}
 
 /// The single serialization point in front of one repository's [`EventLog`].
 ///
@@ -303,6 +379,88 @@ impl Serializer {
         Ok(record)
         // `log` drops first (lock released), then `_permit` (in-flight count
         // decremented) — every path, including the `?` error and any panic.
+    }
+
+    /// Undo the operation at `target` by appending its compensator — **routed
+    /// through the single writer**. Returns the compensating [`EventRecord`] that
+    /// landed on the chain (with its assigned `seq`/`prev_hash`/`this_hash`).
+    ///
+    /// `undo` appends to the log, so it MUST pass through the same serialization
+    /// point as [`submit`](Serializer::submit); otherwise two undos (or an undo
+    /// racing a submit/import) could append outside the writer mutex and the
+    /// single-writer invariant would be false. This takes the same admission
+    /// permit + writer lock as `submit` — the permit is held until after the lock
+    /// drops — so concurrent undos are serialized into the one total order, one
+    /// at a time, exactly like any other append. The compensator is computed and
+    /// appended **atomically under the one lock**, so the prior-state projection
+    /// can never race a concurrent append.
+    pub fn undo(
+        &self,
+        target: u64,
+        principal_chain: Vec<String>,
+        recorded_at: u64,
+    ) -> Result<EventRecord, UndoSubmitError> {
+        let _permit = match self.inner.gate.try_acquire() {
+            Some(permit) => permit,
+            None => {
+                return Err(SubmitError::Backpressure {
+                    capacity: self.inner.capacity,
+                }
+                .into());
+            }
+        };
+        let mut log = self
+            .inner
+            .log
+            .lock()
+            .map_err(|_| SubmitError::WriterPoisoned)?;
+        // Compute the compensator and append it under the SAME lock, so the
+        // prior-state read and the append are one indivisible critical section.
+        let comp = compute_compensation(&log, target)?;
+        let record = log.append(comp.kind, principal_chain, comp.payload, recorded_at);
+        Ok(record)
+        // `log` drops first (lock released), then `_permit` — every path.
+    }
+
+    /// Import a B6 [`IntentSidecar`] by landing it onto the log — **routed
+    /// through the single writer**.
+    ///
+    /// Like [`undo`](Serializer::undo), `import_sidecar` appends, so it goes
+    /// through the same admission gate + writer mutex. Concurrent imports (and
+    /// imports racing undos/submits) are therefore serialized into the one total
+    /// order; the single-writer discipline holds for every append-emitting path,
+    /// not just `submit`.
+    pub fn import_sidecar(
+        &self,
+        sidecar: &IntentSidecar,
+        ref_name: &str,
+        target: &str,
+        principal_chain: Vec<String>,
+        recorded_at: u64,
+    ) -> Result<EventRecord, ImportSubmitError> {
+        let _permit = match self.inner.gate.try_acquire() {
+            Some(permit) => permit,
+            None => {
+                return Err(SubmitError::Backpressure {
+                    capacity: self.inner.capacity,
+                }
+                .into());
+            }
+        };
+        let mut log = self
+            .inner
+            .log
+            .lock()
+            .map_err(|_| SubmitError::WriterPoisoned)?;
+        Ok(import_sidecar(
+            &mut log,
+            sidecar,
+            ref_name,
+            target,
+            principal_chain,
+            recorded_at,
+        )?)
+        // `log` drops first (lock released), then `_permit` — every path.
     }
 
     /// Run `f` against the chain's records under the writer lock — e.g. to verify

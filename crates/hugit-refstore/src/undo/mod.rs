@@ -24,6 +24,7 @@
 //! [`EventLog::append`] extends the same hash chain, so the result re-verifies
 //! and the undo is itself part of history (and is itself undoable).
 
+use crate::intent::model::INTENT_LANDED_KIND;
 use crate::log::EventLog;
 use crate::replay::{ReplayError, replay_unchecked};
 use crate::tamper::{TamperError, verify_chain};
@@ -103,7 +104,11 @@ pub fn compute_compensation(log: &EventLog, target: u64) -> Result<Compensation,
 
     let target_rec = &records[target as usize];
     let ref_name = match target_rec.kind.as_str() {
-        "ref.update" | "ref.delete" => {
+        // All ref-mutating kinds carry a `"ref"` field. `intent.landed` is a ref
+        // mutation too (it advances `ref -> target`), so it is undoable exactly
+        // like a raw push: the compensator is a raw ref event restoring the prior
+        // value — never a fabricated intent.
+        "ref.update" | "ref.delete" | INTENT_LANDED_KIND => {
             let v: serde_json::Value = serde_json::from_str(&target_rec.payload).map_err(|_| {
                 UndoError::BadTargetPayload {
                     target,
