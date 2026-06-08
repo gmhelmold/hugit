@@ -498,9 +498,14 @@ fn item_4_mutation_silent_drop_is_caught_red() {
 
 #[test]
 fn item_5_no_symmetric_authority_property() {
-    // Property: across a sweep of interleavings of the engine's transitions, NO
-    // reachable state has both sides authoritative for main. The forge is always
-    // the arbiter.
+    // Property: across a sweep of interleavings of the engine's REAL transitions
+    // (ingest branch, reroute direct-main push, land via queue, arbitrate branch
+    // divergence), NO reachable state ever records the GitHub side as
+    // authoritative for main. This is a genuine invariant over actual stored
+    // state — `is_symmetric_for_main` reads the real authority for main (no
+    // hardcoded Forge), so a regressed transition that set main→GitHub would be
+    // caught here (and `item_5_mutation_injected_symmetry_is_caught_red`
+    // constructs exactly that forbidden state to prove the predicate is RED on it).
     let protected = "refs/heads/main";
     let gh = GitHubSide::new("prop");
 
@@ -560,14 +565,20 @@ fn item_5_no_symmetric_authority_property() {
             }
             assert!(
                 !forge.authority().is_symmetric_for_main(),
-                "⑤ no reachable state may have both sides authoritative for main \
+                "⑤ no reachable state may record the GitHub side authoritative for main \
                  (seed={seed}, step={step})"
             );
-            // main is ALWAYS forge-authoritative.
+            // main is ALWAYS forge-authoritative — and NEVER GitHub-authoritative
+            // (read from real stored state, not a hardcoded literal).
             assert_eq!(
                 forge.authority().authority_for(protected),
                 AuthoritySide::Forge,
-                "⑤ main is always forge-authoritative"
+                "⑤ main is always forge-authoritative (seed={seed}, step={step})"
+            );
+            assert_ne!(
+                forge.authority().authority_for(protected),
+                AuthoritySide::GitHub,
+                "⑤ main must never become GitHub-authoritative (seed={seed}, step={step})"
             );
         }
     }
@@ -575,26 +586,50 @@ fn item_5_no_symmetric_authority_property() {
 
 #[test]
 fn item_5_mutation_injected_symmetry_is_caught_red() {
-    // MUTATION: construct a model and PROVE that the only way to make
-    // `is_symmetric_for_main` true is to set the protected branch to
-    // AuthoritySide::GitHub — which the engine exposes NO transition to do.
+    // MUTATION (the single defeat of the single-writer rule): make the GitHub
+    // side authoritative for the protected branch. The forbidden state is now
+    // REPRESENTABLE — `set_github_authoritative_for_main` (test-internals
+    // feature, never in a production build) constructs exactly the state a buggy
+    // ingest path would reach if it applied a direct GitHub `main` push as a
+    // symmetric write instead of rerouting it. The oracle must go RED on it.
     //
-    // We cannot reach a symmetric state through the public API, so we
-    // demonstrate the predicate is non-vacuous by checking it directly against
-    // its definition: a state where main maps to GitHub WOULD be symmetric.
-    //
-    // The `AuthorityModel` deliberately only lets `arbitrate` set Forge; there is
-    // no setter for GitHub-authoritative-main. If such a setter were added (the
-    // mutation), the property test above would find a symmetric state → RED.
+    // This proves item ⑤ is NON-VACUOUS: `is_symmetric_for_main` reads the real
+    // stored authority for `main` (no hardcoded `Forge`), so a GitHub-for-main
+    // state trips it. If the property sweep above ever reached this state through
+    // a regressed engine transition, `item_5_no_symmetric_authority_property`
+    // would fail at that step.
     let mut model = AuthorityModel::new("refs/heads/main");
-    // Every transition the engine offers keeps main forge-authoritative.
-    model.arbitrate("refs/heads/main");
-    model.arbitrate("refs/heads/feature");
     assert!(
         !model.is_symmetric_for_main(),
-        "⑤ the engine's transitions can never produce a symmetric-authority state"
+        "⑤ the real engine never produces a symmetric-authority state"
     );
     assert_eq!(model.authority_for("refs/heads/main"), AuthoritySide::Forge);
+
+    // Inject the forbidden state.
+    model.set_github_authoritative_for_main();
+
+    // The predicate CATCHES it (it would be GREEN/vacuous if it hardcoded Forge).
+    assert_eq!(
+        model.authority_for("refs/heads/main"),
+        AuthoritySide::GitHub,
+        "⑤ authority_for reports the REAL stored authority for main"
+    );
+    assert!(
+        model.is_symmetric_for_main(),
+        "⑤ RED-guard: a GitHub-authoritative-main state MUST trip the oracle \
+         (a vacuous predicate that hardcodes Forge would stay false here)"
+    );
+
+    // Same proof end-to-end on a live engine's authority model: the production
+    // transitions keep it false; only the injected mutation makes it true.
+    let mut forge = BidirSync::with_protected("refs/heads/main");
+    forge
+        .land_via_queue("i", "c".repeat(40).as_str(), "land", vec!["q".into()], 1)
+        .unwrap();
+    assert!(
+        !forge.authority().is_symmetric_for_main(),
+        "⑤ a landed main stays forge-authoritative"
+    );
 }
 
 // ── P2 seam: live GitHub detect (webhook/poll) — gated, run-not-skip ─────────

@@ -89,9 +89,29 @@ pub enum AuthoritySide {
 /// The authority model for one ref (rule 5).
 ///
 /// The protected branch is **always** forge-authoritative; the engine exposes no
-/// transition that makes the GitHub side authoritative for it. This type makes
-/// the property checkable: [`AuthorityModel::is_symmetric_for_main`] is the
-/// predicate the property test asserts is `false` across every reachable state.
+/// production transition that makes the GitHub side authoritative for it. This
+/// type makes the property checkable: [`AuthorityModel::is_symmetric_for_main`]
+/// is the predicate the property test asserts is `false` across every reachable
+/// state.
+///
+/// # Why the authority is real, derived state (not a hardcoded literal)
+///
+/// For the rule-5 invariant to be load-bearing, the forbidden "symmetric
+/// authority for `main`" state must be *representable* — a predicate that can
+/// never be `true` catches no bug (the old vacuous oracle). So the authority for
+/// the protected branch is **stored in [`Self::authority`] and derived from the
+/// real engine transitions**: it is seeded `Forge` by [`Self::new`] and only
+/// ever rewritten by [`Self::arbitrate`] (which `land_via_queue` and the branch
+/// arbitration call), and `arbitrate` always writes `Forge`. The reroute / ingest
+/// paths never name `main`, so they never touch its authority.
+///
+/// [`Self::authority_for`] reports that stored value **verbatim** — it does *not*
+/// short-circuit `main` to `Forge`. The only way `main` could read back
+/// `GitHub` is [`Self::set_github_authoritative_for_main`], which exists ONLY
+/// under `#[cfg(test)]` so the RED-guard can *construct the forbidden state* and
+/// prove the predicate rejects it. The production engine never calls it — and
+/// that absence is precisely the invariant the property test verifies over real
+/// reachable states.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorityModel {
     /// The protected branch name (e.g. `refs/heads/main`).
@@ -114,12 +134,15 @@ impl AuthorityModel {
         }
     }
 
-    /// The authoritative side for `ref_name` (the protected branch is always
-    /// [`AuthoritySide::Forge`]).
+    /// The authoritative side for `ref_name`, read from **actual stored state**.
+    ///
+    /// This deliberately does *not* hardcode `Forge` for the protected branch: it
+    /// returns whatever the engine's transitions recorded. The protected branch
+    /// stays forge-authoritative because every reachable transition keeps it so
+    /// (seeded `Forge`; only [`Self::arbitrate`] — which always writes `Forge` —
+    /// rewrites it via the production API). A ref absent from the map is
+    /// uncontended and reported `Forge` (no arbiter needed).
     pub fn authority_for(&self, ref_name: &str) -> AuthoritySide {
-        if ref_name == self.protected {
-            return AuthoritySide::Forge;
-        }
         self.authority
             .get(ref_name)
             .copied()
@@ -127,25 +150,44 @@ impl AuthorityModel {
     }
 
     /// Apply an arbitration step: the forge always wins a contended ref. There is
-    /// deliberately **no** method that sets [`AuthoritySide::GitHub`] for the
-    /// protected branch — a symmetric-authority state is unrepresentable through
-    /// the engine's API.
+    /// deliberately **no** production method that sets [`AuthoritySide::GitHub`]
+    /// for the protected branch — a symmetric-authority state is unreachable
+    /// through the engine's API.
     pub fn arbitrate(&mut self, ref_name: &str) {
         self.authority
             .insert(ref_name.to_string(), AuthoritySide::Forge);
     }
 
-    /// The property under test (rule 5): is `main` simultaneously authoritative
-    /// on both sides? Must be `false` for **every** reachable state.
+    /// The property under test (rule 5): is the GitHub side ALSO authoritative
+    /// for `main`? Must be `false` for **every** reachable state.
+    ///
+    /// The forge is always authoritative for `main`; a *symmetric* state is one
+    /// where the GitHub side is recorded authoritative for the protected branch
+    /// as well. The predicate reads the **real stored authority** for `main` — so
+    /// if any transition ever set it to [`AuthoritySide::GitHub`], this returns
+    /// `true` and the property test fails. No production transition does; the
+    /// only writer of that state is the `#[cfg(test)]`
+    /// [`Self::set_github_authoritative_for_main`] used by the RED-guard.
     pub fn is_symmetric_for_main(&self) -> bool {
-        // The forge is, by construction, authoritative for the protected branch.
-        // A symmetric state would require the GitHub side ALSO authoritative for
-        // it — which the engine exposes no transition to produce.
-        self.authority_for(&self.protected) == AuthoritySide::Forge
-            && self
-                .authority
-                .get(&self.protected)
-                .is_some_and(|s| *s == AuthoritySide::GitHub)
+        self.authority_for(&self.protected) == AuthoritySide::GitHub
+    }
+
+    /// **Test-only** transition that injects the forbidden symmetric state:
+    /// records the GitHub side as authoritative for the protected branch.
+    ///
+    /// Exists so the RED-guard can *construct* the state rule 5 forbids and prove
+    /// [`Self::is_symmetric_for_main`] catches it. The production engine offers no
+    /// path that calls this (the invariant the property test verifies) — but the
+    /// predicate is non-vacuous precisely because the state is representable.
+    ///
+    /// Compiled ONLY for in-crate unit tests (`cfg(test)`) and for the
+    /// `acceptance_bidir` integration test, which links this crate with the
+    /// `test-internals` feature via a dev-dependency. It is never present in a
+    /// production build of any dependent.
+    #[cfg(any(test, feature = "test-internals"))]
+    pub fn set_github_authoritative_for_main(&mut self) {
+        let protected = self.protected.clone();
+        self.authority.insert(protected, AuthoritySide::GitHub);
     }
 }
 
@@ -615,6 +657,60 @@ mod tests {
         assert_eq!(
             s.converge_outbound("refs/heads/b").unwrap(),
             ConvergeOutcome::AlreadyConverged
+        );
+    }
+
+    #[test]
+    fn item5_predicate_is_non_vacuous_red_on_constructed_symmetry() {
+        // The rule-5 invariant must be load-bearing: a state where main is
+        // GitHub-authoritative MUST trip the predicate. Construct exactly that
+        // forbidden state via the test-only setter and prove the predicate goes
+        // RED — while the real engine, driven only by its production transitions,
+        // never reaches it (see the property sweep in acceptance_bidir.rs).
+        let mut model = AuthorityModel::new("refs/heads/main");
+        assert!(
+            !model.is_symmetric_for_main(),
+            "a fresh model is forge-authoritative for main"
+        );
+        // MUTATION (the forbidden transition the engine never exposes in prod):
+        // record GitHub as authoritative for the protected branch.
+        model.set_github_authoritative_for_main();
+        assert_eq!(
+            model.authority_for("refs/heads/main"),
+            AuthoritySide::GitHub,
+            "authority_for now reports REAL stored state (no hardcoded Forge)"
+        );
+        assert!(
+            model.is_symmetric_for_main(),
+            "the predicate MUST catch a GitHub-authoritative-main state (non-vacuous)"
+        );
+    }
+
+    #[test]
+    fn item5_production_transitions_keep_main_forge_authoritative() {
+        // Every real engine transition that touches authority must keep main
+        // forge-authoritative; the predicate stays false the whole way.
+        let mut s = BidirSync::new();
+        assert!(!s.authority().is_symmetric_for_main());
+        // reroute of a direct main push: never touches main's authority.
+        s.ingest_github_push("refs/heads/main", &oid('b'), vec!["dev".into()], 1)
+            .unwrap();
+        assert!(!s.authority().is_symmetric_for_main());
+        // landing via the queue arbitrates main → Forge (never GitHub).
+        s.land_via_queue("i1", &oid('c'), "land", vec!["queue".into()], 2)
+            .unwrap();
+        assert_eq!(
+            s.authority().authority_for("refs/heads/main"),
+            AuthoritySide::Forge
+        );
+        assert!(!s.authority().is_symmetric_for_main());
+        // branch divergence arbitration touches only the contended branch.
+        s.arbitrate_branch_divergence("refs/heads/x", &oid('f'), &oid('e'), vec!["dev".into()], 3)
+            .unwrap();
+        assert!(!s.authority().is_symmetric_for_main());
+        assert_eq!(
+            s.authority().authority_for("refs/heads/main"),
+            AuthoritySide::Forge
         );
     }
 
