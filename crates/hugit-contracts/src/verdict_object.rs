@@ -1,4 +1,6 @@
 //! VerdictObject — frozen by decomposition §1, item 8.
+//!
+//! Verdict produced by a review lens: outcome, claims checked, and evidence refs.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

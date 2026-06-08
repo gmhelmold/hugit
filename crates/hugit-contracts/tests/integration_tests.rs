@@ -147,26 +147,25 @@ fn golden_regen_gate() {
 //   principal_chain = ["agent:runner-01", "user:gustavo"]
 //   payload         = {"ref":"refs/heads/main","target":"abc123"}  (canonical)
 //   seq             = 0
-pub const PIN_THIS_HASH_FIXTURE_PREV: &str =
+const PIN_THIS_HASH_FIXTURE_PREV: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
-pub const PIN_THIS_HASH_FIXTURE_KIND: &str = "ref.update";
-pub const PIN_THIS_HASH_FIXTURE_PAYLOAD: &str = r#"{"ref":"refs/heads/main","target":"abc123"}"#;
-pub const PIN_THIS_HASH_FIXTURE_SEQ: u64 = 0;
-pub const PIN_THIS_HASH_EXPECTED: &str =
+const PIN_THIS_HASH_FIXTURE_KIND: &str = "ref.update";
+const PIN_THIS_HASH_FIXTURE_PAYLOAD: &str = r#"{"ref":"refs/heads/main","target":"abc123"}"#;
+const PIN_THIS_HASH_FIXTURE_SEQ: u64 = 0;
+const PIN_THIS_HASH_EXPECTED: &str =
     "b53e6bd85641955c36a04eecc060691eb7f888b60f250358418b569ec6735416";
 
 // Fixed `memo_key` fixture:
 //   tree_hash        = "cafebabe" * 8
 //   def_digest       = "a1b2c3d4" * 8
 //   toolchain_digest = "12345678" * 8
-pub const PIN_MEMO_TREE: &str = "cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe";
-pub const PIN_MEMO_DEF: &str = "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4";
-pub const PIN_MEMO_TOOLCHAIN: &str =
-    "1234567812345678123456781234567812345678123456781234567812345678";
-pub const PIN_MEMO_KEY_EXPECTED: &str =
+const PIN_MEMO_TREE: &str = "cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe";
+const PIN_MEMO_DEF: &str = "a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4a1b2c3d4";
+const PIN_MEMO_TOOLCHAIN: &str = "1234567812345678123456781234567812345678123456781234567812345678";
+const PIN_MEMO_KEY_EXPECTED: &str =
     "de0d40a5e86f64a15ebe5d6227d9fc30ecf1bd7c95edbb8b98f9e92bffebda84";
 
-pub fn principal_chain_fixture() -> Vec<String> {
+fn principal_chain_fixture() -> Vec<String> {
     vec!["agent:runner-01".to_string(), "user:gustavo".to_string()]
 }
 

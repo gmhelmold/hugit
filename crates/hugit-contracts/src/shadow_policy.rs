@@ -1,4 +1,6 @@
 //! ShadowPolicy — frozen by decomposition §1, item 11 (+).
+//!
+//! Shadow-run policy controlling cadence, compute budget, and opt-in scope.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

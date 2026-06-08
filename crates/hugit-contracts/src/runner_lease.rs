@@ -1,4 +1,7 @@
 //! RunnerLease — frozen by decomposition §1, item 5.
+//!
+//! A scoped filesystem-access lease granted to a runner, with expiry and
+//! lifecycle state tracking.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
