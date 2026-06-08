@@ -18,6 +18,18 @@ sha2 = "0.10"
 sha1 = "0.10"
 hex = "0.4"
 
+[features]
+# Test-only surface (e.g. `AuthorityModel::set_github_authoritative_for_main`)
+# used by acceptance RED-guards to CONSTRUCT a forbidden state and prove the
+# rule-5 oracle rejects it. Never on by default → never in a production build of
+# any dependent; enabled for the integration tests via the dev-dependency below.
+test-internals = []
+
+# Self dev-dependency with `test-internals` on: integration tests in `tests/`
+# link the crate WITH the test-only surface, while production dependents do not.
+[dev-dependencies]
+hugit-mirror = { path = ".", features = ["test-internals"] }
+
 [[test]]
 name = "acceptance_e3"
 path = "tests/acceptance_e3.rs"

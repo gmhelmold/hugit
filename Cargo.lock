@@ -924,6 +924,7 @@ dependencies = [
  "hex",
  "hugit-app",
  "hugit-contracts",
+ "hugit-mirror",
  "hugit-proto",
  "hugit-refstore",
  "serde",
