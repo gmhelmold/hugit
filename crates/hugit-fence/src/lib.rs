@@ -31,6 +31,7 @@
 pub mod broker;
 pub mod enforce;
 pub mod materialize;
+mod util;
 
 pub use broker::{
     AttackVector, ContainerLimits, ContainmentReport, RedTeamHarness, RedTeamOutcome,

@@ -30,6 +30,8 @@ use hugit_contracts::{RunnerLease, RunnerState};
 use hugit_runner::isolation::RunningContainer;
 use hugit_runner::lease::BoxExec;
 
+use crate::util::{base64_encode, shell_quote};
+
 /// An opaque handle to a secret the broker holds. It carries the secret's
 /// **name only** — never the material — so it is safe to log and to embed in a
 /// [`BrokerRequest`] that originates inside the runner.
@@ -394,7 +396,7 @@ impl<S: SecretStore> Broker<S> {
     ///   the secret is resolved and before any remote write is constructed
     ///   (fail-closed). The guard is the *same* normalize rule the materialize
     ///   layer's `place_file` re-guard uses
-    ///   ([`crate::enforce::normalize_segments_pub`]), so the broker delivery
+    ///   ([`crate::enforce::normalize_path`]), so the broker delivery
     ///   path cannot diverge from the fence's traversal policy.
     /// - Propagates [`BrokerError`] from [`execute`](Self::execute) (fail-closed
     ///   on a non-`Held` lease or a down store), or [`BrokerError::Box`] if
@@ -478,6 +480,7 @@ pub fn fail_closed_audit(req: &BrokerRequest<'_>) -> AuditRecord {
 /// dependency. The key is the broker-held secret; the output is public.
 fn sign_hmac_sha256(key: &[u8], message: &[u8]) -> String {
     use sha2::{Digest, Sha256};
+    // SHA-256 block size in bytes (512 bits / 8).
     const BLOCK: usize = 64;
 
     // Normalize the key to one block.
@@ -621,46 +624,16 @@ impl CredentialScan {
     }
 }
 
-/// POSIX single-quote for safe interpolation into a remote `sh -c`.
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
-}
-
 /// `true` iff `result_path` escapes the workspace root — absolute, or containing
 /// any `..` component. This is the **same** rule the materialize layer's
 /// `place_file` re-guard uses (it delegates to the classifier's
-/// [`crate::enforce::normalize_segments_pub`]): a path that cannot be normalized
+/// [`crate::enforce::normalize_path`]): a path that cannot be normalized
 /// to a fence-relative segment list (absolute or `..`-bearing) is an escape.
 ///
 /// `shell_quote` defeats shell injection but not traversal; this is the broker
 /// delivery path's traversal guard, applied before any remote write.
 fn result_path_escapes(result_path: &str) -> bool {
-    crate::enforce::normalize_segments_pub(result_path).is_none()
-}
-
-/// Minimal, dependency-free standard base64 (padded).
-fn base64_encode(bytes: &[u8]) -> String {
-    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0] as usize;
-        let b1 = chunk.get(1).copied().unwrap_or(0) as usize;
-        let b2 = chunk.get(2).copied().unwrap_or(0) as usize;
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        out.push(A[(n >> 18) & 63] as char);
-        out.push(A[(n >> 12) & 63] as char);
-        out.push(if chunk.len() > 1 {
-            A[(n >> 6) & 63] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            A[n & 63] as char
-        } else {
-            '='
-        });
-    }
-    out
+    crate::enforce::normalize_path(result_path).is_none()
 }
 
 pub mod redteam;

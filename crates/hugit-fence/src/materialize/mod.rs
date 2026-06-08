@@ -20,6 +20,7 @@ use hugit_runner::isolation::RunningContainer;
 use hugit_runner::lease::BoxExec;
 
 use crate::enforce::is_admitted;
+use crate::util::{base64_encode, shell_quote};
 
 /// A candidate workspace entry offered to the fence for materialization.
 ///
@@ -101,7 +102,7 @@ fn entry_is_allow_all(entry: &str) -> bool {
     // Reuse the same normalization the classifier uses. An entry that escapes
     // (absolute / `..`) is *not* allow-all (it simply matches nothing); only an
     // entry whose normalized segment list is empty covers the whole root.
-    crate::enforce::normalize_segments_pub(entry).is_some_and(|segs| segs.is_empty())
+    crate::enforce::normalize_path(entry).is_some_and(|segs| segs.is_empty())
 }
 
 /// Validate a manifest before any materialization. **Fail-closed:** rejects an
@@ -233,37 +234,7 @@ fn place_file<B: BoxExec>(
 /// cannot be normalized is an escape). The materialize re-guard refuses such a
 /// path even if it somehow reached `place_file`.
 fn path_escapes_root(path: &str) -> bool {
-    crate::enforce::normalize_segments_pub(path).is_none()
-}
-
-/// POSIX single-quote for safe interpolation into a remote `sh -c`.
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
-}
-
-/// Minimal, dependency-free base64 (standard alphabet, padded).
-fn base64_encode(bytes: &[u8]) -> String {
-    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0] as usize;
-        let b1 = chunk.get(1).copied().unwrap_or(0) as usize;
-        let b2 = chunk.get(2).copied().unwrap_or(0) as usize;
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        out.push(A[(n >> 18) & 63] as char);
-        out.push(A[(n >> 12) & 63] as char);
-        out.push(if chunk.len() > 1 {
-            A[(n >> 6) & 63] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            A[n & 63] as char
-        } else {
-            '='
-        });
-    }
-    out
+    crate::enforce::normalize_path(path).is_none()
 }
 
 #[cfg(test)]
