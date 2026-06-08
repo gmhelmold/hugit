@@ -223,7 +223,7 @@ impl Engine {
 /// The event is appended to the caller-provided log; attribution is carried
 /// in `principal` (who made the change).
 ///
-/// `old_gate_json` / `new_gate_json` are the serialised gate lists before
+/// `old_gates_json` / `new_gates_json` are the serialised gate lists before
 /// and after the edit, so the delta is fully reconstructable from the log.
 pub fn emit_policy_change(
     log: &mut Vec<EventRecord>,
@@ -257,7 +257,7 @@ pub fn emit_policy_change(
     let event = EventRecord {
         seq,
         prev_hash,
-        this_hash: this_hash.clone(),
+        this_hash,
         kind: "policy.change".into(),
         principal_chain: vec![principal.to_string()],
         payload,
