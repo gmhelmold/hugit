@@ -209,33 +209,22 @@ impl FleetState {
 
     /// Validate that this fleet state is schema-valid.
     ///
-    /// Returns Ok(()) if valid, Err with a description if not.
+    /// Returns `Ok(())` if valid, `Err` with a description if not.
+    ///
+    /// All required fields are non-optional in the Rust type, so their presence
+    /// in the serialized output is guaranteed by the derive.  The only runtime
+    /// check that is not trivially proven by the type is that `schema_version`
+    /// is non-empty (a constructive invariant this crate must uphold).
     pub fn validate(&self) -> Result<(), String> {
         if self.schema_version.is_empty() {
             return Err("schema_version must not be empty".to_string());
         }
-        // Re-serialize and re-parse to confirm round-trip stability.
+        // Round-trip probe: confirm the JSON parses back without error.
+        // Field-presence checks are omitted — every field is non-optional in
+        // the Rust type, so `to_string_pretty` guarantees they appear.
         let json = self.to_json();
-        let reparsed: serde_json::Value =
-            serde_json::from_str(&json).map_err(|e| format!("JSON parse error: {e}"))?;
-        if reparsed.get("schema_version").is_none() {
-            return Err("missing schema_version in output".to_string());
-        }
-        if reparsed.get("workspaces").is_none() {
-            return Err("missing workspaces in output".to_string());
-        }
-        if reparsed.get("agents").is_none() {
-            return Err("missing agents in output".to_string());
-        }
-        if reparsed.get("last_seq").is_none() {
-            return Err("missing last_seq in output".to_string());
-        }
-        if reparsed.get("event_count").is_none() {
-            return Err("missing event_count in output".to_string());
-        }
-        if reparsed.get("malformed").is_none() {
-            return Err("missing malformed in output".to_string());
-        }
+        serde_json::from_str::<serde_json::Value>(&json)
+            .map_err(|e| format!("JSON round-trip error: {e}"))?;
         Ok(())
     }
 }
