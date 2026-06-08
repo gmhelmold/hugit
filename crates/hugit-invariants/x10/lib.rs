@@ -57,102 +57,34 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // §1 — Dogfood target set (item ②): the compile-time exclusion law
 // ─────────────────────────────────────────────────────────────────────────────
+//
+// SINGLE SOURCE OF TRUTH (re-review HIGH fix): the dogfood allowlist, the
+// `corelink-server`-excluded compile-time const, and the enrollment gate are
+// owned by the PRODUCTION crate `hugit_dogfood::focus_gate` — that module is
+// what actually enforces enrollment in the dogfood harness. X10 used to carry
+// its OWN divergent copy (synthetic-fleet-a/b vs the production
+// synthetic-fleet-alpha/beta), so its oracle proved item ② against the WRONG
+// list and the two could silently desync. X10 now CONSUMES the production gate
+// so the oracle proves the REAL gate excludes corelink-server.
+//
+// No dependency cycle: `hugit-dogfood` depends on contracts/queue/checks/
+// refstore only — never on `hugit-invariants` — so `hugit-invariants` may
+// safely depend on `hugit-dogfood`.
 
-/// The allowlist of repos that MAY be enrolled in hugit's dogfood harness
-/// during the launch window.
-///
-/// **`corelink-server` is structurally absent.** This list is the build-time
-/// law (item ②): enrolling `corelink-server` requires adding it here, which
-/// immediately turns the `CORELINK_SERVER_EXCLUDED` compile-time assertion RED
-/// and **fails the build**. No runtime check is sufficient — the guard must be
-/// pre-commit.
-///
-/// Source: `docs/plan/warp-10-days.md` §B8 (dogfood targets) + `WP-X10.md`
-/// item ② definition.
-pub const DOGFOOD_TARGET_ALLOWLIST: &[&str] = &[
-    "hugit",               // hugit's own repo
-    "corelink-workspaces", // the workspace snapshots repo (Campaign #2)
-    "synthetic-fleet-a",   // synthetic fleet repo A
-    "synthetic-fleet-b",   // synthetic fleet repo B
-];
-
-/// Assert that `corelink-server` is absent from the dogfood allowlist.
-///
-/// This is the compile-time guard for item ②. The `const { assert!(...) }`
-/// block makes enrollment of `corelink-server` a **build failure**, not a
-/// test failure. A test failure could be silenced by skipping; a build
-/// failure cannot.
-pub const CORELINK_SERVER_EXCLUDED: bool = {
-    let mut i = 0;
-    let mut found = false;
-    while i < DOGFOOD_TARGET_ALLOWLIST.len() {
-        let s = DOGFOOD_TARGET_ALLOWLIST[i].as_bytes();
-        // Byte-by-byte compare for "corelink-server"
-        const TARGET: &[u8] = b"corelink-server";
-        if s.len() == TARGET.len() {
-            let mut j = 0;
-            let mut matches = true;
-            while j < TARGET.len() {
-                if s[j] != TARGET[j] {
-                    matches = false;
-                    break;
-                }
-                j += 1;
-            }
-            if matches {
-                found = true;
-            }
-        }
-        i += 1;
-    }
-    !found // true ↔ corelink-server is excluded
+pub use hugit_dogfood::focus_gate::{
+    CORELINK_SERVER_EXCLUDED, DOGFOOD_TARGET_ALLOWLIST, assert_excluded,
 };
 
-// Compile-time build failure if corelink-server is enrolled.
-// Any attempt to add "corelink-server" to DOGFOOD_TARGET_ALLOWLIST causes
-// this assertion to fire BEFORE the crate even links, failing the build.
-const _: () = assert!(
-    CORELINK_SERVER_EXCLUDED,
-    "WP-X10② VIOLATED: corelink-server is listed in DOGFOOD_TARGET_ALLOWLIST. \
-     Enrollment of corelink-server during the CoreLink launch window is \
-     FORBIDDEN. Remove it from the allowlist to restore the build."
-);
-
-/// Verify at runtime that a repo name is NOT `corelink-server`.
+/// Verify at runtime that a repo name is admissible for dogfood enrollment.
 ///
-/// Called by the dogfood harness enrollment gate at the point a new repo is
-/// proposed for enrollment. Returns `Err` if the name is forbidden; `Ok` if
-/// it is on the allowlist. A name that is neither forbidden nor on the
-/// allowlist is also rejected (no unknown repos admitted).
+/// This is a thin alias over the PRODUCTION focus gate
+/// (`hugit_dogfood::focus_gate::assert_excluded`). It returns `Err` for
+/// `corelink-server` (the hard exclusion, item ②) and for any repo not on the
+/// production [`DOGFOOD_TARGET_ALLOWLIST`] (fail-closed: no unknown repos
+/// admitted). The error is rendered to a `String` so existing X10 call sites
+/// keep their `Result<(), String>` shape.
 pub fn assert_dogfood_enrollment_allowed(repo_name: &str) -> Result<(), String> {
-    // Primary guard: the absolute forbid list.
-    const FORBIDDEN: &[&str] = &[
-        "corelink-server",
-        "corelink-prod",
-        "corelink-staging",
-        "corelink-dev",
-    ];
-    for f in FORBIDDEN {
-        if repo_name == *f {
-            return Err(format!(
-                "DOGFOOD ENROLLMENT REJECTED (WP-X10②): {:?} is a CoreLink \
-                 project and MUST NOT be enrolled in hugit's dogfood harness \
-                 during the CoreLink launch window. This is a build-enforced \
-                 exclusion: enroll only repos from DOGFOOD_TARGET_ALLOWLIST.",
-                repo_name
-            ));
-        }
-    }
-    // Secondary guard: unknown repos not on the allowlist.
-    if !DOGFOOD_TARGET_ALLOWLIST.contains(&repo_name) {
-        return Err(format!(
-            "DOGFOOD ENROLLMENT REJECTED: {:?} is not on the dogfood \
-             allowlist. Add it to DOGFOOD_TARGET_ALLOWLIST (non-CoreLink \
-             repos only) to enroll it.",
-            repo_name
-        ));
-    }
-    Ok(())
+    assert_excluded(repo_name).map_err(|e| e.to_string())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
