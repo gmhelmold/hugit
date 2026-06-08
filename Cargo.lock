@@ -864,6 +864,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hugit-dogfood"
+version = "0.1.0"
+dependencies = [
+ "hugit-checks",
+ "hugit-contracts",
+ "hugit-queue",
+ "hugit-refstore",
+ "serde_json",
+]
+
+[[package]]
 name = "hugit-fence"
 version = "0.1.0"
 dependencies = [
