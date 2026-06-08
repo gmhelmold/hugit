@@ -59,3 +59,6 @@ pub mod x14;
 // ── WP-X7: right-to-erasure cascade invariants ───────────────────────────────
 #[path = "x7/lib.rs"]
 pub mod x7;
+// ── WP-X11: degradation-composition invariants ───────────────────────────────
+#[path = "x11/lib.rs"]
+pub mod x11;
