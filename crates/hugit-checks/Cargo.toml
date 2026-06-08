@@ -42,3 +42,7 @@ path = "tests/acceptance_c8.rs"
 [[test]]
 name = "acceptance_b2a"
 path = "tests/acceptance_b2a.rs"
+
+[[test]]
+name = "acceptance_b2b"
+path = "tests/acceptance_b2b.rs"
