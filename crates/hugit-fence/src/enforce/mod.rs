@@ -12,6 +12,8 @@ use hugit_contracts::FenceManifest;
 use hugit_runner::isolation::RunningContainer;
 use hugit_runner::lease::BoxExec;
 
+use crate::util::shell_quote;
+
 /// Whether a path is inside or outside the fence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FenceVerdict {
@@ -60,13 +62,13 @@ fn normalize_segments(path: &str) -> Option<Vec<&str>> {
     Some(out)
 }
 
-/// Normalize a path into canonical segments, exposed for the materialize layer
-/// so it can detect an empty-normalizing (allow-all) `path_set` entry using the
-/// exact same rules the classifier uses. Returns `None` for an escaping path
-/// (absolute or containing `..`); `Some(vec![])` for a path that collapses to
-/// the root (`"."`, `"./"`, `""`).
+/// Normalize a path into canonical segments, exposed for the materialize and
+/// broker layers so they can detect allow-all `path_set` entries and traversal
+/// escapes using the exact same rules the classifier uses. Returns `None` for
+/// an escaping path (absolute or containing `..`); `Some(vec![])` for a path
+/// that collapses to the root (`"."`, `"./"`, `""`).
 #[must_use]
-pub fn normalize_segments_pub(path: &str) -> Option<Vec<&str>> {
+pub fn normalize_path(path: &str) -> Option<Vec<&str>> {
     normalize_segments(path)
 }
 
@@ -231,11 +233,6 @@ fn join_under_root(root: &str, path: &str) -> String {
     let root = root.trim_end_matches('/');
     let path = path.trim_start_matches('/');
     format!("{root}/{path}")
-}
-
-/// POSIX single-quote a path for safe interpolation into a remote `sh -c`.
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 #[cfg(test)]
