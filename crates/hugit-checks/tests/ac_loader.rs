@@ -24,6 +24,11 @@ use hugit_checks::client::ac::{
 };
 
 const BASE: &str = "https://api.corelink.humangr.com";
+/// A guaranteed-unreachable base URL: port 0 is never bound, so any TCP connect
+/// attempt fails immediately with a transport error. Used to prove the configured
+/// client GENUINELY attempts the network — `Ok(_)` from this URL would mean the
+/// network was never called (e.g. a stub returning `Ok(None)` would fail).
+const UNREACHABLE_BASE: &str = "http://127.0.0.1:0";
 const TENANT: &str = "acme";
 const FILE_PAT: &str = "corelink_pat_FILE_SECRET_must_never_leak";
 const ENV_PAT_VAL: &str = "corelink_pat_ENV_SECRET_must_never_leak";
@@ -64,8 +69,14 @@ fn loader_contract() {
 }
 
 /// (1) All three present (URL + tenant + temp PAT file) → a CONFIGURED client.
-/// A lookup must ATTEMPT the network (a Transport or Status error), proving the
-/// client is wired — it is emphatically NOT `NotConfigured`/`NotWired`.
+/// A lookup MUST ATTEMPT the network, proven by pointing at `UNREACHABLE_BASE`
+/// (`http://127.0.0.1:0`): port 0 is never bound, so any genuine TCP connect
+/// attempt yields `Err(Transport(_))`. `Ok(_)` — including `Ok(None)` — would
+/// mean the transport was never called (e.g. a stub), so it fails the test.
+///
+/// Stub-resistance: a `lookup()` that always returns `Ok(None)` without touching
+/// the network would reach the `Ok(_) => panic!(…)` arm → the test goes RED.
+/// The real client hits port 0, gets a transport error → GREEN.
 fn all_present_yields_configured_client_that_attempts_http() {
     clear_all();
     let dir = tempfile::tempdir().expect("tempdir");
@@ -75,25 +86,33 @@ fn all_present_yields_configured_client_that_attempts_http() {
     writeln!(f, "{FILE_PAT}").unwrap();
     drop(f);
 
-    set(ENV_AC_URL, BASE);
+    // Point at a guaranteed-unreachable URL so Ok(_) is impossible unless the
+    // transport is bypassed.  Any real TCP connect to port 0 → Transport error.
+    set(ENV_AC_URL, UNREACHABLE_BASE);
     set(ENV_TENANT, TENANT);
     set(ENV_PAT_FILE, pat_path.to_str().unwrap());
 
     let client = corelink_ac_from_env().expect("all present → configured client");
-    // A lookup over the (unreachable in-test) endpoint must attempt HTTP, not
-    // short-circuit to NotConfigured/NotWired. Any of Transport/Status/hit/miss
-    // proves the client is configured + the seam is live.
+    // The transport MUST be attempted: with port 0 as target the only legal
+    // outcomes are Transport (connection refused / I/O) or Status (unexpected
+    // HTTP code). `Ok(_)` proves the network was NOT attempted → fail the test.
     let key = "a".repeat(64);
     match client.lookup(&key) {
         Err(AcError::NotConfigured(_)) => {
             panic!("a fully-configured client must not be NotConfigured")
         }
         Err(AcError::NotWired(_)) => panic!("from_runtime must build a CONFIGURED (wired) client"),
-        // Transport (DNS/connection) or any HTTP-status outcome = it tried.
-        Ok(_) | Err(AcError::Transport(_)) | Err(AcError::Status(_)) => {}
+        Ok(_) => panic!(
+            "lookup returned Ok against an unreachable endpoint — \
+             the transport was never called (stub or short-circuit); \
+             a real network attempt must produce a Transport error"
+        ),
+        // Transport (connection refused on port 0) = it tried. Status is also
+        // accepted in case the OS maps port 0 to a live service somehow.
+        Err(AcError::Transport(_)) | Err(AcError::Status(_)) => {}
         other => panic!("unexpected loader outcome: {other:?}"),
     }
-    // Same via the inherent constructor.
+    // Same via the inherent constructor: must succeed to build (env still set).
     assert!(
         HttpAcClient::from_runtime().is_ok(),
         "from_runtime mirrors corelink_ac_from_env"
