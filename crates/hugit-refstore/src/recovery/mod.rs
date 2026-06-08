@@ -34,9 +34,11 @@ pub trait MirrorSource {
     fn records_in(&self, start: u64, end: u64) -> Vec<EventRecord>;
 }
 
-/// The stubbed/contracted mirror used while E1 is not yet built: supplies
-/// nothing. Recovery against [`NoMirror`] therefore proves recoverability from
-/// the cold tier alone.
+/// A null-object [`MirrorSource`] that supplies nothing.
+///
+/// Used in tests and in [`recover_from_cold`] to prove recoverability from the
+/// cold tier alone, without requiring a live E1 mirror.  E1 (hugit-mirror) is
+/// now built; production passes its real mirror as a [`MirrorSource`] instead.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoMirror;
 

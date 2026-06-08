@@ -40,7 +40,7 @@ fn read_golden(type_name: &str) -> String {
         .unwrap_or_else(|e| panic!("cannot read golden fixture {path:?}: {e}"))
 }
 
-fn roundtrip<T>(type_name: &str) -> bool
+fn roundtrip<T>(type_name: &str)
 where
     T: serde::de::DeserializeOwned + serde::Serialize,
 {
@@ -52,7 +52,6 @@ where
         committed, re_serialized,
         "golden round-trip failed for {type_name}: serialized bytes differ from committed fixture",
     );
-    true
 }
 
 // ── golden round-trip tests (one per type) ───────────────────────────────────
@@ -261,10 +260,12 @@ fn schema_drift() {
     check_schema!("RegenGate", RegenGate, update, root);
 }
 
-// ── suppress unused import warnings by having one combined test exercise all subtypes ──
-#[allow(dead_code)]
-fn _assert_all_subtypes_importable() {
-    // Just verifying imports compile. Never called at runtime.
+// ── verify all sub-type imports compile and values are constructable ──────────
+#[test]
+fn all_subtypes_importable() {
+    // Exercises every re-exported sub-type so the compiler proves they are
+    // importable and structurally intact.  Previously a dead-code helper;
+    // promoted to a real test so it actually runs in `cargo test`.
     let _: RunnerState = RunnerState::Held;
     let _: Verdict = Verdict::Approve;
     let _a = Artifact {

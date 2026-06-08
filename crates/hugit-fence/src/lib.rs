@@ -39,5 +39,11 @@ pub use broker::{
     AuditOutcome, AuditRecord, Broker, BrokerError, BrokerOp, BrokerRequest, BrokerResponse,
     CredentialScan, SecretRef, SecretStore, scan_credential_absent,
 };
-pub use enforce::{FenceVerdict, FenceViolation, classify, probe_outside_enoent};
+// `check_access` is the named enforcement gate that constructs `FenceViolation`;
+// `is_admitted` is its boolean form used by the materialize seam.  Both are
+// exported alongside `FenceViolation` so callers never import the result type
+// without the constructor that produces it.
+pub use enforce::{
+    FenceVerdict, FenceViolation, check_access, classify, is_admitted, probe_outside_enoent,
+};
 pub use materialize::{CandidateEntry, MaterializeError, materialize_sparse};

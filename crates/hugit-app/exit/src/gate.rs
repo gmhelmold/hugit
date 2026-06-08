@@ -164,7 +164,10 @@ impl Default for MoneyGate {
     }
 }
 
-/// Return current Unix epoch milliseconds (stub for no-std compat).
+/// Return current Unix epoch milliseconds.
+///
+/// Wraps `SystemTime::now()` and saturates to 0 if the clock predates the Unix
+/// epoch (impossible in practice, but the type system requires the fallback).
 fn current_epoch_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
