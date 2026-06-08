@@ -18,3 +18,7 @@ pub mod refops;
 // WP-E2a: git history import (byte-identity, LFS, resumable, idempotency).
 // Submodules: import::history, import::lfs, import::resume, import::auth.
 pub mod import;
+// WP-bidir-sync — seamless forge-arbitrated bidirectional GitHub ↔ hugit sync
+// (supersedes E6). Consumes E1 divergence/refops + D3 external-change + the
+// canonical refstore event log; the live GitHub detect is the documented P2 seam.
+pub mod sync;
