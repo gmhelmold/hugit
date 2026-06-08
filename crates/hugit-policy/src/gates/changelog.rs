@@ -58,7 +58,7 @@ pub fn eval(ctx: &EvalContext) -> GateOutcome {
 
     // (b) The ## [Unreleased] section must be non-empty
     let content = match ctx.file_contents.get("CHANGELOG.md") {
-        Some(c) => c.clone(),
+        Some(c) => c,
         None => {
             return GateOutcome::Fail {
                 reason: "changelog: CHANGELOG.md content not provided in eval context".into(),
@@ -66,8 +66,7 @@ pub fn eval(ctx: &EvalContext) -> GateOutcome {
         }
     };
 
-    let unreleased_nonempty = has_nonempty_unreleased(&content);
-    if unreleased_nonempty {
+    if has_nonempty_unreleased(content) {
         GateOutcome::Pass
     } else {
         GateOutcome::Fail {
