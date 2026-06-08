@@ -211,6 +211,59 @@ fn item_2_baseline_report_is_versioned_with_formulas() {
         "baseline_exec_ms must be > 0 (memoization was OFF)"
     );
 
+    // ── The baseline is MEASURED, not fabricated ──────────────────────────────
+    // (1) The memo-OFF pass must actually execute EVERY check. A cold AC means
+    //     every check is a miss; the count of local executions in an
+    //     independent cold-AC wave is the ground-truth "all checks ran" figure.
+    //     The baseline report's executions must equal it exactly.
+    let cold = run_wave(&cfg);
+    let expected_all_checks_ran = cold.local_executions;
+    assert!(
+        expected_all_checks_ran > 0,
+        "a cold-AC wave must execute checks (sanity); got {expected_all_checks_ran}"
+    );
+    assert_eq!(
+        report.baseline_local_executions, expected_all_checks_ran,
+        "baseline (memo-OFF) must execute ALL {expected_all_checks_ran} checks; \
+         report says {} — a static-formula baseline that ignores real executions \
+         is a gamed oracle",
+        report.baseline_local_executions
+    );
+
+    // (2) baseline_exec_ms must be the MEASURED sum of the cold wave's per-check
+    //     durations — not a static product of counts × a constant. We recompute
+    //     it from the SAME measured surface the report claims to use.
+    assert_eq!(
+        report.baseline_exec_ms, cold.measured_exec_ms,
+        "baseline_exec_ms ({}) must equal the MEASURED execution time of a \
+         cold-AC wave ({}); if it is a static count product it will not match",
+        report.baseline_exec_ms, cold.measured_exec_ms
+    );
+
+    // (3) The memoized wave's executions must be STRICTLY FEWER than the
+    //     baseline's — that gap IS the memoization wedge. A baseline that does
+    //     not actually run more checks than the memoized pass proves nothing.
+    assert!(
+        report.memoized_local_executions < report.baseline_local_executions,
+        "the wedge requires the memoized pass to execute STRICTLY FEWER checks \
+         than the baseline; memoized={} baseline={}",
+        report.memoized_local_executions,
+        report.baseline_local_executions
+    );
+
+    // (4) The memoized pass on a fully-warm AC must execute ZERO checks, and its
+    //     measured exec time must therefore be 0 (every check is an AC hit).
+    assert_eq!(
+        report.memoized_local_executions, 0,
+        "memoized pass on a warm AC must execute 0 checks; got {}",
+        report.memoized_local_executions
+    );
+    assert_eq!(
+        report.memoized_exec_ms, 0,
+        "memoized_exec_ms must be the measured 0 (all AC hits); got {}",
+        report.memoized_exec_ms
+    );
+
     // The formula must be explicitly stated in the report.
     assert!(
         report.formula.contains("baseline_exec_ms"),
@@ -279,6 +332,8 @@ fn item_2_fabricated_report_fails_oracle() {
         schema_version: "B8-v1.0".to_string(),
         baseline_exec_ms: 0, // fabricated: no actual execution
         memoized_exec_ms: 0,
+        baseline_local_executions: 0, // fabricated: nothing actually ran
+        memoized_local_executions: 0,
         minutes_saved: 999.0, // fabricated: cannot equal formula
         formula: "minutes_saved = (baseline_exec_ms - memoized_exec_ms) / 60000".to_string(),
     };

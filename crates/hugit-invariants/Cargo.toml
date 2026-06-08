@@ -72,6 +72,13 @@ hugit-ledger = { path = "../hugit-ledger" }
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+# WP-X10 (focus gate) SINGLE-SOURCES the dogfood allowlist + corelink-server
+# exclusion from the PRODUCTION owner, `hugit_dogfood::focus_gate` — the module
+# that actually enforces dogfood enrollment. X10 consumes it read-only instead
+# of carrying a divergent copy, so the X10② oracle proves the REAL gate
+# excludes corelink-server. No dependency cycle: hugit-dogfood depends only on
+# contracts/queue/checks/refstore, never on hugit-invariants.
+hugit-dogfood = { path = "../hugit-dogfood" }
 
 [dev-dependencies]
 hugit-contracts = { path = "../hugit-contracts" }

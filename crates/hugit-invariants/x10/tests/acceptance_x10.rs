@@ -224,19 +224,31 @@ fn item_2b_enrollment_gate_rejects_corelink_server() {
         assert!(
             result.is_err(),
             "WP-X10② ORACLE IS VACUOUS: enrollment of {:?} was ACCEPTED but \
-             must be REJECTED — the dogfood enrollment gate is not enforcing \
-             the CoreLink exclusion",
+             must be REJECTED — the PRODUCTION dogfood enrollment gate \
+             (hugit_dogfood::focus_gate) is not enforcing the CoreLink exclusion",
             name
         );
-        // The error message must name the item ② rejection reason.
+        // The error must be a real, descriptive rejection naming the offending
+        // target. (These are the verbatim messages produced by the PRODUCTION
+        // focus gate, which X10 now consumes single-source.)
         let msg = result.unwrap_err();
         assert!(
-            msg.contains("WP-X10②") || msg.contains("REJECTED"),
-            "Enrollment rejection of {:?} must cite X10② or 'REJECTED'; \
-             got: {msg:?}",
-            name
+            msg.contains(name),
+            "Production focus-gate rejection of {name:?} must name the target; \
+             got: {msg:?}"
         );
     }
+
+    // The flagship exclusion: corelink-server is rejected with a message that
+    // cites the item ② law explicitly (the production gate's hard-exclusion
+    // path, distinct from the generic not-on-allowlist path).
+    let corelink = assert_dogfood_enrollment_allowed("corelink-server")
+        .expect_err("corelink-server must be rejected by the production focus gate");
+    assert!(
+        corelink.contains("X10②") && corelink.contains("excluded"),
+        "Production rejection of corelink-server must cite X10② and 'excluded'; \
+         got: {corelink:?}"
+    );
 }
 
 /// ② (c) Runtime enrollment gate accepts allowed repos.

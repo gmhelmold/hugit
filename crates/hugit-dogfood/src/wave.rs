@@ -70,6 +70,11 @@ pub struct WaveReport {
     pub excluded: Vec<String>,
     /// Total number of local check executions (0 on a fully-warmed AC).
     pub local_executions: u32,
+    /// Measured total execution time (ms): the SUM of `CheckResult.duration_ms`
+    /// over the checks that ACTUALLY executed locally in this wave (AC hits
+    /// contribute 0 — a hit performs no execution). On a fully-warmed AC this
+    /// is 0. This is the MEASURED figure, not a static product.
+    pub measured_exec_ms: u64,
     /// Audit event log (one event per landed PR).
     pub event_log: EventLog,
 }
@@ -139,6 +144,7 @@ pub fn run_wave_with_ac(cfg: &WaveConfig, ac: &InMemoryAc) -> WaveReport {
         ac,
         failing_pair,
         total_local_executions: 0,
+        total_measured_exec_ms: 0,
     };
 
     // Evaluate the union and compute per-entry outcomes.
@@ -174,6 +180,7 @@ pub fn run_wave_with_ac(cfg: &WaveConfig, ac: &InMemoryAc) -> WaveReport {
         landed,
         excluded,
         local_executions: oracle.total_local_executions,
+        measured_exec_ms: oracle.total_measured_exec_ms,
         event_log,
     }
 }
@@ -188,6 +195,10 @@ struct WaveOracle<'a> {
     ac: &'a InMemoryAc,
     failing_pair: Option<&'a (String, String)>,
     total_local_executions: u32,
+    /// Sum of `CheckResult.duration_ms` over checks that actually executed
+    /// locally (cache misses). AC hits contribute nothing — measured, not
+    /// fabricated.
+    total_measured_exec_ms: u64,
 }
 
 impl<'a> MemoCheck for WaveOracle<'a> {
@@ -241,6 +252,13 @@ impl<'a> MemoCheck for WaveOracle<'a> {
                 any_red = true;
             }
             self.total_local_executions += outcome.local_executions;
+            // Accumulate the MEASURED execution time only for checks that
+            // actually ran locally (cache miss). An AC hit performs no
+            // execution, so it adds 0 — the baseline figure is therefore
+            // derived from real per-check durations, not a static product.
+            if !outcome.from_cache {
+                self.total_measured_exec_ms += outcome.result.duration_ms;
+            }
             sources.push(if outcome.from_cache {
                 CheckSource::Hit
             } else {

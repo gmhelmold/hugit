@@ -897,6 +897,7 @@ dependencies = [
  "hmac",
  "hugit-cli",
  "hugit-contracts",
+ "hugit-dogfood",
  "hugit-ledger",
  "hugit-refstore",
  "hugit-runner",
