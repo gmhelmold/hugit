@@ -62,8 +62,38 @@ HTTP), B2b/C3/X11 (runner box `HUGIT_RUNNER_HOST`), X6/X10 (live CoreLink
 measurement), X8 (public transparency log). These close when the P2 CoreLink
 tenant + box are provisioned (owner-gated, task #7).
 
+## Update — 2026-06-08: B5/B8/X11 hermetic builds + AC seam + hygiene
+The owner directed "do all of it" with CI gated locally (GitHub Actions quota
+exhausted). A second wave built the hermetic portions of the three previously
+"P2-blocked" WPs (partial-over-fake: prove the logic now, defer only live infra)
+plus the wedge's transport seam and a hygiene pass:
+- **B5** auto-bisect over memoized checks + DiagnosisObject (culprit ≤log₂ execs,
+  bounded diagnosis, auto-trigger on red) — QueueApi prod auto-trigger = seam.
+- **B8** dogfood harness — new `crates/hugit-dogfood`: real in-process 5-PR wave
+  e2e + memoization-off baseline (versioned report) + soak invariant harness;
+  corelink-server excluded. 48h wall-clock soak + live install = seam.
+- **X11** degradation composition — broker fail-closed mid-op (FakeBox), objects
+  provenance-absent with no fabricated intent/attestation, X10 holds while
+  degraded; mutation-verified. Live box fault injection = seam.
+- **B2a AC seam** — `HttpAcClient` wired to CoreLink's `{GET,PUT} /v1/ac/{tenant}/
+  {action_digest}` + Bearer PAT behind a mockable transport (content-address
+  guard; fail-closed when unconfigured); live network = seam.
+- **Hygiene pass** — misleading comments, a dead-code test promoted to run,
+  orphaned fence exports, vacuous fleet-validation checks removed (behavior-
+  preserving).
+
+**Coverage now: 66 of 67 WPs built** (only E6 remains, deferred by design). Every
+WP except E6 has its logic on main; all that's left is flipping the disclosed P2
+live-infra seams (CoreLink tenant + runner box) — owner-gated (task #7).
+
+Note: these landed via **local cold-verify** (fmt + clippy --workspace
+--all-targets --locked + test --workspace --no-fail-fast --locked, toolchain
+1.96.0 per rust-toolchain.toml) and direct merge to main, because GitHub Actions
+quota is exhausted. Re-run CI when quota is restored.
+
 ## State
-`main` green: fmt · clippy --workspace --all-targets --locked -D warnings · test
---workspace --locked · audit (all via CI on every PR and on main `1541baf`). CI
-now also enforces `--locked` so a stale lockfile fails the gate. Repo clean: only
-`main` on origin, zero stray branches, zero worktrees.
+`main` (`9277b86`) green by local cold-verify: fmt · clippy --workspace
+--all-targets --locked -D warnings · test --workspace --no-fail-fast --locked.
+Earlier waves also passed GitHub CI (incl. `cargo audit`) through main `1541baf`;
+CI enforces `--locked`. Repo clean: only `main` on origin, zero stray branches,
+zero worktrees.
