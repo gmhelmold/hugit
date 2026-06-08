@@ -6,11 +6,22 @@ Context for AI agents working in this repo. Keep it lean + high-signal.
 
 The **git-compatible, LLM-native forge** — CoreLink expansion campaign #3.
 VCS + merge + CI designed for orchestrated agent fleets, built on CoreLink's
-production CAS (Cloudflare Workers/R2/D1/DO). Founded 2026-06-05; currently in
-**strategy/research phase** — no product code yet.
+production CAS (Cloudflare Workers/R2/D1/DO). Founded 2026-06-05.
 
-Read first: `docs/strategy/campaign-3-llm-native-forge.md` (the founding brief)
-and `docs/research/` (the evidence base).
+**Status (2026-06-08): the buildable product is complete.** A 14-crate Rust
+workspace implements all 67 work-packages of decomposition v2.0 (E6 superseded
+by the forge-arbitrated bidirectional-sync design); `main` is green by gate
+(fmt + clippy `--workspace --all-targets --locked -D warnings` + test
+`--workspace --locked` + audit). What remains is **owner-gated infra, not
+code**: provisioning the CoreLink prod tenant (P2 — see
+`docs/handoff/2026-06-08-corelink-p2-tenant-request.md`) flips the disclosed
+live-infra seams (AC HTTP, runner box, transparency log, live GitHub detect)
+from hermetic-proof → end-to-end.
+
+Read first: `docs/whitepaper/hugit-v1.md` (product design) ·
+`docs/plan/decomposition.md` + `docs/plan/wp-contracts/` (the 67-WP register) ·
+`docs/review/2026-06-07-roadmap-gap-build-campaign.md` (what's built) ·
+`docs/strategy/campaign-3-llm-native-forge.md` (founding brief) · `docs/research/`.
 
 ## Principles (decided, don't relitigate without the owner)
 
