@@ -11,5 +11,6 @@
 //!     list (no auto-act), and guards against classifying deterministic
 //!     failures as flaky.
 
+pub mod bisect;
 pub mod experiment;
 pub mod flake;

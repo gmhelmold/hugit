@@ -855,6 +855,7 @@ name = "hugit-diag"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "hugit-checks",
  "hugit-contracts",
  "hugit-refstore",
  "serde",
