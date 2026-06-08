@@ -15,7 +15,9 @@ use hugit_contracts::verdict_object::VerdictObject;
 use serde::{Deserialize, Serialize};
 
 /// The canonical redaction sentinel (view-boundary, ④).
-pub const REDACTED: &str = "[REDACTED]";
+///
+/// Re-exported from [`crate::redact::REDACTED`] — single source of truth.
+pub use crate::redact::REDACTED;
 
 /// One entry in the ledger — an intent at its current lifecycle stage.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
