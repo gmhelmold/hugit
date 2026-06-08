@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - fix(hygiene): hugit-contracts — add missing module doc descriptions to runner_lease/shadow_policy/verdict_object; drop spurious `pub` from test-only pin constants and fixture helper in integration_tests.rs
+- fix(hygiene): hugit-ledger — eliminate vacuous `Option` return from `EventClass::classify` (return `Self` directly; call-site `.unwrap_or` was dead); de-duplicate `REDACTED` constant by re-exporting `redact::REDACTED` from `ledger` instead of re-declaring it (drift hazard, single source of truth). Behavior-preserving; all gates green.
 
 - fix(checks): strengthen ac-loader test to prove HTTP is attempted (reject Ok stub) (re-review MED). `all_present_yields_configured_client_that_attempts_http` now points the configured client at `http://127.0.0.1:0` (guaranteed unreachable) and asserts `Err(Transport(_))`; any `Ok(_)` arm (including `Ok(None)` from a stub) now panics, proving the transport was never called. A stub `lookup()` returning `Ok(None)` previously passed; it now fails the test. No production code changed.
 

@@ -37,19 +37,18 @@ pub enum EventClass {
 impl EventClass {
     /// Classify an EventRecord by its `kind` field.
     ///
-    /// Returns `Some(Other)` for unknown kinds instead of `None`, so the
-    /// caller never has to default-to-Landing on the unhappy path.
-    pub fn classify(kind: &str) -> Option<Self> {
+    /// Returns `Other` for unknown kinds — never `None`.
+    pub fn classify(kind: &str) -> Self {
         if kind == "intent.landed" {
-            Some(EventClass::Landing)
+            EventClass::Landing
         } else if kind == "verdict.recorded" {
-            Some(EventClass::Verdict)
+            EventClass::Verdict
         } else if kind == "policy.changed" {
-            Some(EventClass::PolicyChange)
+            EventClass::PolicyChange
         } else if kind.starts_with("ws.state") {
-            Some(EventClass::WsState)
+            EventClass::WsState
         } else {
-            Some(EventClass::Other)
+            EventClass::Other
         }
     }
 
@@ -142,8 +141,7 @@ impl WatchDisplay {
         let text = render_record(record);
         let elapsed = start.elapsed();
 
-        // classify() now returns Some(Other) for unknown kinds — never defaults to Landing.
-        let class = EventClass::classify(&record.kind).unwrap_or(EventClass::Other);
+        let class = EventClass::classify(&record.kind);
 
         let line = WatchLine {
             class,
