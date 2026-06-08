@@ -188,3 +188,16 @@ path = "x1/tests/acceptance_x1.rs"
 [[test]]
 name = "acceptance_x7"
 path = "x7/tests/acceptance_x7.rs"
+
+# WP-X11: degradation composition — the invariants COMPOSE under a PARTIAL
+# degradation injected MID-operation (a degradation window, not a steady-state
+# outage): ① the secrets broker fails CLOSED so no credential reaches any
+# workspace during the window, ② objects written during degradation are marked
+# provenance-ABSENT with ZERO fabricated synthetic intent/attestation, and ③ the
+# CoreLink non-interference baseline (X10) holds WHILE degraded. Sources under
+# x11/ (wired via #[path] in lib.rs). Hermetic in-process fault injection
+# (FakeBox/FakeEngine pattern from X4); the LIVE box mid-op fault is the
+# documented P2 seam gated behind HUGIT_RUNNER_HOST (run-not-skip when set).
+[[test]]
+name = "acceptance_x11"
+path = "x11/tests/acceptance_x11.rs"
