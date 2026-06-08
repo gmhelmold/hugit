@@ -39,6 +39,10 @@ ureq = "2"
 hugit-refstore = { path = "../hugit-refstore" }
 ed25519-dalek = "=2.1.1"
 base64 = "0.22"
+# The CoreLink AC config-loader oracle (ac_loader) points the PAT secret-file
+# path at a temp file so it never touches the real ~/.hugit. Already in the
+# workspace lock (transitive via gix-tempfile) — no new transitive surface.
+tempfile = "3"
 
 [[test]]
 name = "acceptance_c8"
@@ -55,3 +59,11 @@ path = "tests/acceptance_b2b.rs"
 [[test]]
 name = "ac_http"
 path = "tests/ac_http.rs"
+
+[[test]]
+name = "ac_loader"
+path = "tests/ac_loader.rs"
+
+[[test]]
+name = "corelink_ac_smoke"
+path = "tests/corelink_ac_smoke.rs"

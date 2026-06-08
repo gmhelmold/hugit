@@ -18,6 +18,7 @@
 
 use std::collections::HashMap;
 use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use hugit_contracts::CheckResult;
@@ -456,4 +457,151 @@ impl HttpTransport for UreqTransport {
             Err(e) => Err(AcError::Transport(e.to_string())),
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The runtime config LOADER (P2 plug-and-play) — make the CoreLink AC seam
+// plug-and-play once the tenant + PAT exist, WITHOUT compiling any of them in.
+//
+// Names are the binding §5 delivery contract:
+//   - HUGIT_CORELINK_AC_URL  — the AC base URL (e.g. https://api.corelink.humangr.com)
+//   - HUGIT_CORELINK_TENANT  — the tenant slug (first AC path segment)
+//   - the PAT, read from the FILE `~/.hugit/secrets/corelink/pat` (preferred),
+//     falling back to the `HUGIT_CORELINK_PAT` env var ONLY if that file is absent.
+//
+// Fail-closed is LAW: a missing/blank piece returns `AcError::NotConfigured`
+// NAMING which piece is missing — and never the value. The PAT is read into the
+// private `AcConfig` and from there only ever placed in the `Authorization`
+// header; it never appears in Debug/Display/logs/errors.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Env var holding the CoreLink AC base URL.
+pub const ENV_AC_URL: &str = "HUGIT_CORELINK_AC_URL";
+/// Env var holding the CoreLink tenant slug.
+pub const ENV_TENANT: &str = "HUGIT_CORELINK_TENANT";
+/// Env var holding the CoreLink PAT — the FALLBACK source, used only when the
+/// secret file is absent.
+pub const ENV_PAT: &str = "HUGIT_CORELINK_PAT";
+/// Env var overriding the PAT secret-file path (for hermetic tests; production
+/// uses the default handoff path under `~/.hugit`).
+pub const ENV_PAT_FILE: &str = "HUGIT_CORELINK_PAT_FILE";
+
+/// The production default PAT secret-file path, relative to `$HOME`.
+/// Joined with `$HOME` so the absolute path is `~/.hugit/secrets/corelink/pat`.
+const DEFAULT_PAT_FILE_REL: &str = ".hugit/secrets/corelink/pat";
+
+/// Resolve the PAT secret-file path: an explicit `HUGIT_CORELINK_PAT_FILE`
+/// override (tests point this at a temp file) wins; otherwise the production
+/// default `~/.hugit/secrets/corelink/pat` resolved against `$HOME`.
+///
+/// Returns `NotConfigured` only when neither an override nor `$HOME` is set
+/// (so the loader cannot silently fall through to "no file" on a broken env).
+fn resolve_pat_file() -> Result<PathBuf, AcError> {
+    if let Ok(p) = std::env::var(ENV_PAT_FILE)
+        && !p.trim().is_empty()
+    {
+        return Ok(PathBuf::from(p));
+    }
+    let home = std::env::var("HOME").map_err(|_| {
+        AcError::NotConfigured(format!(
+            "PAT: no {ENV_PAT_FILE} override and $HOME is unset (cannot locate the \
+             default ~/{DEFAULT_PAT_FILE_REL})"
+        ))
+    })?;
+    Ok(Path::new(&home).join(DEFAULT_PAT_FILE_REL))
+}
+
+/// Read the PAT, preferring the secret file at `pat_file` (trimming a trailing
+/// newline) and falling back to the `HUGIT_CORELINK_PAT` env var ONLY if the
+/// file is absent. Returns the secret string on success; on every failure path
+/// returns `NotConfigured` whose message names the missing piece but NEVER the
+/// value. A present-but-blank file/env is treated as missing (fail-closed).
+fn read_pat(pat_file: &Path) -> Result<String, AcError> {
+    match std::fs::read_to_string(pat_file) {
+        Ok(contents) => {
+            // Trim only trailing newline(s)/whitespace — a secret never has
+            // meaningful trailing whitespace, and editors append a newline.
+            let pat = contents.trim_end().to_string();
+            if pat.is_empty() {
+                return Err(AcError::NotConfigured(format!(
+                    "PAT: secret file {} is empty",
+                    pat_file.display()
+                )));
+            }
+            Ok(pat)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // File absent → fall back to the env var (the ONLY fallback).
+            match std::env::var(ENV_PAT) {
+                Ok(v) if !v.trim().is_empty() => Ok(v),
+                _ => Err(AcError::NotConfigured(format!(
+                    "PAT: secret file {} absent and {ENV_PAT} unset/empty",
+                    pat_file.display()
+                ))),
+            }
+        }
+        // Any other I/O error (permissions, etc.) is surfaced fail-closed, named
+        // by piece — never the value (there is none to leak here anyway).
+        Err(e) => Err(AcError::NotConfigured(format!(
+            "PAT: cannot read secret file {}: {}",
+            pat_file.display(),
+            e.kind()
+        ))),
+    }
+}
+
+impl HttpAcClient<UreqTransport> {
+    /// Build a CONFIGURED client from the runtime environment — the P2
+    /// plug-and-play entry point. Reads EXACTLY:
+    ///
+    /// - `HUGIT_CORELINK_AC_URL` — the AC base URL,
+    /// - `HUGIT_CORELINK_TENANT` — the tenant slug,
+    /// - the PAT from `~/.hugit/secrets/corelink/pat` (preferred; trailing
+    ///   newline trimmed), falling back to the `HUGIT_CORELINK_PAT` env var ONLY
+    ///   if that file is absent. The file path is overridable via
+    ///   `HUGIT_CORELINK_PAT_FILE` (for hermetic tests).
+    ///
+    /// Returns a configured [`HttpAcClient`] over the real [`UreqTransport`] when
+    /// all three pieces are present and non-empty; otherwise returns
+    /// [`AcError::NotConfigured`] whose message NAMES the missing piece (never
+    /// the value). Fail-closed: an unset deployment can never produce a usable
+    /// (silently mis-targeted) client, and the PAT is held only inside the
+    /// private [`AcConfig`] — never logged, never in Debug/Display/errors.
+    pub fn from_runtime() -> Result<Self, AcError> {
+        corelink_ac_from_env()
+    }
+}
+
+/// Free-function form of [`HttpAcClient::from_runtime`] — reads the CoreLink AC
+/// runtime config from the environment and returns a configured client (real
+/// `ureq` transport) or [`AcError::NotConfigured`] naming the missing piece.
+///
+/// See [`HttpAcClient::from_runtime`] for the exact env/path contract.
+pub fn corelink_ac_from_env() -> Result<HttpAcClient<UreqTransport>, AcError> {
+    // Base URL — present + non-empty, else NotConfigured naming it.
+    let base_url = match std::env::var(ENV_AC_URL) {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => {
+            return Err(AcError::NotConfigured(format!(
+                "base URL: {ENV_AC_URL} unset/empty"
+            )));
+        }
+    };
+    // Tenant — present + non-empty, else NotConfigured naming it.
+    let tenant = match std::env::var(ENV_TENANT) {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => {
+            return Err(AcError::NotConfigured(format!(
+                "tenant: {ENV_TENANT} unset/empty"
+            )));
+        }
+    };
+    // PAT — file-preferred, env-fallback; NotConfigured naming it on any miss.
+    let pat_file = resolve_pat_file()?;
+    let pat = read_pat(&pat_file)?;
+
+    // All three present → build the configured client over the real transport.
+    // `AcConfig::new` re-validates non-emptiness (defense in depth) and holds the
+    // PAT privately; the PAT only ever leaves via the Authorization header.
+    HttpAcClient::configured(base_url, tenant, pat)
 }
