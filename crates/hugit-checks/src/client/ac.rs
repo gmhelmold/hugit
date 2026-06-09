@@ -206,7 +206,7 @@ pub trait HttpTransport {
 /// never logged, never put in an error/`Display`, never in the endpoint string.
 #[derive(Clone)]
 pub struct AcConfig {
-    /// CoreLink AC base URL (e.g. `https://api.corelink.humangr.com`).
+    /// CoreLink AC base URL (e.g. `https://corelink-api.humangr.com`).
     base_url: String,
     /// The tenant slug — first AC path segment, must match the PAT's tenant.
     tenant: String,
@@ -467,7 +467,7 @@ impl HttpTransport for UreqTransport {
 // plug-and-play once the tenant + PAT exist, WITHOUT compiling any of them in.
 //
 // Names are the binding §5 delivery contract:
-//   - HUGIT_CORELINK_AC_URL  — the AC base URL (e.g. https://api.corelink.humangr.com)
+//   - HUGIT_CORELINK_AC_URL  — the AC base URL (e.g. https://corelink-api.humangr.com)
 //   - HUGIT_CORELINK_TENANT  — the tenant slug (first AC path segment)
 //   - the PAT, read from the FILE `~/.hugit/secrets/corelink/pat` (preferred),
 //     falling back to the `HUGIT_CORELINK_PAT` env var ONLY if that file is absent.
