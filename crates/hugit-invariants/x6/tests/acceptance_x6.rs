@@ -347,14 +347,13 @@ fn item_2e_box_config_assertions() {
 #[test]
 fn item_2f_isolation_assertions_are_not_vacuous() {
     use x6::{
-        CORELINK_HETZNER_PROJECTS, CoreLinkTenantQuotaCap, HugitRunnerBox,
-        assert_fleet_project_isolation,
+        CoreLinkTenantQuotaCap, HugitRunnerBox, assert_fleet_project_isolation,
+        assert_fleet_project_isolation_of,
     };
 
     // ── attack 1: a hugit box placed in a CoreLink Hetzner project ────────────
-    // We cannot call `assert_fleet_project_isolation` with a custom fleet
-    // directly (it reads the constant), so we reproduce its logic inline with
-    // a poisoned entry and assert it DETECTS the violation.
+    // Feed the poisoned fleet to the REAL parameterized oracle and assert it
+    // returns Err — gutting the oracle body turns this RED.
     let poisoned_box = HugitRunnerBox {
         hostname: "hugit-runner-99",
         ipv4: "1.2.3.4",
@@ -362,20 +361,25 @@ fn item_2f_isolation_assertions_are_not_vacuous() {
         ssh_key_name: "hugit-runner-99",
         box_type: "Hetzner CPX32",
     };
-    let fake_fleet = &[poisoned_box];
-    let mut violation_found = false;
-    for b in fake_fleet {
-        for corelink_proj in CORELINK_HETZNER_PROJECTS {
-            if b.hetzner_project == *corelink_proj {
-                violation_found = true;
-                break;
-            }
-        }
-    }
+    let result = assert_fleet_project_isolation_of(&[poisoned_box]);
     assert!(
-        violation_found,
+        result.is_err(),
         "ORACLE IS VACUOUS: a hugit box in a CoreLink project was NOT detected \
-         as a violation — the isolation assertion is not live"
+         as a violation by assert_fleet_project_isolation_of — got {result:?}"
+    );
+
+    // A second broken shape: a box in an unknown (non-hugit) project.
+    let stray_box = HugitRunnerBox {
+        hostname: "hugit-runner-98",
+        ipv4: "1.2.3.5",
+        hetzner_project: "some-unknown-project", // not "hugit" → violation
+        ssh_key_name: "hugit-runner-98",
+        box_type: "Hetzner CPX32",
+    };
+    assert!(
+        assert_fleet_project_isolation_of(&[stray_box]).is_err(),
+        "ORACLE IS VACUOUS: a box in an unknown (non-hugit) project was NOT \
+         detected by assert_fleet_project_isolation_of"
     );
 
     // ── attack 2: a quota cap with enforced=false ─────────────────────────────

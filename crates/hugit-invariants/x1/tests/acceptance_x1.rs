@@ -33,6 +33,40 @@ use isolation::{
     TenantId, TenantNamespace, TenantSecret, anonymize, carries_none_of,
 };
 
+/// FP-5③ regression: the allow-list leak-check catches an ENCODED leak that the
+/// previous substring deny-scan would have missed. Makes `carries_none_of`
+/// load-bearing — gutting it (always-true) turns this RED.
+#[test]
+fn item_3_encoded_leak_caught_by_allowlist_not_substring_scan() {
+    // ENCODED LEAK: the producer's private runner secret is hex-encoded into the
+    // shared runner field instead of the platform sentinel. The OLD substring
+    // deny-scan (joined.contains(secret)) would NOT catch this (the verbatim
+    // secret never appears). The NEW allow-list catches it: runner != sentinel.
+    let secret = "runner:tenant-a-box-42-secret";
+    let encoded = secret
+        .bytes()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let leaked = AttestationChain {
+        tree: TREE_HASH.to_string(),
+        def: DEF_DIGEST.to_string(),
+        runner: encoded.clone(), // ENCODED leak — not the sentinel, not verbatim
+        model: "claude-opus-4-8".to_string(),
+        principal: vec![PLATFORM_PRINCIPAL.to_string()],
+        sig: String::new(),
+    };
+    // Old substring scan over the secret would have PASSED (no verbatim match):
+    assert!(
+        !encoded.contains(secret),
+        "evidence precondition: the encoded form does not contain the verbatim secret"
+    );
+    // New allow-list FAILS (RED) on the encoded leak:
+    assert!(
+        !carries_none_of(&leaked),
+        "ALLOW-LIST must reject an encoded leak that the substring scan missed"
+    );
+}
+
 // ── shared fixtures ───────────────────────────────────────────────────────────
 
 /// Tenant A's private HMAC root secret. Distinct from B's — the partition key.
@@ -249,17 +283,13 @@ fn item_3_public_deterministic_shared_no_private_bytes() {
         "the shared attestation is identical for every tenant (no per-tenant fork)"
     );
 
-    // ── PROOF NO PRIVATE BYTES RODE ALONG: the served attestation carries NONE
-    //    of A's private principal/runner/sig bytes. ───────────────────────────
-    let a_private_secrets = [
-        producer.runner.as_str(),
-        producer.principal[0].as_str(),
-        producer.principal[1].as_str(),
-        producer.sig.as_str(),
-    ];
+    // ── PROOF NO PRIVATE BYTES RODE ALONG: the served attestation's
+    //    tenant-identifying fields are EXACTLY the platform sentinels (allow-list
+    //    check — anything other than the sentinels, encoded or not, fails). ─────
     assert!(
-        carries_none_of(b_attest, &a_private_secrets),
-        "LEAK: the shared attestation carried tenant A's private principal/runner/sig bytes"
+        carries_none_of(b_attest),
+        "LEAK: the shared attestation's tenant-identifying fields are not the \
+         platform sentinels — a private principal/runner/sig byte rode along"
     );
 
     // The shared attestation IS the platform-anonymized form …
@@ -290,8 +320,9 @@ fn item_3_public_deterministic_shared_no_private_bytes() {
     // the private links even when called directly.
     let anon = anonymize(&producer);
     assert!(
-        carries_none_of(&anon, &a_private_secrets),
-        "anonymize MUST drop every private runner/principal/sig byte"
+        carries_none_of(&anon),
+        "anonymize MUST drop every private runner/principal/sig byte — its \
+         tenant-identifying fields must equal the platform sentinels"
     );
 }
 

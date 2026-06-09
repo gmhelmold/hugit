@@ -77,12 +77,18 @@ pub const CORELINK_HETZNER_PROJECTS: &[&str] = &["corelink", "corelink-prod", "c
 /// deeper isolation violation).
 pub const HUGIT_SSH_KEY_NAME: &str = "hugit-runner-01";
 
-/// Assert that no hugit runner box shares a Hetzner project with CoreLink.
+/// Assert that no box in the given fleet shares a Hetzner project with CoreLink.
+///
+/// This is the real oracle — it takes the fleet under test, so an anti-vacuity
+/// test can feed it a deliberately poisoned fleet and observe the flip (gutting
+/// this body turns the negative test RED). The zero-arg
+/// [`assert_fleet_project_isolation`] wrapper drives it with the live
+/// [`HUGIT_RUNNER_FLEET`] const on the production/live path.
 ///
 /// Returns `Ok(())` if the fleet is fully isolated, or an `Err` describing
 /// the first violation found.
-pub fn assert_fleet_project_isolation() -> Result<(), String> {
-    for b in HUGIT_RUNNER_FLEET {
+pub fn assert_fleet_project_isolation_of(fleet: &[HugitRunnerBox]) -> Result<(), String> {
+    for b in fleet {
         for corelink_proj in CORELINK_HETZNER_PROJECTS {
             if b.hetzner_project == *corelink_proj {
                 return Err(format!(
@@ -105,6 +111,13 @@ pub fn assert_fleet_project_isolation() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Assert that no box in the live fleet ([`HUGIT_RUNNER_FLEET`]) shares a Hetzner
+/// project with CoreLink. Zero-arg wrapper over
+/// [`assert_fleet_project_isolation_of`] for the production/live call sites.
+pub fn assert_fleet_project_isolation() -> Result<(), String> {
+    assert_fleet_project_isolation_of(HUGIT_RUNNER_FLEET)
 }
 
 /// Assert that the hugit SSH key name is not shared with any CoreLink key.
