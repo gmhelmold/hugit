@@ -486,6 +486,15 @@ mod tests {
     }
 
     #[test]
+    fn permanent_pull_failure_is_case_insensitive() {
+        // The classifier lowercases the stderr, so a permanent signal is caught
+        // regardless of case — and a transient signal stays transient even when
+        // shouted in all-caps.
+        assert!(is_permanent_pull_failure("Manifest Unknown"));
+        assert!(!is_permanent_pull_failure("TOOMANYREQUESTS"));
+    }
+
+    #[test]
     fn concurrent_same_digest_verifies_all_succeed() {
         use std::sync::Arc;
         use std::thread;

@@ -214,17 +214,44 @@ impl SshBox {
     }
 }
 
+/// Path of the pinned `known_hosts` file for runner-box SSH.
+///
+/// Overridable via `HUGIT_RUNNER_KNOWN_HOSTS`; otherwise `$HOME/.hugit/known_hosts`
+/// (falling back to a bare `.hugit/known_hosts` if `HOME` is unset). Paired with
+/// `StrictHostKeyChecking=accept-new` this is **trust-on-first-use, pin
+/// thereafter**: the first connection records the box's host key, and every
+/// later connection is verified against that pin — so a MITM that swaps the host
+/// key after first use is refused (unlike `StrictHostKeyChecking=no`, which
+/// silently accepts ANY key on EVERY connection and thus pins nothing).
+fn known_hosts_path() -> String {
+    if let Ok(p) = std::env::var("HUGIT_RUNNER_KNOWN_HOSTS")
+        && !p.trim().is_empty()
+    {
+        return p;
+    }
+    match std::env::var("HOME") {
+        Ok(home) if !home.trim().is_empty() => format!("{home}/.hugit/known_hosts"),
+        _ => ".hugit/known_hosts".to_string(),
+    }
+}
+
 impl BoxExec for SshBox {
     fn run(&self, argv: &[&str]) -> Result<CmdOutput> {
         let remote = shell_join(argv);
+        let known_hosts = known_hosts_path();
         let mut cmd = Command::new("ssh");
         if let Some(id) = &self.identity {
             cmd.arg("-i").arg(id);
         }
+        // pin-on-first-use: accept-new records the host key on first contact and
+        // verifies against the pinned UserKnownHostsFile on every connection
+        // thereafter (not the blind-accept of StrictHostKeyChecking=no).
         cmd.arg("-o")
             .arg("BatchMode=yes")
             .arg("-o")
-            .arg("StrictHostKeyChecking=no")
+            .arg("StrictHostKeyChecking=accept-new")
+            .arg("-o")
+            .arg(format!("UserKnownHostsFile={known_hosts}"))
             .arg("-o")
             .arg("ConnectTimeout=15")
             .arg(&self.target)
@@ -244,14 +271,20 @@ impl BoxExec for SshBox {
         use std::process::Stdio;
 
         let remote = shell_join(argv);
+        let known_hosts = known_hosts_path();
         let mut cmd = Command::new("ssh");
         if let Some(id) = &self.identity {
             cmd.arg("-i").arg(id);
         }
+        // pin-on-first-use: accept-new records the host key on first contact and
+        // verifies against the pinned UserKnownHostsFile on every connection
+        // thereafter (not the blind-accept of StrictHostKeyChecking=no).
         cmd.arg("-o")
             .arg("BatchMode=yes")
             .arg("-o")
-            .arg("StrictHostKeyChecking=no")
+            .arg("StrictHostKeyChecking=accept-new")
+            .arg("-o")
+            .arg(format!("UserKnownHostsFile={known_hosts}"))
             .arg("-o")
             .arg("ConnectTimeout=15")
             .arg(&self.target)

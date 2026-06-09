@@ -211,7 +211,8 @@ impl DedupSpawner {
     {
         // ── Phase 1: claim or observe the slot (lock held briefly) ────────────
         {
-            let mut map = self.entries.lock().unwrap();
+            // poison recovery: the entries map is internally consistent
+            let mut map = self.entries.lock().unwrap_or_else(|p| p.into_inner());
             loop {
                 match map.get(workspace_id) {
                     Some(SpawnEntry::Ready { handle, at }) if at.elapsed() < self.dedup_window => {
@@ -224,7 +225,7 @@ impl DedupSpawner {
                             Ok(false) => {
                                 // Corpse: discard the slot and fall through to a
                                 // fresh claim below.
-                                let mut m = self.entries.lock().unwrap();
+                                let mut m = self.entries.lock().unwrap_or_else(|p| p.into_inner());
                                 // Only remove if it is still the same dead entry.
                                 if matches!(m.get(workspace_id), Some(SpawnEntry::Ready { .. })) {
                                     m.remove(workspace_id);
@@ -249,7 +250,7 @@ impl DedupSpawner {
                     }
                     Some(SpawnEntry::Pending) => {
                         // Another thread is materializing this id — wait for it.
-                        map = self.ready.wait(map).unwrap();
+                        map = self.ready.wait(map).unwrap_or_else(|p| p.into_inner());
                         continue;
                     }
                     Some(SpawnEntry::Failed) => {
@@ -269,7 +270,7 @@ impl DedupSpawner {
         let result = spawn_workspace(engine, lease, fence, image);
 
         // ── Phase 3: publish the outcome and wake any waiters ─────────────────
-        let mut map = self.entries.lock().unwrap();
+        let mut map = self.entries.lock().unwrap_or_else(|p| p.into_inner());
         match result {
             Ok(handle) => {
                 map.insert(
@@ -292,7 +293,10 @@ impl DedupSpawner {
 
     /// Evict the entry for `workspace_id` (e.g. after teardown).
     pub fn evict(&self, workspace_id: &str) {
-        self.entries.lock().unwrap().remove(workspace_id);
+        self.entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(workspace_id);
         self.ready.notify_all();
     }
 }
@@ -687,7 +691,98 @@ mod tests {
     fn dedup_spawner_evicts_expired() {
         // Window of 0ms means the entry is immediately stale; eviction must not panic.
         let spawner = DedupSpawner::new(Duration::from_millis(0));
-        let map = spawner.entries.lock().unwrap();
+        let map = spawner.entries.lock().unwrap_or_else(|p| p.into_inner());
         assert!(map.is_empty());
+    }
+
+    /// A content-pinned image reference (the only kind `from_lease` accepts).
+    const TEST_PIN: &str =
+        "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc";
+
+    /// Minimal in-process [`Engine`] stub: `spawn` just returns a container
+    /// named after the spec; `is_alive` always reports live. No box contact.
+    struct StubEngine;
+
+    impl Engine for StubEngine {
+        fn spawn(&self, spec: &ContainerSpec) -> Result<RunningContainer> {
+            Ok(RunningContainer {
+                name: spec.name.clone(),
+            })
+        }
+        fn probe(
+            &self,
+            _c: &RunningContainer,
+            _spec: &ContainerSpec,
+        ) -> Result<crate::isolation::IsolationProbe> {
+            Ok(crate::isolation::IsolationProbe {
+                tmp_is_private: true,
+                net_is_isolated: true,
+            })
+        }
+        fn exec(&self, _c: &RunningContainer, _argv: &[&str]) -> Result<Option<i32>> {
+            Ok(Some(0))
+        }
+        fn is_alive(&self, _c: &RunningContainer) -> Result<bool> {
+            Ok(true)
+        }
+    }
+
+    fn oracle_lease() -> RunnerLease {
+        RunnerLease {
+            lease_id: "ws-poison".to_string(),
+            principal_chain: vec!["agent:1".to_string()],
+            path_set: vec!["src/".to_string()],
+            expiry: 0,
+            net_policy: "none".to_string(),
+            tmp_root: "/work/tmp".to_string(),
+            state: hugit_contracts::RunnerState::Held,
+        }
+    }
+
+    fn oracle_fence() -> FenceManifest {
+        FenceManifest {
+            path_set: vec!["src/".to_string()],
+            deny_default: true,
+            materialized: vec![],
+        }
+    }
+
+    /// ORACLE (FP-2 fix #1): a poisoned `entries` mutex must still SERVE.
+    ///
+    /// We force a panic in a thread *while holding the entries lock* (via
+    /// `catch_unwind` so the test itself survives), which poisons the mutex.
+    /// A subsequent `spawn_or_join` must still succeed. Before the poison-
+    /// recovering `.unwrap_or_else(|p| p.into_inner())` fix this PANICKED on
+    /// the first `.lock().unwrap()`, turning one job's panic into a permanent
+    /// DoS for the whole spawner.
+    #[test]
+    fn poisoned_entries_mutex_still_serves() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let spawner = DedupSpawner::new(Duration::from_secs(60));
+
+        // Poison the mutex: panic while the lock guard is held.
+        let entries = Arc::clone(&spawner.entries);
+        let res = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = entries.lock().unwrap();
+            panic!("deliberate panic while holding the entries lock");
+        }));
+        assert!(res.is_err(), "the closure must have panicked");
+        assert!(
+            spawner.entries.is_poisoned(),
+            "the entries mutex must now be poisoned"
+        );
+
+        // After the poison, the spawner must still serve (recovers the guard).
+        let engine = StubEngine;
+        let lease = oracle_lease();
+        let fence = oracle_fence();
+        let handle = spawner
+            .spawn_or_join("ws-poison", &engine, &lease, &fence, TEST_PIN)
+            .expect("spawn must succeed even though the entries mutex was poisoned");
+        assert_eq!(handle.origin, WorkspaceOrigin::Spawned);
+
+        // And eviction (another lock site) must also not re-panic.
+        spawner.evict("ws-poison");
     }
 }
