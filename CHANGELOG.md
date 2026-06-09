@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(hygiene): hugit-mirror — remove vacuous `_now_ms` param from `BadgeState::unknown_api_down` (infinite-staleness path never needs a clock; callers updated); remove vacuous `_trigger: FallbackTrigger` param from `detect_via_poll` (single-variant enum, detection timing is cadence-only; `FallbackTrigger` removed entirely); add `SAFETY` comment on `unsafe set_var` in outbound test. Behavior-preserving; all gates green.
+
 - fix(hygiene): hugit-contracts — add missing module doc descriptions to runner_lease/shadow_policy/verdict_object; drop spurious `pub` from test-only pin constants and fixture helper in integration_tests.rs
 - fix(hygiene): hugit-ledger — eliminate vacuous `Option` return from `EventClass::classify` (return `Self` directly; call-site `.unwrap_or` was dead); de-duplicate `REDACTED` constant by re-exporting `redact::REDACTED` from `ledger` instead of re-declaring it (drift hazard, single source of truth). Behavior-preserving; all gates green.
 - fix(hygiene): hugit-policy — stale doc param names (`old_gate_json`/`new_gate_json` → `old_gates_json`/`new_gates_json` in `emit_policy_change` doc-comment); needless `.clone()` on `this_hash` in `emit_policy_change` (original unused after struct construction); needless `.clone()` on CHANGELOG content in `changelog::eval` (`&String` passed directly as `&str`). All behavior-preserving; gates green.

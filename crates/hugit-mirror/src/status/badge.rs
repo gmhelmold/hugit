@@ -113,8 +113,9 @@ impl BadgeState {
     }
 
     /// Render an "unknown" badge when the API is down and no last-known state
-    /// exists. Observable staleness is infinite.
-    pub fn unknown_api_down(check_name: impl Into<String>, _now_ms: u64) -> Self {
+    /// exists. Observable staleness is infinite — `now_ms` is not needed because
+    /// there is no data timestamp to age against.
+    pub fn unknown_api_down(check_name: impl Into<String>) -> Self {
         Self {
             check_name: check_name.into(),
             status: BadgeStatus::Unknown,

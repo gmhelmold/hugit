@@ -173,7 +173,7 @@ fn item_2_badge_api_down_last_known() {
     );
 
     // Case B: API down, NO last-known state → Unknown status, still observable.
-    let unknown_badge = BadgeState::unknown_api_down("ci/build", now_ms);
+    let unknown_badge = BadgeState::unknown_api_down("ci/build");
 
     assert_eq!(unknown_badge.status, BadgeStatus::Unknown);
     assert!(unknown_badge.api_down);
