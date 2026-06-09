@@ -113,33 +113,109 @@ human-annotation track alongside the machine trajectory.
 }
 ```
 
-### 2.3 Metrics — per intent and per PR
+### 2.3 Metrics — three altitudes: intent → PR → campaign
+
+Metrics roll up at **three altitudes**, each consolidating the one below, each
+with its own author and the **same cost-decomposition vocabulary**:
+
+| Altitude | Authored by | Unit |
+|---|---|---|
+| **intent** | a **subagent** (ephemeral) | a commit |
+| **PR** | the **orchestrator or a human** — never a subagent | a **bundle of intents** (commits) |
+| **campaign** | a **human** (the goal owner) | a **bundle of PRs** in the landing queue — **NOT** a bundle of commits |
+
+> **Crucial:** the landing queue unions and tests a **bundle of PRs** (same
+> campaign), never a bundle of commits. Nesting is strict: `commit ⊂ PR ⊂
+> campaign-bundle`. The union-test / landing unit is the **PR**; the campaign is
+> the set of PRs landed together.
 
 **Per intent:** `metrics` above — tokens (with cache split), wall-clock,
 active time, tool-call count + breakdown, model turns, derived cost.
 
-**Per PR (rollup):** PRs group intents; the forge computes the rollup, it is
-not stored in each envelope. Sums across the PR's intents, plus a calendar span:
+**Per PR — the PR record (NOT just a sum):** Authorship matters here.
+**An intent (commit) is authored by a subagent; a PR is authored by the
+orchestrator or a human — NEVER by a subagent** (forge-authz rule, enforced by
+D14). Consequence: the PR's true cost is **not** Σ(intents). It is the **work**
+(the subagents) **plus** the **coordination** the PR author spent on top
+(planning, decomposing, dispatching, cold-verifying, landing) **plus**
+**verification** (the adversarial panels) **plus** **CI** — with **waste shown,
+not hidden**. The forge computes this record; it is not stored per envelope.
 
 ```jsonc
 {
   "pr_id": "128",
-  "intent_count": 3,
-  "tokens_total": { "input": 0, "output": 0, "total": 0 },
-  "tool_calls_total": 0,
-  "model_turns_total": 0,
-  "cost_usd_total": 0.04,
-  "wall_ms_span": 0,    // first intent born → last intent died (clock time elapsed)
-  "wall_ms_sum": 0,     // Σ per-intent wall (agent-time spent; > span when parallel)
-  "models_used": ["opus-4.8", "sonnet-4.6"],
-  "ci": { "cache_hit": 11, "exec_count": 0, "cost_usd": 0.00 }  // memoization economics
+  "author": { "kind": "orchestrator", "model": "opus-4.8", "run_id": "orq-014" },
+  // kind ∈ {orchestrator, human} — NEVER subagent. human → { "principal": "…" }.
+  "intent_ids": ["a31","a2f","a30"],
+  "intent_count": 3, "agent_count": 3, "models_used": ["opus-4.8","sonnet-4.6"],
+
+  // cost decomposed by WHERE it went — the SOTA part
+  "cost": {
+    "work":          { "tokens": 0, "tool_calls": 0, "cost_usd": 0 },             // Σ intents (subagents)
+    "orchestration": { "tokens": 0, "tool_calls": 0, "turns": 0, "cost_usd": 0 }, // the PR author's own spend
+    "verification":  { "tokens": 0, "verdict_panels": 0, "cost_usd": 0 },         // adversarial review calls
+    "ci":            { "cache_hit": 0, "exec": 0, "cost_usd": 0, "saved_usd": 0 },// memoization economics
+    "waste":         { "discarded_intents": 0, "retried_agents": 0,
+                       "tokens_not_landed": 0, "cost_usd": 0 },                   // spent-but-not-landed
+    "total":         { "tokens": 0, "cost_usd": 0 }       // work + orchestration + verification + ci
+  },
+  "time": {
+    "wall_span_ms": 0,   // first activity → landed (cycle time)
+    "agent_sum_ms": 0,   // Σ per-intent active (agent-time; > span when parallel)
+    "queue_wait_ms": 0,  // time held in the landing queue
+    "human_touches": 0,  // human decisions/comments on the PR
+    "landed_at": 0
+  },
+  "efficiency": {
+    "overhead_pct": 0,        // orchestration ÷ total — lean fleet vs bloated
+    "cache_savings_pct": 0,   // CI saved ÷ would-be
+    "first_pass_yield": 0,    // intents landed without rework
+    "cost_per_net_kloc": 0
+  }
 }
 ```
 
-**Span vs sum is deliberate and a product asset:** `wall_ms_span` = *"this PR
-took 14 min of clock time"* (the headline, reflecting fleet parallelism);
-`wall_ms_sum` = *"3 h of agent-time went into it"* (the compute behind it). The
-forge shows both; no other forge can.
+Two principles this encodes:
+- **Cost is decomposed, not lumped** — work (subagents) vs coordination (the PR
+  author) vs verification vs CI. The **overhead ratio** (orchestration ÷ total)
+  is how you tell a lean fleet from a bloated one; no other forge surfaces it.
+- **Waste is shown, not hidden** — tokens spent on discarded/retried intents
+  that never landed. Gross spend vs landed spend = honest **first-pass yield**.
+
+**Span vs sum (inside `time`) is deliberate and a product asset:** `wall_span_ms`
+= *"this PR took 14 min of clock time"* (reflects fleet parallelism);
+`agent_sum_ms` = *"3 h of agent-time went into it"*. The forge shows both; no
+other forge can.
+
+**Per campaign — the third altitude.** A campaign (the bundle key: PRs of the
+same campaign are tested/landed together) is **owned by a human** and is the
+unit the Ledger reports on (*pedido → feito → provado, por campanha*). It
+consolidates its PRs the same way a PR consolidates its intents — same
+decomposition, plus campaign progress:
+
+```jsonc
+{
+  "campaign": "auth-hardening",
+  "charter": "endurecer a borda de autenticação",   // human-defined goal
+  "owner": { "principal": "gustavo@humangr.com" },  // human — never a subagent
+  "pr_ids": ["128","129"], "pr_count": 2,
+  "intent_count": 5, "agent_count": 5, "models_used": ["opus-4.8","sonnet-4.6"],
+  "cost": { /* work · orchestration · verification · ci · waste · total — Σ over PRs */ },
+  "time": {
+    "wall_span_ms": 0,   // campaign opened → last PR landed (lead time)
+    "agent_sum_ms": 0,
+    "queue_wait_ms": 0
+  },
+  "efficiency": { "overhead_pct": 0, "cache_savings_pct": 0,
+                  "first_pass_yield": 0, "cost_per_net_kloc": 0 },
+  "progress": { "landed": 1, "in_flight": 1, "blocked": 0 }   // campaign completion
+}
+```
+
+So: **intent → PR → campaign**, three nested rollups, one vocabulary. Authorship
+ascends subagent → orchestrator/human → human. Cost stays decomposed (work vs
+coordination vs verification vs CI, waste shown) at every altitude — that is how
+a fleet stays legible from one commit all the way up to a whole campaign.
 
 ## 3. Privacy, redaction, capture levels
 
@@ -177,16 +253,22 @@ Transcripts may carry secrets/PII (whitepaper §13). Therefore:
 
 - **New frozen contract in `hugit-contracts`:** a `ContextEnvelope` type (with
   `schema_version`, `#[serde(deny_unknown_fields)]`, golden round-trip test),
-  plus `IntentMetrics` and a derived (not-frozen, forge-computed) `PrRollup`.
-  Additive to `IntentSidecar` (it already holds `context_ref`).
-- **Producers must emit metrics:** the runner/agent harness must report tokens,
-  wall/active ms, tool-call breakdown, and turns at intent close. (New WP under
-  the runner/journal area; sizing per memory `agent-task-sizing`.)
-- **githugr display obligation:** surface per-intent and per-PR metrics, and the
-  three trajectory altitudes (summary inline → task → full, progressively
-  disclosed). Recorded in the githugr companion ADR; the design mockups
-  (`landing.html` drawer `context.json` block, `pr-detail.html`) must be updated
-  to show the new envelope + a metrics strip.
+  plus `IntentMetrics` and the derived (not-frozen, forge-computed) `PrRecord`
+  and `CampaignRollup`. Additive to `IntentSidecar` (it already holds
+  `context_ref`).
+- **Producers must emit metrics:** the runner/agent harness reports tokens,
+  wall/active ms, tool-call breakdown, and turns at intent close; the
+  **orchestrator must emit its own** coordination metrics (the PR-author spend)
+  and **waste** (discarded/retried intents). (New WP under the runner/journal
+  area; sizing per memory `agent-task-sizing`.)
+- **Forge-authz invariant (D14):** a **PR author ∈ {orchestrator, human}** and a
+  **campaign owner is human** — **never a subagent**. Subagents author intents
+  only. The authz layer must reject any other authorship.
+- **githugr display obligation:** surface metrics at **all three altitudes**
+  (intent · PR · campaign) and the three trajectory altitudes (summary → task →
+  full, progressively disclosed). Recorded in the companion ADR; the mockups
+  (`intent.html`, `pr-detail.html` Overview, plus `ledger.html`/`insights.html`
+  for campaign) must show the decomposed metrics.
 - **Redaction is on the write path,** not the read path — the blob is scrubbed
   before it is stored.
 
