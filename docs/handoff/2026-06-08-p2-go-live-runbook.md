@@ -59,7 +59,9 @@ export HUGIT_RUNNER_HOST="91.99.11.196"   # hugit-runner-01
 ```sh
 export HUGIT_GH_TEST_REPO="<owner>/<throwaway-repo>"
 export HUGIT_GH_INSTALL_TOKEN="<short-lived install token>"   # for history import
-export HUGIT_QUEUE_AUTOTRIGGER=1                              # B5 auto-bisect on red
+
+# NOTE: B5 auto-bisect-on-red is a code stub awaiting QueueApi live wiring —
+# there is no env gate yet; it will be wired when the prod QueueApi lands.
 ```
 
 | Seam | WP | Command |

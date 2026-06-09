@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+<!-- next release entries go here -->
+
+## [0.1.0] — 2026-06-08
+
 - fix(hygiene): hugit-cli — remove vacuous `let _ = account.is_terminating()` (no-op call, result discarded, zero behavioral effect; replace with explanatory comment; rename param to `_account` to signal intentional non-use); mark `fixture_event` with `#[doc(hidden)]` and a test-infrastructure note (it is `pub` only because integration tests require it through the public API, never called from production code). Behavior-preserving; all 30 tests green.
 - fix(hygiene): hugit-app — fix typo `InsufficiendOrOutOfWindow` → `InsufficientOrOutOfWindow` in `exit/src/cohort.rs` doc comment; remove two needless closures in `src/webhook.rs` (`map(|s| s.to_string())` → `map(str::to_string)`, `and_then(|v| v.clone())` → `and_then(Clone::clone)`); rename `TokenRevoked { installation_id }` → `TokenRevoked { repo }` in `src/checks.rs` (field was populated with `request.repo`, not an installation ID — error message was misleading). Behavior-preserving; all gates green.
 
