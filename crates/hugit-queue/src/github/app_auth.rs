@@ -13,6 +13,15 @@
 //! never printed). Keeping signing/transport out of the production crate keeps
 //! the library lean and auditable while still making the live call testable.
 
+/// How far `iat` is backdated, in seconds, to absorb GitHub clock skew (≤60s).
+const IAT_BACKDATE_SECS: i64 = 60;
+
+/// Token lifetime in seconds: 9 minutes, inside GitHub's 10-minute ceiling.
+const TOKEN_LIFETIME_SECS: i64 = 9 * 60;
+
+/// GitHub's hard maximum for `exp - iat`, in seconds (10 minutes).
+const GITHUB_MAX_JWT_WINDOW_SECS: i64 = 600;
+
 /// The registered claims of a GitHub App JWT.
 ///
 /// GitHub requires: `iat` backdated by ≤60s to tolerate clock skew, `exp` no
@@ -30,20 +39,22 @@ pub struct AppJwtClaims {
 
 impl AppJwtClaims {
     /// Build the claim set for App id `app_id` given the current unix time.
-    /// Backdates `iat` by 60s and sets `exp` 9 minutes out — both inside
-    /// GitHub's accepted window.
+    /// Backdates `iat` by [`IAT_BACKDATE_SECS`] and sets `exp`
+    /// [`TOKEN_LIFETIME_SECS`] out — both inside GitHub's accepted window.
     pub fn mint(app_id: &str, now_unix: i64) -> Self {
         Self {
-            iat: now_unix - 60,
-            exp: now_unix + 9 * 60,
+            iat: now_unix - IAT_BACKDATE_SECS,
+            exp: now_unix + TOKEN_LIFETIME_SECS,
             iss: app_id.to_string(),
         }
     }
 
     /// Validate the claim window against GitHub's rules: `iat` not in the
-    /// future relative to `now`, and `exp - iat` ≤ 600s.
+    /// future relative to `now`, and `exp - iat` ≤ [`GITHUB_MAX_JWT_WINDOW_SECS`].
     pub fn is_within_github_window(&self, now_unix: i64) -> bool {
-        self.iat <= now_unix && (self.exp - self.iat) <= 600 && self.exp > self.iat
+        self.iat <= now_unix
+            && (self.exp - self.iat) <= GITHUB_MAX_JWT_WINDOW_SECS
+            && self.exp > self.iat
     }
 }
 
@@ -145,14 +156,14 @@ mod tests {
         assert_eq!(c.iss, "12345");
         assert!(c.iat < now, "iat is backdated");
         assert!(c.is_within_github_window(now));
-        assert!((c.exp - c.iat) <= 600);
+        assert!((c.exp - c.iat) <= GITHUB_MAX_JWT_WINDOW_SECS);
     }
 
     #[test]
     fn over_long_window_is_rejected() {
         let c = AppJwtClaims {
             iat: 0,
-            exp: 700,
+            exp: GITHUB_MAX_JWT_WINDOW_SECS + 100, // 100s over the ceiling
             iss: "1".to_string(),
         };
         assert!(!c.is_within_github_window(0));

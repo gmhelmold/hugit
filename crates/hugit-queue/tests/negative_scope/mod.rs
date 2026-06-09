@@ -7,9 +7,10 @@
 /// Source-path constants for grep-based absence assertions.
 /// Used by `acceptance_wp-b10` tests to anchor the structural proofs to
 /// specific source directories (read-only; never passed to fs::write).
+///
+/// Read by the acceptance test to verify mechanism absence at the source
+/// level (static, structural proof).
 #[allow(dead_code)]
-/// These are read by the acceptance test to verify mechanism absence at
-/// the source level (static, structural proof).
 pub mod paths {
     /// Phase-B dispatch path (pure core engine).
     pub const QUEUE_CORE: &str = "crates/hugit-queue/src/core";

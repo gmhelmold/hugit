@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(hygiene): hugit-queue — promote magic JWT window constants (`IAT_BACKDATE_SECS`, `TOKEN_LIFETIME_SECS`, `GITHUB_MAX_JWT_WINDOW_SECS`) in `app_auth`; add `P95_PERCENTILE` const for the 0.95 fraction in `budget::p95_wait_ticks`; fix doc/attribute ordering in `negative_scope::paths` (second `///` block was after `#[allow(dead_code)]`); remove redundant "ordered," prefix in `batch` module doc. Behavior-preserving; all gates green.
 - fix(hygiene): hugit-contracts — add missing module doc descriptions to runner_lease/shadow_policy/verdict_object; drop spurious `pub` from test-only pin constants and fixture helper in integration_tests.rs
 - fix(hygiene): hugit-ledger — eliminate vacuous `Option` return from `EventClass::classify` (return `Self` directly; call-site `.unwrap_or` was dead); de-duplicate `REDACTED` constant by re-exporting `redact::REDACTED` from `ledger` instead of re-declaring it (drift hazard, single source of truth). Behavior-preserving; all gates green.
 - fix(hygiene): hugit-policy — stale doc param names (`old_gate_json`/`new_gate_json` → `old_gates_json`/`new_gates_json` in `emit_policy_change` doc-comment); needless `.clone()` on `this_hash` in `emit_policy_change` (original unused after struct construction); needless `.clone()` on CHANGELOG content in `changelog::eval` (`&String` passed directly as `&str`). All behavior-preserving; gates green.
