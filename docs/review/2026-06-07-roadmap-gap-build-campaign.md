@@ -32,7 +32,7 @@ RED — proof it is load-bearing, not gamed.
 | **C6** | hugit-diag | flake-stats + quarantine (annotation-only, auto-act uninhabited) + false-positive guard |
 | **X1** | hugit-invariants | tenant isolation red-team (cross-tenant deny, no poison, no side-channel) |
 | **X6** | hugit-invariants | intra-fabric non-interference (resource isolation; live CoreLink measure = P2 seam) |
-| **X7** | hugit-invariants | right-to-erasure cascade — **closes the X3③ purge PARTIAL** (5-store, no orphans, attestation re-seal-or-fail-closed, erasure×seal precedence) |
+| **X7** | hugit-invariants | right-to-erasure cascade — **closes the X3③ purge PARTIAL** (5-store, no orphans, attestation re-seal-or-fail-closed, erasure×seal precedence); closes the cascade gap; the stub-vs-production-surface partial is tracked in the remediation closure report |
 | **X8** | hugit-invariants | self-release attestation (ed25519 + transparency log + boot self-verify; live Rekor = P2 seam) |
 | **X9** | hugit-invariants | cross-phase object identity (CheckResult B↔D byte-identical; intent_id one-id-one-lifecycle) |
 | **X10** | hugit-invariants | focus gate (corelink-server enrollment fails the build; consumption cap; live measure = P2 seam) |

@@ -1,15 +1,11 @@
-# WP-E6 — bidirectional mirror (DEFERRED, gate-bound)
+# WP-E6 — bidirectional mirror (SUPERSEDED + BUILT 2026-06-08)
 
 squad E · L · opus · 60k · branch: wp/E6
 
-> **⛔ NO DISPATCH until months of E1 one-way soak open the gate — panel +
-> catalog decision.** This contract is **PRE-REGISTERED**, not dispatchable.
-> Bidirectional write-back is **explicitly OUT of warp scope** (catalog v2,
-> decomposition v2.0 E6). The acceptance below is fixed so that the day the
-> gate opens, the work is already specified with zero live decisions — the
-> silence was the bug the critic loop fixed, not the gate. An executing agent
-> may take this contract **only** after the gate decision is recorded; until
-> then it is a frozen register entry.
+> **SUPERSEDED.** The gate-bound write-back design was superseded by the
+> forge-arbitrated seamless bidirectional-sync design built 2026-06-08.
+> See `docs/design/2026-06-08-seamless-bidirectional-sync.md` for the
+> implemented design. The acceptance items below remain as the safety contract.
 
 ## Charter
 The bidirectional mirror: bounded, forge-authoritative write-back from GitHub
@@ -43,8 +39,8 @@ open it.
 ## Claims
 *(paths this WP owns — disjoint by construction; writes outside = leak)*
 
-- `crates/hugit-mirror/src/writeback/` — bounded write-back driver, idempotent
-  webhook-sync engine, forge-authoritative conflict resolver.
+- `crates/hugit-mirror/src/sync/` — forge-arbitrated bidirectional sync engine, idempotent
+  convergence, forge-authoritative conflict resolver.
 - `tests/mirror/writeback_bounded_*.rs`, `tests/mirror/webhook_idempotent_*.rs`,
   `tests/mirror/forge_authoritative_*.rs`, `tests/mirror/never_symmetric_*.rs`
   (the property test).

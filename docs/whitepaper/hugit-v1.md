@@ -5,6 +5,9 @@ Gustavo Schneiter · humangr-labs · 2026-06-05 · status: v1 DRAFT (supersedes
 the absorption map, command catalog and dream v0.3 as the integrating document;
 those remain as detail appendices)
 
+**Status 2026-06-08:** all L4+L5 hugit WPs are built; the layer table below
+reflects the original v1 draft — see CLAUDE.md for current state.
+
 ---
 
 ## Abstract

@@ -8,8 +8,9 @@ The **git-compatible, LLM-native forge** — CoreLink expansion campaign #3.
 VCS + merge + CI designed for orchestrated agent fleets, built on CoreLink's
 production CAS (Cloudflare Workers/R2/D1/DO). Founded 2026-06-05.
 
-**Status (2026-06-08): the buildable product is complete.** A 14-crate Rust
-workspace implements all 67 work-packages of decomposition v2.0 (E6 superseded
+**Status (2026-06-08): the buildable product is complete.** A 17-package Rust
+workspace (15 crates + hugit-app/{ui,exit}; hugit-app-sidecar auto-included)
+implements all 67 work-packages of decomposition v2.0 (E6 superseded
 by the forge-arbitrated bidirectional-sync design); `main` is green by gate
 (fmt + clippy `--workspace --all-targets --locked -D warnings` + test
 `--workspace --locked` + audit). What remains is **owner-gated infra, not
@@ -65,8 +66,9 @@ especially corelink-server. Enforcement is physical, not behavioral:
    sibling project's directory (a session anchored elsewhere does not load
    this fence). The founding session was corelink-anchored by historical
    accident; do not repeat it.
-3. The TechLead profile (`.techlead/profile`) mirrors the same `neverTouch`
-   list for fleet dispatch.
+3. The session fence (`.claude/settings.json`) is authoritative; the TechLead
+   profile (`.techlead/profile`) lists a subset of the same `neverTouch` paths
+   for fleet dispatch.
 4. Read-only inspection of siblings (cat/grep/git log) is allowed — context
    is fine, mutation never is. Fence changes require explicit owner approval.
 
