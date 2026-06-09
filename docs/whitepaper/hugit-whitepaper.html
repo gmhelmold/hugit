@@ -94,6 +94,13 @@
   .install{margin-top:14px;font-size:14px;color:var(--text);background:var(--surface-2);border:1px solid var(--border);
     border-radius:12px;padding:12px 16px;text-align:center}
   .install b{color:var(--cyan)}
+  .card .h{font-weight:700;color:var(--text);margin-bottom:4px;font-size:15px}
+  .concept{border:1px solid var(--border-2);border-radius:var(--radius);padding:24px 26px;margin:16px 0 4px;
+    background:linear-gradient(160deg,rgba(139,92,246,.10),rgba(34,211,238,.04))}
+  .concept h2{margin:0 0 6px;font-size:clamp(20px,3vw,27px)}
+  .concept .big{font-size:18px;color:var(--text);font-weight:600;margin:6px 0 14px;line-height:1.5}
+  .concept .card{margin:0}
+  .vs{text-align:center;color:var(--faint);font-weight:700;font-size:13px;margin:6px 0}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
   .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
   @media(max-width:680px){.grid2,.grid3{grid-template-columns:1fr}}
@@ -142,6 +149,23 @@
       </div>
     </div>
     <div class="install">🔌 O que você instala <b>hoje</b>: <b>1 GitHub App + 1 CLI</b> nos seus repos. Pronto. &nbsp;|&nbsp; 🎯 Quem é: times rodando <b>fleets de agentes</b> que produzem PRs mais rápido do que dá pra integrar.</div>
+  </section>
+
+  <section class="concept">
+    <h2>O conceito central: <span class="grad">intent</span> — e por que não é só um commit</h2>
+    <p class="big">Pensa numa prova de matemática. O <b>commit</b> é só a <b>resposta final</b>. O <b>intent</b> é a <b>prova inteira resolvida</b> — o enunciado, suas contas, o porquê de cada passo, e a resposta no fim.</p>
+    <div class="grid2">
+      <div class="card">
+        <div class="h">📌 commit (git) = a resposta final</div>
+        <i>"Consertei o login."</i> + o diff. O <b>porquê</b>, o que o agente leu e pensou, o que ele testou — <b>jogado fora.</b> Em time humano isso ficava na cabeça das pessoas; numa fleet de agentes, some com a janela de contexto.
+      </div>
+      <div class="card good">
+        <div class="h">🧠 intent (hugit) = a história completa</div>
+        O <b>pedido</b> (charter) + o <b>contexto do agente</b> (o que leu, pensou, o prompt) + o que ele <b>testou pra provar</b> + os <b>verdicts</b> + as mudanças. O diff é só <b>um pedaço</b> disso.
+      </div>
+    </div>
+    <div class="pull">O commit é o <b>RESULTADO</b> do intent. O intent é a história que produziu aquele commit — e o hugit <b>gera o commit git</b> a partir dele. Por isso continua 100% compatível com git.</div>
+    <p>Dois jeitos de olhar a <b>mesma coisa</b>: <code>git log</code> mostra os <b>commits</b> (as respostas finais); <code>hugit log</code> mostra os <b>intents</b> (as histórias completas). Mesma store, dois zooms — nunca discordam, porque um é gerado do outro.</p>
   </section>
 
   <div class="switch">
