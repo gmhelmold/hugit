@@ -163,52 +163,52 @@ impl ExperimentGate {
     ) -> Result<Verdict, GateError> {
         // 1 — degraded evaluator = insufficient = fail-closed.
         if attempt.evaluator == EvaluatorHealth::Degraded {
-            let event = self.refuse(
+            self.refuse(
                 log,
                 attempt.promotion,
                 attempt.principal,
                 "evaluator-degraded",
                 now_ms,
             );
-            return Err(refusal_error(GateError::EvaluatorDegraded, event));
+            return Err(GateError::EvaluatorDegraded);
         }
 
         // 2 — authenticity + corpus integrity (⑨ + ⑤).
         match attempt.report.verify(attempt.corpus) {
             Ok(()) => {}
             Err(ReportError::Forged) => {
-                let event = self.refuse(
+                self.refuse(
                     log,
                     attempt.promotion,
                     attempt.principal,
                     "forged-report",
                     now_ms,
                 );
-                return Err(refusal_error(GateError::ForgedReport, event));
+                return Err(GateError::ForgedReport);
             }
             Err(ReportError::CorpusTampered) => {
-                let event = self.refuse(
+                self.refuse(
                     log,
                     attempt.promotion,
                     attempt.principal,
                     "corpus-tampered",
                     now_ms,
                 );
-                return Err(refusal_error(GateError::CorpusTampered, event));
+                return Err(GateError::CorpusTampered);
             }
         }
 
         // 3 — only a genuine PASS authorizes.
         let verdict = attempt.report.verdict();
         if verdict != ReportVerdict::Pass {
-            let event = self.refuse(
+            self.refuse(
                 log,
                 attempt.promotion,
                 attempt.principal,
                 "not-pass",
                 now_ms,
             );
-            return Err(refusal_error(GateError::NotPass(verdict), event));
+            return Err(GateError::NotPass(verdict));
         }
 
         // Authorized — flip the targeted feature and audit it.
@@ -271,7 +271,7 @@ impl ExperimentGate {
         principal: &str,
         reason: &str,
         now_ms: u64,
-    ) -> EventRecord {
+    ) {
         let payload = format!(
             r#"{{"feature":"{}","reason":"{}","action":"refused"}}"#,
             promotion.label(),
@@ -283,13 +283,6 @@ impl ExperimentGate {
             principal,
             &payload,
             now_ms,
-        )
+        );
     }
-}
-
-/// Pack a refusal error with its audited event. The error variant carries the
-/// reason; the event is the tamper-evident record. (We return the error to the
-/// caller and the event is already in the log.)
-fn refusal_error(err: GateError, _event: EventRecord) -> GateError {
-    err
 }

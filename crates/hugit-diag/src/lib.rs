@@ -1,6 +1,9 @@
 //! hugit-diag — diagnostics + the experiment harness.
 //!
-//! Module layout (body lands per owning WP):
+//! Module layout:
+//!   - `bisect/` — auto-bisect over memoized checks (WP-B5): binary-search
+//!     culprit finder (≤ ⌈log₂ n⌉ probes), bounded `DiagnosisObject`, and the
+//!     auto-trigger that fires on every red signal from the landing queue.
 //!   - `experiment/` — the experiment harness + experiment gate (WP-D8):
 //!     auto-collects claim-disjointness + regen-honesty datapoints from the
 //!     fleet's real waves and BINDS the experiment gate (claims-as-oracle
