@@ -29,6 +29,12 @@ _HOME = os.path.expanduser("~")
 REAL_PARENT = "/Users/gustavoschneiter/Documents/HuGR/"
 PARENT_FORMS = [REAL_PARENT, "~/Documents/HuGR/", "$HOME/Documents/HuGR/"]
 HUGIT_SEG = "hugit"  # the ONLY child of the parent that hugit may mutate
+# Owner-approved incubation repos (2026-06-09): NEW HuGR product repos this
+# session was explicitly directed to create and own — no other live session
+# touches them, so the "protect other sessions' repos" intent is preserved.
+# Narrow allow-list; everything else under the parent stays hard-denied.
+INCUBATING_SEGS = {"corelink-runners"}
+ALLOWED_SEGS = {HUGIT_SEG} | INCUBATING_SEGS
 
 # Read-only, side-effect-free programs (NOT find/awk/sed/xargs/tee — those write).
 READONLY_PROGS = {
@@ -69,7 +75,7 @@ def write_path_forbidden(path: str) -> bool:
         return False
     rest = p[len(REAL_PARENT):]
     seg = rest.split("/", 1)[0]
-    return seg != HUGIT_SEG  # any sibling (or the bare parent) => forbidden
+    return seg not in ALLOWED_SEGS  # any other sibling (or bare parent) => forbidden
 
 
 def sibling_refs(cmd: str):
@@ -88,7 +94,7 @@ def sibling_refs(cmd: str):
             after = cmd[i + len(form):]
             m = re.match(r"([A-Za-z0-9._-]+)", after)
             seg = m.group(1) if m else ""
-            if seg != HUGIT_SEG:  # "" (bare parent) or any non-hugit child
+            if seg not in ALLOWED_SEGS:  # "" (bare parent) or any non-allowed child
                 refs.add(form + (seg or "<bare-parent>"))
             start = i + len(form)
     return refs
@@ -229,6 +235,10 @@ def _selftest() -> None:
         ("Edit", {"file_path": REAL_PARENT + "hugit/crates/x.rs"}),
         ("Write", {"file_path": _HOME + "/.hugit/known_hosts"}),
         ("Bash", {"command": "ls /tmp"}),
+        # owner-approved incubation repo (2026-06-09): writable
+        ("Write", {"file_path": REAL_PARENT + "corelink-runners/CLAUDE.md"}),
+        ("Edit", {"file_path": REAL_PARENT + "corelink-runners/docs/product.md"}),
+        ("Bash", {"command": f"mkdir -p {REAL_PARENT}corelink-runners/docs"}),
     ]
     fails = []
     for tool, ti in deny_cases:
