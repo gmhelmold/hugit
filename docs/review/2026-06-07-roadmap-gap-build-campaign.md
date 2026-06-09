@@ -91,9 +91,18 @@ Note: these landed via **local cold-verify** (fmt + clippy --workspace
 1.96.0 per rust-toolchain.toml) and direct merge to main, because GitHub Actions
 quota is exhausted. Re-run CI when quota is restored.
 
+## Update — 2026-06-08: bidirectional sync built → 67/67
+E6 (the last deferred WP) was **superseded** by the forge-arbitrated seamless-sync
+design (`docs/design/2026-06-08-seamless-bidirectional-sync.md`) and **built** on
+`main`: `crates/hugit-mirror/src/sync/{mod,engine,detect}.rs` +
+`tests/acceptance_bidir.rs` (5 owned items, the live GitHub-detect arm gated as a P2
+seam). **Coverage is now 67 of 67 WPs built** — every WP's logic is on `main`; all
+that remains is flipping the disclosed P2 live-infra seams (owner-gated, task #7),
+for which the exact tested sequence is `docs/handoff/2026-06-08-p2-go-live-runbook.md`.
+
 ## State
-`main` (`9277b86`) green by local cold-verify: fmt · clippy --workspace
---all-targets --locked -D warnings · test --workspace --no-fail-fast --locked.
-Earlier waves also passed GitHub CI (incl. `cargo audit`) through main `1541baf`;
-CI enforces `--locked`. Repo clean: only `main` on origin, zero stray branches,
-zero worktrees.
+`main` (`4e03f1b`) green by local cold-verify: fmt · clippy --workspace
+--all-targets --locked -D warnings · test --workspace --no-fail-fast --locked ·
+`cargo audit`. Earlier waves also passed GitHub CI through main `1541baf`; CI
+enforces `--locked` (cloud `gates` job currently quota-paused — re-enable when
+restored). Repo clean: only `main` on origin, zero stray branches, zero worktrees.
