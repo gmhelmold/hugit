@@ -33,7 +33,7 @@ HUGIT_SEG = "hugit"  # the ONLY child of the parent that hugit may mutate
 # session was explicitly directed to create and own — no other live session
 # touches them, so the "protect other sessions' repos" intent is preserved.
 # Narrow allow-list; everything else under the parent stays hard-denied.
-INCUBATING_SEGS = {"corelink-runners"}
+INCUBATING_SEGS = {"corelink-runners", "githugr"}
 ALLOWED_SEGS = {HUGIT_SEG} | INCUBATING_SEGS
 
 # Read-only, side-effect-free programs (NOT find/awk/sed/xargs/tee — those write).
@@ -235,10 +235,12 @@ def _selftest() -> None:
         ("Edit", {"file_path": REAL_PARENT + "hugit/crates/x.rs"}),
         ("Write", {"file_path": _HOME + "/.hugit/known_hosts"}),
         ("Bash", {"command": "ls /tmp"}),
-        # owner-approved incubation repo (2026-06-09): writable
+        # owner-approved incubation repos (2026-06-09): writable
         ("Write", {"file_path": REAL_PARENT + "corelink-runners/CLAUDE.md"}),
         ("Edit", {"file_path": REAL_PARENT + "corelink-runners/docs/product.md"}),
         ("Bash", {"command": f"mkdir -p {REAL_PARENT}corelink-runners/docs"}),
+        ("Write", {"file_path": REAL_PARENT + "githugr/design/landing.html"}),
+        ("Bash", {"command": f"mkdir -p {REAL_PARENT}githugr/design"}),
     ]
     fails = []
     for tool, ti in deny_cases:
