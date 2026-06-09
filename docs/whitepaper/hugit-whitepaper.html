@@ -58,7 +58,17 @@
   article{display:none;padding:16px 0 10px}
   body[data-reg="stake"] #stake,
   body[data-reg="vibe"]  #vibe,
-  body[data-reg="eng"]   #eng{display:block;animation:fade .25s ease}
+  body[data-reg="eng"]   #eng,
+  body[data-reg="cmd"]   #cmd{display:block;animation:fade .25s ease}
+  .reserved{display:inline-block;font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;
+    padding:2px 8px;border-radius:999px;color:var(--amber);background:rgba(245,185,66,.1);border:1px solid rgba(245,185,66,.28)}
+  .live{display:inline-block;font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;
+    padding:2px 8px;border-radius:999px;color:var(--green);background:rgba(52,211,153,.1);border:1px solid rgba(52,211,153,.28)}
+  .flow{counter-reset:step;list-style:none;padding:0;margin:16px 0;display:flex;flex-direction:column;gap:10px}
+  .flow li{position:relative;padding:12px 14px 12px 48px;background:var(--surface);border:1px solid var(--border);border-radius:12px;color:var(--muted)}
+  .flow li:before{counter-increment:step;content:counter(step);position:absolute;left:12px;top:11px;width:24px;height:24px;
+    border-radius:50%;background:var(--accent);color:#0a0a12;font-weight:800;font-size:13px;display:flex;align-items:center;justify-content:center}
+  .flow li b{color:var(--text)}
   @keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 
   .lede{font-size:19px;color:var(--text);font-weight:500;margin:6px 0 24px;line-height:1.5}
@@ -73,6 +83,17 @@
   .pull{border-left:3px solid;border-image:var(--accent) 1;background:var(--surface);
     border-radius:0 12px 12px 0;padding:16px 20px;margin:22px 0;font-size:18px;color:var(--text);font-weight:600;line-height:1.45}
   .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:18px 20px;margin:16px 0}
+  .card.good{border-color:rgba(52,211,153,.32);background:rgba(52,211,153,.05)}
+  .card.bad{border-color:rgba(251,113,133,.30);background:rgba(251,113,133,.05)}
+  .whatis{border:1px solid var(--border-2);border-radius:var(--radius);padding:24px 26px;margin:8px 0 4px;
+    background:linear-gradient(160deg,rgba(99,102,241,.10),rgba(34,211,238,.04))}
+  .whatis h2{margin:0 0 6px;font-size:clamp(20px,3vw,26px)}
+  .whatis .big{font-size:18px;color:var(--text);font-weight:600;margin:6px 0 14px;line-height:1.5}
+  .whatis .card{margin:0}
+  .whatis .card .h{font-weight:700;color:var(--text);margin-bottom:4px;font-size:15px}
+  .install{margin-top:14px;font-size:14px;color:var(--text);background:var(--surface-2);border:1px solid var(--border);
+    border-radius:12px;padding:12px 16px;text-align:center}
+  .install b{color:var(--cyan)}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
   .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
   @media(max-width:680px){.grid2,.grid3{grid-template-columns:1fr}}
@@ -107,11 +128,28 @@
     <p class="tagline">Version control e forge <b>LLM-native</b>. Uma inversão: <b>versione o intent, o contexto e a prova</b> — e trate o diff de código como a projeção verificada deles. git nunca é quebrado; o que vive em cima dele é nativo de fleets de agentes.</p>
   </header>
 
+  <section class="whatis">
+    <h2>Afinal, o que é o hugit?</h2>
+    <p class="big">Um <b>forge (classe-GitHub) + sistema de versionamento</b> feito pra fleets de agentes — e <b>100% compatível com git</b>. Você adota <b>hoje, sobre o seu GitHub atual</b>, sem migrar nada.</p>
+    <div class="grid2">
+      <div class="card good">
+        <div class="h">✅ O que É</div>
+        Um <b>forge LLM-native</b>: hoje um <b>GitHub App + CLI</b> que liga nos seus repos do GitHub e dá <b>CI memoizado + fila de landing</b>. Conforme amadurece, vira um <b>forge completo com hospedagem própria</b> (git-compatível) — alternativa ao GitHub, migra só se/quando quiser. git fica intacto por baixo.
+      </div>
+      <div class="card bad">
+        <div class="h">❌ O que NÃO é</div>
+        <b>Não é um "git novo"</b> — git continua idêntico, todo comando funciona; hugit vive POR CIMA. <b>Não é "migra-tudo-pro-novo-GitHub-hoje"</b> — começa rodando <i>sobre</i> o GitHub que você já usa, zero migração, zero reaprender.
+      </div>
+    </div>
+    <div class="install">🔌 O que você instala <b>hoje</b>: <b>1 GitHub App + 1 CLI</b> nos seus repos. Pronto. &nbsp;|&nbsp; 🎯 Quem é: times rodando <b>fleets de agentes</b> que produzem PRs mais rápido do que dá pra integrar.</div>
+  </section>
+
   <div class="switch">
     <div class="seg" role="tablist">
       <button data-r="stake" class="on">Stakeholder<span class="em">negócio &amp; mercado</span></button>
       <button data-r="vibe">Vibe coder<span class="em">direto ao ponto</span></button>
       <button data-r="eng">Eng sênior<span class="em">arquitetura hardcore</span></button>
+      <button data-r="cmd">Comandos &amp; Intent<span class="em">antes→depois · catálogo</span></button>
     </div>
   </div>
 
@@ -272,6 +310,105 @@ intents de claims disjuntas pousam em lanes paralelas</pre>
     </table>
     <p class="stack">HuGR → CoreLink → { Cache · <b>Runners</b> · Workspaces } → <b>hugit</b></p>
     <div class="card"><span class="tag">o ponto técnico</span><p style="margin:8px 0 0;color:var(--text);font-weight:600;font-size:16px">Versione intent+contexto+prova e memoize verificação por conteúdo: conflitos colidem no dispatch, merges re-executam, a main fica verde em escala de fleet, e nada — nem o force-push — é destrutivo.</p></div>
+  </article>
+
+  <!-- ============================ COMANDOS & INTENT ============================ -->
+  <article id="cmd">
+    <p class="lede">No git você dirige <b>commits, branches e PRs</b> à mão. No hugit você dirige <b>intents</b> — e o sistema <b>emite</b> a cerimônia (mensagem de commit, branch, PR, config de CI). O agente executa <i>um</i> verbo de cerimônia: <code>seal</code>. Todo comando <code>git</code> continua igual, byte-a-byte, pra sempre.</p>
+
+    <h2><span class="n">01</span>O que é um intent (e como funciona)</h2>
+    <p>Um <b>intent</b> é a unidade de trabalho — não um commit, não um PR. Ele carrega <b>charter</b> (o que pretende), <b>claims</b> (o que vai tocar), <b>acceptance</b> (como provar que ficou pronto), o <b>contexto</b> (snapshot do agente), a <b>trajetória</b> (log da execução), o <b>diff</b>, a <b>evidência</b> e os <b>verdicts</b>. Ele percorre um ciclo de vida:</p>
+    <pre>PROPOSED ─plan→ PLANNED ─dispatch→ EXECUTING ─seal→ SEALED ─verify→ VERIFIED
+                                          │                                  │
+                                          └─ BLOCKED (conflito de claim)     ▼
+                          VERIFIED ─queue→ LANDABLE ─union-test→ LANDED ──▶ git commit
+                                              └─ UNION-FAIL → volta a EXECUTING</pre>
+    <p>Na prática, um intent nasce, vive e pousa assim:</p>
+    <ol class="flow">
+      <li>O <b>orchestrator</b> planeja a wave e <b>declara claims</b> (os paths/targets de cada intent). Claims que se cruzam ⇒ o planner re-slice ou serializa <i>antes</i> de começar.</li>
+      <li>Faz <b>dispatch</b> do intent pro agente num <b>workspace fenced</b> (materializa só as claims; escrever fora é fisicamente impossível).</li>
+      <li>O agente trabalha. Salva o raciocínio com <code>ctx snap</code> / <code>journal note</code>, roda <code>hugit check</code> local (memoizado, byte-idêntico ao do forge).</li>
+      <li><code>hugit intent seal</code> — <b>o único verbo de cerimônia.</b> Anexa diff + evidência + o context snapshot. Daqui pra frente é tudo o sistema.</li>
+      <li><b>Verdicts</b>: painéis de reviewers adversariais (máquina) + o humano <b>interroga</b> a mudança (<code>hugit review</code>) — em vez de ler linha por linha.</li>
+      <li>A <b>fila de landing</b> testa o intent <i>em union</i> com os outros (só a novidade executa; o resto é cache-hit). Verde ⇒ pousa atômico.</li>
+      <li>O sistema <b>emite o commit git</b> com mensagem gerada embutindo o <code>intent_id</code>. <code>git log</code> mostra o commit; <code>hugit log</code> mostra o intent. Mesma store, dois zooms.</li>
+    </ol>
+
+    <h2><span class="n">02</span>Antes → Depois</h2>
+    <table>
+      <thead><tr><th>antes (git/GitHub)</th><th>depois (hugit)</th></tr></thead>
+      <tbody>
+        <tr><td class="from">escrever a mensagem de commit, abrir o PR, nomear o branch</td><td class="to">o sistema <b>emite</b> tudo isso ao pousar o intent (você só dá <code>intent seal</code>)</td></tr>
+        <tr><td class="from">pedir review, esperar o LGTM (o gargalo)</td><td class="to"><code>verdict request</code> (painéis adversariais) + <code>review</code> (interrogação com evidência)</td></tr>
+        <tr><td class="from"><code>git merge</code> / merge queue, torcer pra não quebrar</td><td class="to"><code>hugit land</code> — union-testing: testa os PRs <i>combinados</i> antes de pousar; <code>main</code> sempre verde</td></tr>
+        <tr><td class="from">resolver conflito de merge à mão (média 540 linhas)</td><td class="to">conflito colide no <b>dispatch</b> (claims); trabalho ortogonal <b>re-executa</b> (regen rebase, opt-in)</td></tr>
+        <tr><td class="from">config de CI em YAML; CI re-roda tudo a cada push</td><td class="to"><code>hugit check</code> — checks-as-code memoizados; cache-hit ⇒ 0 execução</td></tr>
+        <tr><td class="from">caçar quem quebrou a build no escuro</td><td class="to"><code>hugit diag</code> + auto-bisect sobre checks memoizados (≈grátis)</td></tr>
+        <tr><td class="from"><code>git push --force</code> (apaga histórico)</td><td class="to"><code>hugit undo</code> — evento compensatório; perda de dados é <b>inexprimível</b></td></tr>
+        <tr><td class="from">ver histórico: <code>git log</code> de texto</td><td class="to"><code>hugit ledger</code> (asked→done→proven) — ou <code>git log</code> cru, à sua escolha</td></tr>
+        <tr><td class="from">"quem/qual modelo escreveu isso, a que custo?" — impossível</td><td class="to"><code>hugit why</code> — proveniência até <code>{tree_hash, modelo, prompt, principal}</code></td></tr>
+        <tr><td class="from">clone + setup de ambiente (minutos, gigas duplicados)</td><td class="to"><code>hugit ws spawn</code> — workspace fenced, hidratado do cache quente (segundos)</td></tr>
+        <tr><td class="from"><b>qualquer comando <code>git</code></b></td><td class="to"><b>idêntico, byte-a-byte, pra sempre</b> — git nunca é shadowed</td></tr>
+      </tbody>
+    </table>
+
+    <h2><span class="n">03</span>O catálogo de comandos</h2>
+    <p>Por principal, com a fase em que entra (<b>B</b> = Dev Kit / GitHub App · <b>C</b> = fabric · <b>D</b> = forge) e o status no CLI hoje. <span class="live">live</span> = já dispatchado · <span class="reserved">reservado</span> = planejado/lógica construída, verbo CLI ainda não ligado.</p>
+
+    <h3>👤 Humano <span class="note">(no Dev Kit/B: nenhum CLI novo — é o dashboard do GitHub App + comentários no PR)</span></h3>
+    <table>
+      <tbody>
+        <tr><td><code>hugit ledger [--live]</code></td><td>view de histórico padrão (asked→done→proven)</td><td>D · <span class="reserved">reservado</span></td></tr>
+        <tr><td><code>hugit review &lt;intent&gt;</code></td><td>respostas com evidência; nunca auto-defesa</td><td>D · <span class="reserved">reservado</span></td></tr>
+        <tr><td><code>hugit approve / reject</code></td><td>a política decide o que chega em você</td><td>D · <span class="reserved">reservado</span></td></tr>
+        <tr><td><code>hugit watch</code></td><td>TUI de monitoramento do forge</td><td>D · <span class="reserved">reservado</span></td></tr>
+        <tr><td><code>hugit why &lt;linha|símbolo|intent&gt;</code></td><td>proveniência</td><td>D · <span class="live">live</span></td></tr>
+        <tr><td><code>hugit undo &lt;op&gt;</code></td><td>undo event-sourced, nível-forge</td><td>D · <span class="reserved">reservado</span></td></tr>
+        <tr><td><code>hugit policy edit / test</code></td><td>gates fail-closed, testáveis localmente</td><td>D · <span class="reserved">reservado</span></td></tr>
+      </tbody>
+    </table>
+
+    <h3>🤖 Orchestrator</h3>
+    <table>
+      <tbody>
+        <tr><td><code>hugit land [--queue]</code></td><td>a fila de union-testing (nos PRs do GitHub em B; nativo em D)</td><td>B · <span class="reserved">reservado</span></td></tr>
+        <tr><td><code>hugit verdict request --lens …</code></td><td>reviewers adversariais independentes</td><td>B/D · <span class="reserved">reservado</span></td></tr>
+        <tr><td><code>hugit campaign / plan apply</code></td><td>DAG + binding de acceptance; claims advisory</td><td>D · <span class="reserved">reservado</span></td></tr>
+        <tr><td><code>hugit dispatch &lt;intent&gt;</code></td><td>workspace + pacote de contexto</td><td>D · <span class="reserved">reservado</span></td></tr>
+        <tr><td><code>hugit fleet</code></td><td>estado da fleet, machine-readable</td><td>D · <span class="reserved">reservado</span></td></tr>
+        <tr><td><code>hugit tournament -n N</code></td><td>exploração como verbo</td><td>D · <span class="live">live</span></td></tr>
+      </tbody>
+    </table>
+
+    <h3>🛠️ Agente trabalhador</h3>
+    <table>
+      <tbody>
+        <tr><td><code>hugit check [--local]</code></td><td>memoizado, byte-idêntico local/remoto</td><td>B · <span class="reserved">reservado</span></td></tr>
+        <tr><td><code>hugit diag &lt;failure&gt;</code></td><td>diagnóstico estruturado + culpado</td><td>B · <span class="reserved">reservado</span></td></tr>
+        <tr><td><code>hugit impact &lt;path|change&gt;</code></td><td>raio de impacto no build-graph</td><td>C/D · <span class="live">live</span></td></tr>
+        <tr><td><code>hugit ws spawn/attach/snap/gc</code></td><td>workspaces fenced por claim</td><td>C · <span class="reserved">reservado</span></td></tr>
+        <tr><td><code>hugit ctx snap / resume</code></td><td>snapshot/resume de contexto curto-horizonte</td><td>D · <span class="reserved">reservado</span></td></tr>
+        <tr><td><code>hugit intent seal</code></td><td><b>o único verbo de cerimônia</b></td><td>D · <span class="reserved">reservado</span></td></tr>
+        <tr><td><code>hugit journal note</code></td><td>o entendimento sobrevive à sessão</td><td>D · <span class="reserved">reservado</span></td></tr>
+        <tr><td><code>hugit export</code></td><td>dump anti-lock-in + prova de saída</td><td>D · <span class="live">live</span></td></tr>
+      </tbody>
+    </table>
+    <p class="note">Hoje o binário dispatcha <code>why · impact · tournament · export</code>; o resto é lógica construída nos crates / verbo CLI reservado, ligado por fase. Três leis de namespace: verbo git nunca é shadowed; refs auto-gerenciadas em <code>refs/hugit/…</code>; invariante de degradação (pior caso = git saudável).</p>
+
+    <h2><span class="n">04</span>O que mudou (o diff honesto v1→v2 do catálogo)</h2>
+    <p>O design foi endurecido numa review. As correções importam — mostram que o catálogo é vivido, não decorativo:</p>
+    <table>
+      <thead><tr><th>v1 dizia</th><th>v2 diz</th></tr></thead>
+      <tbody>
+        <tr><td class="from">claims no dispatch previnem conflito</td><td class="to">union-testing no landing é o oráculo; claims = fences de segurança + dica advisory (mudança cross-cutting faz claim-closure colidir → travas)</td></tr>
+        <tr><td class="from">regen rebase default pra intents ortogonais</td><td class="to">opt-in pra sempre + verdict independente por regen (não-determinismo + verificação circular = cavalo de Troia pra main)</td></tr>
+        <tr><td class="from">"gitted context": replay, diff-minds</td><td class="to">proveniência + journals + resume curto-horizonte (meia-vida do contexto ≈ uma versão de modelo; replay não é reproduzível)</td></tr>
+        <tr><td class="from">review = interrogar a mudança</td><td class="to">painéis adversariais + respostas ancoradas em evidência (auto-defesa otimiza persuasão, não correção)</td></tr>
+        <tr><td class="from">um Dev Kit grande (claims+CLI+fila)</td><td class="to">UM GitHub App: CI memoizado + fila de landing (teste do analgésico; disciplina do primeiro dólar)</td></tr>
+      </tbody>
+    </table>
+    <p class="note">O que <b>não</b> mudou: a física econômica (memoize/dedupe/zero-rate — a guerra de incentivos), compatibilidade git sagrada, invariante de degradação, o humano sempre acompanha (árvore de arquivos intacta, ledger, deep links, mirror do GitHub como escape permanente), e a ambição de end-state.</p>
+    <div class="card"><span class="tag">o ponto</span><p style="margin:8px 0 0;color:var(--text);font-weight:600;font-size:16px">Você para de fazer a cerimônia (commit/branch/PR/CI-config) e passa a dirigir intents. O sistema emite a cerimônia, memoiza a verificação, e projeta git impecável por baixo — com todo comando git ainda valendo.</p></div>
   </article>
 
   <footer>
