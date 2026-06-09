@@ -220,7 +220,8 @@ fn write_text(out: &mut Vec<u8>, text: &str) -> Result<(), NegotiationError> {
     Ok(())
 }
 
-/// Decode all pkt-lines from a buffer into owned variants.
+/// Extract the data bytes from a decoded pkt-line, or `None` for flush /
+/// delimiter / response-end packets (which carry no payload).
 fn line_data(line: &OwnedLine) -> Option<&[u8]> {
     match line {
         OwnedLine::Data(d) => Some(d),
@@ -236,6 +237,7 @@ enum OwnedLine {
     ResponseEnd,
 }
 
+/// Decode all pkt-lines from a buffer into owned variants.
 fn decode_lines(mut bytes: &[u8]) -> Result<Vec<OwnedLine>, NegotiationError> {
     let mut out = Vec::new();
     while !bytes.is_empty() {

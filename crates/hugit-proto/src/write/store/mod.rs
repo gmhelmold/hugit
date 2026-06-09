@@ -21,9 +21,11 @@
 //! [`INTENT_LANDED_KIND`]. Synthesising an intent for a raw push is structurally
 //! impossible here: this module has no code path that emits `intent.landed`.
 
-use hugit_refstore::intent::{INTENT_LANDED_KIND, RAW_PUSH_KINDS};
+use hugit_refstore::intent::INTENT_LANDED_KIND;
 use hugit_refstore::log::EventLog;
 use std::collections::BTreeMap;
+
+use crate::write::external::{REF_DELETE_KIND, REF_UPDATE_KIND};
 
 /// A git object id (40-char lowercase hex SHA-1), the CAS key for one object.
 pub type Oid = String;
@@ -99,13 +101,6 @@ impl Cas for InMemoryCas {
     }
 }
 
-/// The frozen raw-push event kind for a ref *set* (oid moves). One of
-/// [`RAW_PUSH_KINDS`]; never an intent kind.
-pub const REF_UPDATE_KIND: &str = RAW_PUSH_KINDS[0];
-
-/// The frozen raw-push event kind for a ref *delete*. One of [`RAW_PUSH_KINDS`].
-pub const REF_DELETE_KIND: &str = RAW_PUSH_KINDS[1];
-
 /// Store a batch of objects into the CAS. Idempotent per object.
 pub fn store_objects(cas: &mut dyn Cas, objects: &[CasObject]) {
     for obj in objects {
@@ -178,6 +173,8 @@ fn json_str(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use hugit_refstore::intent::RAW_PUSH_KINDS;
+
     use super::*;
 
     #[test]
