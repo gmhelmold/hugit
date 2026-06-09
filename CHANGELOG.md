@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(hygiene): hugit-invariants — complete WP layout doc comment in lib.rs (was missing x3, x7, x9, x11, x14); add blank-line separators between all WP sections in lib.rs for consistent visual scanning; remove dead `label: String` field + `#[allow(dead_code)]` from `ProbeResult` in x6 and x10 (field was set but never read anywhere). Behavior-preserving; all gates green.
+
 - fix(hygiene): hugit-refstore — replace raw `format!` JSON string-building in `denial_payload` with `serde_json::json!` (consistent with every other payload site in the crate; eliminates divergence hazard for future value changes)
 
 - fix(hygiene): hugit-queue — promote magic JWT window constants (`IAT_BACKDATE_SECS`, `TOKEN_LIFETIME_SECS`, `GITHUB_MAX_JWT_WINDOW_SECS`) in `app_auth`; add `P95_PERCENTILE` const for the 0.95 fraction in `budget::p95_wait_ticks`; fix doc/attribute ordering in `negative_scope::paths` (second `///` block was after `#[allow(dead_code)]`); remove redundant "ordered," prefix in `batch` module doc. Behavior-preserving; all gates green.

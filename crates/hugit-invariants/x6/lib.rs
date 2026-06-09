@@ -181,9 +181,6 @@ pub const X6_TOLERANCE: NonInterferenceTolerance = NonInterferenceTolerance {
 /// A single probe measurement of a service endpoint.
 #[derive(Debug, Clone)]
 pub struct ProbeResult {
-    /// Label for the endpoint (e.g. `"corelink-prod"`, `"hugit-runner-01"`).
-    #[allow(dead_code)]
-    pub label: String,
     /// Round-trip latency in milliseconds.
     pub latency_ms: f64,
     /// Whether the probe succeeded (HTTP 200-level or equivalent).
@@ -327,7 +324,6 @@ pub fn curl_probe(url: &str) -> ProbeResult {
 
     match output {
         Err(_e) => ProbeResult {
-            label: url.to_string(),
             latency_ms: f64::MAX,
             available: false,
         },
@@ -343,7 +339,6 @@ pub fn curl_probe(url: &str) -> ProbeResult {
                 .and_then(|l| l.trim().replace(',', ".").parse().ok())
                 .unwrap_or(f64::MAX);
             ProbeResult {
-                label: url.to_string(),
                 latency_ms: time_total * 1000.0,
                 available: (200..300).contains(&status_code),
             }
