@@ -1,8 +1,10 @@
 [package]
 name = "hugit-mirror"
-version = "0.1.0"
-edition = "2024"
-publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license-file.workspace = true
 
 [dependencies]
 hugit-contracts = { path = "../hugit-contracts" }
@@ -11,12 +13,12 @@ hugit-app = { path = "../hugit-app" }
 # Bidir-sync consumes the D3⑤ raw-push→external-change recorder (never a
 # fabricated intent) — the canonical ingest path, not re-transcribed here.
 hugit-proto = { path = "../hugit-proto" }
-thiserror = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.10"
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
 sha1 = "0.10"
-hex = "0.4"
+hex = { workspace = true }
 
 [features]
 # Test-only surface (e.g. `AuthorityModel::set_github_authoritative_for_main`)
