@@ -195,6 +195,14 @@ impl<'a, O: CheckOracle> Bisector<'a, O> {
     }
 }
 
+/// Maximum iterations for the serialized-size fixpoint loop.
+///
+/// The fixpoint converges in ≤2 steps in practice (digit count grows at most
+/// once per order of magnitude). `MAX_ITERS = 8` is a safety bound that allows
+/// for any future field additions while catching an infinite loop if the
+/// invariant is broken by a future change to `DiagnosisObject`.
+const MAX_ITERS: u32 = 8;
+
 /// Compute the EXACT serialized byte size of a diagnosis, accounting for the
 /// `size_bytes` field carrying its own (self-referential) decimal width.
 ///
@@ -202,9 +210,14 @@ impl<'a, O: CheckOracle> Bisector<'a, O> {
 /// decimal digits in `v`. We solve the fixpoint: start from the size with
 /// `size_bytes = 0`, then iterate stamping the measured size until it is stable
 /// (converges in ≤2 steps since digit count grows monotonically and slowly).
+///
+/// The loop is bounded by `MAX_ITERS`. If it does not converge (should never
+/// happen for a well-formed `DiagnosisObject`), we fall back to the last
+/// measured value rather than looping forever.
 fn exact_serialized_size(diag: &DiagnosisObject) -> u64 {
     let mut probe = diag.clone();
     let mut stamped = 0u64;
+    let mut iters = 0u32;
     loop {
         probe.size_bytes = stamped;
         let measured = serde_json::to_vec(&probe)
@@ -214,6 +227,16 @@ fn exact_serialized_size(diag: &DiagnosisObject) -> u64 {
             return measured;
         }
         stamped = measured;
+        iters += 1;
+        debug_assert!(
+            iters < MAX_ITERS,
+            "exact_serialized_size fixpoint did not converge in {MAX_ITERS} iterations              — DiagnosisObject serialization invariant broken"
+        );
+        if iters >= MAX_ITERS {
+            // Fallback: return the last measured value; the caller will enforce
+            // the size bound, so an off-by-one in the stamp is safe fail-closed.
+            return stamped;
+        }
     }
 }
 

@@ -151,4 +151,70 @@ mod tests {
             outcome
         );
     }
+    // ── Boundary tests ──────────────────────────────────────────────────────────
+
+    /// A shell comment containing `token=` must NOT be flagged as a secret.
+    ///
+    /// The substring matcher fires on ANY line containing `token=`, including
+    /// `# token=not-a-secret` comments. This IS a false positive — the matcher
+    /// does not understand shell comment syntax.
+    /// DOCUMENTED: `token=` in a comment is a known false positive of this
+    /// substring-based matcher; a regex-aware gate could filter `#`-prefixed
+    /// lines. For now, the behavior is left as-is (fail-closed is safer).
+    #[test]
+    fn comment_token_assignment_is_false_positive() {
+        let ctx = ctx_with_file(
+            "config.sh",
+            "# token=not-a-secret
+export THING=value",
+        );
+        // This IS a false positive: the comment line triggers the `token=` pattern.
+        // Documented here so the behavior is explicit, not accidental.
+        let outcome = eval(&ctx);
+        assert!(
+            matches!(outcome, GateOutcome::Fail { .. }),
+            "KNOWN FALSE POSITIVE: `# token=not-a-secret` triggers the `token=`              substring matcher (no comment-syntax awareness). Outcome: {:?}",
+            outcome
+        );
+    }
+
+    /// A URL containing `password=` in a query string triggers the matcher.
+    ///
+    /// `password=` anywhere in the line is flagged, including in URLs such as
+    /// `https://db.example.com/connect?password=secret`. This IS a true positive
+    /// for the typical case (a literal password in a URL is a secret leak) but
+    /// could be a false positive for a URL with a `password=` parameter that
+    /// holds only a placeholder. The fail-closed behavior is correct here.
+    #[test]
+    fn url_with_password_param_is_flagged() {
+        let ctx = ctx_with_file(
+            "config.toml",
+            r#"db_url = "https://db.example.com/connect?password=hunter2""#,
+        );
+        // The `password=` substring fires — this is intentionally fail-closed.
+        assert!(
+            matches!(eval(&ctx), GateOutcome::Fail { .. }),
+            "a URL containing `password=` must be flagged (fail-closed)"
+        );
+    }
+
+    /// `Bearer` without a trailing space does NOT match the `Bearer ` pattern.
+    ///
+    /// The pattern is `"Bearer "` (with a trailing space). A bare `Bearer` token
+    /// prefix without the space (e.g. in a Base64 context or a comment) is NOT
+    /// flagged. This could be a false negative, but the current conservative
+    /// pattern requires the space to reduce noise on the word "Bearer" appearing
+    /// in documentation.
+    #[test]
+    fn bearer_without_trailing_space_is_not_flagged() {
+        // Content: "Bearer" followed by a newline — no trailing space → no match.
+        let ctx = ctx_with_file("docs.md", "Authorization: Bearer\nEnd of header.");
+        // "Bearer" followed by a newline (no trailing space) → does not match `Bearer `.
+        // Intentional: the pattern requires the trailing space to reduce false positives.
+        assert_eq!(
+            eval(&ctx),
+            GateOutcome::Pass,
+            "bare `Bearer` without trailing space must NOT be flagged (by design)"
+        );
+    }
 }

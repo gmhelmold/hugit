@@ -335,7 +335,7 @@ fn item_6_satisfied_protection_does_not_hold() {
 // LIVE-GITHUB LANE — App JWT mint + GET /app/installations against real GitHub.
 // ════════════════════════════════════════════════════════════════════════════
 
-const SECRETS_DIR: &str = "/Users/gustavoschneiter/.hugit/secrets/github-app-dev";
+// SECRETS_DIR is resolved at runtime from HUGIT_SECRETS_DIR env var (no hardcoded path).
 const TEST_REPO_OWNER: &str = "humangr-labs";
 
 /// Live AppJwt implementation: RS256-signs with jsonwebtoken and calls GitHub
@@ -344,7 +344,9 @@ struct LiveAppJwt;
 
 impl AppJwt for LiveAppJwt {
     fn sign(&self, claims: &AppJwtClaims) -> Result<String, JwtError> {
-        let creds = load_creds().map_err(JwtError::Signing)?;
+        let creds = load_creds()
+            .ok_or_else(|| JwtError::Signing("HUGIT_SECRETS_DIR unset".into()))?
+            .map_err(JwtError::Signing)?;
         let key = jsonwebtoken::EncodingKey::from_rsa_pem(creds.private_key_pem.as_bytes())
             .map_err(|e| JwtError::Signing(e.to_string()))?;
         let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
@@ -390,17 +392,32 @@ impl AppJwt for LiveAppJwt {
 
 /// Read App credentials from the on-disk secret store via std::fs. The key
 /// material is returned in-memory and never printed anywhere.
-fn load_creds() -> Result<AppCredentials, String> {
-    let app_id = std::fs::read_to_string(format!("{SECRETS_DIR}/app-id"))
-        .map_err(|e| format!("read app-id: {e}"))?
-        .trim()
-        .to_string();
-    let private_key_pem = std::fs::read_to_string(format!("{SECRETS_DIR}/private-key.pem"))
-        .map_err(|e| format!("read private key: {e}"))?;
-    Ok(AppCredentials {
-        app_id,
-        private_key_pem,
-    })
+///
+/// Returns `None` when `HUGIT_SECRETS_DIR` is unset (caller must skip the test).
+fn load_creds() -> Option<Result<AppCredentials, String>> {
+    let secrets_dir = match std::env::var("HUGIT_SECRETS_DIR") {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!(
+                "LIVE-SKIP: HUGIT_SECRETS_DIR unset — live App JWT lane requires the \
+                 secret store path; set HUGIT_SECRETS_DIR to run this lane"
+            );
+            return None;
+        }
+    };
+    let result = (|| {
+        let app_id = std::fs::read_to_string(format!("{secrets_dir}/app-id"))
+            .map_err(|e| format!("read app-id: {e}"))?
+            .trim()
+            .to_string();
+        let private_key_pem = std::fs::read_to_string(format!("{secrets_dir}/private-key.pem"))
+            .map_err(|e| format!("read private key: {e}"))?;
+        Ok(AppCredentials {
+            app_id,
+            private_key_pem,
+        })
+    })();
+    Some(result)
 }
 
 fn now_unix() -> i64 {
@@ -435,7 +452,10 @@ fn item_6_live_app_jwt_lists_installations() {
     };
     assert!(repo.contains('/'), "repo must be owner/name");
 
-    let creds = load_creds().expect("App credentials present in secret store");
+    let creds = match load_creds() {
+        None => return, // HUGIT_SECRETS_DIR unset — skip (reason printed above)
+        Some(r) => r.expect("App credentials present in secret store"),
+    };
     assert!(!creds.app_id.is_empty(), "app-id loaded");
     assert!(
         creds.private_key_pem.contains("PRIVATE KEY"),
