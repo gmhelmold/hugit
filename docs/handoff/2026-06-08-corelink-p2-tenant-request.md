@@ -91,7 +91,7 @@ ticket), the third is the secret and goes on the **runner box only**:
 
 | Value | Example | Where it goes on the hugit side |
 |---|---|---|
-| **Base URL** | `https://api.corelink.humangr.com` | env `HUGIT_CORELINK_AC_URL` (non-secret) |
+| **Base URL** | `https://corelink-api.humangr.com` (the FLAT live host — the dotted `api.corelink.humangr.com` does NOT resolve) | env `HUGIT_CORELINK_AC_URL` (non-secret) |
 | **Tenant slug** | `hugit` | env `HUGIT_CORELINK_TENANT` (non-secret) |
 | **PAT** (Bearer) | `clp_…` | file `~/.hugit/secrets/corelink/pat` on `hugit-runner-01` (91.99.11.196), **mode 600, outside every repo** — mirrors the P1 GitHub-App secret pattern. **Never** put it in a repo, a commit, an env dump, or a log. |
 
