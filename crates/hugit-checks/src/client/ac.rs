@@ -55,6 +55,13 @@ pub enum AcError {
         /// The memo key the returned record actually keys to.
         returned: String,
     },
+    /// The `memo_key` to be interpolated into the request URL is not a canonical
+    /// 64-char lowercase-hex digest (`^[0-9a-f]{64}$`). This is a request-target
+    /// trust-boundary guard (defense-in-depth against path traversal /
+    /// cross-tenant escape via the action-digest path segment) — distinct from
+    /// the content-address guard, which protects the RESPONSE. Carries a short
+    /// description of the violation; never the live PAT.
+    InvalidKey(String),
 }
 
 impl std::fmt::Display for AcError {
@@ -75,8 +82,46 @@ impl std::fmt::Display for AcError {
                 "AC content-address violation: looked up {requested} but the \
                  returned record keys to {returned} (refusing a blind hit)"
             ),
+            AcError::InvalidKey(what) => {
+                write!(f, "AC invalid memo key (refusing to build request): {what}")
+            }
         }
     }
+}
+
+/// A canonical AC memo key is a 64-char lowercase-hex SHA-256 digest. Validate it
+/// BEFORE it is interpolated into the request URL: a key carrying path separators
+/// (or any non-hex byte) could escape the `/v1/ac/{tenant}/` prefix and target a
+/// different tenant or route. Returns [`AcError::InvalidKey`] on any violation.
+fn validate_memo_key(memo_key: &str) -> Result<(), AcError> {
+    if memo_key.len() == 64
+        && memo_key
+            .bytes()
+            // lowercase hex only: is_ascii_hexdigit would also accept A-F.
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        Ok(())
+    } else {
+        Err(AcError::InvalidKey(format!(
+            "memo key must match ^[0-9a-f]{{64}}$ (got {} chars)",
+            memo_key.len()
+        )))
+    }
+}
+
+/// A tenant slug is the first AC path segment and comes from an env var, so it is
+/// validated `^[a-z0-9][a-z0-9-]{0,62}$` at config construction. A bad slug could
+/// otherwise alter the request route. Returns `false` on any violation.
+fn is_valid_tenant_slug(tenant: &str) -> bool {
+    let bytes = tenant.as_bytes();
+    if bytes.is_empty() || bytes.len() > 63 {
+        return false;
+    }
+    let is_lower_alnum = |b: u8| b.is_ascii_digit() || b.is_ascii_lowercase();
+    if !is_lower_alnum(bytes[0]) {
+        return false;
+    }
+    bytes[1..].iter().all(|&b| is_lower_alnum(b) || b == b'-')
 }
 
 impl std::error::Error for AcError {}
@@ -94,10 +139,16 @@ pub trait ActionCache {
     fn store(&self, result: &CheckResult) -> Result<(), AcError>;
 }
 
+// TEST FIXTURE — not for production use; substituting this for HttpAcClient
+// silently bypasses CoreLink (no PAT, no tenant scope, no content-address wire
+// guard). It ships in the public API only so cross-crate acceptance tests can
+// reach it via the public path; `#[doc(hidden)]` keeps it out of the rendered
+// docs so it is never mistaken for a production cache backend.
 /// A deterministic, in-process Action Cache. NOT a test stub bolted onto the
 /// test crate — it is the reference semantics of the AC contract (content-keyed,
 /// store-then-hit), so the same code proves the client against it and the live
 /// client must match its behavior.
+#[doc(hidden)]
 #[derive(Debug, Default)]
 pub struct InMemoryAc {
     /// Guards the map; `Mutex` keeps the impl `Sync` without leaking the lock
@@ -232,6 +283,15 @@ impl AcConfig {
         if tenant.trim().is_empty() {
             return Err(AcError::NotConfigured("tenant is empty".into()));
         }
+        // The tenant is the first AC path segment and comes from an env var;
+        // validate the slug shape (`^[a-z0-9][a-z0-9-]{0,62}$`) so a crafted
+        // value cannot alter the request route. Fail-closed, naming the piece —
+        // never the PAT.
+        if !is_valid_tenant_slug(&tenant) {
+            return Err(AcError::NotConfigured(
+                "tenant slug must match ^[a-z0-9][a-z0-9-]{0,62}$".into(),
+            ));
+        }
         if pat.trim().is_empty() {
             return Err(AcError::NotConfigured("PAT is empty".into()));
         }
@@ -249,13 +309,19 @@ impl AcConfig {
     }
 
     /// The full endpoint URL for a memo key (the action-digest path segment).
-    fn endpoint(&self, memo_key: &str) -> String {
-        format!(
+    ///
+    /// The `memo_key` is validated `^[0-9a-f]{64}$` BEFORE interpolation — a key
+    /// carrying path separators could escape the `/v1/ac/{tenant}/` prefix, so a
+    /// non-canonical key is rejected as [`AcError::InvalidKey`] rather than built
+    /// into a request. (The tenant slug is validated once, at construction.)
+    fn endpoint(&self, memo_key: &str) -> Result<String, AcError> {
+        validate_memo_key(memo_key)?;
+        Ok(format!(
             "{}/v1/ac/{}/{}",
             self.base_url.trim_end_matches('/'),
             self.tenant,
             memo_key
-        )
+        ))
     }
 }
 
@@ -390,7 +456,7 @@ impl<T: HttpTransport> ActionCache for HttpAcClient<T> {
                 memo_key
             )));
         };
-        let url = cfg.endpoint(memo_key);
+        let url = cfg.endpoint(memo_key)?;
         let (status, body) = self.transport.get(&url, &cfg.bearer())?;
         match status {
             200 => Ok(Some(parse_hit(memo_key, &body)?)),
@@ -407,7 +473,7 @@ impl<T: HttpTransport> ActionCache for HttpAcClient<T> {
                 result.memo_key
             )));
         };
-        let url = cfg.endpoint(&result.memo_key);
+        let url = cfg.endpoint(&result.memo_key)?;
         let body = store_body(result)?;
         let status = self.transport.put(&url, &cfg.bearer(), &body)?;
         match status {
@@ -522,6 +588,30 @@ fn resolve_pat_file() -> Result<PathBuf, AcError> {
 fn read_pat(pat_file: &Path) -> Result<String, AcError> {
     match std::fs::read_to_string(pat_file) {
         Ok(contents) => {
+            // A secret file must not be readable/writable by group or other.
+            // On Unix, reject any mode with `& 0o077 != 0`, naming the FILE PATH
+            // (never the value): a world-readable PAT is a credential leak, so we
+            // fail closed rather than load it.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let meta = std::fs::metadata(pat_file).map_err(|e| {
+                    AcError::NotConfigured(format!(
+                        "PAT: cannot stat secret file {}: {}",
+                        pat_file.display(),
+                        e.kind()
+                    ))
+                })?;
+                let mode = meta.permissions().mode();
+                if mode & 0o077 != 0 {
+                    return Err(AcError::NotConfigured(format!(
+                        "PAT: secret file {} has insecure permissions {:o} \
+                         (group/other access); chmod 600 it",
+                        pat_file.display(),
+                        mode & 0o777
+                    )));
+                }
+            }
             // Trim only trailing newline(s)/whitespace — a secret never has
             // meaningful trailing whitespace, and editors append a newline.
             let pat = contents.trim_end().to_string();

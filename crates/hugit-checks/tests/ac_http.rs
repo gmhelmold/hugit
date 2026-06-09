@@ -27,7 +27,8 @@
 use std::sync::{Arc, Mutex};
 
 use hugit_checks::client::ac::{
-    AcConfig, AcError, ActionCache, HttpAcClient, HttpTransport, UreqTransport,
+    AcConfig, AcError, ActionCache, ENV_AC_URL, ENV_PAT, ENV_PAT_FILE, ENV_TENANT, HttpAcClient,
+    HttpTransport, UreqTransport, corelink_ac_from_env,
 };
 use hugit_contracts::CheckResult;
 
@@ -372,4 +373,164 @@ fn store_then_lookup_roundtrips_the_canonical_payload() {
     let get_client = shared_client(&get_t);
     let hit = get_client.lookup(&key).expect("ok").expect("hit");
     assert_eq!(hit, result, "what we stored is exactly what we get back");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 6. Request-target trust boundary (FP-4): the memo_key path segment is
+//    validated `^[0-9a-f]{64}$` BEFORE it is interpolated into the URL. The
+//    content-address guard protects the RESPONSE; this protects the REQUEST
+//    target against path traversal / cross-tenant escape via a crafted key.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn lookup_rejects_a_non_hex_or_traversal_memo_key_before_any_request() {
+    // A key carrying path separators would escape the `/v1/ac/{tenant}/` prefix.
+    // It must be rejected as InvalidKey with NO request issued.
+    for bad in [
+        "../other-tenant/x",
+        "..%2Fother",
+        "AA".repeat(32).as_str(), // uppercase hex is not allowed
+        "a".repeat(63).as_str(),  // too short
+        "a".repeat(65).as_str(),  // too long
+        "g".repeat(64).as_str(),  // non-hex char
+    ] {
+        let t = Arc::new(MockTransport::get(200, valid_body()));
+        let client = shared_client(&t);
+        match client.lookup(bad) {
+            Err(AcError::InvalidKey(_)) => {}
+            other => panic!("memo_key {bad:?} must be InvalidKey, got {other:?}"),
+        }
+        assert!(
+            t.seen.lock().unwrap().is_empty(),
+            "no request may be issued for an invalid key {bad:?}"
+        );
+    }
+}
+
+#[test]
+fn store_rejects_an_invalid_memo_key_before_any_request() {
+    let mut result = valid_result();
+    result.memo_key = "../other-tenant/x".to_string();
+    let t = Arc::new(MockTransport::put(201));
+    let client = shared_client(&t);
+    match client.store(&result) {
+        Err(AcError::InvalidKey(_)) => {}
+        other => panic!("store with an invalid memo_key must be InvalidKey, got {other:?}"),
+    }
+    assert!(
+        t.seen.lock().unwrap().is_empty(),
+        "no request may be issued for an invalid key"
+    );
+}
+
+#[test]
+fn lookup_accepts_a_valid_64_hex_memo_key() {
+    // The positive control: a real 64-hex key still flows to the transport and
+    // produces a hit (validation guards the bad shapes, not the good one).
+    let result = valid_result();
+    let key = result.memo_key.clone();
+    let body = serde_json::to_vec(&result).unwrap();
+    let t = Arc::new(MockTransport::get(200, body));
+    let client = shared_client(&t);
+    let hit = client.lookup(&key).expect("ok").expect("hit");
+    assert_eq!(hit, result);
+    assert_eq!(
+        t.seen.lock().unwrap().len(),
+        1,
+        "a valid key issues the request"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 7. Tenant slug trust boundary (FP-4): the tenant comes from an env var and is
+//    the first AC path segment, so it is validated `^[a-z0-9][a-z0-9-]{0,62}$`
+//    at `AcConfig` construction. A bad slug fails closed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn config_rejects_a_traversal_or_uppercase_tenant_slug_fail_closed() {
+    for bad in [
+        "../x",          // path traversal
+        "ACME",          // uppercase not allowed
+        "-leading",      // must start alnum
+        "has space",     // no spaces
+        "a/b",           // no separators
+        &"a".repeat(64), // too long (> 63)
+        "",              // empty (already rejected, kept for completeness)
+    ] {
+        match AcConfig::new(BASE, bad, PAT) {
+            Err(AcError::NotConfigured(msg)) => {
+                assert!(
+                    msg.to_lowercase().contains("tenant"),
+                    "the error names the tenant: {msg}"
+                );
+                assert!(!msg.contains(PAT), "the PAT is never rendered: {msg}");
+            }
+            other => panic!("tenant slug {bad:?} must be rejected, got {other:?}"),
+        }
+    }
+    // A well-formed slug still builds.
+    assert!(AcConfig::new(BASE, "acme-prod-01", PAT).is_ok());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 8. PAT-file permission gate (FP-4): on Unix the loader refuses a PAT file
+//    readable/writable by group or other (`mode & 0o077 != 0`), naming the FILE
+//    PATH (never the secret value). Env vars are process-global so this case is
+//    serialized by a guard (its own binary, but belt-and-suspenders).
+// ─────────────────────────────────────────────────────────────────────────────
+
+static PAT_PERM_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(unix)]
+#[test]
+fn loader_refuses_a_world_readable_pat_file_naming_the_path() {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    let _g = PAT_PERM_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pat_path = dir.path().join("pat");
+    let mut f = std::fs::File::create(&pat_path).unwrap();
+    write!(f, "corelink_pat_SECRET_must_never_leak").unwrap();
+    drop(f);
+    // 0644 → group/other readable → mode & 0o077 != 0.
+    std::fs::set_permissions(&pat_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    // SAFETY: guarded by PAT_PERM_LOCK; env vars are restored at the end.
+    unsafe {
+        std::env::set_var(ENV_AC_URL, BASE);
+        std::env::set_var(ENV_TENANT, TENANT);
+        std::env::remove_var(ENV_PAT);
+        std::env::set_var(ENV_PAT_FILE, pat_path.to_str().unwrap());
+    }
+
+    let outcome = corelink_ac_from_env();
+    // SAFETY: guarded by PAT_PERM_LOCK.
+    unsafe {
+        std::env::remove_var(ENV_AC_URL);
+        std::env::remove_var(ENV_TENANT);
+        std::env::remove_var(ENV_PAT_FILE);
+    }
+
+    match outcome {
+        Err(AcError::NotConfigured(msg)) => {
+            assert!(
+                msg.contains(pat_path.to_str().unwrap()),
+                "the error names the FILE PATH: {msg}"
+            );
+            assert!(
+                !msg.contains("corelink_pat_SECRET"),
+                "the secret value is never rendered: {msg}"
+            );
+        }
+        other => panic!("a 0644 PAT file must be NotConfigured, got {other:?}"),
+    }
+}
+
+/// A canonical valid 200 lookup body — used by the invalid-key cases to prove
+/// the request is rejected BEFORE the (otherwise valid) response could be served.
+fn valid_body() -> Vec<u8> {
+    serde_json::to_vec(&valid_result()).unwrap()
 }

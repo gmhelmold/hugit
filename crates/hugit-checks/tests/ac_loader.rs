@@ -15,7 +15,6 @@
 //! owns them and restores them; sub-cases run as plain functions.
 
 use std::env;
-use std::io::Write;
 use std::sync::Mutex;
 
 use hugit_checks::client::ac::{
@@ -53,6 +52,18 @@ fn set(key: &str, val: &str) {
     unsafe { env::set_var(key, val) }
 }
 
+/// Write a PAT fixture file at mode 0600. The loader rejects a world/group-
+/// readable secret file (FP-4 guard), so fixtures must match the production
+/// discipline (the handoff places the real PAT at mode 600).
+fn write_pat(path: &std::path::Path, contents: &str) {
+    std::fs::write(path, contents).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
 #[test]
 fn loader_contract() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -82,9 +93,7 @@ fn all_present_yields_configured_client_that_attempts_http() {
     let dir = tempfile::tempdir().expect("tempdir");
     let pat_path = dir.path().join("pat");
     // Trailing newline must be trimmed by the loader.
-    let mut f = std::fs::File::create(&pat_path).unwrap();
-    writeln!(f, "{FILE_PAT}").unwrap();
-    drop(f);
+    write_pat(&pat_path, &format!("{FILE_PAT}\n"));
 
     // Point at a guaranteed-unreachable URL so Ok(_) is impossible unless the
     // transport is bypassed.  Any real TCP connect to port 0 → Transport error.
@@ -124,7 +133,7 @@ fn missing_base_url_is_notconfigured_naming_it() {
     clear_all();
     let dir = tempfile::tempdir().unwrap();
     let pat_path = dir.path().join("pat");
-    std::fs::write(&pat_path, FILE_PAT).unwrap();
+    write_pat(&pat_path, FILE_PAT);
     set(ENV_TENANT, TENANT);
     set(ENV_PAT_FILE, pat_path.to_str().unwrap());
     // ENV_AC_URL deliberately unset.
@@ -142,7 +151,7 @@ fn missing_tenant_is_notconfigured_naming_it() {
     clear_all();
     let dir = tempfile::tempdir().unwrap();
     let pat_path = dir.path().join("pat");
-    std::fs::write(&pat_path, FILE_PAT).unwrap();
+    write_pat(&pat_path, FILE_PAT);
     set(ENV_AC_URL, BASE);
     set(ENV_PAT_FILE, pat_path.to_str().unwrap());
     // ENV_TENANT deliberately unset.
@@ -189,7 +198,7 @@ fn file_pat_takes_precedence_over_env() {
     clear_all();
     let dir = tempfile::tempdir().unwrap();
     let pat_path = dir.path().join("pat");
-    std::fs::write(&pat_path, format!("{FILE_PAT}\n")).unwrap();
+    write_pat(&pat_path, &format!("{FILE_PAT}\n"));
     set(ENV_AC_URL, BASE);
     set(ENV_TENANT, TENANT);
     set(ENV_PAT, ENV_PAT_VAL);
@@ -226,7 +235,7 @@ fn pat_is_never_rendered_in_client_debug_or_errors() {
     clear_all();
     let dir = tempfile::tempdir().unwrap();
     let pat_path = dir.path().join("pat");
-    std::fs::write(&pat_path, format!("{FILE_PAT}\n")).unwrap();
+    write_pat(&pat_path, &format!("{FILE_PAT}\n"));
     set(ENV_AC_URL, BASE);
     set(ENV_TENANT, TENANT);
     set(ENV_PAT, ENV_PAT_VAL);
