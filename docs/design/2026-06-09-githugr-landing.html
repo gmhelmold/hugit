@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>githugr — Landing hub (reference)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  :root{
+    --bg:#101013; --rail:#0c0c0f; --panel:#16161a; --panel-2:#1c1c22; --hover:rgba(255,255,255,.035);
+    --line:rgba(255,255,255,.06); --line-2:rgba(255,255,255,.09); --line-3:rgba(255,255,255,.14);
+    --text:#f3f4f5; --text-2:#d0d2d6; --muted:#8a8f98; --faint:#626572; --dim:#44464f;
+    --accent:#5e6ad2; --accent-soft:rgba(94,106,210,.15); --green:#4cb782; --green-soft:rgba(76,183,130,.1);
+    --red:#d96c6c; --amber:#c9a14a;
+    --font:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+    --mono:'JetBrains Mono',ui-monospace,Menlo,monospace; --r:8px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  ::selection{background:rgba(94,106,210,.30)}
+  body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:13.5px;line-height:1.55;-webkit-font-smoothing:antialiased;height:100vh;overflow:hidden;letter-spacing:-.005em}
+  kbd{font-family:var(--mono);font-size:10.5px;color:var(--muted);background:rgba(255,255,255,.035);border:1px solid var(--line-2);border-radius:5px;padding:1px 5px}
+  .mono{font-family:var(--mono)} a{color:inherit;text-decoration:none}
+  .app{display:grid;grid-template-rows:46px 44px 1fr 30px;height:100vh}
+
+  .topbar{display:flex;align-items:center;gap:14px;padding:0 14px;border-bottom:1px solid var(--line);background:var(--rail)}
+  .brand{display:flex;align-items:center;gap:8px;font-weight:600}
+  .brand .logo{width:17px;height:17px;border-radius:5px;background:#5e6ad2} .brand .nm{font-weight:700}
+  .brand .sep{color:var(--dim)} .brand .repo{color:var(--muted);font-weight:500} .brand .repo b{color:var(--text)}
+  .cmdk{flex:1;max-width:440px;margin:0 auto;display:flex;align-items:center;gap:8px;height:30px;padding:0 11px;border:1px solid var(--line-2);border-radius:7px;color:var(--faint);background:rgba(255,255,255,.02);cursor:text}
+  .cmdk:hover{border-color:var(--line-3);color:var(--muted)} .cmdk .sp{flex:1}
+  .right{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:12.5px}
+  .ghbtn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line-2);border-radius:6px;padding:3px 9px;color:var(--muted)}
+  .av{width:22px;height:22px;border-radius:50%;background:#26262c;border:1px solid var(--line-2)}
+
+  .tabbar{display:flex;align-items:center;gap:2px;padding:0 14px;border-bottom:1px solid var(--line);background:var(--rail);overflow-x:auto}
+  .rtab{display:inline-flex;align-items:center;gap:7px;padding:0 11px;height:43px;color:var(--muted);font-weight:450;font-size:13px;cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap}
+  .rtab .ic{color:var(--faint)} .rtab:hover{color:var(--text)}
+  .rtab.on{color:var(--text);border-bottom-color:var(--accent);font-weight:500} .rtab.on .ic{color:var(--text)}
+  .rtab .ct{font-size:11px;color:var(--muted);background:rgba(255,255,255,.06);border-radius:20px;padding:0 6px;font-weight:600}
+  .ext{color:var(--dim);font-size:11px}
+
+  /* landing hub: queue is the hero (main), info orbits (right) */
+  .body{display:grid;grid-template-columns:1fr 300px;overflow:hidden}
+  .main{overflow-y:auto;padding:20px 24px}
+  .hero{display:flex;align-items:center;gap:14px;margin-bottom:4px}
+  .hero h1{font-size:20px;font-weight:600;letter-spacing:-.02em}
+  .mainpill{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:500;color:var(--green);background:var(--green-soft);border:1px solid rgba(76,183,130,.28);border-radius:20px;padding:3px 11px}
+  .mainpill .dot{width:7px;height:7px;border-radius:50%;background:var(--green)}
+  .sub{color:var(--faint);font-size:12.5px;margin:2px 0 20px}
+
+  .qsec{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);font-weight:600;margin:22px 0 9px;display:flex;align-items:center;gap:9px}
+  .qsec .n{color:var(--muted);background:rgba(255,255,255,.05);border-radius:20px;padding:0 7px;font-size:10.5px}
+  .qsec .sp{flex:1} .qsec .ut{color:var(--muted);font-weight:500;font-size:11.5px;text-transform:none;letter-spacing:0}
+
+  /* the batch under union test = the centerpiece */
+  .batch{border:1px solid var(--accent);border-radius:var(--r);overflow:hidden;box-shadow:0 0 0 1px rgba(94,106,210,.1)}
+  .batch .bh{display:flex;align-items:center;gap:10px;padding:11px 15px;background:var(--accent-soft);border-bottom:1px solid var(--line-2);font-size:12.5px}
+  .batch .bh b{color:var(--text)} .batch .bh .sp{flex:1} .batch .bh .prog{color:var(--muted)} .batch .bh .prog b{color:var(--accent)}
+  .qrow{display:grid;grid-template-columns:18px 60px 1fr auto;align-items:center;gap:12px;padding:11px 15px;border-bottom:1px solid var(--line);font-size:13px}
+  .qrow:last-child{border-bottom:0} .qrow:hover{background:var(--hover)}
+  .qrow .d{width:7px;height:7px;border-radius:50%}
+  .qrow .d.g{background:var(--green)} .qrow .d.t{background:var(--accent)} .qrow .d.b{background:var(--red)} .qrow .d.q{background:var(--dim)}
+  .qrow .id{font-family:var(--mono);font-size:11px;color:var(--faint)}
+  .qrow .t{color:var(--text-2)} .qrow .lane{font-size:11px;color:var(--faint);background:rgba(255,255,255,.04);border-radius:5px;padding:1px 7px}
+  .qrow .st{font-size:11.5px;color:var(--muted)} .qrow .st.g{color:var(--green)} .qrow .st.t{color:var(--accent)} .qrow .st.b{color:var(--red)}
+
+  .qlist{border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+  .qlist .qrow{grid-template-columns:18px 60px 1fr auto}
+
+  /* orbiting right rail */
+  .aside{border-left:1px solid var(--line);background:var(--rail);overflow-y:auto;padding:18px 14px}
+  .card{border:1px solid var(--line);border-radius:var(--r);background:var(--panel);padding:13px;margin-bottom:13px}
+  .card.need{border-color:rgba(201,161,74,.4)}
+  .card .h{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);font-weight:600;margin-bottom:11px;display:flex;align-items:center;gap:7px}
+  .card.need .h{color:var(--amber)}
+  .needrow{font-size:12.5px;color:var(--text-2);margin-bottom:9px}
+  .needrow .id{font-family:var(--mono);font-size:11px;color:var(--faint)}
+  .needbtns{display:flex;gap:7px}
+  .bp{background:var(--accent);color:#fff;border:0;border-radius:6px;padding:5px 12px;font-weight:600;font-size:12px;cursor:pointer;font-family:var(--font)}
+  .bg{background:transparent;color:var(--text);border:1px solid var(--line-2);border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer;font-family:var(--font)}
+  .kv{display:flex;align-items:center;gap:9px;font-size:12.5px;color:var(--muted);padding:5px 0}
+  .kv .v{margin-left:auto;color:var(--text-2);font-weight:500} .kv .v.g{color:var(--green)}
+  .meter{height:5px;border-radius:5px;background:rgba(255,255,255,.06);overflow:hidden;margin:7px 0 4px}
+  .meter i{display:block;height:100%;background:var(--accent)}
+  .landed{font-size:12.5px;color:var(--muted);padding:6px 0;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px}
+  .landed:last-child{border-bottom:0} .landed .id{font-family:var(--mono);font-size:11px;color:var(--faint)} .landed .t2{color:var(--text-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap} .landed .tm{margin-left:auto;color:var(--dim);font-size:11px;white-space:nowrap}
+
+  .foot{display:flex;align-items:center;gap:18px;padding:0 16px;border-top:1px solid var(--line);background:var(--rail);color:var(--faint);font-size:11.5px}
+  .foot .sp{flex:1} .foot span{display:inline-flex;align-items:center;gap:6px} .dotg{width:6px;height:6px;border-radius:50%;background:var(--green)}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <div class="topbar">
+    <div class="brand"><span class="logo"></span> <span class="nm">githugr</span> <span class="sep">/</span> <span class="repo"><b>corelink-server</b></span></div>
+    <div class="cmdk"><span>⌘</span> Buscar ou executar… <span class="sp"></span> <kbd>⌘K</kbd></div>
+    <div class="right"><span class="ghbtn">⟲ sync GitHub ✓</span><span class="av"></span></div>
+  </div>
+
+  <!-- repo tab bar = GitHub-faithful + Landing as the one elevated hero -->
+  <div class="tabbar">
+    <div class="rtab"><span class="ic">&lt;&gt;</span> Code</div>
+    <div class="rtab"><span class="ic">○</span> Issues <span class="ext">↗</span></div>
+    <div class="rtab"><span class="ic">◆</span> Intents <span class="ct">24</span></div>
+    <div class="rtab"><span class="ic">✓</span> Checks</div>
+    <div class="rtab on"><span class="ic">⇲</span> Landing</div>
+    <div class="rtab"><span class="ic">⛨</span> Security</div>
+    <div class="rtab"><span class="ic">▦</span> Insights</div>
+    <div class="rtab"><span class="ic">⚙</span> Settings</div>
+  </div>
+
+  <div class="body">
+    <!-- HERO: the landing queue -->
+    <div class="main">
+      <div class="hero">
+        <h1>Landing</h1>
+        <span class="mainpill"><span class="dot"></span> main verde · always-shippable</span>
+      </div>
+      <div class="sub">Ninguém escreve a <span class="mono">main</span> direto. A fila testa os intents <b>juntos</b> (union) e pousa em ordem. Lanes paralelas para claims disjuntas.</div>
+
+      <!-- batch under union test = centerpiece -->
+      <div class="qsec">Em teste agora <span class="n">batch · 4</span><span class="sp"></span><span class="ut">union de 4 · 3 cache-hit · 1 executando</span></div>
+      <div class="batch">
+        <div class="bh">⇲ <b>Union B-217</b> <span class="sp"></span><span class="prog">testando · <b>~12s</b> restantes · custo $0.04</span></div>
+        <div class="qrow"><span class="d t"></span><span class="id">a31</span><span class="t">fix: sessão expira cedo no refresh</span><span class="lane">lane 1</span></div>
+        <div class="qrow"><span class="d g"></span><span class="id">a2f</span><span class="t">rate-limit por tenant no edge</span><span class="st g">cache-hit</span></div>
+        <div class="qrow"><span class="d g"></span><span class="id">a30</span><span class="t">log estruturado de auth</span><span class="st g">cache-hit</span></div>
+        <div class="qrow"><span class="d t"></span><span class="id">a34</span><span class="t">índice em sessions.tenant_id</span><span class="lane">lane 2</span></div>
+      </div>
+
+      <!-- next in queue -->
+      <div class="qsec">Próximos na fila <span class="n">5</span></div>
+      <div class="qlist">
+        <div class="qrow"><span class="d q"></span><span class="id">a28</span><span class="t">cache-warm no boot do runner</span><span class="st">aguardando</span></div>
+        <div class="qrow"><span class="d q"></span><span class="id">a3a</span><span class="t">métricas de hit-rate no dashboard</span><span class="st">aguardando</span></div>
+        <div class="qrow"><span class="d q"></span><span class="id">a3b</span><span class="t">retry com backoff no upload R2</span><span class="st">aguardando</span></div>
+      </div>
+
+      <!-- blocked / union-fail -->
+      <div class="qsec" style="color:var(--red)">Bloqueado · union-fail <span class="n" style="color:var(--red);background:rgba(217,108,108,.12)">1</span></div>
+      <div class="qlist">
+        <div class="qrow"><span class="d b"></span><span class="id">a2c</span><span class="t">migração do schema de sessões</span><span class="st b">regrediu com a30 · voltou ao autor</span></div>
+      </div>
+    </div>
+
+    <!-- orbiting info -->
+    <div class="aside">
+      <div class="card need">
+        <div class="h">⚑ precisa de você</div>
+        <div class="needrow"><span class="id">a2c</span> migração de schema bloqueia o batch — precisa da sua decisão (re-slice ou serializar).</div>
+        <div class="needbtns"><button class="bp">Revisar</button><button class="bg">Adiar</button></div>
+      </div>
+
+      <div class="card">
+        <div class="h">⇲ union test · B-217</div>
+        <div class="kv">affected checks <span class="v">14</span></div>
+        <div class="kv">cache-hit <span class="v g">11 · 0 exec</span></div>
+        <div class="kv">executando <span class="v">3</span></div>
+        <div class="meter"><i style="width:78%"></i></div>
+        <div class="kv">custo do batch <span class="v">$0.04</span></div>
+        <div class="kv">cache salvou <span class="v g">$3.10 · 14min</span></div>
+      </div>
+
+      <div class="card">
+        <div class="h">↓ pousados hoje</div>
+        <div class="landed"><span class="id">a25</span><span class="t2">fix null deref no parser</span><span class="tm">há 22min</span></div>
+        <div class="landed"><span class="id">a24</span><span class="t2">bump ureq 2.12</span><span class="tm">há 40min</span></div>
+        <div class="landed"><span class="id">a21</span><span class="t2">doc: handoff P2</span><span class="tm">há 1h</span></div>
+        <div class="kv" style="padding-top:9px"><span style="color:var(--faint)">total hoje</span><span class="v">9 pousados · 0 quebraram main</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot">
+    <span><kbd>⌘K</kbd> comandos</span><span><kbd>L</kbd> land batch</span>
+    <span class="sp"></span><span><span class="dotg"></span> main verde · 9 pousados hoje</span><span>versionado por hugit</span>
+  </div>
+</div>
+</body>
+</html>
