@@ -162,11 +162,20 @@ fn item_2_fairness_bound_interleave_fixture() {
 
     // ── p95 wait bound ────────────────────────────────────────────────────────
     // The fixture uses tick=ms (1 tick = 1 ms for test purposes).
-    // P95_WAIT_BOUND_MS is 5000; the fixture max tick spread is well under that.
+    // Tight bound: derived from fixture constants: N_TENANTS * ITEMS_PER_TENANT ticks.
+    // A vacuous 5000ms bound lets a maximally-unfair scheduler pass; this bound
+    // Any p95 > N_TENANTS * ITEMS_PER_TENANT = 80 would mean starvation — caught here.
+    // tight_p95_bound = N_TENANTS * ITEMS_PER_TENANT = 80 ticks (tighter than 5000 global)
+    let tight_p95_bound = (N_TENANTS * ITEMS_PER_TENANT) as u64;
     let p95 = mgr.p95_wait_ticks();
     assert!(
-        p95 <= P95_WAIT_BOUND_MS,
-        "p95 queue wait {p95} ticks must be ≤ P95_WAIT_BOUND_MS={P95_WAIT_BOUND_MS}"
+        p95 <= tight_p95_bound,
+        "p95 queue wait {p95} ticks must be <= tight_p95_bound={tight_p95_bound} (N_TENANTS * ITEMS_PER_TENANT — fairness bound, not just a smoke check)"
+    );
+    // Sanity: the tight bound is also within the global P95_WAIT_BOUND_MS contract.
+    assert!(
+        tight_p95_bound <= P95_WAIT_BOUND_MS,
+        "fixture tight bound {tight_p95_bound} must be within global P95_WAIT_BOUND_MS"
     );
 
     // ── throughput share ≥ floor ──────────────────────────────────────────────

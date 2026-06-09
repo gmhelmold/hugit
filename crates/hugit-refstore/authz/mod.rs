@@ -401,4 +401,119 @@ mod tests {
         assert!(record.is_none());
         assert_eq!(log.len(), 0);
     }
+    // ── denial_payload JSON-shape pin tests (one per DenyReason variant) ────────
+    // These pin the EXACT serialized key/value shape of the denial audit payload.
+    // If the shape changes, the pin fails — intentional: audit consumers parse
+    // these fields by key name; a silent rename would break attribution.
+
+    /// UnrecognizedPrincipal denial payload: two fields, exact key/value shape.
+    #[test]
+    fn denial_payload_unrecognized_principal_shape() {
+        use super::*;
+        // All endpoints produce the same shape for UnrecognizedPrincipal.
+        let payload = denial_payload(Endpoint::Push, &DenyReason::UnrecognizedPrincipal);
+        let v: serde_json::Value =
+            serde_json::from_str(&payload).expect("denial payload must be valid JSON");
+        assert_eq!(
+            v.get("endpoint").and_then(|x| x.as_str()),
+            Some("push"),
+            "endpoint key must be the endpoint wire name"
+        );
+        assert_eq!(
+            v.get("reason").and_then(|x| x.as_str()),
+            Some("unrecognized_principal"),
+            "reason key must be the DenyReason code"
+        );
+        // No extra fields (no `class`).
+        let obj = v.as_object().expect("payload is a JSON object");
+        assert_eq!(
+            obj.len(),
+            2,
+            "UnrecognizedPrincipal payload has exactly 2 keys"
+        );
+    }
+
+    /// Verify UnrecognizedPrincipal payload shape for every endpoint.
+    #[test]
+    fn denial_payload_unrecognized_principal_all_endpoints() {
+        use super::*;
+        let expected_endpoints = ["push", "land", "undo", "policy"];
+        for (endpoint, expected_ep_str) in ALL_ENDPOINTS.iter().zip(expected_endpoints.iter()) {
+            let payload = denial_payload(*endpoint, &DenyReason::UnrecognizedPrincipal);
+            let v: serde_json::Value =
+                serde_json::from_str(&payload).expect("payload must be valid JSON");
+            assert_eq!(
+                v.get("endpoint").and_then(|x| x.as_str()),
+                Some(*expected_ep_str),
+                "endpoint field mismatch for {:?}",
+                endpoint
+            );
+            assert_eq!(
+                v.get("reason").and_then(|x| x.as_str()),
+                Some("unrecognized_principal"),
+            );
+        }
+    }
+
+    /// NotPermitted denial payload: three fields — endpoint, reason, class.
+    #[test]
+    fn denial_payload_not_permitted_shape() {
+        use super::*;
+        // Worker trying to Land: denied with class=worker.
+        let payload = denial_payload(
+            Endpoint::Land,
+            &DenyReason::NotPermitted {
+                class: PrincipalClass::Worker,
+            },
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&payload).expect("denial payload must be valid JSON");
+        assert_eq!(
+            v.get("endpoint").and_then(|x| x.as_str()),
+            Some("land"),
+            "endpoint key"
+        );
+        assert_eq!(
+            v.get("reason").and_then(|x| x.as_str()),
+            Some("not_permitted"),
+            "reason key"
+        );
+        assert_eq!(
+            v.get("class").and_then(|x| x.as_str()),
+            Some("worker"),
+            "class key must be the principal class wire name"
+        );
+        let obj = v.as_object().expect("payload is a JSON object");
+        assert_eq!(obj.len(), 3, "NotPermitted payload has exactly 3 keys");
+    }
+
+    /// NotPermitted: every (class, endpoint) denial carries the correct class wire name.
+    #[test]
+    fn denial_payload_not_permitted_all_classes() {
+        use super::*;
+        let cases: &[(PrincipalClass, &str)] = &[
+            (PrincipalClass::Human, "human"),
+            (PrincipalClass::Orchestrator, "orchestrator"),
+            (PrincipalClass::Worker, "worker"),
+            (PrincipalClass::Model, "model"),
+        ];
+        for (class, expected_class_str) in cases {
+            let payload = denial_payload(
+                Endpoint::Policy,
+                &DenyReason::NotPermitted { class: *class },
+            );
+            let v: serde_json::Value =
+                serde_json::from_str(&payload).expect("payload must be valid JSON");
+            assert_eq!(
+                v.get("class").and_then(|x| x.as_str()),
+                Some(*expected_class_str),
+                "class field mismatch for {:?}",
+                class
+            );
+            assert_eq!(
+                v.get("reason").and_then(|x| x.as_str()),
+                Some("not_permitted"),
+            );
+        }
+    }
 }

@@ -283,3 +283,34 @@ pub fn landing_gate_check(
         None => Engine::eval_closed(known_gate_ids),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `None` arm in `Engine::eval` (unregistered gate id) returns
+    /// `GateOutcome::Blocked` — the fail-closed path is covered.
+    #[test]
+    fn unregistered_gate_id_is_blocked_fail_closed() {
+        let gates = vec![GateDescriptor {
+            id: "no_such_gate".into(),
+            description: "a gate whose evaluator is deliberately not registered".into(),
+            enabled: true,
+        }];
+        // Empty registry: no GateFn for "no_such_gate".
+        let registry = std::collections::HashMap::new();
+        let engine = Engine::new(gates, registry);
+
+        let ctx = EvalContext::new();
+        let outcomes = engine.eval(&ctx);
+
+        assert_eq!(outcomes.len(), 1, "one enabled gate → one outcome");
+        let (id, outcome) = &outcomes[0];
+        assert_eq!(id, "no_such_gate");
+        assert!(
+            matches!(outcome, GateOutcome::Blocked { .. }),
+            "unregistered gate must produce Blocked (fail-closed), got {:?}",
+            outcome
+        );
+    }
+}

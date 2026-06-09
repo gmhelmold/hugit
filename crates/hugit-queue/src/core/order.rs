@@ -18,8 +18,10 @@
 
 use crate::core::batch::Batch;
 use crate::core::state::{EntryState, TransitionError, UnionOutcome, transition};
+use std::collections::HashMap;
 
 /// Per-entry result of an ordered landing pass.
+#[must_use]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LandingStep {
     /// Item id this step concerns.
@@ -57,6 +59,7 @@ pub enum LandingError {
 ///
 /// A green entry whose predecessor is genuinely *unresolved* (still `Landable`)
 /// surfaces as a refusal — there is no path that lands it ahead of the gap.
+#[must_use = "use the returned steps or propagate the error"]
 pub fn land_in_order(
     batch: &mut Batch,
     outcomes: &[(&str, UnionOutcome)],
@@ -68,15 +71,17 @@ pub fn land_in_order(
     // closes if an entry ends unresolved (Landable), which would be a real gap.
     let mut all_predecessors_settled = true;
 
+    // Pre-build a lookup map so each entry is found in O(1) instead of O(n).
+    let outcome_map: HashMap<&str, UnionOutcome> = outcomes.iter().copied().collect();
+
     // Collect outcomes in queue order before mutating, to keep the borrow simple.
     let ordered: Vec<(usize, UnionOutcome)> = {
         let mut v = Vec::with_capacity(batch.len());
         for (idx, entry) in batch.entries().iter().enumerate() {
             let id = entry.item_id();
-            let outcome = outcomes
-                .iter()
-                .find(|(oid, _)| *oid == id)
-                .map(|(_, o)| *o)
+            let outcome = outcome_map
+                .get(id)
+                .copied()
                 .ok_or_else(|| LandingError::MissingOutcome(id.to_string()))?;
             v.push((idx, outcome));
         }
