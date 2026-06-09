@@ -13,7 +13,7 @@
     --surface:rgba(255,255,255,.035); --surface-2:rgba(255,255,255,.06);
     --border:rgba(255,255,255,.09); --border-2:rgba(255,255,255,.14);
     --text:#ececf3; --muted:#9a9aac; --faint:#6a6a7a;
-    --indigo:#6366f1; --violet:#8b5cf6; --cyan:#22d3ee; --green:#34d399; --amber:#f5b942;
+    --indigo:#6366f1; --violet:#8b5cf6; --cyan:#22d3ee; --green:#34d399; --amber:#f5b942; --red:#fb7185;
     --accent:linear-gradient(135deg,#6366f1 0%,#8b5cf6 45%,#22d3ee 100%);
     --radius:16px; --font:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
     --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
@@ -26,7 +26,7 @@
       radial-gradient(800px 520px at 92% 2%, rgba(34,211,238,.12), transparent 60%),
       radial-gradient(700px 700px at 50% 120%, rgba(139,92,246,.12), transparent 60%);
     background-attachment:fixed;-webkit-font-smoothing:antialiased;line-height:1.62}
-  .wrap{max-width:880px;margin:0 auto;padding:0 24px}
+  .wrap{max-width:900px;margin:0 auto;padding:0 24px}
   .grad{background:var(--accent);-webkit-background-clip:text;background-clip:text;color:transparent}
   a{color:var(--cyan);text-decoration:none}
 
@@ -34,18 +34,17 @@
     border-bottom:1px solid rgba(245,185,66,.35);color:var(--amber);
     font-size:12.5px;font-weight:600;text-align:center;padding:8px 16px;backdrop-filter:blur(8px)}
 
-  header.hero{padding:60px 0 16px;text-align:center}
+  header.hero{padding:58px 0 14px;text-align:center}
   .eyebrow{display:inline-flex;align-items:center;gap:8px;font-size:12px;font-weight:600;
     letter-spacing:.16em;text-transform:uppercase;color:var(--muted);
     border:1px solid var(--border);border-radius:999px;padding:7px 15px;margin-bottom:22px;background:var(--surface)}
   .eyebrow .dot{width:7px;height:7px;border-radius:50%;background:var(--accent)}
   h1.title{font-size:clamp(40px,7vw,68px);line-height:1.02;font-weight:800;margin:0 0 14px;letter-spacing:-.03em}
-  .tagline{font-size:clamp(16px,2.2vw,21px);color:var(--muted);max-width:620px;margin:0 auto}
+  .tagline{font-size:clamp(16px,2.2vw,21px);color:var(--muted);max-width:660px;margin:0 auto}
   .tagline b{color:var(--text);font-weight:600}
 
-  /* register switch */
   .switch{position:sticky;top:33px;z-index:55;display:flex;justify-content:center;
-    gap:6px;margin:30px 0 6px;padding:10px 0;
+    gap:6px;margin:28px 0 6px;padding:10px 0;
     background:linear-gradient(var(--bg),rgba(8,8,13,.86));backdrop-filter:blur(8px)}
   .seg{display:inline-flex;background:var(--surface);border:1px solid var(--border);
     border-radius:999px;padding:5px;gap:4px;flex-wrap:wrap;justify-content:center}
@@ -56,47 +55,56 @@
   .seg button.on{color:#0a0a12;background:var(--accent)}
   .seg button.on .em{color:rgba(10,10,18,.7)}
 
-  article{display:none;padding:18px 0 10px}
+  article{display:none;padding:16px 0 10px}
   body[data-reg="stake"] #stake,
   body[data-reg="vibe"]  #vibe,
   body[data-reg="eng"]   #eng{display:block;animation:fade .25s ease}
   @keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 
-  .lede{font-size:19px;color:var(--text);font-weight:500;margin:6px 0 26px;line-height:1.5}
-  h2{font-size:clamp(22px,3.4vw,30px);font-weight:800;letter-spacing:-.02em;margin:42px 0 6px;scroll-margin-top:120px}
-  h2 .n{color:var(--violet);font-size:.62em;font-weight:700;margin-right:10px;vertical-align:middle}
-  h3{font-size:17px;font-weight:700;margin:24px 0 4px;color:var(--text)}
+  .lede{font-size:19px;color:var(--text);font-weight:500;margin:6px 0 24px;line-height:1.5}
+  h2{font-size:clamp(21px,3.2vw,28px);font-weight:800;letter-spacing:-.02em;margin:40px 0 6px;scroll-margin-top:120px}
+  h2 .n{color:var(--violet);font-size:.6em;font-weight:700;margin-right:10px;vertical-align:middle}
+  h3{font-size:16px;font-weight:700;margin:20px 0 2px;color:var(--text)}
   p{margin:10px 0;color:var(--muted)}
-  p b,li b{color:var(--text);font-weight:600}
-  .kicker{font-size:12px;font-weight:700;letter-spacing:.15em;text-transform:uppercase;color:var(--cyan);margin-top:34px}
+  p b,li b,td b{color:var(--text);font-weight:600}
   ul{margin:10px 0;padding-left:0;list-style:none;display:flex;flex-direction:column;gap:9px}
   ul li{position:relative;padding-left:24px;color:var(--muted)}
   ul li:before{content:"▸";position:absolute;left:2px;color:var(--violet);font-weight:700}
   .pull{border-left:3px solid;border-image:var(--accent) 1;background:var(--surface);
     border-radius:0 12px 12px 0;padding:16px 20px;margin:22px 0;font-size:18px;color:var(--text);font-weight:600;line-height:1.45}
-  .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px 22px;margin:18px 0}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:18px 20px;margin:16px 0}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
-  @media(max-width:680px){.grid2{grid-template-columns:1fr}}
-  code{font-family:var(--mono);font-size:.86em;background:var(--surface-2);border:1px solid var(--border);
+  .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+  @media(max-width:680px){.grid2,.grid3{grid-template-columns:1fr}}
+  .stat{font-size:30px;font-weight:800;letter-spacing:-.02em}
+  .stat.bad{color:var(--red)} .stat.good{color:var(--green)}
+  .statlbl{font-size:12.5px;color:var(--muted);margin-top:2px}
+  table{border-collapse:collapse;width:100%;margin:16px 0;font-size:13.5px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--border);vertical-align:top}
+  th{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--faint);font-weight:700}
+  td:first-child{color:var(--text);font-weight:600}
+  .from{color:var(--faint)} .to{color:var(--text)}
+  code{font-family:var(--mono);font-size:.85em;background:var(--surface-2);border:1px solid var(--border);
     border-radius:6px;padding:1px 6px;color:#cbd5ff}
-  pre{font-family:var(--mono);font-size:12.5px;line-height:1.55;background:#0b0b14;border:1px solid var(--border);
+  pre{font-family:var(--mono);font-size:12px;line-height:1.55;background:#0b0b14;border:1px solid var(--border);
     border-radius:12px;padding:16px 18px;overflow-x:auto;color:#c9d1ff;margin:16px 0}
   .stack{font-family:var(--mono);font-size:13px;color:var(--muted);text-align:center;margin:6px 0 0}
   .stack b{color:var(--cyan)}
   .tag{display:inline-block;font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
     padding:3px 9px;border-radius:999px;color:var(--green);background:rgba(52,211,153,.12);border:1px solid rgba(52,211,153,.3)}
-  footer{margin:64px 0 60px;text-align:center;color:var(--faint);font-size:12.5px;line-height:1.7;border-top:1px solid var(--border);padding-top:24px}
+  .note{font-size:12px;color:var(--faint)}
+  footer{margin:60px 0 60px;text-align:center;color:var(--faint);font-size:12.5px;line-height:1.7;border-top:1px solid var(--border);padding-top:24px}
 </style>
 </head>
 <body data-reg="stake">
 
-<div class="draftbar">⚠️ WHITEPAPER (preview interno) — mesma mensagem, 3 registros. Troque o público no seletor. Não publicado.</div>
+<div class="draftbar">⚠️ WHITEPAPER (preview interno) — mesma tese canônica, 3 registros. Troque o público no seletor. Fonte: docs/whitepaper/hugit-v1.md. Não publicado.</div>
 
 <div class="wrap">
   <header class="hero">
     <div class="eyebrow"><span class="dot"></span> HuGR · CoreLink · campanha #3</div>
     <h1 class="title">hugit</h1>
-    <p class="tagline">O forge <b>git-compatível e LLM-native</b>: resolve o problema de <b>landing</b> — integrar e mergear o que fleets de agentes produzem em paralelo — com CI <b>memoizado por conteúdo</b>. Roda <b>sobre</b> o GitHub, sem lock-in.</p>
+    <p class="tagline">Version control e forge <b>LLM-native</b>. Uma inversão: <b>versione o intent, o contexto e a prova</b> — e trate o diff de código como a projeção verificada deles. git nunca é quebrado; o que vive em cima dele é nativo de fleets de agentes.</p>
   </header>
 
   <div class="switch">
@@ -109,120 +117,166 @@
 
   <!-- ============================ STAKEHOLDER ============================ -->
   <article id="stake">
-    <p class="lede">IA escreve código mais rápido do que os times conseguem integrar. O gargalo deixou de ser <i>escrever</i> — virou <b>pousar com segurança</b> (merge + CI) o que dezenas de agentes produzem ao mesmo tempo. hugit é o forge que resolve esse gargalo.</p>
+    <p class="lede">Software em 2026 já é escrito por fleets de agentes sob comando humano. A stack embaixo — git + GitHub — foi feita pra outra espécie de trabalhador: humanos, no ritmo humano, com memória humana. O resultado é uma <b>crise de integração</b> mensurável. hugit ataca a causa raiz.</p>
 
-    <h2><span class="n">01</span>A mudança</h2>
-    <p>Fleets de agentes de código já são realidade. Um time pequeno hoje dispara dezenas de PRs por dia. A autoria virou commodity. O que <b>não</b> escala é a <b>integração</b>: quem mergeia tudo isso sem quebrar a <code>main</code>? Quem roda o CI dessas centenas de execuções sem o custo explodir? Quem decide o que precisa de olhar humano?</p>
-    <div class="pull">A autoria foi resolvida pela IA. A <b>pousada</b> (landing) não. Esse é o gargalo — e a cunha do hugit.</div>
+    <h2><span class="n">01</span>O problema, medido</h2>
+    <div class="grid3">
+      <div class="card"><div class="stat">26.9%</div><div class="statlbl">do código em produção já é escrito por IA (e dobrando ano a ano)</div></div>
+      <div class="card"><div class="stat bad">27.67%</div><div class="statlbl">dos PRs de agente batem em conflito de merge (média de 540 linhas)</div></div>
+      <div class="card"><div class="stat bad">32.7% <span style="font-size:15px;color:var(--faint)">vs 84.4%</span></div><div class="statlbl">taxa de aceitação de PR de agente vs humano; e esperam 4.6× mais</div></div>
+    </div>
+    <p>A autoria virou commodity. O gargalo migrou pra <b>pousar com segurança</b> (merge + CI + review) o que os agentes produzem em paralelo — e pra <b>recuperar o entendimento</b> que o git joga fora a cada sessão. Toda sessão de agente termina numa "rodada de reconciliação", re-pagando pelo contexto que a ferramenta descartou. O review humano (LGTM) virou o gargalo de toda a máquina; reviewer LLM lendo diff cru acerta só 24–46%.</p>
 
-    <h2><span class="n">02</span>O que é o hugit</h2>
-    <p>Um <b>forge</b> (hospedagem + merge + CI) desenhado pra fleets de agentes, que <b>roda sobre o GitHub</b> — não substitui, não exige migração, não prende. Ele recebe o que os agentes produzem e <b>pousa com segurança</b>: testa os PRs <i>juntos</i> antes de integrar, mantém a <code>main</code> intocável, e só chama o humano quando realmente precisa.</p>
+    <h2><span class="n">02</span>A inversão (a tese)</h2>
+    <div class="pull">O git fez do <b>código</b> a fonte da verdade e jogou o intent fora — a troca certa em 2005. O hugit faz de <b>intent + contexto + prova</b> a verdade versionada, e trata o código como projeção verificada deles.</div>
+    <table>
+      <thead><tr><th>de (git/GitHub)</th><th>pra (hugit)</th></tr></thead>
+      <tbody>
+        <tr><td class="from">commit/PR como unidade de sentido</td><td class="to"><b>Intent</b> — charter + contexto + trajetória + diff + evidência + verdicts</td></tr>
+        <tr><td class="from">contexto destruído no fim da sessão</td><td class="to"><b>contexto versionado</b> — snapshot, resume, replay, auditoria</td></tr>
+        <tr><td class="from">merge como patch de texto</td><td class="to"><b>merge como re-execução</b> — conflitos colidem no dispatch, antes do trabalho</td></tr>
+        <tr><td class="from">review como ler linhas</td><td class="to"><b>review como interrogação</b> — verificação de claims + ledger conversacional</td></tr>
+        <tr><td class="from">cerimônia feita pelo trabalhador</td><td class="to"><b>cerimônia emitida pelo sistema</b> — commit msgs, branches, PRs, CI: gerados</td></tr>
+      </tbody>
+    </table>
+    <p class="note">E uma invariante acima de tudo: <b>git nunca é quebrado.</b> Todo repo hugit é, a qualquer instante, um repo git válido no protocolo padrão. Se toda camada inteligente cair, sobra git rápido e saudável.</p>
 
-    <h2><span class="n">03</span>Por que ganha</h2>
+    <h2><span class="n">03</span>O xeque-mate econômico</h2>
+    <p>hugit é a <b>camada 4 do CoreLink</b> — plataforma de storage e computação content-addressed já em produção. Isso dá uma propriedade que o incumbente não copia sem destruir a própria receita: <b>os custos que dominam um forge — compute de CI, storage, egress, setup de ambiente — são memoizados, deduplicados ou zero-rated por construção.</b></p>
+    <div class="grid2">
+      <div class="card"><h3 style="color:var(--red)">GitHub fatura o desperdício</h3><p style="margin:4px 0 0">CI por minuto (re-roda tudo), AI usage-billed (choques de 10–50×), egress por byte. O desperdício <i>é</i> a receita — então não pode ser removido.</p></div>
+      <div class="card"><h3 style="color:var(--green)">CoreLink deleta o desperdício</h3><p style="margin:4px 0 0">Verificação memoizada por conteúdo, dedup global, egress R2 = $0, ambiente hidratado de cache quente. Margem da empresa e velocidade do cliente são <b>o mesmo número</b>.</p></div>
+    </div>
+    <p>Não é guerra de features — é <b>guerra de incentivos</b>, e os incentivos do incumbente estão do nosso lado. E aprofunda com escala: artefatos public-deterministic de cada tenant aquecem o cache de todos; o cliente #500 chega num workspace já ~40–70% quente. <b>O produto melhora conforme cresce.</b> (Fronteira inegociável: público-determinístico compartilha; bytes privados nunca cruzam tenants.)</p>
+
+    <h2><span class="n">04</span>O prêmio de consolidação &amp; o TAM</h2>
+    <p>Um dev agent-heavy hoje paga <b>$200–600/mês</b> fragmentado entre GitHub + agentes Copilot + runners + stacked-PR + AI review + sandboxes. hugit é <b>uma fatura só, flat e previsível.</b> Doutrina de preço: flat por unidade-que-escala (assentos de orchestrator, runners paralelos, workspaces quentes); <b>nunca</b> medir o compute do próprio cliente; <b>nunca</b> usage-whiplash.</p>
+    <p>TAM de ferramentas de código IA: <b>$9.5B (2026) → $22B (2030)</b>. Mas a tese mais funda: a categoria do hugit não é "ferramenta de código" — é <b>o sistema de registro do software construído por máquinas</b>. A camada onde todo o resto se pluga.</p>
+
+    <h2><span class="n">05</span>O moat &amp; a janela</h2>
     <ul>
-      <li><b>Abraça, não ataca.</b> Vive em cima do GitHub que o time já usa. Adoção sem rip-and-replace; saída a qualquer hora com o histórico completo (anti-lock-in é uma feature, não promessa).</li>
-      <li><b>CI que não re-roda.</b> Cada verificação é memoizada por conteúdo: já rodou aquele estado exato ⇒ resultado instantâneo, custo zero. Numa fleet que roda CI centenas de vezes/dia, o custo de compute despenca.</li>
-      <li><b>Construído sobre o moat do CoreLink.</b> hugit é a camada 3 da pilha HuGR. O cache content-addressed do CoreLink — o ativo defensável — é o que torna o CI barato e rápido. Ninguém sem esse cache replica a economia.</li>
+      <li><b>A pilha se compõe:</b> HuGR → CoreLink (cache → compute → workspaces) → hugit (forge). Cada camada reforça a de baixo; ninguém sem cache content-addressed em escala precifica isso.</li>
+      <li><b>Abraça, não ataca:</b> a fase 1 roda <i>sobre</i> o GitHub — zero migração. Velocidade vence completude; entramos rápido <b>porque</b> L0–L2 já existem.</li>
+      <li><b>O moat social não é nosso pra ganhar</b> — ganhamos o workflow; as estrelas ficam onde estão até a comunidade movê-las.</li>
     </ul>
-    <p class="stack">HuGR (empresa) → CoreLink (plataforma) → <b>hugit (o forge)</b></p>
-
-    <h2><span class="n">04</span>Modelo de negócio</h2>
-    <p><b>Preço flat, memoizado por conteúdo.</b> Nunca cobramos pra re-rodar o que já está no cache, nem pelo compute do próprio cliente — zero "usage whiplash". <b>Uma fatura só:</b> o cliente vê o hugit; o cache/compute do CoreLink por baixo é base invisível (COGS). Cobrança por <b>repos + assentos + agentes simultâneos</b> (a métrica que é a cara do produto), não por minuto.</p>
-
-    <h2><span class="n">05</span>Por que agora</h2>
-    <p>As fleets chegaram; o merge manual e o CI por-minuto não foram feitos pra elas. A janela é a transição: quem virar o forge-padrão das fleets de agentes captura o fluxo de integração — o ponto de maior alavancagem do ciclo de software.</p>
-
-    <h2><span class="n">06</span>O moat</h2>
-    <p>A pilha se compõe: <b>cache</b> (CoreLink) → <b>compute</b> (Runners) → <b>forge</b> (hugit). Cada camada reforça a de baixo. O CI memoizado do hugit gera valor que <i>nenhum concorrente sem cache content-addressed em escala</i> consegue precificar. É uma vantagem que <b>aprofunda com escala</b>.</p>
-    <div class="card"><span class="tag">A tese, em uma linha</span><p style="margin:8px 0 0;color:var(--text);font-weight:600;font-size:17px">A IA resolveu escrever código. hugit resolve o que vem depois — pousar tudo isso, junto, sem quebrar nada, barato.</p></div>
+    <div class="card"><span class="tag">a tese em uma linha</span><p style="margin:8px 0 0;color:var(--text);font-weight:600;font-size:17px">git foi a revolução do desenvolvimento dirigido por humanos. hugit é a revolução do desenvolvimento dirigido por LLM — com humanos no comando.</p></div>
   </article>
 
   <!-- ============================ VIBE CODER ============================ -->
   <article id="vibe">
-    <p class="lede">Você tem um <b>enxame de agentes</b> cuspindo PR atrás de PR. Massa. Agora: quem mergeia isso tudo sem explodir a <code>main</code>? Quem roda o CI sem você falir? <b>O hugit.</b> Você vibe; ele pousa.</p>
+    <p class="lede">Seu enxame de agentes tá cuspindo PR sem parar. Massa. Só que o git **joga fora o cérebro** que produziu cada mudança, e ninguém tá juntando isso sem explodir a <code>main</code>. hugit versiona o <b>intent + o contexto + a prova</b> — não só o texto. Você vibe; ele lembra, junta e pousa.</p>
 
-    <h2><span class="n">01</span>O problema que você (não) quer ter</h2>
-    <p>Seus agentes tão voando. 30 PRs abertos, todos "prontos". Aí: dois mexeram no mesmo arquivo. Um quebrou a <code>main</code>. O CI rodou o mesmo teste 200 vezes hoje e tua conta tá sangrando. E você virou o gargalo humano clicando "merge" às 2 da manhã. 💀</p>
-    <div class="pull">Escrever código a IA já faz. <b>Juntar tudo sem quebrar</b> é o inferno que sobrou. O hugit come esse inferno.</div>
+    <h2><span class="n">01</span>O inferno que sobrou</h2>
+    <p>A IA já escreve o código. O que sobrou pra você: 30 PRs "prontos", dois mexeram no mesmo arquivo, um quebrou a <code>main</code>, o CI rodou o mesmo teste 200× hoje (💸), e o contexto do agente — o porquê de cada decisão — <b>evaporou</b> quando a janela fechou. Aí você re-explica tudo no próximo merge. 💀</p>
+    <div class="pull">O git versiona o texto e <b>esquece o entendimento</b>. Em time humano isso ficava na cabeça das pessoas. Numa fleet de agentes, some com a context window — e você re-paga toda vez.</div>
 
-    <h2><span class="n">02</span>O que o hugit faz por você</h2>
+    <h2><span class="n">02</span>O que o hugit guarda por você</h2>
     <ul>
-      <li><b>A <code>main</code> é sagrada.</b> Ninguém empurra direto nela. Uma fila pega os PRs, testa <i>juntos</i> (não um isolado que quebra quando encosta no outro) e pousa em ordem. Sua <code>main</code> nunca vira terra de ninguém.</li>
-      <li><b>CI que não repete trabalho.</b> Já rodou esse exato estado? Volta na hora, de graça. Você para de pagar pra re-rodar a mesma coisa mil vezes.</li>
-      <li><b>Mora em cima do teu GitHub.</b> Zero migração. Continua usando GitHub normal. Quis sair? Leva teu histórico inteiro e tchau — sem pegadinha.</li>
-      <li><b>Só te chama quando precisa.</b> O que dá pra resolver sozinho, resolve. Uma fila de atenção te mostra só o que realmente precisa de olho humano.</li>
+      <li><b>O contexto viaja com o trabalho.</b> Modelo, arquivos lidos, tool calls, o raciocínio (redactado por política) — vira um <b>snapshot</b> versionado anexado ao intent. Dá pra <b>resumir, dar replay, auditar</b> — em vez de re-explicar do zero.</li>
+      <li><b>Conflito é pego ANTES de você começar.</b> Cada trabalho declara o que vai tocar (claims). Dois agentes na mesma coisa? O sistema avisa no dispatch, não às 2h da manhã no merge.</li>
+      <li><b>A <code>main</code> é sagrada.</b> Ninguém empurra direto. Uma fila testa os PRs <i>juntos</i> e pousa em ordem — acabou o "passou sozinho, quebrou junto".</li>
+      <li><b>CI que não repete.</b> Já rodou esse estado exato? Verde na hora, custo zero.</li>
     </ul>
 
     <h2><span class="n">03</span>Coisas que vão te fazer sorrir</h2>
     <div class="grid2">
-      <div class="card"><h3>🔀 Pousa em lote</h3><p style="margin:4px 0 0">Testa os PRs combinados antes de mergear. Acabou o "passou sozinho, quebrou junto".</p></div>
-      <div class="card"><h3>⚡ Cache-hit = 0</h3><p style="margin:4px 0 0">Verificação memoizada. Nada mudou? Verde instantâneo. Custo zero.</p></div>
-      <div class="card"><h3>🔎 Quem quebrou?</h3><p style="margin:4px 0 0">Auto-bisect aponta o culpado sozinho. Sem caçar commit no escuro.</p></div>
-      <div class="card"><h3>🧯 Sem lock-in</h3><p style="margin:4px 0 0">Roda sobre o GitHub, sincroniza nos dois sentidos. Sai quando quiser, com tudo.</p></div>
+      <div class="card"><h3>🧠 Contexto versionado</h3><p style="margin:4px 0 0">O "porquê" de cada mudança fica salvo e resumível. Sessão nova começa quente.</p></div>
+      <div class="card"><h3>🔀 Merge que re-executa</h3><p style="margin:4px 0 0">Em vez de brigar com patch de texto, ele re-roda o intent na base nova. Trabalho ortogonal pousa limpo.</p></div>
+      <div class="card"><h3>💬 Interroga a mudança</h3><p style="margin:4px 0 0">"Onde isso toca o fluxo de dinheiro?" "Me convence que é seguro." Resposta do intent + contexto + evidência, com link até a linha.</p></div>
+      <div class="card"><h3>↩️ Undo de tudo</h3><p style="margin:4px 0 0">Tudo é evento. Force-push que apaga histórico? <b>Nem existe</b> — é inexprimível aqui.</p></div>
     </div>
 
-    <h2><span class="n">04</span>O combinado</h2>
-    <p>Preço <b>fixo</b>. Sem medidor por minuto pra te dar ataque cardíaco no fim do mês. Você paga por <b>repos + gente + agentes rodando junto</b> — e nunca paga pra re-rodar o que já rodou.</p>
-    <div class="card"><span class="tag">tldr</span><p style="margin:8px 0 0;color:var(--text);font-weight:600;font-size:17px">Solta os agentes. O hugit junta tudo, testa junto, não quebra a main, e não te cobra duas vezes. Você só vibe. 🚀</p></div>
+    <h2><span class="n">04</span>E o melhor: zero amarra</h2>
+    <p>Roda <b>em cima do teu GitHub</b> — zero migração, sincroniza nos dois sentidos. A árvore de arquivos é só uma árvore de arquivos (local, web, ou no mirror do GitHub). Quis sair? Leva tudo, com prova de export. Preço <b>fixo</b>, sem medidor por minuto, e você nunca paga pra re-rodar o que já rodou.</p>
+    <div class="card"><span class="tag">tldr</span><p style="margin:8px 0 0;color:var(--text);font-weight:600;font-size:17px">Solta os agentes. O hugit lembra o contexto, pega conflito antes da hora, testa junto, mantém a main verde, e te cobra uma vez. Você só vibe. 🚀</p></div>
   </article>
 
   <!-- ============================ SENIOR ENG ============================ -->
   <article id="eng">
-    <p class="lede">hugit é um forge git-compatível onde a <code>main</code> tem <b>um único escritor por construção</b> (a fila de landing), o CI é <b>memoização por conteúdo</b> na Action Cache, e o espelho com o GitHub é <b>arbitrado pelo forge</b> — nunca um sync simétrico ingênuo. Workspace Rust de 14 crates, oracle-first, mutation-verified.</p>
+    <p class="lede">hugit versiona um modelo de objetos content-addressed (Intent, Context Snapshot, Trajectory, Claim, Verdict, Check Result) sobre a CAS do CoreLink; os objetos do git são preservados <b>byte-exatos como projeção</b>. Estado mutável (refs, filas, políticas) é um namespace event-sourced fino por cima. 14 crates Rust, oracle-first, mutation-verified.</p>
 
-    <h2><span class="n">01</span>Single-writer <code>main</code> — a física do conflito evapora</h2>
-    <p>"Dois agentes mexem na mesma coisa ao mesmo tempo" só é um problema porque dois escritores disputam o mesmo ref. hugit remove a disputa: <b>ninguém escreve a <code>main</code> direto.</b> O único escritor é a <b>fila de landing</b> (o árbitro). Branches são refs independentes — coexistem, sincronizam nos dois sentidos, zero conflito. O recurso contendido (a <code>main</code>) passa a ter escritor único; a "física de escrita concorrente" some.</p>
+    <h2><span class="n">01</span>O object model</h2>
+    <table>
+      <thead><tr><th>objeto</th><th>essência</th></tr></thead>
+      <tbody>
+        <tr><td>Intent</td><td><code>{id, campaign, charter, constraints, acceptance[], claims, parent_intents[], ctx_start, trajectory, diff_ref, evidence[], verdicts[], state}</code></td></tr>
+        <tr><td>Context&nbsp;Snapshot</td><td><code>{model, charter_ref, files_read[(path,hash)], tool_calls[], conversation_ref (redacted per policy), journal_ref, env_manifest}</code> — hoje: destruído</td></tr>
+        <tr><td>Trajectory</td><td>event log append-only da execução de um intent; replayable, time-travelable</td></tr>
+        <tr><td>Claim</td><td><code>{paths[], build_targets[], contracts[]}</code> — declarado no plan, <b>imposto fisicamente</b></td></tr>
+        <tr><td>Workspace</td><td>source+deps+toolchain+build-state como um manifest; materializado <b>por claims</b>; local≡remoto</td></tr>
+        <tr><td>Verdict</td><td><code>{intent, tree_hash, lens, verdict∈{APPROVE,FIX-FIRST,REJECT}, claims_checked[], evidence[]}</code></td></tr>
+        <tr><td>Check&nbsp;Result</td><td>memo de <code>check(tree_hash, def_digest, toolchain_digest)</code></td></tr>
+        <tr><td>Blob/Tree/Commit</td><td>objetos do git, byte-exatos — <b>a projeção</b></td></tr>
+      </tbody>
+    </table>
+    <p><b>Projection rule:</b> todo intent que pousa emite commits git determinísticos (mensagem gerada embutindo o <code>intent_id</code>). <code>git log</code> é a altitude-máquina; <code>hugit log</code> é a altitude-intent. Mesma store, dois zooms — nunca discordam porque um é derivado do outro. <span class="note">(O sidecar de intent — <code>IntentSidecar.context_ref</code> — já está construído no crate <code>hugit-app-sidecar</code>, não-autoritativo por design; o verbo <code>ctx snap/resume</code> está reservado.)</span></p>
 
-    <h2><span class="n">02</span>Union-testing landing</h2>
+    <h2><span class="n">02</span>Claims &amp; conflito-no-dispatch</h2>
+    <pre>claims(I) = fecho sobre o build-graph de {paths ∪ targets ∪ contracts}
+independent(I,J) ⇔ claims(I) ∩ claims(J) = ∅
+plan(P): pares na wave se intersectam? planner re-slice ou adiciona aresta no DAG
+runtime: workspace materializa SÓ claims(I) — escrita fora é fisicamente
+         impossível (o arquivo não está lá) + evento de política</pre>
+    <p>Conflitos verdadeiros aparecem <b>antes do trabalho começar</b>. Overlap textual dentro de claims compartilhadas emite evento aos dois orchestrators em segundos. A fence é a materialização esparsa — <code>rm -rf</code> não tem pra onde ir.</p>
+
+    <h2><span class="n">03</span>Checks puros, memoizados</h2>
+    <pre>key = H(tree_root ‖ check_def_digest ‖ toolchain_digest)
+check(key) → AC hit? retorna prova : executa no runner, armazena, retorna
+affected(Δtree) = conjunto de checks alcançável no build-graph
+shadow: a cada snapshot de workspace, avalia affected(Δ) especulativamente</pre>
+    <p><code>hugit check</code> local e a execução no forge são <b>a mesma função</b> — byte-idêntica por construção. Byte-identity é load-bearing: mesmo input ⇒ mesmo <code>CheckResult</code>, ou a memoização envenena; não-determinismo é detectado (difere após 3), não memoizado como verdade.</p>
+
+    <h2><span class="n">04</span>Merge como re-execução (regenerative rebase)</h2>
+    <pre>rebase(I, base B0→B1):
+  se claims(I) ∩ Δ(B0,B1) = ∅:   fast-path textual (limpo garantido)
+  senão:
+    re-executa I: agent(ctx_start(I), charter(I)) em workspace(B1) → diff D′
+    exige acceptance(I) verde em B1+D′
+    se distance(D,D′) > policy.threshold → re-verdict
+    pousa como nova revisão do MESMO intent (ambas guardadas, endereçáveis)</pre>
+    <p>Re-executar a fonte (o intent, mais barato) em vez de remendar o texto é o default pra trabalho ortogonal — viável <b>porque</b> build/test batem na AC e re-verificar é quase-grátis. Confiança vai de opt-in → default conforme dados de confiança-de-aceitação acumulam.</p>
+
+    <h2><span class="n">05</span>Landing — union testing em escala de fleet</h2>
+    <pre>queue = intents landable, ordenados por DAG
+batch B: U = fold(regen-rebase, head, B)
+roda affected checks em U          # quase tudo AC hit — só a novidade executa
+verde → pousa o batch atômico (um move de ref no event-log; main sempre verde)
+vermelho → bisect sobre checks memoizados (≈grátis) → par mínimo que falha
+           → UNION-FAIL estruturado ao owner intent; resto do batch segue
+intents de claims disjuntas pousam em lanes paralelas</pre>
+    <p>É o blueprint do SubmitQueue (Uber) com dois upgrades que ele não tinha: claims declaradas à frente (busca dirigida, não descoberta) e verificação memoizada (union test custa só a novidade). A <code>main</code> é <b>single-writer por construção</b> = a fila; o sync com o GitHub é <b>arbitrado pelo forge</b> (branches seamless dos dois lados, idempotente por content-hash, divergência arbitrada nunca dropada — não existe estado de autoridade simétrica pra <code>main</code>).</p>
+
+    <h2><span class="n">06</span>Event log &amp; undo universal</h2>
+    <p>Um Durable Object por repo possui um event-log append-only, hash-chained. Refs são view derivada. Toda operação — landing, mudança de política, move de ref — é um evento; <code>hugit undo</code> anexa um evento compensatório. <b>Nada é reescrito; a história é re-projetada.</b> Perda de dados por force-push não é "protegida" — é <b>inexprimível</b>.</p>
+
+    <h2><span class="n">07</span>Segurança (5 fechaduras + a fronteira) &amp; proveniência</h2>
     <ul>
-      <li>Um lote de PRs é testado <b>combinado</b> (union tree) antes de pousar — pega a regressão que só aparece quando duas mudanças se encontram (o "passou isolado, quebrou junto").</li>
-      <li><b>Stale-head recompute:</b> um force-push invalida e recomputa; a fila aplica em ordem total, idempotente.</li>
-      <li><b>Kill-tests</b> barram a integração de um lote que regride.</li>
+      <li><b>Claims como fences físicas</b> — workspaces capability-scoped; o blast-radius É a claim.</li>
+      <li><b>Segredos nunca entram no workspace</b> — um broker executa por conta (modelo write-only do CoreLink); agentes não veem credencial.</li>
+      <li><b>Tudo event-sourced → undo universal</b> — toda ação de todo principal, atribuível e reversível.</li>
+      <li><b>Policy gates fail-closed</b> — testáveis localmente, impostos identicamente.</li>
+      <li><b>Invariante de degradação</b> — camadas inteligentes caem ⇒ um repo git válido segue servindo.</li>
     </ul>
+    <p><b>Proveniência:</b> todo artefato traça pra <code>{tree_hash, check_def, runner, model, prompt, principal_chain}</code> — atestação classe-SLSA cai do object model, incluindo a camada que o GitHub não expressa: <i>qual modelo escreveu isto, sob instrução de quem, a que custo.</i> Snapshots de contexto são tenant-private, redactáveis, retention-bound, e <b>nunca</b> viram training data.</p>
 
-    <h2><span class="n">03</span>CI = memoização por conteúdo</h2>
-    <p>Cada check tem uma <b>memo key de três eixos</b>:</p>
-    <pre>memo_key = H( tree_hash ‖ check_def_digest ‖ toolchain_digest )</pre>
-    <ul>
-      <li><b>Hit na Action Cache ⇒ 0 execução</b> — o resultado volta do cache em &lt;500ms. A maioria dos checks de uma fleet é hit.</li>
-      <li><b>Byte-identity é load-bearing:</b> o mesmo <code>CheckDef</code> sobre os mesmos inputs produz um <code>CheckResult</code> byte-idêntico, ou a memoização envenena. Não-determinismo é detectado (difere após 3 execuções) em vez de memoizado como verdade.</li>
-      <li><b>Affected-targets:</b> só roda o que o diff realmente afeta. Hit-rate reportado é honesto, não inflado.</li>
-    </ul>
-
-    <h2><span class="n">04</span>Sync bidirecional arbitrado pelo forge</h2>
-    <p>Supera o "mirror simétrico ingênuo" (perigoso). Regras:</p>
-    <ul>
-      <li><b>Branches sincronizam dos dois lados, seamless</b> — uma mudança no lado GitHub entra como change-event externo (nunca um intent fabricado, nunca toca a <code>main</code>); uma mudança no forge espelha pra fora.</li>
-      <li><b><code>main</code> é single-writer = o forge.</b> Um push direto na <code>main</code> do lado GitHub <b>não</b> é aplicado simetricamente — é re-roteado (branch/PR proposto) pra pousar pela fila.</li>
-      <li><b>Idempotente por content-hash</b> — sem echo loop; convergiu, o sync silencia.</li>
-      <li><b>Divergência arbitrada:</b> tips incompatíveis no mesmo branch ⇒ o forge é autoritativo, o tip do GitHub é preservado como incidente recuperável — nunca dropado em silêncio, cadeia sempre verificável.</li>
-      <li><b>Propriedade:</b> não existe estado alcançável onde os dois lados são autoritativos pra <code>main</code> ao mesmo tempo.</li>
-    </ul>
-
-    <h2><span class="n">05</span>Execução isolada (compute não-confiável)</h2>
-    <ul>
-      <li><b>Fences esparsas por claim:</b> o job só lê/escreve os paths reivindicados; injeção de path absoluto, escape <code>..</code> e colisão de prefixo (<code>srcfoo</code> vs <code>src/</code>) são todos negados, fail-closed.</li>
-      <li><b>Isolamento de tenant</b> via prefixos HMAC (herdado do CoreLink), fail-closed; cross-tenant impossível.</li>
-      <li><b>Secrets broker write-only:</b> o segredo entra no job sem nunca persistir na box (env=0/proc=0/disk=0, atestado; fail-closed em scan inválido).</li>
-      <li><b>Boot cache-warm</b> e microVM efêmera (executa nos CoreLink Runners; o crate <code>hugit-runner</code> é o cliente).</li>
-    </ul>
-
-    <h2><span class="n">06</span>Proveniência, atestação &amp; saída</h2>
-    <ul>
-      <li><b>Attestation chain + transparency log</b> (ed25519 + boot self-verify): tudo que rodou é assinado; um resultado sem atestação válida é rejeitado.</li>
-      <li><b><code>why</code> / <code>impact</code>:</b> proveniência por linha/símbolo e raio de impacto no build-graph.</li>
-      <li><b>Anti-lock-in real:</b> export + provas de saída; cascata de erasure (right-to-erasure across stores, sem órfãos, tombstones tamper-evident). Você sai com tudo, verificável.</li>
-    </ul>
-
-    <h2><span class="n">07</span>Fundação</h2>
-    <p>Construído sobre o CoreLink (CAS/AC/runners consumidos, <b>nunca</b> forkados). 14 crates Rust, gates <code>fmt + clippy --workspace --all-targets --locked -D warnings + test --locked + audit</code>. Disciplina: <b>oracle-first, mutation-verified</b> — derrotar uma invariante deixa o teste vermelho, prova que ela é load-bearing, não decorativa.</p>
+    <h2><span class="n">08</span>A fundação CoreLink</h2>
+    <table>
+      <thead><tr><th>camada</th><th>componente</th><th>status</th></tr></thead>
+      <tbody>
+        <tr><td>L0</td><td>CoreLink CAS — R2, multi-região, manifests Merkle, prefixos HMAC, audit fail-closed</td><td>produção</td></tr>
+        <tr><td>L1</td><td>Action Cache — Bazel REAPI v2, Turborepo, sccache</td><td>produção</td></tr>
+        <tr><td>L2</td><td>Workspaces (<code>clw</code>) — snapshot/hydrate/run memoizado</td><td>shipped</td></tr>
+        <tr><td>L3</td><td>CoreLink Runners — compute efêmero cache-warm</td><td>campanha #1</td></tr>
+        <tr><td>L4/L5</td><td>hugit core + surfaces (intent store, landing, policy, event-log, mirror)</td><td>construído</td></tr>
+      </tbody>
+    </table>
     <p class="stack">HuGR → CoreLink → { Cache · <b>Runners</b> · Workspaces } → <b>hugit</b></p>
-    <div class="card"><span class="tag">o ponto técnico</span><p style="margin:8px 0 0;color:var(--text);font-weight:600;font-size:16px">Remova a escrita concorrente da <code>main</code> e memoize o CI por conteúdo: o landing de fleets deixa de ser caos e vira fila determinística, barata e auditável.</p></div>
+    <div class="card"><span class="tag">o ponto técnico</span><p style="margin:8px 0 0;color:var(--text);font-weight:600;font-size:16px">Versione intent+contexto+prova e memoize verificação por conteúdo: conflitos colidem no dispatch, merges re-executam, a main fica verde em escala de fleet, e nada — nem o force-push — é destrutivo.</p></div>
   </article>
 
   <footer>
     <p>hugit · campanha #3 da família HuGR · whitepaper de 3 registros (stakeholder · vibe coder · eng sênior).<br/>
-    Fonte canônica em prosa: <code>docs/whitepaper/hugit-v1.md</code>. Preview interno — não é página pública.</p>
+    Fonte canônica em prosa + figuras citadas: <code>docs/whitepaper/hugit-v1.md</code> · <code>docs/research/</code>. Preview interno — não é página pública.</p>
   </footer>
 </div>
 
