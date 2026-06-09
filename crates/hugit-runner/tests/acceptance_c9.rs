@@ -157,6 +157,7 @@ fn sweep_c9(boxx: &SshBox) {
 #[test]
 fn item_1_attach_joins_live_workspace_no_respawn() {
     if !box_lane_active() {
+        eprintln!("SKIP: HUGIT_RUNNER_HOST unset — box lane");
         return;
     }
     let boxx = live_box();
@@ -257,6 +258,7 @@ fn item_1_attach_joins_live_workspace_no_respawn() {
 #[test]
 fn item_2_resume_restores_state_fence_path_set_ceiling() {
     if !box_lane_active() {
+        eprintln!("SKIP: HUGIT_RUNNER_HOST unset — box lane");
         return;
     }
     let boxx = live_box();
@@ -344,6 +346,7 @@ fn item_2_resume_restores_state_fence_path_set_ceiling() {
 #[test]
 fn item_3_spawn_lt_1s_concurrent_dedup_one_materialization() {
     if !box_lane_active() {
+        eprintln!("SKIP: HUGIT_RUNNER_HOST unset — box lane");
         return;
     }
     let boxx = live_box();
@@ -490,6 +493,7 @@ fn item_3_spawn_lt_1s_concurrent_dedup_one_materialization() {
 #[test]
 fn item_4_local_remote_identical_observable_results() {
     if !box_lane_active() {
+        eprintln!("SKIP: HUGIT_RUNNER_HOST unset — box lane");
         return;
     }
     let boxx = live_box();
