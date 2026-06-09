@@ -179,12 +179,13 @@ impl From<io::Error> for ExportError {
 /// 6. write a plain bare git repo so the artifact is usable with NO hugit
 ///    tooling (⑤).
 ///
-/// `account` only selects the read-only terminating path (⑧); it never blocks
-/// the export.
+/// `_account` is accepted for the API contract (E5⑧: exit is never blocked by
+/// account status) but has no behavioral effect — the same artifact is produced
+/// regardless of account state.
 pub fn export(
     corpus: &Corpus,
     out_dir: &Path,
-    account: AccountState,
+    _account: AccountState,
 ) -> Result<ExportArtifact, ExportError> {
     // (1) one point-in-time cut.
     let cut = Cut::take(&corpus.event_log)?;
@@ -286,9 +287,10 @@ pub fn export(
     };
     envelope.validate()?;
 
-    // Read-only terminating path: identical output, no mutation of source state.
-    // (export is read-only end-to-end already; the flag documents the guarantee.)
-    let _ = account.is_terminating();
+    // Export is read-only end-to-end; the `_account` parameter is part of the
+    // public API contract (E5⑧: exit is never blocked by account status) but has
+    // no effect on the current implementation — the same artifact is produced for
+    // every account state.
 
     // (5) stream the JSON to disk with bounded memory.
     std::fs::create_dir_all(out_dir)?;

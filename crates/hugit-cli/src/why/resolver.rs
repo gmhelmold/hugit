@@ -402,10 +402,15 @@ pub fn is_derived_kind(kind: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Fixture helpers (used by tests)
+// Fixture helpers (used by integration tests only)
 // ---------------------------------------------------------------------------
 
-/// Build a minimal `EventRecord` for tests.
+/// Build a minimal [`EventRecord`] for integration tests.
+///
+/// This function is **test infrastructure only** — it is `pub` solely because
+/// integration tests in `tests/` must access it through the public crate API.
+/// It must never be called from production code.
+#[doc(hidden)]
 pub fn fixture_event(
     seq: u64,
     kind: &str,
