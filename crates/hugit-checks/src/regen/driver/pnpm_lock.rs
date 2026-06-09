@@ -17,7 +17,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::{DerivedClass, RegenDriver, RegenError};
+use super::{DerivedClass, RegenDriver, RegenError, which_tool};
 
 /// Driver for `pnpm-lock.yaml`.
 ///
@@ -103,10 +103,6 @@ impl RegenDriver for PnpmLockDriver {
     }
 
     fn tool_available(&self) -> bool {
-        Command::new("which")
-            .arg(self.pnpm())
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        which_tool(&self.pnpm())
     }
 }

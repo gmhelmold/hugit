@@ -305,7 +305,10 @@ fn parse_hit(requested: &str, body: &[u8]) -> Result<CheckResult, AcError> {
 }
 
 /// Serialize a [`CheckResult`] to its canonical store body (the opaque payload
-/// CoreLink persists). Pure (no I/O).
+/// CoreLink persists). Pure (no I/O). Serialization failure is mapped to
+/// [`AcError::Decode`] — the only serialization-related error variant available
+/// (a `CheckResult` that cannot round-trip through JSON is a structural defect,
+/// not just a response decode problem).
 fn store_body(result: &CheckResult) -> Result<Vec<u8>, AcError> {
     serde_json::to_vec(result).map_err(|e| AcError::Decode(e.to_string()))
 }

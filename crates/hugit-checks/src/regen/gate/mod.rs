@@ -305,7 +305,7 @@ impl Gate {
         }
 
         // ── ④ provenance closure: land as its own auditable revision ────────
-        self.land(req, verdict, seq, recorded_at, prev_hash, signing_key)
+        self.land(req, seq, recorded_at, prev_hash, signing_key)
     }
 
     // ── ⑤ anti-smuggling predicate ──────────────────────────────────────────
@@ -391,7 +391,6 @@ impl Gate {
     fn land(
         &self,
         req: &RegenRequest<'_>,
-        verdict: &VerdictObject,
         seq: u64,
         recorded_at: u64,
         prev_hash: &str,
@@ -424,7 +423,6 @@ impl Gate {
             "verdict_ref": verdict_ref,
             "verdict_outcome": "approve",
         }));
-        let _ = verdict; // independence already verified upstream.
         let audit = self.audit_event(
             seq,
             prev_hash,

@@ -16,7 +16,7 @@
 //! `runner_ref`, and the captured stdout/stderr blob refs) are deliberately
 //! EXCLUDED — they are not part of the check's content identity.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use hugit_contracts::CheckResult;
 
@@ -128,13 +128,9 @@ pub fn compare_byte_identity(local: &CheckResult, runner: &CheckResult) -> ByteI
         .collect();
 
     let mut compared = 0usize;
-    let all_paths: BTreeMap<&str, ()> = local_map
-        .keys()
-        .chain(runner_map.keys())
-        .map(|p| (*p, ()))
-        .collect();
+    let all_paths: BTreeSet<&str> = local_map.keys().chain(runner_map.keys()).copied().collect();
 
-    for path in all_paths.keys() {
+    for path in &all_paths {
         match (local_map.get(path), runner_map.get(path)) {
             (Some(l), Some(r)) => {
                 compared += 1;

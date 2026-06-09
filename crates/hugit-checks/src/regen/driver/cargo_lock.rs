@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::{DerivedClass, RegenDriver, RegenError};
+use super::{DerivedClass, RegenDriver, RegenError, which_tool};
 
 /// Driver for `Cargo.lock`.
 ///
@@ -90,12 +90,4 @@ impl RegenDriver for CargoLockDriver {
     fn tool_available(&self) -> bool {
         which_tool(&self.cargo())
     }
-}
-
-fn which_tool(bin: &Path) -> bool {
-    Command::new("which")
-        .arg(bin)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
 }
