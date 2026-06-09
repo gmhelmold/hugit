@@ -61,6 +61,14 @@ E1a mirror outbound · M · opus · 80k — E1b mirror failure modes · M · opu
 ### Squad X (14)
 X1 tenant isolation red-team · L→M · opus · 90k — X2 attestation e2e · M · opus · 70k — X3 context privacy · M · opus · 70k — X4 supply chain · M · opus · 60k — X5 namespace laws · S · sonnet · 40k — X6 intra-fabric isolation · M · sonnet · 60k — X7 erasure cascade · L→M · opus · 80k — X8 self-release attestation · M · opus · 60k — X9 cross-phase identity · S · sonnet · 50k — X10 focus gate (incl. API-tenancy channel) · M · sonnet→opus · 80k — X11 degradation composition · M · opus · 80k — X12 erasure×provenance×mirror · M · opus · 70k — X13 legibility composition · M · opus · 60k — X14 deep-link integrity · S · sonnet · 50k
 
+## Post-v1 follow-on (additive — register stays frozen)
+
+ADR-0001 (intent context envelope) adds net-new rework not in the built v1:
+**WP-F1** envelope contract freeze · **WP-F2** metrics+trajectory emission ·
+**WP-F3** projection+PR rollup. Contracts + impact map + sequence in
+`docs/plan/2026-06-09-adr-0001-context-envelope-rework.md`. **BLOCKED** on
+ADR-0001 §7 owner ratification.
+
 ## Rules of the register
 1. Every contract carries its acceptance items VERBATIM from decomposition
    v2.0; splits partition the original's items explicitly (no item orphaned —
