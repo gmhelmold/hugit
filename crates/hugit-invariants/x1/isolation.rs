@@ -436,25 +436,23 @@ pub fn anonymize(producer: &AttestationChain) -> AttestationChain {
     }
 }
 
-/// True iff `chain` carries NO byte of any string in `tenant_secrets` across any
-/// of its fields — the no-leak check for item ③. Used to prove a shared object
-/// carries none of the producing tenant's private principal/runner bytes.
-pub fn carries_none_of(chain: &AttestationChain, tenant_secrets: &[&str]) -> bool {
-    let fields = [
-        chain.tree.as_str(),
-        chain.def.as_str(),
-        chain.runner.as_str(),
-        chain.model.as_str(),
-        chain.sig.as_str(),
-    ];
-    let joined: String = fields
-        .into_iter()
-        .chain(chain.principal.iter().map(String::as_str))
-        // NUL separator so a secret cannot be reconstructed across a field
-        // boundary join.
-        .collect::<Vec<_>>()
-        .join("\u{0}");
-    !tenant_secrets
-        .iter()
-        .any(|s| !s.is_empty() && joined.contains(s))
+/// True iff `chain`'s tenant-identifying fields carry NONE of the producing
+/// tenant's private bytes — the no-leak check for item ③. Used to prove a shared
+/// object carries none of the producing tenant's private principal/runner bytes.
+///
+/// This is an **allow-list** assertion, not a substring deny-scan. A deny-scan
+/// only catches a leak that appears *verbatim*; it silently passes any encoded,
+/// truncated, or otherwise transformed leak. Instead we assert the only
+/// acceptable outcome: the tenant-identifying fields (`runner`, `principal`,
+/// `sig`) MUST be EXACTLY the platform sentinel values that [`anonymize`] is
+/// contracted to produce. Anything other than the sentinels — including an
+/// encoded leak that no substring deny-scan would catch — fails.
+///
+/// The public-deterministic links (`tree`/`def`/`model`) carry no tenant
+/// identity (they are reproducible hashes / the model name) and are preserved by
+/// design, so they are not part of the allow-list.
+pub fn carries_none_of(chain: &AttestationChain) -> bool {
+    chain.runner == PLATFORM_RUNNER
+        && chain.principal == [PLATFORM_PRINCIPAL.to_string()]
+        && chain.sig.is_empty()
 }

@@ -123,9 +123,15 @@ pub const SCOPE_SEPARATION: ScopeSeparation = ScopeSeparation {
     x10_owns_api_tenancy: true, // X10 DOES own the shared API channel
 };
 
-/// Assert that the X6/X10 scope separation is correctly stated.
-pub fn assert_scope_separation() -> Result<(), String> {
-    if SCOPE_SEPARATION.x6_owns_api_tenancy {
+/// Assert that the given X6/X10 scope separation record is correctly stated.
+///
+/// This is the real oracle — it takes the record under test, so an anti-vacuity
+/// test can feed it a deliberately broken value and observe the flip (gutting
+/// this body turns the negative test RED). The zero-arg
+/// [`assert_scope_separation`] wrapper drives it with the live
+/// [`SCOPE_SEPARATION`] const on the production/live path.
+pub fn assert_scope_separation_of(scope: &ScopeSeparation) -> Result<(), String> {
+    if scope.x6_owns_api_tenancy {
         return Err(
             "SCOPE VIOLATION (WP-X10③): SCOPE_SEPARATION.x6_owns_api_tenancy \
              is true — X6 MUST NOT own the CoreLink API-tenancy channel. \
@@ -134,7 +140,7 @@ pub fn assert_scope_separation() -> Result<(), String> {
                 .to_string(),
         );
     }
-    if !SCOPE_SEPARATION.x10_owns_api_tenancy {
+    if !scope.x10_owns_api_tenancy {
         return Err(
             "SCOPE VIOLATION (WP-X10③): SCOPE_SEPARATION.x10_owns_api_tenancy \
              is false — X10 MUST own the CoreLink API-tenancy channel. \
@@ -143,6 +149,13 @@ pub fn assert_scope_separation() -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// Assert that the live X6/X10 scope separation ([`SCOPE_SEPARATION`]) is
+/// correctly stated. Zero-arg wrapper over [`assert_scope_separation_of`] for
+/// the production/live call sites.
+pub fn assert_scope_separation() -> Result<(), String> {
+    assert_scope_separation_of(&SCOPE_SEPARATION)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -40,8 +40,8 @@ mod x10;
 use x10::{
     DOGFOOD_TARGET_ALLOWLIST, FLEET_SCALE_WORKLOAD, HUGIT_CORELINK_TENANT_CAP, P2_DEFERRED_SEAM,
     SCOPE_SEPARATION, X10_TOLERANCE, assert_dogfood_enrollment_allowed, assert_scope_separation,
-    assert_within_x10_tolerance, availability_fraction, live_lane_active, p50_latency_ms, probe_n,
-    write_storm_lane_active,
+    assert_scope_separation_of, assert_within_x10_tolerance, availability_fraction,
+    live_lane_active, p50_latency_ms, probe_n, write_storm_lane_active,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -322,6 +322,10 @@ fn item_3a_scope_separation_x6_intra_x10_adjacent_product() {
 
 /// ③ (b) Negative: a misconfigured SCOPE_SEPARATION (x6 owns the channel)
 /// would be detected. Proves the oracle is not vacuous.
+///
+/// This calls the REAL parameterized oracle (`assert_scope_separation_of`) with
+/// a deliberately broken record and asserts it returns `Err` — so gutting the
+/// oracle's body (making it always return `Ok`) turns this test RED.
 #[test]
 fn item_3b_scope_separation_oracle_is_not_vacuous() {
     use x10::ScopeSeparation;
@@ -333,22 +337,31 @@ fn item_3b_scope_separation_oracle_is_not_vacuous() {
         x6_owns_api_tenancy: true, // WRONG
         x10_owns_api_tenancy: true,
     };
-    // The assertion function must detect the violation.
-    // (We cannot call assert_scope_separation with a custom value — it reads
-    // SCOPE_SEPARATION — so we reproduce its logic inline for the broken case.)
+    // The REAL oracle must detect the violation when fed the broken record.
+    let result = assert_scope_separation_of(&broken);
     assert!(
-        broken.x6_owns_api_tenancy,
-        "Test setup: broken.x6_owns_api_tenancy should be true"
-    );
-    // Confirm the oracle WOULD fire.
-    let would_fire = broken.x6_owns_api_tenancy; // same condition as in the fn
-    assert!(
-        would_fire,
+        result.is_err(),
         "ORACLE IS VACUOUS: a misconfigured scope (x6_owns_api_tenancy=true) \
-         would NOT be detected by assert_scope_separation"
+         was NOT detected by assert_scope_separation_of — got {result:?}"
     );
 
-    // Positive control: the real SCOPE_SEPARATION passes.
+    // A second broken shape: X10 does NOT own the channel.
+    let broken_x10 = ScopeSeparation {
+        x6_scope: "intra-hugit isolation",
+        x10_scope: "adjacent-product boundary",
+        x6_owns_api_tenancy: false,
+        x10_owns_api_tenancy: false, // WRONG
+    };
+    assert!(
+        assert_scope_separation_of(&broken_x10).is_err(),
+        "ORACLE IS VACUOUS: a scope where X10 does not own the API-tenancy \
+         channel was NOT detected by assert_scope_separation_of"
+    );
+
+    // Positive control: the real SCOPE_SEPARATION passes (via both the
+    // parameterized oracle and the zero-arg live wrapper).
+    assert_scope_separation_of(&SCOPE_SEPARATION)
+        .expect("real SCOPE_SEPARATION must pass assert_scope_separation_of");
     assert_scope_separation().expect("real SCOPE_SEPARATION must pass assert_scope_separation");
 }
 
