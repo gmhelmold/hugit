@@ -57,6 +57,13 @@ fn have_binary(name: &str) -> bool {
 /// jj, libgit2): the read path serves the same byte-identical pack regardless of
 /// who pulls it. git ≥ 2.40 is the protocol-v2 floor; when the real git/jj
 /// binaries are present they are exercised on the wire.
+///
+/// HONESTY NOTE (audit 2026-06-09): git and jj are exercised against the REAL
+/// binaries on the wire (jj has its first-class home in `item_7`); **libgit2
+/// conformance is by construction-equivalence** — the served pack is standard
+/// protocol-v2, so any conformant client reads it — it is NOT a real libgit2
+/// clone. A real `git2`-crate round-trip is deferred (adding a native libgit2
+/// build dependency is out of scope for this suite).
 #[test]
 fn item_3_client_matrix_git_jj_libgit2() {
     let repo = build_repo();
