@@ -124,6 +124,7 @@ mod tests {
         // non-covering / offline environment must be PARTIAL, never Verified.
         let auth = AppAuth::new("/nonexistent/github-app-dev");
         // Ensure a repo is set so we exercise the auth branch.
+        // SAFETY: single-threaded test; no concurrent access to this env var.
         unsafe {
             std::env::set_var("HUGIT_GH_TEST_REPO", "humangr-labs/hugit-fleet-syn-1");
         }

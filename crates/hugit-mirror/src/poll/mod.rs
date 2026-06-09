@@ -44,13 +44,6 @@ impl PollConfig {
     }
 }
 
-/// Why the poll fallback engaged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FallbackTrigger {
-    /// A webhook delivery was lost / never arrived — fall back to polling.
-    WebhookLoss,
-}
-
 /// Outcome of a poll-driven divergence scan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PollDetection {
@@ -68,11 +61,7 @@ pub struct PollDetection {
 /// Returns the first poll tick at or after the divergence, and whether it lands
 /// within the SLA. Models the webhook-loss path: no webhook arrives, polling is
 /// the only detector.
-pub fn detect_via_poll(
-    cfg: &PollConfig,
-    _trigger: FallbackTrigger,
-    diverged_at_ms: u64,
-) -> PollDetection {
+pub fn detect_via_poll(cfg: &PollConfig, diverged_at_ms: u64) -> PollDetection {
     let interval = cfg.interval_ms.max(1);
     // First poll tick at or after the divergence appeared.
     let next_tick = diverged_at_ms.div_ceil(interval) * interval;
@@ -99,7 +88,7 @@ mod tests {
     #[test]
     fn webhook_loss_detected_within_sla() {
         let cfg = PollConfig::default();
-        let d = detect_via_poll(&cfg, FallbackTrigger::WebhookLoss, 1);
+        let d = detect_via_poll(&cfg, 1);
         assert!(d.diverged);
         assert!(d.within_sla);
     }

@@ -27,7 +27,7 @@ use hugit_mirror::divergence::{
 use hugit_mirror::outage::{
     BackoffSchedule, DurableQueue, EnqueueResult, QueuedWrite, drain_to_verified,
 };
-use hugit_mirror::poll::{FallbackTrigger, PollConfig, detect_via_poll};
+use hugit_mirror::poll::{PollConfig, detect_via_poll};
 use hugit_mirror::refops::{RefOp, RefTips, apply, apply_all, diff_ref_tips, tips_in_sync};
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -250,7 +250,7 @@ fn item_6_webhook_loss_poll_fallback_detects_within_sla() {
 
     // No webhook arrives; the poll fallback still detects a divergence that
     // appeared early in the window, within the SLA.
-    let det = detect_via_poll(&cfg, FallbackTrigger::WebhookLoss, 1);
+    let det = detect_via_poll(&cfg, 1);
     assert!(det.diverged);
     assert!(
         det.within_sla,
@@ -258,11 +258,7 @@ fn item_6_webhook_loss_poll_fallback_detects_within_sla() {
     );
 
     // Even a divergence appearing just before SLA expiry is caught within it.
-    let late = detect_via_poll(
-        &cfg,
-        FallbackTrigger::WebhookLoss,
-        cfg.sla_ms - cfg.interval_ms,
-    );
+    let late = detect_via_poll(&cfg, cfg.sla_ms - cfg.interval_ms);
     assert!(late.within_sla);
 }
 
