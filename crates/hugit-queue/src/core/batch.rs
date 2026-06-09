@@ -1,4 +1,4 @@
-//! Batching landable entries into an ordered, DAG-ordered batch.
+//! Batching landable entries into a DAG-ordered batch.
 //!
 //! A `Batch` is the unit the union fold operates over. Entries carry their
 //! contract identity (`LandableEntry`) plus the engine-internal affected-set

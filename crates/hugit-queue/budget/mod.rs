@@ -35,6 +35,9 @@ use std::collections::{HashMap, VecDeque};
 /// Maximum p95 queue-wait allowed per tenant under contention (milliseconds).
 pub const P95_WAIT_BOUND_MS: u64 = 5_000;
 
+/// The percentile used for the queue-wait bound (0.95 = 95th percentile).
+const P95_PERCENTILE: f64 = 0.95;
+
 /// Minimum throughput share guaranteed to every tenant under contention
 /// (fraction, where 1.0 = 100%). Represents a fair-share lower bound.
 pub const THROUGHPUT_FLOOR: f64 = 0.20;
@@ -322,7 +325,7 @@ impl BudgetManager {
             return 0;
         }
         waits.sort_unstable();
-        let idx = ((waits.len() as f64) * 0.95).ceil() as usize;
+        let idx = ((waits.len() as f64) * P95_PERCENTILE).ceil() as usize;
         waits[idx.saturating_sub(1).min(waits.len() - 1)]
     }
 
