@@ -13,8 +13,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// The fixed replacement token a redacted span is rewritten to. It is itself
-/// secret-free and stable, so a redacted artifact is deterministic.
-pub const REDACTED_TOKEN: &str = "[REDACTED]";
+/// secret-free and stable, so a redacted artifact is deterministic. Single-sourced
+/// from the canonical [`hugit_contracts::REDACTED_MARKER`] so it cannot drift from
+/// the ledger/verdict redaction sentinel.
+pub const REDACTED_TOKEN: &str = hugit_contracts::REDACTED_MARKER;
 
 /// Known secret signatures redacted at export. Substring matches, no regex — the
 /// same portable approach the secrets gate uses. Order matters only for the

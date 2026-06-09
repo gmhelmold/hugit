@@ -13,8 +13,10 @@
 /// The planted-secret prefix that triggers redaction.
 pub const SECRET_MARKER: &str = "SECRET:";
 
-/// The redaction sentinel rendered in ledger/verdict views.
-pub const REDACTED: &str = "[REDACTED]";
+/// The redaction sentinel rendered in ledger/verdict views. Single-sourced from
+/// the canonical [`hugit_contracts::REDACTED_MARKER`] so it cannot drift from the
+/// CLI export redaction.
+pub const REDACTED: &str = hugit_contracts::REDACTED_MARKER;
 
 /// Apply view-boundary redaction to a string field.
 ///

@@ -6,6 +6,13 @@
 //!
 //! All 15 types were frozen by decomposition §1 (WP-00).
 
+/// The canonical redaction sentinel — the single source of truth for the
+/// `"[REDACTED]"` marker used by both the ledger/verdict redaction
+/// (`hugit-ledger`) and the CLI export redaction (`hugit-cli`), so the two
+/// cannot silently drift (audit remediation). Additive shared constant: it does
+/// not touch any frozen type or its serialization.
+pub const REDACTED_MARKER: &str = "[REDACTED]";
+
 pub mod app_webhooks;
 pub mod attention_rank;
 pub mod attestation_chain;
