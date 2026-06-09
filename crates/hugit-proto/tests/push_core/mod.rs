@@ -175,8 +175,8 @@ pub fn clone_and_head(source: &Path) -> ClonedHead {
     assert!(status.success(), "git clone of materialized repo failed");
     let oid = git(&target, &["rev-parse", "HEAD"]).trim().to_string();
     let commit_bytes = git_bytes(&target, &["cat-file", "commit", &oid]);
-    // keep dst alive until after we read.
-    std::mem::forget(dst);
+    // `dst` drops here, cleaning up the scratch dir.
+    drop(dst);
     ClonedHead { oid, commit_bytes }
 }
 
@@ -199,7 +199,7 @@ fn git_bytes(cwd: &Path, args: &[&str]) -> Vec<u8> {
     out.stdout
 }
 
-fn git_env(cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> String {
+fn git_env(cwd: &Path, args: &[&str], env: &[(&str, &str)]) {
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(cwd).args(args);
     for (k, v) in env {
@@ -213,7 +213,6 @@ fn git_env(cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> String {
         "git {args:?} failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
 fn git_bytes_stdin(cwd: &Path, args: &[&str], stdin: &[u8]) -> Vec<u8> {

@@ -28,12 +28,13 @@
 #[path = "push_core/mod.rs"]
 mod push_core;
 
+use hugit_proto::write::external::REF_UPDATE_KIND;
 use hugit_proto::write::flag::FlagGate;
 use hugit_proto::write::receive::{
     DEFAULT_MAX_PACK_BYTES, ReceiveError, ReceiveRequest, RecvLimits, RefUpdate,
     materialize_bare_repo, receive_pack,
 };
-use hugit_proto::write::store::{InMemoryCas, REF_UPDATE_KIND};
+use hugit_proto::write::store::InMemoryCas;
 use hugit_refstore::intent::{INTENT_LANDED_KIND, intents_from_log};
 use hugit_refstore::log::EventLog;
 use push_core::Fixture;
