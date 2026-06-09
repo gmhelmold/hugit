@@ -18,6 +18,11 @@ use std::sync::Arc;
 use std::thread;
 
 use anyhow::{Context, Result, bail};
+
+/// Number of census polls taken while the batch is in-flight to capture the
+/// peak concurrency. Spinning quickly with no sleep is intentional: real jobs
+/// on the box take O(seconds), so 40 polls is ample without adding latency.
+const CENSUS_POLL_ITERATIONS: usize = 40;
 use hugit_contracts::RunnerLease;
 
 use crate::isolation::{Engine, RunningContainer};
@@ -171,7 +176,7 @@ where
         // While jobs are in flight, sample the live census to capture the peak
         // number of *our* containers running simultaneously.
         let mut peak = 0usize;
-        for _ in 0..40 {
+        for _ in 0..CENSUS_POLL_ITERATIONS {
             if handles.iter().all(|h| h.is_finished()) {
                 break;
             }

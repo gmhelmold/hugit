@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(hygiene): hugit-runner — promote magic literals `"64m"` (tmpfs size), `"3600"` (idle-sleep ceiling), and `40` (census poll iterations) to named consts with explanatory doc comments (`TMPFS_SIZE`, `IDLE_SLEEP_SECS`, `CENSUS_POLL_ITERATIONS`); remove tautological `spawn_lt_1s_budget_duration` unit test (asserted `1000ms >= 1000ms` — trivially true, exercised nothing). Behavior-preserving; all gates green.
+
 - fix(hygiene): hugit-refstore — replace raw `format!` JSON string-building in `denial_payload` with `serde_json::json!` (consistent with every other payload site in the crate; eliminates divergence hazard for future value changes)
 
 - fix(hygiene): hugit-queue — promote magic JWT window constants (`IAT_BACKDATE_SECS`, `TOKEN_LIFETIME_SECS`, `GITHUB_MAX_JWT_WINDOW_SECS`) in `app_auth`; add `P95_PERCENTILE` const for the 0.95 fraction in `budget::p95_wait_ticks`; fix doc/attribute ordering in `negative_scope::paths` (second `///` block was after `#[allow(dead_code)]`); remove redundant "ordered," prefix in `batch` module doc. Behavior-preserving; all gates green.

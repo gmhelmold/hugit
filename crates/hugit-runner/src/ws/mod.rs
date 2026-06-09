@@ -690,11 +690,4 @@ mod tests {
         let map = spawner.entries.lock().unwrap();
         assert!(map.is_empty());
     }
-
-    #[test]
-    fn spawn_lt_1s_budget_duration() {
-        // Document the <1s contract: 1000ms budget expressed in Duration form.
-        let budget_1s = Duration::from_millis(1_000);
-        assert!(budget_1s >= Duration::from_millis(1000));
-    }
 }

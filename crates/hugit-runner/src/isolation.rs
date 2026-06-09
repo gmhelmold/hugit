@@ -15,6 +15,19 @@ use anyhow::{Context, Result, bail};
 
 use crate::lease::{BoxExec, ContainerSpec};
 
+/// Maximum size of the per-job private tmpfs mounted at `tmp_root`.
+///
+/// 64 MiB is intentionally conservative: job scratch space is ephemeral and
+/// the box's RAM is shared across concurrent jobs. Increase only with a
+/// concurrent-job capacity analysis.
+const TMPFS_SIZE: &str = "64m";
+
+/// Duration the idle-container heartbeat `sleep` runs inside a just-spawned
+/// container. `docker run … sleep 3600` keeps the container alive while the
+/// orchestrator calls `docker exec` to run job steps. 3600 s (1 h) is a hard
+/// ceiling; expiry hard-kill (C2b) terminates it earlier via `docker kill`.
+const IDLE_SLEEP_SECS: &str = "3600";
+
 /// Result of probing a running container's isolation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IsolationProbe {
@@ -101,7 +114,7 @@ impl<B: BoxExec> Engine for DockerEngine<B> {
             )
         })?;
 
-        let tmpfs = format!("{}:rw,size=64m", spec.tmp_root);
+        let tmpfs = format!("{}:rw,size={TMPFS_SIZE}", spec.tmp_root);
         let argv = vec![
             "docker",
             "run",
@@ -117,7 +130,7 @@ impl<B: BoxExec> Engine for DockerEngine<B> {
             "hugit.job=1",
             &spec.image,
             "sleep",
-            "3600",
+            IDLE_SLEEP_SECS,
         ];
         let out = self.boxx.run(&argv)?;
         if !out.ok() {
