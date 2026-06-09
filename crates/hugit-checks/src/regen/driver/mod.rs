@@ -17,6 +17,7 @@ pub use cargo_lock::CargoLockDriver;
 pub use pnpm_lock::{PNPM_REGEN_ARGS, PnpmLockDriver};
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 // ── Derived-file classification ───────────────────────────────────────────────
 
@@ -233,6 +234,18 @@ impl DriverRegistry {
             }),
         }
     }
+}
+
+/// Check whether a binary exists in PATH by running `which <bin>`.
+///
+/// Used by [`RegenDriver::tool_available`] implementations. Returns `true` iff
+/// `which` exits zero (the binary was found).
+pub(super) fn which_tool(bin: &Path) -> bool {
+    Command::new("which")
+        .arg(bin)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// Funnel any [`RegenError`] into a [`RegenError::FailClosed`] at the registry

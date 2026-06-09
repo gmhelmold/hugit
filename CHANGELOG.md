@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(hygiene): hugit-checks — replace `BTreeMap<&str, ()>` set idiom with `BTreeSet` in `byte_identity::compare_byte_identity`; remove dead `verdict: &VerdictObject` param from private `Gate::land` (verified upstream, suppressed via `let _ = verdict`); lift duplicated `which_tool` helper from `cargo_lock` into `driver::mod` as `pub(super)` and call it from both `CargoLockDriver` and `PnpmLockDriver`; clarify `store_body` error-mapping comment (serialisation error mapped to `AcError::Decode`). Behavior-preserving; all 64 tests green.
+
 - fix(hygiene): hugit-refstore — replace raw `format!` JSON string-building in `denial_payload` with `serde_json::json!` (consistent with every other payload site in the crate; eliminates divergence hazard for future value changes)
 
 - fix(hygiene): hugit-queue — promote magic JWT window constants (`IAT_BACKDATE_SECS`, `TOKEN_LIFETIME_SECS`, `GITHUB_MAX_JWT_WINDOW_SECS`) in `app_auth`; add `P95_PERCENTILE` const for the 0.95 fraction in `budget::p95_wait_ticks`; fix doc/attribute ordering in `negative_scope::paths` (second `///` block was after `#[allow(dead_code)]`); remove redundant "ordered," prefix in `batch` module doc. Behavior-preserving; all gates green.
