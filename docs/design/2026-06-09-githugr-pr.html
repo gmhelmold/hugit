@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>githugr — PR detail</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  :root{
+    --bg:#101013; --rail:#0c0c0f; --panel:#16161a; --panel-2:#1c1c22; --hover:rgba(255,255,255,.04);
+    --line:rgba(255,255,255,.06); --line-2:rgba(255,255,255,.09); --line-3:rgba(255,255,255,.14);
+    --text:#f3f4f5; --text-2:#d0d2d6; --muted:#8a8f98; --faint:#626572; --dim:#44464f;
+    --accent:#5e6ad2; --accent-soft:rgba(94,106,210,.15); --green:#4cb782; --green-soft:rgba(76,183,130,.1);
+    --red:#d96c6c; --amber:#c9a14a;
+    --font:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+    --mono:'JetBrains Mono',ui-monospace,Menlo,monospace; --r:8px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  ::selection{background:rgba(94,106,210,.30)}
+  body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:13.5px;line-height:1.55;-webkit-font-smoothing:antialiased;height:100vh;overflow:hidden;letter-spacing:-.005em}
+  kbd{font-family:var(--mono);font-size:10.5px;color:var(--muted);background:rgba(255,255,255,.035);border:1px solid var(--line-2);border-radius:5px;padding:1px 5px}
+  .mono{font-family:var(--mono)} a{color:inherit;text-decoration:none}
+  .app{display:grid;grid-template-rows:46px 44px 1fr;height:100vh}
+
+  .topbar{display:flex;align-items:center;gap:14px;padding:0 14px;border-bottom:1px solid var(--line);background:var(--rail)}
+  .brand{display:flex;align-items:center;gap:8px;font-weight:600}
+  .brand .logo{width:17px;height:17px;border-radius:5px;background:#5e6ad2} .brand .nm{font-weight:700}
+  .brand .sep{color:var(--dim)} .brand .repo{color:var(--muted);font-weight:500} .brand .repo b{color:var(--text)}
+  .cmdk{flex:1;max-width:440px;margin:0 auto;display:flex;align-items:center;gap:8px;height:30px;padding:0 11px;border:1px solid var(--line-2);border-radius:7px;color:var(--faint);background:rgba(255,255,255,.02)} .cmdk .sp{flex:1}
+  .right{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:12.5px}
+  .ghbtn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line-2);border-radius:6px;padding:3px 9px;color:var(--muted)}
+  .av{width:22px;height:22px;border-radius:50%;background:#26262c;border:1px solid var(--line-2)}
+
+  .tabbar{display:flex;align-items:center;gap:2px;padding:0 14px;border-bottom:1px solid var(--line);background:var(--rail)}
+  .rtab{display:inline-flex;align-items:center;gap:7px;padding:0 11px;height:43px;color:var(--muted);font-size:13px;cursor:pointer;border-bottom:2px solid transparent}
+  .rtab.on{color:var(--text);border-bottom-color:var(--accent);font-weight:500} .rtab .ic{color:var(--faint)} .rtab.on .ic{color:var(--text)}
+  .ext{color:var(--dim);font-size:11px}
+
+  .body{overflow-y:auto}
+  .wrap{max-width:1080px;margin:0 auto;padding:18px 24px 50px}
+  .crumb{color:var(--faint);font-size:12.5px;margin-bottom:8px} .crumb a{color:var(--muted)} .crumb .mono{color:var(--faint)}
+
+  /* PR header */
+  .prh .t1{display:flex;align-items:center;gap:11px}
+  .prh .num{color:var(--faint);font-weight:400;font-size:22px}
+  .prh h1{font-size:22px;font-weight:600;letter-spacing:-.02em}
+  .pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;padding:3px 11px;border-radius:20px}
+  .pill .dot{width:7px;height:7px;border-radius:50%}
+  .pill.queue{color:var(--accent);background:var(--accent-soft);border:1px solid rgba(94,106,210,.3)} .pill.queue .dot{background:var(--accent)}
+  .prh .t2{margin-top:10px;color:var(--muted);font-size:13px}
+  .prh .t2 b{color:var(--text-2)} .prh .t2 .mono{color:var(--muted)}
+
+  /* the "better than GitHub" strip */
+  .better{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 4px}
+  .chip{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--text-2);background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:5px 11px}
+  .chip .dot{width:6px;height:6px;border-radius:50%;background:var(--green)} .chip b{color:var(--text)}
+  .chip .l{color:var(--faint)}
+
+  .ptabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin-top:18px}
+  .ptab{padding:11px 13px;color:var(--muted);font-size:13.5px;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;display:inline-flex;align-items:center;gap:7px}
+  .ptab:hover{color:var(--text)} .ptab.on{color:var(--text);border-bottom-color:var(--accent);font-weight:500}
+  .ptab .n{font-size:11px;color:var(--muted);background:rgba(255,255,255,.06);border-radius:20px;padding:0 6px;font-weight:600}
+
+  .layout{display:grid;grid-template-columns:1fr 280px;gap:24px;margin-top:20px}
+  .pane{display:none} .pane.on{display:block}
+  .hint{color:var(--faint);font-size:12.5px;margin-bottom:14px}
+
+  /* intents (= commits) inside the PR */
+  .intent{border:1px solid var(--line);border-radius:var(--r);background:var(--panel);margin-bottom:12px;overflow:hidden}
+  .ih{display:grid;grid-template-columns:24px 1fr auto;align-items:center;gap:12px;padding:13px 15px;cursor:pointer}
+  .ih:hover{background:var(--panel-2)}
+  .ih .ico{color:var(--green);text-align:center} .ih .ico.t{color:var(--accent)}
+  .ih .ti{font-size:14px;font-weight:500;color:var(--text)}
+  .ih .mt{font-size:12px;color:var(--faint);margin-top:3px} .ih .mt .id{font-family:var(--mono);color:var(--muted)} .ih .mt b{color:var(--muted)}
+  .ih .rd{color:var(--faint);font-size:12px}
+  .ih .chev{color:var(--faint);transition:.15s} .intent.open .ih .chev{transform:rotate(90deg)}
+
+  .ibody{display:none;border-top:1px solid var(--line);padding:16px 16px 18px} .intent.open .ibody{display:block}
+  .blk{margin-bottom:18px} .blk:last-child{margin-bottom:0}
+  .blk .bt{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);font-weight:600;margin-bottom:8px;display:flex;align-items:center;gap:7px}
+  .blk .bt .g{color:var(--text);text-transform:none;letter-spacing:0;font-weight:400;font-size:11.5px}
+  .charter{font-size:13.5px;color:var(--text-2);max-width:70ch}
+
+  /* context snapshot — the kept brain */
+  .ctx{border:1px solid var(--line-2);border-radius:var(--r);background:var(--panel-2);padding:13px 15px}
+  .ctx .row{display:flex;gap:8px;font-size:12.5px;color:var(--muted);padding:3px 0} .ctx .row .k{color:var(--faint);width:108px;flex:0 0 auto} .ctx .row .v{color:var(--text-2)}
+  .ctx .files{display:flex;flex-wrap:wrap;gap:5px;margin-top:3px} .ctx .files .f{font-family:var(--mono);font-size:11px;color:var(--text-2);background:rgba(255,255,255,.04);border:1px solid var(--line);border-radius:5px;padding:1px 7px}
+  .ctx .reason{margin-top:10px;padding-top:10px;border-top:1px solid var(--line);font-size:12.5px;color:var(--muted);font-style:italic}
+  .ctx .act{margin-top:11px;display:flex;gap:8px}
+  .bg{background:transparent;color:var(--text);border:1px solid var(--line-2);border-radius:6px;padding:5px 11px;font-size:12px;cursor:pointer;font-family:var(--font)}
+
+  /* diff + why-blame */
+  .code{border:1px solid var(--line);border-radius:var(--r);overflow:hidden;background:#0d0d10;font-family:var(--mono);font-size:12.5px}
+  .code .fn{padding:7px 14px;border-bottom:1px solid var(--line);background:var(--rail);color:var(--muted);font-size:11.5px}
+  .cl{display:grid;grid-template-columns:40px 1fr} .cl .ln{color:var(--dim);text-align:right;padding:2px 10px 2px 0;user-select:none} .cl .ct{padding:2px 14px;white-space:pre;color:var(--text-2)}
+  .cl.add{background:rgba(76,183,130,.08)} .cl.add .ct{color:#bfe6cf} .cl.del{background:rgba(217,108,108,.08)} .cl.del .ct{color:#e9b6b6}
+  .cl.hl{background:rgba(94,106,210,.1);border-left:2px solid var(--accent)} .cl.hl .ln{padding-left:0}
+  .cm{color:var(--faint)}
+  .blame{border:1px solid var(--line);border-top:0;border-radius:0 0 var(--r) var(--r);background:var(--panel);padding:11px 14px;font-size:12.5px}
+  .blame .why{color:var(--muted);font-style:italic} .blame .meta{margin-top:8px;display:flex;gap:16px;color:var(--faint);font-size:12px} .blame .meta b{color:var(--text-2)}
+
+  .verd{display:flex;align-items:center;gap:10px;font-size:12.5px;color:var(--muted);padding:6px 0;border-bottom:1px solid var(--line)} .verd:last-child{border:0}
+  .verd .lens{font-family:var(--mono);font-size:11px;color:var(--faint);width:84px} .verd .ok{margin-left:auto;color:var(--green)}
+
+  /* right rail */
+  .aside .card{border:1px solid var(--line);border-radius:var(--r);background:var(--panel);padding:13px;margin-bottom:13px}
+  .aside .h{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);font-weight:600;margin-bottom:11px}
+  .kv{display:flex;align-items:center;gap:9px;font-size:12.5px;color:var(--muted);padding:4px 0} .kv .v{margin-left:auto;color:var(--text-2);font-weight:500} .kv .v.g{color:var(--green)}
+  .bp{width:100%;background:var(--accent);color:#fff;border:0;border-radius:7px;padding:9px;font-weight:600;font-size:13px;cursor:pointer;font-family:var(--font);margin-top:4px}
+  .who{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--muted);padding:4px 0} .who .a{width:20px;height:20px;border-radius:50%;background:#2a2a31;border:1px solid var(--line-2)}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <div class="topbar">
+    <div class="brand"><span class="logo"></span> <span class="nm">githugr</span> <span class="sep">/</span> <span class="repo"><b>corelink-server</b></span></div>
+    <div class="cmdk"><span>⌘</span> Buscar ou executar… <span class="sp"></span> <kbd>⌘K</kbd></div>
+    <div class="right"><span class="ghbtn">⟲ sync GitHub ✓</span><span class="av"></span></div>
+  </div>
+  <div class="tabbar">
+    <div class="rtab"><span class="ic">&lt;&gt;</span> Code</div>
+    <div class="rtab"><span class="ic">○</span> Issues <span class="ext">↗</span></div>
+    <div class="rtab on"><span class="ic">◆</span> Intents (PRs)</div>
+    <div class="rtab"><span class="ic">✓</span> Checks</div>
+    <div class="rtab"><span class="ic">⇲</span> Landing</div>
+    <div class="rtab"><span class="ic">⛨</span> Security</div>
+    <div class="rtab"><span class="ic">▦</span> Insights</div>
+    <div class="rtab"><span class="ic">⚙</span> Settings</div>
+  </div>
+
+  <div class="body"><div class="wrap">
+    <div class="crumb"><a>Intents (PRs)</a> › <span class="mono">#128</span></div>
+
+    <!-- PR header -->
+    <div class="prh">
+      <div class="t1"><span class="num">#128</span><h1>Auth hardening — refresh, rate-limit e logs</h1><span class="pill queue"><span class="dot"></span> na fila de landing</span></div>
+      <div class="t2"><b>opus-4.8</b> quer mergear <span class="mono">campaign/auth-hardening</span> → <span class="mono">main</span> · <b>3 intents</b> · 14 arquivos · <span style="color:var(--green)">+420</span> <span style="color:var(--red)">−90</span></div>
+      <!-- what's better than GitHub, in one strip -->
+      <div class="better">
+        <span class="chip"><span class="dot"></span> union-test <b>verde</b> <span class="l">· testado junto com #129</span></span>
+        <span class="chip">💸 verificado por <b>$0.04</b> <span class="l">· cache poupou $3.10/14min</span></span>
+        <span class="chip">🛡️ <b>3/3 intents atestados</b> <span class="l">· modelo + prompt + prova assinados</span></span>
+        <span class="chip">🧠 <b>contexto preservado</b> <span class="l">· o cérebro de cada agente fica salvo</span></span>
+      </div>
+    </div>
+
+    <!-- PR tabs (familiar) -->
+    <div class="ptabs">
+      <div class="ptab" onclick="ptab(this,'pp-ov')">Overview</div>
+      <div class="ptab on" onclick="ptab(this,'pp-int')">Intents (commits) <span class="n">3</span></div>
+      <div class="ptab" onclick="ptab(this,'pp-int')">Checks <span class="n">14</span></div>
+      <div class="ptab" onclick="ptab(this,'pp-int')">Arquivos <span class="n">14</span></div>
+    </div>
+
+    <div class="layout">
+      <div>
+        <div id="pp-int" class="pane on">
+          <div class="hint">Os "commits" deste PR são <b>intents</b> — cada um carrega o porquê, o contexto do agente e a prova. Clique pra abrir e ler tudo.</div>
+
+          <!-- intent 1 (open) -->
+          <div class="intent open">
+            <div class="ih" onclick="toggle(this)">
+              <span class="ico t">◑</span>
+              <div><div class="ti">fix: sessão expira cedo no refresh do token</div><div class="mt"><span class="id">a31</span> · por <b>opus-4.8</b> · testando · <span class="mono">a31f9c</span></div></div>
+              <div style="display:flex;align-items:center;gap:12px"><span class="rd">ler</span><span class="chev">›</span></div>
+            </div>
+            <div class="ibody">
+              <div class="blk">
+                <div class="bt">Charter <span class="g">· o que esse intent pretende</span></div>
+                <div class="charter">A sessão expirava ~5 min cedo porque o refresh reusava o <span class="mono">iat</span> do token antigo. Re-derivar a expiração do token emitido agora.</div>
+              </div>
+
+              <div class="blk">
+                <div class="bt">🧠 Snapshot de contexto <span class="g">· o cérebro do agente, preservado (o git joga isso fora)</span></div>
+                <div class="ctx">
+                  <div class="row"><span class="k">modelo</span><span class="v">opus-4.8</span></div>
+                  <div class="row"><span class="k">arquivos lidos</span><span class="v"><span class="files"><span class="f">auth/token.rs</span><span class="f">session.rs</span><span class="f">refresh.rs</span><span class="f">+4</span></span></span></div>
+                  <div class="row"><span class="k">tool-calls</span><span class="v">14 (read, edit, cargo test ×3)</span></div>
+                  <div class="row"><span class="k">prompt</span><span class="v">"corrigir expiração precoce no refresh" <span style="color:var(--faint)">(redactado por política)</span></span></div>
+                  <div class="reason">raciocínio: "o refresh re-derivava exp do iat antigo → encurtava a janela. tirei a expiração do now() do token novo; confirmei com teste de regressão em t-1min."</div>
+                  <div class="act"><button class="bg">▸ dar replay da sessão</button><button class="bg">ver trajetória completa</button></div>
+                </div>
+              </div>
+
+              <div class="blk">
+                <div class="bt">Diff + why-blame <span class="g">· passe na linha realçada</span></div>
+                <div class="code">
+                  <div class="fn">crates/auth/src/token.rs</div>
+                  <div class="cl"><span class="ln">41</span><span class="ct">fn refresh(old: &amp;Token) -&gt; Token {</span></div>
+                  <div class="cl del"><span class="ln">42</span><span class="ct">-   let iat = old.iat;</span></div>
+                  <div class="cl add hl"><span class="ln">42</span><span class="ct">+   let iat = now();</span></div>
+                  <div class="cl"><span class="ln">43</span><span class="ct">    Token { iat, exp: iat + TTL }</span></div>
+                </div>
+                <div class="blame">
+                  <div class="why">"esta linha existe porque o refresh precisa da expiração do instante atual, não do token antigo."</div>
+                  <div class="meta"><span>intent <b>a31</b></span><span>modelo <b>opus-4.8</b></span><span>prova <b>test_refresh_full_ttl ✓</b></span></div>
+                </div>
+              </div>
+
+              <div class="blk">
+                <div class="bt">Verdicts <span class="g">· painel adversarial (3 lentes)</span></div>
+                <div class="verd"><span class="lens">correctness</span> a janela agora dura o TTL completo <span class="ok">APPROVE</span></div>
+                <div class="verd"><span class="lens">security</span> nenhum token aceito fora da janela <span class="ok">APPROVE</span></div>
+                <div class="verd"><span class="lens">repro</span> determinístico (byte-idêntico em 3 runs) <span class="ok">APPROVE</span></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- intent 2 (collapsed) -->
+          <div class="intent">
+            <div class="ih" onclick="toggle(this)">
+              <span class="ico">●</span>
+              <div><div class="ti">rate-limit por tenant no edge</div><div class="mt"><span class="id">a2f</span> · por <b>opus-4.8</b> · pronto · <span class="mono">b07c1a</span></div></div>
+              <div style="display:flex;align-items:center;gap:12px"><span class="rd">ler</span><span class="chev">›</span></div>
+            </div>
+            <div class="ibody"><div class="charter">Limite de requisições por tenant aplicado no edge antes de tocar o backend. Contexto + diff + verdicts dentro.</div></div>
+          </div>
+
+          <!-- intent 3 (collapsed) -->
+          <div class="intent">
+            <div class="ih" onclick="toggle(this)">
+              <span class="ico">●</span>
+              <div><div class="ti">log estruturado de auth</div><div class="mt"><span class="id">a30</span> · por <b>sonnet-4.6</b> · pronto · <span class="mono">c33e90</span></div></div>
+              <div style="display:flex;align-items:center;gap:12px"><span class="rd">ler</span><span class="chev">›</span></div>
+            </div>
+            <div class="ibody"><div class="charter">Eventos de auth em formato estruturado para o SIEM. Contexto + diff + verdicts dentro.</div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- right rail -->
+      <div class="aside">
+        <div class="card">
+          <div class="h">Status do landing</div>
+          <div class="kv">union test <span class="v g">verde</span></div>
+          <div class="kv">checks <span class="v g">11 cache-hit · 0 exec</span></div>
+          <div class="kv">conflito <span class="v g">nenhum</span></div>
+          <div class="kv">custo <span class="v">$0.04</span></div>
+          <button class="bp">⇲ Land (entra na main)</button>
+        </div>
+        <div class="card">
+          <div class="h">Revisores</div>
+          <div class="who"><span class="a"></span> você <span class="v" style="color:var(--muted)">interrogue ↗</span></div>
+          <div class="who"><span class="a"></span> painel adversarial <span class="v g">3 APPROVE</span></div>
+        </div>
+        <div class="card">
+          <div class="h">Proveniência</div>
+          <div class="kv">campanha <span class="v">auth-hardening</span></div>
+          <div class="kv">atestado <span class="v g">3/3 assinados</span></div>
+          <div class="kv">espelho <span class="v">GitHub #128 ✓</span></div>
+        </div>
+      </div>
+    </div>
+  </div></div>
+</div>
+<script>
+  function toggle(el){el.parentElement.classList.toggle('open')}
+  function ptab(el,id){document.querySelectorAll('.ptab').forEach(t=>t.classList.remove('on'));el.classList.add('on')}
+</script>
+</body>
+</html>
