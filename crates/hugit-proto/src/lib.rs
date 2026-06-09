@@ -57,7 +57,7 @@ pub use write::external::{
     is_external_change_kind, record_external_change,
 };
 pub use write::flag::{FlagGate, WritePathDisabled};
-pub use write::order::{PushOutcome, RefUpdate, SerializedWriter, StaleRef};
+pub use write::order::{PushOutcome, PushReject, RefUpdate, SerializedWriter, StaleRef};
 // The real receive-pack ingest single-writer point (compare-and-append + total
 // order across concurrent pushes). Its `RefUpdate`/`ReceiveError`/… are reached
 // via `write::receive::` to avoid colliding with the order module's `RefUpdate`.

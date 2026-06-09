@@ -19,6 +19,8 @@ use hugit_contracts::event_record::EventRecord;
 use hugit_refstore::EventLog;
 use hugit_refstore::intent::{INTENT_LANDED_KIND, RAW_PUSH_KINDS};
 
+use crate::write::json_str;
+
 /// The ref-mutating event kind emitted for a raw push that sets/updates a tip.
 pub const REF_UPDATE_KIND: &str = "ref.update";
 /// The ref-mutating event kind emitted for a raw push that deletes a tip.
@@ -166,24 +168,4 @@ pub fn record_external_change(
         kind: record.kind.clone(),
     };
     Ok((record, attribution))
-}
-
-/// Minimal JSON string escaping (quotes + backslash + control chars) so the
-/// canonical payload is valid JSON for the same parser D1a's replay uses.
-fn json_str(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
 }

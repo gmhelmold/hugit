@@ -26,6 +26,7 @@ use hugit_refstore::log::EventLog;
 use std::collections::BTreeMap;
 
 use crate::write::external::{REF_DELETE_KIND, REF_UPDATE_KIND};
+use crate::write::json_str;
 
 /// A git object id (40-char lowercase hex SHA-1), the CAS key for one object.
 pub type Oid = String;
@@ -152,23 +153,6 @@ pub fn raw_push_payload(ref_name: &str, target_oid: &str) -> String {
         json_str(ref_name),
         json_str(target_oid)
     )
-}
-
-/// Minimal JSON string encoder for the ref/oid fields (which are git ref names
-/// and hex oids — no control chars — but we still escape `"` and `\` to keep
-/// the payload well-formed for any ref name git accepts).
-fn json_str(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
 }
 
 #[cfg(test)]
