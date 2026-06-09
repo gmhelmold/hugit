@@ -282,17 +282,17 @@ impl<'a> AuditedGuard<'a> {
 /// Build the JSON audit payload for a denial (stable shape, attributable).
 fn denial_payload(endpoint: Endpoint, reason: &DenyReason) -> String {
     match reason {
-        DenyReason::UnrecognizedPrincipal => format!(
-            r#"{{"endpoint":"{}","reason":"{}"}}"#,
-            endpoint.as_str(),
-            reason.code()
-        ),
-        DenyReason::NotPermitted { class } => format!(
-            r#"{{"endpoint":"{}","reason":"{}","class":"{}"}}"#,
-            endpoint.as_str(),
-            reason.code(),
-            class.as_str()
-        ),
+        DenyReason::UnrecognizedPrincipal => serde_json::json!({
+            "endpoint": endpoint.as_str(),
+            "reason": reason.code(),
+        })
+        .to_string(),
+        DenyReason::NotPermitted { class } => serde_json::json!({
+            "endpoint": endpoint.as_str(),
+            "reason": reason.code(),
+            "class": class.as_str(),
+        })
+        .to_string(),
     }
 }
 
