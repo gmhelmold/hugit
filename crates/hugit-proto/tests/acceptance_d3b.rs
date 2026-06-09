@@ -93,6 +93,7 @@ fn item_2_concurrent_pushes_total_order_stale_rejection() {
     match writer.push(create("refs/heads/main", &base, "seed", 1)) {
         PushOutcome::Landed { .. } => {}
         PushOutcome::Stale(s) => panic!("seed create must land, got {s}"),
+        PushOutcome::Rejected(r) => panic!("seed create must land, got rejected: {r}"),
     }
 
     // Two agents both believe main is at `base` and try to advance it — a real

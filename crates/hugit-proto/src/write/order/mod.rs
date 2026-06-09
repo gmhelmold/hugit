@@ -67,10 +67,34 @@ impl std::fmt::Display for StaleRef {
 
 impl std::error::Error for StaleRef {}
 
+/// Why a serialized push was refused outright — a contract violation, not a
+/// stale race. Mirrors the external-change recorder's fail-closed semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PushReject {
+    /// The push carried no principal — an external change must be attributable.
+    /// Fail-closed: an unattributed push is refused, never recorded blind (same
+    /// semantics as [`ExternalChangeError::MissingAttribution`]).
+    MissingAttribution,
+}
+
+impl std::fmt::Display for PushReject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PushReject::MissingAttribution => {
+                write!(f, "push refused: external change must carry attribution")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PushReject {}
+
 /// The outcome of a serialized push: either it landed (with its log record +
-/// attribution + assigned total-order seq), or it was rejected as stale.
+/// attribution + assigned total-order seq), it was rejected as stale, or it was
+/// refused outright (e.g. unattributed — fail-closed, nothing appended).
 ///
 /// (`EventRecord` is `PartialEq` but not `Eq`, so this enum is `PartialEq` only.)
+#[must_use]
 #[derive(Debug, Clone, PartialEq)]
 pub enum PushOutcome {
     /// The push landed. Carries the appended external-change record, its
@@ -85,6 +109,9 @@ pub enum PushOutcome {
     },
     /// The push was rejected: the ref had moved off the expected tip.
     Stale(StaleRef),
+    /// The push was refused outright (a contract violation, not a race) — e.g.
+    /// an unattributed push. Fail-closed: nothing is appended.
+    Rejected(PushReject),
 }
 
 impl PushOutcome {
@@ -92,7 +119,7 @@ impl PushOutcome {
     pub fn landed_seq(&self) -> Option<u64> {
         match self {
             PushOutcome::Landed { seq, .. } => Some(*seq),
-            PushOutcome::Stale(_) => None,
+            PushOutcome::Stale(_) | PushOutcome::Rejected(_) => None,
         }
     }
 }
@@ -137,6 +164,14 @@ impl SerializedWriter {
     /// so the single-writer point keeps serving instead of becoming a permanent
     /// DoS for every later push.
     pub fn push(&self, update: RefUpdate) -> PushOutcome {
+        // Fail-closed attribution gate FIRST: an unattributed push is refused
+        // outright (mirrors `ExternalChangeError::MissingAttribution`). This is a
+        // typed rejection, never a panic — the external-change recorder used to be
+        // `.expect()`ed below, which panicked on an empty chain.
+        if update.principal_chain.is_empty() {
+            return PushOutcome::Rejected(PushReject::MissingAttribution);
+        }
+
         let mut log = self.log.lock().unwrap_or_else(|p| p.into_inner());
 
         // Derive the current ref view from the log (D1 derived view, never owned).
@@ -156,12 +191,20 @@ impl SerializedWriter {
             ref_name: update.ref_name,
             target: update.target,
         };
-        // Attribution is enforced by the external-change recorder; a push with an
-        // empty principal chain is refused there. We surface that as a panic-free
-        // contract: callers in this WP always pass a non-empty chain.
-        let (record, attribution) =
-            record_external_change(&mut log, &push, update.principal_chain, update.recorded_at)
-                .expect("serialized push carries attribution");
+        // The empty-chain case was already refused above (fail-closed), so the
+        // recorder's only error (`MissingAttribution`) is unreachable here. Surface
+        // it as a typed rejection anyway rather than panic — never `.expect()`.
+        let (record, attribution) = match record_external_change(
+            &mut log,
+            &push,
+            update.principal_chain,
+            update.recorded_at,
+        ) {
+            Ok(rec) => rec,
+            Err(crate::write::external::ExternalChangeError::MissingAttribution) => {
+                return PushOutcome::Rejected(PushReject::MissingAttribution);
+            }
+        };
         let seq = record.seq;
 
         PushOutcome::Landed {

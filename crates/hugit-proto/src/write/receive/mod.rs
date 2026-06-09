@@ -167,6 +167,11 @@ pub enum ReceiveError {
         /// The tip the ref actually held (the value that won the race).
         actual: Option<Oid>,
     },
+    /// The push carried no principal — an external change must be attributable.
+    /// Fail-closed: an unattributed push is refused BEFORE any event is recorded,
+    /// never silently recorded blind (symmetry with the order path /
+    /// [`crate::write::external::ExternalChangeError::MissingAttribution`]).
+    MissingAttribution,
     /// An environment / IO failure (the git binary, temp dirs, etc.).
     Io {
         /// The underlying IO failure detail.
@@ -211,6 +216,10 @@ impl std::fmt::Display for ReceiveError {
                 f,
                 "ref update rejected: stale {ref_name}: expected {expected:?}, but it is {actual:?} (no lost update)"
             ),
+            ReceiveError::MissingAttribution => write!(
+                f,
+                "receive-pack refused: external change must carry attribution"
+            ),
             ReceiveError::Io { detail } => write!(f, "receive-pack IO error: {detail}"),
         }
     }
@@ -249,6 +258,14 @@ pub fn receive_pack(
     // 0. flag gate: the write path is OFF unless self-hosted-alpha. Refuse before
     //    ANY pack work — no scratch odb, no CAS write, no event.
     gate.admit_write()?;
+
+    // 0b. attribution gate: a raw push MUST be attributable. An empty principal
+    //     chain is refused with a typed error BEFORE any event is recorded —
+    //     symmetry with the order path and `record_external_change`'s fail-closed
+    //     `MissingAttribution`. (Was: silently recorded an unattributed event.)
+    if req.principal_chain.is_empty() {
+        return Err(ReceiveError::MissingAttribution);
+    }
 
     // 1. bound the COMPRESSED pack BEFORE any work.
     if req.pack.len() > limits.max_pack_bytes {
