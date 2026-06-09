@@ -1,17 +1,19 @@
 [package]
 name = "hugit-diag"
-version = "0.1.0"
-edition = "2024"
-publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license-file.workspace = true
 
 [dependencies]
 hugit-contracts = { path = "../hugit-contracts" }
 hugit-refstore = { path = "../hugit-refstore" }
 hugit-checks = { path = "../hugit-checks" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.10"
-hex = "0.4"
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 
 [[test]]
 name = "acceptance_d8"

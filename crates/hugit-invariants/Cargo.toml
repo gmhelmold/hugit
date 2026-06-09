@@ -13,9 +13,11 @@
 # package root except this manifest.
 [package]
 name = "hugit-invariants"
-version = "0.1.0"
-edition = "2024"
-publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license-file.workspace = true
 
 [lib]
 name = "hugit_invariants"
@@ -33,7 +35,7 @@ hugit-runner = { path = "../hugit-runner" }
 # "the oracle tests the real surface" structurally true: a git-shadowing verb
 # added to hugit-cli turns the X5① oracle red automatically.
 hugit-cli = { path = "../hugit-cli" }
-anyhow = "1"
+anyhow = { workspace = true }
 # WP-X2 (attestation e2e). Real ASYMMETRIC signature so verification is
 # genuinely PUBLIC (item ③): the public key verifies, only the private key can
 # sign — an HMAC keyed-MAC would fail this. ed25519-dalek is the audited,
@@ -42,8 +44,8 @@ anyhow = "1"
 # external deps" rule is WAIVED by the lead specifically for this vetted crypto.
 # Pinned exact. base64 (0.22) is already in the workspace lockfile (transitive);
 # pinning it here adds no new supply-chain surface, only the documented encoding.
-ed25519-dalek = "=2.1.1"
-base64 = "0.22"
+ed25519-dalek = { workspace = true }
+base64 = { workspace = true }
 # WP-X12 (erasure × provenance × mirror) consumes the canonical
 # attestation/hash surface read-only — `compute_this_hash`, `verify_chain`,
 # `canonical_json`, `EventLog` — so the post-erasure chain-verifiability oracle
@@ -52,8 +54,8 @@ base64 = "0.22"
 # mirror-obligation + exit-proof types so the export/exit proof is a
 # machine-validatable artifact.
 hugit-refstore = { path = "../hugit-refstore" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
 # WP-X13 (legibility × degradation/erasure) consumes the human-facing down-zoom
 # surfaces read-only: deep links (D5 — `hugit_ledger::deeplink::resolve`) and
 # `why` (D10 — `hugit_cli::why::resolver::resolve_why`, hugit-cli already a dep).
@@ -69,9 +71,9 @@ hugit-ledger = { path = "../hugit-ledger" }
 # hmac (0.12) + sha2 (0.10) + hex (0.4) are already in the workspace lockfile
 # (used by hugit-app + transitively by the hash chain), so pinning them here
 # adds NO new supply-chain surface — only the documented HMAC namespace model.
-hmac = "0.12"
-sha2 = "0.10"
-hex = "0.4"
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 # WP-X10 (focus gate) SINGLE-SOURCES the dogfood allowlist + corelink-server
 # exclusion from the PRODUCTION owner, `hugit_dogfood::focus_gate` — the module
 # that actually enforces dogfood enrollment. X10 consumes it read-only instead
@@ -89,8 +91,8 @@ hugit-ledger = { path = "../hugit-ledger" }
 # WP-X12 acceptance oracle re-includes x12/erasure.rs via #[path] and drives the
 # canonical refstore surface directly (verify_chain / compute_this_hash / EventLog).
 hugit-refstore = { path = "../hugit-refstore" }
-serde_json = "1"
-serde = { version = "1", features = ["derive"] }
+serde_json = { workspace = true }
+serde = { workspace = true }
 
 # The acceptance oracle lives under the x4/ subtree (not the default
 # `tests/` dir) so all WP-X4 sources stay inside the owned claim. An explicit

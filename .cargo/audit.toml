@@ -1,0 +1,6 @@
+[advisories]
+# Deny all advisories at low severity and above.
+severity_threshold = "low"
+# Also treat unmaintained/unsound/yanked crates as warnings (--deny warnings
+# in CI elevates these to errors).
+informational_warnings = ["unmaintained", "unsound", "yanked"]

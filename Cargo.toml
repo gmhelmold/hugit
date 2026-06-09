@@ -1,3 +1,29 @@
 [workspace]
 members = ["crates/*", "crates/hugit-app/ui", "crates/hugit-app/exit", "crates/hugit-dogfood"]
 resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+license-file = "LICENSE"
+
+[workspace.dependencies]
+# Serialization
+serde      = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.150"
+
+# Cryptography — exact-pinned for supply-chain invariant (X4)
+sha2         = "=0.10.9"
+hmac         = "=0.12.1"
+hex          = "=0.4.3"
+base64       = "=0.22.1"
+ed25519-dalek = "=2.1.1"
+
+# Error handling
+thiserror = "=2.0.18"
+anyhow    = "=1.0.102"
+
+# HTTP
+ureq = "=2.12.1"

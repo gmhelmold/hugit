@@ -1,20 +1,22 @@
 [package]
 name = "hugit-queue"
-version = "0.1.0"
-edition = "2024"
-publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license-file.workspace = true
 
 [dependencies]
 hugit-contracts = { path = "../hugit-contracts" }
-serde = { version = "1", features = ["derive"] }
+serde = { workspace = true }
 
 # Live-GitHub lane (App JWT mint + installations + merge API) is exercised only
 # by the acceptance test, so its transport/crypto deps are dev-only — the
 # library stays lean and the production audit surface minimal.
 [dev-dependencies]
-serde_json = "1"
+serde_json = { workspace = true }
 jsonwebtoken = "9"
-ureq = "2"
+ureq = { workspace = true }
 
 [[test]]
 name = "acceptance_wp-b4b"

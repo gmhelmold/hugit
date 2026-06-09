@@ -1,8 +1,10 @@
 [package]
 name = "hugit-dogfood"
-version = "0.1.0"
-edition = "2024"
-publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license-file.workspace = true
 
 # B8 dogfood harness: drives the full Phase-B stack end-to-end through
 # the actual hugit-queue + hugit-checks + hugit-refstore surfaces. Consumes
@@ -18,14 +20,14 @@ hugit-checks = { path = "../hugit-checks" }
 # Event-log: append, verify_chain, canonical_json, compute_memo_key
 hugit-refstore = { path = "../hugit-refstore" }
 
-serde_json = "1"
+serde_json = { workspace = true }
 
 [dev-dependencies]
 hugit-contracts = { path = "../hugit-contracts" }
 hugit-queue     = { path = "../hugit-queue" }
 hugit-checks    = { path = "../hugit-checks" }
 hugit-refstore  = { path = "../hugit-refstore" }
-serde_json      = "1"
+serde_json      = { workspace = true }
 
 [[test]]
 name = "acceptance_b8"
