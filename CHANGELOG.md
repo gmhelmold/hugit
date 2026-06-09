@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - fix(hygiene): hugit-runner — promote magic literals `"64m"` (tmpfs size), `"3600"` (idle-sleep ceiling), and `40` (census poll iterations) to named consts with explanatory doc comments (`TMPFS_SIZE`, `IDLE_SLEEP_SECS`, `CENSUS_POLL_ITERATIONS`); remove tautological `spawn_lt_1s_budget_duration` unit test (asserted `1000ms >= 1000ms` — trivially true, exercised nothing). Behavior-preserving; all gates green.
+- fix(hygiene): hugit-diag — add missing `bisect/` entry to `lib.rs` module-layout doc comment (stale omission); remove vacuous `refusal_error` helper in `experiment/gate.rs` (identity wrapper that discarded the owned `EventRecord` parameter without using it; inlined `Err(…)` directly at each call site and changed `refuse` to return `()` since its event is already appended to the log). Behavior-preserving; all 25 tests green.
 
 - fix(hygiene): hugit-refstore — replace raw `format!` JSON string-building in `denial_payload` with `serde_json::json!` (consistent with every other payload site in the crate; eliminates divergence hazard for future value changes)
 
