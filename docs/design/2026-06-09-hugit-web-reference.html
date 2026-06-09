@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>hugit — Linear Noir (reference)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  :root{
+    --bg:#08080a; --bg-rail:#0a0a0e; --panel:#0c0c11; --panel-2:#101017;
+    --line:rgba(255,255,255,.06); --line-2:rgba(255,255,255,.10); --line-3:rgba(255,255,255,.16);
+    --text:#e7e7ec; --muted:#8b8b97; --faint:#5b5b67; --dim:#3f3f49;
+    --accent:#6e6cf6; --accent-soft:rgba(110,108,246,.14); --accent-line:rgba(110,108,246,.42);
+    --green:#46c46a; --green-soft:rgba(70,196,106,.13);
+    --red:#f7768e; --amber:#e3b341;
+    --font:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+    --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+    --r:7px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  ::selection{background:rgba(110,108,246,.32)}
+  body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:13.5px;line-height:1.5;
+    -webkit-font-smoothing:antialiased;height:100vh;overflow:hidden;letter-spacing:-.005em}
+  kbd{font-family:var(--mono);font-size:10.5px;color:var(--muted);background:rgba(255,255,255,.04);
+    border:1px solid var(--line-2);border-bottom-width:1.5px;border-radius:5px;padding:1px 5px;line-height:1.4}
+  .mono{font-family:var(--mono)}
+  .app{display:grid;grid-template-rows:46px 1fr 30px;height:100vh}
+
+  /* ───── top command bar ───── */
+  .topbar{display:flex;align-items:center;gap:14px;padding:0 14px;border-bottom:1px solid var(--line);background:var(--bg-rail)}
+  .brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:13.5px}
+  .brand .logo{width:18px;height:18px;border-radius:5px;background:linear-gradient(135deg,var(--accent),#22d3ee);display:inline-block}
+  .brand .sep{color:var(--dim)}
+  .brand .repo{color:var(--muted);font-weight:500}
+  .cmdk{flex:1;max-width:520px;margin:0 auto;display:flex;align-items:center;gap:8px;height:30px;padding:0 11px;
+    border:1px solid var(--line-2);border-radius:7px;color:var(--faint);background:rgba(255,255,255,.02);cursor:text;font-size:13px}
+  .cmdk:hover{border-color:var(--line-3);color:var(--muted)}
+  .cmdk .ic{color:var(--dim)}
+  .cmdk .sp{flex:1}
+  .topbar .right{display:flex;align-items:center;gap:10px;color:var(--muted)}
+  .av{width:22px;height:22px;border-radius:50%;background:linear-gradient(135deg,#3a3a44,#1c1c22);border:1px solid var(--line-2)}
+
+  /* ───── body ───── */
+  .body{display:grid;grid-template-columns:208px 1fr 270px;overflow:hidden}
+  .rail{border-right:1px solid var(--line);background:var(--bg-rail);padding:10px 8px;overflow-y:auto}
+  .rgrp{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);font-weight:600;padding:14px 8px 5px}
+  .nav{display:flex;align-items:center;gap:9px;padding:6px 9px;border-radius:6px;color:var(--muted);cursor:pointer;font-weight:450;position:relative}
+  .nav:hover{background:rgba(255,255,255,.035);color:var(--text)}
+  .nav.on{background:rgba(255,255,255,.05);color:var(--text)}
+  .nav.on:before{content:"";position:absolute;left:-8px;top:7px;bottom:7px;width:2px;border-radius:2px;background:var(--accent)}
+  .nav .ic{width:15px;color:var(--faint);font-size:13px;text-align:center}
+  .nav.on .ic{color:var(--accent)}
+  .nav .ct{margin-left:auto;font-size:11px;color:var(--bg);background:var(--accent);border-radius:20px;padding:0 6px;font-weight:600;min-width:18px;text-align:center}
+  .nav .kk{margin-left:auto;color:var(--dim)}
+
+  /* center */
+  .main{overflow-y:auto}
+  .crumb{display:flex;align-items:center;gap:8px;padding:14px 22px 0;color:var(--faint);font-size:12.5px}
+  .crumb a{color:var(--muted);text-decoration:none} .crumb a:hover{color:var(--text)}
+  .ihead{padding:8px 22px 16px;border-bottom:1px solid var(--line)}
+  .ihead .row1{display:flex;align-items:center;gap:11px}
+  .iid{font-family:var(--mono);font-size:12px;color:var(--accent);background:var(--accent-soft);border:1px solid var(--accent-line);padding:1px 7px;border-radius:5px}
+  .ititle{font-size:19px;font-weight:600;letter-spacing:-.02em}
+  .pill{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:600;padding:2px 9px;border-radius:20px}
+  .pill .dot{width:6px;height:6px;border-radius:50%}
+  .pill.green{color:var(--green);background:var(--green-soft);border:1px solid rgba(70,196,106,.3)} .pill.green .dot{background:var(--green)}
+  .meta{display:flex;align-items:center;gap:16px;margin-top:11px;color:var(--muted);font-size:12.5px;flex-wrap:wrap}
+  .meta .k{color:var(--faint)} .meta b{color:var(--text);font-weight:600}
+  .cost{display:inline-flex;align-items:center;gap:7px;font-size:12px;padding:3px 10px;border-radius:6px;
+    color:var(--green);background:var(--green-soft);border:1px solid rgba(70,196,106,.25)}
+  .cost .save{color:var(--muted)} .cost .save b{color:var(--green)}
+
+  .tabs{display:flex;gap:2px;padding:0 22px;border-bottom:1px solid var(--line)}
+  .tab{padding:11px 12px;color:var(--muted);font-weight:500;font-size:13px;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}
+  .tab:hover{color:var(--text)}
+  .tab.on{color:var(--text);border-bottom-color:var(--accent)}
+  .pane{padding:20px 22px;display:none} .pane.on{display:block}
+
+  .sect{font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:var(--faint);font-weight:600;margin:6px 0 10px}
+  .charter{font-size:14px;color:#cfcfd6;max-width:62ch}
+  .acc{list-style:none;margin:18px 0 0;display:flex;flex-direction:column;gap:8px}
+  .acc li{display:flex;align-items:center;gap:9px;color:var(--muted);font-size:13px}
+  .acc .ck{width:15px;height:15px;border-radius:4px;background:var(--green-soft);border:1px solid rgba(70,196,106,.4);color:var(--green);display:flex;align-items:center;justify-content:center;font-size:10px}
+
+  /* why-blame code */
+  .code{margin-top:8px;border:1px solid var(--line);border-radius:var(--r);overflow:hidden;background:#0a0a0e;font-family:var(--mono);font-size:12.5px}
+  .code .cl{display:grid;grid-template-columns:42px 1fr;border-bottom:1px solid transparent}
+  .code .cl .ln{color:var(--dim);text-align:right;padding:2px 12px 2px 0;user-select:none;background:rgba(255,255,255,.015)}
+  .code .cl .ct{padding:2px 14px;white-space:pre;color:#c8c8d2}
+  .code .cl.hl{background:var(--accent-soft);position:relative;cursor:help}
+  .code .cl.hl .ct{color:#e9e9f2}
+  .kw{color:#c792ea}.fn{color:#82aaff}.str{color:#c3e88d}.cm{color:#5b5b67}
+  .blame{margin-top:0;border:1px solid var(--accent-line);border-radius:0 0 var(--r) var(--r);border-top:0;
+    background:linear-gradient(180deg,var(--accent-soft),rgba(110,108,246,.04));padding:12px 14px;font-family:var(--font)}
+  .blame .bh{display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--accent);font-weight:600;margin-bottom:7px}
+  .blame .grid{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-size:12px}
+  .blame .grid .k{color:var(--faint)} .blame .grid .v{color:var(--text)}
+  .blame .why{margin-top:9px;padding-top:9px;border-top:1px solid var(--line);color:var(--muted);font-size:12.5px;font-style:italic}
+
+  /* right rail */
+  .aside{border-left:1px solid var(--line);background:var(--bg-rail);overflow-y:auto;padding:16px 14px}
+  .card{border:1px solid var(--line);border-radius:var(--r);background:var(--panel);padding:13px;margin-bottom:12px}
+  .card .h{display:flex;align-items:center;gap:7px;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);font-weight:600;margin-bottom:10px}
+  .lp-row{display:flex;align-items:center;gap:8px;font-size:12.5px;padding:5px 0;color:var(--muted)}
+  .lp-row .id{font-family:var(--mono);font-size:11px;color:var(--accent)}
+  .lp-out{margin-top:9px;padding-top:9px;border-top:1px solid var(--line);display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text);font-weight:600}
+  .verd{display:flex;align-items:center;gap:9px;padding:7px 0;font-size:12.5px;color:var(--muted);border-bottom:1px solid var(--line)}
+  .verd:last-child{border-bottom:0}
+  .verd .lens{font-family:var(--mono);font-size:11px;color:var(--faint);width:64px}
+  .verd .ok{color:var(--green);font-weight:600;margin-left:auto}
+  .replay{display:flex;flex-direction:column;gap:3px;margin-top:4px}
+  .replay .step{display:flex;align-items:center;gap:9px;font-size:12px;color:var(--muted);padding:4px 6px;border-radius:5px}
+  .replay .step:hover{background:rgba(255,255,255,.03);color:var(--text)}
+  .replay .step .t{font-family:var(--mono);font-size:10.5px;color:var(--dim)}
+  .replay .step .d{width:6px;height:6px;border-radius:50%;background:var(--dim)}
+  .replay .step.cur .d{background:var(--accent)} .replay .step.cur{color:var(--text)}
+
+  /* footer */
+  .foot{display:flex;align-items:center;gap:18px;padding:0 16px;border-top:1px solid var(--line);background:var(--bg-rail);color:var(--faint);font-size:11.5px}
+  .foot .sp{flex:1}
+  .foot span{display:inline-flex;align-items:center;gap:6px}
+
+  /* cmd-k palette */
+  .overlay{position:fixed;inset:0;background:rgba(4,4,6,.62);backdrop-filter:blur(3px);display:none;align-items:flex-start;justify-content:center;padding-top:14vh;z-index:50}
+  .overlay.show{display:flex;animation:fade .12s ease}
+  @keyframes fade{from{opacity:0}to{opacity:1}}
+  .palette{width:560px;max-width:92vw;background:var(--panel-2);border:1px solid var(--line-3);border-radius:11px;
+    box-shadow:0 24px 70px -20px rgba(0,0,0,.8),0 0 0 1px rgba(255,255,255,.02);overflow:hidden;animation:pop .14s ease}
+  @keyframes pop{from{transform:translateY(-6px) scale(.99);opacity:.6}to{transform:none;opacity:1}}
+  .palette .pin{display:flex;align-items:center;gap:11px;padding:14px 16px;border-bottom:1px solid var(--line)}
+  .palette .pin .ic{color:var(--faint)} .palette .pin input{flex:1;background:none;border:0;outline:0;color:var(--text);font-size:15px;font-family:var(--font)}
+  .palette .pin input::placeholder{color:var(--faint)}
+  .pgrp{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);font-weight:600;padding:10px 16px 4px}
+  .pitem{display:flex;align-items:center;gap:11px;padding:8px 16px;color:var(--muted);cursor:pointer;font-size:13.5px}
+  .pitem.on,.pitem:hover{background:var(--accent-soft);color:var(--text)}
+  .pitem .ic{width:16px;color:var(--faint)} .pitem.on .ic{color:var(--accent)}
+  .pitem .id{font-family:var(--mono);font-size:11px;color:var(--faint)}
+  .pitem .kk{margin-left:auto}
+  .pfoot{display:flex;gap:14px;padding:9px 16px;border-top:1px solid var(--line);color:var(--faint);font-size:11px}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- top -->
+  <div class="topbar">
+    <div class="brand"><span class="logo"></span> hugit <span class="sep">/</span> <span class="repo">corelink-server</span></div>
+    <div class="cmdk" onclick="openK()"><span class="ic">⌘</span> Buscar ou executar… <span class="sp"></span> <kbd>⌘K</kbd></div>
+    <div class="right"><kbd>?</kbd> <span class="av"></span></div>
+  </div>
+
+  <div class="body">
+    <!-- left rail -->
+    <div class="rail">
+      <div class="rgrp">Comando</div>
+      <div class="nav"><span class="ic">▦</span> Mission Control <span class="kk"><kbd>g h</kbd></span></div>
+      <div class="nav"><span class="ic">≣</span> Ledger</div>
+      <div class="nav"><span class="ic">◎</span> Atenção <span class="ct">3</span></div>
+      <div class="nav"><span class="ic">⇲</span> Fila de landing</div>
+      <div class="rgrp">Trabalho</div>
+      <div class="nav on"><span class="ic">◆</span> Intents</div>
+      <div class="nav"><span class="ic">✓</span> CI · checks</div>
+      <div class="nav"><span class="ic">⌥</span> Campanhas</div>
+      <div class="rgrp">Código</div>
+      <div class="nav"><span class="ic">⊞</span> Arquivos</div>
+      <div class="nav"><span class="ic">⑂</span> Branches</div>
+      <div class="nav"><span class="ic">⟲</span> Sync · GitHub</div>
+    </div>
+
+    <!-- center: intent detail -->
+    <div class="main">
+      <div class="crumb"><a href="#">Intents</a> <span>›</span> <span class="mono">a31</span></div>
+      <div class="ihead">
+        <div class="row1">
+          <span class="iid">intent a31</span>
+          <span class="ititle">fix: sessão expira cedo no refresh do token</span>
+          <span class="pill green"><span class="dot"></span> Landed</span>
+        </div>
+        <div class="meta">
+          <span><span class="k">campanha</span> <b>auth-hardening</b></span>
+          <span><span class="k">agente</span> <b>opus-4.8</b></span>
+          <span><span class="k">claims</span> <b>2 paths</b></span>
+          <span class="cost">💸 custou <b>$0.03</b> <span class="save">· cache te salvou <b>$4.20 / 18 min</b></span></span>
+        </div>
+      </div>
+
+      <div class="tabs">
+        <div class="tab on" onclick="tab(this,'p-charter')">Charter</div>
+        <div class="tab" onclick="tab(this,'p-ctx')">Contexto</div>
+        <div class="tab" onclick="tab(this,'p-diff')">Why-blame</div>
+        <div class="tab" onclick="tab(this,'p-replay')">Replay</div>
+      </div>
+
+      <div id="p-charter" class="pane on">
+        <div class="sect">Charter</div>
+        <p class="charter">A sessão estava expirando ~5 min cedo porque o refresh usava o <span class="mono">iat</span> do token antigo em vez do novo. Corrigir o cálculo da janela e garantir que o refresh re-deriva a expiração do token emitido agora.</p>
+        <div class="sect" style="margin-top:24px">Acceptance</div>
+        <ul class="acc">
+          <li><span class="ck">✓</span> Sessão dura o TTL completo após refresh</li>
+          <li><span class="ck">✓</span> Teste de regressão: refresh em t-1min não encurta a janela</li>
+          <li><span class="ck">✓</span> Nenhum token aceito fora da janela válida</li>
+        </ul>
+      </div>
+
+      <div id="p-ctx" class="pane">
+        <div class="sect">Context snapshot <span style="color:var(--dim)">· o que o agente leu e pensou</span></div>
+        <p class="charter">Modelo <b style="color:var(--text)">opus-4.8</b> · leu <b style="color:var(--text)">7 arquivos</b> · 14 tool-calls · raciocínio e prompt versionados (redactados por política). Tudo replayable na aba ao lado.</p>
+      </div>
+
+      <!-- WHY-BLAME -->
+      <div id="p-diff" class="pane">
+        <div class="sect">Why-blame <span style="color:var(--dim)">· passe o olho na linha realçada — o porquê dela existir</span></div>
+        <div class="code">
+          <div class="cl"><span class="ln">41</span><span class="ct"><span class="kw">fn</span> <span class="fn">refresh</span>(old: &amp;Token) -&gt; Token {</span></div>
+          <div class="cl hl"><span class="ln">42</span><span class="ct">    <span class="kw">let</span> iat = <span class="fn">now</span>();  <span class="cm">// era: old.iat (bug)</span></span></div>
+          <div class="cl"><span class="ln">43</span><span class="ct">    Token { iat, exp: iat + TTL }</span></div>
+          <div class="cl"><span class="ln">44</span><span class="ct">}</span></div>
+        </div>
+        <div class="blame">
+          <div class="bh">◆ por que a linha 42 existe</div>
+          <div class="grid">
+            <span class="k">intent</span><span class="v"><span class="mono" style="color:var(--accent)">a31</span> · fix: sessão expira cedo no refresh</span>
+            <span class="k">modelo</span><span class="v">opus-4.8</span>
+            <span class="k">verdict</span><span class="v" style="color:var(--green)">APPROVE · 3 lentes · evidência anexa</span>
+            <span class="k">prova</span><span class="v" class="mono">test_refresh_full_ttl ✓</span>
+          </div>
+          <div class="why">"O refresh re-derivava <span class="mono">exp</span> do <span class="mono">iat</span> antigo, encurtando a janela. Tirei a expiração do instante de emissão atual (<span class="mono">now()</span>) — confirmado pelo teste de regressão."</div>
+        </div>
+      </div>
+
+      <div id="p-replay" class="pane">
+        <div class="sect">Session replay <span style="color:var(--dim)">· assista como foi construído</span></div>
+        <div class="replay">
+          <div class="step"><span class="d"></span><span class="t">00:00</span> leu <span class="mono">auth/token.rs</span>, <span class="mono">session.rs</span></div>
+          <div class="step"><span class="d"></span><span class="t">00:11</span> hipótese: <span class="mono">iat</span> reaproveitado no refresh</div>
+          <div class="step cur"><span class="d"></span><span class="t">00:24</span> editou linha 42 · rodou <span class="mono">cargo test</span></div>
+          <div class="step"><span class="d"></span><span class="t">00:39</span> verde · <span class="mono">intent seal</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- right rail -->
+    <div class="aside">
+      <!-- LAND PREVIEW -->
+      <div class="card" style="border-color:var(--accent-line)">
+        <div class="h" style="color:var(--accent)">🔮 Land preview</div>
+        <div class="lp-row"><span class="id">a31</span> fix sessão <span style="margin-left:auto;color:var(--green)">●</span></div>
+        <div class="lp-row"><span class="id">a2f</span> rate-limit <span style="margin-left:auto;color:var(--green)">●</span></div>
+        <div class="lp-row"><span class="id">a30</span> log de auth <span style="margin-left:auto;color:var(--green)">●</span></div>
+        <div class="lp-out">union dos 3 → <span class="pill green" style="margin-left:auto"><span class="dot"></span> verde, já testado</span></div>
+      </div>
+      <!-- VERDICTS -->
+      <div class="card">
+        <div class="h">Verdicts</div>
+        <div class="verd"><span class="lens">correctness</span> aprovado <span class="ok">APPROVE</span></div>
+        <div class="verd"><span class="lens">security</span> sem regressão <span class="ok">APPROVE</span></div>
+        <div class="verd"><span class="lens">repro</span> determinístico <span class="ok">APPROVE</span></div>
+      </div>
+      <!-- PROVENANCE -->
+      <div class="card">
+        <div class="h">Proveniência</div>
+        <div class="lp-row" style="padding:3px 0"><span class="k" style="color:var(--faint)">tree</span> <span class="mono" style="margin-left:auto;color:var(--muted)">a31f…9c</span></div>
+        <div class="lp-row" style="padding:3px 0"><span class="k" style="color:var(--faint)">runner</span> <span class="mono" style="margin-left:auto;color:var(--muted)">cl-rnr-02</span></div>
+        <div class="lp-row" style="padding:3px 0"><span class="k" style="color:var(--faint)">principal</span> <span class="mono" style="margin-left:auto;color:var(--muted)">gustavo→opus</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- footer keyboard bar (Linear signature) -->
+  <div class="foot">
+    <span><kbd>j</kbd> <kbd>k</kbd> navegar</span>
+    <span><kbd>⏎</kbd> abrir</span>
+    <span><kbd>⌘K</kbd> comandos</span>
+    <span class="sp"></span>
+    <span style="color:var(--green)">● main verde</span>
+    <span>sync ✓ GitHub</span>
+  </div>
+</div>
+
+<!-- Cmd-K palette -->
+<div class="overlay" id="ov" onclick="if(event.target===this)closeK()">
+  <div class="palette">
+    <div class="pin"><span class="ic">⌘</span><input id="pq" placeholder="Buscar intents, PRs, arquivos — ou executar um comando…" /></div>
+    <div class="pgrp">Ações</div>
+    <div class="pitem on"><span class="ic">⇲</span> Land batch atual <span class="kk"><kbd>L</kbd></span></div>
+    <div class="pitem"><span class="ic">🔮</span> Land preview (ver o futuro da main) <span class="kk"><kbd>P</kbd></span></div>
+    <div class="pitem"><span class="ic">◆</span> Why-blame nesta linha</div>
+    <div class="pgrp">Ir para</div>
+    <div class="pitem"><span class="ic">◎</span> Atenção <span class="id">3 itens</span></div>
+    <div class="pitem"><span class="ic">≣</span> Ledger</div>
+    <div class="pitem"><span class="ic">◆</span> intent a2f · rate-limit <span class="id">opus-4.8</span></div>
+    <div class="pfoot"><span><kbd>↑</kbd><kbd>↓</kbd> mover</span><span><kbd>⏎</kbd> selecionar</span><span><kbd>esc</kbd> fechar</span></div>
+  </div>
+</div>
+
+<script>
+  function openK(){document.getElementById('ov').classList.add('show');setTimeout(function(){document.getElementById('pq').focus()},30)}
+  function closeK(){document.getElementById('ov').classList.remove('show')}
+  function tab(el,id){
+    document.querySelectorAll('.tab').forEach(t=>t.classList.remove('on'));el.classList.add('on');
+    document.querySelectorAll('.pane').forEach(p=>p.classList.remove('on'));document.getElementById(id).classList.add('on');
+  }
+  document.addEventListener('keydown',function(e){
+    if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();openK()}
+    if(e.key==='Escape')closeK();
+  });
+</script>
+</body>
+</html>
