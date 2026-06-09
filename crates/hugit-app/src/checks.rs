@@ -21,8 +21,8 @@ pub enum ChecksClientError {
     Api(String),
 
     /// Installation token is absent or revoked — cannot write checks.
-    #[error("installation token absent or revoked for installation {installation_id}")]
-    TokenRevoked { installation_id: String },
+    #[error("installation token absent or revoked for repo {repo}")]
+    TokenRevoked { repo: String },
 }
 
 /// Checks API client.
@@ -76,7 +76,7 @@ impl ChecksClient {
     ) -> Result<ChecksWriteResponse, ChecksClientError> {
         // Fail-closed: token must be present before any work.
         let _token = installation_token.ok_or_else(|| ChecksClientError::TokenRevoked {
-            installation_id: request.repo.clone(),
+            repo: request.repo.clone(),
         })?;
 
         // Validate the request is well-formed.

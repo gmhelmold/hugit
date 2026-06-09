@@ -2,7 +2,7 @@
 //!
 //! Guards: n=10 external teams, ≥3 weeks real use, evaluation window ANCHORED
 //! to the first-10-paying-customers event and inside 90 days.
-//! Outside any guard → `InsufficiendOrOutOfWindow`, NEVER a pass.
+//! Outside any guard → `InsufficientOrOutOfWindow`, NEVER a pass.
 
 use serde::{Deserialize, Serialize};
 
