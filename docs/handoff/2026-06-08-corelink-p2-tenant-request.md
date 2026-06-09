@@ -99,6 +99,21 @@ ticket), the third is the secret and goes on the **runner box only**:
 PAT lives there because that's where checks execute + where the hugit secrets
 broker, C5b, will later take over from flat-file storage.)
 
+**Placing the PAT on the box, with correct perms** (run on `hugit-runner-01`; do
+NOT echo the PAT into shell history — paste it into the editor or use a here-doc
+from a secure source):
+
+```sh
+install -d -m 700 ~/.hugit/secrets/corelink            # dir, owner-only
+umask 177 && printf '%s' '<PAT>' > ~/.hugit/secrets/corelink/pat   # file mode 600
+chmod 600 ~/.hugit/secrets/corelink/pat                 # belt-and-suspenders
+# verify (prints the byte length only, never the value):
+wc -c < ~/.hugit/secrets/corelink/pat
+```
+
+The loader trims a trailing newline, so `printf` (no newline) or a normal editor
+save both work.
+
 ---
 
 ## 6. Definition of done (how we both confirm it works)
@@ -113,21 +128,49 @@ proves the wiring end-to-end without polluting the cache:
 3. A deliberate cross-tenant probe (a digest under a different tenant slug) → expect
    **403** → proves isolation.
 
-I provide this as a one-command check on the hugit side (see §7). Green on all
-three = P2 done; I flip the seams to live and run hugit's first self-hosted CI.
+All three probes run in **one gated test** — `corelink_ac_live_smoke` in
+`crates/hugit-checks/tests/corelink_ac_smoke.rs`. The exact command (run from the
+runner box `hugit-runner-01`, where the PAT file lives):
+
+```sh
+export HUGIT_CORELINK_AC_URL="<base url you gave me>"
+export HUGIT_CORELINK_TENANT="<tenant slug you gave me>"
+# PAT already at ~/.hugit/secrets/corelink/pat (mode 600) — see §5
+cargo test -p hugit-checks --test corelink_ac_smoke -- --nocapture
+```
+
+- **Success** = the test runs and the three probes pass (404 miss → 200 round-trip
+  hit → 403 cross-tenant). That is P2 done; I flip the seams to live and run hugit's
+  first self-hosted CI.
+- **Before provisioning** (env/PAT absent) the same test **cleanly SKIPS** with a
+  printed reason — so it can never go falsely green, and you can confirm right now
+  that nothing is waiting on the hugit side. (I run this; just telling you what it
+  does so the DoD is transparent.)
 
 ---
 
 ## 7. What is ALREADY done on the hugit side (so you know nothing is waiting on me)
 
-- `HttpAcClient` (in `hugit-checks`) speaks the §3 contract behind a trait;
-  content-address guard + fail-closed when unconfigured; 12 hermetic tests green.
-- A config **loader** reads `HUGIT_CORELINK_AC_URL` + `HUGIT_CORELINK_TENANT` +
-  the PAT file and builds the live client (fail-closed if any is missing).
-- The **smoke test** (§6) is wired, gated to run only when the env + PAT are
-  present (so it can't rot to green before you deliver).
-- Everything merges to `main` green by local cold-verify (GitHub Actions quota is
-  currently exhausted on our side — unrelated to this request).
+- `HttpAcClient` (`crates/hugit-checks/src/client/ac.rs`) speaks the §3 contract
+  behind a `HttpTransport` trait; the content-address guard (`verify_hit`) rejects a
+  200 whose record keys to a different `action_digest`; fail-closed (`NotWired`) when
+  unconfigured. Hermetically tested via a recording mock transport (`tests/ac_http.rs`).
+- A config **loader** `corelink_ac_from_env()` / `HttpAcClient::from_runtime()` reads
+  **exactly** these (the names are FROZEN consts in `ac.rs` — `ENV_AC_URL`,
+  `ENV_TENANT`, `ENV_PAT`, `ENV_PAT_FILE`, `DEFAULT_PAT_FILE_REL`, so this doc and the
+  code cannot drift):
+  - `HUGIT_CORELINK_AC_URL`, `HUGIT_CORELINK_TENANT`,
+  - PAT from `~/.hugit/secrets/corelink/pat` (preferred) → else env `HUGIT_CORELINK_PAT`
+    (override the file path with `HUGIT_CORELINK_PAT_FILE` for tests only).
+  It returns `NotConfigured` naming **which** piece is missing; the PAT is never
+  rendered in `Debug`/`Display`/errors (covered by a redaction test).
+- The **smoke test** `corelink_ac_live_smoke` (`tests/corelink_ac_smoke.rs`) is wired
+  and **gated** to run only when the env + PAT are all present — otherwise it SKIPS
+  with a printed reason (so it can't rot to green before you deliver).
+- Everything merges to `main` green by local cold-verify (fmt + clippy
+  `--workspace --all-targets --locked -D warnings` + test `--workspace --locked` +
+  `cargo audit`); GitHub Actions cloud CI is quota-paused on our side — unrelated to
+  this request.
 
 When the three values land, this goes live with **no further hugit code change** —
 just configuration. Ping me and I'll run §6 and report.
