@@ -38,6 +38,9 @@
   .subhead{display:flex;align-items:center;gap:12px;padding:11px 18px;border-bottom:1px solid var(--line)}
   .subhead h1{font-size:15px;font-weight:600} .subhead .ex{color:var(--faint);font-size:12.5px} .subhead .ex b{color:var(--muted)} .subhead .sp{flex:1}
   .mainstat{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--green);background:rgba(76,183,130,.1);border:1px solid rgba(76,183,130,.28);border-radius:20px;padding:3px 11px} .mainstat .dot{width:6px;height:6px;border-radius:50%;background:var(--green)}
+  .filters{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+  .fpill{font-size:12px;color:var(--muted);border:1px solid var(--line-2);border-radius:7px;padding:4px 10px;cursor:pointer} .fpill:hover{border-color:var(--line-3);color:var(--text)} .fpill.on{color:var(--text);background:rgba(255,255,255,.05);border-color:var(--line-3);font-weight:500} .fpill b{color:var(--faint);font-weight:600;margin-left:4px} .fpill.on b{color:var(--muted)}
+  .fsearch{font-size:12px;color:var(--faint);border:1px solid var(--line-2);border-radius:7px;padding:4px 10px;min-width:150px}
 
   /* stage = board (flex) + drawer (right) */
   .stage{display:flex;overflow:hidden;height:100%}
@@ -98,6 +101,12 @@
   .lcard{border:1px solid var(--line);border-radius:var(--r);background:var(--panel);padding:13px;margin-top:10px}
   .kv{display:flex;align-items:center;gap:9px;font-size:12.5px;color:var(--muted);padding:4px 0} .kv .v{margin-left:auto;color:var(--text-2);font-weight:500} .kv .v.g{color:var(--green)}
   .bp{width:100%;background:var(--accent);color:#fff;border:0;border-radius:7px;padding:9px;font-weight:600;font-size:13px;cursor:pointer;font-family:var(--font);margin-top:6px}
+  .bc{font-size:12.5px;color:var(--muted);display:inline-flex;align-items:center;gap:8px} .bc a{color:var(--muted);cursor:pointer} .bc a:hover{color:var(--text)} .bc .sep{color:var(--dim)} .bc .num{font-family:var(--mono);color:var(--text-2)}
+  .ib{width:28px;height:26px;border-radius:6px;border:1px solid var(--line-2);color:var(--muted);background:transparent;cursor:pointer;font-size:13px} .ib:hover{color:var(--text);border-color:var(--line-3)}
+  .filelist{border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+  .filelist .frow{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:12px;color:var(--text-2);cursor:pointer} .filelist .frow:last-child{border:0} .filelist .frow:hover{background:var(--panel-2)} .filelist .frow .fc{margin-left:auto} .filelist .frow .a{color:var(--green)} .filelist .frow .d{color:var(--red)}
+  body.max .drawer{position:fixed;inset:0;width:auto;flex:none;z-index:40;border-left:0}
+  body.max .din{max-width:1060px;margin:0 auto;width:auto}
 
   .legend{display:flex;gap:14px;align-items:center;padding:8px 18px;border-top:1px solid var(--line);font-size:11.5px;color:var(--faint);flex-wrap:wrap} .legend span{display:inline-flex;align-items:center;gap:6px} .legend .cd{width:8px;height:8px;border-radius:50%}
 </style>
@@ -113,19 +122,25 @@
   <div class="tabbar">
     <div class="rtab"><span class="ic">&lt;&gt;</span> Code</div>
     <div class="rtab"><span class="ic">○</span> Issues <span class="ext">↗</span></div>
-    <div class="rtab"><span class="ic">⇄</span> Pull requests <span class="ct">24</span></div>
+    <div class="rtab on"><span class="ic">⇲</span> Landing (PRs) <span class="ct">24</span></div>
     <div class="rtab"><span class="ic">✓</span> Checks</div>
-    <div class="rtab on"><span class="ic">⇲</span> Landing</div>
     <div class="rtab"><span class="ic">⛨</span> Security</div>
     <div class="rtab"><span class="ic">▦</span> Insights</div>
     <div class="rtab"><span class="ic">⚙</span> Settings</div>
   </div>
 
   <div class="subhead">
-    <h1>Landing</h1>
-    <span class="ex">cada card é um <b>PR</b> · a <b style="color:var(--muted)">cor</b> é a campanha · mesma campanha = testados <b>juntos</b>. Clique pra abrir →</span>
+    <div class="filters">
+      <span class="fpill on">Abertos <b>24</b></span>
+      <span class="fpill">Na fila <b>5</b></span>
+      <span class="fpill">Testando <b>4</b></span>
+      <span class="fpill">Bloqueados <b>1</b></span>
+      <span class="fpill">Merged <b>9</b></span>
+      <span class="fpill">Draft <b>2</b></span>
+      <span class="fsearch">⌕ filtrar por autor, label, campanha…</span>
+    </div>
     <span class="sp"></span>
-    <span class="mainstat"><span class="dot"></span> main verde · 9 PRs entraram hoje · 0 quebraram</span>
+    <span class="mainstat"><span class="dot"></span> main verde · 9 entraram hoje · 0 quebraram</span>
   </div>
 
   <div class="stage">
@@ -181,7 +196,12 @@
 
     <!-- PR DRAWER: opens on the right, all PR info inside -->
     <aside class="drawer"><div class="din">
-      <div class="dx"><button class="close" onclick="closePR()">✕</button><span class="num" id="d-num">#128</span><span class="sp"></span><kbd>esc</kbd></div>
+      <div class="dx">
+        <span class="bc"><a onclick="closePR()">Landing</a> <span class="sep">›</span> <span class="num" id="d-num">#128</span></span>
+        <span class="sp"></span>
+        <button class="ib" onclick="maxPR()" title="maximizar (tela cheia)">⤢</button>
+        <button class="ib" onclick="closePR()" title="fechar (esc)">✕</button>
+      </div>
       <div class="dh1" id="d-title">fix: sessão expira cedo no refresh do token</div>
       <span class="dpill"><span class="dot"></span> na fila de landing · bundle auth-hardening</span>
       <div class="dmeta"><b>opus-4.8</b> quer mergear <span class="mono">campaign/auth-hardening</span> → <span class="mono">main</span> · <b>3 intents</b> · 14 arquivos · <span style="color:var(--green)">+420</span> <span style="color:var(--red)">−90</span></div>
@@ -231,6 +251,22 @@
       <div class="intent"><div class="ih" onclick="tg(this)"><span class="ico">●</span><div><div class="ti">rate-limit por tenant no edge</div><div class="mt"><span class="id">a2f</span> · <b>opus-4.8</b> · <span class="mono">b07c1a</span></div></div><span class="chev">›</span></div><div class="ibody"><div class="charter">Limite por tenant no edge. Charter + context.json + diff + verdicts aqui dentro.</div></div></div>
       <div class="intent"><div class="ih" onclick="tg(this)"><span class="ico">●</span><div><div class="ti">log estruturado de auth</div><div class="mt"><span class="id">a30</span> · <b>sonnet-4.6</b> · <span class="mono">c33e90</span></div></div><span class="chev">›</span></div><div class="ibody"><div class="charter">Eventos de auth pro SIEM. Charter + context.json + diff + verdicts aqui dentro.</div></div></div>
 
+      <div class="dsec">Arquivos alterados · 14 · <span style="color:var(--green)">+420</span> <span style="color:var(--red)">−90</span> <span style="color:var(--dim);font-weight:400;text-transform:none;letter-spacing:0">— maximize ⤢ pra ler 500+ linhas confortável</span></div>
+      <div class="filelist">
+        <div class="frow"><span>crates/auth/src/token.rs</span><span class="fc"><b class="a">+12</b> <b class="d">−4</b></span></div>
+        <div class="frow"><span>crates/auth/src/refresh.rs</span><span class="fc"><b class="a">+38</b> <b class="d">−9</b></span></div>
+        <div class="frow"><span>crates/edge/src/ratelimit.rs</span><span class="fc"><b class="a">+204</b> <b class="d">−12</b></span></div>
+        <div class="frow" style="color:var(--faint)"><span>… +11 arquivos</span><span class="fc"></span></div>
+      </div>
+      <div class="code" style="margin-top:10px">
+        <div class="fn">crates/auth/src/token.rs · +12 −4</div>
+        <div class="cl"><span class="ln">40</span><span class="ct">  pub fn refresh(old: &amp;Token) -&gt; Token {</span></div>
+        <div class="cl del"><span class="ln">41</span><span class="ct">-     let iat = old.iat;</span></div>
+        <div class="cl add"><span class="ln">41</span><span class="ct">+     let iat = now();        <span class="cm">// from the new token</span></span></div>
+        <div class="cl"><span class="ln">42</span><span class="ct">      Token { iat, exp: iat + TTL }</span></div>
+        <div class="cl"><span class="ln">43</span><span class="ct">  }</span></div>
+      </div>
+
       <div class="dsec">Landing</div>
       <div class="lcard">
         <div class="kv">union test <span class="v g">verde</span></div>
@@ -262,9 +298,10 @@
     document.getElementById('d-title').textContent = card.querySelector('.title').textContent;
     document.body.classList.add('open');
   }
-  function closePR(){document.body.classList.remove('open');document.querySelectorAll('.card.sel').forEach(c=>c.classList.remove('sel'))}
+  function closePR(){document.body.classList.remove('open');document.body.classList.remove('max');document.querySelectorAll('.card.sel').forEach(c=>c.classList.remove('sel'))}
+  function maxPR(){document.body.classList.toggle('max')}
   function tg(el){el.parentElement.classList.toggle('open')}
-  document.addEventListener('keydown',e=>{if(e.key==='Escape')closePR()});
+  document.addEventListener('keydown',e=>{if(e.key==='Escape'){if(document.body.classList.contains('max')){document.body.classList.remove('max')}else{closePR()}}});
 </script>
 </body>
 </html>
