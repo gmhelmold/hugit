@@ -149,7 +149,7 @@ pub fn ingest_webhook(
     verify_x_hub_signature_256(secret, raw_payload, Some(verified_header))?;
 
     let payload_str = std::str::from_utf8(raw_payload)
-        .map(|s| s.to_string())
+        .map(str::to_string)
         .map_err(|e| WebhookError::PayloadParse(e.to_string()))?;
 
     Ok(SignedEventEnvelope {
@@ -194,7 +194,7 @@ impl WebhookProcessor {
     /// Retrieve the installation token, if present and not revoked.
     pub fn get_token(&self, installation_id: &str) -> Option<String> {
         let store = self.token_store.lock().expect("token_store lock poisoned");
-        store.get(installation_id).and_then(|v| v.clone())
+        store.get(installation_id).and_then(Clone::clone)
     }
 
     /// Process a raw inbound webhook request.
