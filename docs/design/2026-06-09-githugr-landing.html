@@ -3,16 +3,15 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>githugr — Landing (kanban)</title>
+<title>githugr — Landing (kanban + PR drawer)</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
 <style>
   :root{
-    --bg:#101013; --rail:#0c0c0f; --col:#0e0e12; --card:#16161a; --card-2:#1c1c22;
+    --bg:#101013; --rail:#0c0c0f; --col:#0e0e12; --card:#16161a; --card-2:#1c1c22; --panel:#16161a; --panel-2:#1c1c22;
     --line:rgba(255,255,255,.06); --line-2:rgba(255,255,255,.09); --line-3:rgba(255,255,255,.14);
     --text:#f3f4f5; --text-2:#d0d2d6; --muted:#8a8f98; --faint:#626572; --dim:#44464f;
-    --accent:#5e6ad2; --green:#4cb782; --red:#d96c6c;
-    /* muted campaign hues — used ONLY as a thin edge + a small dot (subliminal grouping, not decoration) */
+    --accent:#5e6ad2; --accent-soft:rgba(94,106,210,.15); --green:#4cb782; --green-soft:rgba(76,183,130,.1); --red:#d96c6c;
     --c-auth:#7079c9; --c-perf:#b89a5a; --c-fabric:#5a9aa8; --c-obs:#b07a86; --c-infra:#7f8694;
     --font:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; --mono:'JetBrains Mono',ui-monospace,Menlo,monospace; --r:8px;
   }
@@ -21,7 +20,7 @@
   body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:13.5px;line-height:1.5;-webkit-font-smoothing:antialiased;height:100vh;overflow:hidden;letter-spacing:-.005em}
   kbd{font-family:var(--mono);font-size:10.5px;color:var(--muted);background:rgba(255,255,255,.035);border:1px solid var(--line-2);border-radius:5px;padding:1px 5px}
   .mono{font-family:var(--mono)} a{color:inherit;text-decoration:none}
-  .app{display:grid;grid-template-rows:46px 44px auto 1fr;height:100vh}
+  .app{display:grid;grid-template-rows:46px 44px auto 1fr auto;height:100vh}
 
   .topbar{display:flex;align-items:center;gap:14px;padding:0 14px;border-bottom:1px solid var(--line);background:var(--rail)}
   .brand{display:flex;align-items:center;gap:8px;font-weight:600}
@@ -40,16 +39,18 @@
   .subhead h1{font-size:15px;font-weight:600} .subhead .ex{color:var(--faint);font-size:12.5px} .subhead .ex b{color:var(--muted)} .subhead .sp{flex:1}
   .mainstat{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--green);background:rgba(76,183,130,.1);border:1px solid rgba(76,183,130,.28);border-radius:20px;padding:3px 11px} .mainstat .dot{width:6px;height:6px;border-radius:50%;background:var(--green)}
 
-  .board{display:flex;gap:14px;padding:16px 18px;overflow-x:auto;align-items:flex-start;height:100%}
-  .column{flex:0 0 308px;display:flex;flex-direction:column;background:var(--col);border:1px solid var(--line);border-radius:10px;max-height:100%}
+  /* stage = board (flex) + drawer (right) */
+  .stage{display:flex;overflow:hidden;height:100%}
+  .board{flex:1;display:flex;gap:14px;padding:16px 18px;overflow-x:auto;align-items:flex-start}
+  .column{flex:0 0 300px;display:flex;flex-direction:column;background:var(--col);border:1px solid var(--line);border-radius:10px;max-height:100%}
   .ch{display:flex;align-items:center;gap:9px;padding:12px 14px;border-bottom:1px solid var(--line)}
   .ch .d{width:8px;height:8px;border-radius:50%} .ch .t{font-size:13px;font-weight:600} .ch .n{margin-left:auto;font-size:11px;color:var(--muted);background:rgba(255,255,255,.06);border-radius:20px;padding:0 7px;font-weight:600}
   .ch.queue .d{background:var(--dim)} .ch.test .d{background:var(--accent)} .ch.block .d{background:var(--red)} .ch.done .d{background:var(--green)}
   .cards{padding:10px;display:flex;flex-direction:column;gap:10px;overflow-y:auto}
 
-  /* PR card — left edge = campaign color (subliminal grouping) */
   .card{background:var(--card);border:1px solid var(--line-2);border-left:3px solid var(--cc,var(--dim));border-radius:var(--r);padding:11px 12px;cursor:pointer;transition:.12s}
   .card:hover{background:var(--card-2);border-color:var(--line-3);transform:translateY(-1px)}
+  .card.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
   .card .c1{display:flex;align-items:center;gap:8px;margin-bottom:6px}
   .card .num{font-family:var(--mono);font-size:11px;color:var(--faint)}
   .card .camp{margin-left:auto;display:inline-flex;align-items:center;gap:5px;font-size:10.5px;color:var(--muted)} .card .camp .cd{width:7px;height:7px;border-radius:50%;background:var(--cc)}
@@ -57,19 +58,48 @@
   .card .c2{display:flex;align-items:center;gap:9px;margin-top:9px;font-size:11.5px;color:var(--faint)} .card .av{width:18px;height:18px} .card .sp{flex:1} .card .ints b{color:var(--muted)}
   .card .ok{color:var(--green)} .card .tm{color:var(--dim)}
 
-  /* BUNDLE = a campaign's PRs tested together (the subliminal "why they're grouped") */
-  .bundle{border:1px solid var(--line-2);border-radius:10px;overflow:hidden;background:rgba(255,255,255,.012)}
-  .bundle{box-shadow:inset 3px 0 0 0 var(--cc)}
+  .bundle{border:1px solid var(--line-2);border-radius:10px;overflow:hidden;box-shadow:inset 3px 0 0 0 var(--cc)}
   .bh{display:flex;align-items:center;gap:8px;padding:10px 12px 9px 14px;background:rgba(255,255,255,.02);border-bottom:1px solid var(--line)}
   .bh .cd{width:9px;height:9px;border-radius:50%;background:var(--cc)} .bh .nm{font-size:12.5px;font-weight:600;color:var(--text-2)} .bh .sp{flex:1} .bh .pct{font-family:var(--mono);font-size:11px;color:var(--accent);font-weight:600}
   .bsub{font-size:10.5px;color:var(--faint);padding:0 14px 8px;background:rgba(255,255,255,.02);border-bottom:1px solid var(--line)}
   .bbar{height:3px;background:rgba(255,255,255,.06)} .bbar i{display:block;height:100%;background:var(--accent)}
   .bcards{padding:9px;display:flex;flex-direction:column;gap:8px}
-  .bcards .card{cursor:pointer;border-left-width:3px}
-
   .card .blk{margin-top:8px;font-size:11px;color:var(--red);background:rgba(217,108,108,.08);border:1px solid rgba(217,108,108,.2);border-radius:6px;padding:6px 9px;line-height:1.4}
-  .legend{display:flex;gap:14px;align-items:center;padding:8px 18px;border-top:1px solid var(--line);font-size:11.5px;color:var(--faint);flex-wrap:wrap}
-  .legend span{display:inline-flex;align-items:center;gap:6px} .legend .cd{width:8px;height:8px;border-radius:50%}
+
+  /* DRAWER — opens on the right, fills the free space */
+  .drawer{flex:0 0 0;width:0;overflow:hidden;border-left:1px solid var(--line);background:var(--rail);transition:width .2s ease,flex-basis .2s ease}
+  body.open .drawer{flex:0 0 560px;width:560px}
+  @media(max-width:1200px){body.open .drawer{flex:0 0 460px;width:460px}}
+  .din{width:560px;height:100%;overflow-y:auto;padding:18px 20px 40px}
+  .dx{position:sticky;top:-18px;background:var(--rail);padding:4px 0 12px;margin:-4px 0 0;z-index:3;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--line)}
+  .dx .close{width:26px;height:26px;border-radius:6px;border:1px solid var(--line-2);color:var(--muted);background:transparent;cursor:pointer;font-size:14px} .dx .num{font-family:var(--mono);font-size:12px;color:var(--faint)} .dx .sp{flex:1} .dx kbd{margin-left:auto}
+  .dh1{font-size:18px;font-weight:600;letter-spacing:-.02em;margin:14px 0 8px}
+  .dpill{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:500;padding:2px 10px;border-radius:20px;color:var(--accent);background:var(--accent-soft);border:1px solid rgba(94,106,210,.3)} .dpill .dot{width:6px;height:6px;border-radius:50%;background:var(--accent)}
+  .dmeta{color:var(--muted);font-size:12.5px;margin:8px 0 0} .dmeta b{color:var(--text-2)} .dmeta .mono{color:var(--muted)}
+  .better{display:flex;flex-direction:column;gap:6px;margin:14px 0}
+  .chip{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-2);background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:7px 11px} .chip .i{color:var(--green)} .chip b{color:var(--text)} .chip .l{color:var(--faint);margin-left:auto}
+
+  .dsec{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);font-weight:600;margin:22px 0 9px}
+  .intent{border:1px solid var(--line);border-radius:var(--r);background:var(--panel);margin-bottom:9px;overflow:hidden}
+  .ih{display:grid;grid-template-columns:20px 1fr auto;align-items:center;gap:11px;padding:11px 13px;cursor:pointer} .ih:hover{background:var(--panel-2)}
+  .ih .ico{color:var(--green);text-align:center} .ih .ico.t{color:var(--accent)}
+  .ih .ti{font-size:13.5px;font-weight:500;color:var(--text)} .ih .mt{font-size:11.5px;color:var(--faint);margin-top:2px} .ih .mt .id{font-family:var(--mono);color:var(--muted)} .ih .mt b{color:var(--muted)}
+  .ih .chev{color:var(--faint);transition:.15s} .intent.open .ih .chev{transform:rotate(90deg)}
+  .ibody{display:none;border-top:1px solid var(--line);padding:14px 13px} .intent.open .ibody{display:block}
+  .blk{margin-bottom:15px} .blk:last-child{margin-bottom:0}
+  .bt{font-size:10.5px;letter-spacing:.04em;text-transform:uppercase;color:var(--faint);font-weight:600;margin-bottom:7px} .bt .g{text-transform:none;letter-spacing:0;font-weight:400;color:var(--dim)}
+  .charter{font-size:13px;color:var(--text-2)}
+  .code{border:1px solid var(--line);border-radius:var(--r);overflow:hidden;background:#0d0d10;font-family:var(--mono);font-size:11.5px}
+  .code .fn{padding:6px 12px;border-bottom:1px solid var(--line);background:var(--rail);color:var(--faint);font-size:10.5px}
+  .cl{display:grid;grid-template-columns:30px 1fr} .cl .ln{color:var(--dim);text-align:right;padding:1px 8px 1px 0} .cl .ct{padding:1px 12px;white-space:pre;color:var(--text-2)}
+  .cl.add{background:rgba(76,183,130,.08)} .cl.add .ct{color:#bfe6cf} .cl.del{background:rgba(217,108,108,.08)} .cl.del .ct{color:#e9b6b6} .cl.hl{background:rgba(94,106,210,.1);border-left:2px solid var(--accent)} .cl.hl .ln{padding-left:0} .cm{color:var(--faint)}
+  .acts{margin-top:8px;display:flex;gap:7px;flex-wrap:wrap} .bg{background:transparent;color:var(--text);border:1px solid var(--line-2);border-radius:6px;padding:5px 10px;font-size:11.5px;cursor:pointer;font-family:var(--font)}
+  .verd{display:flex;align-items:center;gap:9px;font-size:12px;color:var(--muted);padding:5px 0;border-bottom:1px solid var(--line)} .verd:last-child{border:0} .verd .lens{font-family:var(--mono);font-size:10.5px;color:var(--faint);width:78px} .verd .ok{margin-left:auto;color:var(--green)}
+  .lcard{border:1px solid var(--line);border-radius:var(--r);background:var(--panel);padding:13px;margin-top:10px}
+  .kv{display:flex;align-items:center;gap:9px;font-size:12.5px;color:var(--muted);padding:4px 0} .kv .v{margin-left:auto;color:var(--text-2);font-weight:500} .kv .v.g{color:var(--green)}
+  .bp{width:100%;background:var(--accent);color:#fff;border:0;border-radius:7px;padding:9px;font-weight:600;font-size:13px;cursor:pointer;font-family:var(--font);margin-top:6px}
+
+  .legend{display:flex;gap:14px;align-items:center;padding:8px 18px;border-top:1px solid var(--line);font-size:11.5px;color:var(--faint);flex-wrap:wrap} .legend span{display:inline-flex;align-items:center;gap:6px} .legend .cd{width:8px;height:8px;border-radius:50%}
 </style>
 </head>
 <body>
@@ -93,85 +123,124 @@
 
   <div class="subhead">
     <h1>Landing</h1>
-    <span class="ex">cada card é um <b>PR</b> · a <b style="color:var(--muted)">cor</b> é a campanha · PRs da <b>mesma campanha</b> são testados <b>juntos</b> (um bundle). Clique pra abrir.</span>
+    <span class="ex">cada card é um <b>PR</b> · a <b style="color:var(--muted)">cor</b> é a campanha · mesma campanha = testados <b>juntos</b>. Clique pra abrir →</span>
     <span class="sp"></span>
     <span class="mainstat"><span class="dot"></span> main verde · 9 PRs entraram hoje · 0 quebraram</span>
   </div>
 
-  <div class="board">
+  <div class="stage">
+    <div class="board">
 
-    <!-- na fila — cor antecipa em qual bundle/campanha vai cair -->
-    <div class="column">
-      <div class="ch queue"><span class="d"></span><span class="t">Na fila</span><span class="n">4</span></div>
-      <div class="cards">
-        <div class="card" style="--cc:var(--c-fabric)">
-          <div class="c1"><span class="num">#131</span><span class="camp"><span class="cd"></span> fabric</span></div>
-          <div class="title">cache-warm no boot do runner</div>
-          <div class="c2"><span class="av"></span> opus-4.8 <span class="sp"></span><span class="ints">⌥ <b>2</b></span></div>
-        </div>
-        <div class="card" style="--cc:var(--c-fabric)">
-          <div class="c1"><span class="num">#134</span><span class="camp"><span class="cd"></span> fabric</span></div>
-          <div class="title">lease com expiry no runner</div>
-          <div class="c2"><span class="av"></span> opus-4.8 <span class="sp"></span><span class="ints">⌥ <b>1</b></span></div>
-        </div>
-        <div class="card" style="--cc:var(--c-obs)">
-          <div class="c1"><span class="num">#132</span><span class="camp"><span class="cd"></span> obs</span></div>
-          <div class="title">métricas de hit-rate no dashboard</div>
-          <div class="c2"><span class="av"></span> sonnet-4.6 <span class="sp"></span><span class="ints">⌥ <b>1</b></span></div>
+      <div class="column">
+        <div class="ch queue"><span class="d"></span><span class="t">Na fila</span><span class="n">3</span></div>
+        <div class="cards">
+          <div class="card" style="--cc:var(--c-fabric)" onclick="openPR(this)"><div class="c1"><span class="num">#131</span><span class="camp"><span class="cd"></span> fabric</span></div><div class="title">cache-warm no boot do runner</div><div class="c2"><span class="av"></span> opus-4.8 <span class="sp"></span><span class="ints">⌥ <b>2</b></span></div></div>
+          <div class="card" style="--cc:var(--c-fabric)" onclick="openPR(this)"><div class="c1"><span class="num">#134</span><span class="camp"><span class="cd"></span> fabric</span></div><div class="title">lease com expiry no runner</div><div class="c2"><span class="av"></span> opus-4.8 <span class="sp"></span><span class="ints">⌥ <b>1</b></span></div></div>
+          <div class="card" style="--cc:var(--c-obs)" onclick="openPR(this)"><div class="c1"><span class="num">#132</span><span class="camp"><span class="cd"></span> obs</span></div><div class="title">métricas de hit-rate no dashboard</div><div class="c2"><span class="av"></span> sonnet-4.6 <span class="sp"></span><span class="ints">⌥ <b>1</b></span></div></div>
         </div>
       </div>
-    </div>
 
-    <!-- testando: PRs agrupados em BUNDLES por campanha = a resposta subliminar -->
-    <div class="column">
-      <div class="ch test"><span class="d"></span><span class="t">Testando juntos</span><span class="n">2 bundles</span></div>
-      <div class="cards">
-
-        <div class="bundle" style="--cc:var(--c-auth)">
-          <div class="bh"><span class="cd"></span><span class="nm">auth-hardening</span><span class="sp"></span><span class="pct">78%</span></div>
-          <div class="bsub">3 PRs da mesma campanha → testados como um conjunto (union)</div>
-          <div class="bbar"><i style="width:78%"></i></div>
-          <div class="bcards">
-            <div class="card" style="--cc:var(--c-auth)"><div class="c1"><span class="num">#128</span></div><div class="title">fix: sessão expira cedo no refresh</div><div class="c2"><span class="av"></span> opus-4.8 <span class="sp"></span><span class="ints">⌥ <b>3</b></span></div></div>
-            <div class="card" style="--cc:var(--c-auth)"><div class="c1"><span class="num">#130</span></div><div class="title">rate-limit por tenant no edge</div><div class="c2"><span class="av"></span> opus-4.8 <span class="sp"></span><span class="ints">⌥ <b>1</b></span></div></div>
-            <div class="card" style="--cc:var(--c-auth)"><div class="c1"><span class="num">#133</span></div><div class="title">log estruturado de auth</div><div class="c2"><span class="av"></span> sonnet-4.6 <span class="sp"></span><span class="ints">⌥ <b>1</b></span></div></div>
+      <div class="column">
+        <div class="ch test"><span class="d"></span><span class="t">Testando juntos</span><span class="n">2 bundles</span></div>
+        <div class="cards">
+          <div class="bundle" style="--cc:var(--c-auth)">
+            <div class="bh"><span class="cd"></span><span class="nm">auth-hardening</span><span class="sp"></span><span class="pct">78%</span></div>
+            <div class="bsub">3 PRs da mesma campanha → testados como um conjunto</div>
+            <div class="bbar"><i style="width:78%"></i></div>
+            <div class="bcards">
+              <div class="card" style="--cc:var(--c-auth)" onclick="openPR(this)"><div class="c1"><span class="num">#128</span></div><div class="title">fix: sessão expira cedo no refresh</div><div class="c2"><span class="av"></span> opus-4.8 <span class="sp"></span><span class="ints">⌥ <b>3</b></span></div></div>
+              <div class="card" style="--cc:var(--c-auth)" onclick="openPR(this)"><div class="c1"><span class="num">#130</span></div><div class="title">rate-limit por tenant no edge</div><div class="c2"><span class="av"></span> opus-4.8 <span class="sp"></span><span class="ints">⌥ <b>1</b></span></div></div>
+              <div class="card" style="--cc:var(--c-auth)" onclick="openPR(this)"><div class="c1"><span class="num">#133</span></div><div class="title">log estruturado de auth</div><div class="c2"><span class="av"></span> sonnet-4.6 <span class="sp"></span><span class="ints">⌥ <b>1</b></span></div></div>
+            </div>
+          </div>
+          <div class="bundle" style="--cc:var(--c-perf)">
+            <div class="bh"><span class="cd"></span><span class="nm">perf</span><span class="sp"></span><span class="pct">62%</span></div>
+            <div class="bsub">1 PR → lane paralela (claims disjuntas)</div>
+            <div class="bbar"><i style="width:62%"></i></div>
+            <div class="bcards"><div class="card" style="--cc:var(--c-perf)" onclick="openPR(this)"><div class="c1"><span class="num">#129</span></div><div class="title">índice em sessions.tenant_id</div><div class="c2"><span class="av"></span> opus-4.8 <span class="sp"></span><span class="ints">⌥ <b>1</b></span></div></div></div>
           </div>
         </div>
+      </div>
 
-        <div class="bundle" style="--cc:var(--c-perf)">
-          <div class="bh"><span class="cd"></span><span class="nm">perf</span><span class="sp"></span><span class="pct">62%</span></div>
-          <div class="bsub">1 PR → testado em lane paralela (claims disjuntas de auth)</div>
-          <div class="bbar"><i style="width:62%"></i></div>
-          <div class="bcards">
-            <div class="card" style="--cc:var(--c-perf)"><div class="c1"><span class="num">#129</span></div><div class="title">índice em sessions.tenant_id</div><div class="c2"><span class="av"></span> opus-4.8 <span class="sp"></span><span class="ints">⌥ <b>1</b></span></div></div>
+      <div class="column">
+        <div class="ch block"><span class="d"></span><span class="t">Bloqueado</span><span class="n">1</span></div>
+        <div class="cards">
+          <div class="card" style="--cc:var(--c-perf)" onclick="openPR(this)"><div class="c1"><span class="num">#125</span><span class="camp"><span class="cd"></span> perf</span></div><div class="title">migração do schema de sessões</div><div class="c2"><span class="av"></span> opus-4.8 <span class="sp"></span><span class="ints">⌥ <b>2</b></span></div><div class="blk">⚑ conflitou com #133 — voltou ao autor. Você decide.</div></div>
+        </div>
+      </div>
+
+      <div class="column">
+        <div class="ch done"><span class="d"></span><span class="t">Pousado hoje</span><span class="n">9</span></div>
+        <div class="cards">
+          <div class="card" style="--cc:var(--c-infra)" onclick="openPR(this)"><div class="c1"><span class="num">#124</span></div><div class="title">fix null deref no parser de manifest</div><div class="c2"><span class="ok">● entrou na main</span> <span class="sp"></span><span class="tm">há 22min</span></div></div>
+          <div class="card" style="--cc:var(--c-infra)" onclick="openPR(this)"><div class="c1"><span class="num">#122</span></div><div class="title">bump ureq 2.12 + audit</div><div class="c2"><span class="ok">● entrou na main</span> <span class="sp"></span><span class="tm">há 40min</span></div></div>
+          <div class="card" style="--cc:var(--c-obs)" onclick="openPR(this)"><div class="c1"><span class="num">#119</span></div><div class="title">doc: handoff P2 do CoreLink</div><div class="c2"><span class="ok">● entrou na main</span> <span class="sp"></span><span class="tm">há 1h</span></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- PR DRAWER: opens on the right, all PR info inside -->
+    <aside class="drawer"><div class="din">
+      <div class="dx"><button class="close" onclick="closePR()">✕</button><span class="num" id="d-num">#128</span><span class="sp"></span><kbd>esc</kbd></div>
+      <div class="dh1" id="d-title">fix: sessão expira cedo no refresh do token</div>
+      <span class="dpill"><span class="dot"></span> na fila de landing · bundle auth-hardening</span>
+      <div class="dmeta"><b>opus-4.8</b> quer mergear <span class="mono">campaign/auth-hardening</span> → <span class="mono">main</span> · <b>3 intents</b> · 14 arquivos · <span style="color:var(--green)">+420</span> <span style="color:var(--red)">−90</span></div>
+
+      <div class="better">
+        <div class="chip"><span class="i">●</span> union-test <b>verde</b> <span class="l">testado junto com a campanha</span></div>
+        <div class="chip">💸 verificado por <b>$0.04</b> <span class="l">cache poupou $3.10/14min</span></div>
+        <div class="chip">🛡️ <b>3/3 intents atestados</b> <span class="l">modelo+prompt+prova assinados</span></div>
+      </div>
+
+      <div class="dsec">Intents (commits) · 3</div>
+
+      <div class="intent open">
+        <div class="ih" onclick="tg(this)"><span class="ico t">◑</span><div><div class="ti">fix: sessão expira cedo no refresh</div><div class="mt"><span class="id">a31</span> · <b>opus-4.8</b> · <span class="mono">a31f9c</span></div></div><span class="chev">›</span></div>
+        <div class="ibody">
+          <div class="blk"><div class="bt">Charter <span class="g">· o que pretende</span></div><div class="charter">Refresh reusava o <span class="mono">iat</span> do token antigo → janela curta. Re-derivar do token emitido agora.</div></div>
+          <div class="blk">
+            <div class="bt">🧠 context.json <span class="g">· cada intent vem com o seu, por padrão (arquivo, não prosa)</span></div>
+            <div class="code">
+              <div class="fn">a31.context.json · cas:7e1a… · tenant-private · nunca vira training data</div>
+              <div class="cl"><span class="ln"></span><span class="ct">{ "intent":"a31", "model":"opus-4.8",</span></div>
+              <div class="cl"><span class="ln"></span><span class="ct">  "files_read":[</span></div>
+              <div class="cl"><span class="ln"></span><span class="ct">    {"path":"auth/token.rs","hash":"sha256:9c2f…"},</span></div>
+              <div class="cl"><span class="ln"></span><span class="ct">    {"path":"session.rs","hash":"sha256:1b7a…"} ],</span></div>
+              <div class="cl"><span class="ln"></span><span class="ct">  "tool_calls":14, "prompt_ref":"cas:3b… (redacted)",</span></div>
+              <div class="cl"><span class="ln"></span><span class="ct">  "journal_ref":"cas:a902…",</span></div>
+              <div class="cl"><span class="ln"></span><span class="ct">  "env_manifest":"rustc 1.96.0" }</span></div>
+            </div>
+            <div class="acts"><button class="bg">⤓ baixar json</button><button class="bg">▸ replay</button><button class="bg">diff de contexto</button></div>
+          </div>
+          <div class="blk">
+            <div class="bt">Diff + why-blame</div>
+            <div class="code">
+              <div class="fn">crates/auth/src/token.rs</div>
+              <div class="cl del"><span class="ln">42</span><span class="ct">-  let iat = old.iat;</span></div>
+              <div class="cl add hl"><span class="ln">42</span><span class="ct">+  let iat = now();</span></div>
+            </div>
+          </div>
+          <div class="blk"><div class="bt">Verdicts <span class="g">· painel adversarial</span></div>
+            <div class="verd"><span class="lens">correctness</span> dura o TTL completo <span class="ok">APPROVE</span></div>
+            <div class="verd"><span class="lens">security</span> sem token fora da janela <span class="ok">APPROVE</span></div>
+            <div class="verd"><span class="lens">repro</span> byte-idêntico ×3 <span class="ok">APPROVE</span></div>
           </div>
         </div>
-
       </div>
-    </div>
 
-    <!-- bloqueado -->
-    <div class="column">
-      <div class="ch block"><span class="d"></span><span class="t">Bloqueado</span><span class="n">1</span></div>
-      <div class="cards">
-        <div class="card" style="--cc:var(--c-perf)">
-          <div class="c1"><span class="num">#125</span><span class="camp"><span class="cd"></span> perf</span></div>
-          <div class="title">migração do schema de sessões</div>
-          <div class="c2"><span class="av"></span> opus-4.8 <span class="sp"></span><span class="ints">⌥ <b>2</b></span></div>
-          <div class="blk">⚑ conflitou com #133 (logs de auth) — voltou ao autor. Você decide: re-fatiar ou serializar.</div>
-        </div>
-      </div>
-    </div>
+      <div class="intent"><div class="ih" onclick="tg(this)"><span class="ico">●</span><div><div class="ti">rate-limit por tenant no edge</div><div class="mt"><span class="id">a2f</span> · <b>opus-4.8</b> · <span class="mono">b07c1a</span></div></div><span class="chev">›</span></div><div class="ibody"><div class="charter">Limite por tenant no edge. Charter + context.json + diff + verdicts aqui dentro.</div></div></div>
+      <div class="intent"><div class="ih" onclick="tg(this)"><span class="ico">●</span><div><div class="ti">log estruturado de auth</div><div class="mt"><span class="id">a30</span> · <b>sonnet-4.6</b> · <span class="mono">c33e90</span></div></div><span class="chev">›</span></div><div class="ibody"><div class="charter">Eventos de auth pro SIEM. Charter + context.json + diff + verdicts aqui dentro.</div></div></div>
 
-    <!-- pousado -->
-    <div class="column">
-      <div class="ch done"><span class="d"></span><span class="t">Pousado hoje</span><span class="n">9</span></div>
-      <div class="cards">
-        <div class="card" style="--cc:var(--c-infra)"><div class="c1"><span class="num">#124</span></div><div class="title">fix null deref no parser de manifest</div><div class="c2"><span class="ok">● entrou na main</span> <span class="sp"></span><span class="tm">há 22min</span></div></div>
-        <div class="card" style="--cc:var(--c-infra)"><div class="c1"><span class="num">#122</span></div><div class="title">bump ureq 2.12 + audit</div><div class="c2"><span class="ok">● entrou na main</span> <span class="sp"></span><span class="tm">há 40min</span></div></div>
-        <div class="card" style="--cc:var(--c-obs)"><div class="c1"><span class="num">#119</span></div><div class="title">doc: handoff P2 do CoreLink</div><div class="c2"><span class="ok">● entrou na main</span> <span class="sp"></span><span class="tm">há 1h</span></div></div>
+      <div class="dsec">Landing</div>
+      <div class="lcard">
+        <div class="kv">union test <span class="v g">verde</span></div>
+        <div class="kv">checks <span class="v g">11 cache-hit · 0 exec</span></div>
+        <div class="kv">conflito <span class="v g">nenhum</span></div>
+        <div class="kv">custo <span class="v">$0.04</span></div>
+        <div class="kv">espelho <span class="v">GitHub #128 ✓</span></div>
+        <button class="bp">⇲ Land (entra na main)</button>
       </div>
-    </div>
+    </div></aside>
 
   </div>
 
@@ -181,8 +250,21 @@
     <span><span class="cd" style="background:var(--c-perf)"></span> perf</span>
     <span><span class="cd" style="background:var(--c-fabric)"></span> fabric</span>
     <span><span class="cd" style="background:var(--c-obs)"></span> obs</span>
-    <span style="margin-left:auto;color:var(--dim)">a mesma cor = mesmo bundle = testados juntos</span>
+    <span style="margin-left:auto;color:var(--dim)">mesma cor = mesmo bundle = testados juntos · clique num card pra abrir →</span>
   </div>
 </div>
+
+<script>
+  function openPR(card){
+    document.querySelectorAll('.card.sel').forEach(c=>c.classList.remove('sel'));
+    card.classList.add('sel');
+    document.getElementById('d-num').textContent = card.querySelector('.num').textContent;
+    document.getElementById('d-title').textContent = card.querySelector('.title').textContent;
+    document.body.classList.add('open');
+  }
+  function closePR(){document.body.classList.remove('open');document.querySelectorAll('.card.sel').forEach(c=>c.classList.remove('sel'))}
+  function tg(el){el.parentElement.classList.toggle('open')}
+  document.addEventListener('keydown',e=>{if(e.key==='Escape')closePR()});
+</script>
 </body>
 </html>
