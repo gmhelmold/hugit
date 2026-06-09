@@ -122,7 +122,7 @@
   <div class="tabbar">
     <div class="rtab"><span class="ic">&lt;&gt;</span> Code</div>
     <div class="rtab"><span class="ic">○</span> Issues <span class="ext">↗</span></div>
-    <div class="rtab on"><span class="ic">◆</span> Intents (PRs)</div>
+    <div class="rtab on"><span class="ic">⇄</span> Pull requests</div>
     <div class="rtab"><span class="ic">✓</span> Checks</div>
     <div class="rtab"><span class="ic">⇲</span> Landing</div>
     <div class="rtab"><span class="ic">⛨</span> Security</div>
@@ -173,15 +173,22 @@
               </div>
 
               <div class="blk">
-                <div class="bt">🧠 Snapshot de contexto <span class="g">· o cérebro do agente, preservado (o git joga isso fora)</span></div>
-                <div class="ctx">
-                  <div class="row"><span class="k">modelo</span><span class="v">opus-4.8</span></div>
-                  <div class="row"><span class="k">arquivos lidos</span><span class="v"><span class="files"><span class="f">auth/token.rs</span><span class="f">session.rs</span><span class="f">refresh.rs</span><span class="f">+4</span></span></span></div>
-                  <div class="row"><span class="k">tool-calls</span><span class="v">14 (read, edit, cargo test ×3)</span></div>
-                  <div class="row"><span class="k">prompt</span><span class="v">"corrigir expiração precoce no refresh" <span style="color:var(--faint)">(redactado por política)</span></span></div>
-                  <div class="reason">raciocínio: "o refresh re-derivava exp do iat antigo → encurtava a janela. tirei a expiração do now() do token novo; confirmei com teste de regressão em t-1min."</div>
-                  <div class="act"><button class="bg">▸ dar replay da sessão</button><button class="bg">ver trajetória completa</button></div>
+                <div class="bt">🧠 context.json <span class="g">· cada intent (commit) já vem com seu snapshot por padrão — é um arquivo content-addressed, não prosa</span></div>
+                <div class="code">
+                  <div class="fn">a31.context.json · 4.2 KB · cas:7e1a… · tenant-private · nunca vira training data</div>
+                  <div class="cl"><span class="ln"></span><span class="ct">{</span></div>
+                  <div class="cl"><span class="ln"></span><span class="ct">  "intent": "a31",   "model": "opus-4.8",</span></div>
+                  <div class="cl"><span class="ln"></span><span class="ct">  "files_read": [</span></div>
+                  <div class="cl"><span class="ln"></span><span class="ct">    { "path": "auth/token.rs", "hash": "sha256:9c2f…" },</span></div>
+                  <div class="cl"><span class="ln"></span><span class="ct">    { "path": "session.rs",    "hash": "sha256:1b7a…" },</span></div>
+                  <div class="cl"><span class="ln"></span><span class="ct">    { "path": "refresh.rs",    "hash": "sha256:f04e…" }</span></div>
+                  <div class="cl"><span class="ln"></span><span class="ct">  ],</span></div>
+                  <div class="cl"><span class="ln"></span><span class="ct">  "tool_calls": 14,  "prompt_ref": "cas:3b… (redacted per policy)",</span></div>
+                  <div class="cl"><span class="ln"></span><span class="ct">  "journal_ref": "cas:a902…",</span></div>
+                  <div class="cl"><span class="ln"></span><span class="ct">  "env_manifest": "rustc 1.96.0 · x86_64-apple-darwin"</span></div>
+                  <div class="cl"><span class="ln"></span><span class="ct">}</span></div>
                 </div>
+                <div style="margin-top:9px;display:flex;gap:8px"><button class="bg">⤓ baixar json</button><button class="bg">▸ replay da sessão</button><button class="bg">diff de contexto</button></div>
               </div>
 
               <div class="blk">
