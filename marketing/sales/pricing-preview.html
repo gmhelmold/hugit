@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>hugit — Planos &amp; Preços (preview)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+<style>
+  :root{
+    --bg:#08080d; --bg2:#0d0d16;
+    --surface:rgba(255,255,255,.035);
+    --surface-2:rgba(255,255,255,.055);
+    --border:rgba(255,255,255,.09);
+    --border-2:rgba(255,255,255,.14);
+    --text:#ececf3; --muted:#9a9aac; --faint:#6a6a7a;
+    --indigo:#6366f1; --violet:#8b5cf6; --cyan:#22d3ee;
+    --accent:linear-gradient(135deg,#6366f1 0%,#8b5cf6 45%,#22d3ee 100%);
+    --amber:#f5b942; --green:#34d399;
+    --radius:18px;
+    --font:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; font-family:var(--font); color:var(--text);
+    background:var(--bg);
+    background-image:
+      radial-gradient(900px 500px at 12% -8%, rgba(99,102,241,.20), transparent 60%),
+      radial-gradient(800px 520px at 92% 4%, rgba(34,211,238,.13), transparent 60%),
+      radial-gradient(700px 700px at 50% 120%, rgba(139,92,246,.12), transparent 60%);
+    background-attachment:fixed;
+    -webkit-font-smoothing:antialiased; line-height:1.5;
+  }
+  .wrap{max-width:1200px; margin:0 auto; padding:0 24px}
+  .grad{background:var(--accent); -webkit-background-clip:text; background-clip:text; color:transparent}
+  a{color:inherit}
+
+  /* ---------- HERO ---------- */
+  header{padding:74px 0 30px; text-align:center}
+  .eyebrow{
+    display:inline-flex; align-items:center; gap:8px; font-size:12.5px; font-weight:600;
+    letter-spacing:.16em; text-transform:uppercase; color:var(--muted);
+    border:1px solid var(--border); border-radius:999px; padding:7px 15px; margin-bottom:26px;
+    background:var(--surface);
+  }
+  .eyebrow .dot{width:7px;height:7px;border-radius:50%;background:var(--accent)}
+  h1{font-size:clamp(38px,6vw,62px); line-height:1.04; font-weight:800; margin:0 0 18px; letter-spacing:-.025em}
+  .sub{font-size:clamp(16px,2.1vw,20px); color:var(--muted); max-width:680px; margin:0 auto 14px}
+  .sub b{color:var(--text); font-weight:600}
+  .edge{
+    display:inline-flex;gap:18px;flex-wrap:wrap;justify-content:center;
+    margin-top:18px;font-size:13.5px;color:var(--muted)
+  }
+  .edge span{display:inline-flex;align-items:center;gap:7px}
+  .edge .ic{color:var(--cyan)}
+
+  /* ---------- BILLING TOGGLE ---------- */
+  .toggle-row{display:flex;align-items:center;justify-content:center;gap:14px;margin:34px 0 6px}
+  .toggle-row .lab{font-size:14.5px;font-weight:500;color:var(--muted);transition:.2s}
+  .toggle-row .lab.on{color:var(--text)}
+  .save{font-size:11.5px;font-weight:700;color:var(--green);border:1px solid rgba(52,211,153,.35);
+    background:rgba(52,211,153,.10);border-radius:999px;padding:3px 9px;margin-left:2px}
+  .switch{position:relative;width:54px;height:30px;flex:0 0 auto}
+  .switch input{opacity:0;width:0;height:0}
+  .slider{position:absolute;inset:0;border-radius:999px;background:var(--surface-2);
+    border:1px solid var(--border-2);cursor:pointer;transition:.25s}
+  .slider:before{content:"";position:absolute;height:22px;width:22px;left:3px;top:3px;border-radius:50%;
+    background:var(--accent);transition:.25s}
+  input:checked + .slider:before{transform:translateX(24px)}
+
+  /* ---------- TIER CARDS ---------- */
+  .tiers{
+    display:grid;grid-template-columns:repeat(6,1fr);gap:14px;margin:40px 0 14px;align-items:stretch;
+  }
+  @media(max-width:1100px){.tiers{grid-template-columns:repeat(3,1fr)}}
+  @media(max-width:680px){.tiers{grid-template-columns:1fr}}
+  .card{
+    position:relative;display:flex;flex-direction:column;
+    background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+    padding:24px 20px;transition:transform .2s,border-color .2s,background .2s;
+  }
+  .card:hover{transform:translateY(-4px);border-color:var(--border-2);background:var(--surface-2)}
+  .card.pro{
+    border:1px solid transparent;
+    background:
+      linear-gradient(var(--bg2),var(--bg2)) padding-box,
+      var(--accent) border-box;
+    box-shadow:0 0 0 1px rgba(139,92,246,.08), 0 24px 60px -24px rgba(124,58,237,.55);
+  }
+  .card.pro:hover{transform:translateY(-7px)}
+  .ribbon{
+    position:absolute;top:-12px;left:50%;transform:translateX(-50%);
+    font-size:10.5px;font-weight:800;letter-spacing:.09em;text-transform:uppercase;color:#0a0a12;
+    background:var(--accent);border-radius:999px;padding:5px 13px;white-space:nowrap;
+    box-shadow:0 6px 18px -6px rgba(139,92,246,.7)
+  }
+  .tname{font-size:15px;font-weight:700;letter-spacing:.01em;margin:2px 0 3px}
+  .ttag{font-size:12.5px;color:var(--faint);min-height:32px;margin-bottom:14px}
+  .price{display:flex;align-items:baseline;gap:3px;margin-bottom:2px}
+  .price .cur{font-size:18px;font-weight:600;color:var(--muted)}
+  .price .amt{font-size:38px;font-weight:800;letter-spacing:-.03em}
+  .price .per{font-size:13px;color:var(--muted);font-weight:500}
+  .bill-note{display:none;font-size:11px;color:var(--green);margin:1px 0 0}
+  .price.custom .amt{font-size:24px}
+  hr.sep{border:0;border-top:1px solid var(--border);margin:16px 0}
+  .feats{list-style:none;padding:0;margin:0 0 20px;display:flex;flex-direction:column;gap:9px;flex:1}
+  .feats li{display:flex;gap:9px;font-size:13px;color:var(--muted);align-items:flex-start}
+  .feats li b{color:var(--text);font-weight:600}
+  .feats .ck{color:var(--cyan);flex:0 0 auto;margin-top:1px;font-weight:700}
+  .btn{
+    display:block;text-align:center;text-decoration:none;font-size:13.5px;font-weight:600;
+    padding:11px 14px;border-radius:11px;border:1px solid var(--border-2);color:var(--text);
+    background:var(--surface-2);transition:.2s
+  }
+  .btn:hover{background:rgba(255,255,255,.10);border-color:#fff3}
+  .btn.primary{background:var(--accent);border:none;color:#0a0a12;font-weight:700}
+  .btn.primary:hover{filter:brightness(1.08)}
+  .btn.ghost{background:transparent}
+
+  /* ---------- COMPARISON MATRIX ---------- */
+  section.compare{margin:72px 0 0}
+  .sec-head{text-align:center;margin-bottom:30px}
+  .sec-head .kick{font-size:12.5px;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:var(--violet)}
+  .sec-head h2{font-size:clamp(26px,4vw,38px);font-weight:800;letter-spacing:-.02em;margin:8px 0 0}
+  .sec-head p{color:var(--muted);margin:10px auto 0;max-width:600px;font-size:15px}
+  .matrix-scroll{overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius);background:rgba(255,255,255,.018)}
+  table{border-collapse:collapse;width:100%;min-width:880px}
+  thead th{position:sticky;top:0;z-index:2}
+  th,td{padding:14px 16px;text-align:left;font-size:13.5px;border-bottom:1px solid var(--border)}
+  thead th{background:var(--bg2);font-weight:700;font-size:13px;vertical-align:bottom;border-bottom:1px solid var(--border-2)}
+  thead th .th-price{font-size:12px;color:var(--muted);font-weight:600;margin-top:2px}
+  tbody td{color:var(--muted)}
+  tbody td:first-child{color:var(--text);font-weight:500}
+  .grp td{
+    background:rgba(139,92,246,.07);font-weight:700;font-size:11.5px;letter-spacing:.13em;
+    text-transform:uppercase;color:#c4b5fd;border-bottom:1px solid var(--border-2)
+  }
+  .grp.soon td{background:rgba(245,185,66,.08);color:var(--amber)}
+  td.val{text-align:center}
+  th.val,td.val{text-align:center}
+  .ck-y{color:var(--green);font-weight:700}
+  .ck-n{color:var(--faint)}
+  col.pro-col{background:linear-gradient(180deg,rgba(139,92,246,.10),rgba(34,211,238,.05))}
+  th.col-pro,td.col-pro{position:relative}
+  th.col-pro{color:#fff}
+  .pill{display:inline-block;font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;
+    padding:3px 8px;border-radius:999px;vertical-align:middle}
+  .pill.soon{color:var(--amber);background:rgba(245,185,66,.12);border:1px solid rgba(245,185,66,.3)}
+  .pill.live{color:var(--green);background:rgba(52,211,153,.12);border:1px solid rgba(52,211,153,.3)}
+
+  /* ---------- WEDGE BAND ---------- */
+  .band{margin:80px 0 0;display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  @media(max-width:780px){.band{grid-template-columns:1fr}}
+  .rcard{
+    border:1px solid var(--border);border-radius:var(--radius);padding:28px;
+    background:linear-gradient(160deg,rgba(255,255,255,.04),rgba(255,255,255,.012));position:relative;overflow:hidden
+  }
+  .rcard:before{content:"";position:absolute;width:240px;height:240px;border-radius:50%;
+    filter:blur(60px);opacity:.5;top:-90px;right:-70px}
+  .rcard.landing:before{background:radial-gradient(circle,rgba(34,211,238,.5),transparent 70%)}
+  .rcard.memo:before{background:radial-gradient(circle,rgba(139,92,246,.5),transparent 70%)}
+  .rcard h3{font-size:21px;font-weight:800;margin:14px 0 4px;letter-spacing:-.01em;position:relative}
+  .rcard .lead{color:var(--muted);font-size:14px;margin:0 0 18px;position:relative;max-width:44ch}
+  .rlist{list-style:none;padding:0;margin:16px 0 0;position:relative;display:flex;flex-direction:column;gap:8px}
+  .rlist li{font-size:13px;color:var(--muted);display:flex;gap:9px}
+  .rlist .ck{color:var(--cyan);font-weight:700}
+
+  /* ---------- ECOSYSTEM ---------- */
+  .eco{margin:84px 0 0;border:1px solid var(--border);border-radius:var(--radius);
+    background:linear-gradient(180deg,rgba(255,255,255,.03),transparent);padding:34px 30px}
+  .eco-top{text-align:center;margin-bottom:26px}
+  .eco-top h2{font-size:24px;font-weight:800;margin:0 0 6px}
+  .eco-top p{color:var(--muted);margin:0;font-size:14px}
+  .eco-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+  @media(max-width:880px){.eco-grid{grid-template-columns:repeat(2,1fr)}}
+  @media(max-width:520px){.eco-grid{grid-template-columns:1fr}}
+  .eco-item{border:1px solid var(--border);border-radius:14px;padding:18px;background:var(--surface)}
+  .eco-item.self{border-color:var(--border-2);background:var(--surface-2)}
+  .eco-item .nm{font-weight:700;font-size:15px;display:flex;align-items:center;gap:8px;margin-bottom:6px}
+  .eco-item .ds{font-size:12.5px;color:var(--muted);min-height:54px}
+  .tag{font-size:10px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;padding:3px 8px;border-radius:999px}
+  .tag.now{color:var(--green);background:rgba(52,211,153,.12);border:1px solid rgba(52,211,153,.3)}
+  .tag.p3{color:var(--amber);background:rgba(245,185,66,.12);border:1px solid rgba(245,185,66,.3)}
+  .tag.self{color:var(--cyan);background:rgba(34,211,238,.12);border:1px solid rgba(34,211,238,.3)}
+
+  footer{margin:70px 0 60px;text-align:center;color:var(--faint);font-size:12.5px;line-height:1.7}
+  footer .note{max-width:760px;margin:0 auto}
+  .draftbar{
+    position:sticky;top:0;z-index:50;background:rgba(245,185,66,.1);
+    border-bottom:1px solid rgba(245,185,66,.35);color:var(--amber);
+    font-size:12.5px;font-weight:600;text-align:center;padding:8px 16px;backdrop-filter:blur(8px)
+  }
+</style>
+</head>
+<body>
+
+<div class="draftbar">⚠️ PREVIEW INTERNO — não publicado. Estrutura/features/preços indicativos para revisão do techlead &amp; owner.</div>
+
+<div class="wrap">
+
+  <!-- HERO -->
+  <header>
+    <div class="eyebrow"><span class="dot"></span> HuGR · CoreLink · hugit</div>
+    <h1>O forge feito pra<br/><span class="grad">fleets de agentes.</span></h1>
+    <p class="sub">git-compatível, LLM-native. Resolve o <b>problema de landing</b> — integrar e mergear o que dezenas de agentes produzem em paralelo — com <b>CI memoizado por conteúdo</b>: cache-hit ⇒ <b>zero execução</b>. Mesmo modelo do git, sobre a base CoreLink.</p>
+    <div class="edge">
+      <span><span class="ic">◆</span> Cache-hit de check ⇒ <b style="color:var(--text)">0 execução</b></span>
+      <span><span class="ic">◆</span> Fila de landing por union-testing</span>
+      <span><span class="ic">◆</span> Roda <b>sobre</b> o GitHub, sem lock-in</span>
+    </div>
+
+    <!-- BILLING TOGGLE -->
+    <div class="toggle-row">
+      <span class="lab on" id="lab-m">Mensal</span>
+      <label class="switch"><input type="checkbox" id="billing-toggle" /><span class="slider"></span></label>
+      <span class="lab" id="lab-a">Anual <span class="save">2 meses grátis</span></span>
+    </div>
+  </header>
+
+  <!-- TIER CARDS -->
+  <div class="tiers">
+
+    <!-- FREE -->
+    <div class="card">
+      <div class="tname">Free</div>
+      <div class="ttag">Experimentar e open-source</div>
+      <div class="price"><span class="cur">$</span><span class="amt" data-m="0" data-a="0">0</span><span class="per">/mês</span></div>
+      <div class="bill-note">para sempre</div>
+      <hr class="sep"/>
+      <ul class="feats">
+        <li><span class="ck">✓</span> <span><b>1</b> repo · <b>1</b> assento</span></li>
+        <li><span class="ck">✓</span> <span>Até <b>2</b> agentes simultâneos</span></li>
+        <li><span class="ck">✓</span> <span>CI memoizado (uso justo)</span></li>
+        <li><span class="ck">✓</span> <span>Landing layer sobre GitHub</span></li>
+      </ul>
+      <a class="btn ghost" href="#">Começar grátis</a>
+    </div>
+
+    <!-- SOLO -->
+    <div class="card">
+      <div class="tname">Solo</div>
+      <div class="ttag">Dev solo orquestrando agentes</div>
+      <div class="price"><span class="cur">$</span><span class="amt" data-m="19" data-a="15.83">19</span><span class="per">/mês</span></div>
+      <div class="bill-note">cobrado anual · economiza $38/ano</div>
+      <hr class="sep"/>
+      <ul class="feats">
+        <li><span class="ck">✓</span> <span><b>3</b> repos · <b>1</b> assento</span></li>
+        <li><span class="ck">✓</span> <span>Até <b>5</b> agentes simultâneos</span></li>
+        <li><span class="ck">✓</span> <span>Auto-bisect + diagnóstico</span></li>
+        <li><span class="ck">✓</span> <span>Export anti-lock-in</span></li>
+      </ul>
+      <a class="btn" href="#">Assinar Solo</a>
+    </div>
+
+    <!-- STARTER -->
+    <div class="card">
+      <div class="tname">Starter</div>
+      <div class="ttag">Time pequeno com fleet</div>
+      <div class="price"><span class="cur">$</span><span class="amt" data-m="49" data-a="40.83">49</span><span class="per">/mês</span></div>
+      <div class="bill-note">cobrado anual · economiza $98/ano</div>
+      <hr class="sep"/>
+      <ul class="feats">
+        <li><span class="ck">✓</span> <span><b>10</b> repos · <b>3</b> assentos</span></li>
+        <li><span class="ck">✓</span> <span>Até <b>15</b> agentes simultâneos</span></li>
+        <li><span class="ck">✓</span> <span>Fila de landing (union-testing)</span></li>
+        <li><span class="ck">✓</span> <span>SLA 99.5% · suporte e-mail</span></li>
+      </ul>
+      <a class="btn" href="#">Assinar Starter</a>
+    </div>
+
+    <!-- PRO ⭐ -->
+    <div class="card pro">
+      <div class="ribbon">★ Melhor custo-benefício</div>
+      <div class="tname">Pro</div>
+      <div class="ttag">O plano que faz sentido pra maioria</div>
+      <div class="price"><span class="cur">$</span><span class="amt" data-m="99" data-a="82.50">99</span><span class="per">/mês</span></div>
+      <div class="bill-note">cobrado anual · economiza $198/ano</div>
+      <hr class="sep"/>
+      <ul class="feats">
+        <li><span class="ck">✓</span> <span>Repos <b>ilimitados</b> · <b>8</b> assentos</span></li>
+        <li><span class="ck">✓</span> <span>Até <b>50</b> agentes <b style="color:var(--cyan)">(3,3× o Starter)</b></span></li>
+        <li><span class="ck">✓</span> <span><b>Verdict panels</b> + sync bidirecional</span></li>
+        <li><span class="ck">✓</span> <span>Prioritário · SLA 99.9%</span></li>
+      </ul>
+      <a class="btn primary" href="#">Assinar Pro</a>
+    </div>
+
+    <!-- MAX -->
+    <div class="card">
+      <div class="tname">Max</div>
+      <div class="ttag">Escala, SSO, governança</div>
+      <div class="price"><span class="cur">$</span><span class="amt" data-m="299" data-a="249.17">299</span><span class="per">/mês</span></div>
+      <div class="bill-note">cobrado anual · economiza $598/ano</div>
+      <hr class="sep"/>
+      <ul class="feats">
+        <li><span class="ck">✓</span> <span>Repos ilimitados · <b>25</b> assentos</span></li>
+        <li><span class="ck">✓</span> <span>Até <b>150</b> agentes simultâneos</span></li>
+        <li><span class="ck">✓</span> <span><b>SSO/SAML</b> + multi-região</span></li>
+        <li><span class="ck">✓</span> <span>Prioritário · SLA 99.9%</span></li>
+      </ul>
+      <a class="btn" href="#">Assinar Max</a>
+    </div>
+
+    <!-- ENTERPRISE -->
+    <div class="card">
+      <div class="tname">Enterprise</div>
+      <div class="ttag">Volume, contrato, dedicado</div>
+      <div class="price custom"><span class="amt">Sob consulta</span></div>
+      <div class="bill-note">&nbsp;</div>
+      <hr class="sep"/>
+      <ul class="feats">
+        <li><span class="ck">✓</span> <span>Assentos &amp; fleet <b>custom</b></span></li>
+        <li><span class="ck">✓</span> <span>Self-host / BYOC opcional</span></li>
+        <li><span class="ck">✓</span> <span>SLA <b>99.95%</b> + TAM dedicado</span></li>
+        <li><span class="ck">✓</span> <span>SSO · SIEM · contrato &amp; DPA</span></li>
+      </ul>
+      <a class="btn" href="#">Falar com vendas</a>
+    </div>
+
+  </div>
+
+  <!-- COMPARISON MATRIX -->
+  <section class="compare">
+    <div class="sec-head">
+      <div class="kick">Comparação completa</div>
+      <h2>Tudo que entra em cada plano</h2>
+      <p>Preço <b style="color:var(--green)">flat</b>, memoizado por conteúdo: você <b>nunca paga pra re-rodar</b> o que já está no cache, e <b>nunca</b> paga pelo seu próprio compute. A execução roda na base CoreLink — você vê só o hugit.</p>
+    </div>
+
+    <div class="matrix-scroll">
+      <table>
+        <colgroup>
+          <col/><col/><col/><col/><col class="pro-col"/><col/><col/>
+        </colgroup>
+        <thead>
+          <tr>
+            <th>Recurso</th>
+            <th class="val">Free<div class="th-price">$0</div></th>
+            <th class="val">Solo<div class="th-price">$19</div></th>
+            <th class="val">Starter<div class="th-price">$49</div></th>
+            <th class="val col-pro">Pro ★<div class="th-price">$99</div></th>
+            <th class="val">Max<div class="th-price">$299</div></th>
+            <th class="val">Enterprise<div class="th-price">custom</div></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="grp"><td colspan="7">Landing &amp; Merge — a cunha <span class="pill live">Núcleo</span></td></tr>
+          <tr><td>Repositórios</td><td class="val">1</td><td class="val">3</td><td class="val">10</td><td class="val col-pro">∞</td><td class="val">∞</td><td class="val">∞</td></tr>
+          <tr><td>Assentos (humanos)</td><td class="val">1</td><td class="val">1</td><td class="val">3</td><td class="val col-pro">8</td><td class="val">25</td><td class="val">∞</td></tr>
+          <tr><td>Agentes simultâneos (fleet)</td><td class="val">2</td><td class="val">5</td><td class="val">15</td><td class="val col-pro">50</td><td class="val">150</td><td class="val">Custom</td></tr>
+          <tr><td>Fila de landing (union-testing)</td><td class="val ck-n">—</td><td class="val ck-n">—</td><td class="val ck-y">✓</td><td class="val col-pro ck-y">✓</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td></tr>
+          <tr><td>Recompute em force-push · kill-tests</td><td class="val ck-n">—</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td><td class="val col-pro ck-y">✓</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td></tr>
+          <tr><td>`main` single-writer (sem corrupção)</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td><td class="val col-pro ck-y">✓</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td></tr>
+
+          <tr class="grp"><td colspan="7">CI Memoizado (checks-as-code) <span class="pill live">Núcleo</span></td></tr>
+          <tr><td>Cache-hit de check ⇒ 0 execução</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td><td class="val col-pro ck-y">✓</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td></tr>
+          <tr><td>Affected-targets (só roda o que mudou)</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td><td class="val col-pro ck-y">✓</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td></tr>
+          <tr><td>Execução em runners (uso justo / incluído)</td><td class="val">Justo</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td><td class="val col-pro ck-y">✓</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td></tr>
+          <tr><td>Auto-bisect + diagnóstico do culpado</td><td class="val ck-n">—</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td><td class="val col-pro ck-y">✓</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td></tr>
+          <tr><td>Stats de flake + quarentena</td><td class="val ck-n">—</td><td class="val ck-n">—</td><td class="val ck-y">✓</td><td class="val col-pro ck-y">✓</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td></tr>
+
+          <tr class="grp"><td colspan="7">Para fleets de agentes</td></tr>
+          <tr><td>Sandboxes/fences por claim</td><td class="val ck-n">—</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td><td class="val col-pro ck-y">✓</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td></tr>
+          <tr><td>Fila de atenção (o que precisa de humano)</td><td class="val ck-n">—</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td><td class="val col-pro ck-y">✓</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td></tr>
+          <tr><td>Verdict panels (review adversarial)</td><td class="val ck-n">—</td><td class="val ck-n">—</td><td class="val ck-n">—</td><td class="val col-pro ck-y">✓</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td></tr>
+          <tr><td>Journals + resume de sessão</td><td class="val ck-n">—</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td><td class="val col-pro ck-y">✓</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td></tr>
+
+          <tr class="grp"><td colspan="7">Compat GitHub &amp; Anti-lock-in <span class="pill live">Núcleo</span></td></tr>
+          <tr><td>Landing layer sobre GitHub</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td><td class="val col-pro ck-y">✓</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td></tr>
+          <tr><td>Sync bidirecional seamless (forge-arbitrado)</td><td class="val ck-n">—</td><td class="val ck-n">—</td><td class="val ck-y">✓</td><td class="val col-pro ck-y">✓</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td></tr>
+          <tr><td>Actions shim · status compat</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td><td class="val col-pro ck-y">✓</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td></tr>
+          <tr><td>Export + provas de saída (sem lock-in)</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td><td class="val col-pro ck-y">✓</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td></tr>
+          <tr><td>Provenance `why` · `impact`</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td><td class="val col-pro ck-y">✓</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td></tr>
+
+          <tr class="grp"><td colspan="7">Segurança &amp; Suporte <span class="pill live">Núcleo</span></td></tr>
+          <tr><td>Tenant isolation (HMAC, fail-closed)</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td><td class="val col-pro ck-y">✓</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td></tr>
+          <tr><td>Atestação de release + transparency log</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td><td class="val col-pro ck-y">✓</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td></tr>
+          <tr><td>SSO / SAML</td><td class="val ck-n">—</td><td class="val ck-n">—</td><td class="val ck-n">—</td><td class="val col-pro ck-n">—</td><td class="val ck-y">✓</td><td class="val ck-y">✓</td></tr>
+          <tr><td>SLA de uptime</td><td class="val ck-n">—</td><td class="val ck-n">—</td><td class="val">99.5%</td><td class="val col-pro">99.9%</td><td class="val">99.9%</td><td class="val">99.95% + contrato</td></tr>
+          <tr><td>Suporte</td><td class="val">Comunidade</td><td class="val">E-mail</td><td class="val">E-mail</td><td class="val col-pro">Prioritário</td><td class="val">Prioritário</td><td class="val">Dedicado + TAM</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- WEDGE BAND -->
+  <section class="band">
+    <div class="rcard landing">
+      <span class="pill live">A cunha</span>
+      <h3>Landing, não autoria</h3>
+      <p class="lead">O gargalo de uma fleet de agentes não é escrever código — é <b style="color:var(--text)">integrar e mergear</b> o que dezenas produzem ao mesmo tempo, sem quebrar a <code>main</code>. hugit é a fila que faz isso por union-testing.</p>
+      <ul class="rlist">
+        <li><span class="ck">✓</span> <code>main</code> tem um escritor só (a fila) — nunca vira bagunça concorrente</li>
+        <li><span class="ck">✓</span> Branches sincronizam dos dois lados, seamless</li>
+        <li><span class="ck">✓</span> Force-push recomputa; kill-tests barram regressão</li>
+      </ul>
+    </div>
+    <div class="rcard memo">
+      <span class="pill live">O motor</span>
+      <h3>CI que não re-roda</h3>
+      <p class="lead">Cada check é memoizado por conteúdo no Action Cache. Já rodou esse exato estado ⇒ <b style="color:var(--text)">resultado instantâneo, custo zero</b>. Você paga plano flat, não por minuto — e nunca pelo seu próprio compute.</p>
+      <ul class="rlist">
+        <li><span class="ck">✓</span> Cache-hit ⇒ 0 execução (&lt; 500 ms)</li>
+        <li><span class="ck">✓</span> Só roda o que o diff realmente afeta</li>
+        <li><span class="ck">✓</span> Hit-rate honesto — não inflamos número</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ECOSYSTEM -->
+  <section class="eco">
+    <div class="eco-top">
+      <h2>A família <span class="grad">HuGR</span></h2>
+      <p>Uma pilha só: <b>HuGR</b> (a casa) → <b>CoreLink</b> (a plataforma) → <b>hugit</b> (o forge, em cima). Mesmo cache content-addressed por baixo de tudo.</p>
+    </div>
+    <div class="eco-grid">
+      <div class="eco-item">
+        <div class="nm">◆ CoreLink Cache <span class="tag now">Launch</span></div>
+        <div class="ds">A base: cache + governança de storage. CAS, Bazel, Turborepo, sccache, adapters. hugit consome — não reimplementa.</div>
+      </div>
+      <div class="eco-item">
+        <div class="nm">⚡ CoreLink Runners <span class="tag p3">Fase 3</span></div>
+        <div class="ds">Compute efêmero sobre o cache. É onde os checks do hugit executam (quando não dá cache-hit).</div>
+      </div>
+      <div class="eco-item">
+        <div class="nm">⬡ CoreLink Workspaces <span class="tag p3">Fase 3+</span></div>
+        <div class="ds">Workspace como objeto. Os sandboxes/fences de agente do hugit são SKUs deste primitivo.</div>
+      </div>
+      <div class="eco-item self">
+        <div class="nm">⑂ hugit <span class="tag self">Você está aqui</span></div>
+        <div class="ds">O forge LLM-native (campanha #3): landing + merge + CI memoizado pra fleets. Construído sobre o CoreLink; cobrado como um produto só.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FOOTER -->
+  <footer>
+    <p class="note">
+      <b style="color:var(--muted)">Um produto, uma fatura:</b> o cliente do hugit vê só o hugit. CAS / Action Cache / runners do CoreLink são a base por baixo (COGS), nunca uma linha separada na conta — porque hugit <b>é</b> CoreLink, da HuGR. ·
+      <b style="color:var(--muted)">Preço flat, memoizado:</b> nunca cobramos pra re-rodar o que está no cache, nem pelo seu próprio compute. <br/><br/>
+      Preços em USD, <b>indicativos</b> — validar contra o COGS (consumo de CAS/AC/runners do CoreLink, por tenant, com teto de política) antes de publicar. Execução ao vivo depende do provisionamento do tenant CoreLink (P2) — lança junto com a base.<br/>
+      <span style="color:var(--faint)">Preview interno hugit · HuGR · gerado para revisão — não é página pública.</span>
+    </p>
+  </footer>
+
+</div>
+
+<script>
+  var t = document.getElementById('billing-toggle');
+  var labM = document.getElementById('lab-m');
+  var labA = document.getElementById('lab-a');
+  t.addEventListener('change', function () {
+    var annual = t.checked;
+    document.querySelectorAll('.amt[data-m]').forEach(function (el) {
+      el.textContent = annual ? el.getAttribute('data-a') : el.getAttribute('data-m');
+    });
+    document.querySelectorAll('.bill-note').forEach(function (el) {
+      el.style.display = annual ? 'block' : 'none';
+    });
+    labM.classList.toggle('on', !annual);
+    labA.classList.toggle('on', annual);
+  });
+</script>
+
+</body>
+</html>
