@@ -15,14 +15,15 @@ dimension. Builds on D2a's pack-assembly + clone/fetch core.
 > ⑥ 🔧 scale ceilings defined+tested per dimension (repo size, ref count, concurrent clients, pack size): at each limit → documented bounded behavior, never silent failure
 > ⑦(R2) jj FIRST-CLASS: stacked-changes series round-trips via jj with change-ids stable across forge ops; stack reconstructs identically
 
-**Implementation note (audit honesty, 2026-06-09):** item ③ is closed for **git
-and jj against their REAL binaries on the wire** (jj first-class in item ⑦). For
-**libgit2** the proof is **construction-equivalence**, not a real clone: the read
-path serves a standard protocol-v2 pack identical for every client, so any
-conformant client (incl. libgit2) reads it — but no libgit2 binary/`git2`-crate
-clone is executed. A real libgit2 round-trip is **deferred** (adding a native
-libgit2 build dependency is out of scope); the acceptance item above is otherwise
-satisfied. See `crates/hugit-proto/tests/acceptance_d2b.rs::item_3…`.
+**Implementation note (2026-06-09, updated post-audit):** item ③ is closed for
+**all three clients against real implementations**: git and jj against their
+binaries on the wire (jj first-class in item ⑦), and **libgit2** via a genuine
+`git2`/libgit2 clone of the served pack — libgit2 is a TEST-ONLY dev-dependency
+(built vendored; never shipped in the product binary), and the libgit2-cloned
+object closure is asserted byte-identical to git's. (Earlier this leg was closed
+by construction-equivalence only; the audit flagged the overclaim and it was
+upgraded to a real clone.) See `crates/hugit-proto/tests/acceptance_d2b.rs::item_3…`
+and `clone_object_set_via_libgit2`.
 
 (Partition statement — D2 split is exhaustive + disjoint across D2a/D2b.
 **D2b owns client matrix + jj stacks + CPU/chunked fallback + degradation

@@ -19,3 +19,10 @@ gix-object = "0.55"
 gix-pack = "0.65"
 gix-packetline = { version = "0.21", features = ["blocking-io"] }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+# Real libgit2 (the C library, via the git2 wrapper) — TEST-ONLY, never shipped
+# in the product binary. Used by acceptance_d2b item ③ to prove the served pack
+# is cloneable by a real libgit2 client (not just construction-equivalence).
+# libgit2 is built vendored from source (no linkable system lib on this host).
+git2 = "0.20"

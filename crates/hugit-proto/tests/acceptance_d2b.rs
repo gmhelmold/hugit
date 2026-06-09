@@ -39,7 +39,7 @@ use hugit_proto::read::serve::serve_clone;
 
 #[path = "clients_jj_limits/mod.rs"]
 mod fixtures;
-use fixtures::{build_chain, build_repo, clone_object_set_via_git};
+use fixtures::{build_chain, build_repo, clone_object_set_via_git, clone_object_set_via_libgit2};
 
 /// Whether a local binary is on PATH (the suite separately FAILs-not-skips on a
 /// missing `git`/`jj`; in-process model assertions never depend on this).
@@ -58,12 +58,11 @@ fn have_binary(name: &str) -> bool {
 /// who pulls it. git ≥ 2.40 is the protocol-v2 floor; when the real git/jj
 /// binaries are present they are exercised on the wire.
 ///
-/// HONESTY NOTE (audit 2026-06-09): git and jj are exercised against the REAL
-/// binaries on the wire (jj has its first-class home in `item_7`); **libgit2
-/// conformance is by construction-equivalence** — the served pack is standard
-/// protocol-v2, so any conformant client reads it — it is NOT a real libgit2
-/// clone. A real `git2`-crate round-trip is deferred (adding a native libgit2
-/// build dependency is out of scope for this suite).
+/// All three contracted clients are exercised for REAL: git and jj against their
+/// binaries on the wire (jj first-class in `item_7`), and **libgit2** via a
+/// genuine `git2`/libgit2 clone of the served pack (a TEST-ONLY dev-dependency;
+/// libgit2 builds vendored from source). The libgit2-reconstructed object closure
+/// is asserted BYTE-IDENTICAL to git's — no construction-equivalence is relied on.
 #[test]
 fn item_3_client_matrix_git_jj_libgit2() {
     let repo = build_repo();
@@ -135,6 +134,21 @@ fn item_3_client_matrix_git_jj_libgit2() {
     assert!(
         cloned_set.contains(&repo.tips["c1"].to_string()),
         "real clone reaches main's ancestor c1 (genuine reachability over the wire)"
+    );
+
+    // ── libgit2 (the C library, via git2) clones the SAME served pack ─────────
+    // Closes item ③'s libgit2 client FOR REAL — a genuine libgit2 round-trip, no
+    // longer construction-equivalence. The object closure libgit2 reconstructs
+    // must be BYTE-IDENTICAL to git's (one standard protocol-v2 pack ⇒ one set).
+    let cloned_set_libgit2: BTreeSet<String> =
+        clone_object_set_via_libgit2(&pack.bytes, "refs/heads/main", &main_tip);
+    assert_eq!(
+        cloned_set_libgit2, cloned_set,
+        "libgit2 and git reconstruct an IDENTICAL object closure from the served pack"
+    );
+    assert!(
+        cloned_set_libgit2.contains(&main_tip.to_string()),
+        "libgit2 clone of refs/heads/main reaches the main tip"
     );
 
     // The version-floor predicate is enforced against the REAL local git.

@@ -142,6 +142,42 @@ pub fn have_binary(name: &str) -> bool {
 /// client actually reconstructed off the wire, for diffing against the served set.
 ///
 /// Panics (FAIL-not-skip) if `git` is missing — `git` is a contracted client.
+/// Real **libgit2** clone of the served pack — proves item ③'s libgit2 client
+/// for real (a genuine `git2`/libgit2 round-trip, not construction-equivalence).
+/// Builds the same bare server as [`clone_object_set_via_git`], then clones it
+/// with libgit2 and enumerates the cloned object closure via the object database.
+/// Returns the set of object names, to be compared byte-for-byte with the git
+/// client's set and the served closure.
+pub fn clone_object_set_via_libgit2(
+    pack_bytes: &[u8],
+    ref_name: &str,
+    tip: &ObjectId,
+) -> BTreeSet<String> {
+    let server = ScratchDir::new("hugit-d2b-srv-lg2");
+    git(server.path(), &["init", "-q", "--bare", "."]);
+    // Same genuine V2 pack fed to real git, so libgit2 clones the ACTUAL served bytes.
+    git_stdin(server.path(), &["unpack-objects", "-q"], pack_bytes);
+    git(server.path(), &["update-ref", ref_name, &tip.to_string()]);
+    git(server.path(), &["symbolic-ref", "HEAD", ref_name]);
+
+    let dst = ScratchDir::new("hugit-d2b-clone-lg2");
+    let work = dst.path().join("work");
+    let server_url = server.path().to_str().expect("utf8 server path");
+    // Real libgit2 clone (the C library via the git2 crate).
+    let repo = git2::Repository::clone(server_url, &work)
+        .expect("real libgit2 clone of the served pack failed");
+
+    // Enumerate the cloned repo's full object closure via libgit2's odb.
+    let odb = repo.odb().expect("open cloned odb");
+    let mut set = BTreeSet::new();
+    odb.foreach(|oid| {
+        set.insert(oid.to_string());
+        true
+    })
+    .expect("iterate cloned odb");
+    set
+}
+
 pub fn clone_object_set_via_git(
     pack_bytes: &[u8],
     ref_name: &str,
