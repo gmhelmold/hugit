@@ -16,8 +16,11 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+use hugit_cli::campaign::{self, CampaignArgs};
 use hugit_cli::export::{self, AccountState, Corpus};
 use hugit_cli::impact::{ImpactQuery, compute_impact};
+use hugit_cli::intent::{self, IntentArgs};
+use hugit_cli::pr::{self, PrArgs};
 use hugit_cli::tournament::{MAX_N_POLICY, produce_candidates};
 use hugit_cli::why::resolver::LogEntry;
 use hugit_cli::why::{WhyQuery, resolve_why};
@@ -47,6 +50,12 @@ enum Command {
     Tournament(TournamentArgs),
     /// Dump a git artifact + JSON envelope (anti-lock-in exit proof).
     Export(ExportArgs),
+    /// Campaign lifecycle: open / close (seal) / show (WP-PC1).
+    Campaign(CampaignArgs),
+    /// Intent ceremony: new / show (WP-PC2).
+    Intent(IntentArgs),
+    /// Pull-request lifecycle: open / land / show (WP-PC3).
+    Pr(PrArgs),
 }
 
 // ── why ────────────────────────────────────────────────────────────────────
@@ -276,11 +285,18 @@ fn run_export(args: ExportArgs) -> Result<(), String> {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    // The flow-porcelain verbs (campaign/intent/pr) own their own exit code:
+    // they emit a structured JSON envelope on stdout (NOT-IMPLEMENTED stubs at
+    // PC0; real projections at PC1/PC2/PC3) and return an ExitCode directly,
+    // so they bypass the Result→exit-code mapping the library verbs use.
     let result = match cli.command {
         Command::Why(a) => run_why(a),
         Command::Impact(a) => run_impact(a),
         Command::Tournament(a) => run_tournament(a),
         Command::Export(a) => run_export(a),
+        Command::Campaign(a) => return campaign::run(a),
+        Command::Intent(a) => return intent::run(a),
+        Command::Pr(a) => return pr::run(a),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
