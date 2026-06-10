@@ -20,9 +20,13 @@ live-infra seams (AC HTTP, runner box, transparency log, live GitHub detect)
 from hermetic-proof → end-to-end.
 
 Read first: `docs/whitepaper/hugit-v1.md` (product design) ·
+`docs/product/product.md` (the product brief: ICPs, killers, positioning, pricing posture) ·
+`docs/adr/` (0001 context envelope · 0002 HuGR identity) ·
+`docs/interop.md` (the microscopic seam map: AC/CAS · runners · GitHub · githugr) ·
 `docs/plan/decomposition.md` + `docs/plan/wp-contracts/` (the 67-WP register) ·
 `docs/review/2026-06-07-roadmap-gap-build-campaign.md` (what's built) ·
-`docs/strategy/campaign-3-llm-native-forge.md` (founding brief) · `docs/research/`.
+`docs/strategy/campaign-3-llm-native-forge.md` (founding brief) · `docs/research/` ·
+`docs/handoff/` (pending cross-repo work: P2 provisioning · identity rollout).
 
 ## Principles (decided, don't relitigate without the owner)
 
@@ -38,18 +42,35 @@ Read first: `docs/whitepaper/hugit-v1.md` (product design) ·
   charge for the customer's own compute.
 - **Zero debt, no loose ends, impeccable repo** (same owner mandate as
   CoreLink). Verify claims; never loosen rigor without an explicit waiver.
+- **State the family in the correct tense.** Production-state claims about a
+  sibling cite that repo at the time of writing (GA notes, runbooks) — never
+  memory of a design. Cautionary tale: the cross-tenant-dedup overclaim
+  (`../corelink-runners/docs/review/2026-06-09-cross-tenant-dedup-claim.md`).
+- **Identity is decided (ADR-0002):** one **HuGR account** on CoreLink
+  machinery (Clerk · org = tenant · PATs) behind a frozen contract; **a PAT
+  never reaches a browser**. No new auth service without a forcing function.
 
-## Relationship to CoreLink (`../corelink-server`)
+## Relationship to the HuGR family
 
-Same primitive stack, nothing built twice: cache (launch) → compute (#1
-runners) → workspace (#2 snapshots) → **forge (#3, here)**. The CAS, AC,
-manifests, tenancy, and PAT auth live in corelink-server — hugit consumes them,
-it does not fork them. **Do not let hugit work leak into CoreLink's launch
-route or campaign #1/#2 critical paths.**
+Same primitive stack, nothing built twice:
+**HuGR → CoreLink { Cache (launch) · Runners (#1) · Workspaces (#2) } →
+hugit (#3, here) → githugr (#4, the forge surface)**. The CAS, AC, manifests,
+tenancy, and PAT auth live in corelink-server — hugit consumes them, it does
+not fork them. **Do not let hugit work leak into CoreLink's launch route or
+campaign #1/#2 critical paths.**
 
-⚠️ corelink-server frequently has **other live sessions/worktrees** working in
-it. Never assume sole ownership of its checkout; check `git worktree list` and
-uncommitted state before touching anything there.
+Two incubation repos are managed FROM hugit sessions under owner-approved
+fence carve-outs: `../githugr` (campaign #4) and `../corelink-runners`
+(campaign #1 — its `docs/spec/hugit-integration-contract.md` is frozen from
+hugit's side).
+
+⚠️ Sibling repos — corelink-server especially, but **also the carve-outs** —
+have **other live sessions/worktrees**. Never assume sole ownership; check
+status/log before acting. **Never `git commit --amend` or rewrite history in a
+sibling**: another session's commit may have become HEAD between your commit
+and your amend (it happened 2026-06-09; recovered via atomic ref
+compare-and-swap). Fixup commits only; even in hugit, re-check `git log -1` is
+yours immediately before any amend.
 
 ## The session fence (owner mandate 2026-06-05 — MECHANIZED)
 

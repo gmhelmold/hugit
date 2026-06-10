@@ -198,12 +198,15 @@ per layer is stated honestly:
 > This is not a feature war — it is an incentive war, and the incumbent's
 > incentives are on our side.
 
-And the network effect compounds it: every tenant's public-deterministic
-artifacts and check results warm the cache for all tenants. Customer #500
-arrives to a workspace that is already ~40–70% hot. **The product gets better
-as it grows; a competitor without scale cannot match either the cost or the
-hit-rate.** (Boundary, non-negotiable: public-deterministic shares; private
-bytes never cross tenants.)
+And the network effect compounds it — **once the staged cross-tenant lever
+ships** (dedup is intra-tenant at CoreLink's GA; cross-tenant sharing of
+public-deterministic artifacts is designed in, `CAP-DEDUP-CROSS-TENANT`,
+post-GA): every tenant's public-deterministic artifacts and check results warm
+the cache for all tenants, and customer #500 arrives to a workspace that is
+already ~40–70% hot. **The product gets better as it grows; a competitor
+without scale cannot match either the cost or the hit-rate.** (Boundary,
+non-negotiable: public-deterministic shares; private bytes never cross
+tenants.)
 
 ---
 
