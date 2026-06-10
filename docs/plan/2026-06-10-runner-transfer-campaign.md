@@ -225,3 +225,24 @@ box) — MOVES with the runner core.
 
 R0 remaining before charters freeze: read WP-F2's actual diff (capture-code
 location) when its card returns. Everything else above is decided.
+
+## R0 FREEZE (lead, 2026-06-10 — final)
+
+1. **F2/F2b capture inventory:** `crates/hugit-runner/src/envelope/{mod.rs,
+   cold_store.rs}` + `tests/acceptance_f2.rs`. Coupling check: only
+   `lib.rs`'s `pub mod envelope;` references it — the execution core never
+   imports it. **Relocation home: `hugit-ledger::envelope`** (cohesive with
+   `redact` it already calls and `rollup` that consumes its output).
+   Dogfood's `envelope.rs` stays in dogfood (consumer). Executed in R4.
+2. **R2 exclusion list:** the three capture files above STAY in hugit;
+   everything else in hugit-runner moves (incl. tests C2a/C2b/C3/C9/E4).
+   Runner's Cargo deps post-F2 trim back to scout's budget (anyhow + dev
+   serde_json) — envelope's extra dep lines leave with it.
+3. **Fence split (confirmed):** `materialize/` + `enforce/` move with the
+   runner; `broker/` (C5b) stays; broker's container-touching red-team
+   assertions re-point to conformance fixtures (R4; escalation clause stands).
+4. **X4:** acceptance moves with the runner (R4 dual-repo commit); hugit
+   keeps a wire-level conformance assertion.
+5. Transcription triplet + closure (`MaterializedEntry`) already live in
+   corelink-runners @ 78702d6 with byte-identical vectors (lead-verified
+   digests). R1 = COMPLETE (R1a+R1b).
