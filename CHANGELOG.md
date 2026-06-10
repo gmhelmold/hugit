@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(contracts): **WP-F1 — `ContextEnvelope` frozen at three altitudes** (ADR-0001,
+  owner-ratified 2026-06-10). New frozen contract in `hugit-contracts`:
+  `ContextEnvelope` + `IntentMetrics` with the `altitude: intent|pr|campaign`
+  discriminator (each PR carries its orchestrator-session envelope, each campaign its
+  own — owner-directed extension), `deny_unknown_fields`, `schema_version 1.0.0`,
+  JSON Schema + 4 golden byte-exact round-trips (intent/pr/campaign/null-refs). No TTL
+  field by ratified design (retention forever; erasure-by-tombstone only). Derived
+  NOT-frozen read shapes `PrRecord`/`CampaignRollup` with decomposed cost
+  (work/orchestration/verification/ci/waste), span-vs-sum time, efficiency, and
+  `envelope_ref`; `PrAuthorKind` has no subagent variant (D14 authz at type level).
+  Naming reconciliation documented additively — zero frozen v1 types/schemas touched
+  (15 regen byte-identical). Trajectory refs are tier-agnostic (cold-store decision in
+  the ADR). Cold-verified: full gate green, 120 test suites ok.
+
 - feat(web): **githugr spine — wave 1 of campaign #4 (mockup → product)**. New workspace crate `crates/hugit-web` (`[[bin]] hugit-web`, axum 0.8 + maud + the Linear Noir kit lifted verbatim from the design corpus): the forge web surface as a **read-only MVP over a frozen `Provider` seam** (trait + 13 view-model families; screens render VMs, providers never emit HTML). Six spine routes (`/` → redirect, `/static/kit.css`, `/r/{repo}`, `/r/{repo}/landing`, `/r/{repo}/intent/{id}`, `/r/{repo}/checks`, `/r/{repo}/insights`) with real tab navigation (fixes the design corpus' #1 systemic gap), an honest `fixture` badge whenever the world is seeded, and 404 on unknown repo/intent. **The fixture world is derived from the real engine, not hand-typed** (parity law): `hugit_dogfood::run_wave_with_ac` runs wave A twice on a shared AC (cold: 5 executions / measured ms · warm: 0 executions — the memoization wedge, MEASURED) + wave B with a failing pair (→ Bloqueado); the world `EventLog` is built through the real `append`/`canonical_json` path (`intent.landed` + `verdict.recorded` events) and projected through the real `Ledger::from_records` + `intents_from_log`; the parity oracle (`tests/provider_fixture.rs`, 5 tests) re-derives those projections over the same records and holds every VM number to them — plus `verify_chain` over the world log. Five screens transcribed render-faithfully from their approved mockups (`../githugr/design/`, DDD): **Landing** (kanban + campaign bundles + per-card PR drawer with intents/charter/context/diff/verdicts; Land disabled-honest), **Repo home** (GitHub-faithful: file rows with `.ix` intent deep-links, README, About, synergy panel), **Intent detail** (charter + acceptance, 4 trajectory accordions with the load-bearing honest "não capturado" state on every `None` — never a silent blank; context.json block with disabled-honest ⤓/▸; diff + why-blame; rail: autoria/métricas/snapshot/verdicts), **Checks** (measured hit-rate displayed AS-IS with the honest FULL/PARTIAL/NONE/NO-DATA shape vocabulary, cache-hit vs executed affordances, expandable logs, bisect walkthrough, memo note), **Insights + Ledger view** (KPIs, server-rendered landed bars, token-by-campaign, Cost X-ray, pedido→feito→provado per campaign with intent deep-links). 46 new tests (5 smoke + 5 parity + 36 screen oracles), all VM-hand-built and decoupled from the fixture. Built by a 6-agent wave (worktree-isolated, disjoint 2-file claims, zero merge conflicts) over the lead's frozen W0 scaffold; cost/token/metric figures remain fixture-illustrative until WP-F2 (ADR-0001 §7 pending) and are surfaced as such via `Provider::is_fixture`. Workspace deps hoisted exact-pinned (axum/tokio/maud/tower/http-body-util). (wave githugr-spine-w1)
 
 <!-- audit-remediation (post-0.1.0) entries -->
