@@ -278,8 +278,8 @@ impl<'a> MemoCheck for WaveOracle<'a> {
 /// A deterministic in-process check runner.  Always exits 0 (green).
 /// The result is a pure function of the memo key + tree/def/toolchain axes
 /// → byte-identical across all callers with the same inputs.
-struct DeterministicRunner {
-    pr_id: String,
+pub(crate) struct DeterministicRunner {
+    pub(crate) pr_id: String,
 }
 
 impl CheckRunner for DeterministicRunner {
