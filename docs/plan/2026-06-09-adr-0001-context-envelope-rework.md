@@ -11,8 +11,14 @@
 > are **follow-on WPs (F-series)**, same contract rigor, sequenced after owner
 > ratification.
 >
-> **Status: BLOCKED** on ADR-0001 §7 ratification (default capture level,
-> retention TTL, cost visibility) — those three answers parametrize WP-F2.
+> **Status: UNBLOCKED (owner ratified 2026-06-10).** §7.1 capture = `full`
+> always (non-negotiable) · §7.2 retention = forever, no TTL/GC (erasure via
+> tombstone only) · §7.3 cost visibility STILL OPEN — but it only gates the
+> githugr display choice, not the hugit contract/producer work. **Owner also
+> extended the design** (same date): the envelope exists at all three
+> altitudes — each **PR carries the orchestrator-session envelope**
+> (transcript + snapshot), each **campaign its own** — scoped into F1/F2/F3
+> below.
 
 ## What in v1 is touched (impact map)
 
@@ -31,10 +37,12 @@
 **Charter.** Freeze the envelope as a contract type so producers/consumers agree.
 **Owned acceptance.** `ContextEnvelope` + `IntentMetrics` Rust types with
 `#[serde(deny_unknown_fields)]`, `schema_version:"1.0.0"`, JSON Schema, golden
-byte-exact serde round-trip tests (the WP-00 pattern). Nullable refs for
-sub-`full` capture levels round-trip. `PrRecord` + `CampaignRollup` defined as
-**derived** (forge-computed, NOT frozen) shapes. Wire `IntentSidecar.context_ref`
-→ this blob.
+byte-exact serde round-trip tests (the WP-00 pattern). **`altitude:
+intent|pr|campaign` discriminator (owner 2026-06-10)** — one envelope shape at
+all three altitudes; round-trip each. Nullable refs for sub-`full` capture
+levels round-trip. `PrRecord` + `CampaignRollup` defined as **derived**
+(forge-computed, NOT frozen) shapes — **each now carrying `envelope_ref`** to
+its captured session envelope. Wire `IntentSidecar.context_ref` → this blob.
 **⚠ Naming reconciliation (must resolve, not paper over).** The product model is
 **intent = commit · PR = bundle of intents · campaign = bundle of PRs (landing
 queue)**. But the frozen `IntentSidecar` is documented as *"what the PR intends
@@ -57,13 +65,18 @@ three transcript altitudes, redacted, honouring the repo capture level.
 applied on the write path** (REDACTED_MARKER per policy) before any blob is
 stored. **Capture level** (`off|metrics|task|full`) gates what is written;
 absent refs are `null`. Retention TTL tagged on `full` blobs.
-**Also (PR-author + waste):** the **orchestrator** must emit its OWN coordination
-metrics (tokens/tool-calls/turns spent planning/dispatching/cold-verifying/
-landing — the PR-author spend, NOT attributed to any intent) and **waste**
-(discarded intents, retried agents, tokens-not-landed). These feed the PR
-record's `orchestration` and `waste` buckets.
+**Also (PR-author envelope + waste, owner 2026-06-10):** the **orchestrator**
+emits its OWN full envelope per PR (`altitude:"pr"`): the session transcript
+(raw + task + summary) and context snapshot — same capture path as intents,
+CAS-deduped when one session authors several PRs — PLUS coordination metrics
+(tokens/tool-calls/turns spent planning/dispatching/cold-verifying/landing,
+NOT attributed to any intent) and **waste** (discarded intents, retried
+agents, tokens-not-landed). These feed the PR record's `envelope_ref`,
+`orchestration` and `waste`. Campaign-level sessions emit the same at
+`altitude:"campaign"`.
+**Parametrization (ratified):** default capture `full` at every altitude;
+retention forever (no TTL tagging — erasure path only).
 **Deps.** WP-F1 frozen types; X3 redaction policy; C9 runner lifecycle.
-**Blocked-by.** ADR-0001 §7 answers (default level, TTL, cost visibility).
 **DoD.** Global gate green; cold-verify; a metrics+trajectory bundle proven
 against a real spawned intent.
 
@@ -75,10 +88,12 @@ intent → PR record → campaign.
 memoized · `waste` not-landed · `total`), the **two time figures**
 (`wall_span_ms` clock vs `agent_sum_ms` agent, + `queue_wait_ms`), and
 **efficiency** (`overhead_pct`, `cache_savings_pct`, `first_pass_yield`).
-- **PR record** = rollup over a PR's intents + the PR-author spend; author is
-  orchestrator|human (authz: never subagent).
+- **PR record** = rollup over a PR's intents + the PR-author spend + the PR's
+  captured `envelope_ref` (owner 2026-06-10); author is orchestrator|human
+  (authz: never subagent).
 - **CampaignRollup** = rollup over the campaign's **PRs** (the landing-queue
-  **bundle of PRs**, NOT commits) + progress (landed/in-flight/blocked).
+  **bundle of PRs**, NOT commits) + progress (landed/in-flight/blocked) + the
+  campaign's own `envelope_ref`.
 Why-blame/ledger/insights surface the right altitude. Tolerates `null` refs.
 **Deps.** WP-F1 types; D4/D5/D10 projection seams; D14 authz for the author rule.
 **DoD.** Global gate green; cold-verify; all three rollups proven on a
@@ -92,5 +107,7 @@ backlog (update `landing.html` drawer + `pr-detail.html` mockups under DDD).
 
 ## Sequence
 
-Ratify ADR-0001 §7 → **WP-F1** (freeze) → **WP-F2** (produce) ∥ **WP-F3**
-(consume, after F1) → githugr display. F2 and F3 both depend on F1 only.
+~~Ratify ADR-0001 §7~~ DONE (2026-06-10; §7.3 cost-visibility still open but
+only gates githugr display) → **WP-F1** (freeze) → **WP-F2** (produce) ∥
+**WP-F3** (consume, after F1) → githugr display. F2 and F3 both depend on F1
+only.

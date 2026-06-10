@@ -1,7 +1,11 @@
 # ADR-0001 — Intent context envelope (`context.json`)
 
-- **Status:** Proposed (techlead-decided; owner-ratify the 3 knobs in §7)
-- **Date:** 2026-06-09
+- **Status:** Partially ratified (owner, 2026-06-10): §7.1 capture + §7.2
+  retention DECIDED; §7.3 cost visibility still open. Owner-directed extension
+  same date: **the envelope exists at all three altitudes** — the PR carries
+  the orchestrator-session envelope (trajectory + snapshot), the campaign its
+  own (§2.4) — not just computed metric rollups.
+- **Date:** 2026-06-09 (extended + ratified 2026-06-10)
 - **Applies to:** hugit (produces + freezes the schema) · githugr (displays it)
 - **Supersedes:** the narrative "Context Snapshot" sketch in whitepaper §4
   (`model, charter_ref, files_read[], tool_calls[], conversation_ref,
@@ -37,7 +41,16 @@ metrics held **inline**, with **content-addressed refs (`cas:…`)** to the larg
 blobs (transcripts, journal, prompt). Transcripts are never inlined — they are
 stored once by content hash (deduped across intents), referenced here, scrubbed
 by the redaction policy, retention-bounded, **tenant-private, never training
-data** (whitepaper §13). One envelope per intent; PRs roll up by aggregation.
+data** (whitepaper §13).
+
+**One envelope per authored unit, at every altitude** (owner-directed
+2026-06-10): the **intent** carries the subagent's envelope; the **PR** carries
+the **orchestrator-session envelope** (the session transcript that planned,
+dispatched and landed the bundle, plus its context snapshot); the **campaign**
+carries its own. Metric **rollups** (§2.3) stay derived/computed; the
+**envelopes are captured**, not derived. Same shape at every altitude — only
+`altitude` + the authored-unit id change. This is what makes the stack
+auditable top-down: campaign session ⊃ PR session ⊃ intent trajectory.
 
 ### 2.1 The trajectory — three altitudes (this is the core ask)
 
@@ -58,7 +71,8 @@ human-annotation track alongside the machine trajectory.
 ```jsonc
 {
   "schema_version": "1.0.0",          // semver; deny_unknown_fields on freeze
-  "intent_id": "a31",                 // == IntentSidecar.intent_id
+  "altitude": "intent",               // intent | pr | campaign (owner 2026-06-10)
+  "intent_id": "a31",                 // the authored-unit id (pr_id / campaign at higher altitudes)
   "commit": "a31f9c…",                // git commit this intent enriches
   "tree_hash": "…",
 
@@ -149,6 +163,13 @@ not hidden**. The forge computes this record; it is not stored per envelope.
   "intent_ids": ["a31","a2f","a30"],
   "intent_count": 3, "agent_count": 3, "models_used": ["opus-4.8","sonnet-4.6"],
 
+  // — the PR's OWN captured envelope (owner 2026-06-10): the orchestrator
+  //   session that planned/dispatched/landed this bundle. Same shape as the
+  //   intent envelope (§2.2, altitude:"pr"); ref'd here, captured not derived.
+  //   If one session authors several PRs, each PR refs the same session blob
+  //   (CAS dedupes) with its own span markers.
+  "envelope_ref": "cas:…",            // → ContextEnvelope{altitude:"pr"} w/ trajectory + snapshot
+
   // cost decomposed by WHERE it went — the SOTA part
   "cost": {
     "work":          { "tokens": 0, "tool_calls": 0, "cost_usd": 0 },             // Σ intents (subagents)
@@ -198,6 +219,8 @@ decomposition, plus campaign progress:
   "campaign": "auth-hardening",
   "charter": "endurecer a borda de autenticação",   // human-defined goal
   "owner": { "principal": "gustavo@humangr.com" },  // human — never a subagent
+  "envelope_ref": "cas:…",            // campaign's own envelope (altitude:"campaign"):
+                                      // the campaign-level session(s) + snapshot (owner 2026-06-10)
   "pr_ids": ["128","129"], "pr_count": 2,
   "intent_count": 5, "agent_count": 5, "models_used": ["opus-4.8","sonnet-4.6"],
   "cost": { /* work · orchestration · verification · ci · waste · total — Σ over PRs */ },
@@ -223,17 +246,26 @@ Transcripts may carry secrets/PII (whitepaper §13). Therefore:
 
 - **Always tenant-private, never cross-tenant, never training data.** Scrubbed
   with `REDACTED_MARKER` per `redaction_policy` before the blob is written.
-- **Retention-bounded** per repo policy (TTL on `cas:` trajectory blobs).
-- **Capture level is repo-configurable** — the cost/privacy dial:
+- **Default capture level is `full` — RATIFIED, non-negotiable (owner
+  2026-06-10):** *"transcript 100% tem que ser salvo sempre, inegociável — o
+  fato de ser maior é ainda mais motivo pra salvar tudo."* Applies at every
+  altitude (subagent intents, orchestrator PR sessions, campaign sessions).
+  The level ladder below survives only as a **per-repo privacy opt-DOWN for
+  customer tenants** (their data, their dial) — never as our default:
 
   | Level | Stores | Use |
   |---|---|---|
   | `off` | envelope metadata only | max privacy / min storage |
   | `metrics` | + `metrics` | cost/time visibility, no transcript |
-  | `task` | + `task_transcript_ref`, `summary` | the default sweet spot |
-  | `full` | + `raw_transcript_ref` | full forensics / replay |
+  | `task` | + `task_transcript_ref`, `summary` | mid privacy dial |
+  | `full` | + `raw_transcript_ref` | **the default** — forensics / replay |
 
   Refs absent below their level are `null`; consumers must tolerate nulls.
+- **Retention: keep forever by default — RATIFIED by the same directive**
+  ("salvo **sempre**"): no automatic TTL/GC on trajectory blobs. CAS dedupe +
+  flat pricing make this viable; the audit value compounds. Content leaves
+  storage only via the explicit erasure path (tenant request → tombstone:
+  *"o conteúdo é apagável; a prova, não"*) — never via a timer.
 
 ## 4. Why (rationale)
 
@@ -281,11 +313,22 @@ Transcripts may carry secrets/PII (whitepaper §13). Therefore:
 - **Skip cost/time metrics** — rejected: the forge's differentiator is making
   agent work accountable; omitting metrics guts the value.
 
-## 7. Open for owner ratification
+## 7. Owner ratification record
 
-1. **Default capture level** — recommend `task` (summary + task transcript +
-   metrics; raw transcript opt-in per repo). Confirm or change.
-2. **Default retention TTL** for `full` raw-transcript blobs — recommend 90 days
-   then GC to `task` (keep summary/metrics forever, they're tiny). Confirm.
-3. **Is `cost_usd` shown to all repo members, or owner/admin only?** — recommend
-   visible to all (trust by transparency); confirm given it reveals COGS.
+1. **Default capture level — RATIFIED (owner, 2026-06-10): `full`, always,
+   non-negotiable.** Owner verbatim: *"Sub agents by default transcript 100%
+   tem que ser salvo sempre, inegociável. […] o fato de ser maior é ainda mais
+   motivo pra salvar tudo."* (The §7-recommended `task` default is rejected.)
+2. **Retention — RATIFIED by the same directive: forever by default, no
+   TTL/GC.** "Salvo sempre" reads literally; erasure only via the explicit
+   tombstone path, never a timer. (The 90-day GC recommendation is rejected.)
+3. **`cost_usd` visibility (all members vs owner/admin only) — STILL OPEN.**
+   Recommend visible to all (trust by transparency); reveals COGS.
+
+**Owner-directed extension (2026-06-10), same authority as ratification:**
+the envelope exists at all three altitudes — **each PR carries its
+orchestrator-session envelope** (session transcript + context snapshot +
+campaign), **each campaign its own**, alongside the intents' envelopes
+(§2, §2.3 `envelope_ref`). Owner rationale: *"assim teríamos as camadas:
+transcript da sessão, snapshot de contexto e cia da campanha, de cada PR, e
+dos intents — muito mais transparente e auditável."*
