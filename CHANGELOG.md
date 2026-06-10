@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- chore(workspace)!: **`hugit-web` migrated OUT to ../githugr** (owner law
+  2026-06-10: "hugit não tem tela — as telas todas são do githugr", the
+  headless-engine doctrine applied to the workspace itself). The wave-1 crate
+  tree was delivered verbatim to githugr (`incoming/hugit-web` @ githugr
+  `8d08d6a` + DELIVERY manifest: seam = contracts·refstore·ledger·checks·
+  queue·dogfood, no pub(crate)/feature walls); wave-1 history stays here
+  (`debbd9e`…`33a6be6`). Workspace: 18 → 17 packages; web-only workspace deps
+  (axum·tokio·maud·tower·http-body-util) removed. The engine carries no UI.
+
 - feat(contracts): **WP-F1 — `ContextEnvelope` frozen at three altitudes** (ADR-0001,
   owner-ratified 2026-06-10). New frozen contract in `hugit-contracts`:
   `ContextEnvelope` + `IntentMetrics` with the `altitude: intent|pr|campaign`

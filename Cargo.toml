@@ -27,10 +27,3 @@ anyhow    = "=1.0.102"
 
 # HTTP
 ureq = "=2.12.1"
-
-# Web surface (hugit-web — the githugr spine)
-axum  = "=0.8.6"
-tokio = { version = "=1.47.1", features = ["rt-multi-thread", "macros", "net", "signal"] }
-maud  = { version = "=0.27.0", features = ["axum"] }
-tower = "=0.5.2"
-http-body-util = "=0.1.3"
