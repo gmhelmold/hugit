@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(cli): **the flow porcelain — `hugit campaign` · `hugit intent` · `hugit pr`**
+  (owner-directed 2026-06-10: "quem vai digitar são os modelos de LLM").
+  LLM-first design law: stable JSON always on stdout, structured errors
+  carrying the suggested fix, idempotent re-runs (`already_exists`/
+  `already_queued`, exit 0, no duplicate records). `campaign open` registers
+  charter + human owner (D14) on the real EventLog; `close` is the SEAL —
+  refuses with PRs in flight, prints the WP-F3 `campaign_rollup`; `intent new`
+  lands through the real refstore path (tamper fails closed); `pr open`
+  rejects subagent authorship at the door, `land` enters the real
+  `hugit-queue` batch and reports position, `show` carries the `pr_record`
+  cost block when envelopes are captured — honest nulls otherwise. 4 binary
+  end-to-end acceptance tests; registry no-drift oracle extended (PC0–PC3b).
+
 - chore(workspace)!: **`hugit-web` migrated OUT to ../githugr** (owner law
   2026-06-10: "hugit não tem tela — as telas todas são do githugr", the
   headless-engine doctrine applied to the workspace itself). The wave-1 crate
