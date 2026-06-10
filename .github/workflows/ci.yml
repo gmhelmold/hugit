@@ -11,7 +11,10 @@ permissions:
 
 jobs:
   gates:
-    runs-on: ubuntu-latest
+    # HuGR family CI runs on the self-hosted fleet, never GitHub-hosted
+    # (same labels as corelink-server; ubuntu-latest was a founding mistake
+    # that hit the org's Actions billing wall).
+    runs-on: [self-hosted, mac, corelink-builder]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
