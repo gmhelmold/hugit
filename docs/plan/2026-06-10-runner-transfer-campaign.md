@@ -194,3 +194,34 @@ F2/F2b ──► R0 ──► R1 ──► R2 ──► R3 ───────
   secrets — day-0 infra pointers move as DOCUMENTATION only.
 - Does not unfreeze `hugit-contracts` — `RunnerLease` stays exactly where and
   what it is; transcription ≠ relocation.
+
+## Appendix — R0 inputs (scout report, 2026-06-10)
+
+**Transcription list (FROZEN by scout evidence):** exactly the triplet
+`RunnerLease` · `RunnerState` · `FenceManifest` — the runner's whole
+hugit-contracts surface. Nothing more.
+
+**External dep budget:** `anyhow =1.0.102` + dev `serde_json =1.0.150`. Tiny.
+
+**Consumers (exhaustive):** only `hugit-fence` (prod dep) and
+`hugit-invariants` (prod + dev). No hidden coupling anywhere else.
+
+**Fence split (scout draft, lead-confirmed direction):** `broker/` (C5b
+secrets/audit/red-team) is repo-side → STAYS; `materialize/` (sparse
+hydration) → MOVES; `enforce/` (C5a classification) is the gray zone — it
+consumes `RunningContainer`/`BoxExec` from the runner. Lead's leaning:
+enforce+materialize move (fence enforcement is runner-side infrastructure),
+broker stays; broker's container-touching red-team assertions re-point or
+move. R4 escalation clause stands if the broker/enforce extraction is dirty.
+
+**Invariants (X4):** the supply-chain pinning oracle proves the LIVE spawn
+surface (`ContainerSpec::from_lease()` + `Engine::spawn()`) — **cannot be
+mocked without losing proof rigor**. Resolution: X4 acceptance MOVES with the
+runner (it is a runner-product invariant now); hugit keeps a wire-level
+conformance assertion only. Rigor preserved by relocation, not weakened.
+
+**C9:** harness lifecycle (attach/resume/dedup/local≡remote, drives the live
+box) — MOVES with the runner core.
+
+R0 remaining before charters freeze: read WP-F2's actual diff (capture-code
+location) when its card returns. Everything else above is decided.
