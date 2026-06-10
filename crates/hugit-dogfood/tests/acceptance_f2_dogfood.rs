@@ -5,10 +5,11 @@
 //! actual `hugit-checks` client) under a recorder; at intent close the
 //! producer writes the frozen `ContextEnvelope` behind a `context_ref`
 //! wired into the `IntentSidecar`. The orchestrator session then lands the
-//! wave through the real Phase-B engine and emits its own envelope per
-//! landed PR (`altitude:"pr"`, one session blob CAS-deduped across PRs)
-//! plus waste, and a campaign-altitude envelope — the full three-altitude
-//! capture, hermetic, measured.
+//! wave through the real Phase-B engine and emits the full FOUR-altitude
+//! family — its own `altitude:"session"` home envelope, one `altitude:"pr"`
+//! envelope per landed PR, and one `altitude:"campaign"` envelope (PR +
+//! campaign referencing the deduped session-home blobs, WP-F2b) plus waste
+//! — hermetic, measured.
 
 use hugit_checks::client::ac::InMemoryAc;
 use hugit_contracts::{Altitude, ContextEnvelope};
@@ -140,17 +141,57 @@ fn bundle_proven_against_real_spawned_intents() {
     assert!(session_raw.contains("queue.run_wave"));
     assert!(session_raw.contains("landed 5 of 5"));
 
-    // ── campaign altitude: same path ─────────────────────────────────────────
+    // ── session altitude: the physical HOME (WP-F2b) ─────────────────────────
+    let session = &captured.session;
+    assert_eq!(session.envelope.altitude, Altitude::Session);
+    assert_eq!(session.envelope.intent_id, "orq-dogfood-wave");
+    // Under `full` the session home carries BOTH transcript refs (the
+    // two-transcript imperative).
+    let home_raw = session
+        .envelope
+        .trajectory
+        .raw_transcript_ref
+        .as_ref()
+        .expect("session home raw");
+    assert!(session.envelope.trajectory.task_transcript_ref.is_some());
+    // Every PR envelope references the SAME blobs the session homes.
+    for pr in &captured.pr_sessions {
+        assert_eq!(
+            pr.envelope.trajectory.raw_transcript_ref.as_ref(),
+            Some(home_raw),
+            "the PR envelope references the session-home raw blob"
+        );
+    }
+
+    // ── campaign altitude: same path, same home blobs ────────────────────────
     let campaign = &captured.campaign_session;
     assert_eq!(campaign.envelope.altitude, Altitude::Campaign);
     assert_eq!(campaign.envelope.intent_id, DOGFOOD_CAMPAIGN);
     assert_eq!(
-        campaign.envelope.trajectory.raw_transcript_ref,
-        first.envelope.trajectory.raw_transcript_ref,
-        "the campaign envelope refs the same captured session blob"
+        campaign.envelope.trajectory.raw_transcript_ref.as_ref(),
+        Some(home_raw),
+        "the campaign envelope refs the same captured session-home blob"
     );
     let env = fetch_envelope(&store, &campaign.envelope_ref);
     assert_eq!(env, campaign.envelope);
+
+    // ── the four-altitude family, one wave, behind real context_refs ─────────
+    // (Altitude has no Ord; collect the debug labels into a sorted set.)
+    let altitudes: std::collections::BTreeSet<String> =
+        std::iter::once(captured.intents[0].closed.envelope.altitude)
+            .chain(std::iter::once(captured.session.envelope.altitude))
+            .chain(captured.pr_sessions.iter().map(|p| p.envelope.altitude))
+            .chain(std::iter::once(captured.campaign_session.envelope.altitude))
+            .map(|a| format!("{a:?}"))
+            .collect();
+    assert_eq!(
+        altitudes,
+        ["Campaign", "Intent", "Pr", "Session"]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+        "the full four-altitude family is proven on one real wave"
+    );
 }
 
 #[test]
@@ -225,6 +266,7 @@ fn capture_level_opt_down_gates_the_dogfood_bundle_too() {
         let back = fetch_envelope(&store, &intent.closed.context_ref);
         assert_eq!(&back, env);
     }
-    // Only envelope blobs at rest: 5 intents + 5 PR sessions + 1 campaign.
-    assert_eq!(store.len(), 11, "no transcript blobs below `task`");
+    // Only envelope blobs at rest: 5 intents + 1 session + 5 PR sessions +
+    // 1 campaign = 12. No transcript blobs below `task`.
+    assert_eq!(store.len(), 12, "no transcript blobs below `task`");
 }

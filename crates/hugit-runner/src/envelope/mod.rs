@@ -26,16 +26,39 @@
 //!   returned as `context_ref` — the blob behind
 //!   [`hugit_contracts::IntentSidecar::context_ref`].
 //!
-//! **Session (PR/campaign) altitudes** ride the SAME path
-//! ([`close_session_envelope`]): the orchestrator emits its own full
-//! envelope per PR (`altitude:"pr"`) — session transcript + snapshot +
-//! coordination metrics — plus **waste** (discarded intents, retried
-//! agents, tokens-not-landed). When one session authors several PRs the
-//! transcript blobs are content-addressed, so each PR's envelope refs the
-//! SAME session blob (CAS dedupes). Campaign-level sessions emit at
-//! `altitude:"campaign"` through the identical path. These feed the derived
-//! `PrRecord.envelope_ref` / `orchestration` / `waste` (computed by WP-F3,
-//! not here).
+//! **Four altitudes** (ADR-0001 §2, second owner directive 2026-06-10). The
+//! same envelope shape closes at each; only `altitude` + the authored-unit
+//! id change:
+//!
+//! - **`intent`** — a commit, subagent-authored; closed via
+//!   [`close_envelope`].
+//! - **`session`** — the agent session/run ITSELF, the fourth first-class
+//!   altitude. The session envelope is the **physical home** of that
+//!   session's raw + task transcript blobs. One session may author several
+//!   PRs/campaigns; their envelopes REFERENCE the same deduped blobs.
+//! - **`pr`** — a bundle of intents; the orchestrator-session record that
+//!   planned/dispatched/landed the bundle.
+//! - **`campaign`** — a bundle of PRs, human-owned.
+//!
+//! Session/PR/campaign altitudes ride the SAME path
+//! ([`close_session_envelope`]): the author emits its own envelope —
+//! transcript + snapshot + coordination metrics — plus **waste** (discarded
+//! intents, retried agents, tokens-not-landed). Because the transcript blobs
+//! are content-addressed, the relationship between a session and the PRs /
+//! campaigns it authors is **explicit, not coincidental**: a PR or campaign
+//! envelope's trajectory refs MAY EQUAL the home session envelope's refs —
+//! the CAS dedupe proves identical content collapses to one stored blob, so
+//! the session envelope is provably the physical home and the others
+//! reference into it. These feed the derived `PrRecord.envelope_ref` /
+//! `orchestration` / `waste` (computed by WP-F3, not here).
+//!
+//! **The two-transcript imperative** (ADR-0001 §2, second owner directive):
+//! under [`CaptureLevel::Full`] (the ratified default) BOTH
+//! `raw_transcript_ref` (full) and `task_transcript_ref` (compacted) MUST be
+//! present at EVERY altitude — closing Full without both is a hard
+//! [`EnvelopeError::TwoTranscriptViolation`], never a silent null. Null refs
+//! for these two are legal ONLY under an explicit opt-DOWN
+//! (`off`/`metrics`/`task`).
 //!
 //! Retention: forever, no TTL — by ratified design nothing here tags,
 //! expires, or deletes a blob.
@@ -120,10 +143,24 @@ pub enum EnvelopeError {
     /// A blob write/read against the cold store failed.
     Store(ColdStoreError),
     /// [`close_session_envelope`] was called for the `intent` altitude —
-    /// session envelopes exist only at `pr`/`campaign` (an intent is closed
-    /// via [`close_envelope`]; the waste/orchestration emission is a
-    /// session-author concern, never a subagent's).
+    /// session envelopes are emitted at `session`/`pr`/`campaign` (an intent
+    /// is closed via [`close_envelope`]; the waste/orchestration emission is
+    /// a session-author concern, never a subagent's).
     NotASessionAltitude(Altitude),
+    /// The **two-transcript imperative** was violated (ADR-0001 §2, second
+    /// owner directive): under [`CaptureLevel::Full`] — the ratified default
+    /// — EVERY altitude MUST carry BOTH `raw_transcript_ref` (full) and
+    /// `task_transcript_ref` (compacted). A Full close that would leave
+    /// either null is rejected hard, never written as a silent null. Carries
+    /// the altitude and which of the two refs was missing. (Null refs remain
+    /// legal under an explicit opt-DOWN: `off`/`metrics`/`task`.)
+    TwoTranscriptViolation {
+        /// The altitude being closed when the imperative was violated.
+        altitude: Altitude,
+        /// Which mandatory ref was absent (`raw_transcript_ref` /
+        /// `task_transcript_ref` / both).
+        missing: &'static str,
+    },
 }
 
 impl std::fmt::Display for EnvelopeError {
@@ -132,8 +169,15 @@ impl std::fmt::Display for EnvelopeError {
             EnvelopeError::Store(e) => write!(f, "envelope blob store failed: {e}"),
             EnvelopeError::NotASessionAltitude(a) => write!(
                 f,
-                "session close requires altitude pr|campaign, got {a:?} \
+                "session close requires altitude session|pr|campaign, got {a:?} \
                  (intents close via close_envelope)"
+            ),
+            EnvelopeError::TwoTranscriptViolation { altitude, missing } => write!(
+                f,
+                "two-transcript imperative violated at altitude {altitude:?}: capture \
+                 level is full (the ratified default) but {missing} is absent — full \
+                 demands BOTH the full and the compacted transcript at every altitude; \
+                 null refs are legal only under an explicit opt-down (off/metrics/task)"
             ),
         }
     }
@@ -389,13 +433,17 @@ pub fn close_envelope<S: ColdBlobStore>(
     store: &S,
 ) -> Result<ClosedEnvelope, EnvelopeError> {
     // Redaction happens BEFORE any store.put — the write path is the only
-    // path to bytes-at-rest, and it only ever sees redacted text.
-    let raw_transcript_ref = if level >= CaptureLevel::Full {
+    // path to bytes-at-rest, and it only ever sees redacted text. An EMPTY
+    // transcript stores nothing and yields a null ref: "nothing captured" is
+    // not a real transcript. Under `full` that null is exactly the silent
+    // omission the two-transcript imperative forbids — caught below — so an
+    // empty transcript can never masquerade as a captured one.
+    let raw_transcript_ref = if level >= CaptureLevel::Full && !draft.raw_transcript.is_empty() {
         Some(store.put(redact_transcript(&draft.raw_transcript).as_bytes())?)
     } else {
         None
     };
-    let task_transcript_ref = if level >= CaptureLevel::Task {
+    let task_transcript_ref = if level >= CaptureLevel::Task && !draft.task_transcript.is_empty() {
         Some(store.put(redact_transcript(&draft.task_transcript).as_bytes())?)
     } else {
         None
@@ -434,6 +482,29 @@ pub fn close_envelope<S: ColdBlobStore>(
             cost_usd: 0.0,
         }
     };
+
+    // The two-transcript imperative (ADR-0001 §2, second owner directive):
+    // under `full` — the ratified default — BOTH transcript refs MUST be
+    // present at EVERY altitude. Enforced AFTER gating, BEFORE the envelope is
+    // built, so a Full close can never emit a silent null for either ref. The
+    // `Full >= Task >= ...` gating already populates both at `full`; this is
+    // the hard invariant that keeps it that way (and catches any future
+    // regression). Nulls are legal only when the level is an explicit
+    // opt-down (off/metrics/task) — checked solely at Full.
+    if level >= CaptureLevel::Full {
+        let missing = match (raw_transcript_ref.is_none(), task_transcript_ref.is_none()) {
+            (true, true) => Some("raw_transcript_ref and task_transcript_ref"),
+            (true, false) => Some("raw_transcript_ref"),
+            (false, true) => Some("task_transcript_ref"),
+            (false, false) => None,
+        };
+        if let Some(missing) = missing {
+            return Err(EnvelopeError::TwoTranscriptViolation {
+                altitude: draft.altitude,
+                missing,
+            });
+        }
+    }
 
     let envelope = ContextEnvelope {
         schema_version: CONTEXT_ENVELOPE_SCHEMA_VERSION.to_string(),
@@ -478,15 +549,16 @@ pub fn close_envelope<S: ColdBlobStore>(
 // Session (PR / campaign) close — orchestrator envelope + waste
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// What a session close emits per authored PR (or campaign): the captured
-/// envelope + its ref (feeds the derived `PrRecord.envelope_ref` /
-/// `CampaignRollup.envelope_ref`), the author's own coordination spend
-/// (feeds `cost.orchestration`), and the **waste** figures (feeds
-/// `cost.waste`) — shown, not hidden. The rollup itself is WP-F3's
-/// computation; this is the producer-side emission it consumes.
+/// What a session close emits at the `session`/`pr`/`campaign` altitudes:
+/// the captured envelope + its ref (feeds the derived `PrRecord.envelope_ref`
+/// / `CampaignRollup.envelope_ref`; the `session` altitude is the physical
+/// home those refs dedupe into), the author's own coordination spend (feeds
+/// `cost.orchestration`), and the **waste** figures (feeds `cost.waste`) —
+/// shown, not hidden. The rollup itself is WP-F3's computation; this is the
+/// producer-side emission it consumes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionEmission {
-    /// The session envelope as stored (`altitude: pr | campaign`).
+    /// The session envelope as stored (`altitude: session | pr | campaign`).
     pub envelope: ContextEnvelope,
     /// Content-addressed ref of the stored session envelope blob.
     pub envelope_ref: String,
@@ -499,16 +571,21 @@ pub struct SessionEmission {
     pub waste: WasteCost,
 }
 
-/// Close an orchestrator (PR) or campaign session — the SAME capture path
-/// as intents ([`close_envelope`]): redact-on-write, capture-level gating,
-/// cold-store blobs. The transcript blobs are content-addressed, so when
-/// one session authors several PRs each per-PR close stores the SAME
-/// session blob once and every envelope refs it (CAS dedupes).
+/// Close a `session` / `pr` / `campaign` envelope — the SAME capture path as
+/// intents ([`close_envelope`]): redact-on-write, capture-level gating,
+/// cold-store blobs, and the two-transcript imperative. The transcript blobs
+/// are content-addressed, so the `session` altitude is the physical HOME of a
+/// session's raw + task blobs and the `pr` / `campaign` envelopes that same
+/// session authors REFERENCE the identical bytes (CAS dedupes: equal content
+/// → one stored blob, equal ref). That relationship is explicit, not
+/// coincidental — a Pr/Campaign envelope's trajectory refs MAY equal the
+/// Session envelope's refs, and the dedupe proves it.
 ///
 /// # Errors
-/// Fails on a blob-store failure, or fail-closed if called at the `intent`
-/// altitude (waste/orchestration emission is a session-author concern;
-/// intents close via [`close_envelope`]).
+/// Fails on a blob-store failure, on the two-transcript imperative (a `full`
+/// close missing either transcript ref), or fail-closed if called at the
+/// `intent` altitude (waste/orchestration emission is a session-author
+/// concern; intents close via [`close_envelope`]).
 pub fn close_session_envelope<S: ColdBlobStore>(
     draft: &EnvelopeDraft,
     level: CaptureLevel,
@@ -694,5 +771,112 @@ mod tests {
             .expect("present");
         let back: ContextEnvelope = serde_json::from_slice(&bytes).expect("frozen shape");
         assert_eq!(back, emission.envelope);
+    }
+
+    #[test]
+    fn session_altitude_is_first_class() {
+        // Session is the fourth altitude and a valid session close (it is the
+        // physical home of the session's blobs — NOT refused like `intent`).
+        let store = InMemoryColdStore::new();
+        let waste = WasteCost {
+            discarded_intents: 0,
+            retried_agents: 0,
+            tokens_not_landed: 0,
+            cost_usd: 0.0,
+        };
+        let emission = close_session_envelope(
+            &draft(Altitude::Session),
+            CaptureLevel::default(),
+            &store,
+            waste,
+        )
+        .expect("session altitude is first-class, not refused");
+        assert_eq!(emission.envelope.altitude, Altitude::Session);
+        // Full close ⇒ both transcript refs present (imperative satisfied).
+        assert!(emission.envelope.trajectory.raw_transcript_ref.is_some());
+        assert!(emission.envelope.trajectory.task_transcript_ref.is_some());
+    }
+
+    #[test]
+    fn two_transcript_imperative_full_demands_both_refs() {
+        let store = InMemoryColdStore::new();
+
+        // Full close with an EMPTY raw transcript ⇒ the raw ref would be null:
+        // a hard violation, not a silent null.
+        let mut no_raw = draft(Altitude::Intent);
+        no_raw.raw_transcript = vec![];
+        let err = close_envelope(&no_raw, CaptureLevel::Full, &store)
+            .expect_err("full without raw must be refused");
+        assert_eq!(
+            err,
+            EnvelopeError::TwoTranscriptViolation {
+                altitude: Altitude::Intent,
+                missing: "raw_transcript_ref",
+            }
+        );
+
+        // Full close with an EMPTY task transcript ⇒ task ref null ⇒ refused.
+        let mut no_task = draft(Altitude::Pr);
+        no_task.task_transcript = vec![];
+        let err = close_envelope(&no_task, CaptureLevel::Full, &store)
+            .expect_err("full without task must be refused");
+        assert_eq!(
+            err,
+            EnvelopeError::TwoTranscriptViolation {
+                altitude: Altitude::Pr,
+                missing: "task_transcript_ref",
+            }
+        );
+
+        // Both empty ⇒ the message names both.
+        let mut neither = draft(Altitude::Campaign);
+        neither.raw_transcript = vec![];
+        neither.task_transcript = vec![];
+        let err = close_envelope(&neither, CaptureLevel::Full, &store)
+            .expect_err("full without either must be refused");
+        assert_eq!(
+            err,
+            EnvelopeError::TwoTranscriptViolation {
+                altitude: Altitude::Campaign,
+                missing: "raw_transcript_ref and task_transcript_ref",
+            }
+        );
+
+        // The violation flows through close_session_envelope too (same path).
+        let mut session_no_raw = draft(Altitude::Session);
+        session_no_raw.raw_transcript = vec![];
+        let waste = WasteCost {
+            discarded_intents: 0,
+            retried_agents: 0,
+            tokens_not_landed: 0,
+            cost_usd: 0.0,
+        };
+        let err = close_session_envelope(&session_no_raw, CaptureLevel::Full, &store, waste)
+            .expect_err("the imperative holds at the session altitude too");
+        assert!(matches!(
+            err,
+            EnvelopeError::TwoTranscriptViolation {
+                altitude: Altitude::Session,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn two_transcript_imperative_nulls_legal_only_under_opt_down() {
+        let store = InMemoryColdStore::new();
+        // An empty-transcript draft that would violate Full is FINE under an
+        // explicit opt-down: nulls are legal there, by design.
+        let mut empty = draft(Altitude::Intent);
+        empty.raw_transcript = vec![];
+        empty.task_transcript = vec![];
+
+        for level in [CaptureLevel::Off, CaptureLevel::Metrics, CaptureLevel::Task] {
+            let closed = close_envelope(&empty, level, &store)
+                .unwrap_or_else(|e| panic!("opt-down {level:?} tolerates nulls, got {e}"));
+            assert_eq!(closed.envelope.trajectory.raw_transcript_ref, None);
+            // task ref is null too (empty task transcript, even at `task`).
+            assert_eq!(closed.envelope.trajectory.task_transcript_ref, None);
+        }
     }
 }
