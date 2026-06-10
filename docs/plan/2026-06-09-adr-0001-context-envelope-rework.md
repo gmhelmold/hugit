@@ -29,7 +29,7 @@
 | **C9 / runner harness** | must **emit metrics** + capture the 3-altitude trajectory at intent close |
 | **D4** intents+projection · **D5** ledger · **D10** why+impact | project the new fields; compute the **PR rollup** |
 | **D11** journals+resume | `journal_ref` retained alongside the machine trajectory |
-| **X3** context privacy | redaction-on-write + capture levels + retention TTL must cover transcripts |
+| **X3** context privacy | redaction-on-write + capture levels + the erasure/tombstone path must cover transcripts (no TTL — retention forever, ratified) |
 
 ## The follow-on contracts
 
@@ -61,10 +61,13 @@ three transcript altitudes, redacted, honouring the repo capture level.
 (input/output/cache_read/cache_write/total), `wall_ms`, `active_ms`,
 `tool_calls` + per-tool breakdown, `model_turns`, derived `cost_usd`. Writes
 `raw_transcript_ref` (full born→die loop, every turn + tool call/result),
-`task_transcript_ref` (task-scoped), and inline `summary` to CAS. **Redaction
-applied on the write path** (REDACTED_MARKER per policy) before any blob is
-stored. **Capture level** (`off|metrics|task|full`) gates what is written;
-absent refs are `null`. Retention TTL tagged on `full` blobs.
+`task_transcript_ref` (task-scoped), and inline `summary` to the **cold
+object store** (owner 2026-06-10: trajectory blobs never ride the CoreLink
+hot CAS — tier-agnostic content-addressed refs, resolver maps hash → tier).
+**Redaction applied on the write path** (REDACTED_MARKER per policy) before
+any blob is stored. **Capture level** (`off|metrics|task|full`) gates what is
+written; absent refs are `null`. No TTL — retention is forever by ratified
+design.
 **Also (PR-author envelope + waste, owner 2026-06-10):** the **orchestrator**
 emits its OWN full envelope per PR (`altitude:"pr"`): the session transcript
 (raw + task + summary) and context snapshot — same capture path as intents,
