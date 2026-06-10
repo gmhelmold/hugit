@@ -1011,6 +1011,7 @@ dependencies = [
  "hex",
  "hugit-checks",
  "hugit-contracts",
+ "hugit-ledger",
  "hugit-queue",
  "hugit-refstore",
  "serde",
