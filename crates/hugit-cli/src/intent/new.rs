@@ -125,7 +125,11 @@ pub fn run(input: NewIntent, store_path: &Path) -> Result<NewResult, PorcelainEr
     let mut store = IntentStore::load(store_path).map_err(PorcelainError::from_store)?;
 
     // Idempotency: if this id already landed, return it unchanged (exit 0).
-    if store.intent_for(&intent_id).map_err(PorcelainError::from_store)?.is_some() {
+    if store
+        .intent_for(&intent_id)
+        .map_err(PorcelainError::from_store)?
+        .is_some()
+    {
         return Ok(NewResult {
             intent_id,
             already_exists: true,
@@ -144,7 +148,10 @@ pub fn run(input: NewIntent, store_path: &Path) -> Result<NewResult, PorcelainEr
 
     // The principal chain records authorship as given (subagent normally),
     // bound to the campaign — honest provenance, not invented.
-    let principal_chain = vec![format!("campaign:{}", input.campaign), format!("agent:{agent}")];
+    let principal_chain = vec![
+        format!("campaign:{}", input.campaign),
+        format!("agent:{agent}"),
+    ];
     let recorded_at = now_ms();
 
     // The REAL refstore path: land the sidecar onto the event log keyed by its
