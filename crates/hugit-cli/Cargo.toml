@@ -12,6 +12,7 @@ hugit-checks = { path = "../hugit-checks" }
 hugit-queue = { path = "../hugit-queue" }
 hugit-refstore = { path = "../hugit-refstore" }
 # WP-PC1: the campaign porcelain drives the F3 rollup + Ledger projection.
+# WP-PC3: `hugit pr show` reads the F3 `pr_record` rollup for the cost block.
 hugit-ledger = { path = "../hugit-ledger" }
 sha2 = { workspace = true }
 hex = { workspace = true }
@@ -31,6 +32,10 @@ path = "src/main.rs"
 [dev-dependencies]
 hugit-contracts = { path = "../hugit-contracts" }
 hugit-refstore = { path = "../hugit-refstore" }
+# WP-PC3 acceptance: drive `pr open/land/show` over the REAL event log
+# (EventLog) and the REAL landing queue (LandableEntry / Batch) — no
+# hand-faked queue or projection state.
+hugit-queue = { path = "../hugit-queue" }
 serde_json = { workspace = true }
 
 # WP-D9: the attention-queue oracle lives under the module's own tests/ dir
