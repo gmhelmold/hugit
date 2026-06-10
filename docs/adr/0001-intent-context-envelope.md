@@ -47,10 +47,27 @@ data** (whitepaper §13).
 2026-06-10): the **intent** carries the subagent's envelope; the **PR** carries
 the **orchestrator-session envelope** (the session transcript that planned,
 dispatched and landed the bundle, plus its context snapshot); the **campaign**
-carries its own. Metric **rollups** (§2.3) stay derived/computed; the
-**envelopes are captured**, not derived. Same shape at every altitude — only
+carries its own; and the **session** itself is a first-class fourth altitude
+(owner, same date — see below). Metric **rollups** (§2.3) stay derived/computed;
+the **envelopes are captured**, not derived. Same shape at every altitude — only
 `altitude` + the authored-unit id change. This is what makes the stack
 auditable top-down: campaign session ⊃ PR session ⊃ intent trajectory.
+
+**The two-transcript imperative (owner, 2026-06-10 — second directive):**
+*"os metadados de todas as camadas — intent, PR, campanha, sessão — devem ter
+Full transcript (da camada) e compacted transcript (por camada); esses 2 são
+imperativos em todas as camadas."* Concretely: at EVERY altitude the captured
+envelope MUST carry both `raw_transcript_ref` (the full transcript of that
+layer) and `task_transcript_ref` (the compacted transcript — "task" and
+"compacted" are the same thing; the owner's term is compacted). Null refs for
+these two exist ONLY under an explicit customer-tenant opt-down (§3 ladder),
+never by omission. **Campaign capture is not optional**: the campaign-driving
+session(s) are captured like any other — the owner observed correctly that
+nothing captured campaign transcripts before this directive. **Session** is
+its own altitude because one session may author several PRs/campaigns: the
+session envelope is the physical home of that session's full + compacted
+blobs; PR/campaign envelopes reference into it (CAS-deduped), each still
+presenting its own two transcripts.
 
 ### 2.1 The trajectory — three altitudes (this is the core ask)
 
@@ -339,3 +356,11 @@ campaign), **each campaign its own**, alongside the intents' envelopes
 (§2, §2.3 `envelope_ref`). Owner rationale: *"assim teríamos as camadas:
 transcript da sessão, snapshot de contexto e cia da campanha, de cada PR, e
 dos intents — muito mais transparente e auditável."*
+
+**Second owner directive (2026-06-10, later the same day):** the
+**two-transcript imperative** — full + compacted transcripts mandatory at
+EVERY layer (intent · PR · campaign · **session**, now a fourth first-class
+altitude), campaign capture explicitly included ("hoje acho que campanha não
+captura nada" — correct, fixed in WP-F2's scope). Contract consequence:
+`Altitude` gains `Session`, schema_version bumps 1.0.0 → 1.1.0 (additive;
+amended same-day as the freeze, zero producers existed).

@@ -75,8 +75,14 @@ CAS-deduped when one session authors several PRs — PLUS coordination metrics
 (tokens/tool-calls/turns spent planning/dispatching/cold-verifying/landing,
 NOT attributed to any intent) and **waste** (discarded intents, retried
 agents, tokens-not-landed). These feed the PR record's `envelope_ref`,
-`orchestration` and `waste`. Campaign-level sessions emit the same at
-`altitude:"campaign"`.
+`orchestration` and `waste`.
+**Two-transcript imperative (owner, 2026-06-10 second directive):** at EVERY
+altitude — intent · pr · campaign · **session** (fourth altitude, WP-F1b) —
+the producer MUST write BOTH `raw_transcript_ref` (full) and
+`task_transcript_ref` (compacted). **Campaign capture is mandatory, not
+incidental** (the owner caught that nothing captured campaign transcripts);
+the session envelope is the physical home of a session's blobs, PR/campaign
+envelopes reference into it deduped, each presenting its own two refs.
 **Parametrization (ratified):** default capture `full` at every altitude;
 retention forever (no TTL tagging — erasure path only).
 **Deps.** WP-F1 frozen types; X3 redaction policy; C9 runner lifecycle.
