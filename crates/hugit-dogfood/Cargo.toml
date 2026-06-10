@@ -20,7 +20,9 @@ hugit-checks = { path = "../hugit-checks" }
 # Event-log: append, verify_chain, canonical_json, compute_memo_key
 hugit-refstore = { path = "../hugit-refstore" }
 # WP-F2 envelope producer: recorder + close_envelope + cold-store seam
-hugit-runner = { path = "../hugit-runner" }
+# (relocated hugit-runner -> hugit-ledger::envelope by WP-R4 - capture is
+# forge domain; the execution core transferred to corelink-runners).
+hugit-ledger = { path = "../hugit-ledger" }
 
 serde_json = { workspace = true }
 
@@ -29,7 +31,7 @@ hugit-contracts = { path = "../hugit-contracts" }
 hugit-queue     = { path = "../hugit-queue" }
 hugit-checks    = { path = "../hugit-checks" }
 hugit-refstore  = { path = "../hugit-refstore" }
-hugit-runner    = { path = "../hugit-runner" }
+hugit-ledger    = { path = "../hugit-ledger" }
 serde_json      = { workspace = true }
 
 [[test]]

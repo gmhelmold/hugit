@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use hugit_contracts::context_envelope::{Authorship, Spawn, ToolCount, WasteCost};
 use hugit_contracts::{Altitude, ContextEnvelope, REDACTED_MARKER};
-use hugit_runner::envelope::{
+use hugit_ledger::envelope::{
     CaptureLevel, ColdBlobStore, ColdStoreError, DirColdStore, EnvelopeDraft, EnvelopeError,
     InMemoryColdStore, TrajectoryRecorder, UnwiredColdStore, close_envelope,
     close_session_envelope,

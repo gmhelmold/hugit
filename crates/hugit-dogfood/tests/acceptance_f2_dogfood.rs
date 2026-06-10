@@ -15,7 +15,7 @@ use hugit_checks::client::ac::InMemoryAc;
 use hugit_contracts::{Altitude, ContextEnvelope};
 use hugit_dogfood::envelope::{DOGFOOD_CAMPAIGN, run_wave_with_envelope_capture};
 use hugit_dogfood::wave::WaveConfig;
-use hugit_runner::envelope::{CaptureLevel, ColdBlobStore, InMemoryColdStore};
+use hugit_ledger::envelope::{CaptureLevel, ColdBlobStore, InMemoryColdStore};
 
 /// Resolve a ref and parse the blob through the FROZEN envelope type.
 fn fetch_envelope<S: ColdBlobStore>(store: &S, blob_ref: &str) -> ContextEnvelope {

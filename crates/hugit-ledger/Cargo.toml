@@ -12,6 +12,10 @@ hugit-refstore = { path = "../hugit-refstore" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 schemars = { version = "1", features = ["derive"] }
+# WP-F2 envelope producer (relocated from hugit-runner, WP-R4): content-
+# addressed cold-store refs (cas:<sha256-hex>) — workspace-pinned.
+sha2 = { workspace = true }
+hex = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
