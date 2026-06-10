@@ -18,14 +18,23 @@
 //!    transcript blob that every PR envelope refs.
 //! 5. **Disclosed live seam fails closed** — the unwired cold-store binding
 //!    surfaces `NotWired`, never a silent drop.
+//! 6. **Session altitude is the physical home (WP-F2b)** — one session emits
+//!    a `Session` envelope that HOMES the raw + task blobs; the N `Pr`
+//!    envelopes and the `Campaign` envelope that same session authors all
+//!    REFERENCE the identical deduped blobs (the four-altitude family,
+//!    refs proven equal).
+//! 7. **Two-transcript imperative (WP-F2b)** — under `full` (the ratified
+//!    default) closing ANY altitude without BOTH transcript refs is a hard
+//!    `TwoTranscriptViolation`; nulls are legal only under an opt-down.
 
 use std::time::Duration;
 
 use hugit_contracts::context_envelope::{Authorship, Spawn, ToolCount, WasteCost};
 use hugit_contracts::{Altitude, ContextEnvelope, REDACTED_MARKER};
 use hugit_runner::envelope::{
-    CaptureLevel, ColdBlobStore, ColdStoreError, DirColdStore, EnvelopeDraft, InMemoryColdStore,
-    TrajectoryRecorder, UnwiredColdStore, close_envelope, close_session_envelope,
+    CaptureLevel, ColdBlobStore, ColdStoreError, DirColdStore, EnvelopeDraft, EnvelopeError,
+    InMemoryColdStore, TrajectoryRecorder, UnwiredColdStore, close_envelope,
+    close_session_envelope,
 };
 
 /// A planted secret carrying both the canonical marker (`SECRET:`) and a
@@ -399,4 +408,145 @@ fn recorder_metrics_carry_cache_split_and_breakdown_into_the_envelope() {
     let store = InMemoryColdStore::new();
     let closed = close_envelope(&draft, CaptureLevel::default(), &store).expect("close at full");
     assert_eq!(closed.envelope.metrics, draft.metrics);
+}
+
+// ── ⑥ session is the physical home: 1 Session + N Pr + 1 Campaign ─────────────
+
+#[test]
+fn item_6_one_session_homes_the_four_altitude_family() {
+    // ONE session authors the whole family. The Session envelope is the
+    // physical HOME of the raw + task blobs; the N Pr envelopes and the
+    // Campaign envelope reference the SAME deduped blobs.
+    let store = InMemoryColdStore::new();
+    let no_waste = WasteCost {
+        discarded_intents: 0,
+        retried_agents: 0,
+        tokens_not_landed: 0,
+        cost_usd: 0.0,
+    };
+
+    // The shared session draft — same transcript/snapshot, only the altitude +
+    // unit id change across the family (the session-author identity is one).
+    let base = secret_bearing_draft(Altitude::Session);
+    let at = |altitude: Altitude, unit_id: &str| {
+        let mut d = base.clone();
+        d.altitude = altitude;
+        d.unit_id = unit_id.to_string();
+        d.authorship.agent_type = "main".to_string();
+        d
+    };
+
+    // 1 Session envelope (the home).
+    let session = close_session_envelope(
+        &at(Altitude::Session, "orq-session-7"),
+        CaptureLevel::default(),
+        &store,
+        no_waste.clone(),
+    )
+    .expect("session close");
+    assert_eq!(session.envelope.altitude, Altitude::Session);
+
+    // N=2 Pr envelopes authored by that same session.
+    let prs: Vec<_> = ["128", "129"]
+        .iter()
+        .map(|id| {
+            close_session_envelope(
+                &at(Altitude::Pr, id),
+                CaptureLevel::default(),
+                &store,
+                no_waste.clone(),
+            )
+            .expect("pr close")
+        })
+        .collect();
+
+    // 1 Campaign envelope, same session.
+    let campaign = close_session_envelope(
+        &at(Altitude::Campaign, "auth-hardening"),
+        CaptureLevel::default(),
+        &store,
+        no_waste,
+    )
+    .expect("campaign close");
+    assert_eq!(campaign.envelope.altitude, Altitude::Campaign);
+
+    // The home relationship is EXPLICIT: every Pr and the Campaign reference
+    // the SAME raw + task blobs the Session envelope homes (CAS dedupe proves
+    // identical content → one stored blob → one ref).
+    let home_raw = &session.envelope.trajectory.raw_transcript_ref;
+    let home_task = &session.envelope.trajectory.task_transcript_ref;
+    assert!(
+        home_raw.is_some() && home_task.is_some(),
+        "home blobs present"
+    );
+    for pr in &prs {
+        assert_eq!(pr.envelope.altitude, Altitude::Pr);
+        assert_eq!(&pr.envelope.trajectory.raw_transcript_ref, home_raw);
+        assert_eq!(&pr.envelope.trajectory.task_transcript_ref, home_task);
+    }
+    assert_eq!(&campaign.envelope.trajectory.raw_transcript_ref, home_raw);
+    assert_eq!(&campaign.envelope.trajectory.task_transcript_ref, home_task);
+
+    // The four envelopes are DISTINCT (own unit id) over the shared blobs.
+    let envelope_refs: std::collections::BTreeSet<&String> = std::iter::once(&session.envelope_ref)
+        .chain(prs.iter().map(|p| &p.envelope_ref))
+        .chain(std::iter::once(&campaign.envelope_ref))
+        .collect();
+    assert_eq!(envelope_refs.len(), 4, "1 Session + 2 Pr + 1 Campaign");
+    assert_eq!(session.envelope.intent_id, "orq-session-7");
+    assert_eq!(campaign.envelope.intent_id, "auth-hardening");
+}
+
+// ── ⑦ two-transcript imperative: full demands both, opt-down tolerates null ──
+
+#[test]
+fn item_7_two_transcript_imperative_enforced_at_full() {
+    let store = InMemoryColdStore::new();
+
+    // A Full close missing a transcript (here: empty raw) is a HARD error at
+    // every altitude — never a silent null.
+    for altitude in [
+        Altitude::Intent,
+        Altitude::Session,
+        Altitude::Pr,
+        Altitude::Campaign,
+    ] {
+        let mut d = secret_bearing_draft(altitude);
+        d.raw_transcript = vec![];
+        let err =
+            close_envelope(&d, CaptureLevel::Full, &store).expect_err("full demands the raw ref");
+        assert_eq!(
+            err,
+            EnvelopeError::TwoTranscriptViolation {
+                altitude,
+                missing: "raw_transcript_ref",
+            }
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("two-transcript imperative violated"));
+    }
+
+    // The SAME empty-transcript draft is legal under an explicit opt-down:
+    // nulls remain legal there by design (off/metrics/task).
+    let mut empty = secret_bearing_draft(Altitude::Intent);
+    empty.raw_transcript = vec![];
+    empty.task_transcript = vec![];
+    for level in [CaptureLevel::Off, CaptureLevel::Metrics, CaptureLevel::Task] {
+        let closed = close_envelope(&empty, level, &store)
+            .unwrap_or_else(|e| panic!("opt-down {level:?} tolerates nulls, got: {e}"));
+        assert_eq!(closed.envelope.trajectory.raw_transcript_ref, None);
+        assert_eq!(closed.envelope.trajectory.task_transcript_ref, None);
+    }
+
+    // Sanity: a well-formed Full close (both transcripts non-empty) succeeds
+    // and carries BOTH refs — the existing default-path proofs are not
+    // weakened by the new guard.
+    let ok = close_envelope(
+        &secret_bearing_draft(Altitude::Intent),
+        CaptureLevel::Full,
+        &store,
+    )
+    .expect("well-formed full close succeeds");
+    assert!(ok.envelope.trajectory.raw_transcript_ref.is_some());
+    assert!(ok.envelope.trajectory.task_transcript_ref.is_some());
 }

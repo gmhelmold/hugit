@@ -7,10 +7,12 @@
 //! metrics are **measured** (wall/active time, tool-call counts, hit/miss
 //! provenance), never fabricated — and is closed into a frozen
 //! `ContextEnvelope` behind a `context_ref`, wired into its
-//! [`IntentSidecar`]. The orchestrator (the wave run itself) then emits its
-//! OWN session envelope per landed PR (`altitude:"pr"`, one session blob,
-//! CAS-deduped across the PRs) plus **waste**, and a campaign-altitude
-//! envelope through the identical path.
+//! [`IntentSidecar`]. The orchestrator (the wave run itself) then emits the
+//! full FOUR-altitude family through the identical path: its OWN
+//! `altitude:"session"` envelope (the physical HOME of the session's raw +
+//! task blobs), one `altitude:"pr"` envelope per landed PR, and one
+//! `altitude:"campaign"` envelope — the PR/campaign envelopes referencing the
+//! SAME deduped blobs the session homes (WP-F2b) — plus **waste**.
 //!
 //! Token figures are zero by honesty: the deterministic in-process harness
 //! spawns no model, so zero is the measured spend (the token/cache-split
@@ -51,7 +53,8 @@ pub struct CapturedIntent {
     pub closed: ClosedEnvelope,
 }
 
-/// A wave run with full WP-F2 capture at every altitude.
+/// A wave run with full WP-F2/F2b capture across the FOUR altitudes
+/// (`session` · `pr` · `campaign` · `intent`).
 /// (No `Debug` derive: [`WaveReport`] carries the non-`Debug` `EventLog`.)
 pub struct CapturedWave {
     /// The item-① wave report (real Phase-B engine).
@@ -59,11 +62,15 @@ pub struct CapturedWave {
     /// Per-intent emissions (one per wave entry, landed or not — waste is
     /// shown, not hidden).
     pub intents: Vec<CapturedIntent>,
+    /// The orchestrator-session's OWN envelope (`altitude:"session"`) — the
+    /// physical HOME of the session's raw + task transcript blobs. The PR and
+    /// campaign emissions reference the same deduped blobs (WP-F2b).
+    pub session: SessionEmission,
     /// The orchestrator-session emission per LANDED PR (`altitude:"pr"`).
     /// One session authored them all: the transcript blobs are CAS-deduped
-    /// across these emissions.
+    /// against the session home above.
     pub pr_sessions: Vec<SessionEmission>,
-    /// The campaign-altitude emission — same path, same session capture.
+    /// The campaign-altitude emission — same path, same session home blobs.
     pub campaign_session: SessionEmission,
 }
 
@@ -284,6 +291,18 @@ pub fn run_wave_with_envelope_capture<S: ColdBlobStore>(
         verdicts_ref: None,
     };
 
+    // The session's OWN envelope (`altitude:"session"`) — the physical HOME
+    // of the raw + task blobs. Emitted FIRST so the home is unambiguous; the
+    // PR and campaign envelopes below reference the SAME content (CAS dedupes
+    // identical bytes to one stored blob, one ref).
+    let session = close_session_envelope(
+        &session_draft("orq-dogfood-wave".to_string(), Altitude::Session),
+        level,
+        store,
+        waste.clone(),
+    )
+    .expect("session envelope close");
+
     let pr_sessions: Vec<SessionEmission> = report
         .landed
         .iter()
@@ -310,6 +329,7 @@ pub fn run_wave_with_envelope_capture<S: ColdBlobStore>(
     CapturedWave {
         report,
         intents,
+        session,
         pr_sessions,
         campaign_session,
     }
