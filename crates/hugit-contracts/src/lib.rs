@@ -4,7 +4,10 @@
 //! contract surface. This crate has ZERO runtime logic beyond derive-generated
 //! (de)serialization and schema generation.
 //!
-//! All 15 types were frozen by decomposition §1 (WP-00).
+//! All 15 types were frozen by decomposition §1 (WP-00). `ContextEnvelope`
+//! (+ `IntentMetrics`) was frozen by ADR-0001 / WP-F1; its companions
+//! `PrRecord` and `CampaignRollup` are DERIVED (forge-computed) read shapes,
+//! NOT frozen — see `context_envelope` module docs.
 
 /// The canonical redaction sentinel — the single source of truth for the
 /// `"[REDACTED]"` marker used by both the ledger/verdict redaction
@@ -18,6 +21,7 @@ pub mod attention_rank;
 pub mod attestation_chain;
 pub mod check_def;
 pub mod check_result;
+pub mod context_envelope;
 pub mod diagnosis_object;
 pub mod event_record;
 pub mod export_schema;
@@ -36,6 +40,10 @@ pub use attention_rank::AttentionRank;
 pub use attestation_chain::AttestationChain;
 pub use check_def::CheckDef;
 pub use check_result::CheckResult;
+pub use context_envelope::{
+    Altitude, CONTEXT_ENVELOPE_SCHEMA_VERSION, CampaignRollup, ContextEnvelope, IntentMetrics,
+    PrRecord,
+};
 pub use diagnosis_object::DiagnosisObject;
 pub use event_record::EventRecord;
 pub use export_schema::ExportSchema;

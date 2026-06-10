@@ -1,0 +1,72 @@
+{
+  "schema_version": "1.0.0",
+  "altitude": "pr",
+  "intent_id": "128",
+  "commit": "f00df00df00df00df00df00df00df00df00df00d",
+  "tree_hash": "beadbeadbeadbeadbeadbeadbeadbeadbeadbeadbeadbeadbeadbeadbeadbead",
+  "authorship": {
+    "model": "claude-opus-4-8",
+    "model_digest": "d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0",
+    "agent_type": "main",
+    "spawn": {
+      "run_id": "orq-014",
+      "parent_run_id": null,
+      "born_at": 1717000000000,
+      "died_at": 1717004200000
+    },
+    "operator": "gustavo@humangr.com"
+  },
+  "charter": "land auth-hardening wave 1: refresh-window fixes",
+  "campaign": "auth-hardening",
+  "constraints": [],
+  "acceptance": [
+    "all intents land conflict-free"
+  ],
+  "parent_intents": [],
+  "trajectory": {
+    "raw_transcript_ref": "cas:c0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0de",
+    "task_transcript_ref": "cas:deaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddead",
+    "summary": "Planned 3 intents, dispatched 3 subagents, cold-verified, landed the bundle.",
+    "journal_ref": null,
+    "redaction_policy": "default-v1"
+  },
+  "snapshot": {
+    "files_read": [
+      {
+        "path": "docs/plan/wave-1.md",
+        "hash": "sha256:77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa"
+      }
+    ],
+    "prompt_ref": "cas:beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef",
+    "env_manifest": "rustc 1.96.0"
+  },
+  "metrics": {
+    "tokens": {
+      "input": 122000,
+      "output": 18400,
+      "cache_read": 96000,
+      "cache_write": 8000,
+      "total": 244400
+    },
+    "wall_ms": 4200000,
+    "active_ms": 1900000,
+    "tool_calls": 41,
+    "tool_breakdown": [
+      {
+        "tool": "Bash",
+        "count": 22
+      },
+      {
+        "tool": "Read",
+        "count": 13
+      },
+      {
+        "tool": "Task",
+        "count": 6
+      }
+    ],
+    "model_turns": 28,
+    "cost_usd": 0.62
+  },
+  "verdicts_ref": "cas:5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed"
+}
