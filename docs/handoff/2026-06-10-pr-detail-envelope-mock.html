@@ -1,0 +1,742 @@
+<!doctype html>
+<!-- PROPOSTA (hugit → githugr handoff, 2026-06-10): pr-detail + ENVELOPE DO PR em 3 camadas.
+     Base verbatim: ../githugr/design/pr-detail.html (aprovada). Delta: ADR-0001 ratificado hoje —
+     o PR carrega o envelope da sessão do orquestrador (transcript 100% + snapshot + campanha),
+     não só números derivados. Seções novas marcadas com «NOVO». Aba Overview aberta por padrão
+     só neste mock, pra avaliação com os olhos. Para o lead do githugr absorver no corpus DDD. -->
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>githugr — PR detail · envelope do PR (proposta)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  :root{
+    --bg:#101013; --rail:#0c0c0f; --panel:#16161a; --panel-2:#1c1c22; --hover:rgba(255,255,255,.04);
+    --line:rgba(255,255,255,.06); --line-2:rgba(255,255,255,.09); --line-3:rgba(255,255,255,.14);
+    --text:#f3f4f5; --text-2:#d0d2d6; --muted:#8a8f98; --faint:#626572; --dim:#44464f;
+    --accent:#ededf0; --accent-soft:rgba(255,255,255,.07); --green:#5a9e78; --green-soft:rgba(90,158,120,.1);
+    --red:#cf7070; --amber:#b89a5a;
+    --font:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+    --mono:'JetBrains Mono',ui-monospace,Menlo,monospace; --r:8px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  ::selection{background:rgba(255,255,255,.17)}
+  body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:13.5px;line-height:1.55;-webkit-font-smoothing:antialiased;height:100vh;overflow:hidden;letter-spacing:-.005em}
+  kbd{font-family:var(--mono);font-size:10.5px;color:var(--muted);background:rgba(255,255,255,.035);border:1px solid var(--line-2);border-radius:5px;padding:1px 5px}
+  .mono{font-family:var(--mono)} a{color:inherit;text-decoration:none}
+  .app{display:grid;grid-template-rows:46px 44px 1fr;height:100vh}
+
+  .topbar{display:flex;align-items:center;gap:14px;padding:0 14px;border-bottom:1px solid var(--line);background:var(--rail)}
+  .brand{display:flex;align-items:center;gap:8px;font-weight:600}
+  .brand .logo{width:17px;height:17px;border-radius:5px;background:#ededf0} .brand .nm{font-weight:700}
+  .brand .sep{color:var(--dim)} .brand .repo{color:var(--muted);font-weight:500} .brand .repo b{color:var(--text)}
+  .cmdk{flex:1;max-width:440px;margin:0 auto;display:flex;align-items:center;gap:8px;height:30px;padding:0 11px;border:1px solid var(--line-2);border-radius:7px;color:var(--faint);background:rgba(255,255,255,.02)} .cmdk .sp{flex:1}
+  .right{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:12.5px}
+  .ghbtn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line-2);border-radius:6px;padding:3px 9px;color:var(--muted)}
+  .av{width:22px;height:22px;border-radius:50%;background:#26262c;border:1px solid var(--line-2)}
+
+  .tabbar{display:flex;align-items:center;gap:2px;padding:0 14px;border-bottom:1px solid var(--line);background:var(--rail)}
+  .rtab{display:inline-flex;align-items:center;gap:7px;padding:0 11px;height:43px;color:var(--muted);font-size:13px;cursor:pointer;border-bottom:2px solid transparent}
+  .rtab.on{color:var(--text);border-bottom-color:var(--accent);font-weight:500} .rtab .ic{color:var(--faint)} .rtab.on .ic{color:var(--text)}
+  .ext{color:var(--dim);font-size:11px}
+
+  .body{overflow-y:auto}
+  .wrap{max-width:1080px;margin:0 auto;padding:18px 24px 50px}
+  .crumb{color:var(--faint);font-size:12.5px;margin-bottom:8px} .crumb a{color:var(--muted)} .crumb .mono{color:var(--faint)}
+
+  /* PR header */
+  .prh .t1{display:flex;align-items:center;gap:11px}
+  .prh .num{color:var(--faint);font-weight:400;font-size:22px}
+  .prh h1{font-size:22px;font-weight:600;letter-spacing:-.02em}
+  .pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;padding:3px 11px;border-radius:20px}
+  .pill .dot{width:7px;height:7px;border-radius:50%}
+  .pill.queue{color:var(--muted);background:var(--accent-soft);border:1px solid var(--line-2)} .pill.queue .dot{background:var(--faint)}
+  .prh .t2{margin-top:10px;color:var(--muted);font-size:13px}
+  .prh .t2 b{color:var(--text-2)} .prh .t2 .mono{color:var(--muted)}
+
+  /* the "better than GitHub" strip */
+  .better{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 4px}
+  .chip{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--text-2);background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:5px 11px}
+  .chip .dot{width:6px;height:6px;border-radius:50%;background:var(--green)} .chip b{color:var(--text)}
+  .chip .l{color:var(--faint)}
+
+  .ptabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin-top:18px}
+  .ptab{padding:11px 13px;color:var(--muted);font-size:13.5px;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;display:inline-flex;align-items:center;gap:7px}
+  .ptab:hover{color:var(--text)} .ptab.on{color:var(--text);border-bottom-color:var(--accent);font-weight:500}
+  .ptab .n{font-size:11px;color:var(--muted);background:rgba(255,255,255,.06);border-radius:20px;padding:0 6px;font-weight:600}
+
+  .layout{display:grid;grid-template-columns:1fr 280px;gap:24px;margin-top:20px}
+  .pane{display:none} .pane.on{display:block}
+  .hint{color:var(--faint);font-size:12.5px;margin-bottom:14px}
+
+  /* intents (= commits) inside the PR */
+  .intent{border:1px solid var(--line);border-radius:var(--r);background:var(--panel);margin-bottom:12px;overflow:hidden}
+  .ih{display:grid;grid-template-columns:24px 1fr auto;align-items:center;gap:12px;padding:13px 15px;cursor:pointer}
+  .ih:hover{background:var(--panel-2)}
+  .ih .ico{color:var(--green);text-align:center} .ih .ico.t{color:var(--accent)}
+  .ih .ti{font-size:14px;font-weight:500;color:var(--text)}
+  .ih .mt{font-size:12px;color:var(--faint);margin-top:3px} .ih .mt .id{font-family:var(--mono);color:var(--muted)} .ih .mt b{color:var(--muted)}
+  .ih .rd{color:var(--faint);font-size:12px}
+  .ih .chev{color:var(--faint);transition:.15s} .intent.open .ih .chev{transform:rotate(90deg)}
+
+  .ibody{display:none;border-top:1px solid var(--line);padding:16px 16px 18px} .intent.open .ibody{display:block}
+  .blk{margin-bottom:18px} .blk:last-child{margin-bottom:0}
+  .blk .bt{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);font-weight:600;margin-bottom:8px;display:flex;align-items:center;gap:7px}
+  .blk .bt .g{color:var(--text);text-transform:none;letter-spacing:0;font-weight:400;font-size:11.5px}
+  .charter{font-size:13.5px;color:var(--text-2);max-width:70ch}
+
+  /* context snapshot — the kept brain */
+  .ctx{border:1px solid var(--line-2);border-radius:var(--r);background:var(--panel-2);padding:13px 15px}
+  .ctx .row{display:flex;gap:8px;font-size:12.5px;color:var(--muted);padding:3px 0} .ctx .row .k{color:var(--faint);width:108px;flex:0 0 auto} .ctx .row .v{color:var(--text-2)}
+  .ctx .files{display:flex;flex-wrap:wrap;gap:5px;margin-top:3px} .ctx .files .f{font-family:var(--mono);font-size:11px;color:var(--text-2);background:rgba(255,255,255,.04);border:1px solid var(--line);border-radius:5px;padding:1px 7px}
+  .ctx .reason{margin-top:10px;padding-top:10px;border-top:1px solid var(--line);font-size:12.5px;color:var(--muted);font-style:italic}
+  .ctx .act{margin-top:11px;display:flex;gap:8px}
+  .bg{background:transparent;color:var(--text);border:1px solid var(--line-2);border-radius:6px;padding:5px 11px;font-size:12px;cursor:pointer;font-family:var(--font)}
+
+  /* diff + why-blame */
+  .code{border:1px solid var(--line);border-radius:var(--r);overflow:hidden;background:#0d0d10;font-family:var(--mono);font-size:12.5px}
+  .code .fn{padding:7px 14px;border-bottom:1px solid var(--line);background:var(--rail);color:var(--muted);font-size:11.5px}
+  .cl{display:grid;grid-template-columns:40px 1fr} .cl .ln{color:var(--dim);text-align:right;padding:2px 10px 2px 0;user-select:none} .cl .ct{padding:2px 14px;white-space:pre;color:var(--text-2)}
+  .cl.add{background:rgba(90,158,120,.08)} .cl.add .ct{color:#bfe6cf} .cl.del{background:rgba(207,112,112,.08)} .cl.del .ct{color:#e9b6b6}
+  .cl.hl{background:rgba(255,255,255,.1);border-left:2px solid var(--accent)} .cl.hl .ln{padding-left:0}
+  .cm{color:var(--faint)}
+  .blame{border:1px solid var(--line);border-top:0;border-radius:0 0 var(--r) var(--r);background:var(--panel);padding:11px 14px;font-size:12.5px}
+  .blame .why{color:var(--muted);font-style:italic} .blame .meta{margin-top:8px;display:flex;gap:16px;color:var(--faint);font-size:12px} .blame .meta b{color:var(--text-2)}
+
+  .verd{display:flex;align-items:center;gap:10px;font-size:12.5px;color:var(--muted);padding:6px 0;border-bottom:1px solid var(--line)} .verd:last-child{border:0}
+  .verd .lens{font-family:var(--mono);font-size:11px;color:var(--faint);width:84px} .verd .ok{margin-left:auto;color:var(--green)}
+
+  /* right rail */
+  .aside .card{border:1px solid var(--line);border-radius:var(--r);background:var(--panel);padding:13px;margin-bottom:13px}
+  .aside .h{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);font-weight:600;margin-bottom:11px}
+  .kv{display:flex;align-items:center;gap:9px;font-size:12.5px;color:var(--muted);padding:4px 0} .kv .v{margin-left:auto;color:var(--text-2);font-weight:500} .kv .v.g{color:var(--green)}
+  .bp{width:100%;background:var(--accent);color:#15151a;border:0;border-radius:7px;padding:9px;font-weight:600;font-size:13px;cursor:pointer;font-family:var(--font);margin-top:4px}
+  .who{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--muted);padding:4px 0} .who .a{width:20px;height:20px;border-radius:50%;background:#2a2a31;border:1px solid var(--line-2)}
+
+  /* shared section label inside panes */
+  .seclite{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);font-weight:600;margin:20px 0 10px} .seclite .g{text-transform:none;letter-spacing:0;font-weight:400;color:var(--dim)}
+  /* metrics tiles (Overview rollup) */
+  .metrics{display:grid;grid-template-columns:repeat(5,1fr);gap:10px} @media(max-width:900px){.metrics{grid-template-columns:repeat(2,1fr)}}
+  .stat{border:1px solid var(--line);border-radius:var(--r);background:var(--panel);padding:11px 13px}
+  .stat .n{font-size:18px;font-weight:600;letter-spacing:-.02em;font-family:var(--mono)} .stat .n .u{font-size:11px;color:var(--faint);font-weight:400;margin-left:3px}
+  .stat .l{font-size:10.5px;letter-spacing:.04em;text-transform:uppercase;color:var(--faint);font-weight:600;margin-top:4px} .stat .sub{font-size:11px;color:var(--muted);margin-top:5px}
+  .cap{font-size:11px;color:var(--faint);margin-top:9px} .cap b{color:var(--muted)}
+  /* checks rows */
+  .crow{display:flex;align-items:center;gap:11px;padding:10px 13px;border-bottom:1px solid var(--line);font-size:12.5px} .crow:last-child{border:0}
+  .crow .nm{color:var(--text-2);font-family:var(--mono);font-size:12px} .crow .sp{flex:1}
+  .crow .tag{font-size:10.5px;font-weight:600;border-radius:5px;padding:1px 7px} .crow .tag.hit{color:var(--muted);background:rgba(255,255,255,.05);border:1px solid var(--line-2)} .crow .tag.exec{color:var(--green);background:var(--green-soft);border:1px solid rgba(90,158,120,.28)}
+  .crow .mt{color:var(--faint);font-size:11.5px;font-family:var(--mono);width:56px;text-align:right} .crow .ok{color:var(--green)}
+  /* file rows */
+  .frow{display:flex;align-items:center;gap:10px;padding:9px 13px;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:12px;color:var(--text-2);cursor:pointer} .frow:last-child{border:0} .frow:hover{background:var(--panel-2)} .frow .sp{flex:1} .frow .a{color:var(--green)} .frow .d{color:var(--red)}
+  /* cost decomposition rows */
+  .author-line{font-size:12.5px;color:var(--muted);margin-bottom:4px} .author-line b{color:var(--text-2)} .author-line .badge{font-size:10px;letter-spacing:.04em;text-transform:uppercase;color:var(--faint);border:1px solid var(--line-2);border-radius:5px;padding:1px 6px;margin-left:6px}
+  .costrow{display:grid;grid-template-columns:130px 1fr 60px;align-items:center;gap:12px;padding:7px 0;font-size:12.5px}
+  .costrow .cl2{color:var(--muted)} .costrow .cl2 .g{color:var(--faint);font-size:11px}
+  .costrow .track{height:6px;border-radius:6px;background:rgba(255,255,255,.06);overflow:hidden} .costrow .track i{display:block;height:100%;background:var(--accent)}
+  .costrow .amt{text-align:right;font-family:var(--mono);color:var(--text-2)}
+  .costrow.waste .track i{background:var(--amber)} .costrow.waste .cl2{color:var(--amber)}
+  .costrow.total{border-top:1px solid var(--line);margin-top:5px;padding-top:10px} .costrow.total .cl2,.costrow.total .amt{color:var(--text);font-weight:600}
+  .effrow{display:flex;gap:22px;flex-wrap:wrap;margin-top:12px;padding-top:12px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)} .effrow b{color:var(--text-2);font-family:var(--mono)} .effrow .k{color:var(--faint)}
+
+  /* «NOVO» envelope do PR — a sessão em 3 altitudes (vocabulário do ctx/intent) */
+  .env .alt{display:grid;grid-template-columns:104px 1fr auto;align-items:baseline;gap:12px;padding:8px 0;border-bottom:1px solid var(--line)} .env .alt:last-child{border:0}
+  .env .alt .al{font-family:var(--mono);font-size:11px;color:var(--faint)}
+  .env .alt .tx{font-size:12.5px;color:var(--text-2)} .env .alt .tx.i{color:var(--muted);font-style:italic}
+  .env .alt .ref{font-family:var(--mono);font-size:11px;color:var(--muted);background:rgba(255,255,255,.04);border:1px solid var(--line);border-radius:5px;padding:1px 7px;cursor:pointer;white-space:nowrap}
+  .env .alt .ref:hover{color:var(--text);border-color:var(--line-3)}
+  .keepbadge{font-size:10px;letter-spacing:.04em;text-transform:uppercase;color:var(--green);border:1px solid rgba(90,158,120,.28);background:var(--green-soft);border-radius:5px;padding:1px 6px;margin-left:6px}
+  .nest{display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--faint);font-family:var(--mono);margin-top:10px;padding-top:10px;border-top:1px solid var(--line)}
+  .nest .lay{color:var(--muted);background:rgba(255,255,255,.04);border:1px solid var(--line);border-radius:5px;padding:1px 8px} .nest .lay.on{color:var(--text);border-color:var(--line-3)}
+
+  /* changed-files section (compare.html family) */
+  .filehd{display:flex;align-items:center;gap:12px;margin:0 0 11px}
+  .filehd .ttl{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);font-weight:600}
+  .filehd .fstat{font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .filehd .sp{flex:1}
+  .fcard{border:1px solid var(--line);border-radius:var(--r);overflow:hidden;margin-bottom:12px;background:var(--panel)}
+  .fhdr{display:flex;align-items:center;gap:11px;padding:9px 13px;background:var(--rail);border-bottom:1px solid var(--line);cursor:pointer}
+  .fhdr .chev{color:var(--dim);font-size:11px;transition:transform .15s;flex:0 0 auto}
+  .fcard.collapsed .fhdr .chev{transform:rotate(-90deg)}
+  .fhdr .path{font-family:var(--mono);font-size:12px;color:var(--text-2);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .fhdr .fst{font-family:var(--mono);font-size:11px;flex:0 0 auto}
+  .fhdr .fst .ad{color:var(--green)} .fhdr .fst .rm{color:var(--red)}
+  .fhdr .sp{flex:1}
+  .fhdr .blamelink{font-size:11.5px;color:var(--faint);border-bottom:1px solid var(--line-2);flex:0 0 auto;font-style:normal}
+  .fhdr .blamelink:hover{color:var(--text);border-bottom-color:var(--line-3)}
+  .fbody{display:block} .fcard.collapsed .fbody{display:none}
+  .fbody .code{border:0;border-radius:0;background:#0d0d10} .fbody .code .fn{border-radius:0}
+
+  /* toast (house pattern — attention.html / compare.html) */
+  .toast{position:fixed;bottom:30px;left:50%;transform:translateX(-50%) translateY(8px);background:var(--panel-2);border:1px solid var(--line-3);border-radius:8px;padding:9px 15px;font-size:12.5px;color:var(--text-2);box-shadow:0 14px 40px -12px rgba(0,0,0,.7);opacity:0;pointer-events:none;transition:opacity .2s,transform .2s;z-index:60;display:flex;align-items:center;gap:8px;max-width:560px}
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  .toast .dot{width:6px;height:6px;border-radius:50%;background:var(--green);flex:0 0 auto}
+
+  /* Cmd-K palette (kit.css conventions, inlined — this file has no kit link) */
+  .overlay{position:fixed;inset:0;background:rgba(6,6,8,.6);backdrop-filter:blur(2px);display:none;align-items:flex-start;justify-content:center;padding-top:14vh;z-index:50} .overlay.show{display:flex}
+  .palette{width:560px;max-width:92vw;background:var(--panel-2);border:1px solid var(--line-3);border-radius:11px;box-shadow:0 24px 70px -20px rgba(0,0,0,.8);overflow:hidden}
+  .palette .pin{display:flex;align-items:center;gap:11px;padding:14px 16px;border-bottom:1px solid var(--line)} .palette .pin input{flex:1;background:none;border:0;outline:0;color:var(--text);font-size:15px;font-family:var(--font)} .palette .pin input::placeholder{color:var(--faint)} .palette .pin .ic{color:var(--faint)}
+  .pgrp{font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--faint);font-weight:600;padding:10px 16px 4px}
+  .pitem{display:flex;align-items:center;gap:11px;padding:8px 16px;color:var(--muted);cursor:pointer} .pitem.on,.pitem:hover{background:var(--accent-soft);color:var(--text)} .pitem .ic{width:16px;color:var(--faint)} .pitem .id{font-family:var(--mono);font-size:11px;color:var(--faint);margin-left:auto}
+
+  /* Land queued state + approve chip */
+  .bp.queued{background:transparent;color:var(--text-2);border:1px solid var(--line-3);cursor:default} .bp.queued:hover{filter:none}
+  .okchip{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--green);background:var(--green-soft);border:1px solid rgba(90,158,120,.28);border-radius:7px;padding:5px 11px;margin-left:auto} .okchip .dot{width:6px;height:6px;border-radius:50%;background:var(--green)}
+
+/* ---- attention bell (global ◎) ---- */
+.bell{position:relative;display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border:1px solid var(--line-2);border-radius:7px;color:var(--muted);font-size:12px;cursor:pointer;text-decoration:none}
+.bell:hover{border-color:var(--line-3);color:var(--text)}
+.bell.on{border-color:var(--line-3);color:var(--text);background:rgba(255,255,255,.05)}
+.bell i{position:absolute;top:-5px;right:-6px;font-style:normal;font-family:var(--mono);font-size:9px;font-weight:600;color:var(--text);background:#2a2a31;border:1px solid var(--line-3);border-radius:10px;padding:0 4px;line-height:13px}
+
+  /* draft state pill */
+  .pill.draft{color:var(--muted);background:transparent;border:1px solid var(--line-2)} .pill.draft .dot{background:var(--dim)}
+
+  /* ⋯ menu (header) */
+  .more{width:26px;height:26px;display:inline-flex;align-items:center;justify-content:center;background:transparent;border:1px solid var(--line-2);border-radius:7px;color:var(--muted);cursor:pointer;font-size:15px;font-family:var(--font);line-height:1}
+  .more:hover{border-color:var(--line-3);color:var(--text)}
+  .menu{display:none;position:absolute;left:0;top:calc(100% + 5px);min-width:218px;background:var(--panel-2);border:1px solid var(--line-3);border-radius:9px;box-shadow:0 18px 50px -14px rgba(0,0,0,.75);padding:5px;z-index:45}
+  .menu.show{display:block}
+  .mitem{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:6px;color:var(--muted);cursor:pointer;font-size:12.5px}
+  .mitem:hover{background:var(--accent-soft);color:var(--text)}
+
+  /* meta rail (labels · milestone) */
+  .who .v{margin-left:auto;font-weight:500}
+  .lbl{font-size:11px;color:var(--text-2);border:1px solid var(--line-2);border-radius:20px;padding:1px 8px;cursor:pointer;background:transparent}
+  .lbl:hover{border-color:var(--line-3);color:var(--text)}
+  .ms{display:flex;align-items:center;gap:8px;padding:5px 0 1px;cursor:pointer}
+  .ms .bar{flex:1;height:4px;border-radius:4px;background:rgba(255,255,255,.06);border:1px solid var(--line);overflow:hidden}
+  .ms .bar i{display:block;height:100%;background:var(--text-2)}
+  .ms .mt2{font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+
+  /* land split button + options popover */
+  .landgrp{display:flex;gap:1px;margin-top:4px}
+  .landgrp .bp{margin-top:0;border-radius:7px 0 0 7px;flex:1}
+  .landgrp .bp.chev{flex:0 0 30px;width:30px;border-radius:0 7px 7px 0;font-size:11px;padding:9px 0}
+  .bp.disabled{background:rgba(255,255,255,.05);color:var(--faint);cursor:not-allowed;border:1px solid var(--line-2)}
+  .landgrp .bp.chev.dis{background:rgba(255,255,255,.05);color:var(--dim);cursor:not-allowed;border:1px solid var(--line-2)}
+  .bs{display:none;width:100%;background:transparent;color:var(--text);border:1px solid var(--line-3);border-radius:7px;padding:8px;font-weight:500;font-size:12.5px;cursor:pointer;font-family:var(--font);margin-top:8px}
+  .bs:hover{background:var(--hover)} .bs.show{display:block}
+  .pop{display:none;position:absolute;right:-1px;top:calc(100% + 6px);width:272px;background:var(--panel-2);border:1px solid var(--line-3);border-radius:9px;box-shadow:0 18px 50px -14px rgba(0,0,0,.75);padding:11px 13px;z-index:40;font-size:12px}
+  .pop.show{display:block}
+  .pop .ph{font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);font-weight:600;margin-bottom:5px}
+  .pop .req{display:flex;align-items:center;gap:7px;color:var(--text-2);padding:2px 0} .pop .req .ok{color:var(--green)} .pop .req .g{margin-left:auto;color:var(--faint);font-size:11px}
+  .ropt{display:flex;align-items:center;gap:8px;color:var(--muted);padding:5px 6px;border-radius:6px;cursor:pointer}
+  .ropt:hover{background:var(--hover);color:var(--text)}
+  .ropt .r{width:12px;height:12px;border-radius:50%;border:1px solid var(--line-3);flex:0 0 auto;position:relative}
+  .ropt.on{color:var(--text)} .ropt.on .r{border-color:var(--text-2)} .ropt.on .r::after{content:'';position:absolute;inset:3px;border-radius:50%;background:var(--accent)}
+  .ropt .def{margin-left:auto;font-size:10px;color:var(--faint);border:1px solid var(--line-2);border-radius:5px;padding:0 5px}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <div class="topbar">
+    <div class="brand"><span class="logo"></span> <span class="nm">githugr</span> <span class="sep">/</span> <span class="repo"><b>corelink-server</b></span></div>
+    <div class="cmdk" onclick="ck()" style="cursor:text"><span>⌘</span> Buscar ou executar… <span class="sp"></span> <kbd>⌘K</kbd></div>
+    <div class="right"><span class="ghbtn">⟲ sync GitHub ✓</span><a class="bell" href="attention.html" title="Atenção">◎<i>5</i></a><span class="av"></span></div>
+  </div>
+  <div class="tabbar">
+    <div class="rtab" onclick="location.href='repo-home.html'"><span class="ic">&lt;&gt;</span> Code</div>
+    <div class="rtab" onclick="location.href='issues.html'"><span class="ic">○</span> Issues <span class="ct">8</span></div>
+    <div class="rtab on"><span class="ic">⇄</span> Pull requests</div>
+    <div class="rtab" onclick="location.href='checks.html'"><span class="ic">✓</span> Checks</div>
+    <div class="rtab" onclick="location.href='landing.html'"><span class="ic">⇲</span> Landing</div>
+    <div class="rtab" onclick="location.href='security.html'"><span class="ic">⛨</span> Security</div>
+    <div class="rtab" onclick="location.href='insights.html'"><span class="ic">▦</span> Insights</div>
+    <div class="rtab" onclick="location.href='settings.html'"><span class="ic">⚙</span> Settings</div>
+  </div>
+
+  <div class="body"><div class="wrap">
+    <div class="crumb"><a>Intents (PRs)</a> › <span class="mono">#128</span></div>
+
+    <!-- PR header -->
+    <div class="prh">
+      <div class="t1"><span class="num">#128</span><h1>Auth hardening — refresh, rate-limit e logs</h1><span class="pill queue" id="prpill"><span class="dot"></span> na fila de landing</span>
+        <span style="position:relative"><button class="more" onclick="menu(event)" title="mais ações">⋯</button>
+          <div class="menu" id="prmenu">
+            <div class="mitem" id="draftitem" onclick="event.stopPropagation();menuClose();draftToggle()"><span style="color:var(--faint)">◌</span> Converter em rascunho</div>
+          </div>
+        </span>
+      </div>
+      <div class="t2">aberto pelo <b>orquestrador</b> <span class="mono">orq-014</span> · mergear <span class="mono">campaign/auth-hardening</span> → <span class="mono">main</span> · <b>3 intents</b> (opus-4.8 ×2 · sonnet-4.6) · 3 arquivos · <span style="color:var(--green)">+29</span> <span style="color:var(--red)">−7</span></div>
+      <!-- what's better than GitHub, in one strip -->
+      <div class="better">
+        <span class="chip"><span class="dot"></span> union-test <b>verde</b> <span class="l">· testado junto com #129</span></span>
+        <span class="chip"><span class="dot"></span> verificado por <b>$0.04</b> <span class="l">· cache poupou $3.10/14min</span></span>
+        <span class="chip"><span class="dot"></span> <b>3/3 intents atestados</b> <span class="l">· modelo + prompt + prova assinados</span></span>
+        <!-- «NOVO» — a 4ª chip agora fala das 3 camadas -->
+        <span class="chip"><span class="dot"></span> <b>envelope em 3 camadas</b> <span class="l">· campanha ⊃ PR ⊃ intent — transcript 100%, salvo sempre</span></span>
+      </div>
+      <!-- regenerative rebase moment (quiet event line) -->
+      <div class="cap" style="margin-top:9px">base moveu (<span class="mono">#129</span> pousou) → re-executado na base nova <b>(rebase regenerativo)</b> · acceptance verde · diff <span class="mono">D′</span> equivalente — sem re-verdito <span style="color:var(--faint)">(distância &lt; limiar)</span></div>
+    </div>
+
+    <!-- PR tabs (familiar) — Overview aberta por padrão NESTE MOCK (pra ver a novidade) -->
+    <div class="ptabs">
+      <div class="ptab on" onclick="ptab(this,'pp-ov')">Overview</div>
+      <div class="ptab" onclick="ptab(this,'pp-int')">Intents (commits) <span class="n">3</span></div>
+      <div class="ptab" onclick="ptab(this,'pp-checks')">Checks <span class="n">5</span></div>
+      <div class="ptab" onclick="ptab(this,'pp-files')">Arquivos <span class="n">3</span></div>
+    </div>
+
+    <div class="layout">
+      <div>
+        <!-- OVERVIEW pane -->
+        <div id="pp-ov" class="pane on">
+          <div class="hint">O que este PR muda, por quê, o que custou — e agora <b>a sessão que o montou</b>, salva como qualquer intent.</div>
+          <div class="card">
+            <div class="charter" style="max-width:74ch">Endurece a borda de autenticação em três frentes: corrige a janela de sessão que expirava cedo no refresh, aplica rate-limit por tenant no edge, e emite log estruturado de auth pro SIEM. Os três intents são da mesma campanha (<b style="color:var(--text-2)">auth-hardening</b>) e foram testados juntos como um conjunto.</div>
+          </div>
+
+          <div class="seclite">Resumo do PR</div>
+          <div class="metrics">
+            <div class="stat"><div class="n">3</div><div class="l">intents</div><div class="sub">de 4 tentados</div></div>
+            <div class="stat"><div class="n">112<span class="u">k</span></div><div class="l">tokens</div><div class="sub">total do PR</div></div>
+            <div class="stat"><div class="n">$0.13</div><div class="l">custo total (COGS)</div><div class="sub">cache poupou $8.40</div></div>
+            <div class="stat"><div class="n">22<span class="u">m</span></div><div class="l">tempo de relógio</div><div class="sub">de agente: 38m · fila: 6m</div></div>
+            <div class="stat"><div class="n">75<span class="u">%</span></div><div class="l">first-pass yield</div><div class="sub">3 pousaram de 4</div></div>
+          </div>
+
+          <!-- ════ «NOVO» ════ o envelope do PR: a sessão do orquestrador, capturada ════ -->
+          <div class="seclite">Envelope do PR <span class="g">· a sessão que montou este bundle — capturada, não derivada</span></div>
+          <div class="card env">
+            <div class="author-line">sessão do <b>orquestrador</b> <span class="mono">orq-014</span> · opus-4.8 · viva <span class="mono">09:14 → 09:36</span> (22m) <span class="badge">altitude: pr</span><span class="keepbadge">transcript 100% · salvo sempre</span></div>
+
+            <!-- trajetória em 3 altitudes — mesmo vocabulário do intent -->
+            <div class="alt"><span class="al">resumo</span><span class="tx i">"Planejou 4 intents da campanha, despachou 4 agentes em worktrees disjuntos, descartou 1 (a29 — acceptance vermelho), cold-verificou os 3 restantes e montou o bundle pra fila de união."</span></div>
+            <div class="alt"><span class="al">tarefa</span><span class="tx">o passo-a-passo da sessão: brief → plano → dispatch → verificações → bundle</span><span class="ref" onclick="toast('abre o transcript de tarefa da sessão — cas:b81c…')">cas:b81c… · 41 KB</span></div>
+            <div class="alt"><span class="al">bruto</span><span class="tx">a sessão completa, turno a turno, toda tool-call + resultado <span style="color:var(--faint)">(redigido por política)</span></span><span class="ref" onclick="toast('abre o transcript bruto — cas:9d4f… · deduplicado por conteúdo no CAS')">cas:9d4f… · 2.1 MB</span></div>
+
+            <!-- snapshot de contexto do orquestrador -->
+            <div class="row" style="display:flex;gap:8px;font-size:12.5px;color:var(--muted);padding:10px 0 3px;border-top:1px solid var(--line);margin-top:10px"><span class="k" style="color:var(--faint);width:108px;flex:0 0 auto">snapshot</span>
+              <span class="v" style="color:var(--text-2)">o que a sessão leu pra decidir:</span></div>
+            <div class="ctx" style="border:0;background:transparent;padding:0 0 0 116px">
+              <div class="files">
+                <span class="f">docs/plan/wave-auth.md</span><span class="f">conflict-map.json</span><span class="f">crates/auth/** (claim)</span><span class="f">política branch-protection</span><span class="f">+ 8 arquivos</span>
+              </div>
+            </div>
+            <div class="row" style="display:flex;gap:8px;font-size:12.5px;color:var(--muted);padding:6px 0 0"><span class="k" style="color:var(--faint);width:108px;flex:0 0 auto">campanha</span>
+              <span class="v" style="color:var(--text-2)">auth-hardening <span style="color:var(--faint)">· o envelope da campanha consolida os dos PRs, que consolidam os dos intents</span></span></div>
+
+            <!-- o json concreto, mesmo padrão do intent -->
+            <div class="code" style="margin-top:12px">
+              <div class="fn">128.context.json · altitude:"pr" · cas:c2e7… · tenant-private · nunca vira training data</div>
+              <div class="cl"><span class="ln"></span><span class="ct">{</span></div>
+              <div class="cl"><span class="ln"></span><span class="ct">  "altitude": "pr",   "pr_id": "128",   "campaign": "auth-hardening",</span></div>
+              <div class="cl"><span class="ln"></span><span class="ct">  "authorship": { "kind": "orchestrator", "model": "opus-4.8", "run_id": "orq-014" },</span></div>
+              <div class="cl"><span class="ln"></span><span class="ct">  "trajectory": {</span></div>
+              <div class="cl"><span class="ln"></span><span class="ct">    "raw_transcript_ref":  "cas:9d4f…",   <span class="cm">// 100% — salvo sempre, deduplicado</span></span></div>
+              <div class="cl"><span class="ln"></span><span class="ct">    "task_transcript_ref": "cas:b81c…",</span></div>
+              <div class="cl"><span class="ln"></span><span class="ct">    "summary": "planejou 4 · despachou 4 · descartou 1 · montou o bundle"</span></div>
+              <div class="cl"><span class="ln"></span><span class="ct">  },</span></div>
+              <div class="cl"><span class="ln"></span><span class="ct">  "snapshot": { "files_read": 12, "prompt_ref": "cas:77aa… (redacted)" }</span></div>
+              <div class="cl"><span class="ln"></span><span class="ct">}</span></div>
+            </div>
+            <div style="margin-top:9px;display:flex;gap:8px"><button class="bg" onclick="toast('baixa o 128.context.json — content-addressed')">⤓ baixar json</button><button class="bg" onclick="toast('replay da sessão do orquestrador — killer #4')">▸ replay da sessão</button></div>
+
+            <!-- a hierarquia, subliminar -->
+            <div class="nest">camadas:&nbsp;<span class="lay" onclick="toast('envelope da campanha auth-hardening — no Insights › Ledger')" style="cursor:pointer">campanha</span> ⊃ <span class="lay on">PR #128 — você está aqui</span> ⊃ <span class="lay" onclick="toast('cada intent carrega o seu — aba Intents')" style="cursor:pointer">3 intents</span>&nbsp;· cada camada com transcript + snapshot próprios</div>
+          </div>
+          <div class="cap">o PR deixou de ser só números: <b>a sessão que decidiu</b> fica salva igual ao trabalho que ela despachou — auditável de cima a baixo</div>
+          <!-- ════ fim do «NOVO» ════ -->
+
+          <div class="seclite">Custo do PR <span class="g">· onde foi — não é só a soma dos intents</span></div>
+          <div class="card">
+            <div class="author-line">aberto pelo <b>orquestrador</b> <span class="mono">orq-014</span> <span class="badge">nunca subagent</span> — o trabalho é dos intents, a coordenação é do autor do PR</div>
+            <div class="costrow"><span class="cl2">work <span class="g">· 3 intents</span></span><span class="track"><i style="width:46%"></i></span><span class="amt">$0.06</span></div>
+            <div class="costrow"><span class="cl2">orchestration <span class="g">· o autor do PR</span></span><span class="track"><i style="width:15%"></i></span><span class="amt">$0.02</span></div>
+            <div class="costrow"><span class="cl2">verification <span class="g">· painéis</span></span><span class="track"><i style="width:8%"></i></span><span class="amt">$0.01</span></div>
+            <div class="costrow"><span class="cl2">ci <span class="g">· memoizado</span></span><span class="track"><i style="width:31%"></i></span><span class="amt">$0.04</span></div>
+            <div class="costrow total"><span class="cl2">total</span><span class="track"><i style="width:100%"></i></span><span class="amt">$0.13</span></div>
+            <div class="costrow waste"><span class="cl2">desperdício <span class="g">· 1 intent descartado</span></span><span class="track"><i style="width:15%"></i></span><span class="amt">$0.02</span></div>
+            <div class="effrow">
+              <span><span class="k">overhead</span> <b>15%</b> coordenação ÷ total</span>
+              <span><span class="k">cache savings</span> <b>98%</b></span>
+              <span><span class="k">tempo</span> <b>22m</b> relógio · <b>38m</b> agente</span>
+            </div>
+          </div>
+          <div class="cap">custo é <b>transparência, não fatura</b> — você nunca é cobrado por isto · <b>desperdício à vista</b>, não escondido</div>
+
+          <div class="seclite">Conversa</div>
+          <div class="card">
+            <div style="color:var(--text-2)">Você perguntou <b style="color:var(--text)">"onde isso toca o fluxo de dinheiro?"</b> — o painel ancorou em proveniência: nenhum dos 14 arquivos cruza <span class="mono">billing/</span> ou <span class="mono">ledger/</span>. <a style="color:var(--muted)" href="review.html">abrir review completo ↗</a></div>
+          </div>
+        </div>
+
+        <!-- INTENTS pane -->
+        <div id="pp-int" class="pane">
+          <div class="hint">Os "commits" deste PR são <b>intents</b> — cada um carrega o porquê, o contexto do agente e a prova. Abra pra espiar, ou <b>ler tudo</b> na página do intent.</div>
+
+          <!-- intent 1 (open) -->
+          <div class="intent open">
+            <div class="ih" onclick="toggle(this)">
+              <span class="ico t">◑</span>
+              <div><div class="ti">fix: sessão expira cedo no refresh do token</div><div class="mt"><span class="id">a31</span> · por <b>opus-4.8</b> · testando · <span class="mono">a31f9c</span></div></div>
+              <div style="display:flex;align-items:center;gap:12px"><span class="rd" onclick="openIntent(event)" style="cursor:pointer">ler tudo →</span><span class="chev">›</span></div>
+            </div>
+            <div class="ibody">
+              <div class="blk">
+                <div class="bt">Charter <span class="g">· o que esse intent pretende</span></div>
+                <div class="charter">A sessão expirava ~5 min cedo porque o refresh reusava o <span class="mono">iat</span> do token antigo. Re-derivar a expiração do token emitido agora.</div>
+              </div>
+
+              <div class="blk">
+                <div class="bt">context.json <span class="g">· cada intent (commit) já vem com seu snapshot por padrão — é um arquivo content-addressed, não prosa</span></div>
+                <div class="code">
+                  <div class="fn">a31.context.json · 4.2 KB · cas:7e1a… · tenant-private · nunca vira training data</div>
+                  <div class="cl"><span class="ln"></span><span class="ct">{</span></div>
+                  <div class="cl"><span class="ln"></span><span class="ct">  "intent": "a31",   "model": "opus-4.8",</span></div>
+                  <div class="cl"><span class="ln"></span><span class="ct">  "files_read": [</span></div>
+                  <div class="cl"><span class="ln"></span><span class="ct">    { "path": "auth/token.rs", "hash": "sha256:9c2f…" },</span></div>
+                  <div class="cl"><span class="ln"></span><span class="ct">    { "path": "session.rs",    "hash": "sha256:1b7a…" },</span></div>
+                  <div class="cl"><span class="ln"></span><span class="ct">    { "path": "refresh.rs",    "hash": "sha256:f04e…" }</span></div>
+                  <div class="cl"><span class="ln"></span><span class="ct">  ],</span></div>
+                  <div class="cl"><span class="ln"></span><span class="ct">  "tool_calls": 14,  "prompt_ref": "cas:3b… (redacted per policy)",</span></div>
+                  <div class="cl"><span class="ln"></span><span class="ct">  "journal_ref": "cas:a902…",</span></div>
+                  <div class="cl"><span class="ln"></span><span class="ct">  "env_manifest": "rustc 1.96.0 · x86_64-apple-darwin"</span></div>
+                  <div class="cl"><span class="ln"></span><span class="ct">}</span></div>
+                </div>
+                <div style="margin-top:9px;display:flex;gap:8px"><button class="bg">⤓ baixar json</button><button class="bg">▸ replay da sessão</button><button class="bg">diff de contexto</button></div>
+              </div>
+
+              <div class="blk">
+                <div class="bt">Diff + why-blame <span class="g">· passe na linha realçada</span></div>
+                <div class="code">
+                  <div class="fn">crates/auth/src/token.rs</div>
+                  <div class="cl"><span class="ln">41</span><span class="ct">fn refresh(old: &amp;Token) -&gt; Token {</span></div>
+                  <div class="cl del"><span class="ln">42</span><span class="ct">-   let iat = old.iat;</span></div>
+                  <div class="cl add hl"><span class="ln">42</span><span class="ct">+   let iat = now();</span></div>
+                  <div class="cl"><span class="ln">43</span><span class="ct">    Token { iat, exp: iat + TTL }</span></div>
+                </div>
+                <div class="blame">
+                  <div class="why">"esta linha existe porque o refresh precisa da expiração do instante atual, não do token antigo."</div>
+                  <div class="meta"><span>intent <b>a31</b></span><span>modelo <b>opus-4.8</b></span><span>prova <b>test_refresh_full_ttl ✓</b></span></div>
+                </div>
+              </div>
+
+              <div class="blk">
+                <div class="bt">Verdicts <span class="g">· painel adversarial (3 lentes)</span></div>
+                <div class="verd"><span class="lens">correctness</span> a janela agora dura o TTL completo <span class="ok">APPROVE</span></div>
+                <div class="verd"><span class="lens">security</span> nenhum token aceito fora da janela <span class="ok">APPROVE</span></div>
+                <div class="verd"><span class="lens">repro</span> determinístico (byte-idêntico em 3 runs) <span class="ok">APPROVE</span></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- intent 2 (collapsed) -->
+          <div class="intent">
+            <div class="ih" onclick="toggle(this)">
+              <span class="ico">●</span>
+              <div><div class="ti">rate-limit por tenant no edge</div><div class="mt"><span class="id">a2f</span> · por <b>opus-4.8</b> · pronto · <span class="mono">b07c1a</span></div></div>
+              <div style="display:flex;align-items:center;gap:12px"><span class="rd" onclick="openIntent(event)" style="cursor:pointer">ler tudo →</span><span class="chev">›</span></div>
+            </div>
+            <div class="ibody"><div class="charter">Limite de requisições por tenant aplicado no edge antes de tocar o backend. Contexto + diff + verdicts dentro.</div></div>
+          </div>
+
+          <!-- intent 3 (collapsed) -->
+          <div class="intent">
+            <div class="ih" onclick="toggle(this)">
+              <span class="ico">●</span>
+              <div><div class="ti">log estruturado de auth</div><div class="mt"><span class="id">a30</span> · por <b>sonnet-4.6</b> · pronto · <span class="mono">c33e90</span></div></div>
+              <div style="display:flex;align-items:center;gap:12px"><span class="rd" onclick="openIntent(event)" style="cursor:pointer">ler tudo →</span><span class="chev">›</span></div>
+            </div>
+            <div class="ibody"><div class="charter">Eventos de auth em formato estruturado para o SIEM. Contexto + diff + verdicts dentro.</div></div>
+          </div>
+        </div>
+
+        <!-- CHECKS pane -->
+        <div id="pp-checks" class="pane">
+          <div class="hint">CI <b>memoizado</b>: cache-hit ⇒ 0 execução. O verde é provado por ~$0; só o que mudou roda de novo.</div>
+          <div class="seclite">Resumo</div>
+          <div class="card" style="margin-bottom:6px">
+            <div class="kv">union-test <span class="v g">verde</span></div>
+            <div class="kv">cache <span class="v g">4 hit · 1 exec · 80% hit-rate</span></div>
+            <div class="kv">custo <span class="v">$0.04 <span style="color:var(--faint)">· poupou $3.10</span></span></div>
+          </div>
+          <div class="seclite">Checks <span class="g">· por definição</span></div>
+          <div style="border:1px solid var(--line);border-radius:var(--r);overflow:hidden">
+            <div class="crow"><span class="ok">●</span><span class="nm">fmt</span><span class="sp"></span><span class="tag hit">cache-hit</span><span class="mt">0s</span></div>
+            <div class="crow"><span class="ok">●</span><span class="nm">clippy --workspace --all-targets -D warnings</span><span class="sp"></span><span class="tag hit">cache-hit</span><span class="mt">0s</span></div>
+            <div class="crow"><span class="ok">●</span><span class="nm">test --workspace --locked</span><span class="sp"></span><span class="tag hit">cache-hit</span><span class="mt">0s</span></div>
+            <div class="crow"><span class="ok">●</span><span class="nm">cargo audit</span><span class="sp"></span><span class="tag hit">cache-hit</span><span class="mt">0s</span></div>
+            <div class="crow"><span class="ok">●</span><span class="nm">union-test (com #129)</span><span class="sp"></span><span class="tag exec">executou · $0.04</span><span class="mt">14m02s</span></div>
+          </div>
+          <div class="cap" style="margin-top:12px"><a style="color:var(--muted)" href="checks.html">abrir Checks — logs, auto-bisect, hit-rate histórico ↗</a></div>
+        </div>
+
+        <!-- ARQUIVOS pane -->
+        <div id="pp-files" class="pane">
+          <div class="hint">Diff completo deste PR · clique num arquivo pra recolher · <b>ver blame →</b> abre o why-blame por linha. Toda mudança fica sob <span class="mono">crates/auth/**</span> — o claim do PR.</div>
+
+          <div class="filehd">
+            <span class="ttl">Arquivos alterados (3)</span>
+            <span class="fstat">+29 −7</span>
+            <span class="sp"></span>
+            <span class="fstat" style="color:var(--faint)">unificado</span>
+          </div>
+
+          <!-- FILE 1 — refresh.rs (a31: rotação do refresh-token) -->
+          <div class="fcard" id="ff1">
+            <div class="fhdr" onclick="toggleFile('ff1')">
+              <span class="chev">▾</span>
+              <span class="path">crates/auth/src/refresh.rs</span>
+              <span class="fst"><span class="ad">+9</span> <span class="rm">−4</span></span>
+              <span class="sp"></span>
+              <a class="blamelink" href="blob.html" onclick="event.stopPropagation()">ver blame →</a>
+            </div>
+            <div class="fbody">
+              <div class="code">
+                <div class="fn">crates/auth/src/refresh.rs · @@ -52,9 +52,14 @@ impl RefreshStore</div>
+                <div class="cl"><span class="ln">52</span><span class="ct">    pub async fn rotate(&amp;self, presented: &amp;str) -&gt; Result&lt;TokenPair, AuthError&gt; {</span></div>
+                <div class="cl"><span class="ln">53</span><span class="ct">        let row = self.lookup(presented).await?.ok_or(AuthError::Unknown)?;</span></div>
+                <div class="cl del"><span class="ln">54</span><span class="ct">-       // reuso: devolvia o mesmo refresh-token, abrindo replay</span></div>
+                <div class="cl del"><span class="ln">55</span><span class="ct">-       let pair = self.issue(row.subject, presented.to_owned());</span></div>
+                <div class="cl del"><span class="ln">56</span><span class="ct">-       Ok(pair)</span></div>
+                <div class="cl add hl"><span class="ln">54</span><span class="ct">+       if row.consumed_at.is_some() {                 <span class="cm">// rotação: rejeita reuso</span></span></div>
+                <div class="cl add"><span class="ln">55</span><span class="ct">+           self.revoke_family(row.family_id).await?;  <span class="cm">// e mata a família — intent a31</span></span></div>
+                <div class="cl add"><span class="ln">56</span><span class="ct">+           return Err(AuthError::RefreshReuse);</span></div>
+                <div class="cl add"><span class="ln">57</span><span class="ct">+       }</span></div>
+                <div class="cl add"><span class="ln">58</span><span class="ct">+       self.consume(row.id).await?;</span></div>
+                <div class="cl add"><span class="ln">59</span><span class="ct">+       let pair = self.issue(row.subject, row.family_id);</span></div>
+                <div class="cl add"><span class="ln">60</span><span class="ct">+       Ok(pair)</span></div>
+                <div class="cl"><span class="ln">61</span><span class="ct">    }</span></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- FILE 2 — token.rs (a31: expiração derivada do instante atual) -->
+          <div class="fcard" id="ff2">
+            <div class="fhdr" onclick="toggleFile('ff2')">
+              <span class="chev">▾</span>
+              <span class="path">crates/auth/src/token.rs</span>
+              <span class="fst"><span class="ad">+14</span> <span class="rm">−2</span></span>
+              <span class="sp"></span>
+              <a class="blamelink" href="blob.html" onclick="event.stopPropagation()">ver blame →</a>
+            </div>
+            <div class="fbody">
+              <div class="code">
+                <div class="fn">crates/auth/src/token.rs · @@ -38,12 +38,24 @@ impl Token</div>
+                <div class="cl"><span class="ln">38</span><span class="ct">    pub fn refresh(old: &amp;Token, family: FamilyId) -&gt; Token {</span></div>
+                <div class="cl del"><span class="ln">39</span><span class="ct">-       let iat = old.iat;            // herdava o iat antigo → janela curta</span></div>
+                <div class="cl del"><span class="ln">40</span><span class="ct">-       Token { iat, exp: iat + TTL, family }</span></div>
+                <div class="cl add hl"><span class="ln">39</span><span class="ct">+       let iat = now();              <span class="cm">// instante da emissão — intent a31</span></span></div>
+                <div class="cl add"><span class="ln">40</span><span class="ct">+       Token { iat, exp: iat + TTL, family, jti: Jti::new() }</span></div>
+                <div class="cl add"><span class="ln">41</span><span class="ct">+   }</span></div>
+                <div class="cl add"><span class="ln">42</span><span class="ct">+</span></div>
+                <div class="cl add"><span class="ln">43</span><span class="ct">+   /// Verdadeiro só dentro da janela [iat, exp).</span></div>
+                <div class="cl add"><span class="ln">44</span><span class="ct">+   pub fn is_live(&amp;self, at: Instant) -&gt; bool {</span></div>
+                <div class="cl add"><span class="ln">45</span><span class="ct">+       at &gt;= self.iat &amp;&amp; at &lt; self.exp</span></div>
+                <div class="cl"><span class="ln">46</span><span class="ct">    }</span></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- FILE 3 — middleware.rs (a2f: rate-limit por tenant) -->
+          <div class="fcard" id="ff3">
+            <div class="fhdr" onclick="toggleFile('ff3')">
+              <span class="chev">▾</span>
+              <span class="path">crates/auth/src/middleware.rs</span>
+              <span class="fst"><span class="ad">+6</span> <span class="rm">−1</span></span>
+              <span class="sp"></span>
+              <a class="blamelink" href="blob.html" onclick="event.stopPropagation()">ver blame →</a>
+            </div>
+            <div class="fbody">
+              <div class="code">
+                <div class="fn">crates/auth/src/middleware.rs · @@ -71,7 +71,12 @@ async fn guard</div>
+                <div class="cl"><span class="ln">71</span><span class="ct">    let tenant = ctx.tenant_id();</span></div>
+                <div class="cl del"><span class="ln">72</span><span class="ct">-   // sem teto: um tenant ruidoso afogava os outros</span></div>
+                <div class="cl add hl"><span class="ln">72</span><span class="ct">+   if !self.limiter.allow(tenant, now()) {          <span class="cm">// teto por tenant — intent a2f</span></span></div>
+                <div class="cl add"><span class="ln">73</span><span class="ct">+       metrics::counter!("auth.ratelimit.drop", "tenant" =&gt; tenant.to_string());</span></div>
+                <div class="cl add"><span class="ln">74</span><span class="ct">+       return Err(AuthError::RateLimited { retry_after: self.limiter.reset(tenant) });</span></div>
+                <div class="cl add"><span class="ln">75</span><span class="ct">+   }</span></div>
+                <div class="cl"><span class="ln">76</span><span class="ct">    next.run(req).await</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- right rail -->
+      <div class="aside">
+        <div class="card" style="position:relative">
+          <div class="h">Status do landing</div>
+          <div class="kv">union test <span class="v g">verde</span></div>
+          <div class="kv">checks <span class="v g">11 cache-hit · 0 exec</span></div>
+          <div class="kv">conflito <span class="v g">nenhum</span></div>
+          <div class="kv">custo <span class="v">$0.04</span></div>
+          <div class="landgrp">
+            <button class="bp" id="landbtn" onclick="land()">⇲ Land (entra na main)</button>
+            <button class="bp chev" id="landchev" onclick="landpop(event)" title="opções de land">▾</button>
+          </div>
+          <button class="bs" id="readybtn" onclick="toReady()">✓ Pronto pra revisão</button>
+          <!-- land options popover — narração + escolha, não um segundo CTA -->
+          <div class="pop" id="landopts">
+            <div class="ph">Requisitos</div>
+            <div class="req"><span class="ok">✓</span> checks verdes <span class="g">5/5 · cache</span></div>
+            <div class="req"><span class="ok">✓</span> verdito humano <span class="g">rafa aprovou</span></div>
+            <div class="req"><span class="ok">✓</span> política branch-protection <span class="g">main · ok</span></div>
+            <div class="ph" style="margin-top:10px">Fila</div>
+            <div class="req">entra como <b style="font-family:var(--mono)">#3</b> <span class="g">· ~6 min</span></div>
+            <div class="ph" style="margin-top:10px">Modo</div>
+            <div class="ropt on" onclick="mode(this,'union')"><span class="r"></span> Land (fila de união) <span class="def">padrão</span></div>
+            <div class="ropt" onclick="mode(this,'serial')"><span class="r"></span> Land serializado (sem união)</div>
+            <div class="ropt" onclick="mode(this,'window')"><span class="r"></span> Agendar pro próximo land window</div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="h">Revisores</div>
+          <div class="who" onclick="toast('rafa aprovou — ver o review completo em review.html')" style="cursor:pointer"><span class="a"></span> rafa <span class="v" style="color:var(--green)">✓ aprovou</span></div>
+          <div class="who" onclick="toast('mira ainda não revisou — lembrete enviado')" style="cursor:pointer"><span class="a"></span> mira <span class="v" style="color:var(--faint)">◌ pendente</span></div>
+          <div class="who"><span class="a"></span> você <span class="v" id="approveact" onclick="approve()" style="color:var(--muted);cursor:pointer">aprovar ↵</span></div>
+          <div class="who"><span class="a"></span> painel adversarial <span class="v g" style="color:var(--green)">3 APPROVE</span></div>
+        </div>
+        <div class="card">
+          <div class="h">Meta</div>
+          <div class="kv">responsável <span class="v" style="cursor:pointer" onclick="toast('gustavo — orquestrador responsável pelo PR')">gustavo</span></div>
+          <div class="kv">labels <span class="v" style="display:flex;gap:5px;font-weight:400"><span class="lbl" onclick="toast('label auth — filtrar PRs da label')">auth</span><span class="lbl" onclick="toast('label hardening — filtrar PRs da label')">hardening</span></span></div>
+          <div class="kv" style="cursor:pointer" onclick="toast('milestones — visão no produto')">marco <span class="v">v0.5 — autenticação</span></div>
+          <div class="ms" onclick="toast('milestones — visão no produto')" title="7 de 10 PRs do marco concluídos"><span class="bar"><i style="width:70%"></i></span><span class="mt2">7/10</span></div>
+        </div>
+        <div class="card">
+          <div class="h">Proveniência</div>
+          <div class="kv">campanha <span class="v">auth-hardening</span></div>
+          <div class="kv">atestado <span class="v g">3/3 assinados</span></div>
+          <!-- «NOVO» — o envelope na proveniência -->
+          <div class="kv">envelope do PR <span class="v mono" style="font-size:11px;cursor:pointer" onclick="toast('128.context.json — altitude pr · cas:c2e7…')">cas:c2e7… ✓</span></div>
+          <div class="kv">transcripts <span class="v" style="color:var(--green)">100% · pra sempre</span></div>
+          <div class="kv">espelho <span class="v">GitHub #128 ✓</span></div>
+        </div>
+      </div>
+    </div>
+  </div></div>
+</div>
+
+<!-- toast (house pattern) -->
+<div class="toast" id="toast"><span class="dot"></span><span id="toastmsg"></span></div>
+
+<!-- CMD-K -->
+<div class="overlay" id="ov" onclick="if(event.target===this)ck()">
+  <div class="palette">
+    <div class="pin"><span class="ic">⌘</span><input placeholder="Buscar ou executar…" id="ki" /><kbd>esc</kbd></div>
+    <div class="pgrp">Este PR · #128</div>
+    <div class="pitem on" onclick="ck();land()"><span class="ic">⇲</span> Land (entra na fila de união) <span class="id">↵</span></div>
+    <div class="pitem" onclick="ck();landpop()"><span class="ic">▾</span> Opções de land — requisitos · fila · modo</div>
+    <div class="pitem" onclick="ck();draftToggle()"><span class="ic">◌</span> <span id="ckdraft">Converter em rascunho</span></div>
+    <div class="pitem" onclick="ck();approve()"><span class="ic">✓</span> Aprovar este PR <span class="id">a</span></div>
+    <div class="pitem" onclick="ck();toast('abre o envelope da sessão — 128.context.json · cas:c2e7…')"><span class="ic">◔</span> Abrir envelope da sessão (PR)</div>
+    <div class="pitem" onclick="ck();ptab(document.querySelectorAll('.ptab')[3],'pp-files')"><span class="ic">≣</span> Ver arquivos alterados (3)</div>
+    <div class="pitem" onclick="location.href='intent.html'"><span class="ic">◑</span> Abrir intent <span class="mono" style="margin-left:6px;font-size:11px">a31</span></div>
+    <div class="pgrp">Navegar</div>
+    <div class="pitem" onclick="location.href='landing.html'"><span class="ic">⇲</span> Landing (PRs)</div>
+    <div class="pitem" onclick="location.href='checks.html'"><span class="ic">✓</span> Checks</div>
+    <div class="pitem" onclick="location.href='repo-home.html'"><span class="ic">&lt;&gt;</span> Code</div>
+  </div>
+</div>
+
+<script>
+  function toggle(el){el.parentElement.classList.toggle('open')}
+  function ptab(el,id){
+    document.querySelectorAll('.ptab').forEach(t=>t.classList.remove('on')); el.classList.add('on');
+    document.querySelectorAll('.pane').forEach(p=>p.classList.remove('on'));
+    document.getElementById(id).classList.add('on');
+  }
+  function openIntent(e){ e.stopPropagation(); window.location='intent.html'; }
+  function toggleFile(id){ document.getElementById(id).classList.toggle('collapsed'); }
+
+  // ── primary actions (mock states) ──
+  var isDraft=false, landed=false, landMode='union';
+  function land(){
+    if(isDraft){ toast('rascunho não entra na fila — marque "Pronto pra revisão" primeiro'); return }
+    if(landed) return;
+    landed=true; popClose();
+    var b = document.getElementById('landbtn');
+    b.classList.add('queued');
+    if(landMode==='union'){ b.textContent='na fila · #3'; toast('entrou na fila de união · posição #3 · ~6 min'); }
+    else if(landMode==='serial'){ b.textContent='serializado · #3'; toast('vai pousar serializado — sem união com outros PRs'); }
+    else { b.textContent='agendado · land window'; toast('agendado pro próximo land window'); }
+  }
+
+  // ── land options popover ──
+  function landpop(e){
+    if(e) e.stopPropagation();
+    if(isDraft){ toast('rascunho não entra na fila de união'); return }
+    document.getElementById('landopts').classList.toggle('show');
+  }
+  function popClose(){ document.getElementById('landopts').classList.remove('show') }
+  function mode(el,m){
+    landMode=m;
+    document.querySelectorAll('.ropt').forEach(function(r){r.classList.remove('on')}); el.classList.add('on');
+    if(!landed){
+      var b=document.getElementById('landbtn');
+      b.textContent = m==='union' ? '⇲ Land (entra na main)' : m==='serial' ? '⇲ Land serializado' : '⇲ Agendar land';
+    }
+    toast(m==='union'?'modo: fila de união (padrão)':m==='serial'?'modo: serializado — pousa sozinho, sem união':'modo: agendado pro próximo land window');
+  }
+
+  // ── ⋯ menu (header) ──
+  function menu(e){ e.stopPropagation(); document.getElementById('prmenu').classList.toggle('show') }
+  function menuClose(){ document.getElementById('prmenu').classList.remove('show') }
+
+  // ── draft ↔ ready-for-review ──
+  function draftToggle(){ isDraft ? toReady() : toDraft() }
+  function toDraft(){
+    if(isDraft) return; isDraft=true; landed=false; popClose();
+    var p=document.getElementById('prpill'); p.className='pill draft'; p.innerHTML='<span class="dot"></span> rascunho';
+    var b=document.getElementById('landbtn'); b.classList.remove('queued'); b.classList.add('disabled');
+    b.textContent='⇲ Land (entra na main)'; b.title='rascunho não entra na fila de união';
+    var c=document.getElementById('landchev'); c.classList.add('dis'); c.title='rascunho não entra na fila';
+    document.getElementById('readybtn').classList.add('show');
+    document.getElementById('draftitem').innerHTML='<span style="color:var(--faint)">✓</span> Pronto pra revisão';
+    document.getElementById('ckdraft').textContent='Pronto pra revisão';
+    toast('convertido em rascunho — saiu da fila de união');
+  }
+  function toReady(){
+    if(!isDraft) return; isDraft=false;
+    var p=document.getElementById('prpill'); p.className='pill queue'; p.innerHTML='<span class="dot"></span> na fila de landing';
+    var b=document.getElementById('landbtn'); b.classList.remove('disabled'); b.removeAttribute('title');
+    b.textContent = landMode==='union' ? '⇲ Land (entra na main)' : landMode==='serial' ? '⇲ Land serializado' : '⇲ Agendar land';
+    var c=document.getElementById('landchev'); c.classList.remove('dis'); c.title='opções de land';
+    document.getElementById('readybtn').classList.remove('show');
+    document.getElementById('draftitem').innerHTML='<span style="color:var(--faint)">◌</span> Converter em rascunho';
+    document.getElementById('ckdraft').textContent='Converter em rascunho';
+    toast('pronto pra revisão — de volta à fila de landing');
+  }
+  document.addEventListener('click',function(e){
+    var lo=document.getElementById('landopts');
+    if(lo.classList.contains('show') && !lo.contains(e.target) && e.target.id!=='landchev') popClose();
+    var m=document.getElementById('prmenu');
+    if(m.classList.contains('show') && !m.contains(e.target)) menuClose();
+  });
+  function approve(){
+    var a = document.getElementById('approveact');
+    a.classList.add('g'); a.onclick = null; a.style.cursor='default';
+    a.innerHTML = '<span class="dot" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--green);margin-right:5px"></span>aprovado';
+    toast('aprovação humana registrada');
+  }
+
+  // ── toast / cmd-k (house pattern) ──
+  var tt;
+  function toast(msg){
+    var t = document.getElementById('toast');
+    document.getElementById('toastmsg').textContent = msg;
+    t.classList.add('show');
+    clearTimeout(tt); tt = setTimeout(function(){t.classList.remove('show')}, 3400);
+  }
+  function ck(){
+    var ov=document.getElementById('ov');
+    var s=ov.classList.contains('show');
+    ov.classList.toggle('show');
+    if(!s){setTimeout(function(){document.getElementById('ki').focus()},30)}
+  }
+  document.addEventListener('keydown',function(e){
+    if((e.metaKey||e.ctrlKey)&&e.key==='k'){e.preventDefault();ck();return}
+    if(e.key==='Escape'){document.getElementById('ov').classList.remove('show');popClose();menuClose()}
+    var tag=(e.target.tagName||'').toLowerCase();
+    if(tag==='input'||tag==='textarea') return;
+    if(e.key==='a'){ e.preventDefault(); approve(); }
+  });
+</script>
+</body>
+</html>
