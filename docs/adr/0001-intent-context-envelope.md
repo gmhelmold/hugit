@@ -1,7 +1,7 @@
 # ADR-0001 — Intent context envelope (`context.json`)
 
-- **Status:** Partially ratified (owner, 2026-06-10): §7.1 capture + §7.2
-  retention DECIDED; §7.3 cost visibility still open. Owner-directed extension
+- **Status:** RATIFIED in full (owner, 2026-06-10): §7.1 capture + §7.2
+  retention + §7.3 cost-visibility (admin-defined toggle, default all) DECIDED. Owner-directed extension
   same date: **the envelope exists at all three altitudes** — the PR carries
   the orchestrator-session envelope (trajectory + snapshot), the campaign its
   own (§2.4) — not just computed metric rollups.
@@ -346,8 +346,11 @@ Transcripts may carry secrets/PII (whitepaper §13). Therefore:
 2. **Retention — RATIFIED by the same directive: forever by default, no
    TTL/GC.** "Salvo sempre" reads literally; erasure only via the explicit
    tombstone path, never a timer. (The 90-day GC recommendation is rejected.)
-3. **`cost_usd` visibility (all members vs owner/admin only) — STILL OPEN.**
-   Recommend visible to all (trust by transparency); reveals COGS.
+3. **`cost_usd` visibility — RATIFIED (owner, 2026-06-10):** an
+   **admin-controlled per-repo setting** — *"todo mundo, ou só admin (o admin
+   define)"*. Default: visible to all members (trust by transparency); the
+   repo admin can restrict to admin-only. githugr renders cost behind this
+   one toggle. §7 is now FULLY ratified.
 
 **Owner-directed extension (2026-06-10), same authority as ratification:**
 the envelope exists at all three altitudes — **each PR carries its
