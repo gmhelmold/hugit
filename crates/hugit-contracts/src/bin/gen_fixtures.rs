@@ -1,12 +1,18 @@
-//! Generator binary: write all 15 JSON Schemas + golden fixtures.
+//! Generator binary: write all 16 JSON Schemas + golden fixtures (15 WP-00
+//! types + `ContextEnvelope` per ADR-0001 / WP-F1; the envelope ships FOUR
+//! goldens — one per altitude + the nullable-refs sub-`full` capture case).
 //! Run from crate root: `cargo run -p hugit-contracts --bin gen_fixtures`
 
 use hugit_contracts::{
-    AppWebhooks, AttentionRank, AttestationChain, CheckDef, CheckResult, DiagnosisObject,
-    EventRecord, ExportSchema, FenceManifest, IntentSidecar, QueueApi, RegenGate, RunnerLease,
-    ShadowPolicy, VerdictObject,
+    AppWebhooks, AttentionRank, AttestationChain, CheckDef, CheckResult, ContextEnvelope,
+    DiagnosisObject, EventRecord, ExportSchema, FenceManifest, IntentSidecar, QueueApi, RegenGate,
+    RunnerLease, ShadowPolicy, VerdictObject,
     app_webhooks::{AckReceipt, ChecksWriteRequest, ChecksWriteResponse, SignedEventEnvelope},
     check_result::Artifact,
+    context_envelope::{
+        Altitude, Authorship, CONTEXT_ENVELOPE_SCHEMA_VERSION, FileRead, IntentMetrics, Snapshot,
+        Spawn, TokenCounts, ToolCount, Trajectory,
+    },
     fence_manifest::MaterializedEntry,
     queue_api::{BatchSeal, LandableEntry, UnionResult},
     runner_lease::RunnerState,
@@ -318,5 +324,337 @@ fn main() {
         },
     );
 
-    println!("\nAll 15 schemas + golden fixtures written.");
+    // ── ContextEnvelope (ADR-0001 / WP-F1) ──────────────────────────────────
+    // One schema, FOUR goldens: one per altitude (intent · pr · campaign)
+    // plus the nullable-refs case (sub-`full` capture level).
+    write_schema::<ContextEnvelope>("ContextEnvelope");
+    write_golden("ContextEnvelope", &envelope_intent());
+    write_golden("ContextEnvelopePr", &envelope_pr());
+    write_golden("ContextEnvelopeCampaign", &envelope_campaign());
+    write_golden("ContextEnvelopeNullRefs", &envelope_null_refs());
+
+    println!("\nAll 16 schemas + golden fixtures written.");
+}
+
+// ── ContextEnvelope fixtures (ADR-0001 §2.2) ──────────────────────────────────
+
+/// Intent altitude, capture level `full` — every ref present (the ADR §2.2
+/// worked example).
+fn envelope_intent() -> ContextEnvelope {
+    ContextEnvelope {
+        schema_version: CONTEXT_ENVELOPE_SCHEMA_VERSION.into(),
+        altitude: Altitude::Intent,
+        intent_id: "a31".into(),
+        commit: "a31f9ca31f9ca31f9ca31f9ca31f9ca31f9ca31f".into(),
+        tree_hash: "cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe".into(),
+        authorship: Authorship {
+            model: "claude-opus-4-8".into(),
+            model_digest: "d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0".into(),
+            agent_type: "implementer".into(),
+            spawn: Spawn {
+                run_id: "run-impl-0007".into(),
+                parent_run_id: Some("orq-014".into()),
+                born_at: 1_717_000_000_000,
+                died_at: 1_717_000_840_000,
+            },
+            operator: "gustavo@humangr.com".into(),
+        },
+        charter: "fix: refresh token reused the old iat, shortening the window".into(),
+        campaign: Some("auth-hardening".into()),
+        constraints: vec!["no new dependencies".into()],
+        acceptance: vec!["token lasts the full TTL".into()],
+        parent_intents: vec![],
+        trajectory: Trajectory {
+            raw_transcript_ref: Some(
+                "cas:7e1a7e1a7e1a7e1a7e1a7e1a7e1a7e1a7e1a7e1a7e1a7e1a7e1a7e1a7e1a7e1a".into(),
+            ),
+            task_transcript_ref: Some(
+                "cas:9b2c9b2c9b2c9b2c9b2c9b2c9b2c9b2c9b2c9b2c9b2c9b2c9b2c9b2c9b2c9b2c".into(),
+            ),
+            summary: Some(
+                "Re-derived iat from now() to fix the refresh window; read 2 files; \
+                 14 tool calls; 3/3 verdicts green."
+                    .into(),
+            ),
+            journal_ref: Some(
+                "cas:a902a902a902a902a902a902a902a902a902a902a902a902a902a902a902a902".into(),
+            ),
+            redaction_policy: "default-v1".into(),
+        },
+        snapshot: Snapshot {
+            files_read: vec![FileRead {
+                path: "auth/token.rs".into(),
+                hash: "sha256:9c2f9c2f9c2f9c2f9c2f9c2f9c2f9c2f9c2f9c2f9c2f9c2f9c2f9c2f9c2f9c2f"
+                    .into(),
+            }],
+            prompt_ref: Some(
+                "cas:3b4f3b4f3b4f3b4f3b4f3b4f3b4f3b4f3b4f3b4f3b4f3b4f3b4f3b4f3b4f3b4f".into(),
+            ),
+            env_manifest: "rustc 1.96.0".into(),
+        },
+        metrics: IntentMetrics {
+            tokens: TokenCounts {
+                input: 48_211,
+                output: 6_035,
+                cache_read: 39_800,
+                cache_write: 2_100,
+                total: 96_146,
+            },
+            wall_ms: 840_000,
+            active_ms: 612_000,
+            tool_calls: 14,
+            tool_breakdown: vec![
+                ToolCount {
+                    tool: "Edit".into(),
+                    count: 6,
+                },
+                ToolCount {
+                    tool: "Bash".into(),
+                    count: 5,
+                },
+                ToolCount {
+                    tool: "Read".into(),
+                    count: 3,
+                },
+            ],
+            model_turns: 9,
+            cost_usd: 0.04,
+        },
+        verdicts_ref: Some(
+            "cas:4d5e4d5e4d5e4d5e4d5e4d5e4d5e4d5e4d5e4d5e4d5e4d5e4d5e4d5e4d5e4d5e".into(),
+        ),
+    }
+}
+
+/// PR altitude — the orchestrator-session envelope (owner 2026-06-10):
+/// `intent_id` carries the PR id; the author session is top-level
+/// (`parent_run_id: null`, `agent_type: "main"`).
+fn envelope_pr() -> ContextEnvelope {
+    ContextEnvelope {
+        schema_version: CONTEXT_ENVELOPE_SCHEMA_VERSION.into(),
+        altitude: Altitude::Pr,
+        intent_id: "128".into(),
+        commit: "f00df00df00df00df00df00df00df00df00df00d".into(),
+        tree_hash: "beadbeadbeadbeadbeadbeadbeadbeadbeadbeadbeadbeadbeadbeadbeadbead".into(),
+        authorship: Authorship {
+            model: "claude-opus-4-8".into(),
+            model_digest: "d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0".into(),
+            agent_type: "main".into(),
+            spawn: Spawn {
+                run_id: "orq-014".into(),
+                parent_run_id: None,
+                born_at: 1_717_000_000_000,
+                died_at: 1_717_004_200_000,
+            },
+            operator: "gustavo@humangr.com".into(),
+        },
+        charter: "land auth-hardening wave 1: refresh-window fixes".into(),
+        campaign: Some("auth-hardening".into()),
+        constraints: vec![],
+        acceptance: vec!["all intents land conflict-free".into()],
+        parent_intents: vec![],
+        trajectory: Trajectory {
+            raw_transcript_ref: Some(
+                "cas:c0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0de".into(),
+            ),
+            task_transcript_ref: Some(
+                "cas:deaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddead".into(),
+            ),
+            summary: Some(
+                "Planned 3 intents, dispatched 3 subagents, cold-verified, landed the bundle."
+                    .into(),
+            ),
+            journal_ref: None,
+            redaction_policy: "default-v1".into(),
+        },
+        snapshot: Snapshot {
+            files_read: vec![FileRead {
+                path: "docs/plan/wave-1.md".into(),
+                hash: "sha256:77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa"
+                    .into(),
+            }],
+            prompt_ref: Some(
+                "cas:beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef".into(),
+            ),
+            env_manifest: "rustc 1.96.0".into(),
+        },
+        metrics: IntentMetrics {
+            tokens: TokenCounts {
+                input: 122_000,
+                output: 18_400,
+                cache_read: 96_000,
+                cache_write: 8_000,
+                total: 244_400,
+            },
+            wall_ms: 4_200_000,
+            active_ms: 1_900_000,
+            tool_calls: 41,
+            tool_breakdown: vec![
+                ToolCount {
+                    tool: "Bash".into(),
+                    count: 22,
+                },
+                ToolCount {
+                    tool: "Read".into(),
+                    count: 13,
+                },
+                ToolCount {
+                    tool: "Task".into(),
+                    count: 6,
+                },
+            ],
+            model_turns: 28,
+            cost_usd: 0.62,
+        },
+        verdicts_ref: Some(
+            "cas:5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed".into(),
+        ),
+    }
+}
+
+/// Campaign altitude — the campaign's own envelope (owner 2026-06-10):
+/// `intent_id` carries the campaign key.
+fn envelope_campaign() -> ContextEnvelope {
+    ContextEnvelope {
+        schema_version: CONTEXT_ENVELOPE_SCHEMA_VERSION.into(),
+        altitude: Altitude::Campaign,
+        intent_id: "auth-hardening".into(),
+        commit: "feedfeedfeedfeedfeedfeedfeedfeedfeedfeed".into(),
+        tree_hash: "f1cef1cef1cef1cef1cef1cef1cef1cef1cef1cef1cef1cef1cef1cef1cef1ce".into(),
+        authorship: Authorship {
+            model: "claude-opus-4-8".into(),
+            model_digest: "d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0".into(),
+            agent_type: "main".into(),
+            spawn: Spawn {
+                run_id: "campaign-auth-hardening-01".into(),
+                parent_run_id: None,
+                born_at: 1_716_990_000_000,
+                died_at: 1_717_010_000_000,
+            },
+            operator: "gustavo@humangr.com".into(),
+        },
+        charter: "harden the authentication edge".into(),
+        campaign: Some("auth-hardening".into()),
+        constraints: vec![],
+        acceptance: vec!["all auth PRs landed and proven".into()],
+        parent_intents: vec![],
+        trajectory: Trajectory {
+            raw_transcript_ref: Some(
+                "cas:c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9".into(),
+            ),
+            task_transcript_ref: Some(
+                "cas:ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12".into(),
+            ),
+            summary: Some(
+                "Campaign session: scoped 2 PRs, tracked landing, closed the campaign.".into(),
+            ),
+            journal_ref: Some(
+                "cas:09f109f109f109f109f109f109f109f109f109f109f109f109f109f109f109f1".into(),
+            ),
+            redaction_policy: "default-v1".into(),
+        },
+        snapshot: Snapshot {
+            files_read: vec![],
+            prompt_ref: Some(
+                "cas:77fe77fe77fe77fe77fe77fe77fe77fe77fe77fe77fe77fe77fe77fe77fe77fe".into(),
+            ),
+            env_manifest: "rustc 1.96.0".into(),
+        },
+        metrics: IntentMetrics {
+            tokens: TokenCounts {
+                input: 310_000,
+                output: 42_000,
+                cache_read: 250_000,
+                cache_write: 21_000,
+                total: 623_000,
+            },
+            wall_ms: 20_000_000,
+            active_ms: 5_400_000,
+            tool_calls: 88,
+            tool_breakdown: vec![
+                ToolCount {
+                    tool: "Bash".into(),
+                    count: 40,
+                },
+                ToolCount {
+                    tool: "Read".into(),
+                    count: 30,
+                },
+                ToolCount {
+                    tool: "Task".into(),
+                    count: 18,
+                },
+            ],
+            model_turns: 64,
+            cost_usd: 1.85,
+        },
+        verdicts_ref: None,
+    }
+}
+
+/// Intent altitude at capture level `metrics` (a per-repo privacy opt-DOWN,
+/// ADR-0001 §3): every ref is `null` and must round-trip — consumers MUST
+/// tolerate nulls.
+fn envelope_null_refs() -> ContextEnvelope {
+    ContextEnvelope {
+        schema_version: CONTEXT_ENVELOPE_SCHEMA_VERSION.into(),
+        altitude: Altitude::Intent,
+        intent_id: "a2f".into(),
+        commit: "a2f0a2f0a2f0a2f0a2f0a2f0a2f0a2f0a2f0a2f0".into(),
+        tree_hash: "0b570b570b570b570b570b570b570b570b570b570b570b570b570b570b570b57".into(),
+        authorship: Authorship {
+            model: "claude-sonnet-4-6".into(),
+            model_digest: "d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0".into(),
+            agent_type: "implementer".into(),
+            spawn: Spawn {
+                run_id: "run-impl-0008".into(),
+                parent_run_id: None,
+                born_at: 1_717_000_100_000,
+                died_at: 1_717_000_195_000,
+            },
+            operator: "gustavo@humangr.com".into(),
+        },
+        charter: "chore: bump toolchain pin".into(),
+        campaign: None,
+        constraints: vec![],
+        acceptance: vec![],
+        parent_intents: vec![],
+        trajectory: Trajectory {
+            raw_transcript_ref: None,
+            task_transcript_ref: None,
+            summary: None,
+            journal_ref: None,
+            redaction_policy: "default-v1".into(),
+        },
+        snapshot: Snapshot {
+            files_read: vec![],
+            prompt_ref: None,
+            env_manifest: "rustc 1.96.0".into(),
+        },
+        metrics: IntentMetrics {
+            tokens: TokenCounts {
+                input: 9_000,
+                output: 1_200,
+                cache_read: 6_000,
+                cache_write: 500,
+                total: 16_700,
+            },
+            wall_ms: 95_000,
+            active_ms: 80_000,
+            tool_calls: 4,
+            tool_breakdown: vec![
+                ToolCount {
+                    tool: "Bash".into(),
+                    count: 3,
+                },
+                ToolCount {
+                    tool: "Edit".into(),
+                    count: 1,
+                },
+            ],
+            model_turns: 3,
+            cost_usd: 0.01,
+        },
+        verdicts_ref: None,
+    }
 }

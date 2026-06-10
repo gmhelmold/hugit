@@ -3,18 +3,26 @@
 // golden_<type>: read tests/golden/<TypeName>.json → deserialize → serialize
 //   back → assert byte-identical to the committed fixture.
 //
-// schema_drift: regenerate all 15 schemas in-memory and assert byte-identity
+// schema_drift: regenerate all 16 schemas in-memory and assert byte-identity
 //   with the committed schemas/<TypeName>.json.
 //   Set UPDATE_SCHEMAS=1 to re-write the committed schema files.
+//
+// ContextEnvelope (ADR-0001 / WP-F1) ships FOUR goldens: one per altitude
+// (intent · pr · campaign) + the nullable-refs sub-`full` capture case.
 
 use hugit_contracts::{
-    AppWebhooks, AttentionRank, AttestationChain, CheckDef, CheckResult, DiagnosisObject,
-    EventRecord, ExportSchema, FenceManifest, IntentSidecar, QueueApi, RegenGate, RunnerLease,
-    ShadowPolicy, VerdictObject,
+    AppWebhooks, AttentionRank, AttestationChain, CheckDef, CheckResult, ContextEnvelope,
+    DiagnosisObject, EventRecord, ExportSchema, FenceManifest, IntentSidecar, QueueApi, RegenGate,
+    RunnerLease, ShadowPolicy, VerdictObject,
 };
 use hugit_contracts::{
     app_webhooks::{AckReceipt, ChecksWriteRequest, ChecksWriteResponse, SignedEventEnvelope},
     check_result::Artifact,
+    context_envelope::{
+        Altitude, CampaignOwner, CampaignProgress, CampaignRollup, CampaignTime, CiCost,
+        CostDecomposition, Efficiency, OrchestrationCost, PrAuthor, PrAuthorKind, PrRecord, PrTime,
+        TotalCost, VerificationCost, WasteCost, WorkCost,
+    },
     fence_manifest::MaterializedEntry,
     queue_api::{BatchSeal, LandableEntry, MinimalFailingPair, UnionResult},
     runner_lease::RunnerState,
@@ -129,6 +137,178 @@ fn golden_attestation_chain() {
 #[test]
 fn golden_regen_gate() {
     roundtrip::<RegenGate>("RegenGate");
+}
+
+// ── ContextEnvelope goldens (ADR-0001 / WP-F1): one per altitude + null refs ──
+
+#[test]
+fn golden_context_envelope_intent() {
+    roundtrip::<ContextEnvelope>("ContextEnvelope");
+}
+
+#[test]
+fn golden_context_envelope_pr() {
+    roundtrip::<ContextEnvelope>("ContextEnvelopePr");
+}
+
+#[test]
+fn golden_context_envelope_campaign() {
+    roundtrip::<ContextEnvelope>("ContextEnvelopeCampaign");
+}
+
+/// Sub-`full` capture (ADR-0001 §3): every nullable ref is `null` and must
+/// round-trip byte-exactly — consumers MUST tolerate nulls.
+#[test]
+fn golden_context_envelope_null_refs() {
+    roundtrip::<ContextEnvelope>("ContextEnvelopeNullRefs");
+}
+
+/// The three altitude fixtures really carry the three discriminator values
+/// (and the null-refs fixture deserializes with every nullable ref absent).
+#[test]
+fn context_envelope_altitudes_cover_all_three() {
+    let intent: ContextEnvelope = serde_json::from_str(&read_golden("ContextEnvelope")).unwrap();
+    let pr: ContextEnvelope = serde_json::from_str(&read_golden("ContextEnvelopePr")).unwrap();
+    let campaign: ContextEnvelope =
+        serde_json::from_str(&read_golden("ContextEnvelopeCampaign")).unwrap();
+    let null_refs: ContextEnvelope =
+        serde_json::from_str(&read_golden("ContextEnvelopeNullRefs")).unwrap();
+
+    assert_eq!(intent.altitude, Altitude::Intent);
+    assert_eq!(pr.altitude, Altitude::Pr);
+    assert_eq!(campaign.altitude, Altitude::Campaign);
+    for env in [&intent, &pr, &campaign, &null_refs] {
+        assert_eq!(
+            env.schema_version,
+            hugit_contracts::CONTEXT_ENVELOPE_SCHEMA_VERSION
+        );
+    }
+    assert!(null_refs.trajectory.raw_transcript_ref.is_none());
+    assert!(null_refs.trajectory.task_transcript_ref.is_none());
+    assert!(null_refs.trajectory.summary.is_none());
+    assert!(null_refs.trajectory.journal_ref.is_none());
+    assert!(null_refs.snapshot.prompt_ref.is_none());
+    assert!(null_refs.verdicts_ref.is_none());
+    assert!(null_refs.campaign.is_none());
+}
+
+// ── Derived shapes (ADR-0001 §2.3): forge-computed, NOT frozen ────────────────
+//
+// PrRecord + CampaignRollup get a value-level serde round-trip (not a golden
+// byte pin): they are read models the forge may evolve additively, so we
+// prove the ADR field names serialize/deserialize without freezing bytes.
+
+fn cost_decomposition_fixture() -> CostDecomposition {
+    CostDecomposition {
+        work: WorkCost {
+            tokens: 96_146,
+            tool_calls: 14,
+            cost_usd: 0.04,
+        },
+        orchestration: OrchestrationCost {
+            tokens: 244_400,
+            tool_calls: 41,
+            turns: 28,
+            cost_usd: 0.62,
+        },
+        verification: VerificationCost {
+            tokens: 30_000,
+            verdict_panels: 3,
+            cost_usd: 0.05,
+        },
+        ci: CiCost {
+            cache_hit: 11,
+            exec: 4,
+            cost_usd: 0.02,
+            saved_usd: 0.06,
+        },
+        waste: WasteCost {
+            discarded_intents: 1,
+            retried_agents: 1,
+            tokens_not_landed: 18_000,
+            cost_usd: 0.03,
+        },
+        total: TotalCost {
+            tokens: 370_546,
+            cost_usd: 0.73,
+        },
+    }
+}
+
+#[test]
+fn derived_pr_record_roundtrips() {
+    let record = PrRecord {
+        pr_id: "128".into(),
+        author: PrAuthor {
+            kind: PrAuthorKind::Orchestrator,
+            model: Some("claude-opus-4-8".into()),
+            run_id: Some("orq-014".into()),
+            principal: None,
+        },
+        intent_ids: vec!["a31".into(), "a2f".into(), "a30".into()],
+        intent_count: 3,
+        agent_count: 3,
+        models_used: vec!["claude-opus-4-8".into(), "claude-sonnet-4-6".into()],
+        envelope_ref: "cas:c0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0de".into(),
+        cost: cost_decomposition_fixture(),
+        time: PrTime {
+            wall_span_ms: 840_000,
+            agent_sum_ms: 10_800_000,
+            queue_wait_ms: 120_000,
+            human_touches: 2,
+            landed_at: 1_717_004_200_000,
+        },
+        efficiency: Efficiency {
+            overhead_pct: 0.31,
+            cache_savings_pct: 0.75,
+            first_pass_yield: 0.66,
+            cost_per_net_kloc: 1.21,
+        },
+    };
+    let json = serde_json::to_string_pretty(&record).unwrap();
+    let back: PrRecord = serde_json::from_str(&json).unwrap();
+    assert_eq!(record, back);
+    // The author kind serializes snake_case and a subagent kind cannot exist
+    // (D14: PR author ∈ {orchestrator, human} — never a subagent).
+    assert!(json.contains("\"kind\": \"orchestrator\""));
+    assert!(serde_json::from_str::<PrAuthorKind>("\"subagent\"").is_err());
+}
+
+#[test]
+fn derived_campaign_rollup_roundtrips() {
+    let rollup = CampaignRollup {
+        campaign: "auth-hardening".into(),
+        charter: "harden the authentication edge".into(),
+        owner: CampaignOwner {
+            principal: "gustavo@humangr.com".into(),
+        },
+        envelope_ref: "cas:c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9".into(),
+        pr_ids: vec!["128".into(), "129".into()],
+        pr_count: 2,
+        intent_count: 5,
+        agent_count: 5,
+        models_used: vec!["claude-opus-4-8".into(), "claude-sonnet-4-6".into()],
+        cost: cost_decomposition_fixture(),
+        time: CampaignTime {
+            wall_span_ms: 20_000_000,
+            agent_sum_ms: 19_400_000,
+            queue_wait_ms: 240_000,
+        },
+        efficiency: Efficiency {
+            overhead_pct: 0.29,
+            cache_savings_pct: 0.71,
+            first_pass_yield: 0.8,
+            cost_per_net_kloc: 1.05,
+        },
+        progress: CampaignProgress {
+            landed: 1,
+            in_flight: 1,
+            blocked: 0,
+        },
+    };
+    let json = serde_json::to_string_pretty(&rollup).unwrap();
+    let back: CampaignRollup = serde_json::from_str(&json).unwrap();
+    assert_eq!(rollup, back);
 }
 
 // ── independent hash-pin (R0: lock the frozen formula byte-exactly) ────────────
@@ -257,6 +437,7 @@ fn schema_drift() {
     check_schema!("ExportSchema", ExportSchema, update, root);
     check_schema!("AttestationChain", AttestationChain, update, root);
     check_schema!("RegenGate", RegenGate, update, root);
+    check_schema!("ContextEnvelope", ContextEnvelope, update, root);
 }
 
 // ── verify all sub-type imports compile and values are constructable ──────────

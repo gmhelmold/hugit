@@ -1,0 +1,401 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ContextEnvelope",
+  "description": "The Intent Context Envelope — `context.json` (ADR-0001 §2.2).\n\nOne envelope per authored unit at every altitude (intent · PR ·\ncampaign); reachable behind `IntentSidecar.context_ref` (a CAS pointer)\nand the derived records' `envelope_ref`. See the module docs for the\nnaming map onto the frozen v1 `intent_id` fields.\n\nFrozen by WP-F1 (ADR-0001, ratified 2026-06-10).",
+  "type": "object",
+  "properties": {
+    "acceptance": {
+      "description": "Acceptance criteria for the unit.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "altitude": {
+      "description": "The altitude of the authored unit (intent | pr | campaign).",
+      "$ref": "#/$defs/Altitude"
+    },
+    "authorship": {
+      "description": "Provenance: who/what authored the unit (agents are ephemeral).",
+      "$ref": "#/$defs/Authorship"
+    },
+    "campaign": {
+      "description": "Campaign key this unit belongs to; `null` when uncampaigned. Drives\nsubliminal grouping (the landing queue bundles PRs by campaign).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "charter": {
+      "description": "The \"why\" — human-readable charter for the unit.",
+      "type": "string"
+    },
+    "commit": {
+      "description": "Git commit this unit enriches (the intent's commit; at higher\naltitudes, the unit's landed/head commit).",
+      "type": "string"
+    },
+    "constraints": {
+      "description": "Constraints the unit was authored under.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "intent_id": {
+      "description": "The authored-unit id at this envelope's altitude: the commit-level\nintent id at `intent`, the PR id at `pr`, the campaign key at\n`campaign` (ADR-0001 §2.2). See the module docs for how this maps\nonto the frozen v1 `intent_id` fields (which name the landing unit).",
+      "type": "string"
+    },
+    "metrics": {
+      "description": "Per-unit measurement (§2.3).",
+      "$ref": "#/$defs/IntentMetrics"
+    },
+    "parent_intents": {
+      "description": "Ids of parent intents this unit builds on.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "schema_version": {
+      "description": "Envelope schema version (semver); see\n[`CONTEXT_ENVELOPE_SCHEMA_VERSION`].",
+      "type": "string"
+    },
+    "snapshot": {
+      "description": "What the agent read / the environment it ran in.",
+      "$ref": "#/$defs/Snapshot"
+    },
+    "trajectory": {
+      "description": "The three-altitude trajectory (§2.1) — tenant-private, redacted.",
+      "$ref": "#/$defs/Trajectory"
+    },
+    "tree_hash": {
+      "description": "Merkle tree hash of the unit's workspace snapshot.",
+      "type": "string"
+    },
+    "verdicts_ref": {
+      "description": "`cas:` ref to the adversarial panel verdicts (`VerdictObject`s);\n`null` when no panel ran.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "altitude",
+    "intent_id",
+    "commit",
+    "tree_hash",
+    "authorship",
+    "charter",
+    "constraints",
+    "acceptance",
+    "parent_intents",
+    "trajectory",
+    "snapshot",
+    "metrics"
+  ],
+  "$defs": {
+    "Altitude": {
+      "description": "The altitude of the authored unit this envelope records (owner-directed\n2026-06-10): `intent` = a commit (subagent-authored) · `pr` = a bundle of\nintents (orchestrator/human session) · `campaign` = a bundle of PRs\n(human-owned). Same envelope shape at every altitude.",
+      "oneOf": [
+        {
+          "description": "A commit — the hugr-native authored unit, authored by a subagent.",
+          "type": "string",
+          "const": "intent"
+        },
+        {
+          "description": "A PR — a bundle of intents; the envelope is the orchestrator-session\n(or human-session) record that planned/dispatched/landed the bundle.",
+          "type": "string",
+          "const": "pr"
+        },
+        {
+          "description": "A campaign — a bundle of PRs in the landing queue, owned by a human.",
+          "type": "string",
+          "const": "campaign"
+        }
+      ]
+    },
+    "Authorship": {
+      "description": "Provenance: who/what authored the unit (ADR-0001 §2.2 `authorship`).",
+      "type": "object",
+      "properties": {
+        "agent_type": {
+          "description": "Subagent type (e.g. `\"implementer\"`), or `\"main\"` for a top-level\n(orchestrator / campaign) session.",
+          "type": "string"
+        },
+        "model": {
+          "description": "Model identifier (field name consistent with `VerdictObject.model`).",
+          "type": "string"
+        },
+        "model_digest": {
+          "description": "Pinned model version digest.",
+          "type": "string"
+        },
+        "operator": {
+          "description": "Human principal who dispatched the work.",
+          "type": "string"
+        },
+        "spawn": {
+          "description": "The agent's spawn lineage and lifespan.",
+          "$ref": "#/$defs/Spawn"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "model_digest",
+        "agent_type",
+        "spawn",
+        "operator"
+      ]
+    },
+    "FileRead": {
+      "description": "A file the agent read, content-pinned (ADR-0001 §2.2 `snapshot.files_read`).",
+      "type": "object",
+      "properties": {
+        "hash": {
+          "description": "Content hash of the file as read (e.g. `sha256:…`).",
+          "type": "string"
+        },
+        "path": {
+          "description": "Repo-relative path of the file read.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "hash"
+      ]
+    },
+    "IntentMetrics": {
+      "description": "Per-unit measurement (ADR-0001 §2.2 `metrics` / §2.3 per-intent): the\nvocabulary of fleet accountability. `cost_usd` is derived COGS shown for\ntrust — NOT what the customer is billed (never a usage meter).\n\nFrozen by WP-F1 (ADR-0001).",
+      "type": "object",
+      "properties": {
+        "active_ms": {
+          "description": "Model + tool busy time, ms (excludes idle).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cost_usd": {
+          "description": "Derived COGS in USD; NOT what the customer is billed.",
+          "type": "number",
+          "format": "double"
+        },
+        "model_turns": {
+          "description": "Number of model turns.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "tokens": {
+          "description": "Token spend with the cache split.",
+          "$ref": "#/$defs/TokenCounts"
+        },
+        "tool_breakdown": {
+          "description": "Per-tool call breakdown.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolCount"
+          }
+        },
+        "tool_calls": {
+          "description": "Total tool calls.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "wall_ms": {
+          "description": "Born → die wall-clock, ms.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "tokens",
+        "wall_ms",
+        "active_ms",
+        "tool_calls",
+        "tool_breakdown",
+        "model_turns",
+        "cost_usd"
+      ]
+    },
+    "Snapshot": {
+      "description": "What the agent read / the environment it ran in (ADR-0001 §2.2 `snapshot`).",
+      "type": "object",
+      "properties": {
+        "env_manifest": {
+          "description": "Environment manifest (toolchain pin, e.g. `\"rustc 1.96.0\"`).",
+          "type": "string"
+        },
+        "files_read": {
+          "description": "Files the agent read, content-pinned.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FileRead"
+          }
+        },
+        "prompt_ref": {
+          "description": "`cas:` ref to the (redacted) prompt blob; `null` below the capture\nlevel that stores it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "files_read",
+        "env_manifest"
+      ]
+    },
+    "Spawn": {
+      "description": "The agent's lifespan + spawn lineage (agents spawn and die per intent).",
+      "type": "object",
+      "properties": {
+        "born_at": {
+          "description": "Unix ms — when the agent run was born.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "died_at": {
+          "description": "Unix ms — when the agent run died.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "parent_run_id": {
+          "description": "Run identifier of the orchestrator that spawned it; `null` for a\ntop-level (unspawned) session.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run_id": {
+          "description": "Run identifier of the agent run that authored the unit.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "born_at",
+        "died_at"
+      ]
+    },
+    "TokenCounts": {
+      "description": "Token spend with the cache split (ADR-0001 §2.2 `metrics.tokens`).",
+      "type": "object",
+      "properties": {
+        "cache_read": {
+          "description": "Tokens read from prompt cache.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cache_write": {
+          "description": "Tokens written to prompt cache.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "input": {
+          "description": "Input tokens (non-cached).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "output": {
+          "description": "Output tokens.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "total": {
+          "description": "Total tokens.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "input",
+        "output",
+        "cache_read",
+        "cache_write",
+        "total"
+      ]
+    },
+    "ToolCount": {
+      "description": "Per-tool call count (ADR-0001 §2.2 `metrics.tool_breakdown[]`).",
+      "type": "object",
+      "properties": {
+        "count": {
+          "description": "Number of calls to this tool.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "tool": {
+          "description": "Tool name (e.g. `\"Edit\"`, `\"Bash\"`).",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "tool",
+        "count"
+      ]
+    },
+    "Trajectory": {
+      "description": "The trajectory at three altitudes (ADR-0001 §2.1): raw (forensic,\nborn → die) · task (mid-altitude \"what happened\") · summary (inline\ndigest). Tenant-private, redacted on the write path. Refs absent below\nthe repo capture level are `null`; consumers MUST tolerate nulls.",
+      "type": "object",
+      "properties": {
+        "journal_ref": {
+          "description": "`cas:` ref to the append-only `hugit-ledger` Journal — the\nhuman-annotation track alongside the machine trajectory; `null` when\nabsent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "raw_transcript_ref": {
+          "description": "`cas:` ref to the complete agent loop, born → die: every model turn,\nevery tool call + result, system/charter prompts (redacted).\nPresent at capture level `full`; `null` below.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "redaction_policy": {
+          "description": "Which redaction policy scrubbed secrets/PII before the blobs were\nwritten (redaction is on the write path).",
+          "type": "string"
+        },
+        "summary": {
+          "description": "Inline LLM digest, a few sentences — for the drawer.\nPresent at capture level `task` and above; `null` below.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task_transcript_ref": {
+          "description": "`cas:` ref to the task-scoped mid-altitude transcript: brief in,\nplan/step progression, key decisions, result/handoff out.\nPresent at capture level `task` and above; `null` below.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "redaction_policy"
+      ]
+    }
+  }
+}

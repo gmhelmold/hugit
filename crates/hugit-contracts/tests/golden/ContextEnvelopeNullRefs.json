@@ -1,0 +1,61 @@
+{
+  "schema_version": "1.0.0",
+  "altitude": "intent",
+  "intent_id": "a2f",
+  "commit": "a2f0a2f0a2f0a2f0a2f0a2f0a2f0a2f0a2f0a2f0",
+  "tree_hash": "0b570b570b570b570b570b570b570b570b570b570b570b570b570b570b570b57",
+  "authorship": {
+    "model": "claude-sonnet-4-6",
+    "model_digest": "d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0",
+    "agent_type": "implementer",
+    "spawn": {
+      "run_id": "run-impl-0008",
+      "parent_run_id": null,
+      "born_at": 1717000100000,
+      "died_at": 1717000195000
+    },
+    "operator": "gustavo@humangr.com"
+  },
+  "charter": "chore: bump toolchain pin",
+  "campaign": null,
+  "constraints": [],
+  "acceptance": [],
+  "parent_intents": [],
+  "trajectory": {
+    "raw_transcript_ref": null,
+    "task_transcript_ref": null,
+    "summary": null,
+    "journal_ref": null,
+    "redaction_policy": "default-v1"
+  },
+  "snapshot": {
+    "files_read": [],
+    "prompt_ref": null,
+    "env_manifest": "rustc 1.96.0"
+  },
+  "metrics": {
+    "tokens": {
+      "input": 9000,
+      "output": 1200,
+      "cache_read": 6000,
+      "cache_write": 500,
+      "total": 16700
+    },
+    "wall_ms": 95000,
+    "active_ms": 80000,
+    "tool_calls": 4,
+    "tool_breakdown": [
+      {
+        "tool": "Bash",
+        "count": 3
+      },
+      {
+        "tool": "Edit",
+        "count": 1
+      }
+    ],
+    "model_turns": 3,
+    "cost_usd": 0.01
+  },
+  "verdicts_ref": null
+}

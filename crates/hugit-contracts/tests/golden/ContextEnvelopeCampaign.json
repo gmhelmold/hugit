@@ -1,0 +1,67 @@
+{
+  "schema_version": "1.0.0",
+  "altitude": "campaign",
+  "intent_id": "auth-hardening",
+  "commit": "feedfeedfeedfeedfeedfeedfeedfeedfeedfeed",
+  "tree_hash": "f1cef1cef1cef1cef1cef1cef1cef1cef1cef1cef1cef1cef1cef1cef1cef1ce",
+  "authorship": {
+    "model": "claude-opus-4-8",
+    "model_digest": "d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0",
+    "agent_type": "main",
+    "spawn": {
+      "run_id": "campaign-auth-hardening-01",
+      "parent_run_id": null,
+      "born_at": 1716990000000,
+      "died_at": 1717010000000
+    },
+    "operator": "gustavo@humangr.com"
+  },
+  "charter": "harden the authentication edge",
+  "campaign": "auth-hardening",
+  "constraints": [],
+  "acceptance": [
+    "all auth PRs landed and proven"
+  ],
+  "parent_intents": [],
+  "trajectory": {
+    "raw_transcript_ref": "cas:c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9",
+    "task_transcript_ref": "cas:ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12",
+    "summary": "Campaign session: scoped 2 PRs, tracked landing, closed the campaign.",
+    "journal_ref": "cas:09f109f109f109f109f109f109f109f109f109f109f109f109f109f109f109f1",
+    "redaction_policy": "default-v1"
+  },
+  "snapshot": {
+    "files_read": [],
+    "prompt_ref": "cas:77fe77fe77fe77fe77fe77fe77fe77fe77fe77fe77fe77fe77fe77fe77fe77fe",
+    "env_manifest": "rustc 1.96.0"
+  },
+  "metrics": {
+    "tokens": {
+      "input": 310000,
+      "output": 42000,
+      "cache_read": 250000,
+      "cache_write": 21000,
+      "total": 623000
+    },
+    "wall_ms": 20000000,
+    "active_ms": 5400000,
+    "tool_calls": 88,
+    "tool_breakdown": [
+      {
+        "tool": "Bash",
+        "count": 40
+      },
+      {
+        "tool": "Read",
+        "count": 30
+      },
+      {
+        "tool": "Task",
+        "count": 18
+      }
+    ],
+    "model_turns": 64,
+    "cost_usd": 1.85
+  },
+  "verdicts_ref": null
+}

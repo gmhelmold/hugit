@@ -1,0 +1,74 @@
+{
+  "schema_version": "1.0.0",
+  "altitude": "intent",
+  "intent_id": "a31",
+  "commit": "a31f9ca31f9ca31f9ca31f9ca31f9ca31f9ca31f",
+  "tree_hash": "cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe",
+  "authorship": {
+    "model": "claude-opus-4-8",
+    "model_digest": "d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0",
+    "agent_type": "implementer",
+    "spawn": {
+      "run_id": "run-impl-0007",
+      "parent_run_id": "orq-014",
+      "born_at": 1717000000000,
+      "died_at": 1717000840000
+    },
+    "operator": "gustavo@humangr.com"
+  },
+  "charter": "fix: refresh token reused the old iat, shortening the window",
+  "campaign": "auth-hardening",
+  "constraints": [
+    "no new dependencies"
+  ],
+  "acceptance": [
+    "token lasts the full TTL"
+  ],
+  "parent_intents": [],
+  "trajectory": {
+    "raw_transcript_ref": "cas:7e1a7e1a7e1a7e1a7e1a7e1a7e1a7e1a7e1a7e1a7e1a7e1a7e1a7e1a7e1a7e1a",
+    "task_transcript_ref": "cas:9b2c9b2c9b2c9b2c9b2c9b2c9b2c9b2c9b2c9b2c9b2c9b2c9b2c9b2c9b2c9b2c",
+    "summary": "Re-derived iat from now() to fix the refresh window; read 2 files; 14 tool calls; 3/3 verdicts green.",
+    "journal_ref": "cas:a902a902a902a902a902a902a902a902a902a902a902a902a902a902a902a902",
+    "redaction_policy": "default-v1"
+  },
+  "snapshot": {
+    "files_read": [
+      {
+        "path": "auth/token.rs",
+        "hash": "sha256:9c2f9c2f9c2f9c2f9c2f9c2f9c2f9c2f9c2f9c2f9c2f9c2f9c2f9c2f9c2f9c2f"
+      }
+    ],
+    "prompt_ref": "cas:3b4f3b4f3b4f3b4f3b4f3b4f3b4f3b4f3b4f3b4f3b4f3b4f3b4f3b4f3b4f3b4f",
+    "env_manifest": "rustc 1.96.0"
+  },
+  "metrics": {
+    "tokens": {
+      "input": 48211,
+      "output": 6035,
+      "cache_read": 39800,
+      "cache_write": 2100,
+      "total": 96146
+    },
+    "wall_ms": 840000,
+    "active_ms": 612000,
+    "tool_calls": 14,
+    "tool_breakdown": [
+      {
+        "tool": "Edit",
+        "count": 6
+      },
+      {
+        "tool": "Bash",
+        "count": 5
+      },
+      {
+        "tool": "Read",
+        "count": 3
+      }
+    ],
+    "model_turns": 9,
+    "cost_usd": 0.04
+  },
+  "verdicts_ref": "cas:4d5e4d5e4d5e4d5e4d5e4d5e4d5e4d5e4d5e4d5e4d5e4d5e4d5e4d5e4d5e4d5e"
+}
