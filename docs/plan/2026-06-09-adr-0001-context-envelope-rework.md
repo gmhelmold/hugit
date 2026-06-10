@@ -111,3 +111,14 @@ backlog (update `landing.html` drawer + `pr-detail.html` mockups under DDD).
 only gates githugr display) → **WP-F1** (freeze) → **WP-F2** (produce) ∥
 **WP-F3** (consume, after F1) → githugr display. F2 and F3 both depend on F1
 only.
+
+## Deferred cross-repo dependency (flagged 2026-06-10, owner question)
+
+The frozen `corelink-runners/docs/spec/hugit-integration-contract.md` predates
+this ADR and says nothing about envelope emission (verified: zero matches for
+envelope/transcript/metrics). **WP-F2 does NOT wait on it** — capture is built
+and proven on hugit's own runner (C9) + dogfood, hermetic-first. But when
+CoreLink Runners (campaign #1) gets built, its harness must emit the same
+`ContextEnvelope` per intent/session, which requires a contract AMENDMENT —
+negotiated then, from the hugit side, not silently. Until that product exists,
+the hosted-fleet envelope story is a disclosed live-infra seam, same class as P2.
