@@ -1,0 +1,30 @@
+[package]
+name = "hugit-web"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license-file.workspace = true
+description = "githugr — the forge web surface (read-only MVP spine) over the hugit crates"
+
+[[bin]]
+name = "hugit-web"
+path = "src/main.rs"
+
+[dependencies]
+axum = { workspace = true }
+tokio = { workspace = true }
+maud = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+hugit-contracts = { path = "../hugit-contracts" }
+hugit-refstore = { path = "../hugit-refstore" }
+hugit-ledger = { path = "../hugit-ledger" }
+hugit-checks = { path = "../hugit-checks" }
+hugit-queue = { path = "../hugit-queue" }
+hugit-dogfood = { path = "../hugit-dogfood" }
+
+[dev-dependencies]
+tower = { workspace = true }
+http-body-util = { workspace = true }
