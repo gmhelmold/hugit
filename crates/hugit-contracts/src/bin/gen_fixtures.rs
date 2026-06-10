@@ -1,6 +1,7 @@
 //! Generator binary: write all 16 JSON Schemas + golden fixtures (15 WP-00
-//! types + `ContextEnvelope` per ADR-0001 / WP-F1; the envelope ships FOUR
-//! goldens — one per altitude + the nullable-refs sub-`full` capture case).
+//! types + `ContextEnvelope` per ADR-0001 / WP-F1 + WP-F1b; the envelope
+//! ships FIVE goldens — one per altitude (intent · pr · campaign · session)
+//! plus the nullable-refs sub-`full` capture case).
 //! Run from crate root: `cargo run -p hugit-contracts --bin gen_fixtures`
 
 use hugit_contracts::{
@@ -324,13 +325,14 @@ fn main() {
         },
     );
 
-    // ── ContextEnvelope (ADR-0001 / WP-F1) ──────────────────────────────────
-    // One schema, FOUR goldens: one per altitude (intent · pr · campaign)
-    // plus the nullable-refs case (sub-`full` capture level).
+    // ── ContextEnvelope (ADR-0001 / WP-F1 + WP-F1b) ─────────────────────────
+    // One schema, FIVE goldens: one per altitude (intent · pr · campaign ·
+    // session) plus the nullable-refs case (sub-`full` capture level).
     write_schema::<ContextEnvelope>("ContextEnvelope");
     write_golden("ContextEnvelope", &envelope_intent());
     write_golden("ContextEnvelopePr", &envelope_pr());
     write_golden("ContextEnvelopeCampaign", &envelope_campaign());
+    write_golden("ContextEnvelopeSession", &envelope_session());
     write_golden("ContextEnvelopeNullRefs", &envelope_null_refs());
 
     println!("\nAll 16 schemas + golden fixtures written.");
@@ -587,6 +589,91 @@ fn envelope_campaign() -> ContextEnvelope {
             ],
             model_turns: 64,
             cost_usd: 1.85,
+        },
+        verdicts_ref: None,
+    }
+}
+
+/// Session altitude — the fourth first-class altitude (WP-F1b, second owner
+/// directive 2026-06-10): the physical home of the session's full + compacted
+/// transcript blobs. `intent_id` carries the session/run id; the transcript
+/// refs are the SAME `cas:` blobs the PR fixture references (one session
+/// authored that PR — CAS dedupes, the blobs exist once).
+fn envelope_session() -> ContextEnvelope {
+    ContextEnvelope {
+        schema_version: CONTEXT_ENVELOPE_SCHEMA_VERSION.into(),
+        altitude: Altitude::Session,
+        intent_id: "orq-014".into(),
+        commit: "f00df00df00df00df00df00df00df00df00df00d".into(),
+        tree_hash: "beadbeadbeadbeadbeadbeadbeadbeadbeadbeadbeadbeadbeadbeadbeadbead".into(),
+        authorship: Authorship {
+            model: "claude-opus-4-8".into(),
+            model_digest: "d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0d1f0".into(),
+            agent_type: "main".into(),
+            spawn: Spawn {
+                run_id: "orq-014".into(),
+                parent_run_id: None,
+                born_at: 1_717_000_000_000,
+                died_at: 1_717_004_200_000,
+            },
+            operator: "gustavo@humangr.com".into(),
+        },
+        charter: "orchestrator session orq-014: plan and land auth-hardening wave 1".into(),
+        campaign: Some("auth-hardening".into()),
+        constraints: vec![],
+        acceptance: vec!["session transcripts captured full + compacted".into()],
+        parent_intents: vec![],
+        trajectory: Trajectory {
+            raw_transcript_ref: Some(
+                "cas:c0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0de".into(),
+            ),
+            task_transcript_ref: Some(
+                "cas:deaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddead".into(),
+            ),
+            summary: Some(
+                "Session orq-014, born → die: planned wave 1, authored PR 128, landed it.".into(),
+            ),
+            journal_ref: None,
+            redaction_policy: "default-v1".into(),
+        },
+        snapshot: Snapshot {
+            files_read: vec![FileRead {
+                path: "docs/plan/wave-1.md".into(),
+                hash: "sha256:77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa"
+                    .into(),
+            }],
+            prompt_ref: Some(
+                "cas:beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef".into(),
+            ),
+            env_manifest: "rustc 1.96.0".into(),
+        },
+        metrics: IntentMetrics {
+            tokens: TokenCounts {
+                input: 122_000,
+                output: 18_400,
+                cache_read: 96_000,
+                cache_write: 8_000,
+                total: 244_400,
+            },
+            wall_ms: 4_200_000,
+            active_ms: 1_900_000,
+            tool_calls: 41,
+            tool_breakdown: vec![
+                ToolCount {
+                    tool: "Bash".into(),
+                    count: 22,
+                },
+                ToolCount {
+                    tool: "Read".into(),
+                    count: 13,
+                },
+                ToolCount {
+                    tool: "Task".into(),
+                    count: 6,
+                },
+            ],
+            model_turns: 28,
+            cost_usd: 0.62,
         },
         verdicts_ref: None,
     }

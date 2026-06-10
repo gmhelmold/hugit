@@ -1,7 +1,7 @@
 {
   "schema_version": "1.1.0",
-  "altitude": "pr",
-  "intent_id": "128",
+  "altitude": "session",
+  "intent_id": "orq-014",
   "commit": "f00df00df00df00df00df00df00df00df00df00d",
   "tree_hash": "beadbeadbeadbeadbeadbeadbeadbeadbeadbeadbeadbeadbeadbeadbeadbead",
   "authorship": {
@@ -16,17 +16,17 @@
     },
     "operator": "gustavo@humangr.com"
   },
-  "charter": "land auth-hardening wave 1: refresh-window fixes",
+  "charter": "orchestrator session orq-014: plan and land auth-hardening wave 1",
   "campaign": "auth-hardening",
   "constraints": [],
   "acceptance": [
-    "all intents land conflict-free"
+    "session transcripts captured full + compacted"
   ],
   "parent_intents": [],
   "trajectory": {
     "raw_transcript_ref": "cas:c0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0dec0de",
     "task_transcript_ref": "cas:deaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddead",
-    "summary": "Planned 3 intents, dispatched 3 subagents, cold-verified, landed the bundle.",
+    "summary": "Session orq-014, born → die: planned wave 1, authored PR 128, landed it.",
     "journal_ref": null,
     "redaction_policy": "default-v1"
   },
@@ -68,5 +68,5 @@
     "model_turns": 28,
     "cost_usd": 0.62
   },
-  "verdicts_ref": "cas:5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed"
+  "verdicts_ref": null
 }

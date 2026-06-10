@@ -7,8 +7,9 @@
 //   with the committed schemas/<TypeName>.json.
 //   Set UPDATE_SCHEMAS=1 to re-write the committed schema files.
 //
-// ContextEnvelope (ADR-0001 / WP-F1) ships FOUR goldens: one per altitude
-// (intent · pr · campaign) + the nullable-refs sub-`full` capture case.
+// ContextEnvelope (ADR-0001 / WP-F1 + WP-F1b) ships FIVE goldens: one per
+// altitude (intent · pr · campaign · session) + the nullable-refs sub-`full`
+// capture case.
 
 use hugit_contracts::{
     AppWebhooks, AttentionRank, AttestationChain, CheckDef, CheckResult, ContextEnvelope,
@@ -139,7 +140,7 @@ fn golden_regen_gate() {
     roundtrip::<RegenGate>("RegenGate");
 }
 
-// ── ContextEnvelope goldens (ADR-0001 / WP-F1): one per altitude + null refs ──
+// ── ContextEnvelope goldens (WP-F1 + WP-F1b): one per altitude + null refs ──
 
 #[test]
 fn golden_context_envelope_intent() {
@@ -156,6 +157,13 @@ fn golden_context_envelope_campaign() {
     roundtrip::<ContextEnvelope>("ContextEnvelopeCampaign");
 }
 
+/// Session altitude (WP-F1b): the fourth first-class altitude — the physical
+/// home of the session's full + compacted transcript blobs.
+#[test]
+fn golden_context_envelope_session() {
+    roundtrip::<ContextEnvelope>("ContextEnvelopeSession");
+}
+
 /// Sub-`full` capture (ADR-0001 §3): every nullable ref is `null` and must
 /// round-trip byte-exactly — consumers MUST tolerate nulls.
 #[test]
@@ -163,25 +171,36 @@ fn golden_context_envelope_null_refs() {
     roundtrip::<ContextEnvelope>("ContextEnvelopeNullRefs");
 }
 
-/// The three altitude fixtures really carry the three discriminator values
+/// The four altitude fixtures really carry the four discriminator values
 /// (and the null-refs fixture deserializes with every nullable ref absent).
+/// The session fixture (WP-F1b) carries BOTH transcript refs — the
+/// two-transcript imperative under default capture.
 #[test]
-fn context_envelope_altitudes_cover_all_three() {
+fn context_envelope_altitudes_cover_all_four() {
     let intent: ContextEnvelope = serde_json::from_str(&read_golden("ContextEnvelope")).unwrap();
     let pr: ContextEnvelope = serde_json::from_str(&read_golden("ContextEnvelopePr")).unwrap();
     let campaign: ContextEnvelope =
         serde_json::from_str(&read_golden("ContextEnvelopeCampaign")).unwrap();
+    let session: ContextEnvelope =
+        serde_json::from_str(&read_golden("ContextEnvelopeSession")).unwrap();
     let null_refs: ContextEnvelope =
         serde_json::from_str(&read_golden("ContextEnvelopeNullRefs")).unwrap();
 
     assert_eq!(intent.altitude, Altitude::Intent);
     assert_eq!(pr.altitude, Altitude::Pr);
     assert_eq!(campaign.altitude, Altitude::Campaign);
-    for env in [&intent, &pr, &campaign, &null_refs] {
+    assert_eq!(session.altitude, Altitude::Session);
+    for env in [&intent, &pr, &campaign, &session, &null_refs] {
         assert_eq!(
             env.schema_version,
             hugit_contracts::CONTEXT_ENVELOPE_SCHEMA_VERSION
         );
+    }
+    // Two-transcript imperative (WP-F1b): full + compacted both present at
+    // every altitude under default capture — including the session home.
+    for env in [&intent, &pr, &campaign, &session] {
+        assert!(env.trajectory.raw_transcript_ref.is_some());
+        assert!(env.trajectory.task_transcript_ref.is_some());
     }
     assert!(null_refs.trajectory.raw_transcript_ref.is_none());
     assert!(null_refs.trajectory.task_transcript_ref.is_none());

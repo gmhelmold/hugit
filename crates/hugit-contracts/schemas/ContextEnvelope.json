@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ContextEnvelope",
-  "description": "The Intent Context Envelope — `context.json` (ADR-0001 §2.2).\n\nOne envelope per authored unit at every altitude (intent · PR ·\ncampaign); reachable behind `IntentSidecar.context_ref` (a CAS pointer)\nand the derived records' `envelope_ref`. See the module docs for the\nnaming map onto the frozen v1 `intent_id` fields.\n\nFrozen by WP-F1 (ADR-0001, ratified 2026-06-10).",
+  "description": "The Intent Context Envelope — `context.json` (ADR-0001 §2.2).\n\nOne envelope per authored unit at every altitude (intent · PR ·\ncampaign · session); reachable behind `IntentSidecar.context_ref` (a CAS\npointer) and the derived records' `envelope_ref`. See the module docs for\nthe naming map onto the frozen v1 `intent_id` fields.\n\nFrozen by WP-F1 (ADR-0001, ratified 2026-06-10); amended additively by\nWP-F1b the same day (schema 1.1.0, `Altitude::Session`).",
   "type": "object",
   "properties": {
     "acceptance": {
@@ -12,7 +12,7 @@
       }
     },
     "altitude": {
-      "description": "The altitude of the authored unit (intent | pr | campaign).",
+      "description": "The altitude of the authored unit (intent | pr | campaign | session).",
       "$ref": "#/$defs/Altitude"
     },
     "authorship": {
@@ -42,7 +42,7 @@
       }
     },
     "intent_id": {
-      "description": "The authored-unit id at this envelope's altitude: the commit-level\nintent id at `intent`, the PR id at `pr`, the campaign key at\n`campaign` (ADR-0001 §2.2). See the module docs for how this maps\nonto the frozen v1 `intent_id` fields (which name the landing unit).",
+      "description": "The authored-unit id at this envelope's altitude: the commit-level\nintent id at `intent`, the PR id at `pr`, the campaign key at\n`campaign`, the session/run id at `session` (ADR-0001 §2.2 + WP-F1b).\nSee the module docs for how this maps onto the frozen v1 `intent_id`\nfields (which name the landing unit).",
       "type": "string"
     },
     "metrics": {
@@ -98,7 +98,7 @@
   ],
   "$defs": {
     "Altitude": {
-      "description": "The altitude of the authored unit this envelope records (owner-directed\n2026-06-10): `intent` = a commit (subagent-authored) · `pr` = a bundle of\nintents (orchestrator/human session) · `campaign` = a bundle of PRs\n(human-owned). Same envelope shape at every altitude.",
+      "description": "The altitude of the authored unit this envelope records (owner-directed\n2026-06-10): `intent` = a commit (subagent-authored) · `pr` = a bundle of\nintents (orchestrator/human session) · `campaign` = a bundle of PRs\n(human-owned) · `session` = the agent session/run itself (second owner\ndirective, same day). Same envelope shape at every altitude.",
       "oneOf": [
         {
           "description": "A commit — the hugr-native authored unit, authored by a subagent.",
@@ -114,6 +114,11 @@
           "description": "A campaign — a bundle of PRs in the landing queue, owned by a human.",
           "type": "string",
           "const": "campaign"
+        },
+        {
+          "description": "A session — the fourth first-class altitude (second owner directive,\n2026-06-10). The session envelope is the **physical home** of a\nsession's full + compacted transcript blobs: one session may author\nseveral PRs/campaigns, and their envelopes reference INTO the session\nenvelope's blobs (CAS-deduped, never duplicated). Its authored-unit id\n([`ContextEnvelope::intent_id`]) is the session/run id.",
+          "type": "string",
+          "const": "session"
         }
       ]
     },
@@ -356,7 +361,7 @@
       ]
     },
     "Trajectory": {
-      "description": "The trajectory at three altitudes (ADR-0001 §2.1): raw (forensic,\nborn → die) · task (mid-altitude \"what happened\") · summary (inline\ndigest). Tenant-private, redacted on the write path. Refs absent below\nthe repo capture level are `null`; consumers MUST tolerate nulls.",
+      "description": "The trajectory at three altitudes (ADR-0001 §2.1): raw (forensic,\nborn → die) · task (mid-altitude \"what happened\") · summary (inline\ndigest). Tenant-private, redacted on the write path.\n\n**Two-transcript imperative (second owner directive, 2026-06-10):**\n`raw_transcript_ref` (the FULL transcript) AND `task_transcript_ref`\n(the COMPACTED transcript — \"task\" is the owner's \"compacted\") are\n**IMPERATIVE at every altitude** (intent · pr · campaign · session)\nunder the ratified default capture level (`full`). They are `null`\nONLY under an explicit per-tenant capture opt-DOWN — never as a\nproducer convenience. Consumers MUST still tolerate nulls (the\nopt-down exists), but a producer emitting nulls under default capture\nis in violation of the contract.",
       "type": "object",
       "properties": {
         "journal_ref": {
@@ -367,7 +372,7 @@
           ]
         },
         "raw_transcript_ref": {
-          "description": "`cas:` ref to the complete agent loop, born → die: every model turn,\nevery tool call + result, system/charter prompts (redacted).\nPresent at capture level `full`; `null` below.",
+          "description": "`cas:` ref to the complete agent loop, born → die: every model turn,\nevery tool call + result, system/charter prompts (redacted).\nIMPERATIVE at every altitude under default capture (`full`);\n`null` only under an explicit tenant capture opt-down.",
           "type": [
             "string",
             "null"
@@ -385,7 +390,7 @@
           ]
         },
         "task_transcript_ref": {
-          "description": "`cas:` ref to the task-scoped mid-altitude transcript: brief in,\nplan/step progression, key decisions, result/handoff out.\nPresent at capture level `task` and above; `null` below.",
+          "description": "`cas:` ref to the task-scoped (compacted) mid-altitude transcript:\nbrief in, plan/step progression, key decisions, result/handoff out.\nIMPERATIVE at every altitude under default capture; `null` only\nunder an explicit tenant capture opt-down (below level `task`).",
           "type": [
             "string",
             "null"

@@ -7,9 +7,12 @@
 //! (`cas:…`) to the large blobs (transcripts, journal, prompt). One envelope
 //! per authored unit, **at every altitude** (owner-directed 2026-06-10): the
 //! intent carries the subagent's envelope, the PR carries the
-//! orchestrator-session envelope, the campaign its own. Same shape at every
-//! altitude — only [`ContextEnvelope::altitude`] and the authored-unit id
-//! change.
+//! orchestrator-session envelope, the campaign its own — and the session
+//! itself is a fourth first-class altitude (second owner directive, same
+//! day; WP-F1b): the physical home of the session's full + compacted
+//! transcript blobs, referenced (deduped) by the PR/campaign envelopes that
+//! session authored. Same shape at every altitude — only
+//! [`ContextEnvelope::altitude`] and the authored-unit id change.
 //!
 //! Capture levels (ADR-0001 §3): default is `full` — RATIFIED, non-negotiable.
 //! The level ladder (`off | metrics | task | full`) survives only as a
@@ -20,7 +23,7 @@
 //!
 //! Frozen here: [`ContextEnvelope`] (+ its sub-structs) and [`IntentMetrics`]
 //! — `deny_unknown_fields`, committed JSON Schema, golden byte-exact
-//! round-trips at all three altitudes. **Derived, NOT frozen:** [`PrRecord`]
+//! round-trips at all four altitudes. **Derived, NOT frozen:** [`PrRecord`]
 //! and [`CampaignRollup`] (ADR-0001 §2.3) are forge-COMPUTED read shapes —
 //! plain serde structs without `deny_unknown_fields` and without a committed
 //! schema, so the forge may evolve them additively without a contract break.
@@ -43,6 +46,7 @@
 //! | `intent` | a commit | `ContextEnvelope.intent_id` at `altitude:"intent"` |
 //! | `pr` | a bundle of intents | frozen `IntentSidecar.intent_id` = `LandableEntry.intent_id` (the v1 landing unit) · `ContextEnvelope.intent_id` at `altitude:"pr"` carries the PR id |
 //! | `campaign` | a bundle of PRs | `ContextEnvelope.intent_id` at `altitude:"campaign"` carries the campaign key · `CampaignRollup.campaign` |
+//! | `session` | an agent session/run | `ContextEnvelope.intent_id` at `altitude:"session"` carries the session/run id (WP-F1b) |
 //!
 //! Disambiguation rule: when a frozen v1 name says "intent" it means the
 //! **landing unit** (the PR altitude in v1); when ADR-0001 says "intent"
@@ -58,12 +62,18 @@ use serde::{Deserialize, Serialize};
 
 /// The frozen envelope schema version carried in
 /// [`ContextEnvelope::schema_version`] (semver; ADR-0001 §2.2).
-pub const CONTEXT_ENVELOPE_SCHEMA_VERSION: &str = "1.0.0";
+///
+/// `1.1.0` — WP-F1b (second owner directive, 2026-06-10): adds
+/// [`Altitude::Session`] as a fourth altitude. Additive amendment made the
+/// same day as the 1.0.0 freeze, while **zero producers existed** — no
+/// migration path was ever needed.
+pub const CONTEXT_ENVELOPE_SCHEMA_VERSION: &str = "1.1.0";
 
 /// The altitude of the authored unit this envelope records (owner-directed
 /// 2026-06-10): `intent` = a commit (subagent-authored) · `pr` = a bundle of
 /// intents (orchestrator/human session) · `campaign` = a bundle of PRs
-/// (human-owned). Same envelope shape at every altitude.
+/// (human-owned) · `session` = the agent session/run itself (second owner
+/// directive, same day). Same envelope shape at every altitude.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Altitude {
@@ -74,6 +84,13 @@ pub enum Altitude {
     Pr,
     /// A campaign — a bundle of PRs in the landing queue, owned by a human.
     Campaign,
+    /// A session — the fourth first-class altitude (second owner directive,
+    /// 2026-06-10). The session envelope is the **physical home** of a
+    /// session's full + compacted transcript blobs: one session may author
+    /// several PRs/campaigns, and their envelopes reference INTO the session
+    /// envelope's blobs (CAS-deduped, never duplicated). Its authored-unit id
+    /// ([`ContextEnvelope::intent_id`]) is the session/run id.
+    Session,
 }
 
 /// The agent's lifespan + spawn lineage (agents spawn and die per intent).
@@ -110,18 +127,29 @@ pub struct Authorship {
 
 /// The trajectory at three altitudes (ADR-0001 §2.1): raw (forensic,
 /// born → die) · task (mid-altitude "what happened") · summary (inline
-/// digest). Tenant-private, redacted on the write path. Refs absent below
-/// the repo capture level are `null`; consumers MUST tolerate nulls.
+/// digest). Tenant-private, redacted on the write path.
+///
+/// **Two-transcript imperative (second owner directive, 2026-06-10):**
+/// `raw_transcript_ref` (the FULL transcript) AND `task_transcript_ref`
+/// (the COMPACTED transcript — "task" is the owner's "compacted") are
+/// **IMPERATIVE at every altitude** (intent · pr · campaign · session)
+/// under the ratified default capture level (`full`). They are `null`
+/// ONLY under an explicit per-tenant capture opt-DOWN — never as a
+/// producer convenience. Consumers MUST still tolerate nulls (the
+/// opt-down exists), but a producer emitting nulls under default capture
+/// is in violation of the contract.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Trajectory {
     /// `cas:` ref to the complete agent loop, born → die: every model turn,
     /// every tool call + result, system/charter prompts (redacted).
-    /// Present at capture level `full`; `null` below.
+    /// IMPERATIVE at every altitude under default capture (`full`);
+    /// `null` only under an explicit tenant capture opt-down.
     pub raw_transcript_ref: Option<String>,
-    /// `cas:` ref to the task-scoped mid-altitude transcript: brief in,
-    /// plan/step progression, key decisions, result/handoff out.
-    /// Present at capture level `task` and above; `null` below.
+    /// `cas:` ref to the task-scoped (compacted) mid-altitude transcript:
+    /// brief in, plan/step progression, key decisions, result/handoff out.
+    /// IMPERATIVE at every altitude under default capture; `null` only
+    /// under an explicit tenant capture opt-down (below level `task`).
     pub task_transcript_ref: Option<String>,
     /// Inline LLM digest, a few sentences — for the drawer.
     /// Present at capture level `task` and above; `null` below.
@@ -211,11 +239,12 @@ pub struct IntentMetrics {
 /// The Intent Context Envelope — `context.json` (ADR-0001 §2.2).
 ///
 /// One envelope per authored unit at every altitude (intent · PR ·
-/// campaign); reachable behind `IntentSidecar.context_ref` (a CAS pointer)
-/// and the derived records' `envelope_ref`. See the module docs for the
-/// naming map onto the frozen v1 `intent_id` fields.
+/// campaign · session); reachable behind `IntentSidecar.context_ref` (a CAS
+/// pointer) and the derived records' `envelope_ref`. See the module docs for
+/// the naming map onto the frozen v1 `intent_id` fields.
 ///
-/// Frozen by WP-F1 (ADR-0001, ratified 2026-06-10).
+/// Frozen by WP-F1 (ADR-0001, ratified 2026-06-10); amended additively by
+/// WP-F1b the same day (schema 1.1.0, `Altitude::Session`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ContextEnvelope {
@@ -223,13 +252,14 @@ pub struct ContextEnvelope {
     /// [`CONTEXT_ENVELOPE_SCHEMA_VERSION`].
     pub schema_version: String,
 
-    /// The altitude of the authored unit (intent | pr | campaign).
+    /// The altitude of the authored unit (intent | pr | campaign | session).
     pub altitude: Altitude,
 
     /// The authored-unit id at this envelope's altitude: the commit-level
     /// intent id at `intent`, the PR id at `pr`, the campaign key at
-    /// `campaign` (ADR-0001 §2.2). See the module docs for how this maps
-    /// onto the frozen v1 `intent_id` fields (which name the landing unit).
+    /// `campaign`, the session/run id at `session` (ADR-0001 §2.2 + WP-F1b).
+    /// See the module docs for how this maps onto the frozen v1 `intent_id`
+    /// fields (which name the landing unit).
     pub intent_id: String,
 
     /// Git commit this unit enriches (the intent's commit; at higher
