@@ -1050,6 +1050,7 @@ dependencies = [
  "hugit-contracts",
  "hugit-queue",
  "hugit-refstore",
+ "hugit-runner",
  "serde_json",
 ]
 
@@ -1161,8 +1162,11 @@ name = "hugit-runner"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "hex",
  "hugit-contracts",
+ "hugit-ledger",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

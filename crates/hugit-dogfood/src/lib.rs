@@ -15,6 +15,7 @@
 //! proven hermetically now.
 
 pub mod baseline;
+pub mod envelope;
 pub mod focus_gate;
 pub mod soak;
 pub mod wave;

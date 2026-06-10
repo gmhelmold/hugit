@@ -14,6 +14,10 @@
 //! - [`teardown`] — destroy the container and forensically re-scan the box to
 //!   prove nothing was left behind.
 //!
+//! Follow-on: [`envelope`] (**WP-F2**, ADR-0001) — the context-envelope
+//! producer at intent close (metrics + 3-altitude trajectory capture,
+//! redact-on-write, cold blob store seam).
+//!
 //! Concurrency/throughput, expiry hard-kill, and crash recovery are **WP-C2b**;
 //! cache-warm boot is **C3**; the Actions-YAML shim is **E4**; fence path
 //! enforcement (ENOENT) is **C5a** and the secrets broker is **C5b**. None of
@@ -37,6 +41,7 @@
 
 pub mod boot;
 pub mod concurrency;
+pub mod envelope;
 pub mod expiry;
 pub mod isolation;
 pub mod lease;
