@@ -262,10 +262,17 @@ Transcripts may carry secrets/PII (whitepaper §13). Therefore:
 
   Refs absent below their level are `null`; consumers must tolerate nulls.
 - **Retention: keep forever by default — RATIFIED by the same directive**
-  ("salvo **sempre**"): no automatic TTL/GC on trajectory blobs. CAS dedupe +
-  flat pricing make this viable; the audit value compounds. Content leaves
-  storage only via the explicit erasure path (tenant request → tombstone:
-  *"o conteúdo é apagável; a prova, não"*) — never via a timer.
+  ("salvo **sempre**"): no automatic TTL/GC on trajectory blobs. Content
+  leaves storage only via the explicit erasure path (tenant request →
+  tombstone: *"o conteúdo é apagável; a prova, não"*) — never via a timer.
+- **Storage tier — owner-directed (2026-06-10): trajectory blobs do NOT ride
+  the CoreLink hot path.** The AC/CAS fast tier exists for memoized CI
+  (latency on the check path). Transcripts are write-once/read-rarely
+  archive: they go to a **cheap cold object store** behind the same
+  content-addressed ref scheme ("até Google Drive resolve" — the bar is
+  cost, not latency). Refs in the envelope are **tier-agnostic** opaque
+  content-addressed URIs; the resolver maps hash → tier. Dedupe-by-content
+  still applies. The P2 tenant request is NOT sized for transcript growth.
 
 ## 4. Why (rationale)
 

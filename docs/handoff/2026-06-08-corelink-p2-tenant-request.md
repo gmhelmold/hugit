@@ -175,20 +175,20 @@ cargo test -p hugit-checks --test corelink_ac_smoke -- --nocapture
 When the three values land, this goes live with **no further hugit code change** —
 just configuration. Ping me and I'll run §6 and report.
 
-## 8. ADDENDUM 2026-06-10 — CAS scope grew: context-envelope trajectory blobs
 
-Owner ratified ADR-0001 §7 today (`docs/adr/0001-intent-context-envelope.md` @
-`2089b3b`): every intent, **every PR (orchestrator session)** and every campaign
-carries a context envelope whose trajectory blobs (raw + task transcripts) are
-stored in the **same tenant CAS** this request provisions. What changes for you:
+## 8. ADDENDUM 2026-06-10 — scope NOT growing: trajectory blobs stay OFF this tenant
 
-| Aspect | Before this addendum | Now |
-|---|---|---|
-| CAS contents | check artifacts/logs (KB-scale) | + transcript blobs (**MB-scale** per session; content-addressed, deduped — one orchestrator session shared by N PRs stores once) |
-| Retention | (implicit: artifact lifecycle) | **trajectory blobs are kept FOREVER** — owner decision, non-negotiable: no TTL, no GC, ever |
-| Deletion | n/a | the ONLY deletion path is explicit erasure (right-to-be-forgotten): **does your CAS support targeted delete of a content-addressed object + a tombstone record?** Please confirm or state the alternative — this is a new question, nothing else in §3 changes. |
-| Caps (§2.4) | "low monthly $ cap" | still fine to start; expect storage to grow monotonically (no GC). Pick the cap knowing transcripts accrue ~MB per agent-session and never leave. |
+(Replaces an earlier same-day addendum that briefly proposed storing
+context-envelope transcripts in this CAS — the owner overruled it within the
+hour: **"o CoreLink é muito caro pra armazenar esse tipo de coisa."**)
 
-No new API surface is requested — same CAS read/write the PAT already covers.
-The producer side (hugit WP-F2) is not blocked on this; live wiring still gates
-on the §5 deliverables exactly as written.
+ADR-0001 was ratified today: every intent/PR/campaign keeps its full session
+transcript **forever**. Those blobs (MB-scale, write-once/read-rarely archive)
+go to a **cheap cold object store** behind tier-agnostic content-addressed
+refs — **NOT to this tenant's AC/CAS fast path**, which stays exactly as
+scoped in §2 (KB-scale check artifacts on the memoized-CI hot path).
+
+Net effect for you: **nothing in §2–§6 changes; size the §2.4 caps for CI
+traffic only.** One optional question, zero urgency: if CoreLink ever exposes
+a cold/archive storage class, hugit is a natural first customer — but we are
+not waiting on it and will pick a commodity store otherwise.
