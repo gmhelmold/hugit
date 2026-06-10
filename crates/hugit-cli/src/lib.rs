@@ -10,9 +10,17 @@
 //!   - `tournament/` — `hugit tournament -n N` fan-out: N candidates, judge
 //!     panel, budget-bounded (WP-D13)
 //!   - `export/`     — `hugit export` + the exit proof (WP-E5)
+//!   - `porcelain`   — shared JSON-on-stdout conventions for the flow porcelain (WP-PC0)
+//!   - `campaign/`   — `hugit campaign open/close/show` (WP-PC1; scaffold WP-PC0)
+//!   - `intent/`     — `hugit intent new/show` (WP-PC2; scaffold WP-PC0)
+//!   - `pr/`         — `hugit pr open/land/show` (WP-PC3; scaffold WP-PC0)
 
+pub mod campaign;
 pub mod export;
 pub mod impact;
+pub mod intent;
+pub mod porcelain;
+pub mod pr;
 pub mod tournament;
 pub mod verdict;
 pub mod why;
@@ -47,6 +55,13 @@ pub const HUGIT_VERBS: &[&str] = &[
     "impact",     // hugit impact <path|change>   — build-graph blast radius
     "tournament", // hugit tournament -n N    — exploration as a verb
     "export",     // hugit export             — anti-lock-in dump + exit proof
+    // Flow porcelain (WP-PC wave) — dispatched as honest NOT-IMPLEMENTED stubs
+    // at PC0; PC1/PC2/PC3 fill the bodies. The verb is LIVE the moment main.rs
+    // routes it (the no-drift oracle asserts dispatched == registry), so these
+    // belong here, not in HUGIT_RESERVED_VERBS.
+    "campaign", // hugit campaign open/close/show — campaign lifecycle (PC1)
+    "intent",   // hugit intent new/show         — intent ceremony (PC2)
+    "pr",       // hugit pr open/land/show        — pull-request lifecycle (PC3)
 ];
 
 /// Planned hugit verb tokens that are RESERVED but NOT yet dispatched.
@@ -57,7 +72,8 @@ pub const HUGIT_VERBS: &[&str] = &[
 /// `main.rs` dispatch, `hugit --help`, or the WP-X5 no-shadow oracle.
 ///
 /// When a verb graduates to a live dispatch, move it from here to
-/// [`HUGIT_VERBS`] and wire it in `main.rs`.
+/// [`HUGIT_VERBS`] and wire it in `main.rs`. (`campaign`, `intent`, and `pr`
+/// graduated in the PC wave — dispatched as honest stubs at PC0.)
 pub const HUGIT_RESERVED_VERBS: &[&str] = &[
     // Phase B — Orchestrator / Worker (planned)
     "land",    // hugit land [--queue]        — union-testing landing queue
@@ -75,10 +91,8 @@ pub const HUGIT_RESERVED_VERBS: &[&str] = &[
     "watch",    // hugit watch              — TUI forge monitoring
     "undo",     // hugit undo <op>          — event-sourced undo
     "policy",   // hugit policy edit / test — declarative gate management
-    "campaign", // hugit campaign / plan    — DAG + acceptance binding
     "dispatch", // hugit dispatch <intent>  — workspace + context packet
     "fleet",    // hugit fleet              — machine-readable fleet state
-    "intent",   // hugit intent seal        — the one ceremony verb
     "journal",  // hugit journal note       — session note
 ];
 
