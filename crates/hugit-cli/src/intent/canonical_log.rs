@@ -36,10 +36,35 @@ use hugit_refstore::intent::{INTENT_LANDED_KIND, intents_from_log};
 use hugit_refstore::{EventLog, verify_chain};
 
 use super::error::PorcelainError;
+use crate::pr::filelock::{self, FileLock, LockError};
 
 /// The synthetic ref an authored-not-pushed intent lands onto (mirrors the
 /// store's `AUTHORED_REF` — fixture world until a real push binds a git ref).
 const AUTHORED_REF: &str = "refs/hugit/intents";
+
+/// Map a [`LockError`] into the structured porcelain error.
+///
+/// A live holder is `log_busy` (retry-able — another verb owns the seam, so the
+/// read-modify-write is serialized, never a clobber: the TOCTOU is dead); an
+/// I/O fault is the existing `io` kind.
+fn lock_porcelain_error(e: LockError) -> PorcelainError {
+    match e {
+        LockError::Busy { path } => PorcelainError::new(
+            "log_busy",
+            format!(
+                "the --log file {} is locked by another hugit verb",
+                path.display()
+            ),
+            "another `hugit` process holds the log lock; retry once it releases \
+             (a stale lock is auto-reclaimed after a short window)",
+        ),
+        LockError::Io { .. } => PorcelainError::new(
+            "io",
+            e.to_string(),
+            "check the --log path is on a writable directory",
+        ),
+    }
+}
 
 /// Land `sidecar`'s `intent.landed` record on the canonical `[EventRecord, …]`
 /// log at `path`, persisting it back. Idempotent: if the intent id is already on
@@ -57,6 +82,13 @@ pub fn land_intent(
     principal_chain: &[String],
     recorded_at: u64,
 ) -> Result<(), PorcelainError> {
+    // Acquire the advisory exclusive lock BEFORE the load and hold it across the
+    // whole load→mutate→persist (the `_lock` guard releases on Drop / on any
+    // early return). Two concurrent `intent new --log` on one file now serialize
+    // or fail structured (`log_busy`) — never silently clobber (the TOCTOU is
+    // dead). See [`crate::pr::filelock`].
+    let _lock = FileLock::acquire(path).map_err(lock_porcelain_error)?;
+
     let mut log = load(path)?;
 
     // Idempotent on the shared log: an intent already landed here is left as-is.
@@ -190,7 +222,10 @@ fn load(path: &Path) -> Result<EventLog, PorcelainError> {
     Ok(log)
 }
 
-/// Persist the log back to `path` as a pretty `[EventRecord, …]` array.
+/// Persist the log back to `path` as a pretty `[EventRecord, …]` array, via the
+/// **atomic** temp-file-then-rename write (held under the caller's lock). A
+/// reader or a crash sees either the whole old file or the whole new one — never
+/// a half-written, truncated log.
 fn persist(path: &Path, log: &EventLog) -> Result<(), PorcelainError> {
     let bytes = serde_json::to_vec_pretty(log.records()).map_err(|e| {
         PorcelainError::new(
@@ -199,13 +234,7 @@ fn persist(path: &Path, log: &EventLog) -> Result<(), PorcelainError> {
             "this is an internal bug; report it",
         )
     })?;
-    std::fs::write(path, bytes).map_err(|e| {
-        PorcelainError::new(
-            "io",
-            format!("write log {}: {e}", path.display()),
-            "check the --log path is writable",
-        )
-    })
+    filelock::atomic_write(path, &bytes).map_err(lock_porcelain_error)
 }
 
 /// The synthetic target oid for an authored-not-pushed intent (mirrors the

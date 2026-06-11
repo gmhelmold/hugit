@@ -40,6 +40,8 @@ use hugit_refstore::intent::{Intent, intents_from_log};
 use hugit_refstore::{EventLog, verify_chain};
 use serde::{Deserialize, Serialize};
 
+use crate::pr::filelock::{self, FileLock, LockError};
+
 /// A captured adversarial verdict on an intent (honestly absent until a panel
 /// records one — never fabricated). Minimal, machine-stable shape.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -101,6 +103,13 @@ pub enum StoreError {
     },
     /// The store could not be serialised to JSON.
     Serialize(String),
+    /// The store file is locked by another live `hugit` verb (the advisory
+    /// exclusive lock — see [`crate::pr::filelock`]). Retry-able; never a
+    /// silent clobber.
+    Busy {
+        /// The store path that is locked.
+        path: String,
+    },
 }
 
 impl std::fmt::Display for StoreError {
@@ -112,11 +121,28 @@ impl std::fmt::Display for StoreError {
             StoreError::ChainBroken(m) => write!(f, "store chain failed verification: {m}"),
             StoreError::Write { path, source } => write!(f, "write store {path}: {source}"),
             StoreError::Serialize(m) => write!(f, "serialize store: {m}"),
+            StoreError::Busy { path } => {
+                write!(f, "store {path} is locked by another hugit verb")
+            }
         }
     }
 }
 
 impl std::error::Error for StoreError {}
+
+/// Map a [`LockError`] into the store's [`StoreError`] (a live holder →
+/// [`StoreError::Busy`], an I/O fault → [`StoreError::Write`]).
+fn store_lock_error(path: &Path, e: LockError) -> StoreError {
+    match e {
+        LockError::Busy { .. } => StoreError::Busy {
+            path: path.display().to_string(),
+        },
+        LockError::Io { .. } => StoreError::Write {
+            path: path.display().to_string(),
+            source: std::io::Error::other(e.to_string()),
+        },
+    }
+}
 
 /// The in-memory, loaded store: the rehydrated [`EventLog`] (verified) plus the
 /// side corpora. `new` mutates this and persists with [`IntentStore::save`];
@@ -198,7 +224,26 @@ impl IntentStore {
 
     /// Persist the store back to `path` (events + corpora), pretty JSON so the
     /// on-disk artifact stays inspectable.
+    ///
+    /// **Lock + atomic discipline (WP-WC1).** The write acquires the advisory
+    /// exclusive lock for the duration of the write (serializing concurrent
+    /// saves — a racing verb gets [`StoreError::Busy`], never a clobber) and
+    /// lands the bytes via an **atomic** temp-file-then-rename, so a reader or a
+    /// crash sees the whole old store or the whole new one — never a truncated
+    /// file. The lock is released the moment the write returns.
+    ///
+    /// Read-only verbs (`show`/`list`) use the lock-free [`load`](Self::load):
+    /// the atomic write means a reader never observes a half-written store even
+    /// without taking the lock. The residual load→mutate→save window between two
+    /// DISTINCT concurrent `new` intents is bounded by the atomic write (no
+    /// corruption, ever) plus the idempotent intent-id pre-check; the FULL
+    /// load→persist hold lives on the shared canonical `--log` seam
+    /// ([`crate::intent::canonical_log`]), which `intent new --log` drives under
+    /// a single lock held across the whole read-modify-write.
     pub fn save(&self, path: &Path) -> Result<(), StoreError> {
+        // Serialize the write itself behind the advisory lock (the guard drops
+        // when this function returns, releasing it).
+        let _lock = FileLock::acquire(path).map_err(|e| store_lock_error(path, e))?;
         let mut sidecars: Vec<IntentSidecar> = self.sidecars.values().cloned().collect();
         sidecars.sort_by(|a, b| a.intent_id.cmp(&b.intent_id));
         let file = IntentStoreFile {
@@ -209,9 +254,6 @@ impl IntentStore {
         };
         let json = serde_json::to_string_pretty(&file)
             .map_err(|e| StoreError::Serialize(e.to_string()))?;
-        std::fs::write(path, json).map_err(|e| StoreError::Write {
-            path: path.display().to_string(),
-            source: e,
-        })
+        filelock::atomic_write(path, json.as_bytes()).map_err(|e| store_lock_error(path, e))
     }
 }

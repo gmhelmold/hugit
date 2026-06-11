@@ -39,6 +39,7 @@
 //!   captured (sub-`full` capture, or no PR-altitude envelope on the log).
 
 mod cli;
+pub mod filelock;
 
 pub use cli::{PrArgs, PrCommand, run};
 
@@ -567,6 +568,27 @@ pub struct LandArgs {
 /// (ordered by `order_index`), so the reported `position` is the queue's own
 /// ordering — never invented. Reports `{"queued":true,"position":N,"mode":"union"}`.
 ///
+/// # Queue-authority honesty (audit F15 — disclosed seam, not an overclaim)
+///
+/// The reported `position` is the **porcelain's tail index** over the log's
+/// `pr.queued` records: a PR enters at `order_index = count(pr.queued)` and the
+/// `Batch` confirms that order (it enforces `order_index` uniqueness + sort).
+/// It is an honest enqueue ordinal, NOT a landing ETA and NOT a disjointness
+/// verdict.
+///
+/// **Affected-set arbitration is the engine queue's job, not the porcelain's.**
+/// The real union-testing landing queue (B3) decides which queued PRs can land
+/// together by intersecting their AffectedSets over **tree hashes** — but a tree
+/// hash only exists once a PR's bundle is materialized into a real tree, which
+/// is the P2 live-infra seam, not this hermetic file altitude. So every
+/// [`hugit_contracts::LandableEntry`] here carries an **empty `tree_hash` and an
+/// empty [`AffectedSet`]** (the honest placeholder): the porcelain cannot, and
+/// does not claim to, compute disjointness or a batch landing decision. When
+/// real tree hashes flow (P2), the same `Batch` path feeds them through and the
+/// engine arbitrates the affected set; the porcelain's reported `position` stays
+/// the enqueue ordinal it is today. The wedge property (union testing) lives in
+/// the engine the position threads into — this verb is the honest enqueue seam.
+///
 /// Refusals (structured): the PR has no `pr.opened` ([`PrError::UnknownPr`]),
 /// or it bundles zero intents ([`PrError::EmptyPr`]).
 ///
@@ -938,7 +960,11 @@ pub struct QueuedPr {
     pub pr_id: String,
     /// The queue item id.
     pub item_id: String,
-    /// The queue position (`order_index`).
+    /// The queue position (`order_index`) — the porcelain's **tail enqueue
+    /// ordinal** over the log's `pr.queued` records (the `position` reported by
+    /// `land`/`show`/`list`). It is an honest enqueue order, NOT a landing ETA
+    /// and NOT a disjointness/batch verdict: affected-set arbitration over real
+    /// tree hashes is the engine queue's job (the P2 seam — see [`land`]).
     pub order_index: u64,
 }
 

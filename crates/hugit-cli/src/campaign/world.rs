@@ -23,6 +23,28 @@ use hugit_refstore::intent::intents_from_log;
 use hugit_refstore::{EventLog, verify_chain};
 
 use super::output::CampaignError;
+use crate::pr::filelock::{self, FileLock, LockError};
+
+/// Map a [`LockError`] into a structured [`CampaignError`] (a live holder →
+/// `log_busy`, retry-able; an I/O fault → the existing `io` kind).
+fn lock_campaign_error(e: LockError) -> CampaignError {
+    match e {
+        LockError::Busy { path } => CampaignError::new(
+            "log_busy",
+            format!(
+                "the --log file {} is locked by another hugit verb",
+                path.display()
+            ),
+            "another `hugit` process holds the log lock; retry once it releases \
+             (a stale lock is auto-reclaimed after a short window)",
+        ),
+        LockError::Io { .. } => CampaignError::new(
+            "io",
+            e.to_string(),
+            "check the --log path is on a writable directory",
+        ),
+    }
+}
 
 /// One PR bundle of a campaign — projected from the log's `pr.opened` records.
 ///
@@ -505,6 +527,12 @@ pub fn append_authorized_and_persist(
     recorded_at: u64,
 ) -> Result<(), CampaignError> {
     use hugit_refstore::{Endpoint, PrincipalClass};
+    // Serialize the append+persist behind the advisory exclusive lock (WP-WC1):
+    // a campaign mutation racing another verb on the same `--log` gets the
+    // structured `log_busy` rather than clobbering. The guard releases when this
+    // function returns (or on any early `?`). The atomic write below makes the
+    // persist truncation-proof; together they kill the campaign-seam TOCTOU.
+    let _lock = FileLock::acquire(path).map_err(lock_campaign_error)?;
     let mut log = world.log.clone();
     let payload = hugit_refstore::canonical_json(&payload).unwrap_or(payload);
     let principal_chain = vec![format!("user:{owner}")];
@@ -531,7 +559,13 @@ pub fn append_authorized_and_persist(
 }
 
 /// Persist the canonical event log back to `path` as a pretty `[EventRecord, …]`
-/// array (the same shape [`World::load`] reads).
+/// array (the same shape [`World::load`] reads), via the **atomic**
+/// temp-file-then-rename write (WP-WC1) — a reader or a crash sees the whole old
+/// log or the whole new one, never a truncated file.
+///
+/// The lock-discipline is the caller's: [`append_authorized_and_persist`] holds
+/// the advisory exclusive lock across its append→persist. A direct
+/// [`persist_log`] caller relies on the atomic write alone for truncation-safety.
 pub fn persist_log(path: &Path, log: &EventLog) -> Result<(), CampaignError> {
     let bytes = serde_json::to_vec_pretty(log.records()).map_err(|e| {
         CampaignError::new(
@@ -540,5 +574,5 @@ pub fn persist_log(path: &Path, log: &EventLog) -> Result<(), CampaignError> {
             "this is an internal error — report it",
         )
     })?;
-    std::fs::write(path, bytes).map_err(|e| CampaignError::io("write log file", path, &e))
+    filelock::atomic_write(path, &bytes).map_err(lock_campaign_error)
 }
