@@ -241,6 +241,49 @@ fn item_6_tampered_store_fails_closed() {
     let _ = std::fs::remove_file(&store);
 }
 
+// ── WI-PR defect 3: `intent new` bootstraps a missing store parent dir ──────────
+
+/// A first-run `intent new` whose `--store` lives under a directory that does
+/// NOT exist yet (the default is `.hugit/intents.json`, and `.hugit/` is absent
+/// on a fresh checkout) must SUCCEED, creating the parent dir (mkdir -p) before
+/// writing the store. Before the fix the lock-file `create_new` faulted
+/// `store_error` ("no such file or directory") despite the help promising a
+/// bootstrap.
+#[test]
+fn item_bootstrap_new_creates_a_missing_store_parent_dir() {
+    // A fresh, never-created parent dir (the `.hugit/`-style first-run case).
+    let mut dir = std::env::temp_dir();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    dir.push(format!(
+        "hugit-pc2-bootstrap-{nanos}-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!dir.exists(), "the store parent dir must NOT exist yet");
+
+    let store = dir.join("intents.json");
+    let result = new::run(sample(Some("intent-bootstrap-1")), &store)
+        .expect("intent new must bootstrap the missing parent dir, not store_error");
+    assert_eq!(result.intent_id, "intent-bootstrap-1");
+    assert!(!result.already_exists, "first landing is not a re-run");
+
+    // The parent dir AND the store file now exist (the bootstrap happened).
+    assert!(dir.exists(), "the store parent dir was created (mkdir -p)");
+    assert!(store.exists(), "the store file was written");
+
+    // And the store re-loads + re-verifies its chain (a real, chained landing).
+    let loaded = IntentStore::load(&store).expect("store loads + chain verifies");
+    assert!(
+        loaded.intent_for("intent-bootstrap-1").unwrap().is_some(),
+        "the bootstrapped intent is on the chain-verified log"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ── PorcelainError shape is the stable single-object contract ───────────────────
 
 #[test]

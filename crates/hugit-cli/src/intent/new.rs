@@ -168,6 +168,14 @@ pub fn run(input: NewIntent, store_path: &Path) -> Result<NewResult, PorcelainEr
     // bound to the campaign — honest provenance, not invented.
     let principal_chain = vec![format!("campaign:{campaign}"), format!("agent:{agent}")];
 
+    // WI-PR bootstrap: `intent new` is the first-run authoring verb, and the
+    // default `--store` is `.hugit/intents.json`. On a fresh checkout `.hugit/`
+    // does not yet exist, so the lock-file `create_new` (and the atomic store
+    // write) would fault `no such file or directory` — a `store_error` crash
+    // despite the help promising a bootstrap. Create the store's parent dir
+    // (mkdir -p semantics) before locking so a first-run `intent new` works.
+    ensure_store_parent(store_path)?;
+
     // Lock the `--store` BEFORE the load and hold it across the whole
     // load→mutate→save (WF-CLI2 bug 2: the store-seam load→lock inversion — two
     // concurrent `intent new --store` for distinct intents each loaded the same
@@ -250,6 +258,32 @@ pub fn run(input: NewIntent, store_path: &Path) -> Result<NewResult, PorcelainEr
 /// honestly labelled `authored:<id>` (never a fake 40-hex git sha).
 fn authored_target(intent_id: &str) -> String {
     format!("authored:{intent_id}")
+}
+
+/// Bootstrap the store's parent directory (mkdir -p) so a first-run
+/// `intent new` against the default `.hugit/intents.json` store works even when
+/// `.hugit/` does not yet exist.
+///
+/// The lock-file `create_new` and the atomic temp-then-rename store write both
+/// require the target's directory to exist; without this a fresh checkout
+/// faults `store_error` ("no such file or directory") despite the help
+/// promising a bootstrap. A store path with no parent (a bare filename in the
+/// cwd) needs nothing; [`std::fs::create_dir_all`] is a no-op on an
+/// already-present dir, so this is idempotent and safe to call every run.
+fn ensure_store_parent(store_path: &Path) -> Result<(), PorcelainError> {
+    match store_path.parent() {
+        // No parent component, or the parent is the (always-present) cwd root.
+        Some(parent) if !parent.as_os_str().is_empty() => {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                PorcelainError::new(
+                    "store_error",
+                    format!("create store directory {}: {e}", parent.display()),
+                    "ensure the --store path's parent directory is creatable",
+                )
+            })
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Current unix time in milliseconds (the landing event's observability
