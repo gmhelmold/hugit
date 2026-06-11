@@ -200,12 +200,12 @@ fn run_open(a: OpenCliArgs) -> ExitCode {
         ));
     }
     // --run-id is optional; only validate it when the caller passes a non-None value.
-    if let Some(run_id) = &a.run_id {
-        if let Err(e) = crate::ident::validate_identifier(run_id, "--run-id") {
-            return emit_porcelain(&crate::porcelain::PorcelainError::new(
-                e.kind, e.message, e.fix,
-            ));
-        }
+    if let Some(run_id) = &a.run_id
+        && let Err(e) = crate::ident::validate_identifier(run_id, "--run-id")
+    {
+        return emit_porcelain(&crate::porcelain::PorcelainError::new(
+            e.kind, e.message, e.fix,
+        ));
     }
 
     // D14 at the door: validate `--author-kind`, emitting the structured

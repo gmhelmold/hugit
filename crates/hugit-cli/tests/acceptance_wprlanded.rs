@@ -399,7 +399,157 @@ fn pr_show_queue_queued_false_after_settle() {
     );
 }
 
+// ── WI-PR defect 1: pr land is idempotent on a TERMINAL (landed) PR ──────────
+
+/// open → land (queued) → settle (landed) → `pr land` AGAIN must be a NO-OP.
+///
+/// Before the fix, re-running `pr land` on a settled PR re-appended a SECOND
+/// `pr.queued` AFTER the terminal `pr.landed` (post-terminal log corruption),
+/// reporting `already_queued:false` + `queued:true` — a fresh-enqueue lie. The
+/// canonical agent retry-on-land pattern must instead be idempotent: NO new
+/// `pr.queued`, an idempotent response, and the log's pr kinds end at
+/// `pr.landed` (no post-terminal `pr.queued`).
+#[test]
+fn land_is_idempotent_on_a_terminal_landed_pr() {
+    let dir = scratch("land-terminal-idempotent");
+    let (log, _campaign, pr_id, _intent) = seed_campaign_with_open_pr(&dir);
+    let log_s = log.to_str().unwrap();
+
+    // open → land (queued) → settle (landed).
+    let (code, _) = run(&["pr", "land", "--log", log_s, "--pr", &pr_id]);
+    assert_eq!(code, Some(0), "pr land enqueues");
+    let (code, v) = run(&["pr", "land", "--log", log_s, "--pr", &pr_id, "--settle"]);
+    assert_eq!(code, Some(0), "pr land --settle settles: {v}");
+    assert_eq!(v["landed"], true, "{v}");
+    assert_eq!(
+        count_kind(&log, "pr.queued"),
+        1,
+        "exactly one pr.queued so far"
+    );
+    assert_eq!(count_kind(&log, "pr.landed"), 1, "exactly one pr.landed");
+
+    // The terminal log shape BEFORE the retry: the last pr.* kind is pr.landed.
+    assert_eq!(
+        last_pr_kind(&log),
+        Some("pr.landed".to_string()),
+        "terminal pr kind is pr.landed before the retry"
+    );
+
+    // pr land AGAIN on the landed PR — the canonical retry-on-land pattern.
+    let (code, v) = run(&["pr", "land", "--log", log_s, "--pr", &pr_id]);
+    assert_eq!(
+        code,
+        Some(0),
+        "re-land on a landed PR is exit 0 (idempotent): {v}"
+    );
+    // The response is idempotent — NOT a fresh-enqueue lie.
+    assert_eq!(
+        v["already_queued"], true,
+        "re-land must report already_queued:true (no fresh enqueue): {v}"
+    );
+    assert_eq!(
+        v["already_landed"], true,
+        "re-land surfaces the terminal landed state: {v}"
+    );
+
+    // PROOF: NO second pr.queued was appended — the count is unchanged at 1.
+    assert_eq!(
+        count_kind(&log, "pr.queued"),
+        1,
+        "re-land on a landed PR must NOT append a second pr.queued"
+    );
+    // PROOF: the log's pr kinds STILL end at pr.landed — no post-terminal queued.
+    assert_eq!(
+        last_pr_kind(&log),
+        Some("pr.landed".to_string()),
+        "no post-terminal pr.queued — the last pr kind is still pr.landed"
+    );
+
+    // The on-disk chain still verifies (the no-op never corrupted the chain).
+    assert_chain_verifies(&log);
+}
+
+// ── WI-PR defect 2: pr open validates intent existence (like verdict) ─────────
+
+/// `pr open --intent <ghost>` on a log that HAS intent vocabulary must refuse
+/// (exit-2) — never silently accept a phantom intent that `verdict` would later
+/// reject (`intent_not_found`), producing a permanently un-provable PR. A real
+/// intent is accepted. Mirrors the verdict verb's exact raw-record rule.
+#[test]
+fn pr_open_validates_intent_existence_on_a_log_with_intents() {
+    let dir = scratch("pr-open-intent-existence");
+    let (log, campaign, _pr_id, intent_id) = seed_campaign_with_open_pr(&dir);
+    let log_s = log.to_str().unwrap();
+
+    // A GHOST intent (absent from the log, which DOES carry intent vocabulary)
+    // is refused, exit-2 — no pr.opened appended.
+    let before = count_kind(&log, "pr.opened");
+    let (code, v) = run(&[
+        "pr",
+        "open",
+        "--log",
+        log_s,
+        "--pr",
+        "99",
+        "--campaign",
+        &campaign,
+        "--author-kind",
+        "orchestrator",
+        "--run-id",
+        "r9",
+        "--intent",
+        "does-not-exist",
+    ]);
+    assert_eq!(
+        code,
+        Some(2),
+        "pr open with a ghost intent must refuse (exit 2): {v}"
+    );
+    assert!(
+        v["error"]["kind"].is_string(),
+        "structured error with a kind: {v}"
+    );
+    assert_eq!(
+        count_kind(&log, "pr.opened"),
+        before,
+        "no pr.opened appended on a refused open"
+    );
+
+    // A REAL intent (the one seeded onto the log) is accepted, exit 0.
+    let (code, v) = run(&[
+        "pr",
+        "open",
+        "--log",
+        log_s,
+        "--pr",
+        "100",
+        "--campaign",
+        &campaign,
+        "--author-kind",
+        "orchestrator",
+        "--run-id",
+        "r10",
+        "--intent",
+        &intent_id,
+    ]);
+    assert_eq!(code, Some(0), "pr open with a REAL intent succeeds: {v}");
+    assert_eq!(v["state"], "proposed", "{v}");
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+/// The kind of the LAST `pr.*` record on the on-disk log, in chain order — the
+/// terminal-state probe (post-terminal corruption shows up as a trailing
+/// `pr.queued` after the `pr.landed`).
+fn last_pr_kind(path: &Path) -> Option<String> {
+    let v: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    v.as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["kind"].as_str())
+        .rfind(|k| k.starts_with("pr."))
+        .map(str::to_string)
+}
 
 /// Parse the on-disk canonical `[EventRecord, …]` log and assert its hash chain
 /// verifies through the real engine (the settle append must be a real,

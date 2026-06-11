@@ -52,7 +52,6 @@ use hugit_ledger::rollup::{PrQueueInput, pr_record};
 use hugit_queue::core::affected::AffectedSet;
 use hugit_queue::core::batch::Batch;
 use hugit_refstore::EventLog;
-use hugit_refstore::intent::intents_from_log;
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -519,28 +518,58 @@ pub fn open(log: &mut EventLog, args: &OpenArgs) -> Result<Value, PrError> {
     Ok(open_json(&opened, false))
 }
 
+/// The shared canonical event kind a landed intent is recorded under — the
+/// read-side mirror of [`hugit_refstore::intent::INTENT_LANDED_KIND`], restated
+/// so the intent-existence check keys on the EXACT same raw record vocabulary
+/// the `verdict`/`tournament` verbs do (no projection in between).
+const INTENT_LANDED_KIND: &str = "intent.landed";
+
+/// Whether the log carries intent vocabulary at all — at least one raw
+/// `intent.landed` record. Keying the opt-out on raw record presence (not on a
+/// successful PROJECTION) matches `verdict`/`tournament` EXACTLY: a log with a
+/// malformed `intent.landed` payload still HAS the vocabulary, so the check
+/// must fire rather than be silently skipped (WI-PR defect 2 — the silent-skip
+/// gap that let a ghost `--intent` through and produced an un-provable PR).
+fn log_has_intent_vocabulary(log: &EventLog) -> bool {
+    log.records().iter().any(|r| r.kind == INTENT_LANDED_KIND)
+}
+
+/// Whether a raw `intent.landed` record names `intent_id` — the SAME raw-payload
+/// existence rule `verdict`'s `intent_is_on_log` uses (read straight off the
+/// record's `intent_id`, never through the fail-closed projection).
+fn intent_landed_on_log(log: &EventLog, intent_id: &str) -> bool {
+    log.records()
+        .iter()
+        .filter(|r| r.kind == INTENT_LANDED_KIND)
+        .filter_map(|r| serde_json::from_str::<Value>(&r.payload).ok())
+        .any(|v| v.get("intent_id").and_then(Value::as_str) == Some(intent_id))
+}
+
 /// Validate that the PR's `--intent` ids exist on the shared canonical log.
 ///
-/// Opt-out by design: if the log carries NO landed intents, the `intent new
-/// --log` seam is not in use and any `--intent` ids are accepted (an
-/// intent-less fixture log stays valid). Once the log carries at least one
-/// intent, every referenced id MUST be present — a gap is a structured
-/// [`PrError::MissingIntents`] (naming the missing ids + a suggested fix).
+/// **Symmetry with `verdict`/`tournament` (WI-PR defect 2).** A PR whose
+/// `--intent` references an id NOT on the log is permanently un-provable — a
+/// later `hugit verdict --intent <id>` refuses it (`intent_not_found`). So
+/// `pr open` validates intent existence by the EXACT rule the verdict verb uses:
+/// keyed on raw `intent.landed` record vocabulary ([`log_has_intent_vocabulary`])
+/// and raw-payload existence ([`intent_landed_on_log`]) — NOT on the fail-closed
+/// projection (which previously skipped validation whole on a malformed payload,
+/// the silent-skip gap that let a ghost intent through).
+///
+/// Opt-out by design: a log carrying NO `intent.landed` vocabulary is not using
+/// the intent seam, so any `--intent` ids are accepted (an intent-less fixture
+/// log stays valid — the documented permissive rule, mirroring verdict). Once
+/// the log carries the vocabulary, every referenced id MUST be present — a gap
+/// is a structured [`PrError::MissingIntents`] (exit-2, naming the missing ids).
 fn validate_intents(log: &EventLog, args: &OpenArgs) -> Result<(), PrError> {
-    let projected = match intents_from_log(log) {
-        Ok(p) => p,
-        // A malformed intent.landed payload is a log fault, not a PR refusal;
-        // skip validation rather than mis-attribute it to this open.
-        Err(_) => return Ok(()),
-    };
-    if projected.is_empty() {
-        // The intent seam is not in use on this log — opt out of validation.
+    if !log_has_intent_vocabulary(log) {
+        // The intent seam is not in use on this log — opt out (matches verdict).
         return Ok(());
     }
     let missing: Vec<String> = args
         .intent_ids
         .iter()
-        .filter(|id| projected.by_id(id).is_none())
+        .filter(|id| !intent_landed_on_log(log, id))
         .cloned()
         .collect();
     if missing.is_empty() {
@@ -663,6 +692,29 @@ pub fn land(log: &mut EventLog, args: &LandArgs) -> Result<Value, PrError> {
     let opened = find_pr_opened(log, &args.pr_id).ok_or_else(|| PrError::UnknownPr {
         pr_id: args.pr_id.clone(),
     })?;
+
+    // Terminal-landed idempotency (WI-PR defect 1): a PR the log already settles
+    // as LANDED is terminal — `pr.landed` is the end of its lifecycle. Re-running
+    // `pr land` on it (the canonical agent retry-on-land pattern) must be a NO-OP,
+    // never a fresh enqueue. Without this guard, `find_pr_queued` below returns
+    // None for a landed PR (a settled PR leaves the queue projection — see
+    // `all_pr_queued`), so the idempotency check missed it and a SECOND `pr.queued`
+    // was appended AFTER the terminal `pr.landed` — post-terminal log corruption,
+    // reported as `already_queued:false` (a fresh-enqueue lie). Detect the
+    // terminal state FIRST (before the empty/queued checks) and report it
+    // idempotently with NO append. The reported `position` is the PR's original
+    // recorded enqueue ordinal (the settled `pr.queued` still sits on the log; it
+    // is only filtered OUT of the active queue projection, not deleted).
+    if pr_is_landed(log, &args.pr_id) {
+        return Ok(json!({
+            "queued": true,
+            "already_queued": true,
+            "already_landed": true,
+            "pr_id": args.pr_id,
+            "position": landed_pr_order_index(log, &args.pr_id),
+            "mode": LANDING_MODE,
+        }));
+    }
 
     if opened.intent_ids.is_empty() {
         return Err(PrError::EmptyPr {
@@ -958,6 +1010,25 @@ fn abandon_json(pr_id: &str, reason: &str, already: bool) -> Value {
         "already_abandoned": already,
         "reason": reason,
     })
+}
+
+/// The recorded enqueue `order_index` of a (now-landed) PR's `pr.queued` event.
+///
+/// A settled `pr.landed` PR leaves the ACTIVE queue projection
+/// ([`all_pr_queued`] filters it out), so [`find_pr_queued`] returns `None` for
+/// it — but the original `pr.queued` record still sits on the append-only log.
+/// The terminal-landed idempotency path reads it directly so it can echo the
+/// PR's original queue position without resurrecting it into the active queue.
+/// `null` only if the PR somehow has no `pr.queued` at all (settle requires a
+/// queued PR, so a landed PR normally always has one).
+fn landed_pr_order_index(log: &EventLog, pr_id: &str) -> Value {
+    log.records()
+        .iter()
+        .filter(|r| r.kind == PR_QUEUED_KIND)
+        .filter_map(parse_queued)
+        .rfind(|q| q.pr_id == pr_id)
+        .map(|q| json!(q.order_index))
+        .unwrap_or(Value::Null)
 }
 
 /// Whether the log records this PR as LANDED (a `pr.landed` record names it).
