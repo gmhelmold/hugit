@@ -8,42 +8,9 @@
 
 ---
 
-## PS-1 — Recorder verbs: `hugit check` / `hugit verdict` / `pr.landed` producer
+## ~~PS-1 — moved to Closed (see table below)~~
 
-**Status:** DEFERRED — P2/wave-2+ work  
-**Adversarial finding:** P-WEDGE-HOLLOW (Tier 3, `docs/review/2026-06-11-adversarial-round-1.md`)  
-**Governing docs:** `docs/review/2026-06-11-adversarial-round-1.md` §P-WEDGE-HOLLOW;
-SOTA audit `docs/review/2026-06-11-sota-audit.md` §P1;
-`docs/plan/wp-contracts/WP-B2a.md` (executor WP);
-`docs/plan/wp-contracts/WP-B2b.md` (runner-side)
-
-**What is deferred:**
-- `hugit check` is reserved/undispatched (`HUGIT_RESERVED_VERBS`). No production
-  caller appends `check.recorded` events to the event log. As a consequence:
-  `hugit checks show` reads+aggregates `check.recorded` events from the log, but
-  returns all-null KPIs on every real agent log because no producer exists yet.
-- `hugit verdict` is similarly reserved; no producer appends `verdict.recorded`.
-- `pr.landed` producer: the landing queue appends `intent.landed` correctly, but
-  the downstream `pr.landed` event that feeds the queue-wedge KPIs is not yet
-  emitted.
-
-**Impact:** `hugit checks show` and `hugit queue show` return structurally correct
-but operationally empty views on every real fleet log. The memoization wedge (the
-primary value proposition) is invisible through the porcelain in practice.
-
-**Owner:** hugit techlead  
-**Acceptance criteria:**
-1. `hugit check [--local]` is dispatched end-to-end (not reserved); execution
-   appends a `check.recorded` event carrying `memo_key`, `hit/miss`, `duration_ms`.
-2. `hugit checks show` returns non-null hit-rate, last-miss-key, and duration
-   aggregates on any log that ran at least one check.
-3. `hugit verdict` is dispatched; appends `verdict.recorded`.
-4. `pr.landed` event emitted by the landing queue on a successful land.
-5. The `hugit checks show` oracle is upgraded from all-null negative-control to
-   a real aggregation test against a log with seeded `check.recorded` events.
-
-**Unblocked by:** P2 CoreLink tenant is NOT required for this seam — the recorder
-verbs can run against the in-process `EventLog` + `InMemoryAc` today.
+*See the Closed seams table for the governing record.*
 
 ---
 
@@ -191,10 +158,20 @@ on `[self-hosted, mac, corelink-builder]`).
 
 | Seam | Shipped | Governing commit |
 |---|---|---|
+| **PS-1 — Recorder verbs (`hugit check` / `hugit verdict` / `pr.landed`)** | 2026-06-11 (wedge wave W0→W-INT) | CHANGELOG `8b3c9c1` (wedge entry); CHANGELOG WB2 entry (checks show); see note below |
 | `cost_usd f64 → cost_usd_micros u64` (WA4, contract 1.2.0) | 2026-06-11 | CHANGELOG WA4 entry; corelink-runners contract §12 amendment |
 | D14 authz guard wired to CLI mutation path (interim) | 2026-06-11 (WA2) | CHANGELOG WA2 entry |
 | WA3 tombstone erasure on `ColdStore` trait (in-process) | 2026-06-11 | CHANGELOG WA3 entry |
 | `hugit checks show` / `hugit queue show` CLI verbs (WB2) | 2026-06-11 | CHANGELOG WB2 entry |
 | `hugit campaign` / `hugit intent` / `hugit pr` porcelain | 2026-06-10 | CHANGELOG CLI porcelain entry |
+
+**PS-1 closure note:** `hugit check` / `hugit verdict` / `pr.landed` are dispatched
+end-to-end on the LOCAL file-backed Action Cache (`<log>.ac`) — the wedge is
+observable locally TODAY. `hugit checks show` reports a real hit-rate (non-null
+KPIs) over a log with `check.recorded` events. The **LOCAL half is closed**. The
+LIVE fleet-shared Action Cache transport (Seam A of the P2 ceiling request,
+`docs/handoff/2026-06-11-corelink-p2-ceiling-request.md`) remains P2-pending:
+`hit_rate` is structurally local-only until the live AC is wired. P2 does not
+re-open PS-1; it is a separately-tracked infra seam.
 
 *Change protocol: amend this file with a `docs(truth):` commit whenever a seam ships or a new deferral is introduced. Never silently drop a pending seam — move it to the Closed table.*

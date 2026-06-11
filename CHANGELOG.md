@@ -26,6 +26,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stale-base) → W-INT (lead integration onto the frozen contract). The wedge is
   visible locally TODAY; P2 makes the cache fleet-shared.
 
+- fix(security,cli): **Adversarial Round-2 fixes (Wave F)** — 7/7 refutation
+  fleet (after Wave E) found narrower but real pendencies; all four closed.
+  WF-REDACT: bare-hex-secret leak closed (a raw `[0-9a-f]{40,}` blob was not
+  caught by the keyword-context engine; fix extends the redaction engine to
+  detect bare-hex digests long enough to be secrets) + `export` unified to the
+  ledger engine so the two code paths cannot drift. WF-CLI: abandon-projection
+  deadlock closed (the `campaign abandon` handler held the log-lock while
+  calling `checks show`, which re-acquired it; now a single atomic
+  read-project path); `verify_chain` wired onto `hugit checks show` and
+  `hugit queue show` (chain-invalid log → structured error, never silently-
+  projected corrupt world); error uniformity sweep (`--log` missing, tournament,
+  list consistency — all verbs surface stable JSON errors under the WB0
+  one-error/one-exit law). WF-AUTHZ: `import_sidecar` cannot advance a
+  protected ref under the all-class Push cell — the D14 guard was missing from
+  the sidecar-import mutation path; fix routes it through `append_authorized`
+  with the same matrix as every other guarded verb; caller audit confirms no
+  remaining bypass. WF-CLI2: `campaign close`/`abandon` ghost-record guard (a
+  `close` on a campaign with no `campaign.opened` event fabricated a record;
+  guard now requires a live entry before any mutation) + load→lock TOCTOU on
+  campaign/intent-store closed with the WC1 atomic-lock pattern. Gate green
+  after each of the 4 merge commits (WF-REDACT · WF-CLI · WF-AUTHZ · WF-CLI2).
+  Round 3 (fresh fleet) re-audits next.
+
 - fix(security,cli): **Adversarial Round-1 fixes (Wave E)** — 7/7 refutation
   fleet found real pendencies behind the premature "SOTA" claim; all closed.
   E-REDACT: gitleaks-class redaction engine (connection strings, keyword-

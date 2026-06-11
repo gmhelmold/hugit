@@ -8,32 +8,39 @@ The **git-compatible, LLM-native forge** — CoreLink expansion campaign #3.
 VCS + merge + CI designed for orchestrated agent fleets, built on CoreLink's
 production CAS (Cloudflare Workers/R2/D1/DO). Founded 2026-06-05.
 
-**Status (as of 2026-06-11, post Waves A/B/C/D/E + adversarial rounds 1–2,
-Wave F in progress, Round 3 pending): the buildable product is
-complete; adversarial hardening is ongoing, not closed.** A **17-package** Rust
-workspace (hugit-app + {ui,exit,sidecar} sub-crates = 4 crates + 13 feature
-crates — verified by `cargo metadata --no-deps` 2026-06-11; `hugit-web`
-MIGRATED OUT 2026-06-10 to ../githugr per the headless-engine doctrine, and
-`hugit-runner` TRANSFERRED 2026-06-10 to ../corelink-runners per the
-runner-transfer campaign: hugit is git+forge, compute is campaign #1's product;
-the seam is the wire contract — shared `conformance/` vectors byte-identical in
-both repos, no git dependency in either direction) implements all 67
-work-packages of decomposition v2.0 (E6 superseded by the forge-arbitrated
-bidirectional-sync design). Adversarial audit arc: Round 1 (fresh 7-agent fleet,
-after Wave D) found **7/7 DO-NOT-SHIP**; Wave E remediated all seven. Round 2
-(fresh 7-agent fleet, after Wave E) found **7/7 DO-NOT-SHIP again** (narrower —
-structural spine held; 1 CRITICAL + consistency + doc/CI debt). Wave F is
-remediating Round 2. Round 3 (fresh fleet) will follow. `main` is green by
-local gate (fmt + clippy `--workspace --all-targets --locked -D warnings` + test
-`--workspace --locked` + deny + audit); remote CI gate passes when it runs to
-completion, but the single self-hosted runner is contention-flaky (~63% of
-recent runs fail on SIGTERM/exit-127 infra failures, not code — HEAD may show
-`in_progress` or a false failure on CI). What remains to flip to end-to-end:
-**owner-gated infra** (P2 CoreLink tenant provisioning — see
-`docs/handoff/2026-06-08-corelink-p2-tenant-request.md`) + Wave F critical
-fixes (WF-REDACT, WF-CLI, WF-AUTHZ). The disclosed live-infra seams (AC HTTP,
-runner box, transparency log, live GitHub detect) remain hermetic-proof until
-P2.
+**Status (as of 2026-06-11, post Waves A/B/C/D/E+F + the wedge wave +
+adversarial rounds 1–3, Wave G in progress, Round 4 pending): the buildable
+product is complete; adversarial hardening is ongoing, not closed.** A
+**17-package** Rust workspace (hugit-app + {ui,exit,sidecar} sub-crates = 4
+crates + 13 feature crates — verified by `cargo metadata --no-deps`
+2026-06-11; `hugit-web` MIGRATED OUT 2026-06-10 to ../githugr per the
+headless-engine doctrine, and `hugit-runner` TRANSFERRED 2026-06-10 to
+../corelink-runners per the runner-transfer campaign: hugit is git+forge,
+compute is campaign #1's product; the seam is the wire contract — shared
+`conformance/` vectors byte-identical in both repos, no git dependency in
+either direction) implements all 67 work-packages of decomposition v2.0 (E6
+superseded by the forge-arbitrated bidirectional-sync design). Adversarial
+audit arc: Round 1 (fresh 7-agent fleet, after Wave D) found **7/7
+DO-NOT-SHIP**; Wave E remediated all seven. Round 2 (after Wave E) found
+**7/7 DO-NOT-SHIP again** (narrower — spine held; Wave F remediated all
+four: WF-REDACT bare-hex+unify, WF-CLI deadlock/verify_chain/error-law,
+WF-AUTHZ ref-guard, WF-CLI2 ghost-record+TOCTOU). The wedge wave
+(W0→W-INT) is COMPLETE: `hugit check`/`verdict`/`pr.landed` are dispatched
+end-to-end; the memoized-CI wedge is observable locally TODAY (PS-1 closed,
+P2-independent). Round 3 (after Wave F + the wedge wave) found **7/7
+DO-NOT-SHIP** (spine confirmed held across all three rounds; Wave G hardens
+the wedge wave — Cluster A code, Cluster B docs). Round 4 pending after
+Wave G. `main` is green by local gate (fmt + clippy `--workspace
+--all-targets --locked -D warnings` + test `--workspace --locked` + deny +
+audit); remote CI gate passes when it runs to completion, but the single
+self-hosted runner is contention-flaky (~42% of recent runs fail on
+SIGTERM/exit-127 infra failures, not code — HEAD may show `in_progress` or
+a false failure on CI). What remains to flip to end-to-end: **owner-gated
+infra** (P2 CoreLink tenant provisioning — see
+`docs/handoff/2026-06-08-corelink-p2-tenant-request.md` and the P2 ceiling
+request `docs/handoff/2026-06-11-corelink-p2-ceiling-request.md`). The
+disclosed live-infra seams (AC HTTP fleet-shared cache, runner box,
+transparency log, live GitHub detect) remain hermetic-proof until P2.
 
 Read first: `docs/whitepaper/hugit-v1.md` (product design) ·
 `docs/product/product.md` (the product brief: ICPs, killers, positioning, pricing posture) ·
@@ -78,9 +85,10 @@ campaign #1/#2 critical paths.**
 Two incubation repos are managed FROM hugit sessions under owner-approved
 fence carve-outs: `../githugr` (campaign #4) and `../corelink-runners`
 (campaign #1 — its `docs/spec/hugit-integration-contract.md` is frozen from
-hugit's side; **amended to v1.1** 2026-06-10, WP-R6: §13 adds per-job
-metrics emission + transcript capture hook obligations; the frozen v1.0
-§0–§12 are unchanged).
+hugit's side; **amended to v1.2.0** 2026-06-11, WP-R6+WA4: §13 adds per-job
+metrics emission + transcript capture hook obligations; §13.1 money field
+renamed `cost_usd|f64` → `cost_usd_micros|u64` per the WA4 integer-micro-USD
+contract amendment; the frozen v1.0 §0–§12 are otherwise unchanged).
 
 ⚠️ Sibling repos — corelink-server especially, but **also the carve-outs** —
 have **other live sessions/worktrees**. Never assume sole ownership; check

@@ -396,3 +396,71 @@ fn item_9_dry_panel_without_store_records_nothing() {
         "a dry panel appends nothing to the log"
     );
 }
+
+// ── WG-DOCS test-quality addition ────────────────────────────────────────────
+
+/// A verdict re-run with a DIFFERENT lens set must append a NEW `verdict.recorded`
+/// event — not a false-dedup. Idempotency keys on the FULL panel (intent +
+/// exact lens/result set); a panel with a different lens set is a new verdict.
+///
+/// This guards against an over-eager dedup that would silently discard a
+/// second deliberation when the reviewing panel changed its composition.
+#[test]
+fn item_10_different_lens_set_appends_new_record_not_false_dedup() {
+    let dir = scratch("diff-lens");
+    let log = dir.join("log.json");
+    write_empty_log(&log);
+
+    // First panel: security + contracts.
+    let (code1, v1) = run(&[
+        "verdict",
+        "--log",
+        log.to_str().unwrap(),
+        "--store",
+        "--intent",
+        "intent-K",
+        "--lens",
+        "security",
+        "--result",
+        "approve",
+        "--lens",
+        "contracts",
+        "--result",
+        "approve",
+    ]);
+    assert_eq!(code1, 0, "first panel exits 0: {v1}");
+    assert_eq!(v1["already_recorded"], false, "first panel is fresh: {v1}");
+    assert_eq!(count_verdicts(&log), 1, "one verdict after first panel");
+
+    // Second panel: security + contracts + impact (different lens set).
+    let (code2, v2) = run(&[
+        "verdict",
+        "--log",
+        log.to_str().unwrap(),
+        "--store",
+        "--intent",
+        "intent-K",
+        "--lens",
+        "security",
+        "--result",
+        "approve",
+        "--lens",
+        "contracts",
+        "--result",
+        "approve",
+        "--lens",
+        "impact",
+        "--result",
+        "approve",
+    ]);
+    assert_eq!(code2, 0, "second (different-lens) panel exits 0: {v2}");
+    assert_eq!(
+        v2["already_recorded"], false,
+        "a different lens set is NOT a duplicate — it is a new verdict: {v2}"
+    );
+    assert_eq!(
+        count_verdicts(&log),
+        2,
+        "two verdicts on the log — a different lens set appends a NEW record, not a false-dedup"
+    );
+}
