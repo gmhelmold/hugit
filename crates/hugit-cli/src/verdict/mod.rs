@@ -248,10 +248,14 @@ fn record(args: VerdictArgs) -> Result<Value, PorcelainError> {
         evidence_refs: Vec::new(),
     };
 
-    // Canonical JSON payload — sorted keys, no insignificant whitespace.
-    let payload_raw = serde_json::to_string(&verdict_obj)
+    // Canonical JSON payload — sorted keys, no insignificant whitespace —
+    // SCRUBBED-ON-APPEND (WG-SCRUB): `--intent`/`--lens` (and the lens names in
+    // `claims_checked`) are user strings; they are redacted BEFORE the bytes
+    // reach the hash chain. `tree_hash`/`prompt_digest` survive by the helper's
+    // digest-key exemption.
+    let payload_value = serde_json::to_value(&verdict_obj)
         .map_err(|e| PorcelainError::internal(format!("serialise VerdictObject: {e}")))?;
-    let payload = hugit_refstore::canonical_json(&payload_raw).unwrap_or(payload_raw);
+    let payload = crate::porcelain::scrub_to_canonical(payload_value);
 
     // ── Append through the D14 authorization guard ────────────────────────────
     use hugit_refstore::{Endpoint, PrincipalClass};

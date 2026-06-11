@@ -448,6 +448,14 @@ pub struct OpenArgs {
 /// at all keeps the old permissive behavior (an early fixture log without the
 /// campaign seam in use opts out of the check).
 pub fn open(log: &mut EventLog, args: &OpenArgs) -> Result<Value, PrError> {
+    // WG-SCRUB: scrub every user-supplied field ONCE at entry, then use the
+    // scrubbed view for BOTH the lookups/joins AND the hash-chained payload. The
+    // scrub is deterministic, so a secret-shaped id/campaign scrubs identically
+    // in every record — the projection joins stay stable (scrubbed == scrubbed)
+    // while no secret ever persists to the forever-log. Free-text vectors
+    // (`--campaign`/`--run-id`/`--principal`/`--intent`) are closed here; the id
+    // round-trips because lookup + store both see the scrubbed value.
+    let args = &scrub_open_args(args);
     // Idempotency: look for an existing pr.opened for this id.
     if let Some(existing) = find_pr_opened(log, &args.pr_id) {
         if existing.campaign != args.campaign {
@@ -468,6 +476,8 @@ pub fn open(log: &mut EventLog, args: &OpenArgs) -> Result<Value, PrError> {
 
     validate_intents(log, args)?;
 
+    // `args` is already WG-SCRUB-scrubbed at entry, so the principal chain and
+    // payload are both built from redacted user strings.
     let principal_chain = author_principal_chain(args.author_kind, &args.run_id, &args.principal);
     let payload = canonical_open_payload(args);
     // D14 on the mutation primitive: route the pr.opened append through the
@@ -627,6 +637,12 @@ pub struct LandArgs {
 /// Idempotent: a PR already queued returns `"already_queued":true` (exit 0),
 /// no second `pr.queued` is appended, and the original position is reported.
 pub fn land(log: &mut EventLog, args: &LandArgs) -> Result<Value, PrError> {
+    // WG-SCRUB: scrub the id at entry so it matches the scrubbed id `pr open`
+    // stored (deterministic scrub → stable join) and never persists a secret.
+    let args = &LandArgs {
+        pr_id: crate::redaction::scrub(&args.pr_id),
+        recorded_at: args.recorded_at,
+    };
     let opened = find_pr_opened(log, &args.pr_id).ok_or_else(|| PrError::UnknownPr {
         pr_id: args.pr_id.clone(),
     })?;
@@ -698,13 +714,14 @@ pub fn land(log: &mut EventLog, args: &LandArgs) -> Result<Value, PrError> {
         .position(|e| e.item_id() == item_id)
         .expect("the entry just pushed is present in the batch") as u64;
 
-    let payload = format!(
-        "{{\"item_id\":{item},\"mode\":{mode},\"order_index\":{idx},\"pr_id\":{pr}}}",
-        item = json_str(&item_id),
-        mode = json_str(LANDING_MODE),
-        idx = order_index,
-        pr = json_str(&args.pr_id),
-    );
+    // Scrubbed-on-append (WG-SCRUB): `item_id`/`pr_id` derive from `--pr` (a user
+    // string) and are hash-chained — redacted BEFORE the bytes reach the chain.
+    let payload = crate::porcelain::scrub_to_canonical(json!({
+        "item_id": item_id,
+        "mode": LANDING_MODE,
+        "order_index": order_index,
+        "pr_id": args.pr_id,
+    }));
     // D14 on the mutation primitive (WA2b, pr side): route the pr.queued append
     // through the guarded entry point under the opened PR's own author class —
     // the same guarded routing `pr open` uses. A non-author class would be denied
@@ -772,6 +789,11 @@ pub struct SettleArgs {
 /// SAME D14-guarded [`EventLog::append_authorized`] seam (under the opened PR's
 /// author class — orchestrator/human) `pr land`/`pr open` use.
 pub fn settle(log: &mut EventLog, args: &SettleArgs) -> Result<Value, PrError> {
+    // WG-SCRUB: scrub the id at entry (see `land`).
+    let args = &SettleArgs {
+        pr_id: crate::redaction::scrub(&args.pr_id),
+        recorded_at: args.recorded_at,
+    };
     let opened = find_pr_opened(log, &args.pr_id).ok_or_else(|| PrError::UnknownPr {
         pr_id: args.pr_id.clone(),
     })?;
@@ -792,11 +814,12 @@ pub fn settle(log: &mut EventLog, args: &SettleArgs) -> Result<Value, PrError> {
     // The `pr.landed` payload carries the campaign (recovered from the PR's
     // `pr.opened`) so the campaign world scopes the settlement to this campaign
     // — unlike `pr.abandoned`, the world matches `pr.landed` by campaign field.
-    let payload = format!(
-        "{{\"campaign\":{camp},\"pr_id\":{pr}}}",
-        camp = json_str(&opened.campaign),
-        pr = json_str(&args.pr_id),
-    );
+    // Scrubbed-on-append (WG-SCRUB): `campaign` (from the opened PR) and `pr_id`
+    // (`--pr`) are user strings, hash-chained — redacted before reaching the chain.
+    let payload = crate::porcelain::scrub_to_canonical(json!({
+        "campaign": opened.campaign,
+        "pr_id": args.pr_id,
+    }));
     let (class, endpoint) = author_authz(opened.author_kind);
     log.append_authorized(
         class,
@@ -855,6 +878,13 @@ pub struct AbandonArgs {
 /// Idempotent: re-abandoning an already-abandoned PR appends no second event and
 /// returns `"already_abandoned":true` (exit 0).
 pub fn abandon(log: &mut EventLog, args: &AbandonArgs) -> Result<Value, PrError> {
+    // WG-SCRUB: scrub the id (stable join, see `land`) AND the `--reason` free
+    // text (the adversary's headline leak vector) at entry, so neither persists.
+    let args = &AbandonArgs {
+        pr_id: crate::redaction::scrub(&args.pr_id),
+        reason: crate::redaction::scrub(&args.reason),
+        recorded_at: args.recorded_at,
+    };
     let opened = find_pr_opened(log, &args.pr_id).ok_or_else(|| PrError::AbandonUnknownPr {
         pr_id: args.pr_id.clone(),
     })?;
@@ -871,11 +901,13 @@ pub fn abandon(log: &mut EventLog, args: &AbandonArgs) -> Result<Value, PrError>
         return Ok(abandon_json(&args.pr_id, &existing_reason, true));
     }
 
-    let payload = format!(
-        "{{\"pr_id\":{pr},\"reason\":{reason}}}",
-        pr = json_str(&args.pr_id),
-        reason = json_str(&args.reason),
-    );
+    // Scrubbed-on-append (WG-SCRUB): `--reason` is THE adversary's exact leak
+    // vector (a `ghp_…` in `pr abandon --reason`) — and `pr_id` (`--pr`). Both
+    // are user strings, hash-chained; redacted BEFORE reaching the chain.
+    let payload = crate::porcelain::scrub_to_canonical(json!({
+        "pr_id": args.pr_id,
+        "reason": args.reason,
+    }));
     let (class, endpoint) = author_authz(opened.author_kind);
     log.append_authorized(
         class,
@@ -1273,41 +1305,46 @@ fn author_principal_chain(
     }
 }
 
+/// Return a copy of `args` with every user-supplied string field scrubbed
+/// through the redaction engine (WG-SCRUB). Identifiers (`pr_id`) scrub too —
+/// deterministically, so the projection joins stay stable while no secret
+/// persists. Called ONCE at the top of [`open`] so lookups + payload + echo all
+/// agree on the redacted view.
+fn scrub_open_args(args: &OpenArgs) -> OpenArgs {
+    OpenArgs {
+        pr_id: crate::redaction::scrub(&args.pr_id),
+        campaign: crate::redaction::scrub(&args.campaign),
+        author_kind: args.author_kind,
+        run_id: args.run_id.as_deref().map(crate::redaction::scrub),
+        principal: args.principal.as_deref().map(crate::redaction::scrub),
+        intent_ids: crate::redaction::scrub_all(&args.intent_ids),
+        recorded_at: args.recorded_at,
+    }
+}
+
 /// Build the canonical-JSON `pr.opened` payload (sorted keys, no insignificant
-/// whitespace — the hash chain covers these bytes verbatim).
+/// whitespace — the hash chain covers these bytes verbatim), SCRUBBED-ON-APPEND
+/// (WG-SCRUB): every user-supplied string value (`campaign`, `intent_ids`,
+/// `pr_id`, `principal`, `run_id`) is routed through the redaction engine BEFORE
+/// the bytes reach the chain, so a secret in any flag never leaks to the forever
+/// log. None of these are digest fields, so all scrub.
 fn canonical_open_payload(args: &OpenArgs) -> String {
-    // Keys in sorted order: author_kind, campaign, intent_ids, pr_id, principal,
-    // run_id. Optional fields are emitted as null when absent so the payload is
-    // self-describing.
-    let intents = args
+    // Optional fields are emitted as null when absent so the payload is
+    // self-describing; the scrub + canonicalisation sorts keys deterministically.
+    let intent_ids: Vec<Value> = args
         .intent_ids
         .iter()
-        .map(|s| json_str(s))
-        .collect::<Vec<_>>()
-        .join(",");
-    format!(
-        "{{\"author_kind\":{ak},\"campaign\":{camp},\"intent_ids\":[{intents}],\
-         \"pr_id\":{pr},\"principal\":{prin},\"run_id\":{rid}}}",
-        ak = json_str(args.author_kind.as_str()),
-        camp = json_str(&args.campaign),
-        pr = json_str(&args.pr_id),
-        prin = opt_json_str(&args.principal),
-        rid = opt_json_str(&args.run_id),
-    )
-}
-
-/// JSON-encode a string (quoted + escaped) via serde, so payload bytes are
-/// always valid JSON regardless of the input.
-fn json_str(s: &str) -> String {
-    Value::String(s.to_string()).to_string()
-}
-
-/// JSON-encode an optional string: the value (quoted) or the literal `null`.
-fn opt_json_str(s: &Option<String>) -> String {
-    match s {
-        Some(v) => json_str(v),
-        None => "null".to_string(),
-    }
+        .map(|s| Value::String(s.clone()))
+        .collect();
+    let payload = json!({
+        "author_kind": args.author_kind.as_str(),
+        "campaign": args.campaign,
+        "intent_ids": intent_ids,
+        "pr_id": args.pr_id,
+        "principal": args.principal.clone(),
+        "run_id": args.run_id.clone(),
+    });
+    crate::porcelain::scrub_to_canonical(payload)
 }
 
 #[cfg(test)]

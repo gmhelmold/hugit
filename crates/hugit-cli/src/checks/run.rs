@@ -438,8 +438,11 @@ pub fn run(args: &CheckArgs) -> Result<Value, PorcelainError> {
     }
 
     // `--store` records the row onto the canonical log; omit for a dry run.
+    // The payload Value is scrubbed-on-append inside `record_on_log` (WG-SCRUB):
+    // `--def` (`name`)/`--pr` (`pr_id`)/`--principal` are user strings — they
+    // CANNOT reach the forever-log unredacted.
     if args.store {
-        record_on_log(args, payload.to_string())?;
+        record_on_log(args, &payload)?;
     }
 
     Ok(json!({
@@ -471,7 +474,7 @@ pub fn run(args: &CheckArgs) -> Result<Value, PorcelainError> {
 /// The `--log` MUST exist (it is the canonical event log — its absence is the
 /// explicit `log_not_found`, never silently an empty world). The principal is
 /// the caller's `--principal` (default `orchestrator:hugit`).
-fn record_on_log(args: &CheckArgs, payload: String) -> Result<(), PorcelainError> {
+fn record_on_log(args: &CheckArgs, payload: &serde_json::Value) -> Result<(), PorcelainError> {
     let path = &args.log;
     // Hold the advisory exclusive lock across the whole read-modify-write so a
     // concurrent verb on the same --log gets `log_busy`, never a clobber.
@@ -483,7 +486,14 @@ fn record_on_log(args: &CheckArgs, payload: String) -> Result<(), PorcelainError
         .clone()
         .filter(|p| !p.trim().is_empty())
         .unwrap_or_else(|| "orchestrator:hugit".to_string());
-    let payload = hugit_refstore::canonical_json(&payload).unwrap_or(payload);
+    // The principal chain is hash-chained too (`--principal` is a user string),
+    // so scrub it on the same WG-SCRUB seam — a secret in `--principal` never
+    // reaches the forever-log.
+    let principal = crate::redaction::scrub(&principal);
+    // Scrub-on-append (WG-SCRUB): every user string VALUE in the payload is
+    // redacted BEFORE the bytes reach the hash chain; the digest fields
+    // (`memo_key`/`tree_hash`/`*_digest`) survive by the helper's exemption.
+    let payload = crate::porcelain::scrub_to_canonical(payload.clone());
 
     log.append_authorized(
         PrincipalClass::Orchestrator,

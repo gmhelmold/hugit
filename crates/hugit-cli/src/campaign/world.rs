@@ -669,7 +669,19 @@ pub fn append_authorized_and_persist(
 ) -> Result<(), CampaignError> {
     use hugit_refstore::{Endpoint, PrincipalClass};
     let mut log = world.log.clone();
-    let payload = hugit_refstore::canonical_json(&payload).unwrap_or(payload);
+    // Scrub-on-append (WG-SCRUB): route the payload through the central scrubbing
+    // helper BEFORE the bytes reach the hash chain, so no campaign verb can leak a
+    // user string (charter/owner/reason) verbatim — structural, not per-field.
+    // (The verbs also pre-scrub specific fields; the central scrub is idempotent.)
+    // If the payload (already serialised by the caller) does not parse as JSON we
+    // fall back to the prior canonicalisation rather than dropping the append.
+    let payload = match serde_json::from_str::<serde_json::Value>(&payload) {
+        Ok(value) => crate::porcelain::scrub_to_canonical(value),
+        Err(_) => hugit_refstore::canonical_json(&payload).unwrap_or(payload),
+    };
+    // The owner feeds the hash-chained principal chain — scrub it on the same
+    // seam (idempotent: callers already scrub it).
+    let owner = crate::redaction::scrub(owner);
     let principal_chain = vec![format!("user:{owner}")];
     log.append_authorized(
         PrincipalClass::Human,
