@@ -326,18 +326,48 @@ fn live_seam_mid_op_fault_on_box() {
     // skips). The full live transport awaits the provisioned box (P2); until the
     // box-side smart-layer kill harness is wired, assert the box is reachable so
     // the lane FAILS (not silently passes) when the env claims a box exists.
-    use hugit_runner::lease::{BoxExec, SshBox};
-    let boxx = SshBox::from_env().expect("HUGIT_RUNNER_HOST set but no box config");
-    let ping = boxx
-        .run(&["true"])
+    //
+    // Since WP-R4 the SSH transport is the runner product across the wire
+    // (corelink-runners) — hugit links no runner crate. This lane's reach-
+    // ability ping drives `ssh` directly with the SAME transport semantics
+    // the transferred `SshBox` used (BatchMode, pin-on-first-use known_hosts,
+    // ConnectTimeout), so the run-not-skip contract is preserved exactly.
+    let host = std::env::var("HUGIT_RUNNER_HOST").expect("checked by live_lane_active");
+    let target = format!("root@{}", host.trim());
+    let known_hosts = std::env::var("HUGIT_RUNNER_KNOWN_HOSTS")
+        .ok()
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or_else(|| match std::env::var("HOME") {
+            Ok(home) if !home.trim().is_empty() => format!("{home}/.hugit/known_hosts"),
+            _ => ".hugit/known_hosts".to_string(),
+        });
+    let mut cmd = std::process::Command::new("ssh");
+    if let Ok(home) = std::env::var("HOME") {
+        let id = format!("{home}/.ssh/hugit-runner-01");
+        if std::path::Path::new(&id).exists() {
+            cmd.arg("-i").arg(id);
+        }
+    }
+    let ping = cmd
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
+        .arg("-o")
+        .arg(format!("UserKnownHostsFile={known_hosts}"))
+        .arg("-o")
+        .arg("ConnectTimeout=15")
+        .arg(&target)
+        .arg("'true'")
+        .output()
         .expect("ssh to runner box failed to spawn");
     assert!(
-        ping.ok(),
+        ping.status.code() == Some(0),
         "HUGIT_RUNNER_HOST set but runner box unreachable — the live mid-op \
          fault seam must FAIL (not skip) when the env claims a box exists \
          (code={:?}, stderr={:?})",
-        ping.code,
-        ping.stderr.trim()
+        ping.status.code(),
+        String::from_utf8_lossy(&ping.stderr).trim()
     );
     // Box reachable: the hermetic composition above is the proof body; the live
     // smart-layer-kill harness lands when the box smart layer is deployed (P2).

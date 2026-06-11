@@ -7,7 +7,7 @@
 //! - `x1/` — tenant-isolation red-team: cross-tenant private lookup denied, forged/collision memo keys denied+alerted with no poisoning, public-deterministic artifacts shared leak-free, no private-artifact side-channel (WP-X1).
 //! - `x2/` — attestation e2e: full chain resolves cryptographically, tampered/unsigned rejected, public verification, cross-tenant honesty (WP-X2).
 //! - `x3/` — context privacy: journal fields redacted for training exclusion, PII removed from exported bytes (WP-X3).
-//! - `x4/` — supply-chain invariants: pinned images, verified deps, fail-closed (WP-X4).
+//! - `x4/` — supply-chain invariants (WP-X4): the spawn-surface oracle (pinned images, verify-before-spawn, fail-closed) TRANSFERRED to corelink-runners with the execution core (WP-R4 — a runner-product invariant, rigor preserved by relocation); hugit keeps the wire-level conformance assertion pinning the shared `conformance/` vectors byte-exact.
 //! - `x5/` — namespace-law invariants: no git-verb shadow, ref-namespace non-collision (WP-X5).
 //! - `x6/` — resource non-interference: infra isolation config + accounting model + latency measurement (WP-X6).
 //! - `x7/` — right-to-erasure cascade: PII erased across CAS, provenance, context, GitHub mirror, and experiment corpus (WP-X7).
@@ -27,13 +27,11 @@ pub mod x1;
 #[path = "x2/lib.rs"]
 pub mod x2;
 
-// ── WP-X4: supply-chain invariants ───────────────────────────────────────────
-// Re-export x4's public surface so existing consumers (acceptance_x4.rs) keep
-// their `hugit_invariants::pin::…` import paths intact.
-#[path = "x4/lib.rs"]
-mod x4_root;
-
-pub use x4_root::pin;
+// ── WP-X4: supply-chain invariants — wire-level only since WP-R4 ─────────────
+// The spawn-surface oracle (x4/pin.rs + acceptance_x4.rs) transferred to
+// corelink-runners with the runner core it proves; hugit's remaining X4
+// surface is the wire-conformance oracle (x4/tests/acceptance_x4_wire.rs),
+// which needs no library module.
 
 // ── WP-X5: namespace-law invariants ──────────────────────────────────────────
 #[path = "x5/lib.rs"]

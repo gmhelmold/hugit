@@ -21,14 +21,19 @@
 //!
 //! The broker rides on C5a's frozen fence: it never re-implements
 //! materialization or the ENOENT enforcement, and holds no fallback path that
-//! would place a credential inside the fence.
+//! would place a credential inside the fence. Since WP-R4 (runner-transfer
+//! campaign) the fence enforcement half (`materialize`/`enforce`) lives in
+//! corelink-runners with the execution core; the broker reaches the job
+//! container over the narrow [`crate::seam`] (the runner product across the
+//! wire — disclosed), and keeps the fence traversal rule locally
+//! ([`crate::util::normalize_path`]) so its delivery guard never diverges.
 
 use std::collections::BTreeMap;
 use std::fmt;
 
 use hugit_contracts::{RunnerLease, RunnerState};
-use hugit_runner::isolation::RunningContainer;
-use hugit_runner::lease::BoxExec;
+
+use crate::seam::{BoxExec, RunningContainer};
 
 use crate::util::{base64_encode, shell_quote};
 
@@ -373,10 +378,12 @@ impl<S: SecretStore> Broker<S> {
     /// credential is clean (**②**) — see [`scan_credential_absent`].
     ///
     /// `result_rel` is **fence-relative**: it is joined under `workspace_root`
-    /// exactly as the materialize layer joins an in-fence candidate, and it must
-    /// be a relative, traversal-free path (no leading `/`, no `..`). This is the
-    /// same root+relative split [`crate::materialize`]'s `place_file` uses, so a
-    /// delivered result can never land outside the workspace root.
+    /// exactly as the (transferred) materialize layer joins an in-fence
+    /// candidate, and it must be a relative, traversal-free path (no leading
+    /// `/`, no `..`). This is the same root+relative split the materialize
+    /// layer's `place_file` uses on its side of the wire (corelink-runner,
+    /// WP-R4), so a delivered result can never land outside the workspace
+    /// root.
     ///
     /// # Lease ↔ container trust boundary
     /// [`execute`](Self::execute) enforces the lease→op authz gate (the lease
@@ -395,9 +402,10 @@ impl<S: SecretStore> Broker<S> {
     ///   delivered result OUTSIDE `workspace_root`, so it is rejected **before**
     ///   the secret is resolved and before any remote write is constructed
     ///   (fail-closed). The guard is the *same* normalize rule the materialize
-    ///   layer's `place_file` re-guard uses
-    ///   ([`crate::enforce::normalize_path`]), so the broker delivery
-    ///   path cannot diverge from the fence's traversal policy.
+    ///   layer's `place_file` re-guard uses across the wire
+    ///   ([`crate::util::normalize_path`], relocated verbatim from the
+    ///   transferred `enforce` half), so the broker delivery path cannot
+    ///   diverge from the fence's traversal policy.
     /// - Propagates [`BrokerError`] from [`execute`](Self::execute) (fail-closed
     ///   on a non-`Held` lease or a down store), or [`BrokerError::Box`] if
     ///   delivering the result fails.
@@ -413,9 +421,11 @@ impl<S: SecretStore> Broker<S> {
         // before any remote write is constructed). `shell_quote` blocks shell
         // injection but NOT traversal: an absolute `result_rel` or one bearing
         // `..` would be faithfully quoted and then deliver the result OUTSIDE
-        // the workspace root. Reuse the exact normalize/guard `place_file` uses
-        // so the broker delivery path cannot diverge from the fence's traversal
-        // policy: a path is rejected iff it is absolute or contains any `..`
+        // the workspace root. Apply the exact normalize/guard `place_file` uses
+        // (the fence traversal rule, kept locally in util after the WP-R4
+        // transfer) so the broker delivery path cannot diverge from the
+        // fence's traversal policy: a path is rejected iff it is absolute or
+        // contains any `..`
         // (i.e. it does not normalize to a fence-relative segment list). The
         // result is then joined under `workspace_root` here, never supplied as a
         // pre-joined absolute path the caller controls.
@@ -625,22 +635,17 @@ impl CredentialScan {
 }
 
 /// `true` iff `result_path` escapes the workspace root — absolute, or containing
-/// any `..` component. This is the **same** rule the materialize layer's
-/// `place_file` re-guard uses (it delegates to the classifier's
-/// [`crate::enforce::normalize_path`]): a path that cannot be normalized
-/// to a fence-relative segment list (absolute or `..`-bearing) is an escape.
+/// any `..` component. This is the **same** rule the (transferred) materialize
+/// layer's `place_file` re-guard uses on its side of the wire (it delegates to
+/// the fence traversal rule, [`crate::util::normalize_path`]): a path that
+/// cannot be normalized to a fence-relative segment list (absolute or
+/// `..`-bearing) is an escape.
 ///
 /// `shell_quote` defeats shell injection but not traversal; this is the broker
 /// delivery path's traversal guard, applied before any remote write.
 fn result_path_escapes(result_path: &str) -> bool {
-    crate::enforce::normalize_path(result_path).is_none()
+    crate::util::normalize_path(result_path).is_none()
 }
-
-pub mod redteam;
-
-pub use redteam::{
-    AttackVector, ContainerLimits, ContainmentReport, RedTeamHarness, RedTeamOutcome,
-};
 
 /// A small in-memory [`SecretStore`] for the broker — the orchestrator-side
 /// holder. Maps names to material, and can be put into a **down** state to
@@ -686,8 +691,8 @@ impl SecretStore for InMemoryStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::seam::CmdOutput;
     use hugit_contracts::RunnerState;
-    use hugit_runner::lease::CmdOutput;
     use std::cell::Cell;
 
     /// A fake [`BoxExec`] that performs NO real I/O and records whether `run`

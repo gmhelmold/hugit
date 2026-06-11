@@ -901,9 +901,9 @@ version = "0.1.0"
 dependencies = [
  "hugit-checks",
  "hugit-contracts",
+ "hugit-ledger",
  "hugit-queue",
  "hugit-refstore",
- "hugit-runner",
  "serde_json",
 ]
 
@@ -913,7 +913,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "hugit-contracts",
- "hugit-runner",
  "sha2",
 ]
 
@@ -931,7 +930,6 @@ dependencies = [
  "hugit-dogfood",
  "hugit-ledger",
  "hugit-refstore",
- "hugit-runner",
  "serde",
  "serde_json",
  "sha2",
@@ -941,11 +939,13 @@ dependencies = [
 name = "hugit-ledger"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "hugit-contracts",
  "hugit-refstore",
  "schemars",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -1006,18 +1006,6 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "hugit-contracts",
- "serde_json",
- "sha2",
-]
-
-[[package]]
-name = "hugit-runner"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "hex",
- "hugit-contracts",
- "hugit-ledger",
  "serde_json",
  "sha2",
 ]

@@ -34,10 +34,10 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use hugit_contracts::event_record::EventRecord;
 use hugit_contracts::IntentSidecar;
-use hugit_refstore::intent::{intents_from_log, Intent};
-use hugit_refstore::{verify_chain, EventLog};
+use hugit_contracts::event_record::EventRecord;
+use hugit_refstore::intent::{Intent, intents_from_log};
+use hugit_refstore::{EventLog, verify_chain};
 use serde::{Deserialize, Serialize};
 
 /// A captured adversarial verdict on an intent (honestly absent until a panel
@@ -144,9 +144,11 @@ impl IntentStore {
         let file = match std::fs::read(path) {
             Ok(bytes) => {
                 let path_s = path.display().to_string();
-                serde_json::from_slice::<IntentStoreFile>(&bytes).map_err(|e| StoreError::Parse {
-                    path: path_s,
-                    msg: e.to_string(),
+                serde_json::from_slice::<IntentStoreFile>(&bytes).map_err(|e| {
+                    StoreError::Parse {
+                        path: path_s,
+                        msg: e.to_string(),
+                    }
                 })?
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => IntentStoreFile::default(),
@@ -198,8 +200,8 @@ impl IntentStore {
             envelopes: self.envelopes.clone(),
             verdicts: self.verdicts.clone(),
         };
-        let json =
-            serde_json::to_string_pretty(&file).map_err(|e| StoreError::Serialize(e.to_string()))?;
+        let json = serde_json::to_string_pretty(&file)
+            .map_err(|e| StoreError::Serialize(e.to_string()))?;
         std::fs::write(path, json).map_err(|e| StoreError::Write {
             path: path.display().to_string(),
             source: e,

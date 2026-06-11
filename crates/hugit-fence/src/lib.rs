@@ -1,50 +1,40 @@
-//! hugit-fence — claim-fenced workspaces, fence half (WP-C5a).
+//! hugit-fence — the repo-side fence half: the secrets broker (WP-C5b) over
+//! the runner wire seam.
 //!
-//! **Sparse materialization IS the fence** (whitepaper §6.1, §9 lock 1). A
-//! claim-fenced workspace physically materializes *only* the paths listed in
-//! its [`FenceManifest`](hugit_contracts::FenceManifest) `path_set`. Anything
-//! outside that set is simply not there, so any access to an outside path
-//! returns **ENOENT** — not a permission denial layered on top, but physical
-//! absence.
+//! **Sparse materialization IS the fence** (whitepaper §6.1, §9 lock 1) — and
+//! since the runner-transfer campaign (WP-R4, 2026-06-10) the enforcement
+//! half that *implements* that physical fence (`materialize` — sparse hydrate
+//! by path-set — and `enforce` — the ENOENT classifier/probe, WP-C5a) lives
+//! with the execution core in **corelink-runners** (campaign #1), together
+//! with the container-escape red-team harness whose load-bearing vector
+//! drives the real classifier. Relocated, not weakened: every C5a proof and
+//! red-team assertion runs unmodified against the same production code in its
+//! new home.
 //!
-//! # Scope (WP-C5a)
-//! - [`materialize`] — sparse hydrate by path-set: filter a set of candidate
-//!   workspace entries by a frozen `FenceManifest` and write **only** the
-//!   in-fence entries into the runner workspace, then record what was
-//!   materialized back into the manifest.
-//! - [`enforce`] — the ENOENT guarantee: classify any path as inside/outside
-//!   the fence, and probe the live box to prove that an access outside the
-//!   `path_set` returns ENOENT (the file isn't there).
+//! What stays here is what the FORGE owns:
 //!
-//! The secrets broker + escape red-team harness are **WP-C5b** (the
-//! [`broker`] submodule, disjoint from C5a's `{materialize, enforce}` claims);
-//! C5a holds no credentials.
+//! - [`broker`] — the secrets broker (WP-C5b): credentials never enter the
+//!   runner; the broker alone holds secret material, performs privileged ops
+//!   on a workspace's behalf, audits every call with the lease's principal
+//!   chain, and **fails closed** when the store is down.
+//! - [`seam`] — the minimal wire seam the broker drives instead of linking
+//!   the runner crate: `BoxExec` / `CmdOutput` / `RunningContainer`,
+//!   transcribed signatures whose **live implementation is the runner
+//!   product across the wire** (disclosed). Equivalence with the transferred
+//!   side is held by the wire contract (`conformance/` vectors,
+//!   byte-identical in both repos), never by a shared crate.
 //!
-//! # Runtime: container-per-job (consumes WP-C2a)
-//! The fence does **not** re-implement materialization or the box transport.
-//! It consumes the C2a runner's public API — [`BoxExec`](hugit_runner::lease::BoxExec)
-//! to drive the box and a [`RunningContainer`](hugit_runner::isolation::RunningContainer)
-//! to scope the workspace — and filters the materialized view by the
-//! `FenceManifest`. The C2a lease lifecycle / isolation / teardown are
-//! consumed, never rewritten.
+//! The broker keeps the fence traversal rule locally
+//! (`util::normalize_path`, relocated verbatim from the transferred
+//! `enforce` half) so its result-delivery guard can never diverge from the
+//! fence's traversal policy.
 
 pub mod broker;
-pub mod enforce;
-pub mod materialize;
+pub mod seam;
 mod util;
 
-pub use broker::{
-    AttackVector, ContainerLimits, ContainmentReport, RedTeamHarness, RedTeamOutcome,
-};
 pub use broker::{
     AuditOutcome, AuditRecord, Broker, BrokerError, BrokerOp, BrokerRequest, BrokerResponse,
     CredentialScan, SecretRef, SecretStore, scan_credential_absent,
 };
-// `check_access` is the named enforcement gate that constructs `FenceViolation`;
-// `is_admitted` is its boolean form used by the materialize seam.  Both are
-// exported alongside `FenceViolation` so callers never import the result type
-// without the constructor that produces it.
-pub use enforce::{
-    FenceVerdict, FenceViolation, check_access, classify, is_admitted, probe_outside_enoent,
-};
-pub use materialize::{CandidateEntry, MaterializeError, materialize_sparse};
+pub use seam::{BoxExec, CmdOutput, RunningContainer};

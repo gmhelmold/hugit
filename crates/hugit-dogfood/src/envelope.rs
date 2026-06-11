@@ -1,7 +1,7 @@
 //! WP-F2 dogfood leg — envelope capture around REAL spawned intents.
 //!
 //! Extends the item-① wave (`wave.rs`) with the ADR-0001 producer
-//! ([`hugit_runner::envelope`]): each PR's intent does its REAL work (the
+//! ([`hugit_ledger::envelope`]): each PR's intent does its REAL work (the
 //! memoized check through the actual `hugit-checks` client against the
 //! shared `InMemoryAc`) under a [`TrajectoryRecorder`] — so the captured
 //! metrics are **measured** (wall/active time, tool-call counts, hit/miss
@@ -30,7 +30,7 @@ use std::time::Instant;
 use hugit_checks::client::{ac::InMemoryAc, executor::run_memoized, memo_key::FileContent};
 use hugit_contracts::context_envelope::{Authorship, Spawn, WasteCost};
 use hugit_contracts::{Altitude, IntentSidecar};
-use hugit_runner::envelope::{
+use hugit_ledger::envelope::{
     CaptureLevel, ClosedEnvelope, ColdBlobStore, EnvelopeDraft, SessionEmission,
     TrajectoryRecorder, close_envelope, close_session_envelope, cold_ref_for,
 };

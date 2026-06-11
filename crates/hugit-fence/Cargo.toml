@@ -8,7 +8,9 @@ license-file.workspace = true
 
 [dependencies]
 hugit-contracts = { path = "../hugit-contracts" }
-hugit-runner = { path = "../hugit-runner" }
+# NOTE (WP-R4): no hugit-runner dependency. The broker drives the minimal
+# wire seam (src/seam.rs); the live transport is the runner product across
+# the wire (corelink-runners) — disclosed, never linked.
 anyhow = { workspace = true }
 sha2 = { workspace = true }
 

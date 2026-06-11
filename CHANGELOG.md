@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(workspace)!: **`hugit-runner` transferred OUT to ../corelink-runners**
+  (WP-R4, runner-transfer campaign — owner-directed 2026-06-10: "hugit é
+  basicamente um git, não faz sentido o runner ser feature do hugit"). The
+  execution core (lease → container → forensic teardown, warm boot,
+  concurrency/expiry/recovery, Actions-YAML shim + suites C2a/C2b/C3/C9/E4)
+  now lives in corelink-runners (campaign #1 seed, transplant lead-verified
+  @ b8fcde6); the seam is the **wire contract** — `conformance/{RunnerLease,
+  FenceManifest}.json` + `manifest.sha256` committed byte-identical in both
+  repos, pinned on this side by the new X4 wire oracle; no git dependency in
+  either direction. Re-cut, with every proof kept: the WP-F2/F2b envelope
+  producer relocated `hugit-runner::envelope` → `hugit-ledger::envelope`
+  (capture is forge domain; F2 suites pass unchanged), `hugit-fence` keeps
+  the C5b broker over a minimal disclosed seam (`BoxExec`/`CmdOutput`/
+  `RunningContainer`; live impl = the runner product across the wire) while
+  `materialize`/`enforce` + the escape red-team harness moved WITH the
+  classifier they drive (relocated, never weakened), and X4's spawn-surface
+  oracle moved with the spawn surface (rigor preserved by relocation; R0
+  freeze). Workspace: 17 → 16 packages.
+
 - feat(cli): **the flow porcelain — `hugit campaign` · `hugit intent` · `hugit pr`**
   (owner-directed 2026-06-10: "quem vai digitar são os modelos de LLM").
   LLM-first design law: stable JSON always on stdout, structured errors

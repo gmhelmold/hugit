@@ -12,8 +12,15 @@
 //! Plus the [`rollup`] module (WP-F3): the three-altitude metric rollups of
 //! ADR-0001 §2.3 — intent → PR record → campaign — computed over captured
 //! `ContextEnvelope`s + the queue/verdict/check projection seams.
+//!
+//! And the [`envelope`] module (WP-F2/F2b, ADR-0001): the context-envelope
+//! PRODUCER — metrics + 3-altitude trajectory capture at unit close,
+//! redact-on-write via [`redact`], cold blob store seam. Relocated here from
+//! `hugit-runner` (WP-R4, 2026-06-10): capture is forge domain; the
+//! execution core transferred to corelink-runners (campaign #1).
 
 pub mod deeplink;
+pub mod envelope;
 pub mod fleet;
 pub mod journal;
 pub mod ledger;

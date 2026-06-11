@@ -8,10 +8,13 @@ The **git-compatible, LLM-native forge** — CoreLink expansion campaign #3.
 VCS + merge + CI designed for orchestrated agent fleets, built on CoreLink's
 production CAS (Cloudflare Workers/R2/D1/DO). Founded 2026-06-05.
 
-**Status (2026-06-08): the buildable product is complete.** A 17-package Rust
-workspace (15 crates + hugit-app/{ui,exit}; hugit-app-sidecar auto-included —
+**Status (2026-06-08): the buildable product is complete.** A 16-package Rust
+workspace (14 crates + hugit-app/{ui,exit}; hugit-app-sidecar auto-included —
 `hugit-web` MIGRATED OUT 2026-06-10 to ../githugr per the headless-engine
-doctrine: the engine carries no UI; the window lives in its own repo)
+doctrine, and `hugit-runner` TRANSFERRED 2026-06-10 to ../corelink-runners
+per the runner-transfer campaign: hugit is git+forge, compute is campaign
+#1's product; the seam is the wire contract — shared `conformance/` vectors
+byte-identical in both repos, no git dependency in either direction)
 implements all 67 work-packages of
 decomposition v2.0 (E6 superseded
 by the forge-arbitrated bidirectional-sync design); `main` is green by gate

@@ -15,7 +15,7 @@
 //!   `summary` rides in the envelope.
 //! - **Redaction on the WRITE path** (ADR-0001 §3/§5): every transcript
 //!   line, the prompt, and the summary are scrubbed via the established X3
-//!   redaction code path ([`hugit_ledger::redact::apply`], the
+//!   redaction code path ([`crate::redact::apply`], the
 //!   `REDACTED_MARKER` policy) **before any blob is stored** — per line,
 //!   never whole-blob (the X3 lesson: a non-secret line survives).
 //! - **Capture-level gating** (`off | metrics | task | full`): refs absent
@@ -396,14 +396,14 @@ pub struct ClosedEnvelope {
 }
 
 /// Redact a transcript on the write path: the established X3 rule
-/// ([`hugit_ledger::redact::apply`], `REDACTED_MARKER` policy) applied
+/// ([`crate::redact::apply`], `REDACTED_MARKER` policy) applied
 /// **per line** — only secret-bearing lines are replaced, every non-secret
 /// line survives (never whole-blob; the X3 defect). The joined text is the
 /// blob that gets stored.
 fn redact_transcript(lines: &[String]) -> String {
     lines
         .iter()
-        .map(|l| hugit_ledger::redact::apply(l))
+        .map(|l| crate::redact::apply(l))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -449,13 +449,13 @@ pub fn close_envelope<S: ColdBlobStore>(
         None
     };
     let summary = if level >= CaptureLevel::Task {
-        Some(hugit_ledger::redact::apply(&draft.summary))
+        Some(crate::redact::apply(&draft.summary))
     } else {
         None
     };
     let prompt_ref = if level >= CaptureLevel::Full {
         match &draft.prompt {
-            Some(p) => Some(store.put(hugit_ledger::redact::apply(p).as_bytes())?),
+            Some(p) => Some(store.put(crate::redact::apply(p).as_bytes())?),
             None => None,
         }
     } else {
