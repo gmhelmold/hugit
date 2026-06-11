@@ -33,7 +33,9 @@ use std::process::ExitCode;
 
 use clap::Subcommand;
 
+mod abandon;
 mod close;
+mod list;
 mod open;
 mod output;
 mod show;
@@ -48,7 +50,7 @@ pub struct CampaignArgs {
     pub command: CampaignCommand,
 }
 
-/// The campaign subcommand surface (WP-PC1).
+/// The campaign subcommand surface (WP-PC1 + WP-WB-CAMP).
 #[derive(Subcommand, Debug)]
 pub enum CampaignCommand {
     /// Open a campaign: charter + human owner (D14) → `campaign.opened` record.
@@ -57,6 +59,12 @@ pub enum CampaignCommand {
     Close(CloseArgs),
     /// Show campaign progress: landed / in-flight / blocked.
     Show(ShowArgs),
+    /// List all campaigns on the log: key, charter, owner, state, progress.
+    List(ListArgs),
+    /// Abandon a campaign: appends `campaign.abandoned`; releases in-flight PR
+    /// blocking from close semantics. Idempotent. Abandoning a closed campaign
+    /// is a structured error.
+    Abandon(AbandonArgs),
 }
 
 /// `hugit campaign open` — record `campaign.opened` (idempotent on key).
@@ -101,6 +109,29 @@ pub struct ShowArgs {
     pub campaign: String,
 }
 
+/// `hugit campaign list` — enumerate all campaigns on the log (read-only).
+#[derive(clap::Args, Debug)]
+pub struct ListArgs {
+    /// Path to the JSON world file. Read-only — `list` never writes.
+    #[arg(long)]
+    pub log: PathBuf,
+}
+
+/// `hugit campaign abandon` — mark a campaign abandoned (idempotent).
+#[derive(clap::Args, Debug)]
+pub struct AbandonArgs {
+    /// Path to the JSON world file. Read, then rewritten with the appended
+    /// `campaign.abandoned` record on success.
+    #[arg(long)]
+    pub log: PathBuf,
+    /// The campaign key to abandon.
+    #[arg(long)]
+    pub campaign: String,
+    /// Human-readable reason for abandoning (required — honest attribution).
+    #[arg(long)]
+    pub reason: String,
+}
+
 /// Dispatch a `campaign` subcommand.
 ///
 /// Each arm runs the real projection over the hermetic file seam and emits a
@@ -111,6 +142,8 @@ pub fn run(args: CampaignArgs) -> ExitCode {
         CampaignCommand::Open(a) => open::run(a),
         CampaignCommand::Close(a) => close::run(a),
         CampaignCommand::Show(a) => show::run(a),
+        CampaignCommand::List(a) => list::run(a),
+        CampaignCommand::Abandon(a) => abandon::run(a),
     };
     match result {
         Ok(json) => {
