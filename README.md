@@ -7,7 +7,8 @@
 + `hugit-app/{ui,exit}`; `hugit-app-sidecar` auto-included) implements all 67
 work-packages of decomposition v2.0. `main` is green by local gate (fmt +
 clippy `--workspace --all-targets --locked -D warnings` + test `--workspace
---locked` + audit). What remains is owner-gated infra (P2 CoreLink tenant
+--locked` + audit); remote CI green on HEAD, flaky under single-runner
+contention. What remains is owner-gated infra (P2 CoreLink tenant
 provisioning). See **[CLAUDE.md](CLAUDE.md)** for the live source of truth.
 
 ## What hugit is

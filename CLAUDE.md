@@ -18,9 +18,10 @@ per the runner-transfer campaign: hugit is git+forge, compute is campaign
 byte-identical in both repos, no git dependency in either direction)
 implements all 67 work-packages of
 decomposition v2.0 (E6 superseded
-by the forge-arbitrated bidirectional-sync design); `main` is green by gate
+by the forge-arbitrated bidirectional-sync design); `main` is green by local gate
 (fmt + clippy `--workspace --all-targets --locked -D warnings` + test
-`--workspace --locked` + audit). What remains is **owner-gated infra, not
+`--workspace --locked` + audit); remote CI green on HEAD, flaky under
+single-runner contention. What remains is **owner-gated infra, not
 code**: provisioning the CoreLink prod tenant (P2 — see
 `docs/handoff/2026-06-08-corelink-p2-tenant-request.md`) flips the disclosed
 live-infra seams (AC HTTP, runner box, transparency log, live GitHub detect)
