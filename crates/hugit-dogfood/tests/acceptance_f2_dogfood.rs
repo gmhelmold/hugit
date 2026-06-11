@@ -22,6 +22,7 @@ fn fetch_envelope<S: ColdBlobStore>(store: &S, blob_ref: &str) -> ContextEnvelop
     let bytes = store
         .get(blob_ref)
         .expect("cold-store get")
+        .present()
         .expect("the ref must resolve");
     serde_json::from_slice(&bytes).expect("stored blob parses through the frozen ContextEnvelope")
 }
@@ -68,8 +69,8 @@ fn bundle_proven_against_real_spawned_intents() {
             .raw_transcript_ref
             .as_ref()
             .expect("full capture (the ratified default) stores raw");
-        let raw =
-            String::from_utf8(store.get(raw_ref).expect("get").expect("present")).expect("utf-8");
+        let raw = String::from_utf8(store.get(raw_ref).expect("get").present().expect("present"))
+            .expect("utf-8");
         assert!(
             raw.contains("AC miss → executed once, stored"),
             "the raw track must record the real first-run provenance; got: {raw}"
@@ -77,8 +78,14 @@ fn bundle_proven_against_real_spawned_intents() {
         assert!(raw.contains(&format!("brief: land {}", intent.pr_id)));
         // Task track is the mid-altitude subset.
         let task_ref = env.trajectory.task_transcript_ref.as_ref().expect("task");
-        let task =
-            String::from_utf8(store.get(task_ref).expect("get").expect("present")).expect("utf-8");
+        let task = String::from_utf8(
+            store
+                .get(task_ref)
+                .expect("get")
+                .present()
+                .expect("present"),
+        )
+        .expect("utf-8");
         assert!(task.contains("handoff:"));
         assert!(
             !task.contains("check.run_memoized("),
@@ -136,8 +143,14 @@ fn bundle_proven_against_real_spawned_intents() {
         .raw_transcript_ref
         .as_ref()
         .expect("session raw");
-    let session_raw = String::from_utf8(store.get(session_raw_ref).expect("get").expect("present"))
-        .expect("utf-8");
+    let session_raw = String::from_utf8(
+        store
+            .get(session_raw_ref)
+            .expect("get")
+            .present()
+            .expect("present"),
+    )
+    .expect("utf-8");
     assert!(session_raw.contains("queue.run_wave"));
     assert!(session_raw.contains("landed 5 of 5"));
 
@@ -218,8 +231,8 @@ fn repeat_wave_records_hit_provenance_in_the_trajectory() {
             .raw_transcript_ref
             .as_ref()
             .expect("raw");
-        let raw =
-            String::from_utf8(store.get(raw_ref).expect("get").expect("present")).expect("utf-8");
+        let raw = String::from_utf8(store.get(raw_ref).expect("get").present().expect("present"))
+            .expect("utf-8");
         assert!(
             raw.contains("AC hit (zero local execution)"),
             "the warm-run trajectory must record the hit; got: {raw}"

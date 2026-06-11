@@ -26,6 +26,11 @@
 //! 7. **Two-transcript imperative (WP-F2b)** — under `full` (the ratified
 //!    default) closing ANY altitude without BOTH transcript refs is a hard
 //!    `TwoTranscriptViolation`; nulls are legal only under an opt-down.
+//! 8. **Tombstone erasure (WA3, the ratified right-to-erasure path)** — a
+//!    trajectory blob written by the producer can be ERASED on the SAME
+//!    production `ColdBlobStore` trait: `get` then returns `Erased(tombstone)`
+//!    (never the bytes, never `Absent`), the tombstone is content-addressed +
+//!    immutable, and erasure is BY CONTENT (a deduped shared blob is one blob).
 
 use std::time::Duration;
 
@@ -33,8 +38,8 @@ use hugit_contracts::context_envelope::{Authorship, Spawn, ToolCount, WasteCost}
 use hugit_contracts::{Altitude, ContextEnvelope, REDACTED_MARKER};
 use hugit_ledger::envelope::{
     CaptureLevel, ColdBlobStore, ColdStoreError, DirColdStore, EnvelopeDraft, EnvelopeError,
-    InMemoryColdStore, TrajectoryRecorder, UnwiredColdStore, close_envelope,
-    close_session_envelope,
+    GetOutcome, InMemoryColdStore, TombstoneRecord, TrajectoryRecorder, UnwiredColdStore,
+    close_envelope, close_session_envelope,
 };
 
 /// A planted secret carrying both the canonical marker (`SECRET:`) and a
@@ -134,7 +139,7 @@ fn item_1_redaction_applied_before_any_blob_is_stored() {
         .raw_transcript_ref
         .as_ref()
         .expect("full capture stores the raw transcript");
-    let raw = String::from_utf8(store.get(raw_ref).expect("get").expect("present"))
+    let raw = String::from_utf8(store.get(raw_ref).expect("get").present().expect("present"))
         .expect("raw blob is utf-8");
     assert!(
         raw.contains(SURVIVOR_LINE),
@@ -247,6 +252,7 @@ fn item_3_null_refs_round_trip_against_frozen_golden_shape() {
     let bytes = store
         .get(&closed.context_ref)
         .expect("get")
+        .present()
         .expect("the context_ref resolves to the stored envelope blob");
     let back: ContextEnvelope =
         serde_json::from_slice(&bytes).expect("stored blob parses through the frozen type");
@@ -281,7 +287,10 @@ fn item_4a_same_content_same_ref_in_memory_and_dir_backed() {
     let d2 = dir.put(bytes).expect("put again");
     assert_eq!(d1, d2);
     assert_eq!(d1, r1, "the content-addressed ref is tier-agnostic");
-    assert_eq!(dir.get(&d1).expect("get"), Some(bytes.to_vec()));
+    assert_eq!(
+        dir.get(&d1).expect("get"),
+        GetOutcome::Present(bytes.to_vec())
+    );
 
     // Content-address guard: tampered bytes are refused, never served.
     let hash = d1.strip_prefix("cas:").expect("cas-prefixed");
@@ -549,4 +558,84 @@ fn item_7_two_transcript_imperative_enforced_at_full() {
     .expect("well-formed full close succeeds");
     assert!(ok.envelope.trajectory.raw_transcript_ref.is_some());
     assert!(ok.envelope.trajectory.task_transcript_ref.is_some());
+}
+
+// ── ⑧ tombstone erasure on the production trait (WA3) ────────────────────────
+
+/// A caller-supplied erasure authorisation (the X7 cascade owner supplies the
+/// who/when/policy from the authenticated right-to-erasure request).
+fn erasure_record() -> TombstoneRecord {
+    TombstoneRecord {
+        requested_by: "rtbf-request:case-42".to_string(),
+        requested_at_unix: 1_717_900_000,
+        policy_ref: "policy:gdpr-art17-v1".to_string(),
+    }
+}
+
+#[test]
+fn item_8_producer_blob_erases_to_tombstone_on_the_real_trait() {
+    // A real producer write (close_envelope on the PRODUCTION ColdBlobStore),
+    // then erase one of the blobs it stored. The same trait the producer
+    // depends on carries the right-to-erasure path — not a toy.
+    let store = InMemoryColdStore::new();
+    let closed = close_envelope(
+        &secret_bearing_draft(Altitude::Intent),
+        CaptureLevel::Full,
+        &store,
+    )
+    .expect("full close");
+
+    let raw_ref = closed
+        .envelope
+        .trajectory
+        .raw_transcript_ref
+        .clone()
+        .expect("full capture stored the raw transcript");
+
+    // Live before erasure.
+    assert!(matches!(
+        store.get(&raw_ref).expect("get"),
+        GetOutcome::Present(_)
+    ));
+
+    // Erase: NOT a delete — get now yields Erased(tombstone), never the bytes
+    // and never Absent.
+    let ts = store.erase(&raw_ref, erasure_record()).expect("erase");
+    assert_eq!(ts.erased_ref, raw_ref);
+    assert_eq!(ts.record, erasure_record());
+    match store.get(&raw_ref).expect("get after erase") {
+        GetOutcome::Erased(got) => assert_eq!(got, ts),
+        other => panic!("erased producer blob must resolve to a tombstone, got {other:?}"),
+    }
+    // The tombstone is content-addressed + immutable.
+    assert!(ts.tombstone_ref().starts_with("cas:"));
+    assert_eq!(ts.tombstone_ref(), ts.tombstone_ref());
+
+    // A genuinely-absent ref stays Absent — distinguishable from erased.
+    let absent = hugit_ledger::envelope::cold_ref_for(b"never stored");
+    assert_eq!(store.get(&absent).expect("get"), GetOutcome::Absent);
+}
+
+#[test]
+fn item_8_erasure_is_by_content_dir_backed_parity() {
+    // Dir-backed parity: erase atomically replaces the on-disk blob with a
+    // tombstone, and a re-put of the same content cannot resurrect it.
+    let root =
+        std::env::temp_dir().join(format!("hugit-f2-erase-{}-{}", std::process::id(), line!()));
+    let dir = DirColdStore::open(&root).expect("open dir store");
+    let bytes = b"a trajectory blob on disk";
+    let r = dir.put(bytes).expect("put");
+    assert!(matches!(dir.get(&r).expect("get"), GetOutcome::Present(_)));
+
+    let ts = dir.erase(&r, erasure_record()).expect("erase");
+    match dir.get(&r).expect("get") {
+        GetOutcome::Erased(got) => assert_eq!(got, ts),
+        other => panic!("expected tombstone, got {other:?}"),
+    }
+    // Re-put of identical content must NOT resurrect (erasure is permanent).
+    let r2 = dir.put(bytes).expect("re-put");
+    assert_eq!(r2, r);
+    assert!(dir.get(&r).expect("get").is_erased());
+
+    std::fs::remove_dir_all(&root).expect("cleanup");
 }

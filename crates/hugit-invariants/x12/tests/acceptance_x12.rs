@@ -29,6 +29,12 @@ use erasure::{
 };
 use hugit_contracts::event_record::EventRecord;
 use hugit_contracts::export_schema::ExportSchema;
+// The REAL production cold-store trait (WP-F2 / WA3). X12's erasure laws are
+// re-pointed to run against THIS — the trait the live archive binding fills and
+// the envelope producer depends on — not only the toy `ObjectStore`.
+use hugit_ledger::envelope::{
+    ColdBlobStore, DirColdStore, GetOutcome, InMemoryColdStore, TombstoneRecord, cold_ref_for,
+};
 use hugit_refstore::{EventLog, TamperError, compute_this_hash, verify_chain};
 
 // ── shared fixtures ──────────────────────────────────────────────────────────
@@ -404,4 +410,212 @@ fn composition_erasure_leaves_verifiable_tombstone_and_discloses_mirror_residual
     );
     // The exit proof's obligation names the SAME object the tombstone marks.
     assert_eq!(proof.obligations[0].object_hash, linked);
+}
+
+// ── X12 re-pointed: the SAME laws against the REAL production cold-store trait ─
+//
+// The toy `ObjectStore` above models the composition; these tests re-run the
+// erasure leg against the PRODUCTION `hugit_ledger::envelope::ColdBlobStore`
+// (InMemory + Dir), the trait the live archive binding fills and the envelope
+// producer depends on. The audit's S4 contradiction — "X7/X12 proofs run
+// against a toy ObjectStore the live seam doesn't share" — is closed here: the
+// laws hold against the trait that ships.
+//
+// The provenance chain links to a REAL `cas:<sha256>` ref of the subject bytes,
+// the real store holds those bytes, and erasure goes through the production
+// `erase`. The X12/X7 laws proven: (a) erase REMOVES content — `get` never
+// returns the bytes again; (b) the PROOF survives — the append-only attestation
+// chain still verifies byte-for-byte; (c) the residual is an HONEST tombstone —
+// distinguishable from `Absent`, carrying who/when/policy.
+
+/// Build a provenance chain whose object-link references the REAL content ref
+/// of `subject_bytes`, and seed the production cold store with those bytes.
+/// Returns (records, link_seq, the cas: ref of the subject).
+fn seed_provenance_and_real_store<S: ColdBlobStore>(
+    store: &S,
+    subject_bytes: &[u8],
+) -> (Vec<EventRecord>, u64, String) {
+    let subject_ref = store.put(subject_bytes).expect("put subject bytes");
+
+    let mut log = EventLog::new();
+    log.append(
+        "tree.snapshot",
+        vec!["agent:planner".to_string()],
+        object_link_payload("cas:tree-root"),
+        1_000,
+    );
+    let link = log.append(
+        OBJECT_LINK_KIND,
+        vec!["agent:executor".to_string(), "human:owner".to_string()],
+        object_link_payload(&subject_ref),
+        2_000,
+    );
+    log.append(
+        "check.result",
+        vec!["runner:box-01".to_string()],
+        object_link_payload("cas:check-out"),
+        3_000,
+    );
+
+    (log.records().to_vec(), link.seq, subject_ref)
+}
+
+fn real_erasure_record() -> TombstoneRecord {
+    TombstoneRecord {
+        requested_by: "rtbf-request:case-42".to_string(),
+        requested_at_unix: 1_717_900_000,
+        policy_ref: "policy:gdpr-art17-v1".to_string(),
+    }
+}
+
+#[test]
+fn item_1_real_trait_erase_removes_content_proof_survives_inmemory() {
+    let store = InMemoryColdStore::new();
+    let subject = b"the data subject's personal data";
+    let (records, link_seq, subject_ref) = seed_provenance_and_real_store(&store, subject);
+
+    // Sanity: pre-erasure the chain verifies and the real ref resolves Present.
+    assert!(verify_chain(&records).is_ok(), "pre-erasure chain verifies");
+    let linked = link_target(&records[link_seq as usize]).expect("link target");
+    assert_eq!(linked, subject_ref);
+    assert!(matches!(
+        store.get(&subject_ref).expect("get"),
+        GetOutcome::Present(_)
+    ));
+
+    // ── the erasure request via the PRODUCTION trait ──
+    let tombstone = store
+        .erase(&subject_ref, real_erasure_record())
+        .expect("erase");
+
+    // (a) Content REMOVED — get never returns the bytes; it returns the
+    //     tamper-evident tombstone, never Absent.
+    match store.get(&subject_ref).expect("get after erase") {
+        GetOutcome::Erased(ts) => {
+            assert_eq!(ts, tombstone);
+            assert_eq!(ts.erased_ref, subject_ref, "tombstone names the erased ref");
+            assert!(ts.is_tombstone());
+            assert!(
+                ts.tombstone_ref().starts_with("cas:"),
+                "the tombstone is itself content-addressed",
+            );
+        }
+        other => panic!("erased ref must resolve to a tombstone, got {other:?}"),
+    }
+
+    // (b) The PROOF survives — the append-only attestation chain still verifies
+    //     byte-for-byte (erasure touched the OBJECT STORE, never the chain).
+    assert_eq!(
+        verify_chain(&records),
+        Ok(()),
+        "post-erasure the canonical hash-chain must STILL verify",
+    );
+    // The link is NOT re-pointed: it still names the original subject ref.
+    assert_eq!(
+        link_target(&records[link_seq as usize]).as_deref(),
+        Some(subject_ref.as_str()),
+        "erasure must not silently re-link the provenance",
+    );
+
+    // (c) Residual is HONEST: an erased ref is distinguishable from a
+    //     never-present one.
+    let never = cold_ref_for(b"never stored personal data");
+    assert_eq!(store.get(&never).expect("get"), GetOutcome::Absent);
+    assert!(store.get(&subject_ref).expect("get").is_erased());
+}
+
+#[test]
+fn item_1_real_trait_erase_dir_backed_parity() {
+    // Same law on the dir-backed production store (atomic tombstone replace).
+    let root = std::env::temp_dir().join(format!(
+        "hugit-x12-real-erase-{}-{}",
+        std::process::id(),
+        line!()
+    ));
+    let store = DirColdStore::open(&root).expect("open dir store");
+    let subject = b"on-disk personal data";
+    let (records, link_seq, subject_ref) = seed_provenance_and_real_store(&store, subject);
+
+    let tombstone = store
+        .erase(&subject_ref, real_erasure_record())
+        .expect("erase");
+    match store.get(&subject_ref).expect("get") {
+        GetOutcome::Erased(ts) => assert_eq!(ts, tombstone),
+        other => panic!("expected tombstone on disk, got {other:?}"),
+    }
+    assert_eq!(
+        verify_chain(&records),
+        Ok(()),
+        "chain survives on-disk erasure"
+    );
+    assert_eq!(
+        link_target(&records[link_seq as usize]).as_deref(),
+        Some(subject_ref.as_str()),
+    );
+
+    // A re-put of the same content must NOT resurrect the erased subject.
+    let _ = store.put(subject).expect("re-put");
+    assert!(
+        store.get(&subject_ref).expect("get").is_erased(),
+        "re-put must not resurrect erased content (erasure is permanent)",
+    );
+
+    std::fs::remove_dir_all(&root).expect("cleanup");
+}
+
+#[test]
+fn item_1_real_trait_erasure_is_by_content_dedup_disclosure() {
+    // The X7/X12 dedup honesty leg on the REAL trait: two logical references to
+    // identical subject bytes are the SAME blob under the SAME cas: ref; erasing
+    // it discharges the obligation for the content (every reference resolves to
+    // the tombstone). There is one blob — by content — by design.
+    let store = InMemoryColdStore::new();
+    let subject = b"shared subject personal data";
+    let ref_a = store.put(subject).expect("put a");
+    let ref_b = store.put(subject).expect("put b");
+    assert_eq!(ref_a, ref_b, "same content → same ref (dedup-by-content)");
+    assert_eq!(store.len(), 1, "one blob");
+
+    store.erase(&ref_a, real_erasure_record()).expect("erase");
+    assert!(store.get(&ref_a).expect("get a").is_erased());
+    assert!(
+        store.get(&ref_b).expect("get b").is_erased(),
+        "erasure is by content: the shared blob is erased for every reference",
+    );
+}
+
+#[test]
+fn item_1_real_trait_composition_with_mirror_disclosure() {
+    // Full composition on the REAL trait: erase the subject via production
+    // `erase` → (①) the provenance chain still verifies and the ref resolves to
+    // a tombstone, AND (②) the mirror-side residual risk for that SAME ref is
+    // disclosed in the export/exit proof.
+    let store = InMemoryColdStore::new();
+    let subject = b"composition subject data";
+    let (records, _link_seq, subject_ref) = seed_provenance_and_real_store(&store, subject);
+
+    let tombstone = store
+        .erase(&subject_ref, real_erasure_record())
+        .expect("erase");
+    assert_eq!(
+        verify_chain(&records),
+        Ok(()),
+        "①: chain verifies post-erasure"
+    );
+    assert!(store.get(&subject_ref).expect("get").is_erased());
+
+    let proof = ExitProof {
+        schema: export_schema_with_obligation_class(),
+        obligations: vec![MirrorObligation {
+            object_hash: tombstone.erased_ref.clone(),
+            mirror_target: "github.com/acme/repo".to_string(),
+            outcome: MirrorObligationOutcome::ResidualRisk {
+                disclosure: "GitHub mirror copy of the erased object may persist \
+                     in forks/caches; residual risk disclosed."
+                    .to_string(),
+            },
+        }],
+    };
+    assert_eq!(proof.validate(), Ok(()), "②: residual risk disclosed");
+    assert_eq!(proof.obligations[0].object_hash, subject_ref);
 }

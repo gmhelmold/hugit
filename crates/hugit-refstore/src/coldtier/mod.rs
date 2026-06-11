@@ -19,6 +19,26 @@
 //!
 //! Nothing here ever rewrites or drops history — a cold range is an exact,
 //! verifiable copy of the records it sealed (relocated, never mutated).
+//!
+//! # No erasure here — and that is the correct design (WA3 seam note)
+//!
+//! The right-to-erasure / tombstone path lives on the BLOB cold store
+//! ([`hugit_ledger::envelope::ColdBlobStore::erase`], WP-F2/WA3), NOT here.
+//! This [`ColdStore`] holds [`ColdRange`]s — sealed runs of the **append-only
+//! provenance chain** (`EventRecord`s). Under the ratified erasure law
+//! (ADR-0001, "o conteúdo é apagável; a prova, não") erasure operates on the
+//! OBJECT store and NEVER touches the provenance chain: an erased object's
+//! surviving provenance link keeps referencing the same content hash, which now
+//! resolves to a tombstone (proven in WP-X12). The chain is the *proof that
+//! survives* — adding an `erase` that mutated a cold range would let an actor
+//! drop or rewrite sealed provenance, which `verify_chain` exists to make
+//! impossible (X12 ① catches a silent re-link fail-closed).
+//!
+//! So this seam DEFERS erasure by design, not by omission: personal data is the
+//! object content (erased by content on the blob cold store); the provenance
+//! that references it is immutable here. If a future requirement ever needs to
+//! relocate a tombstone-bearing object out of the hot tier, it rides the blob
+//! cold store's tombstone, never a mutation of a `ColdRange`.
 
 use hugit_contracts::event_record::EventRecord;
 use std::collections::BTreeMap;

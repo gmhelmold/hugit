@@ -75,8 +75,8 @@ use hugit_contracts::context_envelope::{
 use hugit_contracts::{Altitude, CONTEXT_ENVELOPE_SCHEMA_VERSION, ContextEnvelope, IntentMetrics};
 
 pub use cold_store::{
-    COLD_REF_PREFIX, ColdBlobStore, ColdStoreError, DirColdStore, InMemoryColdStore,
-    UnwiredColdStore, cold_ref_for,
+    COLD_REF_PREFIX, ColdBlobStore, ColdStoreError, DirColdStore, GetOutcome, InMemoryColdStore,
+    TOMBSTONE_MARKER, Tombstone, TombstoneRecord, UnwiredColdStore, cold_ref_for,
 };
 
 /// The redaction policy identifier stamped into
@@ -768,6 +768,7 @@ mod tests {
         let bytes = store
             .get(&emission.envelope_ref)
             .expect("get")
+            .present()
             .expect("present");
         let back: ContextEnvelope = serde_json::from_slice(&bytes).expect("frozen shape");
         assert_eq!(back, emission.envelope);
