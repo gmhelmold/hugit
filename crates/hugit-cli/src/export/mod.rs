@@ -210,23 +210,33 @@ pub fn export(
             .map_err(|e| ExportError::Intent(e.to_string()))?;
     }
     let intent_log = intents_from_log(&cut_log).map_err(|e| ExportError::Intent(e.to_string()))?;
-    let intents: Vec<IntentSidecar> = intent_log
-        .intents()
-        .iter()
-        .map(|i| IntentSidecar {
-            intent_id: i.intent_id.clone(),
-            charter: i.charter.clone(),
-            acceptance: vec![],
-            context_ref: format!("ctx-{}", i.intent_id),
-            authoritative: false,
-        })
-        .collect();
 
     let events: Vec<EventRecord> = cut.records().to_vec();
 
     // (3) redaction at export. Every redactable field is run through the policy
     // and removals are manifested; nothing is silently dropped.
     let mut manifest = RedactionManifest::new();
+
+    // The intents vector carries author free text (`charter`) — route it through
+    // the unified engine like every other surface (WF-4), never cloned verbatim.
+    // A `ghp_`/SECRET_KEY in a charter would otherwise ride out in the export
+    // envelope (and `.hugit`) unredacted.
+    let intents: Vec<IntentSidecar> = intent_log
+        .intents()
+        .iter()
+        .map(|i| IntentSidecar {
+            intent_id: i.intent_id.clone(),
+            charter: redaction::redact_field(
+                &format!("intents/{}.charter", i.intent_id),
+                &i.charter,
+                &mut manifest,
+            ),
+            acceptance: vec![],
+            context_ref: format!("ctx-{}", i.intent_id),
+            authoritative: false,
+        })
+        .collect();
+
     let journals: Vec<JournalEntry> = corpus
         .journals
         .iter()

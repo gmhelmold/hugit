@@ -529,20 +529,32 @@ pub fn close_envelope<S: ColdBlobStore>(
     // Redaction on the WRITE path is total: EVERY string field that carries
     // author-supplied text is routed through [`crate::redact::apply`] before
     // the envelope is serialized and stored, so the module's "never a byte
-    // un-redacted" claim is literally true (the charter/constraints/
-    // acceptance/parent_intents/env_manifest/files_read-paths were previously
-    // persisted verbatim — a `ghp_`-style secret in a charter rode through).
-    // Exempt by design: `redaction_policy` (a policy identifier, not author
-    // text) and `summary` (already scrubbed above).
+    // un-redacted" claim is literally true. This now INCLUDES
+    // `authorship.operator` and the top-level `campaign` — previously cloned
+    // verbatim despite the "EVERY string field" claim (WF-1): a token planted in
+    // an operator string or a campaign key rode through. A legitimate operator
+    // email is not secret-shaped and survives; a token inside it redacts.
+    //
+    // Exempt by design (NOT author free text):
+    // - `authorship.{model, model_digest, agent_type, spawn}` — model identity /
+    //   pinned digest / lineage, structurally typed, not user prose.
+    // - `commit` / `tree_hash` / `files_read[].hash` — content-address digests,
+    //   load-bearing for the integrity spine, stored verbatim.
+    // - `trajectory.redaction_policy` (a policy identifier) and `summary`
+    //   (already scrubbed above).
+    let authorship = Authorship {
+        operator: crate::redact::apply(&draft.authorship.operator),
+        ..draft.authorship.clone()
+    };
     let envelope = ContextEnvelope {
         schema_version: CONTEXT_ENVELOPE_SCHEMA_VERSION.to_string(),
         altitude: draft.altitude,
         intent_id: draft.unit_id.clone(),
         commit: draft.commit.clone(),
         tree_hash: draft.tree_hash.clone(),
-        authorship: draft.authorship.clone(),
+        authorship,
         charter: crate::redact::apply(&draft.charter),
-        campaign: draft.campaign.clone(),
+        campaign: draft.campaign.as_ref().map(|c| crate::redact::apply(c)),
         constraints: redact_each(&draft.constraints),
         acceptance: redact_each(&draft.acceptance),
         parent_intents: redact_each(&draft.parent_intents),
@@ -964,6 +976,55 @@ mod tests {
         assert!(
             !matches!(result, Err(EnvelopeError::Serialize(_))),
             "a well-formed frozen envelope never hits the Serialize arm: {result:?}"
+        );
+    }
+
+    // ── WF-1: authorship.operator + campaign are scrubbed on the write path ────
+
+    #[test]
+    fn close_envelope_scrubs_operator_token_keeps_legit_email() {
+        let store = InMemoryColdStore::new();
+
+        // A token planted in the operator string must redact wholesale.
+        let mut d = draft(Altitude::Intent);
+        d.authorship.operator = "ops ghp_16C7e42F292c6912E7710c838347Ae178B4a".to_string();
+        let closed = close_envelope(&d, CaptureLevel::Full, &store).expect("closes");
+        assert_eq!(
+            closed.envelope.authorship.operator,
+            crate::redact::REDACTED,
+            "a token in operator redacts (was cloned verbatim before WF-1)"
+        );
+
+        // A legitimate operator email is NOT secret-shaped — it survives.
+        let mut d2 = draft(Altitude::Intent);
+        d2.authorship.operator = "gustavo@humangr.com".to_string();
+        let closed2 = close_envelope(&d2, CaptureLevel::Full, &store).expect("closes");
+        assert_eq!(
+            closed2.envelope.authorship.operator, "gustavo@humangr.com",
+            "a legit email is not secret-shaped and survives"
+        );
+    }
+
+    #[test]
+    fn close_envelope_scrubs_campaign_token() {
+        let store = InMemoryColdStore::new();
+        let mut d = draft(Altitude::Pr);
+        d.campaign = Some("camp token=ghs_16C7e42F292c6912E7710c838347Ae178B4a".to_string());
+        let closed = close_envelope(&d, CaptureLevel::Full, &store).expect("closes");
+        assert_eq!(
+            closed.envelope.campaign.as_deref(),
+            Some(crate::redact::REDACTED),
+            "a token in the campaign key redacts (was cloned verbatim before WF-1)"
+        );
+
+        // A benign campaign key survives.
+        let mut d2 = draft(Altitude::Pr);
+        d2.campaign = Some("githugr-spine-w1".to_string());
+        let closed2 = close_envelope(&d2, CaptureLevel::Full, &store).expect("closes");
+        assert_eq!(
+            closed2.envelope.campaign.as_deref(),
+            Some("githugr-spine-w1"),
+            "a benign campaign key survives"
         );
     }
 }
