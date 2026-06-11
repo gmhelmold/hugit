@@ -309,10 +309,23 @@ pub fn pr_record(
 
     let cost = decompose(work, orchestration, verification, ci, waste)?;
 
-    // ── time: span vs sum (deliberate; ADR-0001 §2.3).
-    // First activity = earliest birth across the bundle's sessions (intents +
-    // the PR author's own session); agent_sum is GROSS agent-time — every
-    // intent attempt's active_ms, waste included (that time was spent).
+    // ── time: span vs sum (ADR-0001 §2.3 — documented law, not a theorem).
+    //
+    // `wall_span_ms` is the wall-clock interval from first activity to
+    // landing (or last session death if not yet landed). `agent_sum_ms` is
+    // GROSS agent-time: the sum of every intent attempt's `active_ms`, waste
+    // included (that time was spent, regardless of whether it landed).
+    //
+    // **Span ≤ sum holds for genuinely parallel fleets** (agents run
+    // concurrently — their individual times accumulate faster than the wall
+    // clock advances). **Span > sum is LEGAL and expected for serial
+    // workloads or idle-heavy sessions** (a single agent occupies a fraction
+    // of the wall interval; the remainder is queue wait, review, or
+    // orchestration time between dispatches). The relationship is a
+    // STRUCTURAL PROPERTY of the inputs, not an invariant the rollup
+    // enforces — the acceptance suite covers both cases (see
+    // `wall_span_le_agent_sum_under_parallelism` and
+    // `wall_span_gt_agent_sum_serial_is_legal` in acceptance_f3).
     let first_born = intent_envelopes
         .iter()
         .map(|e| e.authorship.spawn.born_at)
@@ -330,9 +343,15 @@ pub fn pr_record(
     } else {
         last_died // not landed (yet): span runs to the last session death.
     };
+    // agent_sum: saturating_add (timing counter — a wrap would indicate
+    // garbage input, not a real overspend; capped at u64::MAX is the correct
+    // behaviour for a display field, unlike money which is fail-closed).
+    let agent_sum_ms = intent_envelopes
+        .iter()
+        .fold(0u64, |acc, e| acc.saturating_add(e.metrics.active_ms));
     let time = PrTime {
         wall_span_ms: span_end.saturating_sub(first_born),
-        agent_sum_ms: intent_envelopes.iter().map(|e| e.metrics.active_ms).sum(),
+        agent_sum_ms,
         queue_wait_ms: queue.queue_wait_ms,
         human_touches: queue.human_touches,
         landed_at: queue.landed_at,
@@ -442,8 +461,9 @@ pub fn campaign_rollup(
 
     for (pr, phase) in prs {
         pr_ids.push(pr.pr_id.clone());
-        intent_count += pr.intent_count;
-        agent_count += pr.agent_count;
+        // intent_count / agent_count: saturating (counter, not money).
+        intent_count = intent_count.saturating_add(pr.intent_count);
+        agent_count = agent_count.saturating_add(pr.agent_count);
         for m in &pr.models_used {
             models_used = dedup_push(models_used, m);
         }
@@ -502,8 +522,13 @@ pub fn campaign_rollup(
             pr.cost.ci.saved_usd_micros,
             "ci.saved_usd_micros",
         )?;
-        waste.discarded_intents += pr.cost.waste.discarded_intents;
-        waste.retried_agents += pr.cost.waste.retried_agents;
+        // waste counters: saturating (display, not money).
+        waste.discarded_intents = waste
+            .discarded_intents
+            .saturating_add(pr.cost.waste.discarded_intents);
+        waste.retried_agents = waste
+            .retried_agents
+            .saturating_add(pr.cost.waste.retried_agents);
         waste.tokens_not_landed = add(
             waste.tokens_not_landed,
             pr.cost.waste.tokens_not_landed,
@@ -515,8 +540,9 @@ pub fn campaign_rollup(
             "waste.cost_usd_micros",
         )?;
 
-        agent_sum_ms += pr.time.agent_sum_ms;
-        queue_wait_ms += pr.time.queue_wait_ms;
+        // timing accumulators: saturating (display counters, not money).
+        agent_sum_ms = agent_sum_ms.saturating_add(pr.time.agent_sum_ms);
+        queue_wait_ms = queue_wait_ms.saturating_add(pr.time.queue_wait_ms);
 
         match phase {
             PrPhase::Landed => {
@@ -751,12 +777,56 @@ fn group_attempts(envelopes: &[ContextEnvelope]) -> Vec<(&str, Vec<&ContextEnvel
     groups
 }
 
-/// Index of the attempt that counts as the landed work: the latest-born
-/// (ties broken by input order — the later envelope wins).
+/// Index of the attempt that counts as the landed work: the **latest-born**
+/// among the group's envelopes. Ties (equal `born_at`) are broken by a
+/// **total order** so the work/waste split is deterministic regardless of
+/// envelope arrival order:
+///
+/// 1. `born_at` descending — the chronologically later session wins.
+/// 2. `run_id` lexicographic ascending — stable across any ordering of
+///    same-timestamp siblings (run ids are unique per run).
+/// 3. Input sequence ascending — last fallback; in practice unreachable
+///    once `run_id` is unique, but included to make the ordering provably
+///    total without relying on that external uniqueness invariant.
+///
+/// The first tiebreak (`born_at`) handles the normal case; `run_id` makes
+/// the result independent of the input slice order even when two attempts
+/// share a millisecond; the seq tiebreak closes the last gap.
 fn final_attempt_idx(group: &[&ContextEnvelope]) -> usize {
     let mut best = 0usize;
     for (i, env) in group.iter().enumerate() {
-        if env.authorship.spawn.born_at >= group[best].authorship.spawn.born_at {
+        let best_env = group[best];
+        let cmp_born = env
+            .authorship
+            .spawn
+            .born_at
+            .cmp(&best_env.authorship.spawn.born_at);
+        let is_better = match cmp_born {
+            std::cmp::Ordering::Greater => true,
+            std::cmp::Ordering::Equal => {
+                // Tiebreak 2: run_id lexicographic ascending (lower run_id
+                // loses — the *higher* run_id is "later" in the stable
+                // ordering; we want the *maximum* to win so we take the
+                // one where the candidate's run_id is GREATER).
+                let cmp_run = env
+                    .authorship
+                    .spawn
+                    .run_id
+                    .cmp(&best_env.authorship.spawn.run_id);
+                match cmp_run {
+                    std::cmp::Ordering::Greater => true,
+                    std::cmp::Ordering::Equal => {
+                        // Tiebreak 3: higher input sequence wins (later
+                        // in the slice — `i > best` is always true here
+                        // so this is equivalent to taking `i`).
+                        i > best
+                    }
+                    std::cmp::Ordering::Less => false,
+                }
+            }
+            std::cmp::Ordering::Less => false,
+        };
+        if is_better {
             best = i;
         }
     }
