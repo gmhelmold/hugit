@@ -233,7 +233,10 @@ fn item_4_payload_round_trips_as_verdict_object() {
     assert_eq!(vo.verdict, Verdict::Reject);
     // The per-lens breakdown is carried in claims_checked (lens:result).
     assert!(vo.claims_checked.contains(&"security:approve".to_string()));
-    assert!(vo.claims_checked.contains(&"contracts:fix_first".to_string()));
+    assert!(
+        vo.claims_checked
+            .contains(&"contracts:fix_first".to_string())
+    );
 }
 
 // ── ⑤ missing log under --store → log_not_found / exit-2 ────────────────────
@@ -255,7 +258,10 @@ fn item_5_missing_log_is_log_not_found_exit_2() {
         "approve",
     ]);
     assert_eq!(code, 2, "a missing --log under --store is exit 2: {v}");
-    assert_eq!(v["error"]["kind"], "log_not_found", "canonical envelope: {v}");
+    assert_eq!(
+        v["error"]["kind"], "log_not_found",
+        "canonical envelope: {v}"
+    );
 }
 
 // ── ⑥ lens/result mismatch → lens_result_mismatch / exit-2 ──────────────────
