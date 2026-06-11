@@ -65,11 +65,22 @@ fn open_rejects_subagent_author_kind_at_the_door() {
     let err = pr::PrError::SubagentAuthor {
         got: "subagent".to_string(),
     };
+    // Canonical WB0 error law: nested under `error`, `fix`-keyed, context flat.
     let j = err.to_json();
-    assert_eq!(j["error"], json!("subagent_author"));
-    assert!(j["message"].as_str().unwrap().contains("never a subagent"));
-    assert!(j["fix"].as_str().unwrap().contains("--author-kind"));
-    assert_eq!(j["got"], json!("subagent"));
+    assert_eq!(j["error"]["kind"], json!("subagent_author"));
+    assert!(
+        j["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("never a subagent")
+    );
+    assert!(
+        j["error"]["fix"]
+            .as_str()
+            .unwrap()
+            .contains("--author-kind")
+    );
+    assert_eq!(j["error"]["got"], json!("subagent"));
 }
 
 #[test]
@@ -94,8 +105,8 @@ fn open_rejects_campaign_mismatch_on_reopen() {
     let err = pr::open(&mut log, &open_args("7", "camp-b", &["i1"])).unwrap_err();
     assert_eq!(err.code(), "campaign_mismatch");
     let j = err.to_json();
-    assert_eq!(j["existing_campaign"], json!("camp-a"));
-    assert_eq!(j["attempted_campaign"], json!("camp-b"));
+    assert_eq!(j["error"]["existing_campaign"], json!("camp-a"));
+    assert_eq!(j["error"]["attempted_campaign"], json!("camp-b"));
 }
 
 // ── land ────────────────────────────────────────────────────────────────────
@@ -513,10 +524,20 @@ fn e2e_open_rejects_subagent_author_kind_with_structured_error() {
         "i1",
     ]);
     assert!(!ok, "subagent author-kind MUST be refused (non-zero exit)");
-    assert_eq!(j["error"], json!("subagent_author"));
-    assert!(j["message"].as_str().unwrap().contains("never a subagent"));
-    assert!(j["fix"].as_str().unwrap().contains("--author-kind"));
-    assert_eq!(j["got"], json!("subagent"));
+    assert_eq!(j["error"]["kind"], json!("subagent_author"));
+    assert!(
+        j["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("never a subagent")
+    );
+    assert!(
+        j["error"]["fix"]
+            .as_str()
+            .unwrap()
+            .contains("--author-kind")
+    );
+    assert_eq!(j["error"]["got"], json!("subagent"));
     assert!(!log.exists(), "a rejected open writes no event log");
 }
 
@@ -574,5 +595,5 @@ fn e2e_land_unknown_pr_is_structured_error_exit_two() {
     std::fs::write(&log, "[]").unwrap();
     let (ok, j, _err) = run_pr(&["land", "--log", log.to_str().unwrap(), "--pr", "404"]);
     assert!(!ok, "landing an unknown PR MUST be refused");
-    assert_eq!(j["error"], json!("unknown_pr"));
+    assert_eq!(j["error"]["kind"], json!("unknown_pr"));
 }

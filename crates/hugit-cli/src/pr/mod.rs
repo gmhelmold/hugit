@@ -55,6 +55,8 @@ use hugit_refstore::intent::intents_from_log;
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::porcelain::PorcelainError;
+
 /// Event kind: a PR was proposed (PROPOSED state). Additive over the D1 log,
 /// same store as `intent.landed`. Payload (canonical JSON):
 /// `{"pr_id","campaign","author_kind","run_id","principal","intent_ids":[...]}`.
@@ -63,6 +65,23 @@ pub const PR_OPENED_KIND: &str = "pr.opened";
 /// Event kind: a PR entered the landing queue. Payload (canonical JSON):
 /// `{"pr_id","item_id","order_index","mode":"union"}`.
 pub const PR_QUEUED_KIND: &str = "pr.queued";
+
+/// Event kind: a PR was abandoned (terminal — leaves the queue projection).
+/// Additive over the D1 log, same store as `pr.opened`. Payload (canonical
+/// JSON): `{"pr_id","reason"}`. Routed through the D14-guarded append.
+pub const PR_ABANDONED_KIND: &str = "pr.abandoned";
+
+/// Event kind: a PR settled as LANDED (terminal). The pr porcelain does not
+/// emit it (the landing seam settles it), but `abandon` refuses to abandon a
+/// PR the log already records as landed — abandoning a landed PR is a refusal.
+pub const PR_LANDED_KIND: &str = "pr.landed";
+
+/// Event kind a `hugit campaign open` writes (the campaign module's own
+/// constant, restated here as the read-only vocabulary `pr open --campaign`
+/// validates against — a `campaign.opened` payload carries `{"campaign":…}`).
+/// The campaign module owns the WRITE; this is the read-side mirror of the
+/// stable wire string, so the symmetry check needs no cross-module dependency.
+pub const CAMPAIGN_OPENED_KIND: &str = "campaign.opened";
 
 /// The landing mode a PR enters the queue under — always `union` in v1 (the
 /// union-testing landing queue is the only landing path; the wedge property).
@@ -170,10 +189,39 @@ pub enum PrError {
         /// The `--intent` ids not present on the log.
         missing: Vec<String>,
     },
+    /// Referential asymmetry (audit P5): `--author-kind orchestrator` was
+    /// supplied without the `--run-id` it requires (or `human` without
+    /// `--principal`). The author class is named so the agent knows which flag
+    /// to add.
+    MissingAuthorBinding {
+        /// The author kind whose binding flag is missing.
+        author_kind: AuthorKind,
+    },
+    /// `open --campaign X` named a campaign the log does NOT carry, on a log that
+    /// DOES carry campaign vocabulary (`campaign.opened` records). A log with no
+    /// campaign records at all keeps the old permissive behavior (no error).
+    UnknownCampaign {
+        /// The PR id being opened.
+        pr_id: String,
+        /// The campaign key not found among the log's `campaign.opened` records.
+        campaign: String,
+    },
+    /// `abandon` was asked for a PR id with no `pr.opened` on the log.
+    AbandonUnknownPr {
+        /// The PR id.
+        pr_id: String,
+    },
+    /// `abandon` was asked to abandon a PR the log already records as LANDED —
+    /// a terminal state; abandoning it is a refusal.
+    AbandonLanded {
+        /// The PR id.
+        pr_id: String,
+    },
 }
 
 impl PrError {
-    /// The stable machine-readable error code (the `error` field).
+    /// The stable machine-readable error code (the `kind` field of the canonical
+    /// `{"error":{"kind":…}}` envelope).
     pub fn code(&self) -> &'static str {
         match self {
             PrError::SubagentAuthor { .. } => "subagent_author",
@@ -183,82 +231,134 @@ impl PrError {
             PrError::QueueRefused { .. } => "queue_refused",
             PrError::NotFound { .. } => "pr_not_found",
             PrError::MissingIntents { .. } => "missing_intents",
+            PrError::MissingAuthorBinding { .. } => "missing_author_binding",
+            PrError::UnknownCampaign { .. } => "unknown_campaign",
+            PrError::AbandonUnknownPr { .. } => "unknown_pr",
+            PrError::AbandonLanded { .. } => "pr_already_landed",
         }
     }
 
-    /// Serialise to the stable JSON error object.
-    pub fn to_json(&self) -> Value {
+    /// Build the canonical [`PorcelainError`] for this PR error (the one error
+    /// law: nested `{"error":{"kind","message","fix", …context}}`, `fix` key —
+    /// never a flat object, never `suggested_fix`). All flat domain fields are
+    /// folded in as structured context.
+    pub fn to_porcelain(&self) -> PorcelainError {
         match self {
-            PrError::SubagentAuthor { got } => json!({
-                "error": self.code(),
-                "message": format!(
+            PrError::SubagentAuthor { got } => PorcelainError::new(
+                self.code(),
+                format!(
                     "author-kind '{got}' is not accepted: a PR author is an \
                      orchestrator or a human, never a subagent (D14)"
                 ),
-                "fix": "pass --author-kind orchestrator (with --run-id) or \
-                        --author-kind human (with --principal)",
-                "got": got,
-            }),
+                "pass --author-kind orchestrator (with --run-id) or \
+                 --author-kind human (with --principal)",
+            )
+            .with_context("got", json!(got)),
             PrError::CampaignMismatch {
                 pr_id,
                 existing,
                 attempted,
-            } => json!({
-                "error": self.code(),
-                "message": format!(
+            } => PorcelainError::new(
+                self.code(),
+                format!(
                     "pr '{pr_id}' already exists under campaign '{existing}', \
                      cannot re-open under '{attempted}'"
                 ),
-                "fix": format!("re-open with --campaign {existing}, or open a new PR id"),
-                "pr_id": pr_id,
-                "existing_campaign": existing,
-                "attempted_campaign": attempted,
-            }),
-            PrError::UnknownPr { pr_id } => json!({
-                "error": self.code(),
-                "message": format!("pr '{pr_id}' has no pr.opened on the log — open it first"),
-                "fix": format!("hugit pr open --pr {pr_id} --campaign <key> --intent <id>…"),
-                "pr_id": pr_id,
-            }),
-            PrError::EmptyPr { pr_id } => json!({
-                "error": self.code(),
-                "message": format!("pr '{pr_id}' bundles zero intents — nothing to land"),
-                "fix": "re-open the PR with one or more --intent <id> before landing",
-                "pr_id": pr_id,
-            }),
-            PrError::QueueRefused { pr_id, reason } => json!({
-                "error": self.code(),
-                "message": format!("landing queue refused pr '{pr_id}': {reason}"),
-                "fix": "the event log's queue order is corrupt; inspect with hugit pr show",
-                "pr_id": pr_id,
-            }),
-            PrError::NotFound { pr_id } => json!({
-                "error": self.code(),
-                "message": format!("pr '{pr_id}' not found on the log"),
-                "fix": format!("hugit pr open --pr {pr_id} … to create it"),
-                "pr_id": pr_id,
-            }),
-            PrError::MissingIntents { pr_id, missing } => json!({
-                "error": self.code(),
-                "message": format!(
+                format!("re-open with --campaign {existing}, or open a new PR id"),
+            )
+            .with_context("pr_id", json!(pr_id))
+            .with_context("existing_campaign", json!(existing))
+            .with_context("attempted_campaign", json!(attempted)),
+            PrError::UnknownPr { pr_id } => PorcelainError::new(
+                self.code(),
+                format!("pr '{pr_id}' has no pr.opened on the log — open it first"),
+                format!("hugit pr open --pr {pr_id} --campaign <key> --intent <id>…"),
+            )
+            .with_context("pr_id", json!(pr_id)),
+            PrError::EmptyPr { pr_id } => PorcelainError::new(
+                self.code(),
+                format!("pr '{pr_id}' bundles zero intents — nothing to land"),
+                "re-open the PR with one or more --intent <id> before landing",
+            )
+            .with_context("pr_id", json!(pr_id)),
+            PrError::QueueRefused { pr_id, reason } => PorcelainError::new(
+                self.code(),
+                format!("landing queue refused pr '{pr_id}': {reason}"),
+                "the event log's queue order is corrupt; inspect with hugit pr show",
+            )
+            .with_context("pr_id", json!(pr_id)),
+            PrError::NotFound { pr_id } => PorcelainError::new(
+                self.code(),
+                format!("pr '{pr_id}' not found on the log"),
+                format!("hugit pr open --pr {pr_id} … to create it"),
+            )
+            .with_context("pr_id", json!(pr_id)),
+            PrError::MissingIntents { pr_id, missing } => PorcelainError::new(
+                self.code(),
+                format!(
                     "pr '{pr_id}' references intent(s) not on the log: {}",
                     missing.join(", ")
                 ),
-                "fix": format!(
+                format!(
                     "land them first: hugit intent new --log <log> --campaign <key> \
                      --charter <c> --id {} …",
                     missing.first().map(String::as_str).unwrap_or("<id>")
                 ),
-                "pr_id": pr_id,
-                "missing_intents": missing,
-            }),
+            )
+            .with_context("pr_id", json!(pr_id))
+            .with_context("missing_intents", json!(missing)),
+            PrError::MissingAuthorBinding { author_kind } => {
+                let (got_flag, needs) = match author_kind {
+                    AuthorKind::Orchestrator => ("--author-kind orchestrator", "--run-id <id>"),
+                    AuthorKind::Human => ("--author-kind human", "--principal <id>"),
+                };
+                PorcelainError::new(
+                    self.code(),
+                    format!(
+                        "{got_flag} requires {needs}: an author kind must bind to \
+                         its principal (referential symmetry — D14)"
+                    ),
+                    format!("re-run with {needs}"),
+                )
+                .with_context("author_kind", json!(author_kind.as_str()))
+            }
+            PrError::UnknownCampaign { pr_id, campaign } => PorcelainError::new(
+                self.code(),
+                format!(
+                    "pr '{pr_id}' names campaign '{campaign}', which has no \
+                     campaign.opened on the log"
+                ),
+                format!("hugit campaign open --campaign {campaign} … first"),
+            )
+            .with_context("pr_id", json!(pr_id))
+            .with_context("campaign", json!(campaign)),
+            PrError::AbandonUnknownPr { pr_id } => PorcelainError::new(
+                self.code(),
+                format!("pr '{pr_id}' has no pr.opened on the log — nothing to abandon"),
+                format!("hugit pr open --pr {pr_id} --campaign <key> --intent <id>… first"),
+            )
+            .with_context("pr_id", json!(pr_id)),
+            PrError::AbandonLanded { pr_id } => PorcelainError::new(
+                self.code(),
+                format!("pr '{pr_id}' has already landed — a landed PR cannot be abandoned"),
+                "a landed PR is terminal; nothing to abandon",
+            )
+            .with_context("pr_id", json!(pr_id)),
         }
+    }
+
+    /// Serialise to the canonical `{"error":{…}}` JSON object (nested, `fix`).
+    pub fn to_json(&self) -> Value {
+        // `PorcelainError::to_json` renders the canonical string; parse it back
+        // to a `Value` so the library API stays `Value`-typed.
+        serde_json::from_str(&self.to_porcelain().to_json())
+            .expect("PorcelainError renders valid JSON")
     }
 }
 
 impl std::fmt::Display for PrError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.to_json())
+        write!(f, "{}", self.to_porcelain().to_json())
     }
 }
 
@@ -305,6 +405,15 @@ pub struct OpenArgs {
 /// [`PrError::MissingIntents`] refusal naming the gaps. An intent-less log opts
 /// out (an intent-less fixture stays valid), so the check never breaks a log
 /// that does not yet use the intent seam.
+///
+/// **Referential symmetry (audit P5).** `--author-kind orchestrator` REQUIRES
+/// `--run-id` and `--author-kind human` REQUIRES `--principal` — a missing
+/// binding is a [`PrError::MissingAuthorBinding`] refusal naming the flag. And
+/// `--campaign X` is validated against the log: when the log already carries
+/// campaign vocabulary (`campaign.opened` records) and `X` is not among them,
+/// it is a [`PrError::UnknownCampaign`] refusal. A log with NO campaign records
+/// at all keeps the old permissive behavior (an early fixture log without the
+/// campaign seam in use opts out of the check).
 pub fn open(log: &mut EventLog, args: &OpenArgs) -> Result<Value, PrError> {
     // Idempotency: look for an existing pr.opened for this id.
     if let Some(existing) = find_pr_opened(log, &args.pr_id) {
@@ -318,6 +427,11 @@ pub fn open(log: &mut EventLog, args: &OpenArgs) -> Result<Value, PrError> {
         // Same campaign → idempotent no-op: return the existing record.
         return Ok(open_json(&existing, true));
     }
+
+    // Referential symmetry: the author kind must carry its binding flag.
+    validate_author_binding(args.author_kind, &args.run_id, &args.principal)?;
+    // Campaign symmetry: a campaign named on a campaign-aware log must exist.
+    validate_campaign(log, &args.pr_id, &args.campaign)?;
 
     validate_intents(log, args)?;
 
@@ -376,6 +490,60 @@ fn validate_intents(log: &EventLog, args: &OpenArgs) -> Result<(), PrError> {
             pr_id: args.pr_id.clone(),
             missing,
         })
+    }
+}
+
+/// Referential symmetry (audit P5): the author kind must carry its binding flag
+/// — `orchestrator` REQUIRES `--run-id`, `human` REQUIRES `--principal`. A
+/// missing/blank binding is a [`PrError::MissingAuthorBinding`] refusal naming
+/// the flag (the `--author-kind subagent` door check is upstream of this).
+fn validate_author_binding(
+    author_kind: AuthorKind,
+    run_id: &Option<String>,
+    principal: &Option<String>,
+) -> Result<(), PrError> {
+    let bound = match author_kind {
+        AuthorKind::Orchestrator => run_id.as_deref().is_some_and(|s| !s.is_empty()),
+        AuthorKind::Human => principal.as_deref().is_some_and(|s| !s.is_empty()),
+    };
+    if bound {
+        Ok(())
+    } else {
+        Err(PrError::MissingAuthorBinding { author_kind })
+    }
+}
+
+/// Whether the log carries campaign vocabulary at all — at least one
+/// `campaign.opened` record. The campaign-existence check opts out entirely when
+/// this is false (the documented permissive behavior for a log that does not yet
+/// use the campaign seam).
+fn log_has_campaign_vocabulary(log: &EventLog) -> bool {
+    log.records().iter().any(|r| r.kind == CAMPAIGN_OPENED_KIND)
+}
+
+/// Whether `campaign` is named by a `campaign.opened` record on the log.
+fn campaign_exists(log: &EventLog, campaign: &str) -> bool {
+    log.records()
+        .iter()
+        .filter(|r| r.kind == CAMPAIGN_OPENED_KIND)
+        .filter_map(|r| serde_json::from_str::<Value>(&r.payload).ok())
+        .any(|v| v.get("campaign").and_then(Value::as_str) == Some(campaign))
+}
+
+/// Campaign symmetry (audit P5): validate `--campaign` against the log.
+///
+/// When the log carries campaign vocabulary ([`log_has_campaign_vocabulary`])
+/// and the named campaign has no `campaign.opened` record, refuse with
+/// [`PrError::UnknownCampaign`] (naming it + a fix). A log with NO campaign
+/// records at all keeps the old permissive behavior (no check), documented.
+fn validate_campaign(log: &EventLog, pr_id: &str, campaign: &str) -> Result<(), PrError> {
+    if log_has_campaign_vocabulary(log) && !campaign_exists(log, campaign) {
+        Err(PrError::UnknownCampaign {
+            pr_id: pr_id.to_string(),
+            campaign: campaign.to_string(),
+        })
+    } else {
+        Ok(())
     }
 }
 
@@ -483,7 +651,23 @@ pub fn land(log: &mut EventLog, args: &LandArgs) -> Result<Value, PrError> {
         idx = order_index,
         pr = json_str(&args.pr_id),
     );
-    log.append(PR_QUEUED_KIND, vec![], payload, args.recorded_at);
+    // D14 on the mutation primitive (WA2b, pr side): route the pr.queued append
+    // through the guarded entry point under the opened PR's own author class —
+    // the same guarded routing `pr open` uses. A non-author class would be denied
+    // by the matrix and audited, never appended.
+    let (class, endpoint) = author_authz(opened.author_kind);
+    log.append_authorized(
+        class,
+        endpoint,
+        PR_QUEUED_KIND,
+        vec![],
+        payload,
+        args.recorded_at,
+    )
+    .map_err(|denied| PrError::QueueRefused {
+        pr_id: args.pr_id.clone(),
+        reason: denied.reason.code().to_string(),
+    })?;
 
     Ok(json!({
         "queued": true,
@@ -492,6 +676,104 @@ pub fn land(log: &mut EventLog, args: &LandArgs) -> Result<Value, PrError> {
         "position": position,
         "mode": LANDING_MODE,
     }))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// abandon — terminal: a PROPOSED/queued PR leaves the queue projection.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Inputs to `hugit pr abandon`.
+#[derive(Debug, Clone)]
+pub struct AbandonArgs {
+    /// PR id to abandon (`--pr <id>`).
+    pub pr_id: String,
+    /// The reason for abandoning (`--reason <text>`) — recorded on the event.
+    pub reason: String,
+    /// Unix ms to stamp the appended event with.
+    pub recorded_at: u64,
+}
+
+/// `hugit pr abandon` — terminally abandon a PR (appends `pr.abandoned`).
+///
+/// An abandoned PR leaves the queue projection (the campaign world treats
+/// `pr.abandoned` as a settled, non-in-flight PR; this verb is the porcelain
+/// that writes it). The append is routed through the D14-guarded
+/// [`EventLog::append_authorized`] under the opened PR's author class (WA2b).
+///
+/// Refusals (structured): no `pr.opened` for the id ([`PrError::AbandonUnknownPr`]),
+/// or the PR has already landed ([`PrError::AbandonLanded`] — a landed PR is
+/// terminal, not abandonable).
+///
+/// Idempotent: re-abandoning an already-abandoned PR appends no second event and
+/// returns `"already_abandoned":true` (exit 0).
+pub fn abandon(log: &mut EventLog, args: &AbandonArgs) -> Result<Value, PrError> {
+    let opened = find_pr_opened(log, &args.pr_id).ok_or_else(|| PrError::AbandonUnknownPr {
+        pr_id: args.pr_id.clone(),
+    })?;
+
+    // A landed PR is terminal — refuse to abandon it.
+    if pr_is_landed(log, &args.pr_id) {
+        return Err(PrError::AbandonLanded {
+            pr_id: args.pr_id.clone(),
+        });
+    }
+
+    // Idempotency: already abandoned → no-op, report the recorded reason.
+    if let Some(existing_reason) = find_pr_abandoned_reason(log, &args.pr_id) {
+        return Ok(abandon_json(&args.pr_id, &existing_reason, true));
+    }
+
+    let payload = format!(
+        "{{\"pr_id\":{pr},\"reason\":{reason}}}",
+        pr = json_str(&args.pr_id),
+        reason = json_str(&args.reason),
+    );
+    let (class, endpoint) = author_authz(opened.author_kind);
+    log.append_authorized(
+        class,
+        endpoint,
+        PR_ABANDONED_KIND,
+        vec![],
+        payload,
+        args.recorded_at,
+    )
+    .map_err(|denied| PrError::QueueRefused {
+        pr_id: args.pr_id.clone(),
+        reason: denied.reason.code().to_string(),
+    })?;
+
+    Ok(abandon_json(&args.pr_id, &args.reason, false))
+}
+
+/// The stable `abandon` success shape — the SAME key-set on first-run and the
+/// idempotent re-run (`already_abandoned` carries the difference).
+fn abandon_json(pr_id: &str, reason: &str, already: bool) -> Value {
+    json!({
+        "pr_id": pr_id,
+        "abandoned": true,
+        "already_abandoned": already,
+        "reason": reason,
+    })
+}
+
+/// Whether the log records this PR as LANDED (a `pr.landed` record names it).
+fn pr_is_landed(log: &EventLog, pr_id: &str) -> bool {
+    log.records()
+        .iter()
+        .filter(|r| r.kind == PR_LANDED_KIND)
+        .filter_map(|r| serde_json::from_str::<Value>(&r.payload).ok())
+        .any(|v| v.get("pr_id").and_then(Value::as_str) == Some(pr_id))
+}
+
+/// The reason recorded on this PR's `pr.abandoned`, if it has been abandoned.
+fn find_pr_abandoned_reason(log: &EventLog, pr_id: &str) -> Option<String> {
+    log.records()
+        .iter()
+        .filter(|r| r.kind == PR_ABANDONED_KIND)
+        .filter_map(|r| serde_json::from_str::<Value>(&r.payload).ok())
+        .filter(|v| v.get("pr_id").and_then(Value::as_str) == Some(pr_id))
+        .filter_map(|v| v.get("reason").and_then(Value::as_str).map(str::to_string))
+        .next_back()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -541,6 +823,93 @@ pub fn show(log: &EventLog, args: &ShowArgs) -> Result<Value, PrError> {
         "queue": queue_state,
         "cost": cost,
     }))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// list — every PR on the log, full info per row, stable order.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Inputs to `hugit pr list`.
+#[derive(Debug, Clone, Default)]
+pub struct ListArgs {
+    /// Optional campaign filter (`--campaign <key>`) — only PRs of this campaign.
+    pub campaign: Option<String>,
+    /// Optional state filter (`--state <s>`): `proposed | queued | abandoned |
+    /// landed`. An unrecognized state matches nothing (the row set is empty).
+    pub state: Option<String>,
+}
+
+/// The terminal/lifecycle state of a PR projected off the log.
+///
+/// Precedence (most-settled wins): `landed` ≻ `abandoned` ≻ `queued` ≻
+/// `proposed`. A PR is `proposed` the moment it is opened; entering the queue
+/// makes it `queued`; a `pr.abandoned` makes it `abandoned`; a `pr.landed`
+/// (the disclosed landing seam) makes it `landed`.
+fn pr_state(log: &EventLog, opened: &OpenedPr) -> &'static str {
+    if pr_is_landed(log, &opened.pr_id) {
+        "landed"
+    } else if find_pr_abandoned_reason(log, &opened.pr_id).is_some() {
+        "abandoned"
+    } else if find_pr_queued(log, &opened.pr_id).is_some() {
+        "queued"
+    } else {
+        "proposed"
+    }
+}
+
+/// `hugit pr list` — every PR on the log, one full-info row each, stable order.
+///
+/// Rows are ordered by the `pr.opened` log seq (chain order — stable and
+/// deterministic). Each row carries the SAME key-set: `pr_id`, `campaign`,
+/// `author_kind`, `intent_ids`, `intent_count`, `state`, and `position` (the
+/// queue position, or `null` when not queued). Optional `--campaign` / `--state`
+/// filters narrow the set without changing the row shape.
+pub fn list(log: &EventLog, args: &ListArgs) -> Value {
+    // Project the latest pr.opened per id, in first-seen (open seq) order.
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut ordered: Vec<OpenedPr> = Vec::new();
+    for r in log.records().iter().filter(|r| r.kind == PR_OPENED_KIND) {
+        if let Some(o) = parse_opened(r)
+            && seen.insert(o.pr_id.clone())
+        {
+            // Re-resolve to the LATEST opened for this id (robust to re-state).
+            if let Some(latest) = find_pr_opened(log, &o.pr_id) {
+                ordered.push(latest);
+            }
+        }
+    }
+
+    let rows: Vec<Value> = ordered
+        .iter()
+        .filter(|o| args.campaign.as_deref().is_none_or(|c| o.campaign == c))
+        .filter_map(|o| {
+            let state = pr_state(log, o);
+            if let Some(want) = args.state.as_deref()
+                && want != state
+            {
+                return None;
+            }
+            let position = find_pr_queued(log, &o.pr_id)
+                .map(|q| json!(q.order_index))
+                .unwrap_or(Value::Null);
+            Some(json!({
+                "pr_id": o.pr_id,
+                "campaign": o.campaign,
+                "author_kind": o.author_kind.as_str(),
+                "intent_ids": o.intent_ids,
+                "intent_count": o.intent_ids.len(),
+                "state": state,
+                "position": position,
+            }))
+        })
+        .collect();
+
+    let shown = rows.len();
+    json!({
+        "prs": rows,
+        "count": ordered.len(),
+        "shown": shown,
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

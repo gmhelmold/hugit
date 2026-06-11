@@ -29,9 +29,10 @@ use hugit_contracts::event_record::EventRecord;
 use hugit_refstore::EventLog;
 use serde_json::Value;
 
-use crate::porcelain::PORCELAIN_ERROR_EXIT;
-
-use super::{AuthorKind, LandArgs, OpenArgs, PrError, ShowArgs, land, open, show};
+use super::{
+    AbandonArgs, AuthorKind, LandArgs, ListArgs, OpenArgs, PrError, ShowArgs, abandon, land, list,
+    open, show,
+};
 
 /// `hugit pr <subcommand>` — the pull-request lifecycle (WP-PC3).
 #[derive(clap::Args, Debug)]
@@ -40,7 +41,7 @@ pub struct PrArgs {
     pub command: PrCommand,
 }
 
-/// The pr subcommand surface — `open` / `land` / `show`.
+/// The pr subcommand surface — `open` / `land` / `show` / `list` / `abandon`.
 #[derive(Subcommand, Debug)]
 pub enum PrCommand {
     /// Open a PR: bundle intents → PROPOSED (D14 author authz at the door).
@@ -49,6 +50,10 @@ pub enum PrCommand {
     Land(LandCliArgs),
     /// Show a PR: intents + queue state + the F3 `pr_record` cost rollup.
     Show(ShowCliArgs),
+    /// List every PR on the log (full info per row, stable order; filterable).
+    List(ListCliArgs),
+    /// Abandon a PR: terminal — it leaves the queue projection (idempotent).
+    Abandon(AbandonCliArgs),
 }
 
 /// `hugit pr open` flags.
@@ -107,6 +112,37 @@ pub struct ShowCliArgs {
     pr_id: String,
 }
 
+/// `hugit pr list` flags.
+#[derive(clap::Args, Debug)]
+pub struct ListCliArgs {
+    /// Path to the JSON event log (a `[EventRecord, …]` array).
+    #[arg(long)]
+    log: PathBuf,
+    /// Only PRs of this campaign (`--campaign <key>`).
+    #[arg(long)]
+    campaign: Option<String>,
+    /// Only PRs in this state: `proposed | queued | abandoned | landed`.
+    #[arg(long)]
+    state: Option<String>,
+}
+
+/// `hugit pr abandon` flags.
+#[derive(clap::Args, Debug)]
+pub struct AbandonCliArgs {
+    /// Path to the JSON event log (a `[EventRecord, …]` array).
+    #[arg(long)]
+    log: PathBuf,
+    /// PR id to abandon.
+    #[arg(long = "pr")]
+    pr_id: String,
+    /// The reason for abandoning, recorded on the `pr.abandoned` event.
+    #[arg(long)]
+    reason: String,
+    /// Unix-ms timestamp to stamp the appended `pr.abandoned` event with.
+    #[arg(long = "recorded-at", default_value_t = 0)]
+    recorded_at: u64,
+}
+
 /// A clap-parsed `--author-kind`, enforcing D14 at the door.
 ///
 /// The value parser accepts only `orchestrator` / `human`; `subagent` (or any
@@ -132,6 +168,8 @@ pub fn run(args: PrArgs) -> ExitCode {
         PrCommand::Open(a) => run_open(a),
         PrCommand::Land(a) => run_land(a),
         PrCommand::Show(a) => run_show(a),
+        PrCommand::List(a) => run_list(a),
+        PrCommand::Abandon(a) => run_abandon(a),
     }
 }
 
@@ -201,6 +239,40 @@ fn run_show(a: ShowCliArgs) -> ExitCode {
     }
 }
 
+fn run_list(a: ListCliArgs) -> ExitCode {
+    let log = match load_log(&a.log) {
+        Ok(log) => log,
+        Err(code) => return code,
+    };
+    let value = list(
+        &log,
+        &ListArgs {
+            campaign: a.campaign,
+            state: a.state,
+        },
+    );
+    emit_ok(&value)
+}
+
+fn run_abandon(a: AbandonCliArgs) -> ExitCode {
+    let mut log = match load_log(&a.log) {
+        Ok(log) => log,
+        Err(code) => return code,
+    };
+    let abandon_args = AbandonArgs {
+        pr_id: a.pr_id,
+        reason: a.reason,
+        recorded_at: a.recorded_at,
+    };
+    match abandon(&mut log, &abandon_args) {
+        Ok(value) => match persist_log(&a.log, &log) {
+            Ok(()) => emit_ok(&value),
+            Err(code) => code,
+        },
+        Err(e) => emit_error(&e),
+    }
+}
+
 // ── the `--log` seam ───────────────────────────────────────────────────────────
 
 /// Load the event log from `path` (a JSON `[EventRecord, …]` array),
@@ -244,11 +316,13 @@ fn emit_ok(value: &Value) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Emit a structured [`PrError`] as JSON on stdout, exit with the porcelain
-/// structured-error code (`2`).
+/// Emit a structured [`PrError`] as the canonical `{"error":{…}}` JSON on
+/// stdout (the WB0 one-error law, `fix`-keyed, nested), exit with the one
+/// exit-code law's structured-error code (`2`).
 fn emit_error(err: &PrError) -> ExitCode {
-    println!("{}", err.to_json());
-    ExitCode::from(PORCELAIN_ERROR_EXIT)
+    let porcelain = err.to_porcelain();
+    println!("{}", porcelain.to_json());
+    porcelain.exit_code()
 }
 
 /// Build the generic seam-fault exit code: a `hugit: error:` line on stderr and
