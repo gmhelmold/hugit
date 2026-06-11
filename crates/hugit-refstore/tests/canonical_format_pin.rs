@@ -103,6 +103,72 @@ fn canonical_json_is_order_and_whitespace_invariant() {
     assert_eq!(h1, h2);
 }
 
+/// `canonical_json` sorts keys **explicitly** (BTreeMap walk), not by relying on
+/// serde_json's ambient default object backing. Build a `serde_json::Map` in
+/// deliberately NON-sorted insertion order (the shape `preserve_order` would
+/// preserve) and assert it still canonicalises to sorted bytes — so a transitive
+/// dep enabling `preserve_order` can never diverge the hash chain.
+#[test]
+fn canonical_json_sorts_explicitly_even_for_insertion_ordered_input() {
+    use serde_json::{Map, Value};
+
+    // Construct a Value::Object via a Map populated in reverse-sorted order.
+    // (Under default features the Map is a BTreeMap and re-sorts on insert; the
+    // point of this test is that canonical_json's OWN BTreeMap walk guarantees
+    // the sort regardless of what serde_json compiled with — were preserve_order
+    // ever enabled in the graph, this insertion order would otherwise leak.)
+    let mut nested = Map::new();
+    nested.insert("z_last".to_string(), Value::from(1));
+    nested.insert("a_first".to_string(), Value::from(2));
+
+    let mut outer = Map::new();
+    outer.insert("c".to_string(), Value::Object(nested));
+    outer.insert("b".to_string(), Value::from("two"));
+    outer.insert("a".to_string(), Value::from(true));
+
+    // Serialise the insertion-ordered Value, then canonicalise that text.
+    let insertion_ordered = Value::Object(outer).to_string();
+    let canonical = canonical_json(&insertion_ordered).unwrap();
+
+    // Keys sorted at every depth, no insignificant whitespace.
+    assert_eq!(
+        canonical,
+        r#"{"a":true,"b":"two","c":{"a_first":2,"z_last":1}}"#
+    );
+
+    // And it is idempotent + order-stable against a hand-sorted authoring.
+    let hand_sorted =
+        canonical_json(r#"{"a":true,"b":"two","c":{"a_first":2,"z_last":1}}"#).unwrap();
+    assert_eq!(canonical, hand_sorted);
+}
+
+/// Byte-compat proof: the explicit canonicalisation must NOT change the pinned
+/// `this_hash` — a `pr.opened`-shaped payload canonicalised through the new
+/// BTreeMap walk chains to exactly the same digest the integration pin records.
+/// This guards against the de-feature-flagging silently shifting any byte.
+#[test]
+fn canonical_json_byte_compat_with_pinned_this_hash() {
+    // The PIN payload is already canonical; canonicalising it is a no-op and the
+    // chain hash must still equal the cross-crate pin b53e6bd8….
+    let canonical = canonical_json(PIN_PAYLOAD).expect("pin payload is valid JSON");
+    assert_eq!(
+        canonical, PIN_PAYLOAD,
+        "already-canonical input is unchanged"
+    );
+
+    let mut log = EventLog::new();
+    let rec = log.append(
+        PIN_KIND,
+        principal_chain_fixture(),
+        canonical,
+        1_717_000_000_000,
+    );
+    assert_eq!(
+        rec.this_hash, PIN_THIS_HASH_EXPECTED,
+        "explicit canonicalisation must be byte-compatible with the pinned hash"
+    );
+}
+
 /// The attestation pre-image is byte-exact, length-prefixed + vector-framed, and
 /// distinguishes inputs that share a naive concatenation (framing is unambiguous).
 #[test]

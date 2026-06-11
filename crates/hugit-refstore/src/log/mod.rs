@@ -199,13 +199,55 @@ pub fn attestation_sig_preimage(
 /// logical event. Returns `None` if the input is not valid JSON (the caller
 /// decides whether to reject or to chain the raw bytes — but a chained payload
 /// is by contract canonical JSON).
+///
+/// # Feature-proof key ordering (NOT ambient — explicit)
+///
+/// Key-sorting here does **not** rely on serde_json's default `BTreeMap`-backed
+/// object representation. That representation is feature-controlled: a single
+/// transitive dependency anywhere in the build graph that enables serde_json's
+/// `preserve_order` feature flips objects to an insertion-ordered `IndexMap`,
+/// and (because cargo features are additive + unified across the whole graph)
+/// it would do so for *this* crate too — silently diverging every `this_hash`
+/// fleet-wide without a single line of code changing here. To make that
+/// impossible, [`canonicalize_value`] walks the parsed `Value` and explicitly
+/// rebuilds every object through a [`BTreeMap`](std::collections::BTreeMap), so
+/// the serialized key order is sorted by construction regardless of which
+/// backing map serde_json compiled with. The compact `to_string` then strips
+/// insignificant whitespace. The byte output is identical to the previous
+/// default-feature path (pin: `canonical_format_pin`), so this is a hardening,
+/// not a format change.
 pub fn canonical_json(input: &str) -> Option<String> {
-    // serde_json::Value uses a BTreeMap for objects under the
-    // `preserve_order` feature being OFF (default), giving sorted keys; compact
-    // `to_string` emits no insignificant whitespace. We do not enable
-    // `preserve_order`, so this is deterministic + sorted.
     let value: serde_json::Value = serde_json::from_str(input).ok()?;
-    serde_json::to_string(&value).ok()
+    let canonical = canonicalize_value(value);
+    serde_json::to_string(&canonical).ok()
+}
+
+/// Recursively rebuild a [`serde_json::Value`] with every object's keys in
+/// sorted (`BTreeMap`) order, independent of serde_json's `preserve_order`
+/// feature. Scalars pass through unchanged; arrays preserve element order
+/// (arrays are ordered by JSON semantics) but each element is canonicalised.
+///
+/// This is the feature-proofing core of [`canonical_json`]: by routing every
+/// object through a `BTreeMap`, sorted key order is guaranteed by the data
+/// structure rather than inherited from an ambient cargo feature.
+fn canonicalize_value(value: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    use std::collections::BTreeMap;
+    match value {
+        Value::Object(map) => {
+            // BTreeMap sorts keys lexicographically by the same byte ordering
+            // serde_json's default object emits; rebuilding through it pins the
+            // order explicitly. Re-collect into a serde_json::Map so the result
+            // is a Value::Object whatever backing map serde_json compiled with.
+            let sorted: BTreeMap<String, Value> = map
+                .into_iter()
+                .map(|(k, v)| (k, canonicalize_value(v)))
+                .collect();
+            Value::Object(sorted.into_iter().collect())
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(canonicalize_value).collect()),
+        scalar => scalar,
+    }
 }
 
 /// The append-only, hash-chained event log for one repository.
@@ -240,6 +282,33 @@ impl std::fmt::Display for AppendError {
 }
 
 impl std::error::Error for AppendError {}
+
+/// Returned by [`EventLog::append_authorized`] when the D14 matrix denies the
+/// mutation. The requested event was **not** appended; the carried `audit`
+/// record is the `authz.denied` event that *was* appended (③) so the denial is
+/// attributable. Carries the [`DenyReason`](crate::authz::DenyReason) for the
+/// caller to map to its own structured error.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AuthzDenied {
+    /// Why the mutation was denied.
+    pub reason: crate::authz::DenyReason,
+    /// The `authz.denied` audit record that was appended for this denial.
+    /// Boxed to keep the error variant small (clippy `result_large_err`).
+    pub audit: Box<EventRecord>,
+}
+
+impl std::fmt::Display for AuthzDenied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "authorization denied ({}): the mutation was not appended (audited as {})",
+            self.reason.code(),
+            crate::authz::AUTHZ_DENIED_KIND
+        )
+    }
+}
+
+impl std::error::Error for AuthzDenied {}
 
 impl EventLog {
     /// A fresh, empty log.
@@ -281,6 +350,18 @@ impl EventLog {
     ///
     /// This is the only mutating primitive in the WP. It never rewrites an
     /// existing record.
+    ///
+    /// # TRUSTED append — bypasses the D14 authorization guard
+    ///
+    /// This raw entry point performs **no authorization**. It is the trusted
+    /// primitive used by (a) internal machinery that has already authorized or
+    /// is not a user-facing mutation verb (replay rehydration, the audit-record
+    /// emit inside [`append_authorized`]/[`crate::authz::AuditedGuard`] itself,
+    /// fixtures, golden pins), and (b) emitters whose principal is system-fixed.
+    /// User-facing **mutating forge verbs** (`pr open`/`land`, `push`, `undo`,
+    /// `policy`) MUST route through [`append_authorized`](EventLog::append_authorized)
+    /// so the D14 matrix gates the mutation and denials are audited. Calling this
+    /// directly for a guarded verb is the bypass S3 flagged — don't.
     pub fn append(
         &mut self,
         kind: impl Into<String>,
@@ -306,6 +387,54 @@ impl EventLog {
         };
         self.records.push(record.clone());
         record
+    }
+
+    /// Append a mutating-verb event **through the D14 authorization guard**.
+    ///
+    /// This is the guarded entry point that makes the D14 matrix unbypassable on
+    /// the mutation path. The caller names the mutating [`Endpoint`](crate::authz::Endpoint)
+    /// and the **asserted** [`PrincipalClass`](crate::authz::PrincipalClass) of
+    /// the actor driving it; the class is checked against the frozen permission
+    /// matrix ([`authorize_class`](crate::authz::authorize_class)):
+    ///
+    /// - **Allow** → the real event is appended (raw [`append`](EventLog::append))
+    ///   and the [`EventRecord`] returned.
+    /// - **Deny** → the event is **not** appended; instead an `authz.denied`
+    ///   audit record is appended (③ — the denial is attributable, never silent)
+    ///   and an [`AuthzDenied`] error is returned carrying the reason and the
+    ///   audit record.
+    ///
+    /// The asserted class is **caller-supplied** until identity rollout binds it
+    /// to an authenticated principal (the disclosed seam — see the
+    /// [`authz`](crate::authz) module doc). The matrix decision itself is real and
+    /// enforced here on the only mutating primitive.
+    pub fn append_authorized(
+        &mut self,
+        class: crate::authz::PrincipalClass,
+        endpoint: crate::authz::Endpoint,
+        kind: impl Into<String>,
+        principal_chain: Vec<String>,
+        payload: impl Into<String>,
+        recorded_at: u64,
+    ) -> Result<EventRecord, AuthzDenied> {
+        use crate::authz::{Decision, authorize_class, denial_payload};
+        match authorize_class(class, endpoint) {
+            Decision::Allow => Ok(self.append(kind, principal_chain, payload, recorded_at)),
+            Decision::Deny(reason) => {
+                // Audit the denial (③) via the trusted primitive — the audit
+                // record is system-emitted, not a user mutation.
+                let audit = self.append(
+                    crate::authz::AUTHZ_DENIED_KIND,
+                    principal_chain,
+                    denial_payload(endpoint, &reason),
+                    recorded_at,
+                );
+                Err(AuthzDenied {
+                    reason,
+                    audit: Box::new(audit),
+                })
+            }
+        }
     }
 
     /// Append a pre-formed [`EventRecord`] (e.g. rehydrated from storage),
