@@ -21,6 +21,7 @@
 pub mod campaign;
 pub mod checks;
 pub mod export;
+pub mod ident;
 pub mod impact;
 pub mod intent;
 pub mod porcelain;

@@ -124,12 +124,17 @@ pub fn run(input: NewIntent, store_path: &Path) -> Result<NewResult, PorcelainEr
             "pass a non-empty --charter describing what the intent does",
         ));
     }
-    if input.campaign.trim().is_empty() {
-        return Err(PorcelainError::new(
-            "invalid_argument",
-            "campaign is empty",
-            "pass --campaign <key> binding the intent to a campaign",
-        ));
+    // WH-IDENT: validate --campaign as an identifier (empty + secret-prefix check).
+    // Keeps the existing empty-campaign guard but broadens it to the shared validator
+    // that also catches credential-shaped values.
+    crate::ident::validate_identifier(&input.campaign, "--campaign")
+        .map_err(|e| PorcelainError::new(e.kind, e.message, e.fix))?;
+
+    // WH-IDENT: validate the explicit --id, when given.  Auto-derived ids are
+    // content-hashed by this module (not user input), so they need no check.
+    if let Some(id) = &input.id {
+        crate::ident::validate_identifier(id, "--id")
+            .map_err(|e| PorcelainError::new(e.kind, e.message, e.fix))?;
     }
 
     // Redaction parity (Wave E, P-REDACT-SURFACE): scrub every user-supplied
