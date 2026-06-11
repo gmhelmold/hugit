@@ -12,6 +12,17 @@ use super::output::CampaignError;
 use super::world::{KIND_CAMPAIGN_OPENED, World, append_authorized_and_persist};
 
 pub fn run(args: OpenArgs) -> Result<String, CampaignError> {
+    // WH-IDENT: validate identifier fields at entry — BEFORE they reach the
+    // hash-chained forever-log.  Identifiers are addresses, not free text;
+    // WH-SCRUB exempts them from the scrub engine, so the safety MUST live here.
+    // Reject empty and known-credential-prefix shapes (ghp_/gho_/ghs_/
+    // github_pat_/sk-/AKIA/eyJ/-----BEGIN/conn-string) with exit-2 structured
+    // errors.  Bare 40/64-hex keys are legitimate addresses and are allowed.
+    crate::ident::validate_identifier(&args.campaign, "--campaign")
+        .map_err(|e| CampaignError::new(e.kind, e.message, e.fix))?;
+    crate::ident::validate_identifier(&args.owner, "--owner")
+        .map_err(|e| CampaignError::new(e.kind, e.message, e.fix))?;
+
     // Lock BEFORE the load and hold it across the whole load→mutate→persist
     // (WF-CLI2 bug 2: the load→lock inversion). `open` bootstraps a missing
     // `--log` (an absent log is a legitimate fresh empty world), so it loads

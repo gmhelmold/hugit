@@ -186,6 +186,28 @@ pub fn run(args: PrArgs) -> ExitCode {
 }
 
 fn run_open(a: OpenCliArgs) -> ExitCode {
+    // WH-IDENT: validate identifier fields at entry — before they reach the
+    // hash-chained forever-log.  Rejects empty and known-credential-prefix shapes.
+    // Bare 40/64-hex keys are legitimate addresses and are allowed.
+    if let Err(e) = crate::ident::validate_identifier(&a.pr_id, "--pr") {
+        return emit_porcelain(&crate::porcelain::PorcelainError::new(
+            e.kind, e.message, e.fix,
+        ));
+    }
+    if let Err(e) = crate::ident::validate_identifier(&a.campaign, "--campaign") {
+        return emit_porcelain(&crate::porcelain::PorcelainError::new(
+            e.kind, e.message, e.fix,
+        ));
+    }
+    // --run-id is optional; only validate it when the caller passes a non-None value.
+    if let Some(run_id) = &a.run_id {
+        if let Err(e) = crate::ident::validate_identifier(run_id, "--run-id") {
+            return emit_porcelain(&crate::porcelain::PorcelainError::new(
+                e.kind, e.message, e.fix,
+            ));
+        }
+    }
+
     // D14 at the door: validate `--author-kind`, emitting the structured
     // `subagent_author` error (with fix) on stdout for any non-accepted value.
     let author_kind = match AuthorKind::parse(&a.author_kind.0) {
