@@ -3,24 +3,26 @@
 > **From:** hugit TechLead · **Date:** 2026-06-11 · **Status:** OPEN, owner-gated
 > **Supersedes scope of:** `docs/handoff/2026-06-08-corelink-p2-tenant-request.md`
 > (the tenant-provisioning request) — that doc stands; this one **adds the six
-> live-infra seams** that three adversarial audit rounds proved are the *only*
+> live-infra seams** that four adversarial audit rounds proved are the *only*
 > things standing between hugit and a shippable production forge.
 >
 > **Read this first if you read nothing else (§0).** Everything below is
 > evidence-driven: each ask cites the adversarial finding that proves hugit
 > cannot close it from the code side. Nothing here waits on hugit — §9 shows
 > every hugit-side seam is built, hermetically proven, and `NotWired`-gated,
-> waiting only for the values you hand back.
+> waiting only for the values you hand back. Round 4 ran 2026-06-11; the
+> wedge EXECUTE path is being hardened in Wave H.
 
 ---
 
 ## 0. Executive summary — what I need, in one screen
 
-hugit's engine is **code-complete and adversarially hardened**: three fresh-context
+hugit's engine is **code-complete; adversarial hardening is ongoing (Round 4
+complete, Wave H remediating, Round 5 pending)**: four fresh-context
 7-agent refutation rounds (`docs/review/2026-06-11-adversarial-round-1.md`,
-`-round-2.md`, `-round-3.md`) confirmed the integrity spine (hash-chained log,
-D14 authz, redaction, money) holds; the spine held through all three rounds;
-Wave G hardens the wedge wave (Round 3 findings). The rounds + a full live-seam inventory
+`-round-2.md`, `-round-3.md`, `-round-4.md`) confirmed the integrity spine
+(hash-chained log, D14 authz, redaction, money) holds; the spine held through
+all four rounds; Wave H hardens the wedge EXECUTE path (Round 4 findings). The rounds + a full live-seam inventory
 (`docs/interop.md`, whitepaper §5 truth-table, every `NotWired` code site)
 establish that hugit's path to a **production** forge is gated entirely on
 CoreLink infrastructure. This document enumerates **literally all of it** — the
@@ -49,14 +51,14 @@ hardening that ride the same tenant, **C** on the identity timeline (ADR-0002).
 ## 1. Context — why these six, why now
 
 The hugit thesis is *memoize by content, price flat; agent work is legible and
-accountable*. Two audit rounds confirmed the **legible/accountable** half is
-built: envelopes capture, the Ledger rolls up cost, provenance is signed, the
-log is tamper-evident. But the rounds also reproduced, on the live binary, that
-the **memoize** half — the wedge a customer pays for — is **invisible end-to-end**
-because the cache it reads has no live transport (Seam A). Separately they
-showed two *correctness-of-claim* gaps: we advertise right-to-erasure and
-authenticated authorship, and both are honest-stubbed pending your infra
-(Seams B, C).
+accountable*. Four fresh-context refutation rounds confirmed the
+**legible/accountable** half is built: envelopes capture, the Ledger rolls up
+cost, provenance is signed, the log is tamper-evident. But the rounds also
+reproduced, on the live binary, that the **memoize** half — the wedge a
+customer pays for — is **invisible end-to-end** because the cache it reads has
+no live transport (Seam A). Separately they showed two *correctness-of-claim*
+gaps: we advertise right-to-erasure and authenticated authorship, and both are
+honest-stubbed pending your infra (Seams B, C).
 
 These are not hugit defects. They are the disclosed live-infra boundary the
 whitepaper always named (AC/CAS · runners · identity). This document converts
