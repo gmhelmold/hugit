@@ -146,13 +146,39 @@ fn import_sidecar_authorized(
         .and_then(|id| PrincipalClass::classify(id))
         .unwrap_or(PrincipalClass::Worker);
 
-    // Build the intent.landed payload (same shape import_sidecar uses).
-    let payload = serde_json::json!({
-        "intent_id": sidecar.intent_id,
-        "ref": ref_name,
-        "target": target,
-        "charter": sidecar.charter,
-    })
+    // Extract the campaign key from the principal chain: `intent new` stamps
+    // `campaign:<key>` as the first entry (before `agent:<type>`). The ledger
+    // keys `intent.landed` entries by this field; an absent campaign falls back
+    // to "default" in the ledger, which makes `by_campaign(key)` find nothing
+    // and leaves `proven` stuck at 0 (B3). Including it here — extracted from
+    // the principal_chain the caller already stamped — ensures the ledger files
+    // the entry under the correct campaign.
+    let campaign = principal_chain
+        .iter()
+        .find(|s| s.starts_with("campaign:"))
+        .and_then(|s| s.strip_prefix("campaign:"))
+        .unwrap_or("")
+        .to_string();
+
+    // Build the intent.landed payload. Carries `campaign` so the ledger files
+    // the entry under the correct campaign key (B3 fix: previously omitted,
+    // causing by_campaign(key) to return nothing and proven to stay 0).
+    let payload = if campaign.is_empty() {
+        serde_json::json!({
+            "intent_id": sidecar.intent_id,
+            "ref": ref_name,
+            "target": target,
+            "charter": sidecar.charter,
+        })
+    } else {
+        serde_json::json!({
+            "intent_id": sidecar.intent_id,
+            "ref": ref_name,
+            "target": target,
+            "charter": sidecar.charter,
+            "campaign": campaign,
+        })
+    }
     .to_string();
 
     // Route through append_authorized (Endpoint::Push — always Allow; guard

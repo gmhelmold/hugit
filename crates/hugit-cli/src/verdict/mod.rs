@@ -212,8 +212,33 @@ fn record(args: VerdictArgs) -> Result<Value, PorcelainError> {
     let _lock = FileLock::acquire(path).map_err(|e| lock_error(e, path))?;
     let log = load_event_log(path)?;
 
-    // ── Idempotency check ─────────────────────────────────────────────────────
+    // ── Intent existence guard (B2) ───────────────────────────────────────────
+    // Validate the referenced intent exists on the log as an `intent.landed`
+    // record, but ONLY when the log has intent vocabulary at all (at least one
+    // `intent.landed` record). A log with no intent records stays permissive —
+    // it may be a pre-intent log or a tests-only log that never lands intents.
+    // A log that DOES carry intent.landed records but has none for this id is a
+    // ghost: reject with `intent_not_found` / exit-2.
     let intent = &args.intent;
+    let has_any_intent_landed = log
+        .records()
+        .iter()
+        .any(|r| r.kind == hugit_refstore::intent::INTENT_LANDED_KIND);
+    if has_any_intent_landed && !intent_is_on_log(&log, intent) {
+        return Err(PorcelainError::new(
+            "intent_not_found",
+            format!(
+                "no intent.landed record for intent '{intent}' on the log: cannot record a \
+                 verdict for a nonexistent intent"
+            ),
+            "run `hugit intent new --log <path> --id <id> …` first, or check the \
+             --intent id is spelled correctly",
+        )
+        .with_context("intent", json!(intent))
+        .with_context("log", json!(path.display().to_string())));
+    }
+
+    // ── Idempotency check ─────────────────────────────────────────────────────
     if let Some(existing) = find_existing_verdict(&log, intent, &lens_verdicts) {
         return Ok(json!({
             "verdict_recorded": true,
@@ -373,6 +398,28 @@ fn find_existing_verdict(
             aggregate_json,
         }
     })
+}
+
+/// Check whether an `intent.landed` record for `intent_id` exists on the log.
+///
+/// Used by the existence guard (B2): a log that carries at least one
+/// `intent.landed` record MUST also carry one for the requested intent, or the
+/// verdict is refused with `intent_not_found`. A log with no `intent.landed`
+/// records at all is permissive — the vocabulary is absent, not wrong.
+fn intent_is_on_log(log: &hugit_refstore::EventLog, intent_id: &str) -> bool {
+    log.records()
+        .iter()
+        .filter(|r| r.kind == hugit_refstore::intent::INTENT_LANDED_KIND)
+        .any(|r| {
+            serde_json::from_str::<serde_json::Value>(&r.payload)
+                .ok()
+                .and_then(|v| {
+                    v.get("intent_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(|id| id == intent_id)
+                })
+                .unwrap_or(false)
+        })
 }
 
 /// Map a [`LockError`] into a structured [`PorcelainError`].
