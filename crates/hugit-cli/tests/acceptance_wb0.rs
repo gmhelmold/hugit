@@ -8,8 +8,9 @@
 //!   ② the input-error law: a missing `--log` FILE is an explicit
 //!      `log_not_found` (never silently an empty world), a malformed/truncated
 //!      `--log` file is `parse_log` — both exit `2`;
-//!   ③ the `checks`/`queue` wedge verbs are wired and return the honest
-//!      NOT-IMPLEMENTED envelope (`wp:"WB2"`), exit `2`.
+//!   ③ the `checks`/`queue` wedge verbs are wired and LIVE under the same law
+//!      (WB2 retired the NOT-IMPLEMENTED stub; the exhaustive wedge behavior is
+//!      pinned in `acceptance_wb2.rs`).
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -221,40 +222,58 @@ fn export_missing_log_is_log_not_found() {
     assert_canonical_error(&String::from_utf8_lossy(&out.stdout), "log_not_found");
 }
 
-// ── ③ the wedge stubs are wired + honest NOT-IMPLEMENTED ─────────────────────
+// ── ③ the wedge verbs are wired + LIVE (WB2 retired the NOT-IMPLEMENTED stub) ──
+//
+// WB0 landed `checks`/`queue` as honest NOT-IMPLEMENTED stubs and pinned that
+// here; WB2 filled the projection over the real engine seams, so these guards
+// now assert the verbs are LIVE under the same one-error/one-exit law (a missing
+// `--log` resolves to the canonical `log_not_found`, never a fake success). The
+// exhaustive wedge behavior is pinned in `acceptance_wb2.rs`.
 
 #[test]
-fn checks_show_is_not_implemented_stub() {
+fn checks_show_is_live_under_the_one_error_law() {
     let out = Command::new(hugit_bin())
-        .args(["checks", "show", "--log", "/tmp/whatever.json"])
+        .args(["checks", "show", "--log", "/tmp/wb0-no-such.json"])
         .output()
         .expect("hugit runs");
     assert_exit_two(&out);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let v = assert_canonical_error(&stdout, "not_implemented");
-    assert_eq!(v["error"]["wp"], "WB2");
+    assert_canonical_error(&stdout, "log_not_found");
 }
 
 #[test]
-fn checks_key_is_not_implemented_stub() {
+fn checks_key_is_live_and_computes_the_engine_memo_key() {
     let out = Command::new(hugit_bin())
-        .args(["checks", "key", "--log", "/tmp/whatever.json"])
+        .args([
+            "checks",
+            "key",
+            "--tree",
+            "aa",
+            "--def",
+            "bb",
+            "--toolchain",
+            "cc",
+        ])
         .output()
         .expect("hugit runs");
-    assert_exit_two(&out);
+    assert!(
+        out.status.success(),
+        "checks key is a pure computation, exit 0"
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).expect("stable JSON");
     assert_eq!(
-        assert_canonical_error(&String::from_utf8_lossy(&out.stdout), "not_implemented")["error"]["wp"],
-        "WB2"
+        v["memo_key"],
+        hugit_refstore::compute_memo_key("aa", "bb", "cc")
     );
 }
 
 #[test]
-fn queue_show_is_not_implemented_stub() {
+fn queue_show_is_live_under_the_one_error_law() {
     let out = Command::new(hugit_bin())
-        .args(["queue", "show", "--log", "/tmp/whatever.json"])
+        .args(["queue", "show", "--log", "/tmp/wb0-no-such.json"])
         .output()
         .expect("hugit runs");
     assert_exit_two(&out);
-    let v = assert_canonical_error(&String::from_utf8_lossy(&out.stdout), "not_implemented");
-    assert_eq!(v["error"]["wp"], "WB2");
+    assert_canonical_error(&String::from_utf8_lossy(&out.stdout), "log_not_found");
 }
