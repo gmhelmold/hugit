@@ -456,9 +456,19 @@ fn ac_trait_store_then_hit_roundtrip_in_memory() {
     assert!(ac.is_empty());
 
     let runner = CountingRunner::new();
-    let key = derive_memo_key(&def_a(), as_refs(&tree_base()), TOOLCHAIN_A);
+    // The stored record's axes must be SELF-CONSISTENT with its memo_key — a
+    // real CheckResult always carries the exact tree_root/def_digest the key was
+    // derived from (production builds it that way). The AC's `verify_hit` guard
+    // (content-address integrity) recomputes compute_memo_key(axes) and rejects
+    // any record whose axes don't hash to its key, so the fixture passes the
+    // REAL axes here, not placeholders.
+    let def = def_a();
+    let tree = tree_base();
+    let tree_root = scoped_tree_root(&def.glob_set, as_refs(&tree));
+    let def_digest = compute_def_digest(&def);
+    let key = derive_memo_key(&def, as_refs(&tree), TOOLCHAIN_A);
     let result = runner
-        .run(&def_a(), &key, "tree", "def", TOOLCHAIN_A)
+        .run(&def, &key, &tree_root, &def_digest, TOOLCHAIN_A)
         .unwrap();
 
     assert_eq!(ac.lookup(&key).unwrap(), None, "cold lookup is a MISS");
