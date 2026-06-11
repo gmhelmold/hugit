@@ -58,7 +58,15 @@ fn campaign_open_empty_campaign_key_is_exit2_invalid_argument() {
     let log_s = log.to_str().unwrap();
 
     let (code, v) = run(&[
-        "campaign", "open", "--log", log_s, "--campaign", "", "--charter", "c", "--owner",
+        "campaign",
+        "open",
+        "--log",
+        log_s,
+        "--campaign",
+        "",
+        "--charter",
+        "c",
+        "--owner",
         "o@h.com",
     ]);
     assert_eq!(
