@@ -36,8 +36,8 @@ use serde_json::Value;
 
 use super::filelock::{self, FileLock, LockError};
 use super::{
-    AbandonArgs, AuthorKind, LandArgs, ListArgs, OpenArgs, PrError, ShowArgs, abandon, land, list,
-    open, show,
+    AbandonArgs, AuthorKind, LandArgs, ListArgs, OpenArgs, PrError, SettleArgs, ShowArgs, abandon,
+    land, list, open, settle, show,
 };
 
 /// `hugit pr <subcommand>` — the pull-request lifecycle (WP-PC3).
@@ -102,7 +102,13 @@ pub struct LandCliArgs {
     /// PR id to land.
     #[arg(long = "pr")]
     pr_id: String,
-    /// Unix-ms timestamp to stamp the appended `pr.queued` event with.
+    /// Settle the (already-queued) PR as LANDED — the explicit land-confirm
+    /// step that appends `pr.landed` (W-PRLANDED). Without it, `land` enqueues
+    /// (`pr.queued`); with it, a queued PR settles terminal-landed. Does NOT run
+    /// the P2 union-test verdict — it is the operator/orchestrator confirmation.
+    #[arg(long = "settle", default_value_t = false)]
+    settle: bool,
+    /// Unix-ms timestamp to stamp the appended `pr.queued`/`pr.landed` event with.
     #[arg(long = "recorded-at", default_value_t = 0)]
     recorded_at: u64,
 }
@@ -233,11 +239,27 @@ fn run_land(a: LandCliArgs) -> ExitCode {
         Ok(log) => log,
         Err(code) => return code,
     };
-    let land_args = LandArgs {
-        pr_id: a.pr_id,
-        recorded_at: a.recorded_at,
+    // `--settle` is the land-confirm settlement step (appends `pr.landed`);
+    // without it, `land` enqueues (`pr.queued`). Both run through the SAME
+    // guarded append + atomic-lock + persist seam.
+    let result = if a.settle {
+        settle(
+            &mut log,
+            &SettleArgs {
+                pr_id: a.pr_id,
+                recorded_at: a.recorded_at,
+            },
+        )
+    } else {
+        land(
+            &mut log,
+            &LandArgs {
+                pr_id: a.pr_id,
+                recorded_at: a.recorded_at,
+            },
+        )
     };
-    match land(&mut log, &land_args) {
+    match result {
         Ok(value) => match persist_log(&a.log, &log) {
             Ok(()) => emit_ok(&value),
             Err(code) => code,

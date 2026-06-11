@@ -72,9 +72,25 @@ pub const PR_QUEUED_KIND: &str = "pr.queued";
 /// JSON): `{"pr_id","reason"}`. Routed through the D14-guarded append.
 pub const PR_ABANDONED_KIND: &str = "pr.abandoned";
 
-/// Event kind: a PR settled as LANDED (terminal). The pr porcelain does not
-/// emit it (the landing seam settles it), but `abandon` refuses to abandon a
-/// PR the log already records as landed — abandoning a landed PR is a refusal.
+/// Event kind: a PR settled as LANDED (terminal). Emitted by `pr land --settle`
+/// — the explicit land-confirm settlement step (W-PRLANDED). `abandon` refuses
+/// to abandon a PR the log already records as landed (abandoning a landed PR is
+/// a refusal), and the campaign world projects a `pr.landed` PR as `landed`
+/// (out of the in-flight set, so `campaign close` reaches `closed:true`).
+///
+/// # Settlement honesty (P2 disclosed seam — not a faked union-test verdict)
+///
+/// `pr land --settle` requires the PR to be queued first (it is the
+/// land-confirm over a PR that has entered the queue) and then records the
+/// settlement. It does NOT run the union-test / queue disjointness verdict that
+/// the B3 engine arbitrates over real tree hashes — that arbitration is the P2
+/// live-infra seam (see [`land`]). So `--settle` is the explicit operator/
+/// orchestrator confirmation that the PR has landed; AUTOMATIC settlement
+/// (emit `pr.landed` the moment the queue verdict says the batch is disjoint
+/// and green) awaits that P2 queue-verdict seam. The porcelain never fabricates
+/// a union-test result. The payload carries `{"campaign","pr_id"}` (the
+/// campaign is recovered from the PR's `pr.opened`) so the campaign world
+/// scopes the settlement to the right campaign.
 pub const PR_LANDED_KIND: &str = "pr.landed";
 
 /// Event kind a `hugit campaign open` writes (the campaign module's own
@@ -218,6 +234,12 @@ pub enum PrError {
         /// The PR id.
         pr_id: String,
     },
+    /// `land --settle` was asked to settle a PR that has not entered the queue
+    /// (`pr land` first). Settlement is the land-confirm over a *queued* PR.
+    SettleNotQueued {
+        /// The PR id.
+        pr_id: String,
+    },
 }
 
 impl PrError {
@@ -236,6 +258,7 @@ impl PrError {
             PrError::UnknownCampaign { .. } => "unknown_campaign",
             PrError::AbandonUnknownPr { .. } => "unknown_pr",
             PrError::AbandonLanded { .. } => "pr_already_landed",
+            PrError::SettleNotQueued { .. } => "pr_not_queued",
         }
     }
 
@@ -343,6 +366,15 @@ impl PrError {
                 self.code(),
                 format!("pr '{pr_id}' has already landed — a landed PR cannot be abandoned"),
                 "a landed PR is terminal; nothing to abandon",
+            )
+            .with_context("pr_id", json!(pr_id)),
+            PrError::SettleNotQueued { pr_id } => PorcelainError::new(
+                self.code(),
+                format!(
+                    "pr '{pr_id}' has not entered the landing queue — settle is the \
+                     land-confirm over a queued PR"
+                ),
+                format!("hugit pr land --pr {pr_id} first, then --settle"),
             )
             .with_context("pr_id", json!(pr_id)),
         }
@@ -698,6 +730,100 @@ pub fn land(log: &mut EventLog, args: &LandArgs) -> Result<Value, PrError> {
         "position": position,
         "mode": LANDING_MODE,
     }))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// settle — terminal: a queued PR settles as LANDED (the `pr land --settle` step).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Inputs to `hugit pr land --settle`.
+#[derive(Debug, Clone)]
+pub struct SettleArgs {
+    /// PR id to settle as landed (`--pr <n>`).
+    pub pr_id: String,
+    /// Unix ms to stamp the appended event with.
+    pub recorded_at: u64,
+}
+
+/// `hugit pr land --settle` — settle a queued PR as **landed** (appends
+/// `pr.landed`, the terminal settlement event the campaign world projects to
+/// the `landed` phase).
+///
+/// This is the explicit land-confirm settlement step (W-PRLANDED): it is the
+/// producer the campaign progress projection needs to advance a PR past
+/// in-flight to `landed`, so a campaign whose PRs all landed can `campaign
+/// close` to `closed:true` driven by REAL `pr.landed` (not only by `abandon`).
+///
+/// # Settlement honesty (P2 disclosed seam — see [`PR_LANDED_KIND`])
+///
+/// `--settle` does NOT run the B3 union-test / disjointness verdict over real
+/// tree hashes (that arbitration is the P2 live-infra seam — see [`land`]). It
+/// is the operator/orchestrator's explicit confirmation that the PR (already in
+/// the landing queue) has landed; automatic settlement off the queue verdict
+/// awaits P2. It never fabricates a union-test result.
+///
+/// Pre-conditions:
+/// - the PR must have a `pr.opened` ([`PrError::UnknownPr`] otherwise);
+/// - the PR must already be queued ([`PrError::SettleNotQueued`] otherwise —
+///   settle is the land-confirm over a queued PR; `pr land` enqueues first).
+///
+/// Idempotent: re-settling an already-landed PR appends no second event and
+/// returns `"already_landed":true` (exit 0). The append is routed through the
+/// SAME D14-guarded [`EventLog::append_authorized`] seam (under the opened PR's
+/// author class — orchestrator/human) `pr land`/`pr open` use.
+pub fn settle(log: &mut EventLog, args: &SettleArgs) -> Result<Value, PrError> {
+    let opened = find_pr_opened(log, &args.pr_id).ok_or_else(|| PrError::UnknownPr {
+        pr_id: args.pr_id.clone(),
+    })?;
+
+    // Idempotency: already landed → no-op, report the settled state.
+    if pr_is_landed(log, &args.pr_id) {
+        return Ok(settle_json(&args.pr_id, &opened.campaign, true));
+    }
+
+    // Settle is the land-confirm over a QUEUED PR: it must have entered the
+    // queue (via `pr land`) first.
+    if find_pr_queued(log, &args.pr_id).is_none() {
+        return Err(PrError::SettleNotQueued {
+            pr_id: args.pr_id.clone(),
+        });
+    }
+
+    // The `pr.landed` payload carries the campaign (recovered from the PR's
+    // `pr.opened`) so the campaign world scopes the settlement to this campaign
+    // — unlike `pr.abandoned`, the world matches `pr.landed` by campaign field.
+    let payload = format!(
+        "{{\"campaign\":{camp},\"pr_id\":{pr}}}",
+        camp = json_str(&opened.campaign),
+        pr = json_str(&args.pr_id),
+    );
+    let (class, endpoint) = author_authz(opened.author_kind);
+    log.append_authorized(
+        class,
+        endpoint,
+        PR_LANDED_KIND,
+        vec![],
+        payload,
+        args.recorded_at,
+    )
+    .map_err(|denied| PrError::QueueRefused {
+        pr_id: args.pr_id.clone(),
+        reason: denied.reason.code().to_string(),
+    })?;
+
+    Ok(settle_json(&args.pr_id, &opened.campaign, false))
+}
+
+/// The stable `settle` success shape — the SAME key-set on first-run and the
+/// idempotent re-run (`already_landed` carries the difference).
+fn settle_json(pr_id: &str, campaign: &str, already: bool) -> Value {
+    json!({
+        "pr_id": pr_id,
+        "campaign": campaign,
+        "landed": true,
+        "already_landed": already,
+        "state": "landed",
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
