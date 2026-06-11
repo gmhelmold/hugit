@@ -51,6 +51,7 @@ use hugit_ledger::rollup::{PrQueueInput, pr_record};
 use hugit_queue::core::affected::AffectedSet;
 use hugit_queue::core::batch::Batch;
 use hugit_refstore::EventLog;
+use hugit_refstore::intent::intents_from_log;
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -157,6 +158,18 @@ pub enum PrError {
         /// The PR id.
         pr_id: String,
     },
+    /// `open` referenced `--intent` ids the shared canonical log does NOT carry.
+    ///
+    /// Validation fires only when the log already carries at least one landed
+    /// intent (the seam is in use); an intent-less log opts out, so an
+    /// intent-less fixture stays valid. Names the missing ids so the agent can
+    /// `hugit intent new --log` them first.
+    MissingIntents {
+        /// The PR id being opened.
+        pr_id: String,
+        /// The `--intent` ids not present on the log.
+        missing: Vec<String>,
+    },
 }
 
 impl PrError {
@@ -169,6 +182,7 @@ impl PrError {
             PrError::EmptyPr { .. } => "empty_pr",
             PrError::QueueRefused { .. } => "queue_refused",
             PrError::NotFound { .. } => "pr_not_found",
+            PrError::MissingIntents { .. } => "missing_intents",
         }
     }
 
@@ -224,6 +238,20 @@ impl PrError {
                 "fix": format!("hugit pr open --pr {pr_id} … to create it"),
                 "pr_id": pr_id,
             }),
+            PrError::MissingIntents { pr_id, missing } => json!({
+                "error": self.code(),
+                "message": format!(
+                    "pr '{pr_id}' references intent(s) not on the log: {}",
+                    missing.join(", ")
+                ),
+                "fix": format!(
+                    "land them first: hugit intent new --log <log> --campaign <key> \
+                     --charter <c> --id {} …",
+                    missing.first().map(String::as_str).unwrap_or("<id>")
+                ),
+                "pr_id": pr_id,
+                "missing_intents": missing,
+            }),
         }
     }
 }
@@ -270,6 +298,13 @@ pub struct OpenArgs {
 ///
 /// The D14 author-kind is validated by the caller via [`AuthorKind::parse`]
 /// (a `subagent` token never reaches here as a valid [`AuthorKind`]).
+///
+/// **Intent validation (PC4).** When the shared canonical log already carries at
+/// least one landed intent (the `intent new --log` seam is in use), every
+/// `--intent` id MUST be present on the log — a missing id is a
+/// [`PrError::MissingIntents`] refusal naming the gaps. An intent-less log opts
+/// out (an intent-less fixture stays valid), so the check never breaks a log
+/// that does not yet use the intent seam.
 pub fn open(log: &mut EventLog, args: &OpenArgs) -> Result<Value, PrError> {
     // Idempotency: look for an existing pr.opened for this id.
     if let Some(existing) = find_pr_opened(log, &args.pr_id) {
@@ -284,12 +319,48 @@ pub fn open(log: &mut EventLog, args: &OpenArgs) -> Result<Value, PrError> {
         return Ok(open_json(&existing, true));
     }
 
+    validate_intents(log, args)?;
+
     let principal_chain = author_principal_chain(args.author_kind, &args.run_id, &args.principal);
     let payload = canonical_open_payload(args);
     log.append(PR_OPENED_KIND, principal_chain, payload, args.recorded_at);
 
     let opened = find_pr_opened(log, &args.pr_id).expect("pr.opened was just appended for this id");
     Ok(open_json(&opened, false))
+}
+
+/// Validate that the PR's `--intent` ids exist on the shared canonical log.
+///
+/// Opt-out by design: if the log carries NO landed intents, the `intent new
+/// --log` seam is not in use and any `--intent` ids are accepted (an
+/// intent-less fixture log stays valid). Once the log carries at least one
+/// intent, every referenced id MUST be present — a gap is a structured
+/// [`PrError::MissingIntents`] (naming the missing ids + a suggested fix).
+fn validate_intents(log: &EventLog, args: &OpenArgs) -> Result<(), PrError> {
+    let projected = match intents_from_log(log) {
+        Ok(p) => p,
+        // A malformed intent.landed payload is a log fault, not a PR refusal;
+        // skip validation rather than mis-attribute it to this open.
+        Err(_) => return Ok(()),
+    };
+    if projected.is_empty() {
+        // The intent seam is not in use on this log — opt out of validation.
+        return Ok(());
+    }
+    let missing: Vec<String> = args
+        .intent_ids
+        .iter()
+        .filter(|id| projected.by_id(id).is_none())
+        .cloned()
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(PrError::MissingIntents {
+            pr_id: args.pr_id.clone(),
+            missing,
+        })
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

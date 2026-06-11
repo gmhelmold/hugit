@@ -1,11 +1,15 @@
 //! Acceptance — WP-PC1: `hugit campaign open / close / show`.
 //!
-//! Drives the REAL `hugit` binary (`CARGO_BIN_EXE_hugit`) over a hermetic
-//! world file. The world is built from REAL projection inputs — a real event
-//! log (un-hashed events the binary hash-chains through
-//! `hugit_refstore::EventLog::append`) plus frozen `ContextEnvelope`s (the
-//! WP-F1 shape) — never hand-faked sums; `close` drives the WP-F3
-//! `campaign_rollup` over them, exactly as `hugit-ledger`'s F3 acceptance does.
+//! Drives the REAL `hugit` binary (`CARGO_BIN_EXE_hugit`) over the **one
+//! canonical on-disk seam every porcelain verb shares** (PC4): a JSON
+//! `[EventRecord, …]` array — the engine's `hugit_refstore::EventLog` shape. The
+//! fixtures build that array by appending through the REAL
+//! `hugit_refstore::EventLog::append` (so every `this_hash` is real, never
+//! hand-faked); captured `ContextEnvelope`s ride as `pr.envelope` /
+//! `intent.envelope` / `campaign.envelope` records and PR bundles are derived
+//! from `pr.opened` records — the same records `hugit pr open` writes. `close`
+//! drives the WP-F3 `campaign_rollup` over them, exactly as `hugit-ledger`'s F3
+//! acceptance does.
 //!
 //! Proven here, per the DoD:
 //! - `open` records `campaign.opened` (charter + human owner, D14) and is
@@ -56,39 +60,74 @@ fn run(args: &[&str]) -> (bool, Value) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// World fixtures — real event log inputs + frozen envelopes
+// World fixtures — the canonical [EventRecord, …] log (PC4)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// An un-hashed event (the binary computes the hash chain).
-fn event(kind: &str, payload: Value, at: u64) -> Value {
-    json!({
-        "kind": kind,
-        "principal_chain": ["user:gustavo@humangr.com", "orchestrator:opus"],
-        "payload": payload.to_string(),
-        "recorded_at": at,
-    })
+/// One event to append: a kind + JSON payload. The principal chain is stamped
+/// by [`write_log`]; the binary/engine compute the hash chain.
+struct Ev {
+    kind: &'static str,
+    payload: Value,
 }
 
-fn pr_event(kind: &str, pr_id: &str, at: u64) -> Value {
-    event(
-        kind,
-        json!({ "pr_id": pr_id, "campaign": CAMPAIGN, "union_verdict": "green" }),
-        at,
+fn ev(kind: &'static str, payload: Value) -> Ev {
+    Ev { kind, payload }
+}
+
+/// A `pr.opened` record (the bundle + in-flight onset) carrying the PR's
+/// intent ids — the same record `hugit pr open` writes, so the campaign derives
+/// the bundle from the log.
+fn pr_opened(pr_id: &str, intent_ids: &[&str]) -> Ev {
+    ev(
+        "pr.opened",
+        json!({
+            "pr_id": pr_id,
+            "campaign": CAMPAIGN,
+            "author_kind": "orchestrator",
+            "intent_ids": intent_ids,
+        }),
     )
 }
 
-fn landed_intent(id: &str, at: u64) -> Value {
-    event(
+/// A `pr.landed` record (settles the PR to landed).
+fn pr_landed(pr_id: &str) -> Ev {
+    ev(
+        "pr.landed",
+        json!({ "pr_id": pr_id, "campaign": CAMPAIGN, "union_verdict": "green" }),
+    )
+}
+
+/// An `intent.landed` record (the real intent-landing shape).
+fn landed_intent(id: &str, at: u64) -> Ev {
+    ev(
         "intent.landed",
         json!({
             "intent_id": id,
             "ref": "refs/heads/main",
-            "target": format!("{:040x}", at),
+            "target": format!("{at:040x}"),
             "charter": format!("harden auth — {id}"),
             "campaign": CAMPAIGN,
             "deep_link_target": id,
         }),
-        at,
+    )
+}
+
+/// A `<altitude>.envelope` record carrying a captured `ContextEnvelope`.
+fn envelope_event(altitude: &str, env: Value) -> Ev {
+    let kind: &'static str = match altitude {
+        "campaign" => "campaign.envelope",
+        "pr" => "pr.envelope",
+        "intent" => "intent.envelope",
+        other => panic!("unknown envelope altitude {other}"),
+    };
+    Ev { kind, payload: env }
+}
+
+/// The `campaign.envelope_ref` record carrying the F2b seal pointer.
+fn campaign_envelope_ref(envelope_ref: &str) -> Ev {
+    ev(
+        "campaign.envelope_ref",
+        json!({ "campaign": CAMPAIGN, "envelope_ref": envelope_ref }),
     )
 }
 
@@ -160,67 +199,144 @@ fn envelope(
 
 /// A world with two LANDED PRs (PR-1: 2 intents, PR-2: 1 intent) and full
 /// envelope capture — the settled, fully-captured happy path.
-fn settled_world() -> Value {
-    json!({
-        "events": [
-            pr_event("pr.submitted", "PR-1", T0),
-            pr_event("pr.submitted", "PR-2", T0 + 1_000),
-            landed_intent("i-a1", T0 + 100_000),
-            landed_intent("i-a2", T0 + 101_000),
-            landed_intent("i-b1", T0 + 120_000),
-            pr_event("pr.landed", "PR-1", T0 + 110_000),
-            pr_event("pr.landed", "PR-2", T0 + 130_000),
-        ],
-        "envelopes": [
-            // campaign-altitude (top-level, human-driven orchestrator).
-            envelope("campaign", CAMPAIGN, "opus-4.8", "main", "orq-c", None,
-                     T0, T0 + 130_000, metrics(5_000, 10_000, 10, 6, 0.20)),
-            envelope("pr", "PR-1", "opus-4.8", "main", "orq-1", None,
-                     T0, T0 + 110_000, metrics(20_000, 30_000, 40, 12, 0.50)),
-            envelope("pr", "PR-2", "opus-4.8", "main", "orq-2", None,
-                     T0 + 1_000, T0 + 130_000, metrics(10_000, 15_000, 20, 8, 0.25)),
-            envelope("intent", "i-a1", "opus-4.8", "implementer", "run-a1", Some("orq-1"),
-                     T0 + 10_000, T0 + 80_000, metrics(50_000, 60_000, 30, 8, 1.00)),
-            envelope("intent", "i-a2", "opus-4.8", "implementer", "run-a2", Some("orq-1"),
-                     T0 + 10_000, T0 + 90_000, metrics(45_000, 50_000, 25, 8, 0.90)),
-            envelope("intent", "i-b1", "opus-4.8", "implementer", "run-b1", Some("orq-2"),
-                     T0 + 20_000, T0 + 100_000, metrics(40_000, 55_000, 20, 8, 0.80)),
-        ],
-        "bundles": [
-            { "pr_id": "PR-1", "intent_ids": ["i-a1", "i-a2"], "phase": "landed", "landed_at": T0 + 110_000 },
-            { "pr_id": "PR-2", "intent_ids": ["i-b1"], "phase": "landed", "landed_at": T0 + 130_000 },
-        ],
-        "campaign_envelope_ref": "cas:campaign-envelope/auth-hardening",
-    })
+fn settled_world() -> Vec<Ev> {
+    vec![
+        pr_opened("PR-1", &["i-a1", "i-a2"]),
+        pr_opened("PR-2", &["i-b1"]),
+        landed_intent("i-a1", T0 + 100_000),
+        landed_intent("i-a2", T0 + 101_000),
+        landed_intent("i-b1", T0 + 120_000),
+        pr_landed("PR-1"),
+        pr_landed("PR-2"),
+        // campaign-altitude (top-level, human-driven orchestrator).
+        envelope_event(
+            "campaign",
+            envelope(
+                "campaign",
+                CAMPAIGN,
+                "opus-4.8",
+                "main",
+                "orq-c",
+                None,
+                T0,
+                T0 + 130_000,
+                metrics(5_000, 10_000, 10, 6, 0.20),
+            ),
+        ),
+        envelope_event(
+            "pr",
+            envelope(
+                "pr",
+                "PR-1",
+                "opus-4.8",
+                "main",
+                "orq-1",
+                None,
+                T0,
+                T0 + 110_000,
+                metrics(20_000, 30_000, 40, 12, 0.50),
+            ),
+        ),
+        envelope_event(
+            "pr",
+            envelope(
+                "pr",
+                "PR-2",
+                "opus-4.8",
+                "main",
+                "orq-2",
+                None,
+                T0 + 1_000,
+                T0 + 130_000,
+                metrics(10_000, 15_000, 20, 8, 0.25),
+            ),
+        ),
+        envelope_event(
+            "intent",
+            envelope(
+                "intent",
+                "i-a1",
+                "opus-4.8",
+                "implementer",
+                "run-a1",
+                Some("orq-1"),
+                T0 + 10_000,
+                T0 + 80_000,
+                metrics(50_000, 60_000, 30, 8, 1.00),
+            ),
+        ),
+        envelope_event(
+            "intent",
+            envelope(
+                "intent",
+                "i-a2",
+                "opus-4.8",
+                "implementer",
+                "run-a2",
+                Some("orq-1"),
+                T0 + 10_000,
+                T0 + 90_000,
+                metrics(45_000, 50_000, 25, 8, 0.90),
+            ),
+        ),
+        envelope_event(
+            "intent",
+            envelope(
+                "intent",
+                "i-b1",
+                "opus-4.8",
+                "implementer",
+                "run-b1",
+                Some("orq-2"),
+                T0 + 20_000,
+                T0 + 100_000,
+                metrics(40_000, 55_000, 20, 8, 0.80),
+            ),
+        ),
+        campaign_envelope_ref("cas:campaign-envelope/auth-hardening"),
+    ]
 }
 
-/// The same campaign with PR-2 STILL IN-FLIGHT (submitted, not settled).
-fn in_flight_world() -> Value {
-    json!({
-        "events": [
-            pr_event("pr.submitted", "PR-1", T0),
-            pr_event("pr.submitted", "PR-2", T0 + 1_000),
-            landed_intent("i-a1", T0 + 100_000),
-            pr_event("pr.landed", "PR-1", T0 + 110_000),
-            // PR-2 submitted but neither landed nor excluded → in-flight.
-        ],
-        "envelopes": [],
-        "bundles": [],
-        "campaign_envelope_ref": null,
-    })
+/// The same campaign with PR-2 STILL IN-FLIGHT (proposed, not settled).
+fn in_flight_world() -> Vec<Ev> {
+    vec![
+        pr_opened("PR-1", &["i-a1"]),
+        pr_opened("PR-2", &["i-b1"]),
+        landed_intent("i-a1", T0 + 100_000),
+        pr_landed("PR-1"),
+        // PR-2 opened but neither landed nor excluded → in-flight.
+    ]
 }
 
-fn write_world(dir: &std::path::Path, world: &Value) -> PathBuf {
-    let p = dir.join("world.json");
-    std::fs::write(&p, world.to_string()).unwrap();
+/// Build the canonical `[EventRecord, …]` log from `events` (appending through
+/// the REAL `hugit_refstore::EventLog`, so the hash chain is genuine) and write
+/// it to a fresh file. This IS the one canonical on-disk seam every porcelain
+/// verb shares.
+fn write_world(dir: &std::path::Path, events: &[Ev]) -> PathBuf {
+    use hugit_refstore::{EventLog, canonical_json};
+    let mut log = EventLog::new();
+    for (i, e) in events.iter().enumerate() {
+        let payload = e.payload.to_string();
+        let payload = canonical_json(&payload).unwrap_or(payload);
+        log.append(
+            e.kind.to_string(),
+            vec![
+                "user:gustavo@humangr.com".to_string(),
+                "orchestrator:opus".to_string(),
+            ],
+            payload,
+            T0 + i as u64,
+        );
+    }
+    let p = dir.join("log.json");
+    std::fs::write(&p, serde_json::to_vec_pretty(log.records()).unwrap()).unwrap();
     p
 }
 
-/// Count `kind` records in a world file's event list.
+/// Count `kind` records in the canonical `[EventRecord, …]` log file.
 fn count_kind(path: &std::path::Path, kind: &str) -> usize {
     let v: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-    v["events"]
-        .as_array()
+    v.as_array()
         .unwrap()
         .iter()
         .filter(|e| e["kind"] == kind)
@@ -234,7 +350,7 @@ fn count_kind(path: &std::path::Path, kind: &str) -> usize {
 #[test]
 fn open_records_campaign_opened_with_charter_and_human_owner() {
     let dir = scratch("open");
-    let world = write_world(&dir, &json!({ "events": [] }));
+    let world = write_world(&dir, &[]);
     let log = world.to_str().unwrap();
 
     let (ok, v) = run(&[
@@ -263,7 +379,7 @@ fn open_records_campaign_opened_with_charter_and_human_owner() {
 #[test]
 fn open_is_idempotent_no_duplicate_record() {
     let dir = scratch("open-idem");
-    let world = write_world(&dir, &json!({ "events": [] }));
+    let world = write_world(&dir, &[]);
     let log = world.to_str().unwrap();
     let args = [
         "open",
@@ -386,13 +502,11 @@ fn close_seals_progress_only_when_no_envelope_captured() {
     let dir = scratch("close-nocap");
     let world = write_world(
         &dir,
-        &json!({
-            "events": [
-                pr_event("pr.submitted", "PR-1", T0),
-                landed_intent("i-a1", T0 + 100_000),
-                pr_event("pr.landed", "PR-1", T0 + 110_000),
-            ],
-        }),
+        &[
+            pr_opened("PR-1", &["i-a1"]),
+            landed_intent("i-a1", T0 + 100_000),
+            pr_landed("PR-1"),
+        ],
     );
     let log = world.to_str().unwrap();
 
@@ -452,12 +566,12 @@ fn show_surfaces_rollup_summary_when_captured() {
 fn close_refuses_subagent_authored_campaign_envelope() {
     let dir = scratch("close-d14");
     let mut world = settled_world();
-    // Corrupt the campaign envelope's authorship into a subagent (spawned).
-    let envs = world["envelopes"].as_array_mut().unwrap();
-    for e in envs.iter_mut() {
-        if e["altitude"] == "campaign" {
-            e["authorship"]["agent_type"] = json!("implementer");
-            e["authorship"]["spawn"]["parent_run_id"] = json!("orq-boss");
+    // Corrupt the campaign-altitude envelope record's authorship into a subagent
+    // (spawned) — the rollup must reject it fail-closed.
+    for e in world.iter_mut() {
+        if e.kind == "campaign.envelope" && e.payload["altitude"] == "campaign" {
+            e.payload["authorship"]["agent_type"] = json!("implementer");
+            e.payload["authorship"]["spawn"]["parent_run_id"] = json!("orq-boss");
         }
     }
     let path = write_world(&dir, &world);

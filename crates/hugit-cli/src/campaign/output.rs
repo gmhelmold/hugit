@@ -50,12 +50,13 @@ impl CampaignError {
         )
     }
 
-    /// A parse error on the world file.
+    /// A parse error on the event log file.
     pub fn parse(e: &serde_json::Error) -> Self {
         CampaignError::new(
             "parse",
-            format!("world file is not valid JSON: {e}"),
-            "the --log file must be a JSON object {\"events\":[...]} (see WorldInput)",
+            format!("event log is not valid JSON: {e}"),
+            "the --log file must be a canonical JSON [EventRecord, …] array \
+             (the engine's EventLog shape, shared by every porcelain verb)",
         )
     }
 

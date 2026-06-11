@@ -23,6 +23,7 @@
 //! - [`show`]  — `hugit intent show`: project the intent record honestly.
 //! - [`error`] — the structured, fix-carrying porcelain error.
 
+pub mod canonical_log;
 pub mod error;
 pub mod new;
 pub mod show;
@@ -71,6 +72,12 @@ pub enum IntentCommand {
         /// The local intent store file.
         #[arg(long, default_value = DEFAULT_STORE)]
         store: PathBuf,
+        /// Optional **shared canonical event log** (the one `[EventRecord, …]`
+        /// seam `hugit pr`/`hugit campaign` read). When given, `intent.landed`
+        /// is ALSO appended here so a later `pr open --intent <id>` can validate
+        /// the intent exists. Omit it to keep the `--store`-only behavior.
+        #[arg(long)]
+        log: Option<PathBuf>,
     },
     /// Show an intent: native projection + sidecar + envelope ref + verdicts.
     Show {
@@ -96,6 +103,7 @@ pub fn run(args: IntentArgs) -> ExitCode {
             agent,
             context_ref,
             store,
+            log,
         } => {
             let input = new::NewIntent {
                 charter,
@@ -104,6 +112,7 @@ pub fn run(args: IntentArgs) -> ExitCode {
                 id,
                 agent,
                 context_ref,
+                log,
             };
             match new::run(input, &store) {
                 Ok(result) => print_ok(&result),

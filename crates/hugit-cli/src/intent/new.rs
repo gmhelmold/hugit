@@ -26,12 +26,13 @@
 //! records the authoring agent type on the landing event's principal chain;
 //! the honest default is `"main"` (the orchestrator), never an invented agent.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use hugit_contracts::IntentSidecar;
 use hugit_refstore::intent::import_sidecar;
 use sha2::{Digest, Sha256};
 
+use super::canonical_log;
 use super::error::PorcelainError;
 use super::store::IntentStore;
 
@@ -60,6 +61,12 @@ pub struct NewIntent {
     pub agent: Option<String>,
     /// Optional content-addressed ref to the full context blob (the envelope).
     pub context_ref: Option<String>,
+    /// Optional **shared canonical event log** (`--log`). When given, the
+    /// `intent.landed` record is ALSO appended to this `[EventRecord, …]` file —
+    /// the same canonical seam `hugit pr` and `hugit campaign` read — so a later
+    /// `pr open --intent <id>` can validate the intent exists. `--store`-only
+    /// invocation (no `--log`) keeps working: the log is optional.
+    pub log: Option<PathBuf>,
 }
 
 /// The stable result object printed by `intent new`.
@@ -122,16 +129,6 @@ pub fn run(input: NewIntent, store_path: &Path) -> Result<NewResult, PorcelainEr
         derive_intent_id(&input.charter, &input.campaign, &input.acceptance, &agent)
     });
 
-    let mut store = IntentStore::load(store_path).map_err(PorcelainError::from_store)?;
-
-    // Idempotency: if this id already landed, return it unchanged (exit 0).
-    if store.intent_for(&intent_id).map_err(PorcelainError::from_store)?.is_some() {
-        return Ok(NewResult {
-            intent_id,
-            already_exists: true,
-        });
-    }
-
     let context_ref = input.context_ref.unwrap_or_default();
     let sidecar = IntentSidecar {
         intent_id: intent_id.clone(),
@@ -141,10 +138,32 @@ pub fn run(input: NewIntent, store_path: &Path) -> Result<NewResult, PorcelainEr
         // Frozen invariant: the sidecar is NEVER authoritative (B6④).
         authoritative: false,
     };
-
     // The principal chain records authorship as given (subagent normally),
     // bound to the campaign — honest provenance, not invented.
-    let principal_chain = vec![format!("campaign:{}", input.campaign), format!("agent:{agent}")];
+    let principal_chain = vec![
+        format!("campaign:{}", input.campaign),
+        format!("agent:{agent}"),
+    ];
+
+    let mut store = IntentStore::load(store_path).map_err(PorcelainError::from_store)?;
+
+    // Idempotency: if this id already landed in the store, return it unchanged
+    // (exit 0). When a shared `--log` is given, still reconcile it (so an intent
+    // already in the store is also present on the shared canonical log).
+    if store
+        .intent_for(&intent_id)
+        .map_err(PorcelainError::from_store)?
+        .is_some()
+    {
+        if let Some(log_path) = input.log.as_deref() {
+            canonical_log::land_intent(log_path, &sidecar, &principal_chain, now_ms())?;
+        }
+        return Ok(NewResult {
+            intent_id,
+            already_exists: true,
+        });
+    }
+
     let recorded_at = now_ms();
 
     // The REAL refstore path: land the sidecar onto the event log keyed by its
@@ -155,7 +174,7 @@ pub fn run(input: NewIntent, store_path: &Path) -> Result<NewResult, PorcelainEr
         &sidecar,
         AUTHORED_REF,
         &authored_target(&intent_id),
-        principal_chain,
+        principal_chain.clone(),
         recorded_at,
     )
     .map_err(|e| {
@@ -170,11 +189,18 @@ pub fn run(input: NewIntent, store_path: &Path) -> Result<NewResult, PorcelainEr
 
     // Record the non-authoritative sidecar corpus and the disclosed envelope
     // ref (when given) by intent_id — one lifecycle, one id.
-    store.sidecars.insert(intent_id.clone(), sidecar);
+    store.sidecars.insert(intent_id.clone(), sidecar.clone());
     if !context_ref.is_empty() {
         store.envelopes.insert(intent_id.clone(), context_ref);
     }
     store.save(store_path).map_err(PorcelainError::from_store)?;
+
+    // Also land `intent.landed` on the shared canonical log when `--log` is
+    // given — the one on-disk seam every porcelain verb shares (PC4). Idempotent
+    // on the log too: an intent already on it is left untouched.
+    if let Some(log_path) = input.log.as_deref() {
+        canonical_log::land_intent(log_path, &sidecar, &principal_chain, recorded_at)?;
+    }
 
     Ok(NewResult {
         intent_id,
