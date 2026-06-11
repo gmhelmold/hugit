@@ -724,12 +724,17 @@ fn builtin_def_with_cmd_reports_cmd_ignored() {
     );
 }
 
-/// WG-CHECK-ROBUST [TOCTOU]: two concurrent `hugit check` on identical inputs do
-/// NOT both execute + both record. The AC-store lock spans lookup→execute→store,
-/// so exactly one MISS+records; the other either HITs or serializes (retryable
-/// `ac_busy`). The log carries NO duplicate `check.recorded` for the single MISS.
+/// WH-CHECK [lock-poison fix]: two concurrent `hugit check` on identical inputs
+/// MAY both execute — the AC lock is now held ONLY around the cache file's own
+/// lookup/store ops, NOT across the unbounded execute, so a hung/slow command can
+/// never poison the AC lock for everyone else. We deliberately ACCEPT that small
+/// benign double-exec window (strictly better than a lock-poison hang). What is
+/// NOT acceptable — and is still guaranteed — is a duplicate on the canonical log:
+/// the log's own lock serializes the two recorders and the `(memo_key, cache_hit)`
+/// dedup drops the second, so the log carries NO duplicate `check.recorded` and
+/// the wedge KPIs are never inflated by the race.
 #[test]
-fn concurrent_checks_do_not_double_execute_or_double_record() {
+fn concurrent_checks_do_not_double_record_even_if_both_execute() {
     use std::thread;
 
     let dir = scratch("toctou");
@@ -739,7 +744,8 @@ fn concurrent_checks_do_not_double_execute_or_double_record() {
     let root = seed_tree(&dir);
 
     // Two threads launch the SAME check simultaneously. `sleep 0.2` widens the
-    // execution window so an unlocked lookup would let both MISS.
+    // execution window so both can MISS (the now-released-during-execute lock no
+    // longer serializes the execute — the lock-poison fix).
     let args = check_args("race-check", "sleep 0.2", &log, &ac, &root);
     let handles: Vec<_> = (0..2)
         .map(|_| {
@@ -752,35 +758,307 @@ fn concurrent_checks_do_not_double_execute_or_double_record() {
         .collect();
     let results: Vec<(i32, Value)> = handles.into_iter().map(|h| h.join().unwrap()).collect();
 
-    // Each run either succeeded (exit 0) or serialized with a retryable ac_busy.
-    let mut misses = 0;
-    let mut hits = 0;
-    let mut busy = 0;
+    // Every run either succeeded (exit 0, a real cache verdict) or serialized with
+    // a retryable contention error on a state file (`ac_busy` from the per-op AC
+    // lock, or `log_busy` from the canonical-log lock) — NEVER a poison/clobber.
     for (code, v) in &results {
         if *code == 0 {
-            match v["cache_hit"].as_bool() {
-                Some(true) => hits += 1,
-                Some(false) => misses += 1,
-                None => panic!("a successful run reports cache_hit: {v}"),
-            }
-        } else {
-            assert_eq!(
-                v["error"]["kind"], "ac_busy",
-                "the loser serializes with a retryable ac_busy: {v}"
+            assert!(
+                v["cache_hit"].as_bool().is_some(),
+                "a successful run reports a real cache verdict: {v}"
             );
-            busy += 1;
+        } else {
+            let kind = v["error"]["kind"].as_str().unwrap_or("");
+            assert!(
+                kind == "ac_busy" || kind == "log_busy",
+                "the loser serializes with a retryable busy (no poison): {v}"
+            );
         }
     }
-    assert!(
-        misses <= 1,
-        "at most ONE concurrent check executes (no double-exec): misses={misses}, hits={hits}, busy={busy}"
-    );
 
-    // The canonical log carries at most ONE `check.recorded` MISS — no duplicate.
+    // The KPI-integrity invariant the lock-poison fix preserves: the canonical log
+    // carries at MOST ONE `check.recorded` MISS for the single memo_key — the
+    // `(memo_key, cache_hit)` dedup drops the second recorder even though both may
+    // have executed. No double-record, no inflated hit-rate.
     let (_, show) = run(&["checks", "show", "--log", &log.display().to_string()]);
     let executed = show["kpis"]["executed"].as_u64().unwrap_or(0);
     assert!(
         executed <= 1,
-        "no duplicate check.recorded for the single execution: executed={executed} ({show})"
+        "no duplicate check.recorded for the single memo_key: executed={executed} ({show})"
+    );
+}
+
+// ── WH-CHECK (adversarial Round-4 Cluster B) acceptance additions ─────────────
+
+/// WH-CHECK [HIGH — KPI fabrication]: `check --store` is IDEMPOTENT. Three (or N)
+/// identical `check --store` runs do NOT append N `check.recorded` rows — the
+/// `(memo_key, cache_hit)` dedup bounds the log to one cold MISS + one warm HIT,
+/// so `check_count` and `hit_rate_pct` are STABLE no matter how many times the
+/// same check is re-run. A re-run that adds nothing reports `already_recorded`.
+#[test]
+fn check_store_is_idempotent_repeated_runs_do_not_inflate_kpis() {
+    let dir = scratch("idem");
+    let log = dir.join("log.json");
+    let ac = dir.join("ac.json");
+    write_empty_log(&log);
+    let root = seed_tree(&dir);
+
+    let args = check_args("idem-check", "true", &log, &ac, &root);
+    let r: Vec<&str> = args.iter().map(String::as_str).collect();
+
+    // Run 1: cold MISS — newly recorded.
+    let (_, run1) = run(&r);
+    assert_eq!(run1["cache_hit"], false, "run1 is a cold MISS: {run1}");
+    assert_eq!(
+        run1["already_recorded"], false,
+        "the cold MISS is a NEW record: {run1}"
+    );
+
+    // Run 2: warm HIT — newly recorded (distinct (key,cache_hit) pair).
+    let (_, run2) = run(&r);
+    assert_eq!(run2["cache_hit"], true, "run2 is a warm HIT: {run2}");
+    assert_eq!(
+        run2["already_recorded"], false,
+        "the FIRST warm HIT is a new record (the wedge's hit row): {run2}"
+    );
+
+    // Run 3..=5: identical warm HITs — deduped, NOTHING appended.
+    for n in 3..=5 {
+        let (_, again) = run(&r);
+        assert_eq!(again["cache_hit"], true, "run{n} is a warm HIT: {again}");
+        assert_eq!(
+            again["already_recorded"], true,
+            "a repeated identical HIT appends nothing (idempotent): {again}"
+        );
+    }
+
+    // The log holds EXACTLY two rows (1 miss + 1 hit) — never five.
+    let (_, show) = run(&["checks", "show", "--log", &log.display().to_string()]);
+    assert_eq!(
+        show["check_count"], 2,
+        "five identical runs leave exactly two rows (1 miss + 1 hit), not five: {show}"
+    );
+    // hit_rate is a STABLE 50% — un-inflatable by re-running.
+    let rate = show["kpis"]["hit_rate_pct"].as_f64().unwrap();
+    assert!(
+        (rate - 50.0).abs() < 1e-9,
+        "hit-rate is a stable 50%: {show}"
+    );
+    assert_eq!(show["kpis"]["hits"], 1, "exactly one hit row: {show}");
+    assert_eq!(show["kpis"]["executed"], 1, "exactly one miss row: {show}");
+}
+
+/// WH-CHECK [SHIP-BLOCKER — symlink-cycle stack overflow]: a workspace with a
+/// directory symlink LOOP (`work/sub/loop → work`, common in monorepos) is walked
+/// safely — the visited-real-path set + depth cap break the cycle, so `hugit
+/// check` returns a structured result, NEVER a SIGSEGV / stack-overflow crash.
+#[test]
+fn a_directory_symlink_cycle_does_not_crash_the_tree_walk() {
+    let dir = scratch("symcycle");
+    let log = dir.join("log.json");
+    let ac = dir.join("ac.json");
+    write_empty_log(&log);
+
+    // Build work/sub/a.rs, then a directory symlink work/sub/loop → work (a cycle).
+    let work = dir.join("work");
+    let sub = work.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(sub.join("a.rs"), b"fn x() {}\n").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&work, sub.join("loop")).unwrap();
+
+    let args = check_args("cycle-check", "true", &log, &ac, &work);
+    let r: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (code, v) = run(&r);
+    // The verb completes with a real verdict — no crash (a SIGSEGV would not even
+    // produce parseable JSON / a 0 exit). The walk skipped the cycle, didn't crash.
+    assert_eq!(
+        code, 0,
+        "a symlink-cycle workspace yields a structured result, not a crash: {v}"
+    );
+    assert_eq!(v["ok"], true, "the check ran to a real outcome: {v}");
+    assert_eq!(v["cache_hit"], false, "first run is a cold miss: {v}");
+}
+
+/// WH-CHECK [SHIP-BLOCKER — process-group kill]: a command that BACKGROUNDS a
+/// grandchild (`sleep 30 & … sleep 30`) is killed AS A GROUP at the timeout — the
+/// orphan grandchild dies too, and the wall-time ceiling is honoured (the verb
+/// returns in ~1-2 s, not 30 s). `child.kill()` alone would orphan the grandchild
+/// and let it survive past the deadline.
+#[test]
+#[cfg(unix)]
+fn a_backgrounding_command_is_killed_with_its_whole_process_group() {
+    let dir = scratch("pgroup");
+    let log = dir.join("log.json");
+    let ac = dir.join("ac.json");
+    write_empty_log(&log);
+    let root = seed_tree(&dir);
+
+    // The grandchild records its pid to a marker file, then both it and the direct
+    // child sleep well past the 1 s ceiling.
+    let marker = dir.join("orphan.pid");
+    let cmd = format!("sleep 30 & echo $! > {}; sleep 30", marker.display());
+
+    let start = std::time::Instant::now();
+    let (code, v) = run(&[
+        "check",
+        "--def",
+        "bg-check",
+        "--cmd",
+        &cmd,
+        "--log",
+        &log.display().to_string(),
+        "--store",
+        "--ac",
+        &ac.display().to_string(),
+        "--root",
+        &root.display().to_string(),
+        "--toolchain",
+        "tc-fixed",
+        "--timeout-secs",
+        "1",
+    ]);
+    let elapsed = start.elapsed();
+    assert_eq!(code, 2, "the backgrounding command times out, exit 2: {v}");
+    assert_eq!(
+        v["error"]["kind"], "check_timeout",
+        "structured timeout: {v}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(15),
+        "the wall-time ceiling is honoured (did not wait the full 30 s): {elapsed:?}"
+    );
+
+    // Give the group-kill a moment, then assert the orphan grandchild is DEAD.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let pid = std::fs::read_to_string(&marker).unwrap_or_default();
+    let pid = pid.trim();
+    assert!(!pid.is_empty(), "the grandchild recorded its pid: {v}");
+    // `kill -0 <pid>` succeeds iff the process is still alive. It must be dead.
+    let alive = Command::new("kill")
+        .arg("-0")
+        .arg(pid)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    assert!(
+        !alive,
+        "the orphan grandchild (pid={pid}) was killed with the group, not left alive"
+    );
+}
+
+/// WH-CHECK [SHIP-BLOCKER — lock-poison]: a SLOW check holding mid-execute does
+/// NOT poison the AC lock — a DIFFERENT concurrent check still completes cleanly
+/// (it is not blocked on a command-long AC lock). The two record independently;
+/// the log carries BOTH rows. (Before the fix the slow check held the `.ac` lock
+/// across its whole execute, so every concurrent `hugit check` got `ac_busy`.)
+#[test]
+fn a_slow_check_does_not_poison_the_ac_lock_for_a_concurrent_check() {
+    use std::thread;
+
+    let dir = scratch("nopoison");
+    let log = dir.join("log.json");
+    let ac = dir.join("ac.json");
+    write_empty_log(&log);
+    let root = seed_tree(&dir);
+
+    // A slow check (sleep 1.5) on toolchain SLOW, launched first.
+    let slow = {
+        let mut a = check_args("poison-slow", "sleep 1.5", &log, &ac, &root);
+        *a.last_mut().unwrap() = "tc-SLOW".into();
+        a
+    };
+    let slow_handle = thread::spawn(move || {
+        let r: Vec<&str> = slow.iter().map(String::as_str).collect();
+        run(&r)
+    });
+
+    // While the slow check is mid-execute (lock released), a FAST check on a
+    // DIFFERENT toolchain (distinct memo_key) must complete cleanly.
+    thread::sleep(std::time::Duration::from_millis(400));
+    let fast = {
+        let mut a = check_args("poison-fast", "true", &log, &ac, &root);
+        *a.last_mut().unwrap() = "tc-FAST".into();
+        a
+    };
+    let fr: Vec<&str> = fast.iter().map(String::as_str).collect();
+    let (fcode, fv) = run(&fr);
+    assert_eq!(
+        fcode, 0,
+        "a concurrent check is NOT poisoned by the slow check's execute: {fv}"
+    );
+    assert_eq!(
+        fv["ok"], true,
+        "the concurrent check ran to a real outcome: {fv}"
+    );
+
+    let (scode, sv) = slow_handle.join().unwrap();
+    assert_eq!(scode, 0, "the slow check itself completes: {sv}");
+
+    // Both checks recorded — the log was never poisoned.
+    let (_, show) = run(&["checks", "show", "--log", &log.display().to_string()]);
+    assert_eq!(
+        show["check_count"], 2,
+        "both the slow and the concurrent check recorded — no poison: {show}"
+    );
+}
+
+/// WH-CHECK [MED — ad-hoc `--cmd` never memoizes]: a 2nd identical ad-hoc `--cmd`
+/// run on the same inputs is a HIT. The fix excludes hugit's OWN wedge-state files
+/// (`--log`, `--ac`, sidecars) from the tree axis, so storing the cold result no
+/// longer mutates the tree the next run hashes (which had been busting the key).
+/// This reproduces the failure shape the adversary hit: `--root` CONTAINS the
+/// `--log`/`--ac` (the realistic cwd default), where the ad-hoc glob `**/*` would
+/// otherwise sweep them in.
+#[test]
+fn an_identical_ad_hoc_cmd_run_is_a_cache_hit_even_with_state_under_root() {
+    let dir = scratch("adhoc-memo");
+    let log = dir.join("log.json");
+    let ac = dir.join("ac.json");
+    write_empty_log(&log);
+    // A matched source file alongside the log/ac — the ROOT is `dir` itself, so the
+    // ad-hoc `**/*` glob would sweep in log.json / ac.json without the exclusion.
+    std::fs::write(dir.join("src.rs"), b"fn main() {}\n").unwrap();
+
+    let args = || -> Vec<String> {
+        vec![
+            "check".into(),
+            "--def".into(),
+            "adhoc-memo-check".into(),
+            "--cmd".into(),
+            "true".into(),
+            "--log".into(),
+            log.display().to_string(),
+            "--store".into(),
+            "--ac".into(),
+            ac.display().to_string(),
+            // ROOT is the dir that CONTAINS the log + ac (the realistic shape).
+            "--root".into(),
+            dir.display().to_string(),
+            "--toolchain".into(),
+            "tc-fixed".into(),
+        ]
+    };
+
+    let a1 = args();
+    let r1: Vec<&str> = a1.iter().map(String::as_str).collect();
+    let (_, cold) = run(&r1);
+    assert_eq!(
+        cold["cache_hit"], false,
+        "first ad-hoc run is a MISS: {cold}"
+    );
+    let key1 = cold["memo_key"].as_str().unwrap().to_string();
+
+    let a2 = args();
+    let r2: Vec<&str> = a2.iter().map(String::as_str).collect();
+    let (_, warm) = run(&r2);
+    assert_eq!(
+        warm["cache_hit"], true,
+        "a 2nd identical ad-hoc --cmd run is a HIT (state files excluded from the tree axis): {warm}"
+    );
+    assert_eq!(
+        warm["memo_key"].as_str().unwrap(),
+        key1,
+        "the memo key is STABLE across runs — hugit's own state no longer busts it: {warm}"
     );
 }
