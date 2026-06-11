@@ -14,6 +14,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
 
@@ -21,8 +22,22 @@ fn hugit_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_hugit"))
 }
 
+/// Per-process call counter — prevents name collisions when multiple tests in
+/// this suite call `scratch()` within the same process (or on a fast re-run
+/// that recycles the same pid). The pid anchors cross-process isolation; the
+/// counter anchors intra-process call-site isolation. Both are combined so no
+/// two `scratch()` calls ever share a directory, even under parallel test
+/// execution.
+///
+/// Cleanup is best-effort: the `remove_dir_all` at the START of each call
+/// clears any stale dir from a previous run with the same pid+counter (which
+/// would only occur after a pid wrap, i.e., extremely rarely). A test failure
+/// may leave the dir behind for post-mortem inspection; that is intentional.
+static SCRATCH_CTR: AtomicU64 = AtomicU64::new(0);
+
 fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("hugit-pc4-{tag}-{}", std::process::id()));
+    let n = SCRATCH_CTR.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("hugit-pc4-{tag}-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir

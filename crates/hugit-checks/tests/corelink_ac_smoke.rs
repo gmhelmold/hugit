@@ -74,11 +74,16 @@ fn random_hex64() -> String {
 fn corelink_ac_live_smoke() {
     // ── GATE: the loader is the gate. Ok ⇒ all three present ⇒ RUN; a
     //    NotConfigured ⇒ absent ⇒ clean SKIP with a printed reason. ──────────
+    // NOTE: cargo test captures stdout by default; pass --nocapture to see this
+    // skip message in the terminal. The eprintln! variant below reaches stderr
+    // (always visible), but the canonical loud-skip protocol uses println! for
+    // stdout parity with other env-gated suites in this workspace.
     let client = match corelink_ac_from_env() {
         Ok(c) => c,
         Err(AcError::NotConfigured(why)) => {
-            eprintln!(
-                "SKIP corelink_ac_live_smoke: CoreLink AC config absent ({why}). \
+            println!(
+                "SKIPPED corelink_ac_live_smoke: CoreLink AC config absent ({why}) — \
+                 live lane not exercised. \
                  Set {ENV_AC_URL} + {ENV_TENANT} + the PAT (file ~/.hugit/secrets/corelink/pat \
                  or HUGIT_CORELINK_PAT) to run the live §6 probes."
             );

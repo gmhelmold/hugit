@@ -99,12 +99,22 @@ fn item_2_runner_lease_vector_round_trips_through_frozen_type() {
     let raw = String::from_utf8(read("RunnerLease.json")).expect("vector is utf-8");
     let lease: RunnerLease = serde_json::from_str(&raw)
         .expect("RunnerLease vector must parse through the frozen type (deny_unknown_fields)");
-    let re = serde_json::to_string_pretty(&lease).expect("frozen RunnerLease serializes");
+    // Re-serialize and append the trailing newline that the committed vector
+    // carries (POSIX text-file convention: serde_json::to_string_pretty does
+    // NOT add a trailing newline, but the committed vector does). The comparison
+    // is byte-exact — trim_end() is intentionally absent so any trailing-byte
+    // drift (added or removed whitespace) immediately breaks this assertion.
+    let re = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&lease).expect("frozen RunnerLease serializes")
+    );
     assert_eq!(
-        raw.trim_end(),
-        re.trim_end(),
+        raw,
+        re,
         "RunnerLease wire round-trip is not byte-exact: hugit's frozen type \
-         and the committed vector disagree"
+         and the committed vector disagree (byte difference: raw {} bytes, re {} bytes)",
+        raw.len(),
+        re.len(),
     );
 }
 
@@ -113,11 +123,21 @@ fn item_2_fence_manifest_vector_round_trips_through_frozen_type() {
     let raw = String::from_utf8(read("FenceManifest.json")).expect("vector is utf-8");
     let manifest: FenceManifest = serde_json::from_str(&raw)
         .expect("FenceManifest vector must parse through the frozen type (deny_unknown_fields)");
-    let re = serde_json::to_string_pretty(&manifest).expect("frozen FenceManifest serializes");
+    // Re-serialize and append the trailing newline that the committed vector
+    // carries (POSIX text-file convention: serde_json::to_string_pretty does
+    // NOT add a trailing newline, but the committed vector does). The comparison
+    // is byte-exact — trim_end() is intentionally absent so any trailing-byte
+    // drift (added or removed whitespace) immediately breaks this assertion.
+    let re = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&manifest).expect("frozen FenceManifest serializes")
+    );
     assert_eq!(
-        raw.trim_end(),
-        re.trim_end(),
+        raw,
+        re,
         "FenceManifest wire round-trip is not byte-exact: hugit's frozen type \
-         and the committed vector disagree"
+         and the committed vector disagree (byte difference: raw {} bytes, re {} bytes)",
+        raw.len(),
+        re.len(),
     );
 }
