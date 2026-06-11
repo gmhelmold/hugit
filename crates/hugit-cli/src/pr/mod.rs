@@ -448,6 +448,14 @@ pub struct OpenArgs {
 /// at all keeps the old permissive behavior (an early fixture log without the
 /// campaign seam in use opts out of the check).
 pub fn open(log: &mut EventLog, args: &OpenArgs) -> Result<Value, PrError> {
+    // WG-SCRUB: scrub every user-supplied field ONCE at entry, then use the
+    // scrubbed view for BOTH the lookups/joins AND the hash-chained payload. The
+    // scrub is deterministic, so a secret-shaped id/campaign scrubs identically
+    // in every record — the projection joins stay stable (scrubbed == scrubbed)
+    // while no secret ever persists to the forever-log. Free-text vectors
+    // (`--campaign`/`--run-id`/`--principal`/`--intent`) are closed here; the id
+    // round-trips because lookup + store both see the scrubbed value.
+    let args = &scrub_open_args(args);
     // Idempotency: look for an existing pr.opened for this id.
     if let Some(existing) = find_pr_opened(log, &args.pr_id) {
         if existing.campaign != args.campaign {
@@ -468,15 +476,9 @@ pub fn open(log: &mut EventLog, args: &OpenArgs) -> Result<Value, PrError> {
 
     validate_intents(log, args)?;
 
-    // The principal chain carries `--run-id`/`--principal` (user strings) and is
-    // hash-chained, so scrub it on the WG-SCRUB seam alongside the payload.
-    let principal_chain: Vec<String> =
-        author_principal_chain(args.author_kind, &args.run_id, &args.principal)
-            .into_iter()
-            .map(|p| crate::redaction::scrub(&p))
-            .collect();
-    // Scrubbed-on-append (WG-SCRUB): `--campaign`/`--intent`/`--principal`/
-    // `--run-id` are user strings; redacted BEFORE the bytes reach the chain.
+    // `args` is already WG-SCRUB-scrubbed at entry, so the principal chain and
+    // payload are both built from redacted user strings.
+    let principal_chain = author_principal_chain(args.author_kind, &args.run_id, &args.principal);
     let payload = canonical_open_payload(args);
     // D14 on the mutation primitive: route the pr.opened append through the
     // guarded entry point. The author class is the caller-asserted --author-kind
@@ -635,6 +637,12 @@ pub struct LandArgs {
 /// Idempotent: a PR already queued returns `"already_queued":true` (exit 0),
 /// no second `pr.queued` is appended, and the original position is reported.
 pub fn land(log: &mut EventLog, args: &LandArgs) -> Result<Value, PrError> {
+    // WG-SCRUB: scrub the id at entry so it matches the scrubbed id `pr open`
+    // stored (deterministic scrub → stable join) and never persists a secret.
+    let args = &LandArgs {
+        pr_id: crate::redaction::scrub(&args.pr_id),
+        recorded_at: args.recorded_at,
+    };
     let opened = find_pr_opened(log, &args.pr_id).ok_or_else(|| PrError::UnknownPr {
         pr_id: args.pr_id.clone(),
     })?;
@@ -781,6 +789,11 @@ pub struct SettleArgs {
 /// SAME D14-guarded [`EventLog::append_authorized`] seam (under the opened PR's
 /// author class — orchestrator/human) `pr land`/`pr open` use.
 pub fn settle(log: &mut EventLog, args: &SettleArgs) -> Result<Value, PrError> {
+    // WG-SCRUB: scrub the id at entry (see `land`).
+    let args = &SettleArgs {
+        pr_id: crate::redaction::scrub(&args.pr_id),
+        recorded_at: args.recorded_at,
+    };
     let opened = find_pr_opened(log, &args.pr_id).ok_or_else(|| PrError::UnknownPr {
         pr_id: args.pr_id.clone(),
     })?;
@@ -865,6 +878,13 @@ pub struct AbandonArgs {
 /// Idempotent: re-abandoning an already-abandoned PR appends no second event and
 /// returns `"already_abandoned":true` (exit 0).
 pub fn abandon(log: &mut EventLog, args: &AbandonArgs) -> Result<Value, PrError> {
+    // WG-SCRUB: scrub the id (stable join, see `land`) AND the `--reason` free
+    // text (the adversary's headline leak vector) at entry, so neither persists.
+    let args = &AbandonArgs {
+        pr_id: crate::redaction::scrub(&args.pr_id),
+        reason: crate::redaction::scrub(&args.reason),
+        recorded_at: args.recorded_at,
+    };
     let opened = find_pr_opened(log, &args.pr_id).ok_or_else(|| PrError::AbandonUnknownPr {
         pr_id: args.pr_id.clone(),
     })?;
@@ -1282,6 +1302,23 @@ fn author_principal_chain(
     match kind {
         AuthorKind::Human => principal.clone().into_iter().collect(),
         AuthorKind::Orchestrator => run_id.clone().into_iter().collect(),
+    }
+}
+
+/// Return a copy of `args` with every user-supplied string field scrubbed
+/// through the redaction engine (WG-SCRUB). Identifiers (`pr_id`) scrub too —
+/// deterministically, so the projection joins stay stable while no secret
+/// persists. Called ONCE at the top of [`open`] so lookups + payload + echo all
+/// agree on the redacted view.
+fn scrub_open_args(args: &OpenArgs) -> OpenArgs {
+    OpenArgs {
+        pr_id: crate::redaction::scrub(&args.pr_id),
+        campaign: crate::redaction::scrub(&args.campaign),
+        author_kind: args.author_kind,
+        run_id: args.run_id.as_deref().map(crate::redaction::scrub),
+        principal: args.principal.as_deref().map(crate::redaction::scrub),
+        intent_ids: crate::redaction::scrub_all(&args.intent_ids),
+        recorded_at: args.recorded_at,
     }
 }
 

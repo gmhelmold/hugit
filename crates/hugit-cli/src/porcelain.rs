@@ -398,4 +398,124 @@ mod tests {
         assert_eq!(v["error"]["wp"], "WB2");
         assert!(v["error"]["fix"].is_string());
     }
+
+    // ── WG-SCRUB: scrub-on-append structural seam ────────────────────────────
+
+    const GHP: &str = "ghp_16C7e42F292c6912E7710c838347Ae178B4a";
+    const REDACTED: &str = hugit_ledger::redact::REDACTED;
+
+    #[test]
+    fn scrub_payload_redacts_every_user_string_value() {
+        // A planted PAT in a free-text value redacts; benign prose survives;
+        // KEYS are never touched (they are structural).
+        let mut v = json!({
+            "name": format!("deploy with {GHP}"),
+            "reason": "abandoned for cause",
+            "ghp_key_as_name": "value",
+        });
+        scrub_payload(&mut v);
+        assert_eq!(v["name"], REDACTED, "secret in a value must redact");
+        assert_eq!(v["reason"], "abandoned for cause", "benign prose survives");
+        // The key `ghp_key_as_name` contains `ghp_` but a KEY is structural — it
+        // is NOT scrubbed (only the VALUE is), and the benign value survives.
+        assert!(
+            v.get("ghp_key_as_name").is_some(),
+            "structural key is preserved verbatim"
+        );
+        assert_eq!(v["ghp_key_as_name"], "value");
+    }
+
+    #[test]
+    fn scrub_payload_exempts_digest_keyed_values() {
+        // A content-address / digest VALUE must SURVIVE verbatim — even a bare
+        // 64-hex run that free text would (correctly) redact. The exemption is
+        // by KEY: memo_key / tree_hash / commit / *_digest / hash.
+        let bare_64 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let bare_40 = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
+        let mut v = json!({
+            "memo_key": bare_64,
+            "tree_hash": bare_64,
+            "commit": bare_40,
+            "def_digest": bare_64,
+            "toolchain_digest": bare_64,
+            "prompt_digest": bare_64,
+            "hash": bare_64,
+            // A non-digest free-text field carrying the SAME bare hex MUST redact.
+            "name": bare_64,
+        });
+        scrub_payload(&mut v);
+        for key in [
+            "memo_key",
+            "tree_hash",
+            "commit",
+            "def_digest",
+            "toolchain_digest",
+            "prompt_digest",
+            "hash",
+        ] {
+            assert_ne!(v[key], REDACTED, "digest field `{key}` must survive");
+        }
+        assert_eq!(v["commit"], bare_40);
+        assert_eq!(
+            v["name"], REDACTED,
+            "the SAME bare hex in a non-digest field redacts (engine's free-text law)"
+        );
+    }
+
+    #[test]
+    fn is_digest_key_matches_the_envelope_rule() {
+        for k in [
+            "memo_key",
+            "tree_hash",
+            "commit",
+            "hash",
+            "def_digest",
+            "toolchain_digest",
+            "prompt_digest",
+        ] {
+            assert!(is_digest_key(k), "`{k}` must be exempt");
+        }
+        for k in [
+            "name", "reason", "intent", "lens", "pr_id", "campaign", "charter",
+        ] {
+            assert!(!is_digest_key(k), "`{k}` must NOT be exempt");
+        }
+    }
+
+    #[test]
+    fn scrub_payload_recurses_into_arrays_and_nested_objects() {
+        let mut v = json!({
+            "claims_checked": ["security:approve", format!("note {GHP}")],
+            "nested": { "reason": format!("see {GHP}"), "tree_hash": "abc" },
+            "intent_ids": [GHP, "i-2"],
+        });
+        scrub_payload(&mut v);
+        assert_eq!(v["claims_checked"][0], "security:approve");
+        assert_eq!(v["claims_checked"][1], REDACTED, "array element scrubs");
+        assert_eq!(
+            v["nested"]["reason"], REDACTED,
+            "nested object value scrubs"
+        );
+        // A digest key inside a nested object is still exempt.
+        assert_eq!(v["nested"]["tree_hash"], "abc");
+        assert_eq!(v["intent_ids"][0], REDACTED);
+        assert_eq!(v["intent_ids"][1], "i-2");
+    }
+
+    #[test]
+    fn scrub_to_canonical_is_sorted_and_scrubbed() {
+        // The forbidden path (a raw, un-scrubbed append) is closed: the helper
+        // returns canonical (sorted-key) JSON with the secret already redacted.
+        let out = scrub_to_canonical(json!({
+            "tree_hash": "deadbeef",
+            "name": format!("token {GHP}"),
+        }));
+        // Sorted keys: name before tree_hash.
+        assert_eq!(
+            out,
+            format!(r#"{{"name":"{REDACTED}","tree_hash":"deadbeef"}}"#)
+        );
+        // Re-canonicalises to itself (stable wire bytes).
+        assert_eq!(hugit_refstore::canonical_json(&out).unwrap(), out);
+    }
 }
