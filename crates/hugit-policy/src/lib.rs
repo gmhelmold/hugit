@@ -13,7 +13,8 @@
 //! Every policy change emits a hash-chained [`EventRecord`] (③).
 
 use hugit_contracts::EventRecord;
-use hugit_refstore::{GENESIS_PREV_HASH, canonical_json, compute_this_hash};
+use hugit_refstore::authz::{DenyReason, Endpoint, PrincipalClass};
+use hugit_refstore::{EventLog, canonical_json};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -217,26 +218,83 @@ impl Engine {
 
 // ─── audit event emitter ─────────────────────────────────────────────────────
 
-/// Emits an [`EventRecord`] describing a policy change.
+/// The event kind every policy change appends.
+pub const POLICY_CHANGE_KIND: &str = "policy.change";
+
+/// Why an [`emit_policy_change`] did not append a `policy.change` event.
 ///
-/// Every call to [`emit_policy_change`] produces one audited event (③).
-/// The event is appended to the caller-provided log; attribution is carried
-/// in `principal` (who made the change).
+/// `policy` is one of the four mutating forge verbs the D14 matrix gates
+/// ([`hugit_refstore::authz`]); the matrix declares it **Human-only** (a human
+/// stakeholder control). A non-human asserted class — or an attempt to seed the
+/// emitter with a malformed prior chain — is refused, fail-closed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyEmitError {
+    /// The D14 guard denied the policy change: `policy` is Human-only and the
+    /// asserted [`PrincipalClass`] was not [`PrincipalClass::Human`]. The
+    /// `policy.change` event was **not** appended; an `authz.denied` audit
+    /// record (③) was written to the log instead, so the denial is attributable.
+    /// Carries the [`DenyReason`] for the caller to map to its own error.
+    Denied(DenyReason),
+    /// The caller-provided prior records do not form a gap-free, monotonic hash
+    /// chain, so the guarded append point cannot extend it (fail-closed). The
+    /// log is left untouched.
+    BadPriorChain,
+}
+
+impl std::fmt::Display for PolicyEmitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PolicyEmitError::Denied(reason) => {
+                write!(
+                    f,
+                    "policy change denied: {} (policy is Human-only)",
+                    reason.code()
+                )
+            }
+            PolicyEmitError::BadPriorChain => {
+                write!(f, "prior policy log is not a gap-free monotonic chain")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PolicyEmitError {}
+
+/// Emits an [`EventRecord`] describing a policy change — **through the D14
+/// authorization guard** (`policy` is a Human-only forge verb).
 ///
-/// `old_gates_json` / `new_gates_json` are the serialised gate lists before
-/// and after the edit, so the delta is fully reconstructable from the log.
+/// `policy` is one of the four mutating verbs the D14 matrix gates
+/// ([`hugit_refstore::authz`]); the matrix declares it **Human-only** (a human
+/// stakeholder control — the `policy` row). This emitter therefore routes the
+/// append through [`EventLog::append_authorized`] under [`Endpoint::Policy`]
+/// with the **caller-asserted** `class`, rather than hand-rolling the
+/// hash-chained record (the bypass the adversarial round caught — D14 was
+/// gated nowhere on this path). The class→principal binding is the disclosed
+/// authentication seam (P2 / ADR-0002); the matrix decision is real and
+/// enforced here:
+///
+/// - `class == `[`PrincipalClass::Human`] → the `policy.change` event is
+///   appended and returned.
+/// - any non-human `class` → **denied** fail-closed: no `policy.change` is
+///   appended, an `authz.denied` audit record (③) is written by the guard, and
+///   [`PolicyEmitError::Denied`] carries the [`DenyReason`].
+///
+/// The event is appended to the caller-provided log (a canonical
+/// `Vec<EventRecord>` chain); attribution is carried in `principal` (who made
+/// the change). `old_gates_json` / `new_gates_json` are the serialised gate
+/// lists before and after the edit, so the delta is fully reconstructable.
+///
+/// The hash-chain math is the refstore's frozen formula (via
+/// [`EventLog::append_authorized`] → [`EventLog::append`]) — byte-identical to
+/// what every other guarded verb produces, so a verifier re-canonicalises and
+/// re-chains it exactly.
 pub fn emit_policy_change(
     log: &mut Vec<EventRecord>,
+    class: PrincipalClass,
     principal: &str,
     old_gates_json: &str,
     new_gates_json: &str,
-) -> EventRecord {
-    let seq = log.len() as u64;
-    let prev_hash = log
-        .last()
-        .map(|e| e.this_hash.clone())
-        .unwrap_or_else(|| GENESIS_PREV_HASH.to_string());
-
+) -> Result<EventRecord, PolicyEmitError> {
     let payload_raw = serde_json::json!({
         "old": old_gates_json,
         "new": new_gates_json,
@@ -246,26 +304,40 @@ pub fn emit_policy_change(
     // and compare bytes; a non-canonical payload would produce a different hash.
     let payload = canonical_json(&payload_raw).unwrap_or(payload_raw);
 
-    let this_hash = compute_this_hash(
-        &prev_hash,
-        "policy.change",
-        &[principal.to_string()],
-        &payload,
-        seq,
-    );
+    // Rehydrate the caller's prior records into an EventLog so the append goes
+    // through the one guarded mutating primitive. A prior chain that is not
+    // gap-free/monotonic is refused fail-closed (the guarded append point owns
+    // the seq invariant; we never silently re-seq).
+    let mut event_log = EventLog::new();
+    for record in log.iter() {
+        event_log
+            .push_record(record.clone())
+            .map_err(|_| PolicyEmitError::BadPriorChain)?;
+    }
 
-    let event = EventRecord {
-        seq,
-        prev_hash,
-        this_hash,
-        kind: "policy.change".into(),
-        principal_chain: vec![principal.to_string()],
+    // Route through the D14 guard under Endpoint::Policy with the caller-asserted
+    // class. On Allow the real event is appended; on Deny the guard writes an
+    // `authz.denied` audit record (③) into `event_log` instead — which we mirror
+    // back so the denial is persisted and attributable, then surface the error.
+    match event_log.append_authorized(
+        class,
+        Endpoint::Policy,
+        POLICY_CHANGE_KIND,
+        vec![principal.to_string()],
         payload,
-        recorded_at: 0, // deterministic for tests; callers may overwrite
-    };
-
-    log.push(event.clone());
-    event
+        0, // deterministic for tests; callers may overwrite recorded_at
+    ) {
+        Ok(event) => {
+            log.push(event.clone());
+            Ok(event)
+        }
+        Err(denied) => {
+            // Persist the guard's audit record (the denial is never silent) and
+            // return the structured error.
+            log.push((*denied.audit).clone());
+            Err(PolicyEmitError::Denied(denied.reason))
+        }
+    }
 }
 
 /// Landing-path enforcement adapter.

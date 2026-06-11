@@ -35,6 +35,7 @@
 //! append/hash-chain primitive D1a sealed. Any correctness regression observed
 //! here is a defect in those primitives, fixed at root, never bypassed here.
 
+use crate::authz::{AuditedGuard, Decision, Endpoint};
 use crate::intent::import::{ImportError, import_sidecar};
 use crate::log::EventLog;
 use crate::undo::{UndoError, compute_compensation};
@@ -394,6 +395,21 @@ impl Serializer {
     /// at a time, exactly like any other append. The compensator is computed and
     /// appended **atomically under the one lock**, so the prior-state projection
     /// can never race a concurrent append.
+    ///
+    /// # D14 guard (Human-only)
+    ///
+    /// `undo` is a guarded mutating forge verb the D14 matrix declares
+    /// **Human-only** ([`crate::authz`]). This is a user-reachable rollback verb
+    /// (the porcelain `hugit undo` / the queue's compensating-undo path), so —
+    /// exactly like the free [`crate::undo::undo`](crate::undo::undo) function
+    /// E-GUARD routed — it authorizes the `principal_chain` through the D14
+    /// [`AuditedGuard`] under [`Endpoint::Undo`] **before** appending. A
+    /// non-human (or unrecognized/empty) principal is **denied** fail-closed: the
+    /// compensating event is **not** appended, the guard writes an `authz.denied`
+    /// audit record (③) into the same log under the one lock, and
+    /// [`UndoError::Denied`] is surfaced (mapped to [`UndoSubmitError::Undo`]).
+    /// The authorize→append is one indivisible critical section under the writer
+    /// lock, so the single-writer invariant holds for the audit record too.
     pub fn undo(
         &self,
         target: u64,
@@ -414,11 +430,27 @@ impl Serializer {
             .log
             .lock()
             .map_err(|_| SubmitError::WriterPoisoned)?;
-        // Compute the compensator and append it under the SAME lock, so the
-        // prior-state read and the append are one indivisible critical section.
+        // Compute the compensator first (re-verifies the chain, fail-closed) so a
+        // denial does not even reach the append path on a malformed target — all
+        // under the SAME lock, so the prior-state read, the guard decision, and
+        // the append are one indivisible critical section.
         let comp = compute_compensation(&log, target)?;
-        let record = log.append(comp.kind, principal_chain, comp.payload, recorded_at);
-        Ok(record)
+        // D14 guard on the chain-classified principal: only a Human may undo.
+        // The guard audits a denial (③) into this same log; an authorized actor
+        // proceeds to append the compensator. (Mirrors crate::undo::undo, run
+        // under the serializer's writer lock so the single-writer invariant holds.)
+        let decision = {
+            let mut guard = AuditedGuard::new(&mut log);
+            let (decision, _audit) = guard.authorize(&principal_chain, Endpoint::Undo, recorded_at);
+            decision
+        };
+        match decision {
+            Decision::Allow => {
+                let record = log.append(comp.kind, principal_chain, comp.payload, recorded_at);
+                Ok(record)
+            }
+            Decision::Deny(reason) => Err(UndoError::Denied(reason).into()),
+        }
         // `log` drops first (lock released), then `_permit` — every path.
     }
 
@@ -631,5 +663,109 @@ mod tests {
         drop(p1);
         drop(p2);
         assert_eq!(sem.in_use(), 0, "all permits returned");
+    }
+
+    // ── D14 guard on the serialized `Serializer::undo` path (P-GUARD2) ──────────
+    // The Serializer previously raw-appended the compensator, bypassing the
+    // Human-only `undo` matrix cell the free `crate::undo::undo` function guards.
+    // These pin that the serialized path now denies a non-human, audits the
+    // denial, appends NO compensator on denial, and allows a human undo.
+    use crate::authz::DenyReason;
+    use crate::undo::UndoError;
+
+    /// Seed a serializer with two ref.updates on one ref so undoing seq 1 has a
+    /// real compensator (restore to the seq-0 value).
+    fn two_update_serializer() -> Serializer {
+        let s = Serializer::new();
+        let r = "refs/heads/main";
+        s.submit(Op::new(
+            "ref.update",
+            vec!["user:gustavo".into()],
+            format!(r#"{{"ref":"{r}","target":"{}"}}"#, "a".repeat(40)),
+            1,
+        ))
+        .expect("seed 0 accepted");
+        s.submit(Op::new(
+            "ref.update",
+            vec!["user:gustavo".into()],
+            format!(r#"{{"ref":"{r}","target":"{}"}}"#, "b".repeat(40)),
+            2,
+        ))
+        .expect("seed 1 accepted");
+        s
+    }
+
+    #[test]
+    fn serialized_undo_human_succeeds() {
+        let s = two_update_serializer();
+        let before = s.len().expect("not poisoned");
+        let rec = s
+            .undo(1, vec!["user:gustavo".into()], 3)
+            .expect("a human may undo through the serializer");
+        assert_eq!(rec.kind, "ref.update", "the compensator is a ref.update");
+        assert_eq!(
+            s.len().expect("not poisoned"),
+            before + 1,
+            "exactly the compensator appended, no audit"
+        );
+        s.with_records(|recs| {
+            assert!(
+                !recs.iter().any(|r| r.kind == "authz.denied"),
+                "an allowed undo emits no denial audit"
+            );
+        })
+        .expect("not poisoned");
+    }
+
+    #[test]
+    fn serialized_undo_non_human_denied_and_audited() {
+        // orchestrator, worker (subagent), model — all denied for undo.
+        for actor in ["orchestrator:lead", "agent:runner-03", "model:claude"] {
+            let s = two_update_serializer();
+            let before = s.len().expect("not poisoned");
+            let err = s
+                .undo(1, vec![actor.into()], 3)
+                .expect_err("a non-human serialized undo is denied");
+            match err {
+                UndoSubmitError::Undo(UndoError::Denied(DenyReason::NotPermitted { .. })) => {}
+                other => panic!("expected NotPermitted denial for {actor}, got {other:?}"),
+            }
+            // Only the audit record was appended — NOT a compensator.
+            assert_eq!(
+                s.len().expect("not poisoned"),
+                before + 1,
+                "only the authz.denied audit was appended on a denied serialized undo"
+            );
+            s.with_records(|recs| {
+                let last = recs.last().unwrap();
+                assert_eq!(last.kind, "authz.denied");
+                assert!(last.payload.contains("\"endpoint\":\"undo\""));
+                assert_eq!(
+                    recs.iter().filter(|r| r.kind == "ref.update").count(),
+                    2,
+                    "no compensating ref.update appended on a denied serialized undo"
+                );
+            })
+            .expect("not poisoned");
+        }
+    }
+
+    #[test]
+    fn serialized_undo_unrecognized_principal_denied() {
+        let s = two_update_serializer();
+        let err = s
+            .undo(1, vec!["queue".into()], 3)
+            .expect_err("unrecognized principal denied");
+        assert!(matches!(
+            err,
+            UndoSubmitError::Undo(UndoError::Denied(DenyReason::UnrecognizedPrincipal))
+        ));
+        // empty chain → also unrecognized, denied.
+        let s2 = two_update_serializer();
+        let err2 = s2.undo(1, vec![], 3).expect_err("empty chain denied");
+        assert!(matches!(
+            err2,
+            UndoSubmitError::Undo(UndoError::Denied(DenyReason::UnrecognizedPrincipal))
+        ));
     }
 }
