@@ -161,6 +161,14 @@ pub enum EnvelopeError {
         /// `task_transcript_ref` / both).
         missing: &'static str,
     },
+    /// The [`ContextEnvelope`] could not be serialized to JSON before the
+    /// `context_ref` store write. The envelope shape is frozen and all money
+    /// fields are integers (WA4), so this path is unreachable in practice —
+    /// but `serde_json::to_vec(...).expect(...)` is a panic class that dies
+    /// on any unexpected non-serializable value (e.g. a future non-finite
+    /// f64 sneaking in). This error variant replaces that panic with a
+    /// fail-closed `Result` so the capture path never aborts the process.
+    Serialize(String),
 }
 
 impl std::fmt::Display for EnvelopeError {
@@ -178,6 +186,10 @@ impl std::fmt::Display for EnvelopeError {
                  level is full (the ratified default) but {missing} is absent — full \
                  demands BOTH the full and the compacted transcript at every altitude; \
                  null refs are legal only under an explicit opt-down (off/metrics/task)"
+            ),
+            EnvelopeError::Serialize(msg) => write!(
+                f,
+                "envelope JSON serialization failed (fail-closed, capture aborted): {msg}"
             ),
         }
     }
@@ -559,7 +571,13 @@ pub fn close_envelope<S: ColdBlobStore>(
 
     // The envelope blob itself is content-addressed behind the same
     // tier-agnostic ref scheme — this is the `IntentSidecar.context_ref`.
-    let bytes = serde_json::to_vec(&envelope).expect("frozen ContextEnvelope serializes");
+    // The shape is frozen and all money fields are integers (WA4), so
+    // serialization failure is unreachable in practice — but a panic here
+    // would abort the capture path. `EnvelopeError::Serialize` replaces the
+    // panic class with a fail-closed `Result` (the error surfaces to the
+    // caller; the process continues).
+    let bytes =
+        serde_json::to_vec(&envelope).map_err(|e| EnvelopeError::Serialize(e.to_string()))?;
     let context_ref = store.put(&bytes)?;
 
     Ok(ClosedEnvelope {
@@ -902,5 +920,50 @@ mod tests {
             // task ref is null too (empty task transcript, even at `task`).
             assert_eq!(closed.envelope.trajectory.task_transcript_ref, None);
         }
+    }
+
+    /// **NaN/serialization panic (A2-F14)**: `EnvelopeError::Serialize` is the
+    /// fail-closed replacement for `serde_json::to_vec(...).expect(...)`. The
+    /// frozen `ContextEnvelope` shape carries no `f64` fields (WA4 — money is
+    /// integer micro-USD), so serialization failure is unreachable with the
+    /// current schema; the test proves the error variant and its `Display` are
+    /// correctly wired rather than panicking.
+    ///
+    /// We verify: (a) the variant constructs and round-trips through `Display`;
+    /// (b) it is distinct from all other `EnvelopeError` arms; (c) a successful
+    /// close (the normal path) does NOT return `Serialize`.
+    #[test]
+    fn serialize_error_variant_is_fail_closed_not_a_panic() {
+        // (a) The variant constructs and its Display is informative.
+        let err = EnvelopeError::Serialize("simulated: value is not finite".to_string());
+        let msg = err.to_string();
+        assert!(
+            msg.contains("fail-closed"),
+            "Display must mention fail-closed: {msg}"
+        );
+        assert!(
+            msg.contains("simulated"),
+            "Display must include the underlying message: {msg}"
+        );
+
+        // (b) The variant is distinguishable from other arms (pattern match).
+        assert!(
+            matches!(err, EnvelopeError::Serialize(_)),
+            "variant matches its own arm"
+        );
+        assert!(
+            !matches!(err, EnvelopeError::Store(_)),
+            "not a Store variant"
+        );
+
+        // (c) A well-formed envelope does NOT return Serialize — the normal path
+        // succeeds, confirming the error arm is wired but unreachable with the
+        // current frozen (all-integer) schema.
+        let store = InMemoryColdStore::new();
+        let result = close_envelope(&draft(Altitude::Intent), CaptureLevel::Full, &store);
+        assert!(
+            !matches!(result, Err(EnvelopeError::Serialize(_))),
+            "a well-formed frozen envelope never hits the Serialize arm: {result:?}"
+        );
     }
 }

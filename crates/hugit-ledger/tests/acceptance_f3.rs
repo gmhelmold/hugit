@@ -1018,3 +1018,205 @@ fn campaign_rollup_over_multi_pr_campaign() {
             * 100.0
     ));
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WC2 additions — tiebreak determinism + span law (both directions)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **born_at tie nondeterminism (A1-F6)**: two attempts share the same
+/// `born_at`; the tiebreak order is (born_at DESC, run_id lex ASC, seq ASC).
+/// Feeding the envelopes in both possible orders must produce the SAME
+/// work/waste split — the decomposition is deterministic regardless of
+/// envelope arrival order.
+#[test]
+fn born_at_tie_tiebreak_is_deterministic() {
+    // Two attempts for the same intent, born at the same millisecond.
+    // run_id "zzz-run" > "aaa-run" lexicographically → "zzz-run" wins the
+    // tiebreak (the higher run_id is the "later" / winning attempt).
+    let shared_born = T0 + 5_000;
+    let attempt_aaa = intent_env(
+        "i-tie",
+        "opus-4.8",
+        "aaa-run",
+        "orq-014",
+        shared_born,
+        shared_born + 10_000,
+        8_000,
+        20_000,
+        10,
+        200_000, // this is WASTE (aaa < zzz)
+    );
+    let attempt_zzz = intent_env(
+        "i-tie",
+        "opus-4.8",
+        "zzz-run",
+        "orq-014",
+        shared_born,
+        shared_born + 15_000,
+        10_000,
+        30_000,
+        15,
+        300_000, // this is WORK (zzz wins)
+    );
+
+    // A minimal PR envelope for the tiebreak fixture.
+    let pr_env = envelope(
+        Altitude::Pr,
+        "PR-TIE",
+        "opus-4.8",
+        "main",
+        "orq-014",
+        None,
+        T0,
+        T0 + 30_000,
+        metrics(5_000, 4_000, 5, 3, 50_000),
+    );
+
+    // Feed [aaa, zzz] — normal order.
+    let rec_normal = pr_record(
+        &pr_env,
+        "cas:pr-tie",
+        &[attempt_aaa.clone(), attempt_zzz.clone()],
+        &["i-tie".to_string()],
+        &[],
+        zero_ci(),
+        PrQueueInput {
+            queue_wait_ms: 1_000,
+            human_touches: 0,
+            landed_at: T0 + 20_000,
+        },
+    )
+    .expect("normal order computes");
+
+    // Feed [zzz, aaa] — shuffled order.
+    let rec_shuffled = pr_record(
+        &pr_env,
+        "cas:pr-tie",
+        &[attempt_zzz.clone(), attempt_aaa.clone()],
+        &["i-tie".to_string()],
+        &[],
+        zero_ci(),
+        PrQueueInput {
+            queue_wait_ms: 1_000,
+            human_touches: 0,
+            landed_at: T0 + 20_000,
+        },
+    )
+    .expect("shuffled order computes");
+
+    // Both orderings must agree: zzz-run wins (work = 300_000 micros).
+    assert_eq!(
+        rec_normal.cost.work.cost_usd_micros, 300_000,
+        "normal order: zzz wins (higher run_id)"
+    );
+    assert_eq!(
+        rec_shuffled.cost.work.cost_usd_micros, 300_000,
+        "shuffled order: zzz still wins — deterministic regardless of arrival"
+    );
+    // The waste split must also agree.
+    assert_eq!(rec_normal.cost.waste.cost_usd_micros, 200_000);
+    assert_eq!(rec_shuffled.cost.waste.cost_usd_micros, 200_000);
+    // And the decomposition identity holds in both cases.
+    assert_eq!(
+        rec_normal.cost.total.cost_usd_micros,
+        rec_normal.cost.work.cost_usd_micros
+            + rec_normal.cost.orchestration.cost_usd_micros
+            + rec_normal.cost.ci.cost_usd_micros
+    );
+    assert_eq!(
+        rec_normal.cost.total.cost_usd_micros, rec_shuffled.cost.total.cost_usd_micros,
+        "total is identical regardless of arrival order"
+    );
+}
+
+/// **Span law — serial fixture (A1-F1)**: a single agent runs briefly, then
+/// the wall clock idles for orchestration/queue time before landing. Here
+/// `wall_span_ms > agent_sum_ms` is EXPECTED and ACCEPTED — the rollup does
+/// not assert the parallel-only inequality in the serial case.
+///
+/// This fixture is the complement of `wall_span_le_agent_sum_under_parallelism`:
+/// that one proves span ≤ sum under parallelism; this one proves span > sum
+/// is legal under serial workloads. Together they confirm the span law is a
+/// structural property of the inputs, not a rollup invariant.
+#[test]
+fn wall_span_gt_agent_sum_serial_is_legal() {
+    // Single intent: active for 10 s, but the wall clock from PR start to
+    // landing spans 120 s (orchestration + queue time dominate).
+    let active_ms: u64 = 10_000;
+    let wall_ms: u64 = 120_000;
+    assert!(
+        wall_ms > active_ms,
+        "fixture sanity: wall span must exceed agent active time"
+    );
+
+    let pr_born = T0;
+    let pr_landed_at = T0 + wall_ms;
+    let intent_born = T0 + 5_000; // agent born 5 s into the PR window
+    let intent_died = intent_born + active_ms;
+
+    // Build a one-intent envelope with a tiny active_ms but a wide wall span.
+    let serial_intent = {
+        let mut env = intent_env(
+            "i-serial",
+            "opus-4.8",
+            "run-serial",
+            "orq-serial",
+            intent_born,
+            intent_died,
+            active_ms,
+            15_000,
+            5,
+            150_000,
+        );
+        // Override wall_ms to reflect the wide outer span for completeness.
+        env.metrics.wall_ms = active_ms + 2_000;
+        env
+    };
+
+    let pr_env = envelope(
+        Altitude::Pr,
+        "PR-SERIAL",
+        "opus-4.8",
+        "main",
+        "orq-serial",
+        None,
+        pr_born,
+        pr_born + wall_ms,
+        metrics(5_000, 3_000, 4, 2, 40_000),
+    );
+
+    let rec = pr_record(
+        &pr_env,
+        "cas:pr-serial",
+        &[serial_intent],
+        &["i-serial".to_string()],
+        &[],
+        zero_ci(),
+        PrQueueInput {
+            queue_wait_ms: 60_000,
+            human_touches: 1,
+            landed_at: pr_landed_at,
+        },
+    )
+    .expect("serial PR computes");
+
+    // The wall span runs from the PR's born (= T0, the earliest) to landed_at.
+    assert_eq!(rec.time.wall_span_ms, wall_ms);
+    // agent_sum = only the single intent's active_ms (the PR author's own
+    // session contributes to orchestration, not agent_sum).
+    assert_eq!(rec.time.agent_sum_ms, active_ms);
+    // THE LAW: span > sum is legal for serial workloads.
+    assert!(
+        rec.time.wall_span_ms > rec.time.agent_sum_ms,
+        "serial fleet: span ({}) > sum ({}) is expected and accepted",
+        rec.time.wall_span_ms,
+        rec.time.agent_sum_ms
+    );
+    // Decomposition identity still holds.
+    assert_eq!(
+        rec.cost.total.cost_usd_micros,
+        rec.cost.work.cost_usd_micros
+            + rec.cost.orchestration.cost_usd_micros
+            + rec.cost.ci.cost_usd_micros
+    );
+}
