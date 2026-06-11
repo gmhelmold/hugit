@@ -293,11 +293,19 @@ fn aggregate_kpis(rows: &[CheckRow]) -> Value {
 }
 
 /// Read `path` (a JSON `[EventRecord, …]` array) into an [`EventLog`], rehydrating
-/// the hash chain. Every fault is the canonical [`PorcelainError`] (exit `2`):
-/// `log_not_found` (absent file — NEVER silently an empty world), `parse_log`
-/// (malformed JSON), `io` (other read fault), `internal` (a record whose seq
-/// breaks the append-only invariant — a corrupt chain, a hugit-side fault).
-pub(crate) fn load_event_log(path: &Path) -> Result<EventLog, PorcelainError> {
+/// **and verifying** the hash chain. Every fault is the canonical
+/// [`PorcelainError`] (exit `2`): `log_not_found` (absent file — NEVER silently
+/// an empty world), `parse_log` (malformed JSON), `io` (other read fault),
+/// `internal` (a record whose seq breaks the append-only invariant), and
+/// `chain_broken` (the hash chain is tampered/corrupt).
+///
+/// WF-3: this loader (shared by `checks show` AND `queue show` — the latter
+/// calls it through [`crate::queue`]; and `tournament --log`'s existence check)
+/// previously SKIPPED the chain verification its siblings
+/// (`pr`/`campaign`/`intent`) all run, so a tampered log projected as truth on
+/// those two reads. It now fails closed exactly like the siblings: a tampered
+/// chain is `chain_broken`/exit-2, never read.
+pub fn load_event_log(path: &Path) -> Result<EventLog, PorcelainError> {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -313,6 +321,14 @@ pub(crate) fn load_event_log(path: &Path) -> Result<EventLog, PorcelainError> {
             PorcelainError::internal(format!("rehydrate log {}: {e}", path.display()))
         })?;
     }
+    // Fail closed on a tampered / corrupt chain (the siblings verify; so must we).
+    hugit_refstore::verify_chain(log.records()).map_err(|e| {
+        PorcelainError::new(
+            "chain_broken",
+            format!("log {} failed integrity verification: {e}", path.display()),
+            "the --log file's hash chain is tampered or corrupt",
+        )
+    })?;
     Ok(log)
 }
 

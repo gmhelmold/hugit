@@ -151,7 +151,8 @@ fn cross_verb_cycle_composes_on_one_canonical_log() {
     assert!(!ok, "close must refuse while a PR is in-flight");
     assert_eq!(v["error"]["kind"], "in_flight_prs");
     assert_eq!(v["error"]["fix"], "land or abandon first");
-    let in_flight = v["error"]["detail"]["in_flight"].as_array().unwrap();
+    // WF error-shape uniformity: context folded FLAT under `error` (not `detail`).
+    let in_flight = v["error"]["in_flight"].as_array().unwrap();
     assert!(in_flight.iter().any(|p| p == "1"), "names the in-flight PR");
     assert_eq!(
         count_kind(Path::new(log), "campaign.closed"),
@@ -377,5 +378,122 @@ fn pr_open_refuses_intent_not_on_the_log() {
         count_kind(Path::new(log), "pr.opened"),
         0,
         "no pr.opened appended on a refused open"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WF-2 — abandon-projection deadlock: `pr abandon` must release `campaign close`.
+//
+// Before the fix the campaign projections (pr_phases) IGNORED `pr.abandoned`, so
+// an abandoned PR stayed in-flight forever, `campaign close` refused forever, and
+// `closed:true` was UNREACHABLE. This drives the full cycle over the REAL binary
+// and proves close now SUCCEEDS (closed:true) once the only PR is abandoned, and
+// `campaign show` projects the PR as `abandoned`, not `in_flight`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn wf2_pr_abandon_releases_campaign_close_to_reach_closed_true() {
+    let dir = scratch("wf2-abandon-deadlock");
+    let log = dir.join("L.json");
+    let log = log.to_str().unwrap();
+    let store = dir.join("store.json");
+    let store = store.to_str().unwrap();
+
+    // campaign open → intent new → pr open → pr land (in-flight: queued).
+    let (ok, _, e) = run(&[
+        "campaign",
+        "open",
+        "--log",
+        log,
+        "--campaign",
+        CAMPAIGN,
+        "--charter",
+        "c",
+        "--owner",
+        "o@h.com",
+    ]);
+    assert!(ok, "campaign open exits 0: {e}");
+    let (ok, _, e) = run(&[
+        "intent",
+        "new",
+        "--log",
+        log,
+        "--store",
+        store,
+        "--campaign",
+        CAMPAIGN,
+        "--charter",
+        "land it",
+        "--id",
+        "i1",
+    ]);
+    assert!(ok, "intent new exits 0: {e}");
+    let (ok, _, e) = run(&[
+        "pr",
+        "open",
+        "--log",
+        log,
+        "--pr",
+        "1",
+        "--campaign",
+        CAMPAIGN,
+        "--author-kind",
+        "orchestrator",
+        "--run-id",
+        "r",
+        "--intent",
+        "i1",
+    ]);
+    assert!(ok, "pr open exits 0: {e}");
+    let (ok, _, e) = run(&["pr", "land", "--log", log, "--pr", "1"]);
+    assert!(ok, "pr land exits 0: {e}");
+
+    // PRE-FIX REPRO: close refuses (the PR is in-flight/queued).
+    let (ok, v, _) = run(&["campaign", "close", "--log", log, "--campaign", CAMPAIGN]);
+    assert!(!ok, "close refuses while the PR is in-flight");
+    assert_eq!(v["error"]["kind"], "in_flight_prs");
+
+    // pr abandon — appends `pr.abandoned`. The projections must now HONOR it.
+    let (ok, v, e) = run(&[
+        "pr",
+        "abandon",
+        "--log",
+        log,
+        "--pr",
+        "1",
+        "--reason",
+        "superseded",
+    ]);
+    assert!(ok, "pr abandon exits 0: {e}");
+    assert_eq!(v["abandoned"], true);
+
+    // campaign show: the abandoned PR is `abandoned`, NOT `in_flight` (and the
+    // in-flight count drops to zero — the deadlock is gone).
+    let (ok, v, _) = run(&["campaign", "show", "--log", log, "--campaign", CAMPAIGN]);
+    assert!(ok, "show is read-only and exits 0: {v}");
+    assert_eq!(v["progress"]["in_flight"], 0, "no PR is in-flight anymore");
+    assert_eq!(v["progress"]["abandoned"], 1, "the PR is counted abandoned");
+    let prs = v["prs"].as_array().unwrap();
+    assert_eq!(prs.len(), 1);
+    assert_eq!(prs[0]["pr_id"], "1");
+    assert_eq!(
+        prs[0]["phase"], "abandoned",
+        "campaign show projects the PR as abandoned, not in_flight"
+    );
+
+    // THE PROOF: campaign close now SUCCEEDS and `closed:true` is reachable.
+    let (ok, v, e) = run(&["campaign", "close", "--log", log, "--campaign", CAMPAIGN]);
+    assert!(
+        ok,
+        "campaign close MUST succeed once the PR is abandoned: {e}"
+    );
+    assert_eq!(
+        v["closed"], true,
+        "closed:true is reachable (deadlock fixed)"
+    );
+    assert_eq!(
+        count_kind(Path::new(log), "campaign.closed"),
+        1,
+        "the close seal is appended exactly once"
     );
 }

@@ -76,6 +76,15 @@ pub struct IntentStoreFile {
 /// An error operating the on-disk intent store.
 #[derive(Debug)]
 pub enum StoreError {
+    /// The `--store` FILE does not exist on disk. Surfaced by the read-only
+    /// queries ([`IntentStore::load_existing`], used by `intent list`/`show`) —
+    /// NEVER a silent empty store/exit-0, matching the sibling `--log`
+    /// contract (`log_not_found`/exit-2). The bootstrap path
+    /// ([`IntentStore::load`], used by `intent new`) tolerates absence instead.
+    NotFound {
+        /// The store path that is absent.
+        path: String,
+    },
     /// The store file could not be read (and `--store` was not a fresh path).
     Read {
         /// The store path that failed to read.
@@ -115,6 +124,7 @@ pub enum StoreError {
 impl std::fmt::Display for StoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            StoreError::NotFound { path } => write!(f, "--store file does not exist: {path}"),
             StoreError::Read { path, source } => write!(f, "read store {path}: {source}"),
             StoreError::Parse { path, msg } => write!(f, "parse store {path}: {msg}"),
             StoreError::Rehydrate(m) => write!(f, "rehydrate event log: {m}"),
@@ -206,6 +216,23 @@ impl IntentStore {
             envelopes: file.envelopes,
             verdicts: file.verdicts,
         })
+    }
+
+    /// Like [`IntentStore::load`], but a MISSING `--store` file is an explicit
+    /// [`StoreError::NotFound`] (exit-2), never a silent empty store.
+    ///
+    /// The read-only queries (`intent list` / `intent show`) call this so a
+    /// missing `--store` is the SAME structured `store_not_found`/exit-2 the
+    /// sibling `--log` reads give (`log_not_found`); `intent new`'s
+    /// bootstrap-on-absent behavior stays on [`IntentStore::load`]. The
+    /// distinction is at the CALL SITE, not the shared loader.
+    pub fn load_existing(path: &Path) -> Result<Self, StoreError> {
+        if !path.exists() {
+            return Err(StoreError::NotFound {
+                path: path.display().to_string(),
+            });
+        }
+        IntentStore::load(path)
     }
 
     /// The native intent altitude over the current log (the real projection).

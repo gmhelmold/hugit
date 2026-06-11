@@ -335,3 +335,57 @@ fn malformed_log_is_the_canonical_parse_log_envelope_exit_two() {
         assert_eq!(v["error"]["path"], log_s);
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WF-3 — a TAMPERED chain → `chain_broken`/exit-2 on `checks show` AND `queue
+// show`. These two loaders previously skipped the `verify_chain` their siblings
+// (pr/campaign/intent) run, so a tampered log projected as truth. Both must now
+// fail closed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn tampered_chain_is_chain_broken_exit_two_on_checks_and_queue() {
+    let dir = scratch("tamper");
+    let log = dir.join("tampered.json");
+
+    // Build a REAL, well-formed 2-record chain through the engine's append path.
+    write_log(
+        &log,
+        &[
+            (
+                "check.recorded",
+                json!({"name": "fmt", "exit": 0, "cache_hit": true}),
+            ),
+            (
+                "check.recorded",
+                json!({"name": "clippy", "exit": 0, "cache_hit": false}),
+            ),
+        ],
+    );
+
+    // Tamper: mutate the first record's recorded payload on disk WITHOUT
+    // recomputing the hash chain — the records still parse + rehydrate
+    // (monotonic seq intact), but the stored hash no longer matches the payload,
+    // so `verify_chain` fails. The payload is a JSON STRING, so the field name
+    // is escaped on disk (`\"fmt\"`); match the escaped form.
+    let raw = std::fs::read_to_string(&log).unwrap();
+    let tampered = raw.replacen(r#"\"fmt\""#, r#"\"fmt-TAMPERED\""#, 1);
+    assert_ne!(raw, tampered, "the tamper must actually change a byte");
+    std::fs::write(&log, tampered).unwrap();
+    let log_s = log.to_str().unwrap();
+
+    for verb in [
+        vec!["checks", "show", "--log", log_s],
+        vec!["queue", "show", "--log", log_s],
+    ] {
+        let (code, v) = run(&verb);
+        assert_eq!(code, 2, "a tampered chain is exit 2 ({verb:?}): {v}");
+        assert_eq!(
+            v["error"]["kind"], "chain_broken",
+            "the tampered log must be rejected as chain_broken ({verb:?}): {v}"
+        );
+        assert!(v["error"]["fix"].is_string());
+        // Nested under "error", never flat.
+        assert!(v.get("kind").is_none());
+    }
+}

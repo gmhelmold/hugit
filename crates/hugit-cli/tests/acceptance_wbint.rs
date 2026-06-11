@@ -217,14 +217,20 @@ fn item_4_error_uses_fix_key_not_suggested_fix() {
 }
 
 #[test]
-fn item_4b_error_with_detail_folds_into_envelope() {
-    let detail = serde_json::json!({"ids": ["i1", "i2"]});
-    let e =
-        PorcelainError::new("missing", "two intents missing", "run intent new").with_detail(detail);
+fn item_4b_error_context_folds_flat_into_envelope() {
+    // WF error-shape uniformity: structured context is folded FLAT under
+    // `error` (never nested under a `detail` sub-object), so ONE parser
+    // (`error.<key>`) works across intent + every sibling porcelain verb.
+    let e = PorcelainError::new("missing", "two intents missing", "run intent new")
+        .with_context("ids", serde_json::json!(["i1", "i2"]));
     let v: serde_json::Value = serde_json::from_str(&e.to_json()).unwrap();
 
     assert_eq!(v["error"]["kind"], "missing");
-    assert_eq!(v["error"]["detail"]["ids"][0], "i1");
+    assert_eq!(v["error"]["ids"][0], "i1");
+    assert!(
+        v["error"].get("detail").is_none(),
+        "context is flat, never nested under detail"
+    );
 }
 
 #[test]
@@ -519,4 +525,49 @@ fn item_8_binary_list_verb_exits_zero_and_returns_intents_array() {
     assert_eq!(intents[0]["campaign"], "camp-bin");
     // landed = true because --log was given and the intent was landed there.
     assert_eq!(intents[0]["landed"], true);
+}
+
+// ── WF item 5 — `intent list`/`show` on a MISSING --store is structured ────────
+// `store_not_found`/exit-2 (the sibling contract — matching the `--log` reads'
+// `log_not_found`), never a silent empty list/exit-0 (the divergence WF flagged).
+
+#[test]
+fn wf_intent_list_missing_store_is_structured_store_not_found() {
+    // A --store path that was NEVER created (no `intent new` first).
+    let store = temp_file("list-missing", "json");
+    assert!(!store.exists(), "the store must be absent for this test");
+
+    let err = list::run(
+        ListIntents {
+            log: None,
+            campaign: None,
+        },
+        &store,
+    )
+    .expect_err("a missing --store is an error, never a silent empty list");
+    assert_eq!(err.kind, "store_not_found");
+    assert!(!err.fix.is_empty());
+
+    // Canonical envelope: nested, fix-keyed, path folded FLAT (uniformity).
+    let v: serde_json::Value = serde_json::from_str(&err.to_json()).unwrap();
+    assert_eq!(v["error"]["kind"], "store_not_found");
+    assert_eq!(v["error"]["path"], store.display().to_string());
+    assert!(v["error"].get("detail").is_none(), "context is flat");
+}
+
+#[test]
+fn wf_intent_show_missing_store_matches_the_sibling_contract() {
+    // `intent show` on a missing store gives the SAME `store_not_found` (not a
+    // misleading `not_found` for the id) — consistent with `intent list`.
+    let store = temp_file("show-missing", "json");
+    assert!(!store.exists());
+
+    let err = show::run(
+        ShowIntent {
+            intent_id: "whatever".to_string(),
+        },
+        &store,
+    )
+    .expect_err("a missing --store is an error");
+    assert_eq!(err.kind, "store_not_found");
 }

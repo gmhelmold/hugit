@@ -423,7 +423,9 @@ fn close_refuses_while_a_pr_is_in_flight() {
     assert!(!ok, "close must exit nonzero while a PR is in-flight");
     assert_eq!(v["error"]["kind"], "in_flight_prs");
     assert_eq!(v["error"]["fix"], "land or abandon first");
-    let in_flight = v["error"]["detail"]["in_flight"].as_array().unwrap();
+    // WF error-shape uniformity: context is folded FLAT under `error`, never
+    // nested under a `detail` sub-object (one parser across every verb).
+    let in_flight = v["error"]["in_flight"].as_array().unwrap();
     assert!(
         in_flight.iter().any(|p| p == "PR-2"),
         "the in-flight PR is named: {in_flight:?}"
