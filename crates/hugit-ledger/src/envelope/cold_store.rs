@@ -24,7 +24,33 @@
 //!
 //! Retention is **forever** by ratified design: this seam has NO delete,
 //! NO TTL, NO GC surface. Content leaves storage only via the explicit
-//! erasure/tombstone path (X7 cascade owner) — never via a timer.
+//! erasure/tombstone path ("o conteúdo é apagável; a prova, não" — ADR-0001
+//! ratified) — never via a timer.
+//!
+//! ## Erasure is tombstoning, not deletion (the right-to-erasure path)
+//!
+//! [`ColdBlobStore::erase`] is the SOLE way content leaves this tier. It is
+//! NOT a delete: it replaces the blob bytes with an immutable, content-
+//! addressed [`Tombstone`] keyed by the SAME `cas:` ref. After an erase:
+//!
+//! - [`ColdBlobStore::get`] on the erased ref returns
+//!   [`GetOutcome::Erased`] carrying the tombstone — never the bytes, and
+//!   never [`GetOutcome::Absent`] (an erased ref is provably distinct from a
+//!   never-seen one: the proof survives the content).
+//! - The tombstone records WHO requested the erasure, WHEN (a caller-supplied
+//!   timestamp — this module mints no clock), the policy that authorised it,
+//!   and the erased ref itself. It is itself content-addressed
+//!   ([`Tombstone::tombstone_ref`]) and immutable.
+//!
+//! **Dedup interplay (stated honestly):** erasure is BY CONTENT. The cold tier
+//! dedupes — the same bytes are one blob under one `cas:` ref, regardless of
+//! how many logical objects reference it. Erasing a ref therefore erases THAT
+//! content for every reference that resolves to it: there is exactly one blob,
+//! and the tombstone replaces it. This is correct for right-to-erasure (the
+//! personal data is the content; erasing the content discharges the obligation
+//! for all copies of that content) but the caller must understand a shared-
+//! content blob is shared: there is no per-reference erasure of identical
+//! bytes, because there is no per-reference copy of identical bytes.
 
 use std::collections::HashMap;
 use std::fs;
@@ -93,6 +119,154 @@ pub fn cold_ref_for(bytes: &[u8]) -> String {
     format!("{COLD_REF_PREFIX}{}", hex::encode(Sha256::digest(bytes)))
 }
 
+/// The on-disk byte sentinel that marks a file as a tombstone rather than a
+/// live blob (DirColdStore). A live blob can never collide with this: a live
+/// blob at `<hash>` must hash to `<hash>`, and these bytes hash to something
+/// else, so the content-address guard already distinguishes them — the prefix
+/// is a fast, explicit discriminator the reader checks first.
+const TOMBSTONE_SENTINEL: &[u8] = b"hugit-cold-tombstone-v1\n";
+
+/// The caller-supplied authorisation record for an erasure: the *who/when/why*
+/// of a right-to-erasure request, transcribed verbatim into the immutable
+/// [`Tombstone`]. This module mints no clock and trusts no ambient identity —
+/// the caller (the X7 cascade owner) supplies these from the authenticated
+/// request, so the tombstone is an honest record of what was authorised, not a
+/// guess.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TombstoneRecord {
+    /// WHO requested the erasure (an authenticated principal / request id —
+    /// caller-supplied; this module does not authenticate).
+    pub requested_by: String,
+    /// WHEN, as a caller-supplied Unix timestamp (seconds). This module mints
+    /// no clock: the time is part of the authorised request, recorded as given.
+    pub requested_at_unix: u64,
+    /// The policy/legal-basis ref that authorised the erasure (e.g. a DPA case
+    /// id or retention-policy ref). The audit anchor for the erasure.
+    pub policy_ref: String,
+}
+
+/// An immutable, content-addressed erasure marker. Minted by
+/// [`ColdBlobStore::erase`], it REPLACES the blob at a `cas:` ref. It carries
+/// the erased ref itself, plus the [`TombstoneRecord`] (who/when/policy), so it
+/// is a self-describing record of a lawful erasure — never a void.
+///
+/// The tombstone is itself content-addressed: [`Tombstone::tombstone_ref`] is
+/// the `cas:` ref of its own canonical bytes, and it is immutable (no setter).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Tombstone {
+    /// The `cas:` ref whose content was erased. The reference that resolved to
+    /// the now-erased bytes still resolves here — to this tombstone.
+    pub erased_ref: String,
+    /// The caller-supplied who/when/policy of the erasure request.
+    pub record: TombstoneRecord,
+    /// A fixed marker tag making a tombstone trivially distinguishable on the
+    /// wire (`"tombstone"`).
+    pub marker: String,
+}
+
+/// The fixed tombstone marker tag.
+pub const TOMBSTONE_MARKER: &str = "tombstone";
+
+impl Tombstone {
+    /// Mint a tombstone for `erased_ref` from the caller-supplied request.
+    #[must_use]
+    pub fn new(erased_ref: impl Into<String>, record: TombstoneRecord) -> Self {
+        Self {
+            erased_ref: erased_ref.into(),
+            record,
+            marker: TOMBSTONE_MARKER.to_string(),
+        }
+    }
+
+    /// The canonical byte image of this tombstone (the persisted form). Goes
+    /// through serde_json; the field order is the struct's declared order, so
+    /// the same tombstone always yields the same bytes (content-addressable).
+    #[must_use]
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        // The tombstone is a small, flat, owned struct over String/u64 — serde
+        // cannot fail to serialise it. The sentinel prefix makes the persisted
+        // form self-identifying on disk and in memory.
+        let body = serde_json::to_vec(self).expect("tombstone serialises (flat owned struct)");
+        let mut out = Vec::with_capacity(TOMBSTONE_SENTINEL.len() + body.len());
+        out.extend_from_slice(TOMBSTONE_SENTINEL);
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// The content-addressed ref OF this tombstone (the `cas:` ref of its own
+    /// [`canonical_bytes`](Tombstone::canonical_bytes)). Stable + immutable:
+    /// the same tombstone is the same ref.
+    #[must_use]
+    pub fn tombstone_ref(&self) -> String {
+        cold_ref_for(&self.canonical_bytes())
+    }
+
+    /// Whether this is a well-formed tombstone (carries the marker tag).
+    #[must_use]
+    pub fn is_tombstone(&self) -> bool {
+        self.marker == TOMBSTONE_MARKER
+    }
+
+    /// Parse a tombstone from its persisted byte image, if `bytes` is one.
+    /// Returns `None` for live blobs (anything not carrying the sentinel).
+    fn from_persisted(bytes: &[u8]) -> Option<Self> {
+        let body = bytes.strip_prefix(TOMBSTONE_SENTINEL)?;
+        serde_json::from_slice(body).ok()
+    }
+}
+
+/// The outcome of resolving a `cas:` ref against a cold tier. Erasure makes
+/// this a THREE-state outcome, not an `Option`: an erased ref is provably
+/// distinct from a never-present one (the proof survives the content), so it is
+/// never collapsed into `Absent`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GetOutcome {
+    /// The live bytes (content-address verified on read).
+    Present(Vec<u8>),
+    /// The ref was lawfully erased; the bytes are gone and this tamper-evident
+    /// [`Tombstone`] stands in their place. NEVER the bytes, never `Absent`.
+    Erased(Tombstone),
+    /// Nothing is stored under this ref in this tier (and it was never erased
+    /// here) — a genuine miss, e.g. a ref that lives in another tier.
+    Absent,
+}
+
+impl GetOutcome {
+    /// The live bytes if present, else `None` (an `Option`-shaped view for the
+    /// producer read path; `Erased` and `Absent` both map to `None`).
+    #[must_use]
+    pub fn present(self) -> Option<Vec<u8>> {
+        match self {
+            GetOutcome::Present(b) => Some(b),
+            _ => None,
+        }
+    }
+
+    /// Borrow the live bytes if present.
+    #[must_use]
+    pub fn as_present(&self) -> Option<&[u8]> {
+        match self {
+            GetOutcome::Present(b) => Some(b),
+            _ => None,
+        }
+    }
+
+    /// The tombstone if this ref was erased.
+    #[must_use]
+    pub fn erased(&self) -> Option<&Tombstone> {
+        match self {
+            GetOutcome::Erased(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// Whether this ref resolves to a tombstone (was lawfully erased).
+    #[must_use]
+    pub fn is_erased(&self) -> bool {
+        matches!(self, GetOutcome::Erased(_))
+    }
+}
+
 /// Validate a ref and return its hex hash segment. The hash becomes a path
 /// segment in [`DirColdStore`], so anything other than `cas:` + 64 lowercase
 /// hex chars is refused before it can touch a path.
@@ -120,7 +294,9 @@ fn ref_hash(blob_ref: &str) -> Result<&str, ColdStoreError> {
 ///
 /// Content-addressed: `put` returns the tier-agnostic `cas:<sha256>` ref of
 /// the bytes; putting the same bytes twice is a dedup no-op returning the
-/// same ref. There is deliberately no delete (retention forever, ratified).
+/// same ref. There is deliberately no DELETE (retention forever, ratified) —
+/// the only way content leaves is [`erase`](ColdBlobStore::erase), which
+/// tombstones rather than deletes.
 pub trait ColdBlobStore {
     /// Store `bytes`, returning their content-addressed ref
     /// (`cas:<sha256-hex>`). Idempotent: same bytes → same ref, stored once.
@@ -130,12 +306,32 @@ pub trait ColdBlobStore {
     /// disclosed live seam, because the binding is not wired).
     fn put(&self, bytes: &[u8]) -> Result<String, ColdStoreError>;
 
-    /// Resolve a ref to its bytes. `Ok(None)` = not present in this tier.
+    /// Resolve a ref to its outcome: [`GetOutcome::Present`] (live bytes,
+    /// content-address verified), [`GetOutcome::Erased`] (a tombstone — the ref
+    /// was lawfully erased), or [`GetOutcome::Absent`] (nothing here). An erased
+    /// ref is NEVER `Absent` and NEVER returns the bytes.
     ///
     /// # Errors
     /// Fails on a malformed ref, a backing-tier failure, or a
-    /// content-address violation (bytes that don't hash back to the ref).
-    fn get(&self, blob_ref: &str) -> Result<Option<Vec<u8>>, ColdStoreError>;
+    /// content-address violation (live bytes that don't hash back to the ref).
+    fn get(&self, blob_ref: &str) -> Result<GetOutcome, ColdStoreError>;
+
+    /// Erase the content at `blob_ref`, replacing it with an immutable,
+    /// content-addressed [`Tombstone`] minted from the caller-supplied
+    /// [`TombstoneRecord`]. This is the SOLE right-to-erasure path — NOT a
+    /// delete: after it, [`get`](ColdBlobStore::get) on `blob_ref` returns
+    /// [`GetOutcome::Erased`], never the bytes and never `Absent`.
+    ///
+    /// Erasure is BY CONTENT (the cold tier dedupes): there is exactly one blob
+    /// per `cas:` ref, so erasing the ref erases that content for every logical
+    /// reference that resolves to it. Erasing an absent-or-already-erased ref is
+    /// idempotent: it installs / keeps a tombstone (an erased ref never decays
+    /// to `Absent`).
+    ///
+    /// # Errors
+    /// Fails on a malformed ref, a backing-tier failure, or — on the disclosed
+    /// live seam — because the binding is not wired (fail-closed).
+    fn erase(&self, blob_ref: &str, record: TombstoneRecord) -> Result<Tombstone, ColdStoreError>;
 }
 
 // HERMETIC FIXTURE — the reference semantics of the cold-store contract
@@ -149,6 +345,9 @@ pub struct InMemoryColdStore {
     /// ref → bytes. `Mutex` keeps the impl `Sync` without leaking the lock
     /// into the trait surface.
     blobs: Mutex<HashMap<String, Vec<u8>>>,
+    /// ref → tombstone for erased refs. An erased ref is removed from `blobs`
+    /// and recorded here, so `get` distinguishes erased from absent.
+    tombstones: Mutex<HashMap<String, Tombstone>>,
 }
 
 impl InMemoryColdStore {
@@ -187,6 +386,17 @@ impl InMemoryColdStore {
 impl ColdBlobStore for InMemoryColdStore {
     fn put(&self, bytes: &[u8]) -> Result<String, ColdStoreError> {
         let blob_ref = cold_ref_for(bytes);
+        // Erasure is permanent: a re-put of erased content must NOT resurrect
+        // it. If the ref is tombstoned, the put is a no-op that returns the ref
+        // (the content stays erased; `get` keeps returning the tombstone).
+        if self
+            .tombstones
+            .lock()
+            .expect("tombstones lock poisoned")
+            .contains_key(&blob_ref)
+        {
+            return Ok(blob_ref);
+        }
         self.blobs
             .lock()
             .expect("blobs lock poisoned")
@@ -195,14 +405,55 @@ impl ColdBlobStore for InMemoryColdStore {
         Ok(blob_ref)
     }
 
-    fn get(&self, blob_ref: &str) -> Result<Option<Vec<u8>>, ColdStoreError> {
+    fn get(&self, blob_ref: &str) -> Result<GetOutcome, ColdStoreError> {
         ref_hash(blob_ref)?;
-        Ok(self
+        // Live bytes take precedence; an erased ref is never live.
+        let live = self
             .blobs
             .lock()
             .expect("blobs lock poisoned")
             .get(blob_ref)
-            .cloned())
+            .cloned();
+        if let Some(bytes) = live {
+            // Read-guard parity with DirColdStore: re-hash on read and refuse
+            // bytes that no longer hash back to the ref (defends against an
+            // in-memory map mutated out of band, e.g. via a poisoned-recovered
+            // lock or unsafe aliasing — never serve a blind read).
+            let actual = cold_ref_for(&bytes);
+            if actual != blob_ref {
+                return Err(ColdStoreError::DigestMismatch {
+                    requested: blob_ref.to_string(),
+                    actual,
+                });
+            }
+            return Ok(GetOutcome::Present(bytes));
+        }
+        if let Some(ts) = self
+            .tombstones
+            .lock()
+            .expect("tombstones lock poisoned")
+            .get(blob_ref)
+            .cloned()
+        {
+            return Ok(GetOutcome::Erased(ts));
+        }
+        Ok(GetOutcome::Absent)
+    }
+
+    fn erase(&self, blob_ref: &str, record: TombstoneRecord) -> Result<Tombstone, ColdStoreError> {
+        ref_hash(blob_ref)?;
+        let tombstone = Tombstone::new(blob_ref, record);
+        // Drop the bytes (erasure is by content: this is the one shared blob),
+        // then install the immutable tombstone keyed by the SAME ref. Order:
+        // tombstone-then-drop would briefly show both; drop-then-tombstone
+        // briefly shows Absent — under the shared lock-pair below neither is
+        // observable, but we hold blobs first so a concurrent get never sees
+        // the bytes after the tombstone is published.
+        let mut blobs = self.blobs.lock().expect("blobs lock poisoned");
+        let mut tombstones = self.tombstones.lock().expect("tombstones lock poisoned");
+        blobs.remove(blob_ref);
+        tombstones.insert(blob_ref.to_string(), tombstone.clone());
+        Ok(tombstone)
     }
 }
 
@@ -243,7 +494,10 @@ impl ColdBlobStore for DirColdStore {
         let path = self.root.join(hash);
         if !path.exists() {
             // Write-once via temp + rename so a concurrent reader never sees
-            // a half-written blob; an existing file is the dedup hit.
+            // a half-written blob; an existing file is the dedup hit. An
+            // existing file may also be a TOMBSTONE (erasure is permanent): the
+            // `exists` guard makes a re-put of erased content a no-op, so it is
+            // never resurrected — `get` keeps returning the tombstone.
             let tmp = self.root.join(format!("{hash}.tmp-{}", std::process::id()));
             fs::write(&tmp, bytes)
                 .map_err(|e| ColdStoreError::Io(format!("writing {}: {e}", tmp.display())))?;
@@ -253,12 +507,14 @@ impl ColdBlobStore for DirColdStore {
         Ok(blob_ref)
     }
 
-    fn get(&self, blob_ref: &str) -> Result<Option<Vec<u8>>, ColdStoreError> {
+    fn get(&self, blob_ref: &str) -> Result<GetOutcome, ColdStoreError> {
         let hash = ref_hash(blob_ref)?;
         let path = self.root.join(hash);
         let bytes = match fs::read(&path) {
             Ok(b) => b,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(GetOutcome::Absent);
+            }
             Err(e) => {
                 return Err(ColdStoreError::Io(format!(
                     "reading {}: {e}",
@@ -266,6 +522,19 @@ impl ColdBlobStore for DirColdStore {
                 )));
             }
         };
+        // A tombstone occupies the live-blob slot at <hash>; recognise it first
+        // (it carries the sentinel and self-describes the erased ref).
+        if let Some(ts) = Tombstone::from_persisted(&bytes) {
+            if ts.erased_ref != blob_ref {
+                // The persisted tombstone names a different ref than the path it
+                // sits under — a corrupted/forged marker. Fail closed.
+                return Err(ColdStoreError::DigestMismatch {
+                    requested: blob_ref.to_string(),
+                    actual: ts.erased_ref,
+                });
+            }
+            return Ok(GetOutcome::Erased(ts));
+        }
         // Content-address guard: never serve bytes that don't hash back.
         let actual = cold_ref_for(&bytes);
         if actual != blob_ref {
@@ -274,7 +543,27 @@ impl ColdBlobStore for DirColdStore {
                 actual,
             });
         }
-        Ok(Some(bytes))
+        Ok(GetOutcome::Present(bytes))
+    }
+
+    fn erase(&self, blob_ref: &str, record: TombstoneRecord) -> Result<Tombstone, ColdStoreError> {
+        let hash = ref_hash(blob_ref)?;
+        let path = self.root.join(hash);
+        let tombstone = Tombstone::new(blob_ref, record);
+        // Atomic replace: write the tombstone to a temp file then rename OVER
+        // the live blob (rename is atomic on POSIX) so a concurrent reader sees
+        // EITHER the live blob OR the tombstone, never a half-written file and
+        // never a NotFound gap. This is erasure-by-content: the single shared
+        // blob at <hash> becomes the tombstone for every ref that resolves here.
+        let tmp = self
+            .root
+            .join(format!("{hash}.tombstone.tmp-{}", std::process::id()));
+        fs::write(&tmp, tombstone.canonical_bytes())
+            .map_err(|e| ColdStoreError::Io(format!("writing {}: {e}", tmp.display())))?;
+        fs::rename(&tmp, &path).map_err(|e| {
+            ColdStoreError::Io(format!("publishing tombstone {}: {e}", path.display()))
+        })?;
+        Ok(tombstone)
     }
 }
 
@@ -309,7 +598,18 @@ impl ColdBlobStore for UnwiredColdStore {
         Err(Self::not_wired())
     }
 
-    fn get(&self, _blob_ref: &str) -> Result<Option<Vec<u8>>, ColdStoreError> {
+    fn get(&self, _blob_ref: &str) -> Result<GetOutcome, ColdStoreError> {
+        Err(Self::not_wired())
+    }
+
+    fn erase(
+        &self,
+        _blob_ref: &str,
+        _record: TombstoneRecord,
+    ) -> Result<Tombstone, ColdStoreError> {
+        // Fail-closed: an unprovisioned deployment can never claim to have
+        // erased anything (a false discharge of a right-to-erasure obligation
+        // would be worse than an honest "not wired").
         Err(Self::not_wired())
     }
 }
@@ -351,7 +651,10 @@ mod tests {
         let r2 = store.put(b"same bytes").expect("put again");
         assert_eq!(r1, r2, "same content must yield the same ref");
         assert_eq!(store.len(), 1, "dedupe: stored once");
-        assert_eq!(store.get(&r1).expect("get"), Some(b"same bytes".to_vec()));
+        assert_eq!(
+            store.get(&r1).expect("get"),
+            GetOutcome::Present(b"same bytes".to_vec())
+        );
         let r3 = store.put(b"other bytes").expect("put other");
         assert_ne!(r1, r3);
         assert_eq!(store.len(), 2);
@@ -365,5 +668,197 @@ mod tests {
             live.get(&cold_ref_for(b"x")),
             Err(ColdStoreError::NotWired(_))
         ));
+        // Erasure on the unwired seam must ALSO fail closed: never a false
+        // discharge of a right-to-erasure obligation.
+        assert!(matches!(
+            live.erase(&cold_ref_for(b"x"), rec()),
+            Err(ColdStoreError::NotWired(_))
+        ));
+    }
+
+    /// A caller-supplied erasure record (the X7 cascade owner supplies these).
+    fn rec() -> TombstoneRecord {
+        TombstoneRecord {
+            requested_by: "rtbf-request:case-42".to_string(),
+            requested_at_unix: 1_717_900_000,
+            policy_ref: "policy:gdpr-art17-v1".to_string(),
+        }
+    }
+
+    #[test]
+    fn tombstone_is_content_addressed_and_immutable() {
+        let r = cold_ref_for(b"subject data");
+        let t1 = Tombstone::new(&r, rec());
+        let t2 = Tombstone::new(&r, rec());
+        assert!(t1.is_tombstone());
+        assert_eq!(t1.marker, TOMBSTONE_MARKER);
+        // Same erased-ref + same record → same content-addressed tombstone ref.
+        assert_eq!(t1.tombstone_ref(), t2.tombstone_ref());
+        assert!(t1.tombstone_ref().starts_with(COLD_REF_PREFIX));
+        // A different policy ref yields a different tombstone ref (the record is
+        // part of the addressed content).
+        let mut other_rec = rec();
+        other_rec.policy_ref = "policy:other".to_string();
+        let t3 = Tombstone::new(&r, other_rec);
+        assert_ne!(t1.tombstone_ref(), t3.tombstone_ref());
+    }
+
+    #[test]
+    fn in_memory_erase_returns_erased_never_bytes_never_absent() {
+        let store = InMemoryColdStore::new();
+        let r = store.put(b"subject personal data").expect("put");
+        assert!(matches!(
+            store.get(&r).expect("get"),
+            GetOutcome::Present(_)
+        ));
+
+        let ts = store.erase(&r, rec()).expect("erase");
+        assert_eq!(ts.erased_ref, r);
+        assert_eq!(ts.record, rec());
+
+        // get on the erased ref is Erased(tombstone) — never the bytes, never
+        // Absent (distinguishable from a never-present ref).
+        match store.get(&r).expect("get erased") {
+            GetOutcome::Erased(got) => assert_eq!(got, ts),
+            other => panic!("erased ref must resolve to a tombstone, got {other:?}"),
+        }
+        // A genuinely-absent ref is Absent, NOT Erased — the two are distinct.
+        let absent = cold_ref_for(b"never stored anywhere");
+        assert_eq!(store.get(&absent).expect("get absent"), GetOutcome::Absent);
+    }
+
+    #[test]
+    fn in_memory_erase_is_idempotent_and_blocks_resurrection() {
+        let store = InMemoryColdStore::new();
+        let bytes = b"resurrect me?";
+        let r = store.put(bytes).expect("put");
+        store.erase(&r, rec()).expect("erase");
+        // Erasing again is fine (idempotent), stays erased.
+        store.erase(&r, rec()).expect("erase again");
+        assert!(store.get(&r).expect("get").is_erased());
+        // A re-put of the SAME content must NOT resurrect it (erasure is by
+        // content and permanent).
+        let r2 = store.put(bytes).expect("re-put erased content");
+        assert_eq!(r2, r);
+        assert!(
+            store.get(&r).expect("get").is_erased(),
+            "re-put must not resurrect erased content",
+        );
+    }
+
+    #[test]
+    fn in_memory_get_re_hashes_on_read() {
+        // The audit's read-guard gap: InMemoryColdStore::get must re-hash on
+        // read like DirColdStore. Inject a blob under a ref it does NOT hash to
+        // (simulating an out-of-band map mutation) and prove get fails CLOSED
+        // with DigestMismatch — never serving the mismatched bytes.
+        let store = InMemoryColdStore::new();
+        let real_ref = cold_ref_for(b"the real content");
+        let wrong_ref = cold_ref_for(b"a different ref");
+        store
+            .blobs
+            .lock()
+            .expect("lock")
+            .insert(wrong_ref.clone(), b"the real content".to_vec());
+        assert_ne!(real_ref, wrong_ref);
+        match store.get(&wrong_ref) {
+            Err(ColdStoreError::DigestMismatch { requested, actual }) => {
+                assert_eq!(requested, wrong_ref);
+                assert_eq!(actual, real_ref, "re-hash exposes the true content ref");
+            }
+            other => panic!("re-hash guard must fail closed, got {other:?}"),
+        }
+        // A clean put round-trips fine (the guard only rejects mismatches).
+        let r = store.put(b"clean").expect("put");
+        assert!(matches!(
+            store.get(&r).expect("get"),
+            GetOutcome::Present(_)
+        ));
+    }
+
+    #[test]
+    fn dir_erase_round_trip_and_get_re_hash_guard() {
+        let root = std::env::temp_dir().join(format!(
+            "hugit-coldstore-erase-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let store = DirColdStore::open(&root).expect("open");
+        let r = store.put(b"subject data on disk").expect("put");
+        assert!(matches!(
+            store.get(&r).expect("get"),
+            GetOutcome::Present(_)
+        ));
+
+        // Read-guard: tamper the live blob → DigestMismatch (never served).
+        let hash = r.strip_prefix(COLD_REF_PREFIX).expect("cas");
+        fs::write(root.join(hash), b"tampered live bytes").expect("tamper");
+        assert!(matches!(
+            store.get(&r),
+            Err(ColdStoreError::DigestMismatch { .. })
+        ));
+
+        // Erase atomically replaces the (tampered) blob with a tombstone.
+        let ts = store.erase(&r, rec()).expect("erase");
+        match store.get(&r).expect("get erased") {
+            GetOutcome::Erased(got) => assert_eq!(got, ts),
+            other => panic!("expected tombstone, got {other:?}"),
+        }
+        // Re-put of the same content must not resurrect (file exists = no-op).
+        let _ = store.put(b"subject data on disk").expect("re-put");
+        assert!(store.get(&r).expect("get").is_erased());
+
+        fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn dir_absent_is_absent_not_erased() {
+        let root = std::env::temp_dir().join(format!(
+            "hugit-coldstore-absent-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let store = DirColdStore::open(&root).expect("open");
+        let absent = cold_ref_for(b"never stored");
+        assert_eq!(store.get(&absent).expect("get"), GetOutcome::Absent);
+        fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn dir_forged_tombstone_for_wrong_ref_fails_closed() {
+        // A tombstone whose self-described erased_ref does not match the path it
+        // sits under is corrupt/forged → fail closed (not served as Erased).
+        let root = std::env::temp_dir().join(format!(
+            "hugit-coldstore-forge-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let store = DirColdStore::open(&root).expect("open");
+        let r = store.put(b"victim").expect("put");
+        let hash = r.strip_prefix(COLD_REF_PREFIX).expect("cas");
+        // Write a tombstone that claims a DIFFERENT erased_ref at this path.
+        let forged = Tombstone::new(cold_ref_for(b"some other ref"), rec());
+        fs::write(root.join(hash), forged.canonical_bytes()).expect("forge");
+        assert!(matches!(
+            store.get(&r),
+            Err(ColdStoreError::DigestMismatch { .. })
+        ));
+        fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn dedup_erasure_is_by_content_shared_blob() {
+        // Honest dedup disclosure: two logical references to the SAME content
+        // are the SAME blob under the SAME ref. Erasing it erases the content
+        // for both — there is one blob, by design.
+        let store = InMemoryColdStore::new();
+        let ra = store.put(b"shared personal data").expect("put a");
+        let rb = store.put(b"shared personal data").expect("put b");
+        assert_eq!(ra, rb, "same content → same ref (dedup)");
+        assert_eq!(store.len(), 1, "one blob");
+        store.erase(&ra, rec()).expect("erase");
+        // Both references now resolve to the tombstone — by content.
+        assert!(store.get(&ra).expect("get a").is_erased());
+        assert!(store.get(&rb).expect("get b").is_erased());
     }
 }
