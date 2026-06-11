@@ -68,8 +68,13 @@ pub struct ListResult {
 }
 
 /// Enumerate all intents in the store, optionally resolving landed state.
+///
+/// A MISSING `--store` is an explicit `store_not_found`/exit-2 (via
+/// [`IntentStore::load_existing`]) — matching the sibling read-only contract
+/// (`intent show`, and the `--log` reads' `log_not_found`), never a silent
+/// empty list/exit-0 (the divergence WF flagged).
 pub fn run(input: ListIntents, store_path: &Path) -> Result<ListResult, PorcelainError> {
-    let store = IntentStore::load(store_path).map_err(PorcelainError::from_store)?;
+    let store = IntentStore::load_existing(store_path).map_err(PorcelainError::from_store)?;
 
     // Projection of the real event log for landed-state resolution.
     let landed_ids: Option<std::collections::HashSet<String>> =

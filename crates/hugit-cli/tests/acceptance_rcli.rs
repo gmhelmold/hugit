@@ -353,3 +353,91 @@ fn item_6_canonical_registry_equals_dispatched_surface() {
     // hugit_verbs() returns the same canonical list (stable accessor for X5).
     assert_eq!(hugit_cli::hugit_verbs(), hugit_cli::HUGIT_VERBS);
 }
+
+// ── WF item 5 — `tournament --intent` existence check against the log ──────────
+
+/// Run `hugit <args>`, returning `(exit_code, parsed_stdout_json)`.
+fn run_hugit(args: &[&str]) -> (i32, serde_json::Value) {
+    let out = Command::new(hugit_bin())
+        .args(args)
+        .output()
+        .expect("hugit binary runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or(serde_json::Value::Null);
+    (out.status.code().unwrap_or(-1), v)
+}
+
+#[test]
+fn wf_tournament_without_log_stays_permissive_exit_zero() {
+    // The log-less fan-out (fixture/smoke path) is unchanged: any intent id is
+    // accepted, exit 0 — no --log means no existence check.
+    let (code, v) = run_hugit(&["tournament", "-n", "3", "--intent", "intent-xyz"]);
+    assert_eq!(code, 0, "log-less tournament stays exit 0: {v}");
+    assert_eq!(v["candidates"], 3);
+}
+
+#[test]
+fn wf_tournament_with_log_refuses_a_nonexistent_intent() {
+    let dir = scratch("tourney-ghost");
+    let log = dir.join("L.json");
+    let log_s = log.to_str().unwrap();
+    let store = dir.join("store.json");
+    let store_s = store.to_str().unwrap();
+
+    // Land a REAL intent `i1` on the canonical log.
+    let (code, _) = run_hugit(&[
+        "campaign",
+        "open",
+        "--log",
+        log_s,
+        "--campaign",
+        "camp-t",
+        "--charter",
+        "c",
+        "--owner",
+        "o@h.com",
+    ]);
+    assert_eq!(code, 0, "campaign open");
+    let (code, _) = run_hugit(&[
+        "intent",
+        "new",
+        "--log",
+        log_s,
+        "--store",
+        store_s,
+        "--campaign",
+        "camp-t",
+        "--charter",
+        "land it",
+        "--id",
+        "i1",
+    ]);
+    assert_eq!(code, 0, "intent new");
+
+    // An EXISTING intent is accepted (exit 0, real fan-out over the log).
+    let (code, v) = run_hugit(&["tournament", "-n", "2", "--intent", "i1", "--log", log_s]);
+    assert_eq!(code, 0, "existing intent is accepted: {v}");
+    assert_eq!(v["candidates"], 2);
+
+    // A GHOST intent is a structured `intent_not_found`/exit-2 — never a
+    // fabricated exit-0 fan-out (the WF item-5 defect).
+    let (code, v) = run_hugit(&["tournament", "-n", "2", "--intent", "ghost", "--log", log_s]);
+    assert_eq!(code, 2, "a nonexistent intent must be refused: {v}");
+    assert_eq!(v["error"]["kind"], "intent_not_found");
+    assert_eq!(v["error"]["intent"], "ghost");
+    assert!(v["error"]["fix"].is_string());
+
+    // A MISSING --log is the canonical `log_not_found`/exit-2 (the shared loader).
+    let (code, v) = run_hugit(&[
+        "tournament",
+        "-n",
+        "2",
+        "--intent",
+        "i1",
+        "--log",
+        "/no/such.json",
+    ]);
+    assert_eq!(code, 2, "missing log is exit 2: {v}");
+    assert_eq!(v["error"]["kind"], "log_not_found");
+}

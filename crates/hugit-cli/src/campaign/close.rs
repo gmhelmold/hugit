@@ -75,7 +75,9 @@ pub fn run(args: CloseArgs) -> Result<String, CampaignError> {
             ),
             "land or abandon first",
         )
-        .with_detail(json!({ "in_flight": in_flight })));
+        // Uniformity: fold the in-flight list FLAT under `error` (never `detail`)
+        // — one parser (`error.<key>`) reads context across every porcelain verb.
+        .with_context("in_flight", json!(in_flight)));
     }
 
     // The F3 rollup — the seal's cost report (real projection; None when the

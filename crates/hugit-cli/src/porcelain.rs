@@ -158,12 +158,22 @@ impl PorcelainError {
 
     /// A malformed/truncated `--log` file (not valid canonical JSON). The one
     /// input-error law's `parse_log` kind — never silently an empty world.
+    ///
+    /// This helper is the **flow porcelain's** loader fault (campaign / intent /
+    /// pr / checks / queue — the verbs that share the canonical
+    /// `[EventRecord, …]` log). The legacy verbs `why`/`export` read their OWN
+    /// distinct on-disk shapes (a why-entry wrapper array / an `{events:[…]}`
+    /// object) and build their own `parse_log` error with a verb-specific shape
+    /// hint in `main.rs` — they do NOT call this helper, so its fix text is
+    /// accurate for every verb that DOES (no verb claims a shared format it does
+    /// not honor — see `--log` consistency, WF item 4).
     pub fn parse_log(path: &std::path::Path, e: &serde_json::Error) -> Self {
         PorcelainError::new(
             "parse_log",
             format!("--log file {} is not valid JSON: {e}", path.display()),
             "the --log file must be a canonical JSON [EventRecord, …] array \
-             (the engine's EventLog shape, shared by every porcelain verb); \
+             (the engine's EventLog shape, shared by every FLOW porcelain verb — \
+             campaign/intent/pr/checks/queue; why/export read their own shapes); \
              a truncated/corrupt file is rejected, never read as an empty world",
         )
         .with_context("path", json!(path.display().to_string()))
@@ -171,13 +181,19 @@ impl PorcelainError {
 
     /// A `--log` FILE that does not exist (the path is absent on disk). Explicit
     /// — NEVER silently an empty world (the P5 audit finding). Exit `2`.
+    ///
+    /// Shared by the flow porcelain AND the legacy `why`/`export` reads (a
+    /// missing file is the same canonical `log_not_found`/exit-2 everywhere);
+    /// the canonical-shape hint below is the flow shape — `why`/`export` add
+    /// their own verb-specific shape hint on the `parse_log` path in `main.rs`.
     pub fn log_not_found(path: &std::path::Path) -> Self {
         PorcelainError::new(
             "log_not_found",
             format!("--log file does not exist: {}", path.display()),
             "create the log first (e.g. `hugit intent new --log <path>` \
-             bootstraps it) or point --log at an existing canonical \
-             [EventRecord, …] file",
+             bootstraps it) or point --log at an existing log in the shape this \
+             verb reads (the flow porcelain shares the canonical \
+             [EventRecord, …] array; why/export read their own shapes)",
         )
         .with_context("path", json!(path.display().to_string()))
     }

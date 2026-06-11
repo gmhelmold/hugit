@@ -26,10 +26,12 @@ pub struct ShowIntent {
     pub intent_id: String,
 }
 
-/// Project an intent into its stable JSON object, or a structured `not_found`
-/// error when the id is absent from the store.
+/// Project an intent into its stable JSON object, or a structured error: a
+/// MISSING `--store` is `store_not_found`/exit-2 (the read-only sibling
+/// contract — never a silent empty store reported as the intent merely being
+/// absent); an existing store missing the queried id is `not_found`.
 pub fn run(input: ShowIntent, store_path: &Path) -> Result<Value, PorcelainError> {
-    let store = IntentStore::load(store_path).map_err(PorcelainError::from_store)?;
+    let store = IntentStore::load_existing(store_path).map_err(PorcelainError::from_store)?;
 
     let intent = store
         .intent_for(&input.intent_id)

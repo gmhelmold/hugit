@@ -274,6 +274,12 @@ struct TournamentArgs {
     /// The intent id to fan out.
     #[arg(long)]
     intent: String,
+    /// Optional canonical event log (`[EventRecord, …]`). When provided, the
+    /// `--intent` id MUST exist on it (be landed) — a nonexistent intent is a
+    /// structured `intent_not_found`/exit-2 error, never a fabricated fan-out.
+    /// Omit it to keep the log-less fan-out (the fixture/smoke path).
+    #[arg(long)]
+    log: Option<std::path::PathBuf>,
 }
 
 fn run_tournament(args: TournamentArgs) -> Result<String, PorcelainError> {
@@ -292,6 +298,38 @@ fn run_tournament(args: TournamentArgs) -> Result<String, PorcelainError> {
         )
         .with_context("requested", json!(args.n))
         .with_context("cap", json!(MAX_N_POLICY)));
+    }
+    // Existence check (only when a --log is provided): a tournament over a
+    // nonexistent intent must NOT fabricate candidates. Read the canonical log
+    // through the same loader/projection the flow porcelain uses (a missing
+    // file is `log_not_found`, a tampered chain `chain_broken`, an absent id
+    // `intent_not_found`) — never a silent exit-0 fan-out over a ghost intent.
+    if let Some(log_path) = &args.log {
+        let log = checks::load_event_log(log_path)?;
+        let projected = hugit_refstore::intent::intents_from_log(&log).map_err(|e| {
+            PorcelainError::new(
+                "bad_log",
+                format!("event log does not project intents: {e}"),
+                "fix the malformed intent.landed payload in the --log file",
+            )
+        })?;
+        let exists = projected
+            .intents()
+            .iter()
+            .any(|i| i.intent_id == args.intent);
+        if !exists {
+            return Err(PorcelainError::new(
+                "intent_not_found",
+                format!(
+                    "intent '{}' is not on the --log file (no landed intent by that id)",
+                    args.intent
+                ),
+                "create/land the intent first (`hugit intent new --log <path> …`) \
+                 or pass an --intent id that exists on the log",
+            )
+            .with_context("intent", json!(args.intent))
+            .with_context("log", json!(log_path.display().to_string())));
+        }
     }
     let intent = IntentSidecar {
         intent_id: args.intent,

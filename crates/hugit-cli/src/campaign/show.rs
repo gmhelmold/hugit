@@ -1,15 +1,14 @@
 //! `hugit campaign show` (WP-PC1) — progress projection (read-only).
 //!
-//! Projects the campaign's PR phases (landed / in-flight / blocked) off the
-//! event log, the asked→done→proven Ledger figures, and — when the campaign
-//! envelope is captured — the F3 rollup summary. Never writes.
+//! Projects the campaign's PR phases (landed / in-flight / blocked / abandoned)
+//! off the event log, the asked→done→proven Ledger figures, and — when the
+//! campaign envelope is captured — the F3 rollup summary. Never writes.
 
 use serde_json::{Value, json};
 
 use super::ShowArgs;
 use super::output::CampaignError;
-use super::world::World;
-use hugit_ledger::rollup::PrPhase;
+use super::world::{CampaignPrPhase, World};
 
 pub fn run(args: ShowArgs) -> Result<String, CampaignError> {
     // Read-only query: a MISSING --log is an explicit `log_not_found` (exit-2),
@@ -45,37 +44,37 @@ pub fn run(args: ShowArgs) -> Result<String, CampaignError> {
     .to_string())
 }
 
-/// Count PRs per phase.
-pub fn progress_counts(phases: &[(String, PrPhase)]) -> Value {
+/// Count PRs per phase. `abandoned` is its own count (WF-2) — a terminal that
+/// is neither in-flight nor a `blocked` union-test failure.
+pub fn progress_counts(phases: &[(String, CampaignPrPhase)]) -> Value {
     let mut landed = 0;
     let mut in_flight = 0;
     let mut blocked = 0;
+    let mut abandoned = 0;
     for (_, p) in phases {
         match p {
-            PrPhase::Landed => landed += 1,
-            PrPhase::InFlight => in_flight += 1,
-            PrPhase::Blocked => blocked += 1,
+            CampaignPrPhase::Landed => landed += 1,
+            CampaignPrPhase::InFlight => in_flight += 1,
+            CampaignPrPhase::Blocked => blocked += 1,
+            CampaignPrPhase::Abandoned => abandoned += 1,
         }
     }
-    json!({ "landed": landed, "in_flight": in_flight, "blocked": blocked })
+    json!({
+        "landed": landed,
+        "in_flight": in_flight,
+        "blocked": blocked,
+        "abandoned": abandoned,
+    })
 }
 
 /// The PR list with each PR's phase (sorted by pr_id — `pr_phases` is sorted).
-pub fn pr_list(phases: &[(String, PrPhase)]) -> Value {
+pub fn pr_list(phases: &[(String, CampaignPrPhase)]) -> Value {
     Value::Array(
         phases
             .iter()
-            .map(|(id, p)| json!({ "pr_id": id, "phase": phase_str(*p) }))
+            .map(|(id, p)| json!({ "pr_id": id, "phase": p.label() }))
             .collect(),
     )
-}
-
-fn phase_str(p: PrPhase) -> &'static str {
-    match p {
-        PrPhase::Landed => "landed",
-        PrPhase::InFlight => "in_flight",
-        PrPhase::Blocked => "blocked",
-    }
 }
 
 /// A compact summary of the F3 campaign rollup (the full rollup is the close
