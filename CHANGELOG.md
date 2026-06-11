@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - fix(robustness): **SOTA-audit Wave C — Tier-3 hardening + Wave D records sweep**
-  (audit closed). WC1: porcelain file seam is atomic+locked (`.lock` create_new
+  (audit Tier-1/2 fixed; Tier-4 records + transplant-naming tracked). WC1: porcelain file seam is atomic+locked (`.lock` create_new
   + tmp/fsync/rename) — the TOCTOU read-modify-write race is gone (proof: 2
   concurrent `intent new` × 8 rounds → exactly one wins with `log_busy` or both
   serialize, chain always valid); corrupt/truncated/wrong-shape logs surface
@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   carries live-lane signal), x4 wire round-trip byte-exact (no trim_end mask),
   scratch dirs collision-proof (atomic counter). WD: docs swept true post
   Waves A/B — ADR JSONC synced to schema 1.2.0 + four altitudes, package count
-  corrected to 17, plan status lines flipped to COMPLETE, handoffs marked
+  corrected to 18, plan status lines flipped to COMPLETE, handoff marked
   APPLIED/CLOSED.
 
 - feat(cli): **SOTA-audit Wave B — the wedge made visible + one porcelain law**
@@ -28,10 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`{"error":{kind,message,fix,…}}`) + ONE exit law (0/2/1) across ALL verbs —
   the legacy four (why/impact/tournament/export) now speak stable JSON;
   missing/corrupt logs are explicit structured errors, never a silent empty
-  world. WB2: `hugit checks show` (real hit-rate/memo-key aggregation,
-  honest nulls), `hugit checks key` (engine-parity memo key — agents predict
-  the cache), `hugit queue show` (union batches by campaign; verdict
-  null-disclosed until the recorder seam lands). New verbs: `pr list/abandon`
+  world. WB2: `hugit checks show` (reads+aggregates check.recorded events;
+  the recorder verb (`hugit check`) is a tracked pending seam — KPIs are null
+  on logs without it; honest nulls), `hugit checks key` (engine-parity memo
+  key — agents predict the cache), `hugit queue show` (union batches by
+  campaign; verdict null-disclosed until the recorder seam lands). New verbs: `pr list/abandon`
   · `campaign list/abandon` · `intent list` (id recovery). Referential
   symmetry (orchestrator⇒--run-id, human⇒--principal, ghost campaigns
   refused), stable key-sets across idempotent re-runs, every fix-hint names
@@ -72,7 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `materialize`/`enforce` + the escape red-team harness moved WITH the
   classifier they drive (relocated, never weakened), and X4's spawn-surface
   oracle moved with the spawn surface (rigor preserved by relocation; R0
-  freeze). Workspace: 17 → 16 packages.
+  freeze). Workspace: 18 → 17 packages.
 - docs(plan): **WP-R5 — runner-transfer campaign records (R0–R6)** (2026-06-10).
   Supersession appendix appended to `docs/plan/decomposition.md` (E6 precedent;
   register body frozen): C2a/C2b/C3/E4 acceptance suites + C9 harness +
@@ -85,7 +86,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `hugit-ledger::envelope` (F2/F2b capture, A7 green), `hugit-fence::{broker,seam}`
   (C5b + wire seam, no assertion weakened), `hugit-invariants` (INV-* green,
   wire-level X4 conformance assertion), `hugit-contracts` (frozen, untouched),
-  16 packages. WP-R3 absorbed into R1b + R4② — no standalone commit, A3
+  17 packages. WP-R3 absorbed into R1b + R4② — no standalone commit, A3
   satisfied. `docs/strategy/absorption-map.md` Actions YAML row corrected.
   corelink-runners CLAUDE.md advanced to CODE status; handoff note authored.
   (runner-transfer-campaign)
