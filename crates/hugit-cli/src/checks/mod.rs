@@ -26,6 +26,8 @@
 //! ([`crate::porcelain`]): `log_not_found` / `parse_log` are the canonical
 //! `{"error":{…}}` envelopes, exit `2`.
 
+mod run;
+
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -109,11 +111,17 @@ pub fn run(args: ChecksArgs) -> ExitCode {
 /// subcommands above). It runs a single memoized check for real: resolve the
 /// three-axis memo key, look up the AC, execute on a miss, and — with `--store`
 /// — record a [`CHECK_RECORDED_KIND`] event onto the canonical `--log` so the
-/// `checks show` read can project it. W0 freezes this seam; the executor +
-/// recorder body lands at W-CHECK (the [`run_check`] stub is honest until then).
+/// `checks show` read can project it.
+///
+/// W0 froze the seam `--def --log [--store]`; W-INT ports the W-CHECK executor
+/// body in behind it and adds the *additive* run-shaping flags (`--cmd`,
+/// `--root`, `--toolchain`, `--pr`, `--principal`, `--ac`) — all optional, so
+/// the frozen `--def --log [--store]` contract is unchanged.
 #[derive(clap::Args, Debug)]
 pub struct CheckArgs {
-    /// Check-definition name to run (resolves to a [`hugit_checks::CheckDef`]).
+    /// Check-definition name to run. A built-in (`fmt` / `clippy` / `test`)
+    /// resolves to its frozen gate command; any other name is an ad-hoc check
+    /// that REQUIRES `--cmd`.
     #[arg(long)]
     pub def: String,
     /// Path to the canonical JSON event log — the shared `--log` seam. The
@@ -125,18 +133,45 @@ pub struct CheckArgs {
     /// Omit to run without persisting (a dry memoized check).
     #[arg(long)]
     pub store: bool,
+    /// The shell command for an ad-hoc `--def <name>` that is not a built-in.
+    /// Ignored (the built-in command wins) for a built-in name.
+    #[arg(long)]
+    pub cmd: Option<String>,
+    /// Workspace root the check's input subtree is scoped from (default: cwd).
+    /// The memo `tree_hash` axis is the Merkle root over the files under this
+    /// root matching the def's `glob_set` — so an edit inside the glob is a MISS.
+    #[arg(long)]
+    pub root: Option<PathBuf>,
+    /// The toolchain digest (third memo axis). Defaults to a fixed local marker
+    /// so the wedge is deterministic without a content-addressed toolchain.
+    #[arg(long)]
+    pub toolchain: Option<String>,
+    /// Optional PR id stamped onto the `check.recorded` row (so `checks show
+    /// --pr` can scope to it).
+    #[arg(long)]
+    pub pr: Option<String>,
+    /// The principal recording the check (default `orchestrator:hugit` — fleet/CI
+    /// provenance). Routed through the D14 guard at `Endpoint::Push`.
+    #[arg(long)]
+    pub principal: Option<String>,
+    /// The local file-backed Action Cache path. Defaults to `<log>.ac` so a warm
+    /// re-run (a separate process) is a HIT over the same wedge state. The live
+    /// CoreLink AC swaps in behind the same `ActionCache` seam at P2.
+    #[arg(long)]
+    pub ac: Option<PathBuf>,
 }
 
 /// `hugit check` — run a memoized CI check for real (W-CHECK EXECUTE path).
 ///
-/// W0 freezes the verb + flag seam (`--def --log [--store]`) and dispatches an
-/// honest NOT-IMPLEMENTED stub: the executor (`hugit_checks::run_memoized` over a
-/// real `AcClient`) and the `--store` recorder (appending [`CHECK_RECORDED_KIND`]
-/// onto the log) land at W-CHECK. The stub never returns a fake success — it
-/// emits the canonical `{"error":{"kind":"not_implemented","wp":"W-CHECK"}}`
-/// envelope on stdout, exit 2.
-pub fn run_check(_args: CheckArgs) -> ExitCode {
-    crate::porcelain::not_implemented("W-CHECK")
+/// Resolves the def, snapshots the tree subtree, runs it through the engine's
+/// own [`hugit_checks::client::executor::run_memoized`] over a file-backed local
+/// Action Cache (cross-process so a warm re-run is a real HIT), and — with
+/// `--store` — appends a [`CHECK_RECORDED_KIND`] event onto the canonical `--log`
+/// through the same guarded/atomic seam every porcelain verb shares. The result
+/// (cache verdict + memo key + the wedge's local/saved wall-clock split) is
+/// stable JSON on stdout; any fault is the canonical `{"error":{…}}` envelope.
+pub fn run_check(args: CheckArgs) -> ExitCode {
+    emit(run::run(&args))
 }
 
 /// Emit a `Result<Value, PorcelainError>` as stable JSON on stdout under the one
