@@ -24,8 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   intents). E-DOCS: CHANGELOG truth (18→17 packages, audit-closed→honest,
   wedge claim downgraded to match reality), `docs/plan/2026-06-11-pending-
   seams.md` register (recorder verbs · authn binding · coldtier erasure),
-  contract-1.2.0 propagated to corelink-runners + githugr with §12 amendment
-  logs. Gate green: 118 suites. Round 2 (fresh fleet) re-audits next.
+  contract-1.2.0 propagated to feature branches in corelink-runners
+  (`integ/seed-runner`) + githugr (branch) with §12 amendment logs — sibling
+  mainline merges are pending, not yet on their respective `main`s. Gate green:
+  118 suites. Round 2 (fresh fleet) re-audits next.
 
 - fix(robustness): **SOTA-audit Wave C — Tier-3 hardening + Wave D records sweep**
   (audit Tier-1/2 fixed; Tier-4 records + transplant-naming tracked). WC1: porcelain file seam is atomic+locked (`.lock` create_new
@@ -39,9 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   saturating. WC3: env-gated lanes print SKIP+reason (the green count now
   carries live-lane signal), x4 wire round-trip byte-exact (no trim_end mask),
   scratch dirs collision-proof (atomic counter). WD: docs swept true post
-  Waves A/B — ADR JSONC synced to schema 1.2.0 + four altitudes, package count
-  corrected to 18, plan status lines flipped to COMPLETE, handoff marked
-  APPLIED/CLOSED.
+  Waves A/B — ADR JSONC synced to schema 1.2.0 + four altitudes, plan status
+  lines flipped to COMPLETE, handoff marked APPLIED/CLOSED. (Note: the Wave D
+  entry originally claimed "package count corrected to 18" — that was false;
+  `hugit-runner` had already transferred out, leaving 17 packages. The 18-count
+  claim was a doc error corrected in Wave E / WF-DOCS.)
 
 - feat(cli): **SOTA-audit Wave B — the wedge made visible + one porcelain law**
   (audit Tier-2, P1-P8 closed). WB0: ONE canonical error shape

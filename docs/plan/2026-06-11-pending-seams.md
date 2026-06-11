@@ -119,6 +119,74 @@ implicitly referenced in CHANGELOG WA3 entry
 
 ---
 
+## PS-4 — Transplant naming: `HUGIT_RUNNER_HOST` env-var + `hugit-runner` doc title inside corelink-runners
+
+**Status:** DEFERRED — naming drift introduced by runner-transfer campaign (WP-R4, 2026-06-10)  
+**Adversarial finding:** Docs/process — Round-2 verdict (`docs/review/2026-06-11-adversarial-round-2.md`);
+claimed "tracked" in the Round-1 CHANGELOG but was never entered in this register.  
+**Governing docs:** `docs/review/2026-06-11-adversarial-round-2.md` §Docs/process;
+`../corelink-runners/docs/spec/hugit-integration-contract.md` (wire contract);
+CHANGELOG runner-transfer entry.
+
+**What is deferred:**
+- After `hugit-runner` transferred to `../corelink-runners`, the runner product
+  retained the crate name `corelink-runner` but the env-var `HUGIT_RUNNER_HOST`
+  and the user-facing doc title "hugit-runner" remain in corelink-runners code/docs.
+  These identifiers now straddle the product boundary: the env-var name anchors
+  the hugit seam contract (fine), but the doc title "hugit-runner" inside a
+  CoreLink campaign #1 product doc creates a naming mismatch that will confuse
+  operators configuring the runner fleet.
+- The fix requires a coordinated rename in `../corelink-runners` (doc title, any
+  README references, operator runbook) — read-only from hugit's side (hugit
+  consumes `HUGIT_RUNNER_HOST`, the env-var name is intentional product-seam
+  naming and does NOT need to change here).
+
+**Owner:** hugit techlead — coordinates with corelink-runners owner  
+**Acceptance criteria:**
+1. The corelink-runners product docs (CLAUDE.md, operator runbook, any `hugit-runner`
+   title references) are updated to use the campaign #1 product name consistently
+   (`corelink-runner` / "CoreLink runner"), with a note that the HUGIT integration
+   seam uses `HUGIT_RUNNER_HOST` by contract.
+2. The hugit `docs/interop.md` seam map is verified: `HUGIT_RUNNER_HOST` is
+   documented as the intentional cross-product seam variable (not a naming error).
+3. No rename of the env-var itself — it is frozen by the wire contract.
+
+---
+
+## PS-5 — CI fork-guard: `pull_request` trigger on self-hosted runner without fork isolation
+
+**Status:** DEFERRED — accepted LOW risk (private repo today); escalates to HIGH if repo goes public  
+**Adversarial finding:** Docs/process — Round-2 verdict (`docs/review/2026-06-11-adversarial-round-2.md`);
+claimed "tracked" in the Round-1 CHANGELOG but was never entered in this register.  
+**Governing docs:** `docs/review/2026-06-11-adversarial-round-2.md` §Docs/process;
+`.github/workflows/ci.yml` + `.github/workflows/dco.yml` (both use `pull_request`
+on `[self-hosted, mac, corelink-builder]`).
+
+**What is deferred:**
+- Both `ci.yml` and `dco.yml` trigger on `pull_request` without a fork-guard.
+  GitHub's `pull_request` trigger for a fork PR runs checkout of the fork's code
+  on the self-hosted runner — a fork contributor could execute arbitrary code on
+  the corelink-builder machine.
+- **Current risk: LOW** — the repo is private; fork PRs require write access; no
+  external contributors. The risk profile matches a typical private org repo.
+- **If the repo goes public:** risk becomes HIGH (runner compromise from any fork
+  PR). The correct fix is `pull_request_target` with an environment protection
+  gate OR explicit `github.event.pull_request.head.repo.fork == false` guard.
+  See the accepted-risk comment added to both workflow files (WF-DOCS).
+
+**Owner:** hugit techlead — reassess on any repo visibility change  
+**Acceptance criteria:**
+1. If and when the repo is made public: `ci.yml` and `dco.yml` are updated to
+   use `pull_request_target` with a protected environment approval gate for fork
+   PRs, OR a fork-origin check (`github.event.pull_request.head.repo.fork == false`)
+   with a separate trusted-maintainer path.
+2. Until then: the accepted-risk comment in both workflow files (added by WF-DOCS)
+   documents the threat model and the fix path, satisfying the audit trail.
+3. The transition is tested: a fork PR must NOT run on the self-hosted runner
+   without an explicit approver gate.
+
+---
+
 ## Closed seams (reference — do not re-open without owner approval)
 
 | Seam | Shipped | Governing commit |
