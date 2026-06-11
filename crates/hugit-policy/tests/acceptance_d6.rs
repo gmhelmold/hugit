@@ -9,9 +9,10 @@
 //! Oracle: these tests (crates/hugit-policy/tests/acceptance_d6.rs)
 
 use hugit_policy::{
-    Engine, EvalContext, GateOutcome, changelog, dco, emit_policy_change, landing_gate_check,
-    secrets,
+    Engine, EvalContext, GateOutcome, POLICY_CHANGE_KIND, PolicyEmitError, changelog, dco,
+    emit_policy_change, landing_gate_check, secrets,
 };
+use hugit_refstore::authz::{DenyReason, PrincipalClass};
 use hugit_refstore::{GENESIS_PREV_HASH, canonical_json, compute_this_hash};
 use std::collections::HashMap;
 
@@ -248,8 +249,13 @@ fn item_3_policy_change_audited() {
     let old_gates = r#"[{"id":"dco","enabled":true}]"#;
     let new_gates = r#"[{"id":"dco","enabled":true},{"id":"secrets","enabled":true}]"#;
 
+    // policy is a Human-only verb (D14 matrix): the actor is asserted Human.
+    let alice = "user:alice@example.com";
+    let bob = "user:bob@example.com";
+
     // ── First policy change ───────────────────────────────────────────────────
-    let event1 = emit_policy_change(&mut log, "alice@example.com", old_gates, new_gates);
+    let event1 = emit_policy_change(&mut log, PrincipalClass::Human, alice, old_gates, new_gates)
+        .expect("a human may change policy");
 
     assert_eq!(
         log.len(),
@@ -265,7 +271,7 @@ fn item_3_policy_change_audited() {
     assert_eq!(event1.kind, "policy.change", "kind must be 'policy.change'");
     assert_eq!(
         event1.principal_chain,
-        vec!["alice@example.com"],
+        vec![alice],
         "principal_chain must carry the actor"
     );
     assert!(!event1.this_hash.is_empty(), "this_hash must be non-empty");
@@ -290,7 +296,7 @@ fn item_3_policy_change_audited() {
     let expected_this_hash = compute_this_hash(
         GENESIS_PREV_HASH,
         "policy.change",
-        &[String::from("alice@example.com")],
+        &[String::from(alice)],
         &expected_payload,
         0,
     );
@@ -316,7 +322,8 @@ fn item_3_policy_change_audited() {
     let old2 = new_gates;
     let new2 = r#"[{"id":"dco","enabled":true},{"id":"secrets","enabled":false}]"#;
 
-    let event2 = emit_policy_change(&mut log, "bob@example.com", old2, new2);
+    let event2 = emit_policy_change(&mut log, PrincipalClass::Human, bob, old2, new2)
+        .expect("a human may change policy");
 
     assert_eq!(
         log.len(),
@@ -334,7 +341,7 @@ fn item_3_policy_change_audited() {
     );
     assert_eq!(
         event2.principal_chain,
-        vec!["bob@example.com"],
+        vec![bob],
         "second event must carry bob's identity"
     );
 
@@ -346,5 +353,94 @@ fn item_3_policy_change_audited() {
         log.len(),
         log_len_before,
         "no spurious events appended without an explicit emit"
+    );
+}
+
+// ─── item ③ (D14 guard): policy is Human-only, denials audited ────────────────
+//
+// The policy emitter routes through the D14 `append_authorized` guard under
+// Endpoint::Policy. `policy` is a Human-only forge verb (the matrix); a
+// non-human asserted class is denied fail-closed — the `policy.change` event is
+// NOT appended, an `authz.denied` audit record IS appended, and the structured
+// PolicyEmitError::Denied carries the reason. A human is allowed.
+//
+#[test]
+fn policy_change_non_human_denied_and_audited() {
+    let old_gates = r#"[{"id":"dco","enabled":true}]"#;
+    let new_gates = r#"[{"id":"dco","enabled":true},{"id":"secrets","enabled":true}]"#;
+
+    // Orchestrator, worker (subagent), and model are all denied for policy.
+    for (class, principal) in [
+        (PrincipalClass::Orchestrator, "orchestrator:lead"),
+        (PrincipalClass::Worker, "agent:runner-03"),
+        (PrincipalClass::Model, "model:claude"),
+    ] {
+        let mut log = Vec::new();
+        let err = emit_policy_change(&mut log, class, principal, old_gates, new_gates)
+            .expect_err("a non-human class must be denied policy");
+        match err {
+            PolicyEmitError::Denied(DenyReason::NotPermitted { .. }) => {}
+            other => panic!("expected NotPermitted denial for {principal}, got {other:?}"),
+        }
+        // The policy.change event was NOT appended; only the audit record was.
+        assert_eq!(
+            log.len(),
+            1,
+            "only the authz.denied audit was appended on a denied policy change"
+        );
+        let last = &log[0];
+        assert_eq!(
+            last.kind, "authz.denied",
+            "the single appended record is the denial audit"
+        );
+        assert!(
+            last.payload.contains("\"endpoint\":\"policy\""),
+            "audit payload must attribute the policy endpoint"
+        );
+        assert!(
+            !log.iter().any(|r| r.kind == POLICY_CHANGE_KIND),
+            "no policy.change event may slip onto the log on a denial"
+        );
+    }
+}
+
+#[test]
+fn policy_change_denied_appends_nothing_but_audit_on_empty_log() {
+    // Genesis-position denial: an empty log gains exactly one record — the audit.
+    let mut log = Vec::new();
+    let err = emit_policy_change(
+        &mut log,
+        PrincipalClass::Worker,
+        "agent:x",
+        r#"[]"#,
+        r#"[{"id":"dco","enabled":true}]"#,
+    )
+    .expect_err("worker is denied policy");
+    assert!(matches!(
+        err,
+        PolicyEmitError::Denied(DenyReason::NotPermitted { .. })
+    ));
+    assert_eq!(log.len(), 1, "exactly the audit record");
+    assert_eq!(log[0].kind, "authz.denied");
+    assert_eq!(log[0].seq, 0, "audit lands at genesis seq on an empty log");
+}
+
+#[test]
+fn policy_change_human_allowed_appends_exactly_the_change() {
+    // The legitimate Human path: exactly one policy.change appended, no audit.
+    let mut log = Vec::new();
+    let event = emit_policy_change(
+        &mut log,
+        PrincipalClass::Human,
+        "user:gustavo",
+        r#"[]"#,
+        r#"[{"id":"dco","enabled":true}]"#,
+    )
+    .expect("a human may change policy");
+    assert_eq!(log.len(), 1, "exactly the policy.change event");
+    assert_eq!(event.kind, POLICY_CHANGE_KIND);
+    assert!(
+        !log.iter().any(|r| r.kind == "authz.denied"),
+        "an allowed policy change emits no denial audit"
     );
 }

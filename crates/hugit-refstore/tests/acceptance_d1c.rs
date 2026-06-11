@@ -430,9 +430,13 @@ fn undo_and_import_are_serialized_through_the_writer() {
             while ready.load(Ordering::Acquire) < total {
                 std::hint::spin_loop();
             }
+            // undo is a Human-only D14 verb (the serializer now routes through
+            // the guard), so the principal must be a human for the legitimate
+            // serialized-undo path under test here. The denial path is covered
+            // by the dedicated guard tests below.
             s.undo(
                 i as u64,
-                vec![format!("agent:undoer-{i:03}")],
+                vec![format!("user:undoer-{i:03}")],
                 1_800_000_000_000,
             )
             .expect("serialized undo succeeds")
