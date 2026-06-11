@@ -345,8 +345,10 @@ fn pr_open_refuses_intent_not_on_the_log() {
         "i-ghost",
     ]);
     assert!(!ok, "pr open must refuse an intent absent from the log");
-    assert_eq!(v["error"], "missing_intents");
-    let missing = v["missing_intents"].as_array().unwrap();
+    // Canonical WB0 error law: nested `{"error":{"kind",…,"fix"}}`, context flat.
+    assert_eq!(v["error"]["kind"], "missing_intents");
+    assert!(v["error"]["fix"].is_string());
+    let missing = v["error"]["missing_intents"].as_array().unwrap();
     assert_eq!(missing.len(), 1);
     assert_eq!(missing[0], "i-ghost");
     assert_eq!(
