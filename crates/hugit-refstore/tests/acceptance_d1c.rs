@@ -461,8 +461,10 @@ fn undo_and_import_are_serialized_through_the_writer() {
             };
             s.import_sidecar(
                 &sidecar,
-                &format!("refs/heads/imported-{i:03}"),
-                &format!("oid-imp-{i:08x}"),
+                // WF-AUTHZ: import_sidecar only accepts the intent namespace
+                // (refs/hugit/**); refs/heads/** is now refused (ProtectedRef).
+                &format!("refs/hugit/imported-{i:03}"),
+                &format!("authored:import-{i:03}"),
                 vec![format!("agent:importer-{i:03}")],
                 1_900_000_000_000,
             )

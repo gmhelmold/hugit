@@ -156,7 +156,8 @@ impl From<UndoError> for UndoSubmitError {
 ///
 /// Either the operation was not admitted / the writer was poisoned
 /// ([`SubmitError`]), or the import itself was rejected ([`ImportError`] — empty
-/// or duplicate `intent_id`). Both are surfaced explicitly.
+/// or duplicate `intent_id`, or a protected ref namespace (WF-AUTHZ)). Both are
+/// surfaced explicitly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImportSubmitError {
     /// Admission/writer-level failure routing the import through the serializer.

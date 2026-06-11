@@ -131,8 +131,10 @@ fn item_3_sidecar_corpus_importable() {
         import_sidecar(
             &mut log,
             sidecar,
-            "refs/heads/main",
-            &format!("oid-import-{i}"),
+            // WF-AUTHZ: import_sidecar only accepts the intent namespace
+            // (refs/hugit/**); refs/heads/** is a protected ref.
+            "refs/hugit/intents",
+            &format!("authored:sidecar-{i}"),
             vec!["agent:importer".into()],
             1_717_000_100_000 + i as u64,
         )
@@ -165,8 +167,8 @@ fn item_3_sidecar_corpus_importable() {
     let dup = import_sidecar(
         &mut log,
         &corpus[0],
-        "refs/heads/main",
-        "oid-dup",
+        "refs/hugit/intents",
+        "authored:dup",
         vec!["agent:importer".into()],
         1_717_000_200_000,
     );
