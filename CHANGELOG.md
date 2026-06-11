@@ -25,6 +25,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   classifier they drive (relocated, never weakened), and X4's spawn-surface
   oracle moved with the spawn surface (rigor preserved by relocation; R0
   freeze). Workspace: 17 → 16 packages.
+- docs(plan): **WP-R5 — runner-transfer campaign records (R0–R6)** (2026-06-10).
+  Supersession appendix appended to `docs/plan/decomposition.md` (E6 precedent;
+  register body frozen): C2a/C2b/C3/E4 acceptance suites + C9 harness +
+  C5a materialize/enforce + X4 spawn-surface oracle TRANSFERRED to
+  `corelink-runners/crates/corelink-runner` @ b6319a3, on top of contracts @
+  78702d6 (triplet + MaterializedEntry closure) and integration contract v1.1 @
+  9796aa8 (envelope emission obligations, WP-R6). Wire-contract seam: JSON
+  conformance vectors byte-identical in both repos (manifest sha256 `159fe8c5…`;
+  `RunnerLease` `ab1744c9…`; `FenceManifest` `07940b9a…`). hugit retains:
+  `hugit-ledger::envelope` (F2/F2b capture, A7 green), `hugit-fence::{broker,seam}`
+  (C5b + wire seam, no assertion weakened), `hugit-invariants` (INV-* green,
+  wire-level X4 conformance assertion), `hugit-contracts` (frozen, untouched),
+  16 packages. WP-R3 absorbed into R1b + R4② — no standalone commit, A3
+  satisfied. `docs/strategy/absorption-map.md` Actions YAML row corrected.
+  corelink-runners CLAUDE.md advanced to CODE status; handoff note authored.
+  (runner-transfer-campaign)
 
 - feat(cli): **the flow porcelain — `hugit campaign` · `hugit intent` · `hugit pr`**
   (owner-directed 2026-06-10: "quem vai digitar são os modelos de LLM").

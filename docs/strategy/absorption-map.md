@@ -65,7 +65,7 @@
 | Capability | Verdict | In hugit |
 |---|---|---|
 | Actions (CI) | 🟢 SUPERSET | memoized checks + affected targets + CoreLink runners — **the economic engine**: never re-verify the verified; flat pricing; your hardware never metered |
-| Actions YAML / marketplace | 🔌 COMPAT SHIM | an Actions-compatibility runner executes existing workflows unchanged during migration; native checks-as-code is the destination |
+| Actions YAML / marketplace | 🔌 COMPAT SHIM | an Actions-compatible runner (execution core lives in `corelink-runners`, campaign #1 seed — runner-transfer 2026-06-10) executes existing workflows unchanged during migration; native checks-as-code is the destination |
 | Status checks API / badges | 🔌 COMPAT SHIM | we emit GitHub-compatible statuses through the mirror so every ecosystem tool (badges, bots, integrations) keeps working |
 | Dependabot | 🟢 SUPERSET | dep updates as speculative pre-tested landings by policy — silent when green, one task when red; the 200-PRs/week flood, deleted |
 | Code scanning (CodeQL-class) | 🟢 SUPERSET | security scanners are just checks: memoized by tree-hash, affected-target scoped, results as structured findings bound to intents |

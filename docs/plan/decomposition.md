@@ -242,3 +242,60 @@ test crates + red-team fixtures (`crates/hugit-invariants`).
   mirror = E6, explicitly gate-bound deferral with pre-registered
   acceptance, NOT in warp scope; pip-vs-npm partial-hit honesty =
   representative coverage via B2⑤ (behavior is ecosystem-agnostic).
+
+---
+
+## SUPERSESSION APPENDIX (E6 precedent — frozen register body above NOT edited)
+
+> **Date:** 2026-06-10 · **Authority:** owner-directed runner transfer +
+> TechLead concurrence · **Pattern:** mirrors the E6 deferral record.
+
+### Runner-transfer campaign (#3 → campaign #1 seed)
+
+**Superseded WPs (transferred — not dropped, not weakened):**
+
+| WP | Original charter | Disposition |
+|---|---|---|
+| C2a | Acceptance suite — lease lifecycle | TRANSFERRED → `corelink-runners/crates/corelink-runner` @ b6319a3 |
+| C2b | Acceptance suite — isolation/teardown | TRANSFERRED → `corelink-runners/crates/corelink-runner` @ b6319a3 |
+| C3 | Acceptance suite — boot/warm/concurrency | TRANSFERRED → `corelink-runners/crates/corelink-runner` @ b6319a3 |
+| E4 | Acceptance suite — end-to-end harness | TRANSFERRED → `corelink-runners/crates/corelink-runner` @ b6319a3 |
+| C9 | Harness lifecycle (attach/resume/dedup/local≡remote) | TRANSFERRED with execution core @ b6319a3 |
+| C5a (materialize/enforce half) | Fence: sparse hydration + in/out classifier + red-team | TRANSFERRED → `corelink-runner` @ b6319a3 (broker/C5b stays hugit-side) |
+| X4 (spawn-surface oracle) | Supply-chain pinning oracle over live spawn surface | TRANSFERRED → `corelink-runner/x4` @ b6319a3; hugit retains wire-level conformance assertion in `hugit-invariants` |
+
+**Foundation SHAs (corelink-runners branch `integ/seed-runner`):**
+- Contracts + conformance vectors (RunnerLease/FenceManifest byte-identical,
+  triplet + MaterializedEntry closure): `78702d6`
+- Execution core transplant (WP-R2) + fence enforcement + X4 oracle (WP-R4④): `b6319a3`
+- Integration contract v1.1 (envelope emission obligations, WP-R6): `9796aa8`
+
+**Wire-contract law (the seam that makes the transfer safe):**
+- Types transcribed on each side; `hugit-contracts` frozen and unrelocated;
+  `corelink-runners-contracts` holds the re-declared triplet + MaterializedEntry.
+- Conformance vectors (`conformance/RunnerLease.json`, `conformance/FenceManifest.json`,
+  `conformance/manifest.sha256`) committed **byte-identical in both repos** — the
+  drift tripwire. Manifest SHA-256: `159fe8c5…`; `RunnerLease` vector: `ab1744c9…`;
+  `FenceManifest` vector: `07940b9a…`.
+- No git/path dependency in either direction (both `deny.toml`: crates.io only).
+- Consumed via `hugit-integration-contract.md` v1.1 (WP-R6 @ 9796aa8).
+
+**Plan-vs-actual absorption note:**
+WP-R3 (cross-repo conformance harness — separate WP in the plan) was
+**absorbed**: its content executed as R1b (vectors + goldens, corelink side @
+78702d6) + R4② (hugit side wire oracle in `hugit-invariants`). No standalone
+R3 commit; A3 is satisfied by those two commits. Record the absorption; no R3
+is missing.
+
+**What hugit retains (nothing weakened):**
+- `hugit-ledger::envelope` — F2/F2b capture producer (forge domain; suite A7 green).
+- `hugit-fence::{broker,seam}` — C5b secrets broker + repo-side session fence;
+  wire seam discloses `BoxExec`/`CmdOutput`/`RunningContainer` only; no assertion
+  weakened.
+- `hugit-invariants` — INV-* all green; wire-level conformance assertion for X4;
+  invariants re-pointed at conformance fixtures (hermetic, rigor preserved by
+  relocation).
+- `hugit-contracts` — `RunnerLease`, `RunnerState`, `FenceManifest` frozen and
+  unchanged (transcription ≠ relocation).
+- Package count: 17 → 16 (hugit-runner removed post-transfer; hugit-web migrated
+  out earlier to ../githugr; current workspace = 16 packages).
