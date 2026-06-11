@@ -1,14 +1,14 @@
-# Request to the CoreLink TechLead — lift the hugit P2 ceiling (3 infra seams)
+# Request to the CoreLink TechLead — lift the hugit P2 ceiling (6 infra seams)
 
 > **From:** hugit TechLead · **Date:** 2026-06-11 · **Status:** OPEN, owner-gated
 > **Supersedes scope of:** `docs/handoff/2026-06-08-corelink-p2-tenant-request.md`
-> (the tenant-provisioning request) — that doc stands; this one **adds the three
+> (the tenant-provisioning request) — that doc stands; this one **adds the six
 > live-infra seams** that two adversarial audit rounds proved are the *only*
 > things standing between hugit and a shippable production forge.
 >
 > **Read this first if you read nothing else (§0).** Everything below is
 > evidence-driven: each ask cites the adversarial finding that proves hugit
-> cannot close it from the code side. Nothing here waits on hugit — §6 shows
+> cannot close it from the code side. Nothing here waits on hugit — §9 shows
 > every hugit-side seam is built, hermetically proven, and `NotWired`-gated,
 > waiting only for the values you hand back.
 
@@ -19,24 +19,33 @@
 hugit's engine is **code-complete and adversarially hardened**: two fresh-context
 7-agent refutation rounds (`docs/review/2026-06-11-adversarial-round-1.md`,
 `-round-2.md`) confirmed the integrity spine (hash-chained log, D14 authz,
-redaction, money) holds. The rounds also proved that **three** ship-blocking
-gaps are **not closable in hugit code** — they are CoreLink infrastructure
-seams. They are the entire "P2 ceiling":
+redaction, money) holds. The rounds + a full live-seam inventory
+(`docs/interop.md`, whitepaper §5 truth-table, every `NotWired` code site)
+establish that hugit's path to a **production** forge is gated entirely on
+CoreLink infrastructure. This document enumerates **literally all of it** — the
+3 ship-blockers the audit reproduced (A/B/C) **and** the 3 build-out seams the
+inventory surfaced (D/E/F) — each with an exact contract and DoD. **§8 is a
+coverage matrix** proving every known CoreLink-gated seam is either asked here,
+already asked in the tenant/identity docs, or explicitly owned elsewhere with a
+reason. Nothing is left implicit.
 
-| # | Seam | What it unblocks | Adversarial finding | CoreLink primitive needed |
+| # | Seam | What it unblocks | Evidence / source | CoreLink primitive |
 |---|---|---|---|---|
-| **A** | **Live Action Cache transport** | the memoized-CI wedge becomes *observable* (today it renders null on every real log) | PS-1 / P-WEDGE-HOLLOW | AC namespace + HTTP endpoint + PAT (the §2 tenant ask, now load-bearing) |
-| **B** | **CAS erase / tombstone API (R2)** | right-to-erasure on the forever-store becomes *real* (today proven only against an in-process toy) | PS-3 / SOTA-audit S4 | R2 keyed delete + a durable tombstone record |
-| **C** | **Session→token exchange endpoint** | `--author-kind` stops being caller-asserted (today a subagent can claim `orchestrator`) | PS-2 / SOTA-audit S3 | the ADR-0002 §A1 endpoint (Clerk-backed) |
+| **A** | **Live Action Cache transport** | the memoized-CI wedge becomes *observable* (renders null on every real log today) | PS-1 / P-WEDGE-HOLLOW (reproduced live) | AC namespace + HTTPS GET/PUT + PAT |
+| **B** | **CAS erase + D1 event-payload purge** | right-to-erasure on the forever-store becomes *real* (proven only against an in-process toy today) | PS-3 / SOTA-audit S4 | R2 keyed DELETE + tombstone **+ D1 payload purge** |
+| **C** | **Session→token exchange endpoint** | `--author-kind` stops being caller-asserted (a subagent can claim `orchestrator` today) | PS-2 / SOTA-audit S3 | ADR-0002 §A1 endpoint (Clerk-backed) |
+| **D** | **Per-repo Durable Object event-log binding** | the hash-chained event log gets a live home so githugr can serve it (it is in-process/fixture today) | `docs/interop.md` §5, whitepaper §5 L4 ("to build") | per-repo DO hosting the append-only log |
+| **E** | **Transparency / attestation log** | self-release attestation (X8) gets a public inclusion proof; boot can verify it | `crates/hugit-invariants/x8/tlog.rs` `P2_LIVE_SEAM`, interop §4 | a Rekor-class append-only public log endpoint |
+| **F** | **Live secrets broker (C5b)** | the flat-file PAT is replaced by a lease-based broker (the credential never sits on the box image/argv) | `hugit-fence/src/broker` (in-process today), interop §6 | a tenant secrets-broker lease API |
 
-Each is detailed below with an exact contract and a definition-of-done. **A** is
-the smallest and highest-value (it lights up the product's headline). **C** is
-the one with a cross-repo identity dependency (ADR-0002). **B** is a focused R2
-capability.
+Priority by value × effort: **A** first (lights the headline), **B** next (one
+R2 + one D1 capability), **D** for the githugr serving path, **E**/**F** are
+hardening that ride the same tenant, **C** on the identity timeline (ADR-0002).
+**A/B/C are the audit-proven ship-blockers; D/E/F are build-out completeness.**
 
 ---
 
-## 1. Context — why these three, why now
+## 1. Context — why these six, why now
 
 The hugit thesis is *memoize by content, price flat; agent work is legible and
 accountable*. Two audit rounds confirmed the **legible/accountable** half is
@@ -50,7 +59,7 @@ authenticated authorship, and both are honest-stubbed pending your infra
 
 These are not hugit defects. They are the disclosed live-infra boundary the
 whitepaper always named (AC/CAS · runners · identity). This document converts
-that boundary into three precise, independently-shippable asks.
+that boundary into six precise, independently-shippable asks (A–F).
 
 ---
 
@@ -139,14 +148,32 @@ bucket**, not the latency-sensitive AC.
 - `PUT` of a previously-erased hash must be **refused** (resurrection-closed) —
   return `409 Gone`.
 
+### The D1 half (do not omit — the erasure cascade has two stores)
+Erasure is a **two-store cascade**, not one DELETE. A trajectory/object blob
+lives in R2 (the bytes), but personal data can also sit **inside event-log
+payloads** that are projected from the per-repo event store (D1-backed at P2,
+Seam D). Right-to-erasure must purge **both**:
+```
+1. R2:  DELETE the content-addressed blob  → 410-Gone tombstone (above)
+2. D1:  purge/redact the event-payload field(s) carrying the same personal data,
+        WITHOUT breaking the hash chain — i.e. replace the payload bytes with a
+        signed tombstone marker and re-anchor, preserving "the proof it existed"
+        while removing "the content."
+```
+hugit needs the D1-side capability (a targeted payload-purge that keeps
+`verify_chain` valid via a tombstone re-anchor) confirmed or designed with you —
+this is the half PS-3 names that R2 DELETE alone does not cover.
+
 ### Definition of done
 1. The production `ColdStore` adapter (`hugit-refstore` cold tier over CoreLink
    CAS) implements `erase` against the real R2 DELETE.
-2. X7① + X12① acceptance suites re-target to the **real** adapter under
+2. The D1 event-payload purge path exists and keeps `verify_chain` green
+   post-purge (tombstone re-anchor, not a chain break).
+3. X7① + X12① acceptance suites re-target to the **real** adapter under
    `HUGIT_CORELINK_*` (run-not-skip); removing the adapter's erase call turns
    X7① RED (proven load-bearing).
-3. A round-trip test: store → get(Present) → erase → get(410 Gone tombstone) →
-   put(409 refused).
+4. A round-trip test: store → get(Present) → erase → get(410 Gone tombstone) →
+   put(409 refused); plus an event-payload purge that survives `verify_chain`.
 
 ---
 
@@ -195,7 +222,92 @@ to confirm.
 
 ---
 
-## 5. Sequencing & non-interference (please respect)
+## 5. SEAM D — Per-repo Durable Object event-log binding
+
+### What I need
+A live, per-repo **Durable Object** that hosts hugit's append-only, hash-chained
+event log, with a thin API hugit's refstore binds to:
+```
+append(record)         → seq, this_hash     (single-writer, serialized — the DO IS the writer lock)
+read(range)            → [EventRecord…]      (for projection / verify_chain)
+head()                 → seq, this_hash      (CAS-style optimistic concurrency)
+```
+Single-writer is the load-bearing property: hugit's chain integrity assumes one
+serialized appender. A DO is the natural fit (it already serializes); the
+flat-file `.lock`/atomic-write seam hugit ships (WC1) is the local stand-in.
+
+### Why
+Today the event log is in-process / fixture (`hugit-refstore`); githugr serves
+it through a `Provider` over that local log. `docs/interop.md` §5 and the
+whitepaper §5 truth-table (L4: "hugit DO event-log — to build") name the live
+per-repo DO as the P2 binding. Without it there is no multi-client authoritative
+log — the forge is single-host. This is the seam that makes githugr a *hosted*
+forge rather than a local viewer.
+
+### Definition of done
+1. The per-repo DO API (append/read/head, single-writer guarantee, optimistic
+   `head()` concurrency token) is confirmed or designed with you.
+2. hugit's refstore binds to it behind the same trait the local log implements;
+   `verify_chain` holds across a DO-hosted log; concurrent appenders serialize
+   (no lost record — the WC1 concurrency proof re-run against the live DO).
+
+---
+
+## 6. SEAM E — Transparency / attestation log
+
+### What I need
+A **Rekor-class append-only public transparency log** endpoint where hugit
+publishes its self-release attestations and, at boot/verify, checks inclusion:
+```
+publish(attestation)   → log_index, inclusion_proof
+verify(log_index, att) → inclusion_proof | not-found
+```
+
+### Why
+`crates/hugit-invariants/x8/tlog.rs` defines a `TransparencyLog` trait gated on
+`P2_LIVE_SEAM`; `docs/interop.md` §4 names the live tlog as the binding that
+turns hugit's ed25519 self-release attestation (already produced + signed) from
+*self-asserted* into *publicly verifiable*. The Security screen's "transparency
+log" + SLSA posture (githugr design) reads from this. Without it, attestation is
+honest but unwitnessed.
+
+### Definition of done
+1. The tlog endpoint contract (publish/verify, inclusion-proof shape) is
+   confirmed or corrected.
+2. X8's `TransparencyLog` live impl publishes a real attestation and boot-verify
+   confirms inclusion (run-not-skip under the live env).
+
+---
+
+## 7. SEAM F — Live secrets broker (C5b)
+
+### What I need
+A tenant **secrets-broker lease API** that replaces the interim flat-file PAT:
+hugit requests a short-lived lease for a named secret at the moment of use; the
+credential value is never written to the runner box image, argv, env dump, or
+log.
+```
+lease(secret_name, ttl)  → lease_handle (value resolved out-of-band, never logged)
+revoke(lease_handle)     → ok
+```
+
+### Why
+`hugit-fence/src/broker` ships the broker logic with an `InMemoryStore` and a
+red-team harness proving the secret never persists; `docs/interop.md` §6 and the
+2008 tenant request §5 note the live broker "later takes over from flat-file
+storage." The flat-file PAT (mode 600) is the disclosed interim; the broker is
+the production posture (lease, audit, revoke) — the fence's write-only-secret
+model needs a live backend to enforce against.
+
+### Definition of done
+1. The broker lease/revoke API contract is confirmed or designed with you.
+2. hugit's fence broker binds to it; the C5b red-team harness (mid-op fault,
+   secret-never-on-box) runs against the live broker (run-not-skip); flat-file
+   PAT becomes a fallback, not the default.
+
+---
+
+## 8. Sequencing & non-interference (please respect)
 
 - **Independence:** A, B, C are independently shippable. Recommended order by
   value × effort: **A first** (lights the wedge), **B next** (one R2 capability),
@@ -213,7 +325,7 @@ to confirm.
 
 ---
 
-## 6. What is ALREADY done on the hugit side (nothing waits on me)
+## 9. What is ALREADY done on the hugit side (nothing waits on me)
 
 Every seam below is built, hermetically proven, and gated so it **cannot rot to
 a false green** before you deliver — it fails closed or skips loudly:
@@ -224,6 +336,9 @@ a false green** before you deliver — it fails closed or skips loudly:
 | A — recorder verb | `hugit check` recorder (`check.recorded` producer) is **hugit-side, P2-independent** — I build it next; it works against `InMemoryAc` today and swaps to live AC by config | PS-1 acceptance criteria |
 | B — erase trait | `ColdBlobStore::erase` + `GetOutcome::{Present,Erased,Absent}` + resurrection-refused shipped (WA3); X7/X12 prove the cascade on the in-process store | CHANGELOG WA3; `crates/hugit-invariants/x7,x12` |
 | C — authz spine | D14 `append_authorized` + `AuditedGuard` wired to every mutation path; full caller audit, no bypass (Wave A/E, E-GUARD/E-GUARD2) | `docs/review/2026-06-11-adversarial-round-2.md` (authz lens: spine confirmed sound) |
+| D — event-log | refstore log is single-writer hash-chained with WC1 atomic-lock; binds to a DO behind the same trait | `verify_chain`; WC1 concurrency proof |
+| E — tlog | ed25519 self-release attestation produced + signed; `TransparencyLog` trait awaits a live endpoint | `x8/tlog.rs` `P2_LIVE_SEAM` |
+| F — broker | fence broker logic + red-team harness ship with an in-process store; binds to a live lease API | `hugit-fence/src/broker`; C5b suite |
 | Secrets | PAT lands at `~/.hugit/secrets/corelink/pat` (mode 600, outside every repo); gitleaks-class redaction-on-write so no PAT/secret enters the forever-log | CHANGELOG WA1/WF-REDACT |
 
 When A/B/C land, each goes live with **configuration only — no further hugit code
@@ -232,7 +347,40 @@ DoD and report.
 
 ---
 
-## 7. Definition of done (how we both confirm the ceiling is lifted)
+## 10. Coverage matrix — every CoreLink-gated seam, accounted for
+
+Built from the full live-seam inventory (`docs/interop.md`, whitepaper §5, every
+`NotWired`/env-gated site). **No seam is left implicit.** Each is asked here,
+asked in the tenant/identity docs, or explicitly out of CoreLink scope with a
+reason.
+
+| Seam (inventory) | Disposition |
+|---|---|
+| Live Action Cache transport | **Ask A** (this doc) + tenant §2.2 |
+| CAS namespace + R2 bucket | tenant request §2.3 |
+| CAS erase / tombstone (R2 DELETE) | **Ask B** (this doc) |
+| D1 event-payload purge (erasure half 2) | **Ask B** (this doc, the D1 half) |
+| Session→token exchange (ADR-0002 §A1) | **Ask C** (this doc) + identity rollout §A1 |
+| Per-repo Durable Object event-log | **Ask D** (this doc) |
+| Transparency / attestation log (X8) | **Ask E** (this doc) |
+| Live secrets broker (C5b) | **Ask F** (this doc) |
+| Scoped PAT delivery | tenant request §2.5/§5 |
+| Policy caps (rate + $ budget) | tenant request §2.4 (+ §5 here) |
+| Tenant base URL + slug | tenant request §5 |
+| Live X6/X10 non-interference probe URL | **rides Ask A** — same tenant/PAT; the probe endpoint is the AC host (`HUGIT_CORELINK_PROBE_URL` = the AC URL). DoD: X6/X10 run-not-skip once A is live. Flagged here, no separate primitive. |
+| Live B8 dogfood soak driver | **rides the tenant** — `HUGIT_DOGFOOD_LIVE` drives the provisioned tenant; no new CoreLink primitive, wiring is hugit-side. |
+| **Runner fabric authenticated exec API (M1)** | **OUT of this request — owned by `corelink-runners`.** The runner core was transferred there (campaign #1, WP-R4); hugit consumes it via the frozen wire contract (`hugit-integration-contract.md` v1.2). The interim SSH-to-`hugit-runner-01` box works today; the fabric Bearer-PAT exec API is corelink-runners' deliverable, negotiated through that contract, not a hugit infra ask. |
+| **Live GitHub detect (bidir-sync)** | **OUT — GitHub-side, not CoreLink.** `hugit-mirror::sync::detect` `NotWired`; needs a real repo + webhook/poll. A GitHub infra seam (interop §3), not a CoreLink ask. Flagged for completeness. |
+| **GitHub App install token (private import/mirror)** | **OUT — GitHub-side.** App ID + private key for private-repo access (`hugit-mirror::import::auth`, fail-not-skip). GitHub infra, tracked in day-0 pointers, not a CoreLink ask. |
+| **Workspaces (clw) runtime tie-in (M4)** | **OUT — roadmap, not P2.** Sandboxes as Workspace SKUs is convergence milestone M4 (interop §7); no runtime call exists yet. Named so the enumeration is exhaustive, not requested. |
+| Cold trajectory-blob storage (the bytes) | **OUT of the CoreLink hot tenant by owner decision** (2026-06-10, "muito caro" — 2008 §8 addendum): trajectory blobs go to a commodity cold store; only their *erase* path (Ask B) touches CoreLink R2. |
+
+If any seam exists that is not in this matrix, it is an omission — tell me and I
+add it. This matrix is the contract of completeness.
+
+---
+
+## 11. Definition of done (how we both confirm the ceiling is lifted)
 
 - **A:** `corelink_ac_live_smoke` green; `hugit checks show` non-null hit-rate on
   a real log; cross-tenant `GET` → 403 fail-closed.
