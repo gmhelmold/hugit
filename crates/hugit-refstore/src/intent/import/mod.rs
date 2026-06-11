@@ -31,6 +31,27 @@
 //! ever change. This matches the CLI `intent new --log` routing established in
 //! `hugit-cli/src/intent/canonical_log.rs` (one altitude, one matrix cell).
 //!
+//! # WF-AUTHZ: Protected-ref guard — import may not advance a branch ref
+//!
+//! The `Push` cell is allowed for every principal class, which is correct for
+//! authoring intents. But `intent.landed` also advances ref state in replay
+//! (exactly like `ref.update`), so a caller that passes `ref_name =
+//! "refs/heads/main"` would produce a main-advancing `intent.landed` gated only
+//! on the all-classes Push cell — bypassing the `Land` authority that is the
+//! only legitimate path for advancing protected branch refs.
+//!
+//! **Rule (WF-AUTHZ option a):** `import_sidecar` may only target the
+//! **intent-namespace** (`refs/hugit/**`). Passing a `ref_name` that starts
+//! with `refs/heads/` (or any other branch-like namespace outside
+//! `refs/hugit/`) is rejected with [`ImportError::ProtectedRef`] before any
+//! guard or append is attempted. Advancing a real branch MUST go through the
+//! `Land`-gated path. This is deliberately fail-closed: unknown namespaces
+//! outside `refs/hugit/` are also rejected rather than silently promoted.
+//!
+//! The CLI passes `AUTHORED_REF = "refs/hugit/intents"`, which is in the
+//! intent namespace and is always accepted — the subagent intent-authorship path
+//! is unaffected.
+//!
 //! [`IntentSidecar`]: hugit_contracts::intent_sidecar::IntentSidecar
 //! [`EventLog::append_authorized`]: crate::log::EventLog::append_authorized
 
@@ -50,6 +71,12 @@ pub enum ImportError {
     /// one id: re-importing the same id is refused (fail-closed, idempotent at
     /// the call site — the caller decides whether to skip).
     DuplicateIntentId { intent_id: String },
+    /// The `ref_name` targets a protected ref namespace (e.g. `refs/heads/**`).
+    /// `import_sidecar` is gated on the all-class `Push` cell, which is correct
+    /// for intent authorship but MUST NOT be used to advance protected branch
+    /// refs. Advancing a real branch requires the `Land`-gated path. Only the
+    /// intent namespace (`refs/hugit/**`) is accepted here (WF-AUTHZ).
+    ProtectedRef { ref_name: String },
     /// The D14 guard denied the intent-landing append. Intent authorship is the
     /// `Push` verb (every class allowed), so this arm is **unreachable today** —
     /// it exists for fail-closed completeness: if the matrix ever restricts the
@@ -66,6 +93,12 @@ impl std::fmt::Display for ImportError {
             ImportError::DuplicateIntentId { intent_id } => {
                 write!(f, "intent_id {intent_id} already landed on the log")
             }
+            ImportError::ProtectedRef { ref_name } => write!(
+                f,
+                "import_sidecar cannot advance a protected ref '{ref_name}': \
+                 intent.landed via import is restricted to refs/hugit/**; \
+                 advancing a branch ref requires the Land-gated path"
+            ),
             ImportError::Denied(reason) => {
                 write!(f, "intent import denied by D14 guard: {}", reason.code())
             }
@@ -74,6 +107,16 @@ impl std::fmt::Display for ImportError {
 }
 
 impl std::error::Error for ImportError {}
+
+/// Whether `ref_name` is within the intent namespace permitted for import.
+///
+/// Only `refs/hugit/**` is allowed via the all-class `Push` cell (WF-AUTHZ).
+/// Any other namespace — including `refs/heads/**` (branches), `refs/tags/**`,
+/// or bare/unknown ref paths — is a protected ref that must be advanced through
+/// the `Land`-gated path, not through `import_sidecar`.
+fn is_intent_namespace(ref_name: &str) -> bool {
+    ref_name.starts_with("refs/hugit/")
+}
 
 /// Import one [`IntentSidecar`] corpus into the native intent model by landing
 /// it onto the event log **keyed by its `intent_id`** (③).
@@ -87,6 +130,13 @@ impl std::error::Error for ImportError {}
 ///
 /// Fails closed on an empty id, and refuses to import an `intent_id` that is
 /// already on the log (no duplicate identities).
+///
+/// **WF-AUTHZ protected-ref guard:** `ref_name` MUST be within the intent
+/// namespace (`refs/hugit/**`). Passing a branch ref (e.g. `refs/heads/main`)
+/// or any other non-intent namespace is rejected with
+/// [`ImportError::ProtectedRef`] before any append is attempted. Advancing a
+/// real branch ref requires the `Land`-gated path; this function is never the
+/// right path for that.
 ///
 /// The `intent.landed` append routes through the D14 [`EventLog::append_authorized`]
 /// guard under [`Endpoint::Push`] (intent authorship is the universal git verb —
@@ -104,6 +154,13 @@ pub fn import_sidecar(
     principal_chain: Vec<String>,
     recorded_at: u64,
 ) -> Result<EventRecord, ImportError> {
+    // WF-AUTHZ: guard first — before the empty-id or duplicate checks — so a
+    // caller cannot probe "does this intent exist?" by passing a protected ref.
+    if !is_intent_namespace(ref_name) {
+        return Err(ImportError::ProtectedRef {
+            ref_name: ref_name.to_string(),
+        });
+    }
     if sidecar.intent_id.is_empty() {
         return Err(ImportError::EmptyIntentId);
     }
@@ -162,10 +219,15 @@ fn already_landed(log: &EventLog, intent_id: &str) -> bool {
 mod guard_tests {
     //! D14 guard on the `import_sidecar` intent-landing path (P-GUARD2). Intent
     //! authorship is the universal `Push` verb, so EVERY principal class (human /
-    //! orchestrator / worker subagent / model) is ALLOWED — the legitimate
-    //! landed-intent path is never broken — while the mutation surface is gated
-    //! through `append_authorized` (no raw-append bypass). No `authz.denied`
-    //! audit is emitted on the allowed path; exactly one `intent.landed` lands.
+    //! orchestrator / worker subagent / model) is ALLOWED for the intent namespace
+    //! (`refs/hugit/**`) — the legitimate landed-intent path is never broken —
+    //! while the mutation surface is gated through `append_authorized` (no
+    //! raw-append bypass). No `authz.denied` audit is emitted on the allowed path;
+    //! exactly one `intent.landed` lands.
+    //!
+    //! WF-AUTHZ tests additionally cover the protected-ref guard: a worker-class
+    //! import targeting `refs/heads/main` is refused BEFORE the D14 guard and
+    //! before any log mutation; only `refs/hugit/**` is accepted.
     use super::*;
 
     fn sidecar(id: &str) -> IntentSidecar {
@@ -178,20 +240,23 @@ mod guard_tests {
         }
     }
 
+    /// Helper that imports into the INTENT NAMESPACE (refs/hugit/intents) —
+    /// the correct path for intent authorship under the all-class Push cell.
     fn import(log: &mut EventLog, id: &str, actor: &str) -> Result<EventRecord, ImportError> {
         import_sidecar(
             log,
             &sidecar(id),
-            "refs/heads/main",
-            "oid-1",
+            "refs/hugit/intents",
+            &format!("authored:{id}"),
             vec![actor.into()],
             1_717_000_000_000,
         )
     }
 
     #[test]
-    fn every_class_may_author_intent_via_push_cell() {
-        // human / orchestrator / worker (subagent) / model — all allowed.
+    fn every_class_may_author_intent_into_intent_namespace() {
+        // human / orchestrator / worker (subagent) / model — all allowed for the
+        // intent namespace (refs/hugit/**) via the Push cell.
         for actor in [
             "user:gustavo",
             "orchestrator:lead",
@@ -214,20 +279,24 @@ mod guard_tests {
 
     #[test]
     fn unclassifiable_principal_falls_back_to_worker_and_is_allowed() {
-        // A bare/unclassifiable identity falls back to Worker — which Push allows.
+        // A bare/unclassifiable identity falls back to Worker — which Push allows
+        // for the intent namespace.
         // (The honest P2 authn seam: classification is caller-supplied today.)
         let mut log = EventLog::new();
         let rec = import(&mut log, "intent-y", "queue")
-            .expect("unclassifiable → Worker fallback, allowed for Push");
+            .expect("unclassifiable → Worker fallback, allowed for Push on intent namespace");
         assert_eq!(rec.kind, INTENT_LANDED_KIND);
         assert_eq!(log.len(), 1);
         assert!(!log.records().iter().any(|r| r.kind == "authz.denied"));
     }
 
     #[test]
-    fn empty_and_duplicate_ids_still_refused_before_the_guard() {
+    fn empty_and_duplicate_ids_still_refused_before_the_d14_guard() {
         // Pre-guard refusals are unchanged: empty id and duplicate id never reach
-        // the append, so the log stays empty / single-record.
+        // the D14 append guard, so the log stays empty / single-record.
+        // NOTE: the protected-ref check runs BEFORE these — the helper already
+        // uses the intent namespace, so these are the only two remaining early
+        // refusals before the D14 guard.
         let mut log = EventLog::new();
         assert!(matches!(
             import(&mut log, "", "user:g"),
@@ -241,5 +310,112 @@ mod guard_tests {
             Err(ImportError::DuplicateIntentId { .. })
         ));
         assert_eq!(log.len(), 1, "duplicate refusal appends nothing");
+    }
+
+    // ── WF-AUTHZ: protected-ref guard tests ──────────────────────────────────
+    // Rule (option a): import_sidecar may only target refs/hugit/**. Any attempt
+    // to pass refs/heads/** (or other non-intent namespaces) is refused BEFORE
+    // any log mutation — the log is left untouched.
+
+    #[test]
+    fn worker_import_into_intent_namespace_succeeds() {
+        // Worker-class actor importing into refs/hugit/intents: ALLOWED (the
+        // CLI `intent new` path — Push cell, intent namespace).
+        let mut log = EventLog::new();
+        let rec = import_sidecar(
+            &mut log,
+            &sidecar("intent-ok"),
+            "refs/hugit/intents",
+            "authored:intent-ok",
+            vec!["agent:runner-07".into()],
+            1_717_000_001_000,
+        )
+        .expect("worker into refs/hugit/** is always allowed");
+        assert_eq!(rec.kind, INTENT_LANDED_KIND);
+        assert_eq!(log.len(), 1);
+    }
+
+    #[test]
+    fn worker_import_targeting_refs_heads_main_is_refused() {
+        // WF-AUTHZ: a worker-class actor MUST NOT be able to advance
+        // refs/heads/main via import_sidecar (which is gated only on the
+        // all-class Push cell). The protected-ref guard REFUSES before any
+        // append is attempted — the log stays completely empty.
+        let mut log = EventLog::new();
+        let err = import_sidecar(
+            &mut log,
+            &sidecar("intent-bad"),
+            "refs/heads/main",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            vec!["agent:runner-07".into()],
+            1_717_000_002_000,
+        )
+        .expect_err("targeting refs/heads/main must be refused");
+        assert!(
+            matches!(err, ImportError::ProtectedRef { ref ref_name } if ref_name == "refs/heads/main"),
+            "expected ProtectedRef for refs/heads/main, got {err:?}"
+        );
+        // The log MUST NOT have been mutated — no append at all.
+        assert_eq!(
+            log.len(),
+            0,
+            "protected-ref refusal must not append anything"
+        );
+        assert!(
+            !log.records().iter().any(|r| r.kind == "authz.denied"),
+            "protected-ref guard fires before the D14 guard — no authz.denied record"
+        );
+    }
+
+    #[test]
+    fn protected_ref_guard_covers_all_non_intent_namespaces() {
+        // The guard rejects anything not in refs/hugit/**, not just refs/heads/**.
+        // A caller cannot find a hole by using a different namespace.
+        let cases = [
+            "refs/heads/main",
+            "refs/heads/feature-x",
+            "refs/tags/v1.0",
+            "refs/remotes/origin/main",
+            "HEAD",
+            "refs/",
+            "",
+        ];
+        for ref_name in cases {
+            let mut log = EventLog::new();
+            let err = import_sidecar(
+                &mut log,
+                &sidecar("intent-probe"),
+                ref_name,
+                "target",
+                vec!["agent:runner-07".into()],
+                1_717_000_003_000,
+            )
+            .expect_err(&format!(
+                "'{ref_name}' must be refused as a non-intent namespace"
+            ));
+            assert!(
+                matches!(err, ImportError::ProtectedRef { .. }),
+                "expected ProtectedRef for '{ref_name}', got {err:?}"
+            );
+            assert_eq!(log.len(), 0, "no append for '{ref_name}'");
+        }
+    }
+
+    #[test]
+    fn orchestrator_import_targeting_refs_heads_is_also_refused() {
+        // Even an orchestrator-class actor cannot bypass the protected-ref guard
+        // via import_sidecar: the Land-gated path is the right one for branch refs.
+        let mut log = EventLog::new();
+        let err = import_sidecar(
+            &mut log,
+            &sidecar("intent-orch"),
+            "refs/heads/main",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            vec!["orchestrator:lead".into()],
+            1_717_000_004_000,
+        )
+        .expect_err("orchestrator targeting refs/heads/main via import must still be refused");
+        assert!(matches!(err, ImportError::ProtectedRef { .. }));
+        assert_eq!(log.len(), 0);
     }
 }
