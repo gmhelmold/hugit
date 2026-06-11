@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(cli): **the memoized-CI wedge is now operationally REAL (PS-1 closed,
+  P2-independent)**. Owner-directed (execute-for-real, full wedge):
+  `hugit check --def <fmt|clippy|test|--cmd> --log <l> [--store]` executes via
+  `hugit_checks::executor::run_memoized` over a file-backed local Action Cache
+  (`<log>.ac`, cross-process; live `HttpAcClient` swaps in at P2 behind the
+  `ActionCache` seam) — a cold run executes (cache_hit:false, 1 exec), a warm
+  re-run with byte-identical inputs is a HIT (cache_hit:true, duration_ms:0,
+  same 64-char memo key), editing a globbed input busts the key. `hugit checks
+  show` now reports a REAL hit-rate (50% over a seeded log; non-null
+  hits/executed/saved_ms) — the all-null negative-control note is gone.
+  `hugit verdict --intent <id> --lens <l> --result approve|reject … [--store]`
+  records a canonical `VerdictObject` (`verdict.recorded`) via the guarded
+  append seam, making `queue show`'s verdict real. `pr land --settle` emits
+  `pr.landed` so a campaign settles to `closed:true` via landed (not only
+  abandon). All appends route through the D14 `append_authorized` guard.
+  Built W0 (scaffold/contract freeze) → W-CHECK/W-VERDICT/W-PRLANDED (builders,
+  stale-base) → W-INT (lead integration onto the frozen contract). The wedge is
+  visible locally TODAY; P2 makes the cache fleet-shared.
+
 - fix(security,cli): **Adversarial Round-1 fixes (Wave E)** — 7/7 refutation
   fleet found real pendencies behind the premature "SOTA" claim; all closed.
   E-REDACT: gitleaks-class redaction engine (connection strings, keyword-
