@@ -8,8 +8,9 @@ The **git-compatible, LLM-native forge** — CoreLink expansion campaign #3.
 VCS + merge + CI designed for orchestrated agent fleets, built on CoreLink's
 production CAS (Cloudflare Workers/R2/D1/DO). Founded 2026-06-05.
 
-**Status (2026-06-08): the buildable product is complete.** A 16-package Rust
-workspace (14 crates + hugit-app/{ui,exit}; hugit-app-sidecar auto-included —
+**Status (as of 2026-06-11, post Waves A/B/C/D): the buildable product is
+complete and the four SOTA-audit waves are closed.** A **17-package** Rust
+workspace (hugit-app + {ui,exit,sidecar} sub-crates + 13 feature crates —
 `hugit-web` MIGRATED OUT 2026-06-10 to ../githugr per the headless-engine
 doctrine, and `hugit-runner` TRANSFERRED 2026-06-10 to ../corelink-runners
 per the runner-transfer campaign: hugit is git+forge, compute is campaign
@@ -68,7 +69,9 @@ campaign #1/#2 critical paths.**
 Two incubation repos are managed FROM hugit sessions under owner-approved
 fence carve-outs: `../githugr` (campaign #4) and `../corelink-runners`
 (campaign #1 — its `docs/spec/hugit-integration-contract.md` is frozen from
-hugit's side).
+hugit's side; **amended to v1.1** 2026-06-10, WP-R6: §13 adds per-job
+metrics emission + transcript capture hook obligations; the frozen v1.0
+§0–§12 are unchanged).
 
 ⚠️ Sibling repos — corelink-server especially, but **also the carve-outs** —
 have **other live sessions/worktrees**. Never assume sole ownership; check

@@ -87,8 +87,10 @@ human-annotation track alongside the machine trajectory.
 
 ```jsonc
 {
-  "schema_version": "1.0.0",          // semver; deny_unknown_fields on freeze
-  "altitude": "intent",               // intent | pr | campaign (owner 2026-06-10)
+  "schema_version": "1.2.0",          // semver; deny_unknown_fields on freeze
+  // 1.0.0 → 1.1.0 (2026-06-10): Altitude gains Session (fourth altitude)
+  // 1.1.0 → 1.2.0 (WA4): cost_usd_micros integer micro-USD replaces cost_usd f64
+  "altitude": "intent",               // intent | pr | campaign | session (owner 2026-06-10)
   "intent_id": "a31",                 // the authored-unit id (pr_id / campaign at higher altitudes)
   "commit": "a31f9c…",                // git commit this intent enriches
   "tree_hash": "…",
@@ -137,7 +139,7 @@ human-annotation track alongside the machine trajectory.
     "tool_calls": 14,
     "tool_breakdown": [{ "tool": "Edit", "count": 6 }, { "tool": "Bash", "count": 5 }],
     "model_turns": 0,
-    "cost_usd": 0.04                  // derived COGS; NOT what the customer is billed
+    "cost_usd_micros": 40000          // derived COGS as integer micro-USD (1.2.0); NOT what the customer is billed
   },
 
   "verdicts_ref": "cas:…"             // adversarial panel (VerdictObject) — nullable
@@ -189,13 +191,13 @@ not hidden**. The forge computes this record; it is not stored per envelope.
 
   // cost decomposed by WHERE it went — the SOTA part
   "cost": {
-    "work":          { "tokens": 0, "tool_calls": 0, "cost_usd": 0 },             // Σ intents (subagents)
-    "orchestration": { "tokens": 0, "tool_calls": 0, "turns": 0, "cost_usd": 0 }, // the PR author's own spend
-    "verification":  { "tokens": 0, "verdict_panels": 0, "cost_usd": 0 },         // adversarial review calls
-    "ci":            { "cache_hit": 0, "exec": 0, "cost_usd": 0, "saved_usd": 0 },// memoization economics
+    "work":          { "tokens": 0, "tool_calls": 0, "cost_usd_micros": 0 },             // Σ intents (subagents)
+    "orchestration": { "tokens": 0, "tool_calls": 0, "turns": 0, "cost_usd_micros": 0 }, // the PR author's own spend
+    "verification":  { "tokens": 0, "verdict_panels": 0, "cost_usd_micros": 0 },         // adversarial review calls
+    "ci":            { "cache_hit": 0, "exec": 0, "cost_usd_micros": 0, "saved_usd_micros": 0 },// memoization economics
     "waste":         { "discarded_intents": 0, "retried_agents": 0,
-                       "tokens_not_landed": 0, "cost_usd": 0 },                   // spent-but-not-landed
-    "total":         { "tokens": 0, "cost_usd": 0 }       // work + orchestration + verification + ci
+                       "tokens_not_landed": 0, "cost_usd_micros": 0 },                   // spent-but-not-landed
+    "total":         { "tokens": 0, "cost_usd_micros": 0 }   // work + orchestration + verification + ci
   },
   "time": {
     "wall_span_ms": 0,   // first activity → landed (cycle time)
@@ -367,3 +369,14 @@ altitude), campaign capture explicitly included ("hoje acho que campanha não
 captura nada" — correct, fixed in WP-F2's scope). Contract consequence:
 `Altitude` gains `Session`, schema_version bumps 1.0.0 → 1.1.0 (additive;
 amended same-day as the freeze, zero producers existed).
+
+**Amendment 1.2.0 (WA4, SOTA-audit Wave A, 2026-06-11 — owner-ratified):**
+`cost_usd: f64` replaced by `cost_usd_micros: u64` (integer micro-USD) across
+all nine cost fields in `IntentMetrics` and the `CostBucket` sub-struct used in
+`PrRecord`/`CampaignRollup`. Rationale: f64 accumulation is not bit-exact at
+scale; integer micro-USD is exact, overflow-detected, and NaN-immune. The wire
+type change was treated as a **minor** version bump (additive breaking for
+producers; consumers reading old f64 values would drift silently — hence the
+bump). Live constant: `CONTEXT_ENVELOPE_SCHEMA_VERSION = "1.2.0"` in
+`hugit-contracts::context_envelope`. Hand-pinned golden (generator is no longer
+its own oracle).

@@ -11,14 +11,16 @@
 > are **follow-on WPs (F-series)**, same contract rigor, sequenced after owner
 > ratification.
 >
-> **Status: UNBLOCKED (owner ratified 2026-06-10).** §7.1 capture = `full`
-> always (non-negotiable) · §7.2 retention = forever, no TTL/GC (erasure via
-> tombstone only) · §7.3 cost visibility STILL OPEN — but it only gates the
-> githugr display choice, not the hugit contract/producer work. **Owner also
-> extended the design** (same date): the envelope exists at all three
-> altitudes — each **PR carries the orchestrator-session envelope**
-> (transcript + snapshot), each **campaign its own** — scoped into F1/F2/F3
-> below.
+> **Status: COMPLETE** (F1 + F2 + F2b + F3 all built and gate-green as of
+> 2026-06-10; §7 fully ratified including §7.3 cost visibility). §7.1 capture
+> = `full` always (non-negotiable) · §7.2 retention = forever, no TTL/GC
+> (erasure via tombstone only) · §7.3 cost visibility = admin-defined toggle,
+> default all (ratified 2026-06-10). **Owner also extended the design** (same
+> date): the envelope exists at all four altitudes — each **PR carries the
+> orchestrator-session envelope** (transcript + snapshot), each **campaign its
+> own**, and **session** is a fourth first-class altitude — scoped into
+> F1/F1b/F2/F2b/F3 and built. Schema advanced to 1.2.0 (WA4: integer
+> micro-USD money fields).
 
 ## What in v1 is touched (impact map)
 

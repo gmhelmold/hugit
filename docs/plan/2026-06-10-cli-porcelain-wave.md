@@ -3,8 +3,11 @@
 > Owner: *"isso aí tem que existir — fricção é pedir pro usuário fazer a mesma
 > coisa de um jeito diferente sem ganho real. E quem vai digitar são os modelos
 > de LLM que o usuário rodar."* The flow porcelain becomes real commands.
-> Today's CLI has only why/impact/tournament/export; intents/PRs are born
-> through engine seams with no porcelain; campaign has NO lifecycle at all.
+> **Status: SHIPPED** (2026-06-10 — PC0/PC1/PC2/PC3 complete; `intent new/show`,
+> `pr open/land/show`, `campaign open/close/show` all live with stable JSON output,
+> structured errors, idempotency, and D14 authz at the door).
+> ~~Today's CLI has only why/impact/tournament/export; intents/PRs are born
+> through engine seams with no porcelain; campaign has NO lifecycle at all.~~
 
 ## Design law (decided)
 

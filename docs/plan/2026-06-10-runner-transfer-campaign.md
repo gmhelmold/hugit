@@ -6,9 +6,10 @@
 > execution core of **CoreLink Runners (campaign #1)**. TechLead concurs:
 > "nothing built twice"; hugit's wedge is landing, not compute.
 >
-> Status: **PLANNED — execution gated on WP-F2/F2b merge** (F2 is editing
-> `hugit-runner` right now; moving the crate mid-flight is a guaranteed
-> collision). This doc is the decomposition for the fleet.
+> Status: **DONE** (2026-06-10 — WP-R0 through R6 complete; `hugit-runner`
+> transferred and gate-green in `corelink-runners`; wire contract v1.1 applied;
+> hugit workspace pruned to 17 packages post-transfer). This doc is the
+> historical decomposition record; execution is closed.
 
 ## 0. End-state architecture (the one drawing that matters)
 
