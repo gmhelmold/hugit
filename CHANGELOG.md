@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(security,cli): **Adversarial Round-4 fixes (Wave H) — wedge EXECUTE path
+  hardened**. Round 4 (fresh 7-agent fleet) held the spine a 7th time; findings
+  concentrated in the fast-built EXECUTE path + the scrub exemption + the proven
+  projection, several being consequences of Wave G's own fixes. WH-SCRUB:
+  the digest-key scrub exemption is now VALUE-GATED — a `*_digest`/`tree_hash`/
+  `hash`/`commit` field is exempt only if its value is actually digest-shaped
+  (64/40-hex or `sha256:`/`cas:` prefix), so a secret smuggled via
+  `check --toolchain`/`verdict --tree-hash` now redacts; identifier fields
+  {campaign,intent_id,pr_id,run_id} are exempt-from-scrub (addresses, not free
+  text). WH-IDENT: identifiers are validated at INPUT (reject empty +
+  known-secret-prefix shapes) so the exemption can't leak or collapse — two
+  distinct 40-hex campaign keys no longer collapse to one `[REDACTED]`. WH-CHECK:
+  the `.ac` lock is held ONLY for cache ops, never across execute (a hung/slow
+  command no longer poisons the log); the child runs in its own process group
+  and is killed as a group on timeout (no surviving orphans); `check --store` is
+  idempotent (dedup on memo_key+cache_hit → no KPI inflation); `collect_files`
+  guards symlink cycles (visited-set + depth cap → no SIGSEGV); ad-hoc `--cmd`
+  now memoizes (state files excluded from the tree axis). WH-PROVEN: `proven`
+  advances ONLY on an APPROVE verdict; a REJECT surfaces `ledger.rejected` in
+  campaign show/close (rejected work is no longer sealed as proven). WH-DOCS:
+  queue-verdict CHANGELOG claim corrected, PS-6 (queue batch-verdict) + PS-7
+  (toolchain-unprobed) tracked, status truthful, + an e2e wedge-chain test.
+
 - fix(security,cli): **Adversarial Round-3 fixes (Wave G) — wedge hardened to
   engine standards**. Round 3 (fresh 7-agent fleet) confirmed the spine held
   through all three rounds; the findings were the fast wedge wave's rough edges,
