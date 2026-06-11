@@ -338,6 +338,12 @@ fn item_4_broker_down_fail_closed() {
 #[test]
 fn item_6_positive_path_via_broker_credential_absent() {
     if !box_lane_active() {
+        // NOTE: cargo test captures stdout by default; pass --nocapture or run
+        // with `cargo test -- --nocapture` to see this line in the terminal.
+        println!(
+            "SKIPPED item_6_positive_path_via_broker_credential_absent: \
+             HUGIT_RUNNER_HOST unset — live lane not exercised"
+        );
         return;
     }
     let boxx = live_box();

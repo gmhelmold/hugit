@@ -32,6 +32,7 @@
 //!    (never the bytes, never `Absent`), the tombstone is content-addressed +
 //!    immutable, and erasure is BY CONTENT (a deduped shared blob is one blob).
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use hugit_contracts::context_envelope::{Authorship, Spawn, ToolCount, WasteCost};
@@ -41,6 +42,23 @@ use hugit_ledger::envelope::{
     GetOutcome, InMemoryColdStore, TombstoneRecord, TrajectoryRecorder, UnwiredColdStore,
     close_envelope, close_session_envelope,
 };
+
+/// Per-process call counter for temp-dir uniqueness.
+///
+/// Combined with the pid this guarantees no two `tmp_dir()` calls in this
+/// test suite ever share a directory, even under parallel test execution or
+/// a fast re-run that recycles the same pid. Cleanup is best-effort: the
+/// caller is responsible for `remove_dir_all` on success; a test failure may
+/// leave the directory behind for post-mortem inspection (intentional).
+static TMP_DIR_CTR: AtomicU64 = AtomicU64::new(0);
+
+/// Allocate a unique, never-stale temp directory for this call site.
+/// The pid anchors cross-process isolation; the counter anchors
+/// intra-process call-site isolation.
+fn tmp_dir(slug: &str) -> std::path::PathBuf {
+    let n = TMP_DIR_CTR.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("hugit-f2-{slug}-{}-{n}", std::process::id()))
+}
 
 /// A planted secret carrying both the canonical marker (`SECRET:`) and a
 /// distinct VALUE, so the oracle can assert the value is absent (a
@@ -346,11 +364,7 @@ fn item_4a_same_content_same_ref_in_memory_and_dir_backed() {
 
     // Dir-backed (hermetic temp dir, std only), same law + the same ref as
     // the in-memory store (tier-agnostic: the ref never encodes the tier).
-    let root = std::env::temp_dir().join(format!(
-        "hugit-f2-coldstore-{}-{}",
-        std::process::id(),
-        line!()
-    ));
+    let root = tmp_dir("coldstore");
     let dir = DirColdStore::open(&root).expect("open dir store");
     let d1 = dir.put(bytes).expect("put");
     let d2 = dir.put(bytes).expect("put again");
@@ -689,8 +703,7 @@ fn item_8_producer_blob_erases_to_tombstone_on_the_real_trait() {
 fn item_8_erasure_is_by_content_dir_backed_parity() {
     // Dir-backed parity: erase atomically replaces the on-disk blob with a
     // tombstone, and a re-put of the same content cannot resurrect it.
-    let root =
-        std::env::temp_dir().join(format!("hugit-f2-erase-{}-{}", std::process::id(), line!()));
+    let root = tmp_dir("erase");
     let dir = DirColdStore::open(&root).expect("open dir store");
     let bytes = b"a trajectory blob on disk";
     let r = dir.put(bytes).expect("put");

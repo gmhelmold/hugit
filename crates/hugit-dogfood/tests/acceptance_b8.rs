@@ -456,9 +456,12 @@ fn item_3_lost_pr_turns_oracle_red() {
 fn item_3_live_48h_soak_p2_seam_run_not_skip() {
     if std::env::var("HUGIT_DOGFOOD_LIVE").is_err() {
         // P2 seam: live env not available; document the skip, never fake a pass.
-        eprintln!(
-            "SKIP (P2 seam): HUGIT_DOGFOOD_LIVE not set — \
-             real 48h wall-clock soak requires a live GitHub App installation. \
+        // NOTE: cargo test captures stdout by default; pass --nocapture to see
+        // this line in the terminal.
+        println!(
+            "SKIPPED item_3_live_48h_soak_p2_seam_run_not_skip: \
+             HUGIT_DOGFOOD_LIVE unset — live lane not exercised. \
+             Real 48h wall-clock soak requires a live GitHub App installation. \
              Set HUGIT_DOGFOOD_LIVE=1 to activate."
         );
         return;
@@ -466,5 +469,10 @@ fn item_3_live_48h_soak_p2_seam_run_not_skip() {
     // When the env IS set, the soak must run and the oracle must hold.
     // (Actual live soak is driven by the SoakDriver with a real WaveConfig
     // pointing at the live installation — plugged in at P2.)
-    panic!("P2 seam reached: wire the live SoakDriver here when HUGIT_DOGFOOD_LIVE is set");
+    // EXPECTED until P2 provisioning: this panic is the disclosed P2 seam
+    // behaving run-not-skip (fail loudly until infra exists). By design.
+    panic!(
+        "P2 seam reached: wire the live SoakDriver here when HUGIT_DOGFOOD_LIVE is set \
+         [EXPECTED until P2 provisioning — this is the disclosed live-infra seam]"
+    );
 }
