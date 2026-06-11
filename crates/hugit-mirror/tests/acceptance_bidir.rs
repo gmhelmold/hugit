@@ -365,8 +365,15 @@ fn item_3_main_single_writer_direct_push_rerouted() {
 
     // main advances ONLY via the landing queue.
     let landed = gh.commit_on("staging", "s.txt", "queued-change");
+    // land is the orchestrator's verb (D14): an orchestrator-class principal.
     forge
-        .land_via_queue("intent-1", &landed, "land it", vec!["queue".into()], 2)
+        .land_via_queue(
+            "intent-1",
+            &landed,
+            "land it",
+            vec!["orchestrator:lead".into()],
+            2,
+        )
         .unwrap();
     assert_eq!(
         forge.forge_tip("refs/heads/main").unwrap().as_deref(),
@@ -545,7 +552,7 @@ fn item_5_no_symmetric_authority_property() {
                         &format!("i{seed}{step}"),
                         &t,
                         "land",
-                        vec!["queue".into()],
+                        vec!["orchestrator:lead".into()],
                         step + 1,
                     );
                 }
@@ -624,7 +631,13 @@ fn item_5_mutation_injected_symmetry_is_caught_red() {
     // transitions keep it false; only the injected mutation makes it true.
     let mut forge = BidirSync::with_protected("refs/heads/main");
     forge
-        .land_via_queue("i", "c".repeat(40).as_str(), "land", vec!["q".into()], 1)
+        .land_via_queue(
+            "i",
+            "c".repeat(40).as_str(),
+            "land",
+            vec!["orchestrator:lead".into()],
+            1,
+        )
         .unwrap();
     assert!(
         !forge.authority().is_symmetric_for_main(),
