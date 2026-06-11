@@ -40,11 +40,13 @@ use crate::porcelain::PorcelainError;
 /// the [`hugit_contracts::CheckResult`] fields, optionally extended with the
 /// provenance the executor carries: `name`, `cache_hit` (bool), `pr_id`.
 ///
-/// No current porcelain verb appends this kind — the local executor
-/// (`hugit_checks::run_memoized`) returns its `CheckOutcome` in-process. This
-/// read is therefore honest-empty on today's logs and live the instant a seam
-/// records checks. Naming it here (additive over the D1 log, sibling to
-/// `pr.opened`/`pr.queued`) is the forward contract the recorder will target.
+/// **Producer (frozen at W0): `hugit check --store` — the W-CHECK EXECUTE
+/// path** ([`run_check`]). Until W-CHECK lands the recorder body, no porcelain
+/// verb appends this kind — the local executor (`hugit_checks::run_memoized`)
+/// returns its `CheckOutcome` in-process. This read is therefore honest-empty on
+/// today's logs and live the instant `check --store` records onto the log.
+/// Naming it here (additive over the D1 log, sibling to `pr.opened`/`pr.queued`)
+/// is the forward contract the recorder targets.
 pub const CHECK_RECORDED_KIND: &str = "check.recorded";
 
 /// `hugit checks <subcommand>` — memoized-CI visibility (WP-WB2).
@@ -99,6 +101,42 @@ pub fn run(args: ChecksArgs) -> ExitCode {
         ChecksCommand::Key(a) => Ok(key(&a)),
     };
     emit(result)
+}
+
+/// `hugit check` flags — the wedge EXECUTE path (W-CHECK).
+///
+/// This is the top-level `check` verb (distinct from the `checks show/key` READ
+/// subcommands above). It runs a single memoized check for real: resolve the
+/// three-axis memo key, look up the AC, execute on a miss, and — with `--store`
+/// — record a [`CHECK_RECORDED_KIND`] event onto the canonical `--log` so the
+/// `checks show` read can project it. W0 freezes this seam; the executor +
+/// recorder body lands at W-CHECK (the [`run_check`] stub is honest until then).
+#[derive(clap::Args, Debug)]
+pub struct CheckArgs {
+    /// Check-definition name to run (resolves to a [`hugit_checks::CheckDef`]).
+    #[arg(long)]
+    pub def: String,
+    /// Path to the canonical JSON event log — the shared `--log` seam. The
+    /// run's memo lookup/result is read from / (with `--store`) recorded to it.
+    #[arg(long)]
+    pub log: PathBuf,
+    /// Record the [`hugit_contracts::CheckResult`] onto the log as a
+    /// `check.recorded` event (the recorder seam `checks show` projects from).
+    /// Omit to run without persisting (a dry memoized check).
+    #[arg(long)]
+    pub store: bool,
+}
+
+/// `hugit check` — run a memoized CI check for real (W-CHECK EXECUTE path).
+///
+/// W0 freezes the verb + flag seam (`--def --log [--store]`) and dispatches an
+/// honest NOT-IMPLEMENTED stub: the executor (`hugit_checks::run_memoized` over a
+/// real `AcClient`) and the `--store` recorder (appending [`CHECK_RECORDED_KIND`]
+/// onto the log) land at W-CHECK. The stub never returns a fake success — it
+/// emits the canonical `{"error":{"kind":"not_implemented","wp":"W-CHECK"}}`
+/// envelope on stdout, exit 2.
+pub fn run_check(_args: CheckArgs) -> ExitCode {
+    crate::porcelain::not_implemented("W-CHECK")
 }
 
 /// Emit a `Result<Value, PorcelainError>` as stable JSON on stdout under the one

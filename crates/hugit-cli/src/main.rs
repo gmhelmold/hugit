@@ -5,7 +5,9 @@
 //! binary OWNS no behavior — it parses arguments, calls the library, emits the
 //! result as STABLE JSON on stdout, and maps the outcome to the process exit
 //! code under the one exit-code law (`0` success · `2` structured user/domain
-//! error · `1` internal fault). The wired verbs (`why`, `impact`, `tournament`,
+//! error · `1` internal fault). The wedge EXECUTE verbs (`check` / `verdict`)
+//! are dispatched at W0 as honest NOT-IMPLEMENTED stubs (bodies land per
+//! W-CHECK / W-VERDICT). The wired verbs (`why`, `impact`, `tournament`,
 //! `export`) run end-to-end against the real library functions and emit the
 //! canonical `{"error":{…}}` envelope on failure — the SAME law the flow
 //! porcelain (`campaign`/`intent`/`pr`) already uses.
@@ -21,7 +23,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 use hugit_cli::campaign::{self, CampaignArgs};
-use hugit_cli::checks::{self, ChecksArgs};
+use hugit_cli::checks::{self, CheckArgs, ChecksArgs};
 use hugit_cli::export::{self, AccountState, Corpus};
 use hugit_cli::impact::{ImpactQuery, compute_impact};
 use hugit_cli::intent::{self, IntentArgs};
@@ -29,6 +31,7 @@ use hugit_cli::porcelain::PorcelainError;
 use hugit_cli::pr::{self, PrArgs};
 use hugit_cli::queue::{self, QueueArgs};
 use hugit_cli::tournament::{MAX_N_POLICY, produce_candidates};
+use hugit_cli::verdict::{self, VerdictArgs};
 use hugit_cli::why::resolver::LogEntry;
 use hugit_cli::why::{WhyQuery, resolve_why};
 
@@ -68,6 +71,10 @@ enum Command {
     Checks(ChecksArgs),
     /// Landing-queue state: show — make the union-batch wedge visible (WP-WB2 stub).
     Queue(QueueArgs),
+    /// Run a memoized CI check for real (W-CHECK stub — the wedge EXECUTE path).
+    Check(CheckArgs),
+    /// Convene an adversarial verdict panel (W-VERDICT stub — EXECUTE path).
+    Verdict(VerdictArgs),
 }
 
 // ── why ────────────────────────────────────────────────────────────────────
@@ -445,6 +452,11 @@ fn main() -> ExitCode {
         Command::Pr(a) => return pr::run(a),
         Command::Checks(a) => return checks::run(a),
         Command::Queue(a) => return queue::run(a),
+        // Wedge EXECUTE verbs (W0 scaffold): thin → the owning module's runner,
+        // which returns the honest NOT-IMPLEMENTED stub until W-CHECK/W-VERDICT
+        // land the bodies. They own their own exit code (the WB0 one-exit law).
+        Command::Check(a) => return checks::run_check(a),
+        Command::Verdict(a) => return verdict::run(a),
     };
     match result {
         Ok(json) => {
