@@ -9,7 +9,7 @@ use serde_json::json;
 
 use super::OpenArgs;
 use super::output::CampaignError;
-use super::world::{KIND_CAMPAIGN_OPENED, World, append_and_persist};
+use super::world::{KIND_CAMPAIGN_OPENED, World, append_authorized_and_persist};
 
 pub fn run(args: OpenArgs) -> Result<String, CampaignError> {
     let world = World::load(&args.log)?;
@@ -17,11 +17,21 @@ pub fn run(args: OpenArgs) -> Result<String, CampaignError> {
     // Idempotent open: the key already has a `campaign.opened` record → exit 0,
     // no duplicate. The charter/owner of the existing record are authoritative;
     // we do not overwrite them.
+    //
+    // Stable key-set (P8): the re-run shape carries charter/owner (null when the
+    // projection is unavailable, never absent) — the same keys as the first-run
+    // shape.
     if world.campaign_opened(&args.campaign) {
+        let (charter, owner) = world
+            .campaign_charter_owner(&args.campaign)
+            .map(|(c, o)| (serde_json::Value::String(c), serde_json::Value::String(o)))
+            .unwrap_or((serde_json::Value::Null, serde_json::Value::Null));
         return Ok(json!({
             "campaign": args.campaign,
             "opened": true,
             "already_exists": true,
+            "owner": owner,
+            "charter": charter,
         })
         .to_string());
     }
@@ -34,11 +44,13 @@ pub fn run(args: OpenArgs) -> Result<String, CampaignError> {
     })
     .to_string();
 
-    append_and_persist(
+    // D14 guarded append: campaign.opened is a human-owned mutation; route
+    // through append_authorized so the matrix gates it and denials are audited.
+    append_authorized_and_persist(
         &world,
         &args.log,
         KIND_CAMPAIGN_OPENED,
-        vec![format!("user:{}", args.owner)],
+        &args.owner,
         payload,
         0,
     )?;

@@ -62,6 +62,8 @@ pub const KIND_CAMPAIGN_ENVELOPE: &str = "campaign.envelope";
 /// `{"campaign","envelope_ref"}` payload — distinct from the envelope record
 /// itself, since [`ContextEnvelope`] denies unknown fields.
 pub const KIND_CAMPAIGN_ENVELOPE_REF: &str = "campaign.envelope_ref";
+/// `kind` for the abandon record — appended by `hugit campaign abandon`.
+pub const KIND_CAMPAIGN_ABANDONED: &str = "campaign.abandoned";
 /// `kind` carrying a captured PR-altitude envelope (shared with `hugit pr`).
 pub const KIND_PR_ENVELOPE: &str = "pr.envelope";
 /// `kind` carrying a captured intent-altitude envelope (shared with `hugit pr`).
@@ -85,6 +87,66 @@ impl World {
     /// Whether a `campaign.closed` record already names this key.
     pub fn campaign_closed(&self, key: &str) -> bool {
         self.has_campaign_record(KIND_CAMPAIGN_CLOSED, key)
+    }
+
+    /// Whether a `campaign.abandoned` record already names this key.
+    pub fn campaign_abandoned(&self, key: &str) -> bool {
+        self.has_campaign_record(KIND_CAMPAIGN_ABANDONED, key)
+    }
+
+    /// Project the charter and owner of the first `campaign.opened` record for
+    /// `key`, if any.
+    pub fn campaign_charter_owner(&self, key: &str) -> Option<(String, String)> {
+        self.log
+            .records()
+            .iter()
+            .find(|r| {
+                r.kind == KIND_CAMPAIGN_OPENED
+                    && serde_json::from_str::<serde_json::Value>(&r.payload)
+                        .ok()
+                        .and_then(|v| {
+                            v.get("campaign")
+                                .and_then(|c| c.as_str())
+                                .map(str::to_string)
+                        })
+                        .as_deref()
+                        == Some(key)
+            })
+            .and_then(|r| {
+                let v: serde_json::Value = serde_json::from_str(&r.payload).ok()?;
+                let charter = v.get("charter")?.as_str()?.to_string();
+                let owner = v.get("owner")?.as_str()?.to_string();
+                Some((charter, owner))
+            })
+    }
+
+    /// Project the abandon reason for `key`, if abandoned.
+    pub fn campaign_abandon_reason(&self, key: &str) -> Option<String> {
+        self.log
+            .records()
+            .iter()
+            .filter(|r| r.kind == KIND_CAMPAIGN_ABANDONED)
+            .filter_map(|r| serde_json::from_str::<serde_json::Value>(&r.payload).ok())
+            .filter(|v| v.get("campaign").and_then(|c| c.as_str()) == Some(key))
+            .filter_map(|v| v.get("reason").and_then(|r| r.as_str()).map(str::to_string))
+            .next_back()
+    }
+
+    /// Project all known campaign keys from the log, in stable (sorted) order.
+    ///
+    /// A key appears if it has at least one `campaign.opened` record.
+    pub fn all_campaign_keys(&self) -> Vec<String> {
+        use std::collections::BTreeSet;
+        let mut keys: BTreeSet<String> = BTreeSet::new();
+        for r in self.log.records() {
+            if r.kind == KIND_CAMPAIGN_OPENED
+                && let Ok(v) = serde_json::from_str::<serde_json::Value>(&r.payload)
+                && let Some(key) = v.get("campaign").and_then(|c| c.as_str())
+            {
+                keys.insert(key.to_string());
+            }
+        }
+        keys.into_iter().collect()
     }
 
     fn has_campaign_record(&self, kind: &str, key: &str) -> bool {
@@ -424,21 +486,47 @@ fn zero_ci() -> CiCost {
     }
 }
 
-/// Append a record to the canonical log and persist it back to `path` as a
-/// pretty `[EventRecord, …]` array — the one canonical on-disk seam. The append
-/// goes through the REAL [`EventLog::append`] (no forged hashes); the payload is
-/// canonicalised before chaining, per the EventRecord freeze.
-pub fn append_and_persist(
+/// Append a campaign-lifecycle record through the **D14 authorization guard**
+/// ([`EventLog::append_authorized`]) and persist back to `path`.
+///
+/// Campaign mutations are human-owned (the owner field carries the human
+/// principal: `user:<owner>`). The guard is gated on
+/// `(PrincipalClass::Human, Endpoint::Policy)` — the human stakeholder-control
+/// cell, which is distinct from the PR porcelain's `(Human, Undo)` gate and
+/// matches the "campaign owner decides" semantics. A denial (which can only
+/// happen if the asserted class were somehow not human) is mapped to a
+/// structured `CampaignError` and the audit record is persisted alongside it.
+pub fn append_authorized_and_persist(
     world: &World,
     path: &Path,
     kind: &str,
-    principal_chain: Vec<String>,
+    owner: &str,
     payload: String,
     recorded_at: u64,
 ) -> Result<(), CampaignError> {
+    use hugit_refstore::{Endpoint, PrincipalClass};
     let mut log = world.log.clone();
     let payload = hugit_refstore::canonical_json(&payload).unwrap_or(payload);
-    log.append(kind.to_string(), principal_chain, payload, recorded_at);
+    let principal_chain = vec![format!("user:{owner}")];
+    log.append_authorized(
+        PrincipalClass::Human,
+        Endpoint::Policy,
+        kind.to_string(),
+        principal_chain,
+        payload,
+        recorded_at,
+    )
+    .map_err(|denied| {
+        CampaignError::new(
+            "authz_denied",
+            format!(
+                "campaign mutation denied by D14 guard: {}",
+                denied.reason.code()
+            ),
+            "campaign operations must be driven by a human principal (user: prefix)",
+        )
+    })?;
+    // The log now carries the appended record; persist it.
     persist_log(path, &log)
 }
 

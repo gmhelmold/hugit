@@ -20,27 +20,53 @@ use serde_json::{Value, json};
 use super::CloseArgs;
 use super::output::CampaignError;
 use super::show::{pr_list, progress_counts};
-use super::world::{KIND_CAMPAIGN_CLOSED, World, append_and_persist};
+use super::world::{KIND_CAMPAIGN_CLOSED, World, append_authorized_and_persist};
 
 pub fn run(args: CloseArgs) -> Result<String, CampaignError> {
     let world = World::load(&args.log)?;
     let key = &args.campaign;
 
+    let phases = world.pr_phases(key);
+
     // Idempotent close: already sealed → exit 0, no duplicate record.
+    // Stable key-set (P8): the re-run shape carries all the same keys as the
+    // first-run shape — null over absent where projection is not available.
     if world.campaign_closed(key) {
+        let rollup = world.build_rollup(key, &phases)?;
+        let rollup_json = match &rollup {
+            Some(r) => serde_json::to_value(r).map_err(|e| {
+                CampaignError::new(
+                    "serialize",
+                    format!("rollup did not serialise: {e}"),
+                    "internal error — report it",
+                )
+            })?,
+            None => Value::Null,
+        };
+        let envelope = world
+            .campaign_envelope_ref(key)
+            .unwrap_or_else(|| "not_captured".to_string());
         return Ok(json!({
             "campaign": key,
             "closed": true,
             "already_closed": true,
+            "envelope": envelope,
+            "progress": progress_counts(&phases),
+            "prs": pr_list(&phases),
+            "ledger": {
+                "done": world.ledger.done(key),
+                "proven": world.ledger.proven(key),
+            },
+            "rollup": rollup_json,
         })
         .to_string());
     }
 
-    let phases = world.pr_phases(key);
-
-    // Refuse to seal over unsettled work: any in-flight PR blocks the close.
+    // Refuse to seal over unsettled work: any in-flight PR blocks the close
+    // (unless the campaign is abandoned — abandon releases the blocking
+    // constraint, as its own close-semantic).
     let in_flight = world.in_flight_prs(key);
-    if !in_flight.is_empty() {
+    if !in_flight.is_empty() && !world.campaign_abandoned(key) {
         return Err(CampaignError::new(
             "in_flight_prs",
             format!(
@@ -73,19 +99,19 @@ pub fn run(args: CloseArgs) -> Result<String, CampaignError> {
         .unwrap_or_else(|| "not_captured".to_string());
 
     // Append the seal record before printing (the seal must be on the log).
+    // D14 guarded: close is a human-owned mutation; use the campaign owner for
+    // the principal chain. Fall back to the campaign key when no opened record
+    // is present (log-less campaigns are honest about missing context).
+    let owner = world
+        .campaign_charter_owner(key)
+        .map(|(_, o)| o)
+        .unwrap_or_else(|| key.to_string());
     let payload = json!({
         "campaign": key,
         "envelope_ref": campaign_envelope_ref,
     })
     .to_string();
-    append_and_persist(
-        &world,
-        &args.log,
-        KIND_CAMPAIGN_CLOSED,
-        vec![format!("campaign:{key}")],
-        payload,
-        0,
-    )?;
+    append_authorized_and_persist(&world, &args.log, KIND_CAMPAIGN_CLOSED, &owner, payload, 0)?;
 
     Ok(json!({
         "campaign": key,
