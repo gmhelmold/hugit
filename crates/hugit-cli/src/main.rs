@@ -99,11 +99,21 @@ struct WhyLogEntryInput {
     sidecar: Option<IntentSidecar>,
 }
 
-/// Read a `--log` file under the one input-error law: a missing FILE is an
+/// Read a `--log`/input file under the one input-error law: a missing FILE is an
 /// explicit `log_not_found` (NEVER silently an empty world — the P5 finding); a
 /// malformed/truncated file is a `parse_log` error. Both are exit-2 structured
 /// errors. `parse` deserialises the read bytes into the verb's input type.
-fn read_log<T: for<'de> Deserialize<'de>>(path: &std::path::Path) -> Result<T, PorcelainError> {
+///
+/// `shape` is the verb's OWN expected on-disk shape (P3, P-WHY-FORMAT): `why`
+/// reads a `[{record, attestation?, sidecar?}, …]` array and `export` reads an
+/// `{events:[…]}` object — NEITHER is the canonical `[EventRecord, …]` array the
+/// flow porcelain shares. The shared error helper used to claim the canonical
+/// shape for both, misleading the agent about the file format; the caller now
+/// supplies the truthful shape so the `fix` hint is correct per verb.
+fn read_log<T: for<'de> Deserialize<'de>>(
+    path: &std::path::Path,
+    shape: &str,
+) -> Result<T, PorcelainError> {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -111,11 +121,31 @@ fn read_log<T: for<'de> Deserialize<'de>>(path: &std::path::Path) -> Result<T, P
         }
         Err(e) => return Err(PorcelainError::io("read log", path, &e)),
     };
-    serde_json::from_slice(&bytes).map_err(|e| PorcelainError::parse_log(path, &e))
+    serde_json::from_slice(&bytes).map_err(|e| {
+        PorcelainError::new(
+            "parse_log",
+            format!("--log file {} is not valid JSON: {e}", path.display()),
+            format!("the --log file for this verb must be {shape}"),
+        )
+        .with_context("path", json!(path.display().to_string()))
+    })
 }
 
+/// The on-disk shape `hugit why` reads — its own wrapper array, NOT the shared
+/// canonical `[EventRecord, …]` log (P3 / P-WHY-FORMAT honest hint).
+const WHY_LOG_SHAPE: &str = "a JSON array of why-log entries \
+     [{\"record\":<EventRecord>, \"attestation\"?:<chain>, \"sidecar\"?:<IntentSidecar>}, …] \
+     — note this is `why`'s own wrapper shape, NOT the bare [EventRecord, …] array \
+     the flow porcelain (campaign/intent/pr) shares";
+
+/// The on-disk shape `hugit export` reads — an events-intent object, also not
+/// the canonical `[EventRecord, …]` array.
+const EXPORT_LOG_SHAPE: &str = "a JSON object {\"events\":[{\"kind\",\"principal_chain\"?,\
+     \"payload\",\"recorded_at\"?}, …]} of un-hashed events to append \
+     (export computes the hash chain), NOT the bare [EventRecord, …] array";
+
 fn run_why(args: WhyArgs) -> Result<String, PorcelainError> {
-    let raw: Vec<WhyLogEntryInput> = read_log(&args.log)?;
+    let raw: Vec<WhyLogEntryInput> = read_log(&args.log, WHY_LOG_SHAPE)?;
     let entries: Vec<LogEntry> = raw
         .into_iter()
         .map(|r| LogEntry {
@@ -322,7 +352,7 @@ struct ExportEventInput {
 }
 
 fn run_export(args: ExportArgs) -> Result<String, PorcelainError> {
-    let input: ExportLogInput = read_log(&args.log)?;
+    let input: ExportLogInput = read_log(&args.log, EXPORT_LOG_SHAPE)?;
 
     let mut event_log = hugit_refstore::EventLog::new();
     for e in input.events {

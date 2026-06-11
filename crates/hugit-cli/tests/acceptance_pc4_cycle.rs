@@ -302,12 +302,19 @@ fn map_shaped_log_is_rejected_by_every_verb() {
     assert!(!ok, "campaign rejects a map-shaped log");
     assert_eq!(v["error"]["kind"], "parse");
 
-    // pr show rejects it on the seam fault path (generic error on stderr).
-    let (ok, _, stderr) = run(&["pr", "show", "--log", log, "--pr", "1"]);
+    // pr show rejects it under the ONE error law (P-PR-LAW, Wave E): the
+    // canonical `{"error":{kind:"parse_log",…}}` envelope on STDOUT, exit 2 —
+    // parity with the sibling campaign/intent verbs, no longer the old
+    // plaintext-stderr/exit-1 seam-fault path.
+    let (ok, v, _) = run(&["pr", "show", "--log", log, "--pr", "1"]);
     assert!(!ok, "pr rejects a map-shaped log");
+    assert_eq!(
+        v["error"]["kind"], "parse_log",
+        "pr surfaces the parse fault under the one error law: {v}"
+    );
     assert!(
-        stderr.contains("parse log"),
-        "pr surfaces the parse fault: {stderr}"
+        v["error"]["fix"].is_string(),
+        "the parse_log envelope carries a fix hint: {v}"
     );
 }
 

@@ -19,15 +19,25 @@ use super::show::progress_counts;
 use super::world::World;
 
 pub fn run(args: ListArgs) -> Result<String, CampaignError> {
-    let world = World::load(&args.log)?;
+    // Read-only query: a MISSING --log is an explicit `log_not_found` (exit-2),
+    // never a silent empty world (P-CAMPAIGN-EMPTY).
+    let world = World::load_existing(&args.log)?;
     let keys = world.all_campaign_keys();
 
     let campaigns: Vec<_> = keys
         .iter()
         .map(|key| {
+            // Redaction parity (Wave E, P-REDACT-SURFACE): scrub the echoed
+            // free-text fields through the hardened engine (defence-in-depth
+            // over the write-path redaction; also covers a pre-Wave-E log).
             let (charter, owner) = world
                 .campaign_charter_owner(key)
-                .map(|(c, o)| (serde_json::Value::String(c), serde_json::Value::String(o)))
+                .map(|(c, o)| {
+                    (
+                        serde_json::Value::String(crate::redaction::scrub(&c)),
+                        serde_json::Value::String(crate::redaction::scrub(&o)),
+                    )
+                })
                 .unwrap_or((serde_json::Value::Null, serde_json::Value::Null));
 
             let phases = world.pr_phases(key);
@@ -35,7 +45,7 @@ pub fn run(args: ListArgs) -> Result<String, CampaignError> {
             let abandoned = world.campaign_abandoned(key);
             let reason = world
                 .campaign_abandon_reason(key)
-                .map(serde_json::Value::String)
+                .map(|r| serde_json::Value::String(crate::redaction::scrub(&r)))
                 .unwrap_or(serde_json::Value::Null);
 
             json!({

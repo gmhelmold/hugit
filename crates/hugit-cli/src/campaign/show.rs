@@ -12,7 +12,9 @@ use super::world::World;
 use hugit_ledger::rollup::PrPhase;
 
 pub fn run(args: ShowArgs) -> Result<String, CampaignError> {
-    let world = World::load(&args.log)?;
+    // Read-only query: a MISSING --log is an explicit `log_not_found` (exit-2),
+    // never a silent empty world (P-CAMPAIGN-EMPTY).
+    let world = World::load_existing(&args.log)?;
     let key = &args.campaign;
 
     let phases = world.pr_phases(key);

@@ -95,10 +95,32 @@ impl World {
     /// Read + parse the canonical `[EventRecord, …]` log and build the real
     /// projections. A missing file is an EMPTY log (so `open` may bootstrap it);
     /// any other read/parse/chain fault fails closed.
+    ///
+    /// This is the BOOTSTRAP loader — used by the mutating verbs (`open` /
+    /// `close` / `abandon`) that may legitimately start from an absent log. The
+    /// read-only queries (`show` / `list`) must instead use
+    /// [`World::load_existing`], which rejects a missing file (P-CAMPAIGN-EMPTY:
+    /// a missing `--log` is `log_not_found`/exit-2, never a silent empty world).
     pub fn load(path: &Path) -> Result<World, CampaignError> {
         let log = load_canonical_log(path)?;
         let ledger = Ledger::from_records(log.records());
         Ok(World { log, ledger })
+    }
+
+    /// Like [`World::load`], but a MISSING `--log` file is an explicit
+    /// `log_not_found` error (exit-2), never a silent empty world.
+    ///
+    /// The read-only campaign queries (`show` / `list`) call this so they cannot
+    /// report an empty/exit-0 result for a path that does not exist
+    /// (P-CAMPAIGN-EMPTY — the regression `checks`/`queue` already get right).
+    /// `open`'s bootstrap-on-absent behavior is preserved by keeping it on
+    /// [`World::load`]; the distinction is at the CALL SITE, not the shared
+    /// canonical loader.
+    pub fn load_existing(path: &Path) -> Result<World, CampaignError> {
+        if !path.exists() {
+            return Err(CampaignError::log_not_found(path));
+        }
+        World::load(path)
     }
 
     /// Whether a `campaign.opened` record already names this key (idempotency).
