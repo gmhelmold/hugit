@@ -526,14 +526,18 @@ pub fn close_envelope<S: ColdBlobStore>(
         }
     }
 
-    // Redaction on the WRITE path is total: EVERY string field that carries
-    // author-supplied text is routed through [`crate::redact::apply`] before
-    // the envelope is serialized and stored, so the module's "never a byte
-    // un-redacted" claim is literally true (the charter/constraints/
+    // Redaction on the WRITE path covers EVERY string field that carries
+    // author-supplied text — routed through [`crate::redact::apply`] before
+    // the envelope is serialized and stored (the charter/constraints/
     // acceptance/parent_intents/env_manifest/files_read-paths were previously
     // persisted verbatim — a `ghp_`-style secret in a charter rode through).
-    // Exempt by design: `redaction_policy` (a policy identifier, not author
-    // text) and `summary` (already scrubbed above).
+    // Exempt by design (not author-supplied text):
+    //   • `redaction_policy` — a policy identifier literal, not user content.
+    //   • `summary` — already scrubbed above via `redact_transcript`.
+    //   • `files_read[].hash` — a content-address digest (e.g. `sha256:…`),
+    //     produced by the harness, not typed by the author; redacting it would
+    //     destroy the content-pinning guarantee. Only the `path` field of each
+    //     `FileRead` entry is scrubbed (could contain a secret-bearing path).
     let envelope = ContextEnvelope {
         schema_version: CONTEXT_ENVELOPE_SCHEMA_VERSION.to_string(),
         altitude: draft.altitude,

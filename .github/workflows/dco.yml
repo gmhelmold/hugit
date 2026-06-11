@@ -1,6 +1,8 @@
 name: DCO
 
 on:
+  # Fork-guard note (PS-5, WF-DOCS): see ci.yml for full rationale.
+  # Same accepted risk applies here (private repo; LOW). If public: same fix.
   pull_request:
 
 permissions:

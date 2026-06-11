@@ -1,6 +1,13 @@
 name: CI
 
 on:
+  # Fork-guard note (PS-5, WF-DOCS): `pull_request` runs fork code on the
+  # self-hosted runner. Accepted risk: this repo is PRIVATE — fork PRs require
+  # write access; no external contributors. Risk = LOW.
+  # If the repo goes public: switch to `pull_request_target` with a protected
+  # environment approval gate, or add a fork-origin guard:
+  #   if: github.event.pull_request.head.repo.fork == false
+  # to prevent untrusted fork code from running on the corelink-builder machine.
   pull_request:
   push:
     branches:
