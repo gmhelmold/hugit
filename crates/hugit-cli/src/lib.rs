@@ -74,6 +74,14 @@ pub const HUGIT_VERBS: &[&str] = &[
     // dispatched == registry), so they belong here, not in RESERVED.
     "checks", // hugit checks show/key          — memoized-CI visibility (WB2)
     "queue",  // hugit queue show               — landing-queue visibility (WB2)
+    // Wedge EXECUTE verbs (PS-1 wedge wave) — graduated from RESERVED at W0.
+    // `check` runs a memoized check for real and (with --store) records it;
+    // `verdict` records an adversarial verdict. W0 lands the VERBS into the
+    // registry + dispatch as honest NOT-IMPLEMENTED stubs (the EXECUTE bodies
+    // land per W-CHECK / W-VERDICT); LIVE the moment main.rs routes them, so the
+    // no-drift oracle requires them here, not in HUGIT_RESERVED_VERBS.
+    "check",   // hugit check --def --log [--store] — memoized CI check (W-CHECK)
+    "verdict", // hugit verdict …                   — adversarial verdict (W-VERDICT)
 ];
 
 /// Planned hugit verb tokens that are RESERVED but NOT yet dispatched.
@@ -88,10 +96,9 @@ pub const HUGIT_VERBS: &[&str] = &[
 /// graduated in the PC wave — dispatched as honest stubs at PC0.)
 pub const HUGIT_RESERVED_VERBS: &[&str] = &[
     // Phase B — Orchestrator / Worker (planned)
-    "land",    // hugit land [--queue]        — union-testing landing queue
-    "verdict", // hugit verdict request …     — adversarial reviewer panels
-    "check",   // hugit check [--local]       — memoized CI check
-    "diag",    // hugit diag <failure>        — structured diagnosis
+    "land", // hugit land [--queue]        — union-testing landing queue
+    // (`check` + `verdict` graduated to HUGIT_VERBS at W0 — wedge EXECUTE wave.)
+    "diag", // hugit diag <failure>        — structured diagnosis
     // Phase C — Workspace + context (planned)
     "ws",  // hugit ws spawn/attach/snap/gc — claim-fenced workspaces
     "ctx", // hugit ctx snap / resume      — short-horizon session resume

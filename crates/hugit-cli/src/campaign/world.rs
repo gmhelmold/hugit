@@ -485,7 +485,7 @@ impl World {
         self.log
             .records()
             .iter()
-            .filter(|r| r.kind == "verdict.recorded")
+            .filter(|r| r.kind == crate::verdict::VERDICT_RECORDED_KIND)
             .filter_map(|r| serde_json::from_str::<VerdictObject>(&r.payload).ok())
             .filter(|vo| intent_ids.contains(&vo.intent))
             .collect()
