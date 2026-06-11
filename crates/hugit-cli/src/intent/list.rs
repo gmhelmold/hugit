@@ -98,11 +98,16 @@ pub fn run(input: ListIntents, store_path: &Path) -> Result<ListResult, Porcelai
                 .as_ref()
                 .map(|ids| ids.contains(&intent.intent_id));
 
+            // Redaction parity (Wave E, P-REDACT-SURFACE): scrub the echoed
+            // free-text fields through the hardened engine on the way OUT
+            // (defence-in-depth over the write-path redaction; also covers a
+            // pre-Wave-E log). Scrub the full charter THEN excerpt, so a redacted
+            // charter shows the sentinel, never an 80-char secret prefix.
             Some(IntentListItem {
                 id: intent.intent_id.clone(),
-                charter: charter_excerpt(&intent.charter),
-                campaign: campaign.unwrap_or_default(),
-                agent,
+                charter: charter_excerpt(&crate::redaction::scrub(&intent.charter)),
+                campaign: crate::redaction::scrub(&campaign.unwrap_or_default()),
+                agent: agent.map(|a| crate::redaction::scrub(&a)),
                 landed,
             })
         })

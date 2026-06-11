@@ -50,6 +50,21 @@ impl CampaignError {
         )
     }
 
+    /// A `--log` FILE that does not exist (the path is absent on disk). Explicit
+    /// — NEVER silently an empty world (P-CAMPAIGN-EMPTY). Exit `2`. Carries the
+    /// `path` as flat context, matching the sibling porcelain
+    /// [`crate::porcelain::PorcelainError::log_not_found`].
+    pub fn log_not_found(path: &std::path::Path) -> Self {
+        CampaignError::new(
+            "log_not_found",
+            format!("--log file does not exist: {}", path.display()),
+            "open the campaign first (`hugit campaign open --log <path> …` \
+             bootstraps it) or point --log at an existing canonical \
+             [EventRecord, …] file",
+        )
+        .with_detail(json!({ "path": path.display().to_string() }))
+    }
+
     /// A parse error on the event log file.
     pub fn parse(e: &serde_json::Error) -> Self {
         CampaignError::new(

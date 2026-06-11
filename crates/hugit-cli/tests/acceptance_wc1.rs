@@ -174,16 +174,20 @@ fn pr_rejects_every_corrupt_log_without_clobber() {
         let log = dir.join("L.json");
         std::fs::write(&log, &bytes).unwrap();
 
-        // `pr show` reads the log; a corrupt log is a seam fault (the documented
-        // pr `--log` seam-fault path: a `hugit: error:` line on stderr, a
-        // non-success exit) — deterministic, never a fake success, never a
-        // clobber. (The one-error-JSON convergence for pr is Wave-B1's; WC1
-        // proves the rejection is structured + non-destructive.)
-        let (ok, _v, stderr) = run(&["pr", "show", "--log", log.to_str().unwrap(), "--pr", "1"]);
-        assert!(!ok, "[{tag}] pr must reject a corrupt --log: {stderr}");
+        // `pr show` reads the log; under the ONE error law (P-PR-LAW, Wave E) a
+        // corrupt log is the canonical `{"error":{kind:"parse_log",…}}` envelope
+        // on STDOUT with the structured-error exit code (2) — parity with the
+        // sibling campaign/intent verbs, never the old plaintext-stderr path.
+        // Deterministic, never a fake success, never a clobber.
+        let (ok, v, stderr) = run(&["pr", "show", "--log", log.to_str().unwrap(), "--pr", "1"]);
+        assert!(!ok, "[{tag}] pr must reject a corrupt --log: {v} {stderr}");
+        assert_eq!(
+            v["error"]["kind"], "parse_log",
+            "[{tag}] pr surfaces a structured parse_log fault on stdout: {v}"
+        );
         assert!(
-            stderr.contains("parse log") || stderr.contains("rehydrate log"),
-            "[{tag}] pr surfaces a deterministic parse/rehydrate fault: {stderr}"
+            v["error"]["fix"].is_string(),
+            "[{tag}] the parse_log envelope carries a fix: {v}"
         );
         assert_eq!(
             std::fs::read(&log).unwrap(),

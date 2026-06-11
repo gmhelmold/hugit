@@ -25,6 +25,11 @@ pub fn run(args: AbandonArgs) -> Result<String, CampaignError> {
     let world = World::load(&args.log)?;
     let key = &args.campaign;
 
+    // Redaction parity (Wave E, P-REDACT-SURFACE): scrub the free-text reason
+    // through the hardened engine BEFORE it reaches the hash-chained
+    // `campaign.abandoned` payload and the echo.
+    let reason = crate::redaction::scrub(&args.reason);
+
     // Abandoning a closed campaign is an error: the SEAL is final.
     if world.campaign_closed(key) {
         return Err(CampaignError::new(
@@ -43,7 +48,10 @@ pub fn run(args: AbandonArgs) -> Result<String, CampaignError> {
             "campaign": key,
             "abandoned": true,
             "already_abandoned": true,
-            "reason": world.campaign_abandon_reason(key),
+            // Scrub the projected reason on the way out (defence-in-depth).
+            "reason": world
+                .campaign_abandon_reason(key)
+                .map(|r| crate::redaction::scrub(&r)),
         })
         .to_string());
     }
@@ -61,15 +69,18 @@ pub fn run(args: AbandonArgs) -> Result<String, CampaignError> {
         ));
     }
 
-    // Derive the owner from the opened record for the D14 principal chain.
-    let owner = world
-        .campaign_charter_owner(key)
-        .map(|(_, o)| o)
-        .unwrap_or_else(|| key.to_string());
+    // Derive the owner from the opened record for the D14 principal chain
+    // (scrubbed — it feeds the principal chain, which `intent show` echoes).
+    let owner = crate::redaction::scrub(
+        &world
+            .campaign_charter_owner(key)
+            .map(|(_, o)| o)
+            .unwrap_or_else(|| key.to_string()),
+    );
 
     let payload = json!({
         "campaign": key,
-        "reason": args.reason,
+        "reason": reason,
     })
     .to_string();
 
@@ -87,7 +98,7 @@ pub fn run(args: AbandonArgs) -> Result<String, CampaignError> {
         "campaign": key,
         "abandoned": true,
         "already_abandoned": false,
-        "reason": args.reason,
+        "reason": reason,
     })
     .to_string())
 }

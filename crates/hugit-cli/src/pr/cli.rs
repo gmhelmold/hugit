@@ -14,8 +14,13 @@
 //! - **Exit codes** mirror the sibling porcelain ([`crate::porcelain`]): `0` on
 //!   success (incl. the idempotent no-ops, which carry `already_*: true`),
 //!   [`crate::porcelain::PORCELAIN_ERROR_EXIT`] (`2`) on a structured domain
-//!   error, and a generic non-zero with a `hugit: error:` line on stderr for an
-//!   I/O / parse failure of the `--log` seam itself.
+//!   error. The `--log` READ seam (missing / malformed / tampered file) ALSO
+//!   converges on the one error law (P-PR-LAW, Wave E): the canonical
+//!   `{"error":{kind,message,fix}}` envelope on stdout + exit `2`, routed
+//!   through the shared [`crate::porcelain`] helpers — no longer a
+//!   plaintext-stderr/exit-`1` seam fault. Only the WRITE/persist seam faults
+//!   (serialize / lock I/O — internal, not caller input) keep the generic
+//!   `hugit: error:`/exit-`1` path.
 //! - **D14 at the door** — `--author-kind` is constrained to `orchestrator |
 //!   human` by [`AuthorKindArg`]'s value parser; `subagent` (or anything else)
 //!   is rejected with the structured `subagent_author` error before any event
@@ -293,18 +298,46 @@ fn run_abandon(a: AbandonCliArgs) -> ExitCode {
 // ── the `--log` seam ───────────────────────────────────────────────────────────
 
 /// Load the event log from `path` (a JSON `[EventRecord, …]` array),
-/// rehydrating the hash chain through [`EventLog::push_record`]. Returns the
-/// generic-error exit code (with a `hugit: error:` line on stderr) on an I/O /
-/// parse / chain-rehydrate failure — these are seam faults, not domain errors.
+/// rehydrating + verifying the hash chain.
+///
+/// Under the ONE error law (P-PR-LAW, Wave E): every read fault emits the
+/// canonical `{"error":{kind,message,fix}}` envelope on **stdout** and returns
+/// the structured-error exit code (`2`), routed through the same
+/// [`crate::porcelain`] helpers (`log_not_found` / `parse_log`) the sibling
+/// `campaign`/`intent` verbs use — never the old plaintext-stderr/exit-`1`
+/// path. A MISSING file is an explicit `log_not_found` (never a silent empty
+/// world); a malformed file is `parse_log`; a tampered chain is `chain_broken`
+/// (the `verify_chain` call the pr loader previously skipped — siblings call
+/// it, so the pr read path must reject a tampered chain too).
 fn load_log(path: &PathBuf) -> Result<EventLog, ExitCode> {
-    let bytes = std::fs::read(path).map_err(|e| io_fail(format!("read log {path:?}: {e}")))?;
-    let records: Vec<EventRecord> =
-        serde_json::from_slice(&bytes).map_err(|e| io_fail(format!("parse log {path:?}: {e}")))?;
+    use crate::porcelain::PorcelainError;
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(emit_porcelain(&PorcelainError::log_not_found(path)));
+        }
+        Err(e) => return Err(emit_porcelain(&PorcelainError::io("read log", path, &e))),
+    };
+    let records: Vec<EventRecord> = serde_json::from_slice(&bytes)
+        .map_err(|e| emit_porcelain(&PorcelainError::parse_log(path, &e)))?;
     let mut log = EventLog::new();
     for record in records {
-        log.push_record(record)
-            .map_err(|e| io_fail(format!("rehydrate log {path:?}: {e}")))?;
+        log.push_record(record).map_err(|e| {
+            emit_porcelain(&PorcelainError::new(
+                "rehydrate",
+                format!("rehydrate log {path:?}: {e}"),
+                "the --log file's records must form a gap-free, monotonic chain",
+            ))
+        })?;
     }
+    // Fail closed on a tampered / corrupt chain (the siblings verify; so must we).
+    hugit_refstore::verify_chain(log.records()).map_err(|e| {
+        emit_porcelain(&PorcelainError::new(
+            "chain_broken",
+            format!("log {path:?} failed integrity verification: {e}"),
+            "the --log file's hash chain is tampered or corrupt",
+        ))
+    })?;
     Ok(log)
 }
 
@@ -373,9 +406,20 @@ fn emit_error(err: &PrError) -> ExitCode {
     porcelain.exit_code()
 }
 
+/// Emit a [`crate::porcelain::PorcelainError`] as the canonical
+/// `{"error":{kind,message,fix}}` JSON on **stdout** and return its exit code
+/// (the structured-error `2`). The ONE error law for the pr `--log` read seam
+/// (P-PR-LAW) — replacing the old plaintext-stderr/exit-`1` path.
+fn emit_porcelain(err: &crate::porcelain::PorcelainError) -> ExitCode {
+    println!("{}", err.to_json());
+    err.exit_code()
+}
+
 /// Build the generic seam-fault exit code: a `hugit: error:` line on stderr and
 /// a generic [`ExitCode::FAILURE`] (`1`) — distinct from the structured domain
 /// error code (`2`), consistent with `main.rs`'s library-verb error path.
+/// Retained for the WRITE/persist seam faults (serialize / lock I/O), which are
+/// internal faults, not caller-input domain errors.
 fn io_fail(msg: String) -> ExitCode {
     eprintln!("hugit: error: {msg}");
     ExitCode::FAILURE

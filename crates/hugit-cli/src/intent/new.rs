@@ -132,26 +132,36 @@ pub fn run(input: NewIntent, store_path: &Path) -> Result<NewResult, PorcelainEr
         ));
     }
 
-    let agent = input.agent.unwrap_or_else(|| DEFAULT_AGENT.to_string());
-    let intent_id = input.id.clone().unwrap_or_else(|| {
-        derive_intent_id(&input.charter, &input.campaign, &input.acceptance, &agent)
-    });
+    // Redaction parity (Wave E, P-REDACT-SURFACE): scrub every user-supplied
+    // free-text field through the hardened engine BEFORE it reaches the sidecar,
+    // the store, or the hash-chained `--log` payload. The log is append-only and
+    // forever — redact-before-append is the only fix (a secret hashed into the
+    // chain is unredactable later). Validation above ran on the raw input so an
+    // all-whitespace charter still errors; the id is derived from the REDACTED
+    // content so idempotency is stable (both runs scrub identically).
+    let charter = crate::redaction::scrub(&input.charter);
+    let campaign = crate::redaction::scrub(&input.campaign);
+    let acceptance = crate::redaction::scrub_all(&input.acceptance);
+    let agent_raw = input.agent.unwrap_or_else(|| DEFAULT_AGENT.to_string());
+    let agent = crate::redaction::scrub(&agent_raw);
+    let intent_id = input
+        .id
+        .clone()
+        .map(|id| crate::redaction::scrub(&id))
+        .unwrap_or_else(|| derive_intent_id(&charter, &campaign, &acceptance, &agent));
 
-    let context_ref = input.context_ref.unwrap_or_default();
+    let context_ref = crate::redaction::scrub(&input.context_ref.unwrap_or_default());
     let sidecar = IntentSidecar {
         intent_id: intent_id.clone(),
-        charter: input.charter.clone(),
-        acceptance: input.acceptance.clone(),
+        charter: charter.clone(),
+        acceptance: acceptance.clone(),
         context_ref: context_ref.clone(),
         // Frozen invariant: the sidecar is NEVER authoritative (B6④).
         authoritative: false,
     };
     // The principal chain records authorship as given (subagent normally),
     // bound to the campaign — honest provenance, not invented.
-    let principal_chain = vec![
-        format!("campaign:{}", input.campaign),
-        format!("agent:{agent}"),
-    ];
+    let principal_chain = vec![format!("campaign:{campaign}"), format!("agent:{agent}")];
 
     let mut store = IntentStore::load(store_path).map_err(PorcelainError::from_store)?;
 
@@ -171,7 +181,7 @@ pub fn run(input: NewIntent, store_path: &Path) -> Result<NewResult, PorcelainEr
         return Ok(NewResult {
             intent_id,
             already_exists: true,
-            campaign: input.campaign.clone(),
+            campaign: campaign.clone(),
             agent: agent.clone(),
         });
     }
@@ -217,7 +227,7 @@ pub fn run(input: NewIntent, store_path: &Path) -> Result<NewResult, PorcelainEr
     Ok(NewResult {
         intent_id,
         already_exists: false,
-        campaign: input.campaign.clone(),
+        campaign: campaign.clone(),
         agent: agent.clone(),
     })
 }

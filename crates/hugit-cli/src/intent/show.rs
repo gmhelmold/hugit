@@ -75,23 +75,39 @@ pub fn run(input: ShowIntent, store_path: &Path) -> Result<Value, PorcelainError
             .map(str::to_string)
     });
 
+    // Redaction parity (Wave E, P-REDACT-SURFACE): scrub every echoed free-text
+    // field through the hardened engine on the way OUT, as defence-in-depth. The
+    // write path (`intent new`) already redacts before persisting, so a fresh
+    // store carries nothing verbatim; this guard also covers a pre-Wave-E log
+    // that was written before redact-on-write existed. Structural fields
+    // (`ref`/`target`/`seq`/`recorded_at`/`authoritative`/`verdicts`) are not
+    // free text and are not scrubbed.
+    let charter = crate::redaction::scrub(&intent.charter);
+    let context_ref = context_ref.map(crate::redaction::scrub);
+    let campaign = campaign.map(|c| crate::redaction::scrub(&c));
+    let agent = agent.map(|a| crate::redaction::scrub(&a));
+    let acceptance: Vec<String> = sidecar
+        .map(|s| crate::redaction::scrub_all(&s.acceptance))
+        .unwrap_or_default();
+    let principal_chain = crate::redaction::scrub_all(&intent.principal_chain);
+
     // Stable key-set: ALL fields are present on every show call, whether the
     // data was captured or not.  Absent optional data is explicit `null` —
     // never missing keys, never invented values.
     Ok(json!({
         "intent_id": intent.intent_id,
         // The native projection off the real event log (the authoritative spine).
-        "charter": intent.charter,
+        "charter": charter,
         "ref": intent.ref_name,
         "target": intent.target,
         "seq": intent.seq,
         "recorded_at": intent.recorded_at,
-        "principal_chain": intent.principal_chain,
+        "principal_chain": principal_chain,
         // Derived convenience fields (always present, null when not extractable).
         "campaign": campaign,
         "agent": agent,
         // The non-authoritative sidecar corpus — null when no corpus is stored.
-        "acceptance": sidecar.map(|s| s.acceptance.clone()).unwrap_or_default(),
+        "acceptance": acceptance,
         "authoritative": sidecar.map(|s| s.authoritative).unwrap_or(false),
         // Envelope ref + verdicts: honestly null/empty until captured (never faked).
         "context_ref": context_ref,

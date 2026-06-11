@@ -26,6 +26,7 @@ pub mod intent;
 pub mod porcelain;
 pub mod pr;
 pub mod queue;
+pub mod redaction;
 pub mod tournament;
 pub mod verdict;
 pub mod why;
