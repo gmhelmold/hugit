@@ -323,7 +323,23 @@ pub fn open(log: &mut EventLog, args: &OpenArgs) -> Result<Value, PrError> {
 
     let principal_chain = author_principal_chain(args.author_kind, &args.run_id, &args.principal);
     let payload = canonical_open_payload(args);
-    log.append(PR_OPENED_KIND, principal_chain, payload, args.recorded_at);
+    // D14 on the mutation primitive: route the pr.opened append through the
+    // guarded entry point. The author class is the caller-asserted --author-kind
+    // (orchestrator|human — never a subagent; the binding of that assertion to an
+    // authenticated principal is the disclosed P2/identity seam). A worker/model
+    // class asserted here is denied by the matrix and audited, never appended.
+    let (class, endpoint) = author_authz(args.author_kind);
+    log.append_authorized(
+        class,
+        endpoint,
+        PR_OPENED_KIND,
+        principal_chain,
+        payload,
+        args.recorded_at,
+    )
+    .map_err(|denied| PrError::SubagentAuthor {
+        got: denied.reason.code().to_string(),
+    })?;
 
     let opened = find_pr_opened(log, &args.pr_id).expect("pr.opened was just appended for this id");
     Ok(open_json(&opened, false))
@@ -703,6 +719,24 @@ fn open_json(opened: &OpenedPr, already_exists: bool) -> Value {
         "state": "proposed",
         "already_exists": already_exists,
     })
+}
+
+/// Map an [`AuthorKind`] to the D14 `(class, endpoint)` the `pr.opened` append
+/// is gated on by [`EventLog::append_authorized`].
+///
+/// `pr.opened` is authored by an orchestrator or a human, never a worker/model
+/// (the [`AuthorKind`] type already encodes that — `subagent` is not a variant).
+/// We gate each author class on a matrix verb it legitimately owns
+/// (orchestrator→`land`, human→`undo`), so the only way the guard denies here is
+/// if a non-author class were ever asserted — a worker/model — which the matrix
+/// rejects and audits. This is defense-in-depth on the mutation primitive behind
+/// the door-level [`AuthorKind::parse`] check.
+fn author_authz(kind: AuthorKind) -> (hugit_refstore::PrincipalClass, hugit_refstore::Endpoint) {
+    use hugit_refstore::{Endpoint, PrincipalClass};
+    match kind {
+        AuthorKind::Orchestrator => (PrincipalClass::Orchestrator, Endpoint::Land),
+        AuthorKind::Human => (PrincipalClass::Human, Endpoint::Undo),
+    }
 }
 
 /// The principal chain to stamp a `pr.opened` event with: the human principal

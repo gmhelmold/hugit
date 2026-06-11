@@ -30,9 +30,12 @@ pub mod compaction;
 pub mod recovery;
 pub mod undo;
 
+pub use authz::{
+    Decision, DenyReason, Endpoint, PrincipalClass, authorize, authorize_class, matrix,
+};
 pub use log::{
-    EventLog, GENESIS_PREV_HASH, attestation_sig_preimage, canonical_json, compute_memo_key,
-    compute_this_hash,
+    AppendError, AuthzDenied, EventLog, GENESIS_PREV_HASH, attestation_sig_preimage,
+    canonical_json, compute_memo_key, compute_this_hash,
 };
 pub use replay::{RefState, replay};
 pub use tamper::{TamperError, verify_chain};

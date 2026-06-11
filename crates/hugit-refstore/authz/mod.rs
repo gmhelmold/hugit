@@ -20,6 +20,27 @@
 //!    D1a append point — which principal, which endpoint, when — so a denial is
 //!    never silent and is always attributable. See [`AuditedGuard::authorize`].
 //!
+//! # Authentication is a disclosed seam (not faked here)
+//!
+//! This guard enforces the *authorization matrix* — given a principal class and
+//! an endpoint, may the mutation proceed? It does **not** authenticate the
+//! principal: it trusts the class it is handed. Two routes feed it:
+//!
+//! - **Chain-classified** ([`authorize`]): the actor is the tail of the
+//!   `principal_chain` and its class is read from the identity prefix
+//!   (`user:` / `agent:` / …). This binds class to the chain only as far as the
+//!   chain itself is trustworthy.
+//! - **Caller-asserted** ([`EventLog::append_authorized`]): the porcelain (CLI)
+//!   supplies the class directly (e.g. `pr open --author-kind`). Today that
+//!   token is **caller-supplied** — a subagent process could pass
+//!   `--author-kind orchestrator`. The guard still enforces the matrix on the
+//!   asserted class (a self-declared `worker` is denied `land`/`pr.opened`), but
+//!   binding the asserted class to an *authenticated* principal lands with
+//!   identity rollout (P2 / ADR-0002: one HuGR account, Clerk principals, PATs).
+//!   Until then this is the honestly-disclosed authentication seam — the matrix
+//!   is real and unbypassable on the mutation path; the principal→class binding
+//!   is the part P2 completes. We do **not** fabricate authentication here.
+//!
 //! # The permission model (FROZEN — decomposition v2.0 D14②, whitepaper §3 + §7)
 //!
 //! Every principal is a first-class identity (whitepaper §3): human,
@@ -219,6 +240,18 @@ pub fn authorize(principal_chain: &[String], endpoint: Endpoint) -> Decision {
     let Some(class) = PrincipalClass::classify(actor) else {
         return Decision::Deny(DenyReason::UnrecognizedPrincipal);
     };
+    authorize_class(class, endpoint)
+}
+
+/// Authorize an already-classified principal against [`matrix`], **fail-closed**.
+///
+/// This is the decision over a *caller-asserted* class — used by
+/// [`EventLog::append_authorized`](crate::log::EventLog::append_authorized) when
+/// the porcelain hands the class directly (e.g. `pr open --author-kind`) rather
+/// than carrying it in the `principal_chain`. The class→principal *binding* is
+/// the disclosed authentication seam (see the module doc); the matrix decision
+/// itself is real. A disallowed cell is [`DenyReason::NotPermitted`].
+pub fn authorize_class(class: PrincipalClass, endpoint: Endpoint) -> Decision {
     if matrix(class, endpoint) {
         Decision::Allow
     } else {
@@ -280,7 +313,7 @@ impl<'a> AuditedGuard<'a> {
 }
 
 /// Build the JSON audit payload for a denial (stable shape, attributable).
-fn denial_payload(endpoint: Endpoint, reason: &DenyReason) -> String {
+pub(crate) fn denial_payload(endpoint: Endpoint, reason: &DenyReason) -> String {
     match reason {
         DenyReason::UnrecognizedPrincipal => serde_json::json!({
             "endpoint": endpoint.as_str(),

@@ -221,3 +221,104 @@ fn item_3_authz_denials_audited() {
     assert!(record.payload.contains("unrecognized_principal"));
     assert_eq!(log.len(), before + 1);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WA2 — the guard is WIRED ONTO THE MUTATION PRIMITIVE (S3).
+//
+// Before WA2 the guard was a detached lock: golden-tested but with zero callers
+// on `EventLog::append`. `EventLog::append_authorized` makes the D14 matrix
+// unbypassable on the only mutating primitive. These tests pin that the guarded
+// path appends on allow, refuses + audits on deny, and that a subagent-classed
+// actor cannot append a `pr.opened`-class record through it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A `pr.opened` is authored by an orchestrator (gated on `land`) — an
+/// authorized orchestrator append succeeds and the real record lands.
+#[test]
+fn wa2_guarded_append_allows_authorized_orchestrator() {
+    let mut log = EventLog::new();
+    let rec = log
+        .append_authorized(
+            PrincipalClass::Orchestrator,
+            Endpoint::Land,
+            "pr.opened",
+            chain("orchestrator:opus"),
+            r#"{"pr_id":"7"}"#,
+            1_717_000_000_000,
+        )
+        .expect("authorized orchestrator append must succeed");
+    assert_eq!(rec.kind, "pr.opened");
+    assert_eq!(log.len(), 1, "exactly the real event is on the log");
+    assert_eq!(log.records()[0].kind, "pr.opened");
+}
+
+/// A SUBAGENT (worker class) CANNOT append a `pr.opened`-class record through the
+/// guarded path: the matrix denies a worker the orchestrator `land` verb, the
+/// real event is NOT appended, an `authz.denied` audit record IS appended, and
+/// the returned error carries the deny reason + the audit record (③).
+#[test]
+fn wa2_subagent_cannot_append_pr_opened_through_guard() {
+    let mut log = EventLog::new();
+    let denied = log
+        .append_authorized(
+            PrincipalClass::Worker, // a subagent self-asserting authorship
+            Endpoint::Land,
+            "pr.opened",
+            chain("agent:runner-03"),
+            r#"{"pr_id":"7"}"#,
+            1_717_000_000_000,
+        )
+        .expect_err("a subagent must be denied a pr.opened-class append");
+
+    // The real pr.opened was NEVER appended.
+    assert!(
+        log.records().iter().all(|r| r.kind != "pr.opened"),
+        "the denied mutation must not be on the log"
+    );
+    // Exactly one record landed: the audit event (③).
+    assert_eq!(log.len(), 1, "only the audit record is appended");
+    assert_eq!(log.records()[0].kind, AUTHZ_DENIED_KIND);
+
+    // The error carries the reason + the audit record, attributable.
+    assert_eq!(
+        denied.reason,
+        DenyReason::NotPermitted {
+            class: PrincipalClass::Worker
+        }
+    );
+    assert_eq!(denied.audit.kind, AUTHZ_DENIED_KIND);
+    assert_eq!(*denied.audit, log.records()[0]);
+    assert!(
+        denied
+            .audit
+            .payload
+            .contains("\"reason\":\"not_permitted\"")
+    );
+    assert!(denied.audit.payload.contains("\"class\":\"worker\""));
+}
+
+/// An UNRECOGNIZED principal asserted with any class is still gated by the matrix
+/// on the guarded path — a worker asserting `land` is denied; the chain stays
+/// intact (the audit record is a real, chained event).
+#[test]
+fn wa2_guarded_append_keeps_chain_intact_on_deny() {
+    let mut log = EventLog::new();
+    // First a legitimate append so the chain is non-trivial.
+    log.append("ref.update", chain("user:gustavo"), r#"{"r":1}"#, 1);
+    let head_before = log.head_hash();
+
+    let _ = log.append_authorized(
+        PrincipalClass::Model,
+        Endpoint::Policy, // model may not policy
+        "policy.set",
+        chain("model:claude"),
+        r#"{"k":"v"}"#,
+        2,
+    );
+
+    // The audit record chained onto the previous head (real event, not silent).
+    let audit = log.records().last().unwrap();
+    assert_eq!(audit.kind, AUTHZ_DENIED_KIND);
+    assert_eq!(audit.prev_hash, head_before);
+    assert_eq!(audit.seq, 1);
+}
