@@ -67,6 +67,12 @@ fn seed_tree(dir: &Path) -> PathBuf {
     root
 }
 
+/// A measurable-duration shell command whose real wall-clock time is > 0 ms on
+/// any real OS — used so `saved_ms` is assertably positive after a warm HIT.
+/// `sleep 0.05` is 50 ms, orders of magnitude above rounding noise, and safe
+/// on macOS (BSD sleep accepts fractional seconds) and Linux.
+const SLOW_CMD: &str = "sleep 0.05";
+
 #[test]
 fn cold_run_executes_records_miss_then_warm_rerun_is_a_hit_then_show_is_real() {
     let dir = scratch("wedge");
@@ -301,5 +307,136 @@ fn dry_run_without_store_records_nothing_on_the_log() {
     assert!(
         show["kpis"]["hit_rate_pct"].is_null(),
         "no records ⇒ honest-null KPIs: {show}"
+    );
+}
+
+// ── WG-DOCS test-quality additions ───────────────────────────────────────────
+
+/// A memoized RED stays red — a warm cache HIT for a command that exits 1 must
+/// still report `ok:false`. This is the honesty gap: the cache must NOT mask a
+/// failing result as green on a warm re-run.
+///
+/// - Cold run: `false` exits 1 → `ok:false`, `exit:1`, `cache_hit:false`.
+/// - Warm re-run (identical inputs, same AC): cache HIT → `ok:false`, `exit:1`,
+///   `cache_hit:true`. The stored result is faithfully "red"; the hit only avoids
+///   re-execution — it never fabricates success.
+#[test]
+fn memoized_red_stays_red_warm_hit_does_not_mask_failure() {
+    let dir = scratch("red-memo");
+    let log = dir.join("log.json");
+    let ac = dir.join("ac.json");
+    write_empty_log(&log);
+    let root = seed_tree(&dir);
+
+    let common = || -> Vec<String> {
+        vec![
+            "check".into(),
+            "--def".into(),
+            "red-check".into(),
+            "--cmd".into(),
+            "false".into(), // always exits 1
+            "--log".into(),
+            log.display().to_string(),
+            "--store".into(),
+            "--ac".into(),
+            ac.display().to_string(),
+            "--root".into(),
+            root.display().to_string(),
+            "--toolchain".into(),
+            "tc-fixed".into(),
+        ]
+    };
+
+    // Cold: executes, records a MISS with ok:false and exit:1.
+    let cold_args = common();
+    let cold_ref: Vec<&str> = cold_args.iter().map(String::as_str).collect();
+    let (code, cold) = run(&cold_ref);
+    // The verb exits 0 (the check ran and reported its result) even though the
+    // check itself failed — the error law reports the check outcome, not panics.
+    assert_eq!(code, 0, "check verb exits 0 (reports outcome): {cold}");
+    assert_eq!(cold["cache_hit"], false, "cold run is a MISS: {cold}");
+    assert_eq!(cold["ok"], false, "a `false` command is not ok: {cold}");
+    assert_eq!(cold["exit"], 1, "`false` exits 1: {cold}");
+    assert_eq!(cold["stored"], true, "--store recorded the MISS: {cold}");
+
+    // Warm re-run — a HIT. The cached result is still the failing one.
+    let warm_args = common();
+    let warm_ref: Vec<&str> = warm_args.iter().map(String::as_str).collect();
+    let (code, warm) = run(&warm_ref);
+    assert_eq!(code, 0, "warm run exits 0 (reports cached outcome): {warm}");
+    assert_eq!(warm["cache_hit"], true, "warm re-run is a HIT: {warm}");
+    assert_eq!(
+        warm["ok"], false,
+        "the warm HIT faithfully reports the stored FAILURE — not masked green: {warm}"
+    );
+    assert_eq!(
+        warm["exit"], 1,
+        "the warm HIT carries the stored exit code 1: {warm}"
+    );
+}
+
+/// A measurable-duration cold run gives a positive `saved_ms` on a warm HIT.
+///
+/// Uses `SLOW_CMD` (sleep 50 ms) so the cold execution takes a non-zero wall
+/// clock. After a warm HIT the `checks show` KPI `saved_ms` must be > 0
+/// (the duration saved by the cache hit).
+#[test]
+fn saved_ms_is_positive_after_warm_hit_on_slow_command() {
+    let dir = scratch("saved-ms");
+    let log = dir.join("log.json");
+    let ac = dir.join("ac.json");
+    write_empty_log(&log);
+    let root = seed_tree(&dir);
+
+    let common = || -> Vec<String> {
+        vec![
+            "check".into(),
+            "--def".into(),
+            "slow-check".into(),
+            "--cmd".into(),
+            SLOW_CMD.into(),
+            "--log".into(),
+            log.display().to_string(),
+            "--store".into(),
+            "--ac".into(),
+            ac.display().to_string(),
+            "--root".into(),
+            root.display().to_string(),
+            "--toolchain".into(),
+            "tc-fixed".into(),
+        ]
+    };
+
+    // Cold: executes SLOW_CMD, stores a measured duration.
+    let cold_args = common();
+    let cold_ref: Vec<&str> = cold_args.iter().map(String::as_str).collect();
+    let (code, cold) = run(&cold_ref);
+    assert_eq!(code, 0, "cold slow run exits 0: {cold}");
+    assert_eq!(cold["cache_hit"], false, "cold run is a MISS: {cold}");
+    assert_eq!(cold["ok"], true, "sleep exits 0: {cold}");
+    let cold_ms = cold["duration_ms"].as_u64().unwrap_or(0);
+    // The cold duration should be >= 1 ms (50 ms nominal; we use 1 ms as the
+    // lower bound to avoid flakes on slow CI where the measurement could round
+    // differently, while still ensuring it is non-zero).
+    assert!(
+        cold_ms >= 1,
+        "cold run duration_ms >= 1 ms (measured): {cold}"
+    );
+
+    // Warm: a HIT. duration_ms must be 0 (no re-execution).
+    let warm_args = common();
+    let warm_ref: Vec<&str> = warm_args.iter().map(String::as_str).collect();
+    let (code, warm) = run(&warm_ref);
+    assert_eq!(code, 0, "warm slow run exits 0: {warm}");
+    assert_eq!(warm["cache_hit"], true, "warm re-run is a HIT: {warm}");
+    assert_eq!(warm["duration_ms"], 0, "a HIT has duration_ms:0: {warm}");
+
+    // `checks show` — `saved_ms` is the cold duration saved by the HIT.
+    let (code, show) = run(&["checks", "show", "--log", &log.display().to_string()]);
+    assert_eq!(code, 0, "checks show exits 0: {show}");
+    let saved = show["kpis"]["saved_ms"].as_u64().unwrap_or(0);
+    assert!(
+        saved >= 1,
+        "saved_ms > 0 after a warm HIT on a slow command: {show}"
     );
 }

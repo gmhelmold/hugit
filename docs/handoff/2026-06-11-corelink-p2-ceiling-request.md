@@ -3,7 +3,7 @@
 > **From:** hugit TechLead · **Date:** 2026-06-11 · **Status:** OPEN, owner-gated
 > **Supersedes scope of:** `docs/handoff/2026-06-08-corelink-p2-tenant-request.md`
 > (the tenant-provisioning request) — that doc stands; this one **adds the six
-> live-infra seams** that two adversarial audit rounds proved are the *only*
+> live-infra seams** that three adversarial audit rounds proved are the *only*
 > things standing between hugit and a shippable production forge.
 >
 > **Read this first if you read nothing else (§0).** Everything below is
@@ -16,10 +16,11 @@
 
 ## 0. Executive summary — what I need, in one screen
 
-hugit's engine is **code-complete and adversarially hardened**: two fresh-context
+hugit's engine is **code-complete and adversarially hardened**: three fresh-context
 7-agent refutation rounds (`docs/review/2026-06-11-adversarial-round-1.md`,
-`-round-2.md`) confirmed the integrity spine (hash-chained log, D14 authz,
-redaction, money) holds. The rounds + a full live-seam inventory
+`-round-2.md`, `-round-3.md`) confirmed the integrity spine (hash-chained log,
+D14 authz, redaction, money) holds; the spine held through all three rounds;
+Wave G hardens the wedge wave (Round 3 findings). The rounds + a full live-seam inventory
 (`docs/interop.md`, whitepaper §5 truth-table, every `NotWired` code site)
 establish that hugit's path to a **production** forge is gated entirely on
 CoreLink infrastructure. This document enumerates **literally all of it** — the
@@ -399,5 +400,5 @@ in `CLAUDE.md` and the pending-seams register (`docs/plan/2026-06-11-pending-sea
 
 *Cross-references: tenant provisioning `docs/handoff/2026-06-08-corelink-p2-tenant-request.md`
 · identity `docs/handoff/2026-06-09-hugr-identity-rollout.md` + `docs/adr/0002-hugr-identity.md`
-· evidence `docs/review/2026-06-11-adversarial-round-{1,2}.md` · seam register
+· evidence `docs/review/2026-06-11-adversarial-round-{1,2,3}.md` · seam register
 `docs/plan/2026-06-11-pending-seams.md` · the interop seam map `docs/interop.md`.*

@@ -4,7 +4,9 @@
 > env gates, and failure semantics. Sources of truth: `crates/hugit-contracts`
 > (the IDL — Rust + JSON Schema + golden serde, frozen),
 > `../corelink-runners/docs/spec/hugit-integration-contract.md` (the fabric
-> seam, frozen from hugit's side; **v1.1** as of 2026-06-10, §13 envelope emission),
+> seam, frozen from hugit's side; **v1.2.0** as of 2026-06-11 — §13 envelope
+> emission (WP-R6, 2026-06-10) + §13.1 `cost_usd_micros` money amendment (WA4,
+> 2026-06-11); the frozen v1.0 §0–§12 are otherwise unchanged),
 > `docs/adr/0001` (context envelope),
 > `docs/adr/0002` (identity), `docs/handoff/2026-06-08-p2-go-live-runbook.md`
 > (what flips live). Production-state claims cite source repos — never memory.
@@ -13,6 +15,9 @@
 > updated to reflect that `hugit-runner` transferred to `corelink-runners`
 > (WP-R4, 2026-06-10) and transcript blobs are retained forever by ratified
 > design (erasure via explicit tombstone only — no TTL).
+>
+> *Updated 2026-06-11 (WG-DOCS):* §2 runner-contract version advanced to
+> **v1.2.0** (WA4 `cost_usd_micros` u64 amendment applied; v1.1 was stale).
 
 ```
             githugr (campaign #4, design)  ──reads──▶  hugit (THIS REPO, built)
@@ -41,8 +46,9 @@
 ## 2. hugit → Runners (check execution) — contract frozen from our side
 
 Canonical: `../corelink-runners/docs/spec/hugit-integration-contract.md`
-(**contract v1.1** — §13 envelope emission obligation added 2026-06-10 by
-WP-R6; the runner must emit per-job metrics consistent with `IntentMetrics`
+(**contract v1.2.0** — §13 envelope emission obligation added 2026-06-10 by
+WP-R6; §13.1 `cost_usd_micros|u64` money amendment added 2026-06-11 per WA4;
+the runner must emit per-job metrics consistent with `IntentMetrics`
 and expose capture hook points for the two-transcript imperative).
 `hugit-runner` **transferred to `corelink-runners`** (WP-R4, 2026-06-10) —
 the runner execution core (lease, isolation, warm boot, C2/C3/C5 suites)
