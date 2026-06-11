@@ -41,7 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is tamper-evident (sha256 self-hash verified on read → a forged green is never
   served), real toolchain digest (no cross-toolchain false-hit), 300s exec
   timeout with child-kill (no lock starvation on a hung command),
-  lookup-before-decision lock (no double-exec), `hugit check` honours the
+  lookup-before-decision lock (no double-exec at the time — **superseded by
+  Wave H / WH-CHECK**: the lock is held only for cache ops, not across
+  execute; a bounded double-exec window is accepted + tracked as AR-1 in
+  `docs/plan/2026-06-11-pending-seams.md`), `hugit check` honours the
   log-not-found/exit-2 law, `cmd_ignored` honesty. WG-PR: reachable `.expect()`
   panics → structured internal errors (one-error-law), a settled `pr.landed` PR
   leaves the queue projection. WG-COHERENCE: `hugit verdict` rejects a

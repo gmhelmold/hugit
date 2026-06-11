@@ -124,6 +124,15 @@ fn push_vec_field(buf: &mut Vec<u8>, elems: &[String]) {
 /// [`crate::tamper::verify_chain`] both route through it so the producer and the
 /// verifier can never drift. Every other crate that emits events MUST call this
 /// (re-import: `hugit_refstore::compute_this_hash`) rather than re-transcribe.
+///
+/// # Honesty caveat — UNKEYED hash (public, deterministic)
+///
+/// SHA-256 is a public, deterministic function. A writer with full read+write
+/// access to the log can call this function themselves to recompute a forged
+/// chain. The chain is therefore tamper-EVIDENT (detects partial/incomplete
+/// corruption + ordering) but NOT tamper-PROOF against a competent rewriter.
+/// Cryptographic authentication is the P2 server-side seam (PS-8); see
+/// [`crate::tamper::verify_chain`] for the full honesty caveat.
 pub fn compute_this_hash(
     prev_hash: &str,
     kind: &str,
