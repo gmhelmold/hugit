@@ -184,12 +184,22 @@ impl InMemoryAc {
 impl ActionCache for InMemoryAc {
     fn lookup(&self, memo_key: &str) -> Result<Option<CheckResult>, AcError> {
         *self.lookups.lock().expect("lookups lock poisoned") += 1;
-        Ok(self
+        let hit = self
             .store
             .lock()
             .expect("store lock poisoned")
             .get(memo_key)
-            .cloned())
+            .cloned();
+        // Run the content-address guard on the in-memory backend too (WG-CACHE):
+        // a record whose memo axes do not key to `memo_key` is a content-address
+        // fault, never a silent hit — the same law the HTTP client enforces.
+        match hit {
+            Some(result) => {
+                verify_hit(memo_key, &result)?;
+                Ok(Some(result))
+            }
+            None => Ok(None),
+        }
     }
 
     fn store(&self, result: &CheckResult) -> Result<(), AcError> {
@@ -344,7 +354,15 @@ impl std::fmt::Debug for AcConfig {
 /// served as a false hit. The key formula is single-sourced via
 /// [`hugit_refstore::compute_memo_key`] (never re-transcribed), so this verifies
 /// against the exact same content-address the lookup used.
-fn verify_hit(requested: &str, result: &CheckResult) -> Result<(), AcError> {
+///
+/// `pub` (re-exported via the `client::ac` path) so EVERY [`ActionCache`] backend
+/// — the HTTP client, the in-memory fake, AND the CLI's file-backed cache — runs
+/// the same content-address guard, not just the HTTP path (the WG-CACHE wiring).
+/// This is the AXIS-level half of tamper-evidence: it rejects a record whose
+/// three memo axes were altered. A flipped `exit`/`ok` leaves the axes (hence the
+/// key) intact, so the file backend pairs this with a self-hash over the canonical
+/// record bytes to also catch that vector.
+pub fn verify_hit(requested: &str, result: &CheckResult) -> Result<(), AcError> {
     let recomputed = hugit_refstore::compute_memo_key(
         &result.tree_hash,
         &result.def_digest,

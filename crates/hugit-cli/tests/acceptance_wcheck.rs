@@ -440,3 +440,347 @@ fn saved_ms_is_positive_after_warm_hit_on_slow_command() {
         "saved_ms > 0 after a warm HIT on a slow command: {show}"
     );
 }
+
+// ── WG-CACHE — tamper-evident cache, real toolchain axis, exec timeout, ──────
+// ── lookup lock, log-not-found law, cmd-ignored honesty. ─────────────────────
+
+/// Build the standard `check` arg vector for an ad-hoc def over a given AC path.
+fn check_args(def: &str, cmd: &str, log: &Path, ac: &Path, root: &Path) -> Vec<String> {
+    vec![
+        "check".into(),
+        "--def".into(),
+        def.into(),
+        "--cmd".into(),
+        cmd.into(),
+        "--log".into(),
+        log.display().to_string(),
+        "--store".into(),
+        "--ac".into(),
+        ac.display().to_string(),
+        "--root".into(),
+        root.display().to_string(),
+        "--toolchain".into(),
+        "tc-fixed".into(),
+    ]
+}
+
+/// WG-CACHE [CRITICAL]: editing the stored `<log>.ac` to flip a RED result's
+/// `exit`→0 (forge a green) is DETECTED — the next `hugit check` recomputes the
+/// entry self-hash, finds a mismatch, treats it as a MISS, and RE-EXECUTES the
+/// real command. The forged green is NEVER served, never laundered into the log.
+#[test]
+fn tampering_the_ac_to_forge_a_green_is_detected_and_re_executed() {
+    let dir = scratch("tamper");
+    let log = dir.join("log.json");
+    let ac = dir.join("ac.json");
+    write_empty_log(&log);
+    let root = seed_tree(&dir);
+
+    // Cold run of a RED command (`false` exits 1) — stores a genuine red result.
+    let args = check_args("red-check", "false", &log, &ac, &root);
+    let r: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (code, cold) = run(&r);
+    assert_eq!(code, 0, "verb reports outcome: {cold}");
+    assert_eq!(cold["cache_hit"], false, "cold run is a MISS: {cold}");
+    assert_eq!(cold["ok"], false, "the real result is RED: {cold}");
+    assert_eq!(cold["exit"], 1, "`false` exits 1: {cold}");
+
+    // A warm re-run WITHOUT tampering is a faithful red HIT.
+    let (_, warm) = run(&r);
+    assert_eq!(warm["cache_hit"], true, "untampered warm run HITs: {warm}");
+    assert_eq!(warm["ok"], false, "the HIT is still red: {warm}");
+
+    // TAMPER: flip the stored exit 1 → 0 in the `.ac` file (forge a green) WITHOUT
+    // recomputing the self-hash. (`true`/`false` both pretty-print `"exit": N`.)
+    let raw = std::fs::read_to_string(&ac).unwrap();
+    let forged = raw.replace("\"exit\": 1", "\"exit\": 0");
+    assert_ne!(forged, raw, "the tamper actually changed the stored exit");
+    std::fs::write(&ac, &forged).unwrap();
+
+    // Next check: the self-hash over the forged bytes no longer matches → MISS →
+    // RE-EXECUTE the real `false` → ok:false again. The forged green is rejected.
+    let (code, after) = run(&r);
+    assert_eq!(code, 0, "verb reports outcome: {after}");
+    assert_eq!(
+        after["cache_hit"], false,
+        "a tampered entry is a MISS — the cache re-executes, never serves the forgery: {after}"
+    );
+    assert_eq!(
+        after["ok"], false,
+        "re-execution yields the REAL red result, not the forged green: {after}"
+    );
+    assert_eq!(
+        after["exit"], 1,
+        "the real `false` exit survives the tamper: {after}"
+    );
+}
+
+/// WG-CACHE [MEDIUM]: two DIFFERENT toolchain digests key DISTINCTLY — a green
+/// cached under toolchain A is a MISS under toolchain B. (Proves the toolchain
+/// axis is a real, key-busting input, not the old `local-toolchain` constant.)
+#[test]
+fn two_toolchain_digests_key_distinctly() {
+    let dir = scratch("tc-axis");
+    let log = dir.join("log.json");
+    let ac = dir.join("ac.json");
+    write_empty_log(&log);
+    let root = seed_tree(&dir);
+
+    let mut a = check_args("tc-check", "true", &log, &ac, &root);
+    // Replace the trailing "tc-fixed" with toolchain A.
+    *a.last_mut().unwrap() = "toolchain-A".into();
+    let ra: Vec<&str> = a.iter().map(String::as_str).collect();
+    let (_, run_a) = run(&ra);
+    assert_eq!(
+        run_a["cache_hit"], false,
+        "first run (A) is a MISS: {run_a}"
+    );
+    let key_a = run_a["memo_key"].as_str().unwrap().to_string();
+
+    // Same everything but toolchain B → a DIFFERENT memo key → a MISS, not a hit.
+    let mut b = a.clone();
+    *b.last_mut().unwrap() = "toolchain-B".into();
+    let rb: Vec<&str> = b.iter().map(String::as_str).collect();
+    let (_, run_b) = run(&rb);
+    assert_eq!(
+        run_b["cache_hit"], false,
+        "a different toolchain digest is a MISS, not a cross-toolchain false hit: {run_b}"
+    );
+    assert_ne!(
+        run_b["memo_key"].as_str().unwrap(),
+        key_a,
+        "two toolchain digests key to distinct memo keys: {run_b}"
+    );
+}
+
+/// WG-CACHE: omitting `--toolchain` resolves a REAL active-toolchain digest (a
+/// 64-char sha256 hex), not a constant — so a toolchain change busts the key.
+#[test]
+fn omitting_toolchain_yields_a_real_digest_axis() {
+    let dir = scratch("tc-real");
+    let log = dir.join("log.json");
+    let ac = dir.join("ac.json");
+    write_empty_log(&log);
+    let root = seed_tree(&dir);
+
+    // No --toolchain flag.
+    let (code, v) = run(&[
+        "check",
+        "--def",
+        "tc-real-check",
+        "--cmd",
+        "true",
+        "--log",
+        &log.display().to_string(),
+        "--store",
+        "--ac",
+        &ac.display().to_string(),
+        "--root",
+        &root.display().to_string(),
+    ]);
+    assert_eq!(code, 0, "runs without --toolchain: {v}");
+    // The recorded row carries the resolved toolchain_digest; read it back.
+    let (_, show) = run(&["checks", "show", "--log", &log.display().to_string()]);
+    let mk = show["checks"][0]["memo_key"].as_str().unwrap();
+    assert_eq!(mk.len(), 64, "memo key is a 64-char digest: {show}");
+    // The toolchain digest itself is either a 64-char sha256 hex (rustc probed) or
+    // the explicit `toolchain-unprobed` marker — NEVER the old `local-toolchain`
+    // constant. We assert it is not that stale constant by re-running with an
+    // explicit toolchain equal to "local-toolchain" and confirming a DIFFERENT key.
+    let (_, explicit) = run(&[
+        "check",
+        "--def",
+        "tc-real-check",
+        "--cmd",
+        "true",
+        "--log",
+        &log.display().to_string(),
+        "--ac",
+        &ac.display().to_string(),
+        "--root",
+        &root.display().to_string(),
+        "--toolchain",
+        "local-toolchain",
+    ]);
+    assert_eq!(
+        explicit["cache_hit"], false,
+        "the default toolchain axis is NOT the old `local-toolchain` constant: {explicit}"
+    );
+}
+
+/// WG-CHECK-ROBUST [SHIP-BLOCKER]: a hanging command (`sleep 30`) bounded by a
+/// short `--timeout-secs` is KILLED and returns a structured `check_timeout`
+/// (exit 2) — it does NOT block forever holding the log lock.
+#[test]
+fn a_hanging_command_times_out_with_a_structured_error() {
+    let dir = scratch("hang");
+    let log = dir.join("log.json");
+    let ac = dir.join("ac.json");
+    write_empty_log(&log);
+    let root = seed_tree(&dir);
+
+    let start = std::time::Instant::now();
+    let (code, v) = run(&[
+        "check",
+        "--def",
+        "hang-check",
+        "--cmd",
+        "sleep 30",
+        "--log",
+        &log.display().to_string(),
+        "--store",
+        "--ac",
+        &ac.display().to_string(),
+        "--root",
+        &root.display().to_string(),
+        "--timeout-secs",
+        "1",
+    ]);
+    let elapsed = start.elapsed();
+    assert_eq!(code, 2, "a timeout is a structured error, exit 2: {v}");
+    assert_eq!(
+        v["error"]["kind"], "check_timeout",
+        "canonical envelope names the timeout: {v}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(20),
+        "the timeout fired (did not block for the full 30s sleep): {elapsed:?}"
+    );
+}
+
+/// WG-CHECK-ROBUST: the log-not-found law holds WITHOUT `--store` too. A `hugit
+/// check` against a nonexistent `--log` is `log_not_found`/exit-2 — never a
+/// silent dry green on a typo'd path.
+#[test]
+fn missing_log_without_store_is_log_not_found_not_a_silent_green() {
+    let dir = scratch("nolog-dry");
+    let missing = dir.join("typo.json");
+    let root = seed_tree(&dir);
+    let (code, v) = run(&[
+        "check",
+        "--def",
+        "dry-check",
+        "--cmd",
+        "true",
+        "--log",
+        &missing.display().to_string(),
+        // NO --store.
+        "--root",
+        &root.display().to_string(),
+    ]);
+    assert_eq!(
+        code, 2,
+        "a missing --log without --store is exit 2 (not a dry green): {v}"
+    );
+    assert_eq!(
+        v["error"]["kind"], "log_not_found",
+        "canonical envelope: {v}"
+    );
+}
+
+/// WG-CHECK-ROBUST: a built-in `--def` that is given a `--cmd` surfaces
+/// `cmd_ignored:true` so the agent KNOWS its command had no effect (the built-in
+/// gate command wins). An ad-hoc def that USES its `--cmd` reports `false`.
+#[test]
+fn builtin_def_with_cmd_reports_cmd_ignored() {
+    let dir = scratch("cmd-ignored");
+    let log = dir.join("log.json");
+    let ac = dir.join("ac.json");
+    write_empty_log(&log);
+    let root = seed_tree(&dir);
+
+    // `fmt` is a built-in; supplying --cmd must be flagged as ignored. Point the
+    // built-in's command at a tree with nothing to format under a 30s ceiling;
+    // we only care about the cmd_ignored signal, not the gate's exit.
+    let (_, v) = run(&[
+        "check",
+        "--def",
+        "fmt",
+        "--cmd",
+        "echo should-be-ignored",
+        "--log",
+        &log.display().to_string(),
+        "--ac",
+        &ac.display().to_string(),
+        "--root",
+        &root.display().to_string(),
+        "--toolchain",
+        "tc-fixed",
+        "--timeout-secs",
+        "60",
+    ]);
+    assert_eq!(
+        v["cmd_ignored"], true,
+        "a built-in def flags an ignored --cmd: {v}"
+    );
+
+    // An ad-hoc def USES its --cmd → cmd_ignored:false.
+    let a = check_args("adhoc-check", "true", &log, &ac, &root);
+    let r: Vec<&str> = a.iter().map(String::as_str).collect();
+    let (_, v2) = run(&r);
+    assert_eq!(
+        v2["cmd_ignored"], false,
+        "an ad-hoc def honours its --cmd (not ignored): {v2}"
+    );
+}
+
+/// WG-CHECK-ROBUST [TOCTOU]: two concurrent `hugit check` on identical inputs do
+/// NOT both execute + both record. The AC-store lock spans lookup→execute→store,
+/// so exactly one MISS+records; the other either HITs or serializes (retryable
+/// `ac_busy`). The log carries NO duplicate `check.recorded` for the single MISS.
+#[test]
+fn concurrent_checks_do_not_double_execute_or_double_record() {
+    use std::thread;
+
+    let dir = scratch("toctou");
+    let log = dir.join("log.json");
+    let ac = dir.join("ac.json");
+    write_empty_log(&log);
+    let root = seed_tree(&dir);
+
+    // Two threads launch the SAME check simultaneously. `sleep 0.2` widens the
+    // execution window so an unlocked lookup would let both MISS.
+    let args = check_args("race-check", "sleep 0.2", &log, &ac, &root);
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let args = args.clone();
+            thread::spawn(move || {
+                let r: Vec<&str> = args.iter().map(String::as_str).collect();
+                run(&r)
+            })
+        })
+        .collect();
+    let results: Vec<(i32, Value)> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+    // Each run either succeeded (exit 0) or serialized with a retryable ac_busy.
+    let mut misses = 0;
+    let mut hits = 0;
+    let mut busy = 0;
+    for (code, v) in &results {
+        if *code == 0 {
+            match v["cache_hit"].as_bool() {
+                Some(true) => hits += 1,
+                Some(false) => misses += 1,
+                None => panic!("a successful run reports cache_hit: {v}"),
+            }
+        } else {
+            assert_eq!(
+                v["error"]["kind"], "ac_busy",
+                "the loser serializes with a retryable ac_busy: {v}"
+            );
+            busy += 1;
+        }
+    }
+    assert!(
+        misses <= 1,
+        "at most ONE concurrent check executes (no double-exec): misses={misses}, hits={hits}, busy={busy}"
+    );
+
+    // The canonical log carries at most ONE `check.recorded` MISS — no duplicate.
+    let (_, show) = run(&["checks", "show", "--log", &log.display().to_string()]);
+    let executed = show["kpis"]["executed"].as_u64().unwrap_or(0);
+    assert!(
+        executed <= 1,
+        "no duplicate check.recorded for the single execution: executed={executed} ({show})"
+    );
+}

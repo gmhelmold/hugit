@@ -41,6 +41,12 @@ pub enum ExecError {
     /// that ran and reported a non-zero exit — that is a successful run with a
     /// non-zero `CheckResult::exit`).
     Run(String),
+    /// The check ran past its bounded execution deadline and was killed
+    /// (WG-CHECK-ROBUST). Carries the timeout (seconds) that was exceeded. A
+    /// timed-out check is NOT memoized — it is a structured failure, never a
+    /// stored result, so a hang can never poison the cache or hold the log lock
+    /// indefinitely.
+    Timeout(u64),
 }
 
 impl std::fmt::Display for ExecError {
@@ -48,6 +54,12 @@ impl std::fmt::Display for ExecError {
         match self {
             ExecError::Ac(e) => write!(f, "{e}"),
             ExecError::Run(e) => write!(f, "check execution failed: {e}"),
+            ExecError::Timeout(secs) => {
+                write!(
+                    f,
+                    "check execution exceeded the {secs}s timeout and was killed"
+                )
+            }
         }
     }
 }
