@@ -189,6 +189,13 @@ impl IntentStore {
         Ok(intents.by_id(intent_id).cloned())
     }
 
+    /// All native intents on the log, in log order (the full altitude projection).
+    pub fn intent_for_all(&self) -> Result<Vec<Intent>, StoreError> {
+        let intents =
+            intents_from_log(&self.log).map_err(|e| StoreError::ChainBroken(e.to_string()))?;
+        Ok(intents.intents().to_vec())
+    }
+
     /// Persist the store back to `path` (events + corpora), pretty JSON so the
     /// on-disk artifact stays inspectable.
     pub fn save(&self, path: &Path) -> Result<(), StoreError> {

@@ -85,11 +85,17 @@ fn item_1_new_lands_real_intent_and_returns_id() {
 fn item_2_new_result_is_the_stable_object() {
     let store = temp_store("new-shape");
     let result = new::run(sample(Some("intent-fixed-1")), &store).expect("new succeeds");
-    let json = serde_json::to_string(&result).unwrap();
-    assert_eq!(
-        json,
-        r#"{"intent_id":"intent-fixed-1","already_exists":false}"#
-    );
+    // Stable key-set (WB0): intent_id, already_exists, campaign, agent always present.
+    assert_eq!(result.intent_id, "intent-fixed-1");
+    assert!(!result.already_exists);
+    assert_eq!(result.campaign, "cli-porcelain");
+    assert_eq!(result.agent, "main"); // default agent
+    let v: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&result).unwrap()).unwrap();
+    assert!(v.get("intent_id").is_some());
+    assert!(v.get("already_exists").is_some());
+    assert!(v.get("campaign").is_some());
+    assert!(v.get("agent").is_some());
     let _ = std::fs::remove_file(&store);
 }
 
@@ -191,12 +197,12 @@ fn item_5_show_missing_intent_is_structured_not_found() {
     )
     .expect_err("absent id is an error");
     assert_eq!(err.kind, "not_found");
-    assert!(!err.suggested_fix.is_empty(), "the fix is non-empty");
+    assert!(!err.fix.is_empty(), "the fix is non-empty");
 
-    // The structured JSON wire shape.
+    // The structured JSON wire shape (WB0 canonical: "fix" not "suggested_fix").
     let json = err.to_json();
     assert!(json.contains(r#""kind":"not_found""#));
-    assert!(json.contains(r#""suggested_fix""#));
+    assert!(json.contains(r#""fix""#));
 
     let _ = std::fs::remove_file(&store);
 }
@@ -240,8 +246,13 @@ fn item_6_tampered_store_fails_closed() {
 #[test]
 fn porcelain_error_json_is_stable() {
     let e = PorcelainError::new("not_found", "no intent x", "create it first");
-    assert_eq!(
-        e.to_json(),
-        r#"{"error":{"kind":"not_found","message":"no intent x","suggested_fix":"create it first"}}"#
+    let v: serde_json::Value = serde_json::from_str(&e.to_json()).unwrap();
+    // WB0 canonical: {"error":{"kind":…,"message":…,"fix":…}} — "fix" not "suggested_fix".
+    assert_eq!(v["error"]["kind"], "not_found");
+    assert_eq!(v["error"]["message"], "no intent x");
+    assert_eq!(v["error"]["fix"], "create it first");
+    assert!(
+        v["error"].get("suggested_fix").is_none(),
+        "must be 'fix' not 'suggested_fix'"
     );
 }
