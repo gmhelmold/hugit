@@ -202,21 +202,87 @@ fn resolve_def(args: &CheckArgs) -> Result<CheckDef, PorcelainError> {
 /// absolute-prefix changes. A missing/inaccessible file is skipped (it cannot
 /// contribute content); the digest is over what is present + matched, exactly as
 /// the engine's `scoped_tree_root` consumes it.
-fn snapshot_tree(root: &Path, glob_set: &[String]) -> BTreeMap<String, FileContent> {
+///
+/// The walk is cycle-safe (WH-CHECK): a directory symlink loop (`a/link → a`,
+/// common in monorepos) is broken by a visited-real-path set AND a depth cap, so
+/// it returns a structured snapshot rather than recursing into a SIGSEGV.
+fn snapshot_tree(
+    root: &Path,
+    glob_set: &[String],
+    excluded: &std::collections::HashSet<PathBuf>,
+) -> BTreeMap<String, FileContent> {
     let mut files = BTreeMap::new();
-    collect_files(root, root, glob_set, &mut files);
+    let mut visited = std::collections::HashSet::new();
+    collect_files(root, root, glob_set, excluded, &mut files, &mut visited, 0);
     files
 }
+
+/// The set of CANONICAL paths to exclude from the tree axis: hugit's own
+/// wedge-state files plus their `.lock`/`.tmp` sidecars. Canonicalized so the
+/// match works regardless of how `--root` reaches them (the walk also
+/// canonicalizes each candidate). A path that does not yet exist canonicalizes to
+/// nothing — harmless, it simply contributes no exclusion (the file isn't there
+/// to be hashed either). The `.tmp` sidecars are name-prefixed (`.<file>.tmp-…`)
+/// so we exclude by the prefix check in [`collect_files`], not by exact path.
+fn state_file_exclusions(state_files: &[&Path]) -> std::collections::HashSet<PathBuf> {
+    let mut set = std::collections::HashSet::new();
+    for f in state_files {
+        // The file itself.
+        if let Ok(c) = std::fs::canonicalize(f) {
+            set.insert(c);
+        }
+        // Its `<file>.lock` sidecar (the FileLock advisory lock).
+        let mut lock = f.as_os_str().to_os_string();
+        lock.push(".lock");
+        if let Ok(c) = std::fs::canonicalize(PathBuf::from(lock)) {
+            set.insert(c);
+        }
+    }
+    set
+}
+
+/// Hard depth ceiling for the tree walk. A real source tree is a handful of
+/// levels deep; 64 is far above any legitimate layout while bounding even a
+/// pathological non-symlink-but-deep tree (the visited-set already breaks true
+/// symlink cycles — this is the belt-and-suspenders guard).
+const MAX_WALK_DEPTH: usize = 64;
 
 /// Recursively walk `dir`, collecting glob-matched files relative to `base`.
 /// Skips `target/`, `.git/`, and the worktree scratch dir so the tree axis is the
 /// SOURCE subtree, not build output (which would make every run a miss).
+///
+/// Cycle-safe (WH-CHECK SHIP-BLOCKER): a directory symlink loop would otherwise
+/// recurse forever → stack overflow / SIGSEGV. We guard with two independent
+/// caps: (1) a `visited` set of CANONICAL (symlink-resolved) directory paths so a
+/// link that points back into an already-walked real directory is not re-entered;
+/// (2) a `depth` ceiling ([`MAX_WALK_DEPTH`]) so even a canonicalize failure can
+/// never recurse unboundedly. On either trip we simply stop descending that
+/// branch — the snapshot is a faithful subset, never a crash.
+#[allow(clippy::too_many_arguments)]
 fn collect_files(
     base: &Path,
     dir: &Path,
     glob_set: &[String],
+    excluded: &std::collections::HashSet<PathBuf>,
     out: &mut BTreeMap<String, FileContent>,
+    visited: &mut std::collections::HashSet<PathBuf>,
+    depth: usize,
 ) {
+    // Depth cap: a degenerate (or adversarial) tree never overflows the stack.
+    if depth >= MAX_WALK_DEPTH {
+        return;
+    }
+    // Resolve this directory to its real path and refuse to re-enter one we have
+    // already walked — this is what breaks a directory symlink cycle. A dir whose
+    // real path cannot be resolved (a dangling link, a permission fault) is simply
+    // not descended (fail-safe: skip, never crash).
+    let Ok(real) = std::fs::canonicalize(dir) else {
+        return;
+    };
+    if !visited.insert(real) {
+        return; // already walked this real directory — a cycle/alias, stop.
+    }
+
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -229,8 +295,10 @@ fn collect_files(
             if name == "target" || name == ".git" || name == ".claude" {
                 continue;
             }
-            collect_files(base, &path, glob_set, out);
-        } else if let Ok(rel) = path.strip_prefix(base) {
+            collect_files(base, &path, glob_set, excluded, out, visited, depth + 1);
+        } else if !is_excluded_state_file(&path, excluded)
+            && let Ok(rel) = path.strip_prefix(base)
+        {
             let rel = rel.to_string_lossy().replace('\\', "/");
             if hugit_checks::client::glob::matches_any(glob_set, &rel)
                 && let Ok(bytes) = std::fs::read(&path)
@@ -239,6 +307,25 @@ fn collect_files(
             }
         }
     }
+}
+
+/// Whether `path` is one of hugit's own wedge-state files (the `--log`, the
+/// `--ac`, or a `.lock`/`.tmp-…` sidecar) that must NOT contribute to the tree
+/// axis (WH-CHECK cmd-memoize fix). Matches by canonical path (so the walk's
+/// canonicalized candidates line up with the canonicalized exclusion set) and
+/// additionally skips the transient atomic-write temp files, which are named
+/// `.<file>.tmp-<pid>-<nanos>` and could be caught mid-rename.
+fn is_excluded_state_file(path: &Path, excluded: &std::collections::HashSet<PathBuf>) -> bool {
+    if let Ok(c) = std::fs::canonicalize(path)
+        && excluded.contains(&c)
+    {
+        return true;
+    }
+    // The atomic-write temp sidecar pattern: `.<name>.tmp-<pid>-<nanos>`. These
+    // are hugit's own crash-consistent write staging, never a check input.
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with('.') && n.contains(".tmp-"))
 }
 
 /// The real, process-spawning [`CheckRunner`]: executes the def's `command` via
@@ -272,31 +359,45 @@ impl CheckRunner for ProcessRunner {
         let start = Instant::now();
         // Spawn (not `.output()`) so we keep the child handle and can kill it on
         // the deadline. stdout/stderr are piped so the wait-with-output drains
-        // them without polluting the verb's JSON contract.
-        let mut child = shell_command(&def.command)
+        // them without polluting the verb's JSON contract. The child is spawned in
+        // its OWN process group (`process_group(0)` — std-only, Unix) so the whole
+        // tree (including a backgrounded grandchild) can be killed as a unit on a
+        // timeout (WH-CHECK lock-poison fix item b: `child.kill()` alone reaps only
+        // the direct child, letting an orphan grandchild survive past the deadline
+        // and a backgrounding command bypass the wall-time ceiling).
+        let mut command = shell_command(&def.command);
+        command
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // The child becomes the leader of a fresh group whose pgid == its pid,
+            // so `kill -<pid>` (negative pid = the group) reaps the whole subtree.
+            command.process_group(0);
+        }
+        let mut child = command
             .spawn()
             .map_err(|e| ExecError::Run(format!("spawn `{}`: {e}", def.command)))?;
 
-        // Poll for completion up to the deadline; kill + reap on expiry.
+        // Poll for completion up to the deadline; kill the whole GROUP + reap on
+        // expiry (WH-CHECK: a backgrounding child must not outlive the ceiling).
         let exit = loop {
             match child.try_wait() {
                 Ok(Some(status)) => break status.code().unwrap_or(-1),
                 Ok(None) => {
                     if start.elapsed() >= self.timeout {
-                        // Bounded ceiling reached: kill the child, reap it (so we
-                        // leave no zombie), and surface a structured timeout. The
-                        // result is NOT stored — a hang never poisons the cache.
-                        let _ = child.kill();
-                        let _ = child.wait();
+                        // Bounded ceiling reached: kill the whole process GROUP (so
+                        // orphan grandchildren die too), reap the direct child (no
+                        // zombie), and surface a structured timeout. The result is
+                        // NOT stored — a hang never poisons the cache.
+                        kill_group(&mut child);
                         return Err(ExecError::Timeout(self.timeout.as_secs()));
                     }
                     std::thread::sleep(POLL_INTERVAL);
                 }
                 Err(e) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    kill_group(&mut child);
                     return Err(ExecError::Run(format!("wait `{}`: {e}", def.command)));
                 }
             }
@@ -337,6 +438,31 @@ fn shell_command(cmd: &str) -> Command {
     }
 }
 
+/// Kill the child's whole process GROUP and reap the direct child (no zombie).
+///
+/// On Unix the child was spawned with `process_group(0)` so its pgid equals its
+/// pid; sending the signal to the negative pid (`kill -<pid>`) reaches every
+/// descendant — including a backgrounded grandchild that `child.kill()` alone
+/// would orphan past the timeout. We deliver SIGTERM then SIGKILL through the
+/// `kill(1)` binary (std-only — no libc/nix dep), then `wait()` the direct child
+/// so it is reaped. On non-Unix the std `child.kill()` is the best available.
+fn kill_group(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let pid = child.id();
+        // Negative pid targets the whole group. TERM first (graceful), then KILL
+        // (so a TERM-ignoring child still dies). Best-effort: a failure only risks
+        // an orphan the OS reaps on the parent's exit — never a correctness loss.
+        let group = format!("-{pid}");
+        let _ = Command::new("kill").arg("-TERM").arg(&group).status();
+        let _ = Command::new("kill").arg("-KILL").arg(&group).status();
+    }
+    // Always also signal + reap the direct child (covers non-Unix and guarantees
+    // no zombie even if the group signal raced the child's own exit).
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// Unix epoch milliseconds (best-effort; `0` if the clock is before the epoch).
 fn now_unix_ms() -> u64 {
     SystemTime::now()
@@ -375,18 +501,22 @@ impl ActionCache for AcBackend {
 /// (or `<log>.ac`). The live CoreLink `HttpAcClient::from_runtime` swaps in
 /// behind the same [`ActionCache`] trait at P2 — `run_memoized` does not change.
 ///
-/// The returned [`FileAc`] HOLDS the AC-store advisory lock for its whole
-/// lifetime (WG-CHECK-ROBUST TOCTOU fix): the lock spans lookup → execute-on-miss
-/// → store, so two concurrent `hugit check` on the same inputs cannot both MISS,
-/// both execute, and both record a duplicate `check.recorded`. The loser gets a
-/// retryable `ac_busy` and serializes. A live AC over HTTP needs no local lock —
-/// that arm would not take one.
+/// The returned [`FileAc`] locks the cache file ONLY during each individual
+/// `lookup`/`store` op (acquire→read/write→release), NOT across the unbounded
+/// execute (WH-CHECK lock-poison fix item a). A hung/slow/orphaning command can
+/// therefore never hold the `.ac` lock across its whole runtime and poison every
+/// concurrent `hugit check`. The accepted cost is the small benign double-exec
+/// window the original lookup-then-store TOCTOU already had — strictly better
+/// than a lock-poison hang; the canonical `--log` append still serializes via its
+/// own lock, and `check --store`'s memo_key dedup keeps the log idempotent so a
+/// double-exec records at most ONE `check.recorded`. A live AC over HTTP needs no
+/// local lock — that arm would not take one.
 fn select_ac(args: &CheckArgs) -> Result<AcBackend, PorcelainError> {
     let store = args
         .ac
         .clone()
         .unwrap_or_else(|| with_extension(&args.log, "ac"));
-    Ok(AcBackend::Local(FileAc::new_locked(store)?))
+    Ok(AcBackend::Local(FileAc::new(store)))
 }
 
 /// Append `.<ext>` to a path's existing file name (so `log.json` → `log.json.ac`,
@@ -443,32 +573,33 @@ fn entry_self_hash(result: &CheckResult) -> String {
 /// across processes WITHOUT P2; the live HTTP client is the P2 swap behind the
 /// same trait.
 ///
-/// The whole memoized op (lookup → execute-on-miss → store) runs while this
-/// backend HOLDS the AC-store advisory [`FileLock`] (`_guard`), so a TOCTOU race
-/// between the (previously unlocked) lookup and a concurrent process is closed:
-/// two `hugit check` on the same inputs cannot both MISS + both execute + both
-/// record. Writes still go through [`atomic_write`](crate::pr::filelock::atomic_write)
+/// # Lock scope (WH-CHECK lock-poison fix)
+///
+/// The advisory [`FileLock`] is taken ONLY around each individual cache file op —
+/// `lookup` (acquire→read→release) and `store` (acquire→read-modify-write→release)
+/// — NOT across the unbounded execute that happens between them. A hung/slow or
+/// process-orphaning command therefore can NEVER hold the `.ac` lock across its
+/// whole runtime and poison every concurrent `hugit check` with `ac_busy`. The
+/// prior design held the lock for the whole lookup→execute→store op; that closed
+/// a TOCTOU but opened a lock-poison hang, which is strictly worse. We accept the
+/// small benign double-exec window the original lookup-then-store TOCTOU already
+/// had (two concurrent cold misses may both execute) because the canonical-log
+/// append still serializes via its own lock AND `check --store` dedups on
+/// `memo_key`, so a double-exec records at most ONE `check.recorded` — no KPI
+/// inflation. Writes go through [`atomic_write`](crate::pr::filelock::atomic_write)
 /// so on-disk state is crash-consistent. Every entry is tamper-evident
 /// ([`CachedEntry`]).
 struct FileAc {
     path: PathBuf,
-    /// The held AC-store lock — acquired in [`FileAc::new_locked`] and dropped
-    /// when the backend drops. Its presence means `store` must NOT re-acquire
-    /// (the lock is non-reentrant). `None` is only the bare-`new` test helper.
-    _guard: Option<FileLock>,
 }
 
 impl FileAc {
-    /// Acquire the AC-store advisory lock and return a backend that HOLDS it for
-    /// its lifetime — the lock-before-decision fix. A live holder (a concurrent
-    /// `hugit check`) yields `ac_busy` (retryable), so the two serialize rather
-    /// than double-execute.
-    fn new_locked(path: PathBuf) -> Result<Self, PorcelainError> {
-        let guard = FileLock::acquire(&path).map_err(map_ac_lock_error)?;
-        Ok(FileAc {
-            path,
-            _guard: Some(guard),
-        })
+    /// Construct a file-backed AC over `path`. No lock is held by the backend
+    /// itself — each `lookup`/`store` op takes the lock only for its own short
+    /// critical section (the lock-poison fix), so the execute between them runs
+    /// UNLOCKED.
+    fn new(path: PathBuf) -> Self {
+        FileAc { path }
     }
 
     /// Read the `{memo_key: CachedEntry}` map from disk; an absent/empty/corrupt
@@ -487,7 +618,13 @@ impl FileAc {
 
 impl ActionCache for FileAc {
     fn lookup(&self, key: &str) -> Result<Option<CheckResult>, hugit_checks::client::ac::AcError> {
-        let map = self.read_map();
+        // Lock only the read of the cache file (acquire→read→release): a concurrent
+        // store must not observe a half-written map. The lock is dropped the moment
+        // this scope ends, BEFORE any execute — never held across the command.
+        let map = {
+            let _lock = acquire_ac_lock(&self.path)?;
+            self.read_map()
+        };
         let Some(entry) = map.get(key) else {
             return Ok(None);
         };
@@ -509,10 +646,10 @@ impl ActionCache for FileAc {
 
     fn store(&self, result: &CheckResult) -> Result<(), hugit_checks::client::ac::AcError> {
         use hugit_checks::client::ac::AcError;
-        // No lock is acquired here: the backend ALREADY HOLDS the AC-store lock
-        // (`_guard`, taken in `new_locked`) for the whole lookup→execute→store op,
-        // so re-acquiring the non-reentrant lock would self-deadlock as `ac_busy`.
-        // The held lock is exactly what serializes two concurrent checks.
+        // Lock the whole read-modify-write of the cache file so two concurrent
+        // stores merge instead of clobbering, then release. The lock is taken HERE
+        // (per-op), never held across the execute that produced `result`.
+        let _lock = acquire_ac_lock(&self.path)?;
         let mut map = self.read_map();
         let entry = CachedEntry {
             self_hash: entry_self_hash(result),
@@ -525,6 +662,43 @@ impl ActionCache for FileAc {
             .map_err(|e| AcError::Transport(format!("AC store write: {e}")))?;
         Ok(())
     }
+}
+
+/// How many times a per-op AC-file lock acquisition retries on a LIVE holder
+/// before giving up. Because the lock is now held ONLY for a sub-millisecond
+/// read or read-modify-write (NOT across the unbounded execute — WH-CHECK), a
+/// contender almost always clears within a few short sleeps, so a transient
+/// per-op collision resolves silently instead of surfacing `ac_busy`.
+const AC_LOCK_RETRIES: u32 = 50;
+
+/// Sleep between AC-file lock retries. 50 × 4 ms = 200 ms total budget — ample
+/// for a sub-ms critical section to clear, far below any real command runtime.
+const AC_LOCK_RETRY_SLEEP: Duration = Duration::from_millis(4);
+
+/// Acquire the per-op AC-file lock, retrying briefly on a LIVE holder.
+///
+/// The lock now guards only the cache file's own short read / read-modify-write
+/// (never the execute), so two concurrent `hugit check` collide only for the
+/// microseconds one is touching the `.ac` map. We retry a bounded number of times
+/// so that benign per-op contention is invisible; only a genuinely stuck holder
+/// (which the age-based stale-lock takeover also reclaims) exhausts the budget
+/// and surfaces as a retryable `ac_busy` through `ExecError::Ac`. An I/O fault is
+/// surfaced immediately.
+fn acquire_ac_lock(path: &Path) -> Result<FileLock, hugit_checks::client::ac::AcError> {
+    use hugit_checks::client::ac::AcError;
+    for _ in 0..AC_LOCK_RETRIES {
+        match FileLock::acquire(path) {
+            Ok(lock) => return Ok(lock),
+            Err(LockError::Busy { .. }) => std::thread::sleep(AC_LOCK_RETRY_SLEEP),
+            Err(e @ LockError::Io { .. }) => {
+                return Err(AcError::Transport(format!("AC store lock: {e}")));
+            }
+        }
+    }
+    Err(AcError::Transport(format!(
+        "ac_busy: the AC store {} stayed locked by another hugit check",
+        path.display()
+    )))
 }
 
 /// `hugit check` — resolve → memoize → execute-on-miss → (with `--store`) record.
@@ -555,14 +729,27 @@ pub fn run(args: &CheckArgs) -> Result<Value, PorcelainError> {
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    let files = snapshot_tree(&root, &def.glob_set);
+    // Exclude hugit's OWN wedge-state files from the tree axis (WH-CHECK
+    // cmd-memoize fix). An ad-hoc def globs `**/*`, which would otherwise match the
+    // `--log`, the `--ac` cache, and their `.lock`/`.tmp` sidecars when they live
+    // under `--root` — so storing the cold result MUTATES the tree the very next
+    // run hashes, busting the memo key and making every re-run a MISS. These files
+    // are hugit STATE, never a check INPUT, so they must not contribute to the key.
+    let ac_path = args
+        .ac
+        .clone()
+        .unwrap_or_else(|| with_extension(&args.log, "ac"));
+    let excluded = state_file_exclusions(&[&args.log, &ac_path]);
+    let files = snapshot_tree(&root, &def.glob_set, &excluded);
     let ac = select_ac(args)?;
     let runner = ProcessRunner {
         timeout: Duration::from_secs(args.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS)),
     };
 
     // The wedge: derive the three-axis key, look it up, execute-on-miss + store.
-    // The `ac` backend holds the AC-store lock for this whole call (TOCTOU-safe).
+    // The `ac` backend locks the cache file ONLY per-op (lookup/store), never
+    // across the execute (WH-CHECK lock-poison fix), so a hung command can never
+    // poison the AC lock for concurrent checks.
     let outcome = executor::run_memoized(
         &ac,
         &runner,
@@ -609,20 +796,29 @@ pub fn run(args: &CheckArgs) -> Result<Value, PorcelainError> {
         "cache_hit": outcome.from_cache,
         "duration_ms": result.duration_ms,
     });
-    if let Some(pr) = &args.pr {
-        payload
-            .as_object_mut()
-            .unwrap()
-            .insert("pr_id".to_string(), json!(pr));
+    // Stamp the optional PR id without `unwrap` (advisory #5: a non-panicking
+    // form). `payload` is a freshly-built `json!` object, so `as_object_mut` is
+    // always `Some`; the `if let` keeps that fact a SAFE no-op rather than a
+    // latent panic if the literal ever changes shape.
+    if let (Some(pr), Some(obj)) = (&args.pr, payload.as_object_mut()) {
+        obj.insert("pr_id".to_string(), json!(pr));
     }
 
     // `--store` records the row onto the canonical log; omit for a dry run.
     // The payload Value is scrubbed-on-append inside `record_on_log` (WG-SCRUB):
     // `--def` (`name`)/`--pr` (`pr_id`)/`--principal` are user strings — they
     // CANNOT reach the forever-log unredacted.
-    if args.store {
-        record_on_log(args, &payload)?;
-    }
+    //
+    // Idempotency (WH-CHECK): `record_on_log` dedups on `memo_key` — if this
+    // memo_key already has a `check.recorded` row on the log, it appends NOTHING
+    // and reports `already_recorded:true`. N identical `check --store` runs thus
+    // leave EXACTLY ONE row, so `checks show`'s count + hit_rate cannot be
+    // inflated by re-runs (the same `already_*` law verdict/pr/intent follow).
+    let already_recorded = if args.store {
+        !record_on_log(args, &payload)?
+    } else {
+        false
+    };
 
     // `--cmd` is honoured for an ad-hoc def but IGNORED for a built-in (the frozen
     // gate command wins). Surface `cmd_ignored:true` so the agent KNOWS its `--cmd`
@@ -645,6 +841,9 @@ pub fn run(args: &CheckArgs) -> Result<Value, PorcelainError> {
         "exit": result.exit,
         "ok": ok,
         "stored": args.store,
+        // True when `--store` found this memo_key already on the log and appended
+        // NOTHING (idempotent re-run) — the `already_*` law (WH-CHECK dedup).
+        "already_recorded": already_recorded,
         // True when a built-in `--def` ignored a supplied `--cmd` (honest signal).
         "cmd_ignored": cmd_ignored,
         "recorded_kind": CHECK_RECORDED_KIND,
@@ -662,12 +861,40 @@ pub fn run(args: &CheckArgs) -> Result<Value, PorcelainError> {
 /// The `--log` MUST exist (it is the canonical event log — its absence is the
 /// explicit `log_not_found`, never silently an empty world). The principal is
 /// the caller's `--principal` (default `orchestrator:hugit`).
-fn record_on_log(args: &CheckArgs, payload: &serde_json::Value) -> Result<(), PorcelainError> {
+///
+/// Returns `Ok(true)` when a NEW `check.recorded` row was appended, `Ok(false)`
+/// when this `memo_key` was already on the log so NOTHING was appended (the
+/// idempotency dedup — WH-CHECK). Both are exit-0 successes; the difference is
+/// surfaced as `already_recorded` to the agent.
+fn record_on_log(args: &CheckArgs, payload: &serde_json::Value) -> Result<bool, PorcelainError> {
     let path = &args.log;
     // Hold the advisory exclusive lock across the whole read-modify-write so a
-    // concurrent verb on the same --log gets `log_busy`, never a clobber.
+    // concurrent verb on the same --log gets `log_busy`, never a clobber. Holding
+    // it across the dedup SCAN too makes the check-then-append atomic: two
+    // concurrent `check --store` for the same memo_key cannot both pass the scan
+    // and both append (one serializes on the log lock, then sees the other's row).
     let _lock = FileLock::acquire(path).map_err(map_lock_error)?;
     let mut log = load_event_log(path)?;
+
+    // Idempotency dedup (WH-CHECK [HIGH]): if a `check.recorded` event with THIS
+    // (memo_key, cache_hit) pair is already on the log, append NOTHING and report
+    // not-newly-recorded. N identical `check --store` runs thus leave at most TWO
+    // rows total — one cold MISS and one warm HIT — NEVER N, so `check_count` +
+    // `hit_rate_pct` cannot be inflated by re-runs (the fabrication harm is closed:
+    // the KPIs are stable no matter how many times you re-run the same check).
+    //
+    // The pair (not memo_key alone) is the honest key because the wedge's value is
+    // PRECISELY that the same action recorded once as a MISS and once as a HIT —
+    // collapsing both to one row would erase the hit-rate the wedge exists to show.
+    // A third+ identical run (also a HIT, same key) IS deduped — that is the
+    // re-run that would otherwise fabricate. A real input/toolchain change keys
+    // differently and is a legitimately new row.
+    if let Some(memo_key) = payload.get("memo_key").and_then(Value::as_str) {
+        let cache_hit = payload.get("cache_hit").and_then(Value::as_bool);
+        if check_already_recorded(&log, memo_key, cache_hit) {
+            return Ok(false);
+        }
+    }
 
     let principal = args
         .principal
@@ -704,7 +931,28 @@ fn record_on_log(args: &CheckArgs, payload: &serde_json::Value) -> Result<(), Po
         )
     })?;
 
-    persist_log(path, &log)
+    persist_log(path, &log)?;
+    Ok(true)
+}
+
+/// Whether a `check.recorded` event with this `(memo_key, cache_hit)` pair is
+/// already on `log` (the idempotency predicate — WH-CHECK).
+///
+/// The recorded `memo_key` is a content-addressed digest exempt from the WG-SCRUB
+/// redaction, so it survives onto the log verbatim and a re-run's freshly-derived
+/// memo_key matches it byte-for-byte. Pairing it with `cache_hit` lets the wedge
+/// keep BOTH a cold-MISS row and a warm-HIT row for the same action (the hit-rate
+/// the wedge demonstrates) while deduping any FURTHER identical run — so the KPIs
+/// are stable no matter how many times the same check is re-run.
+fn check_already_recorded(log: &EventLog, memo_key: &str, cache_hit: Option<bool>) -> bool {
+    log.records()
+        .iter()
+        .filter(|r| r.kind == CHECK_RECORDED_KIND)
+        .filter_map(|r| serde_json::from_str::<Value>(&r.payload).ok())
+        .any(|v| {
+            v.get("memo_key").and_then(Value::as_str) == Some(memo_key)
+                && v.get("cache_hit").and_then(Value::as_bool) == cache_hit
+        })
 }
 
 /// Persist the canonical event log back to `path` as a pretty `[EventRecord, …]`
@@ -733,29 +981,6 @@ fn map_lock_error(e: LockError) -> PorcelainError {
             "io",
             e.to_string(),
             "check the --log path is on a writable directory",
-        ),
-    }
-}
-
-/// Map an AC-store [`FileLock`] error into the canonical porcelain envelope: a
-/// live holder → `ac_busy` (retry-able — a concurrent `hugit check` holds the AC
-/// lock; the two serialize), an I/O fault → `io`. Distinct from `log_busy` so an
-/// agent can tell the AC contention apart from the canonical-log contention.
-fn map_ac_lock_error(e: LockError) -> PorcelainError {
-    match e {
-        LockError::Busy { path } => PorcelainError::new(
-            "ac_busy",
-            format!(
-                "the AC store {} is locked by another hugit check",
-                path.display()
-            ),
-            "another `hugit check` holds the AC-store lock; retry once it releases \
-             (a stale lock is auto-reclaimed after a short window)",
-        ),
-        LockError::Io { .. } => PorcelainError::new(
-            "io",
-            e.to_string(),
-            "check the --ac path is on a writable directory",
         ),
     }
 }
@@ -914,12 +1139,12 @@ mod tests {
             produced_at: 0,
         };
         {
-            let ac = FileAc::new_locked(ac_path.clone()).unwrap();
+            let ac = FileAc::new(ac_path.clone());
             ac.store(&red).unwrap();
             // A clean lookup is a HIT carrying the stored exit:1.
             let hit = ac.lookup(&key).unwrap().expect("stored entry hits");
             assert_eq!(hit.exit, 1, "untampered entry serves the real red result");
-        } // drop releases the lock
+        } // per-op lock released after each call
 
         // Tamper: flip `exit`→0 in the on-disk entry WITHOUT updating the self-hash.
         let raw = std::fs::read_to_string(&ac_path).unwrap();
@@ -929,7 +1154,7 @@ mod tests {
 
         // Lookup now recomputes the self-hash over the forged bytes; mismatch ⇒
         // MISS. The forged green is NEVER served.
-        let ac = FileAc::new_locked(ac_path.clone()).unwrap();
+        let ac = FileAc::new(ac_path.clone());
         assert!(
             ac.lookup(&key).unwrap().is_none(),
             "a tampered (flipped exit) entry is a MISS, not a forged green hit"

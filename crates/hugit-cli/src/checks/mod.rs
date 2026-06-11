@@ -300,11 +300,15 @@ fn show(args: &ShowArgs) -> Result<Value, PorcelainError> {
         "checks": row_json,
         "kpis": kpis,
     });
-    if rows.is_empty() {
+    if rows.is_empty()
+        && let Some(obj) = out.as_object_mut()
+    {
         // Honest disclosure: no seam records CheckResults onto the porcelain log
         // yet, so a clean log legitimately has zero check rows. Say so — never
-        // imply checks ran with a 0% hit-rate.
-        out.as_object_mut().unwrap().insert(
+        // imply checks ran with a 0% hit-rate. (`out` is a freshly-built `json!`
+        // object so `as_object_mut` is always `Some`; the `if let` keeps that a
+        // SAFE no-op rather than a latent `unwrap` panic — advisory #5.)
+        obj.insert(
             "note".to_string(),
             json!(
                 "no check.recorded events on this log; the local executor \
