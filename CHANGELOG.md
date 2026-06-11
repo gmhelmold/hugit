@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(robustness): **SOTA-audit Wave C — Tier-3 hardening + Wave D records sweep**
+  (audit closed). WC1: porcelain file seam is atomic+locked (`.lock` create_new
+  + tmp/fsync/rename) — the TOCTOU read-modify-write race is gone (proof: 2
+  concurrent `intent new` × 8 rounds → exactly one wins with `log_busy` or both
+  serialize, chain always valid); corrupt/truncated/wrong-shape logs surface
+  structured errors, never a panic or silent clobber (9 reject tests). WC2:
+  rollup tiebreak deterministic (born_at DESC, run_id, seq — input-order
+  independent), span≤sum law honest both directions, capture serialize path
+  fail-closed (`EnvelopeError::Serialize`, no `.expect()` panic), arithmetic
+  saturating. WC3: env-gated lanes print SKIP+reason (the green count now
+  carries live-lane signal), x4 wire round-trip byte-exact (no trim_end mask),
+  scratch dirs collision-proof (atomic counter). WD: docs swept true post
+  Waves A/B — ADR JSONC synced to schema 1.2.0 + four altitudes, package count
+  corrected to 17, plan status lines flipped to COMPLETE, handoffs marked
+  APPLIED/CLOSED.
+
 - feat(cli): **SOTA-audit Wave B — the wedge made visible + one porcelain law**
   (audit Tier-2, P1-P8 closed). WB0: ONE canonical error shape
   (`{"error":{kind,message,fix,…}}`) + ONE exit law (0/2/1) across ALL verbs —
