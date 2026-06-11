@@ -47,6 +47,11 @@ const SECRET_VALUE: &str = "f2-cold-api-key-7c41e9";
 /// redactor is per-line, not whole-blob).
 const SURVIVOR_LINE: &str = "ran cargo test --workspace: 312 passed";
 
+/// A realistic GitHub PAT planted in a CHARTER (no `SECRET:` marker — the
+/// real detector set must catch it by prefix shape). Proves the envelope
+/// scrubs EVERY string field on write, not just transcripts.
+const CHARTER_GHP_TOKEN: &str = "ghp_16C7e42F292c6912E7710c838347Ae178B4a";
+
 fn authorship() -> Authorship {
     Authorship {
         model: "in-process-deterministic".to_string(),
@@ -148,6 +153,70 @@ fn item_1_redaction_applied_before_any_blob_is_stored() {
 
     // The stamped policy is the canonical one.
     assert_eq!(closed.envelope.trajectory.redaction_policy, "default-v1");
+}
+
+/// EVERY string field of the envelope rides the write-path scrubber — not
+/// only the transcripts. Plant a `ghp_`-style PAT (NO `SECRET:` marker — the
+/// real detector set must catch it by prefix shape) into the CHARTER and
+/// prove no stored blob, and no surfaced envelope field, contains it.
+#[test]
+fn item_1b_every_string_field_scrubbed_on_write() {
+    let mut draft = secret_bearing_draft(Altitude::Intent);
+    // Plant the unprefixed PAT across the author-supplied string fields.
+    draft.charter = format!("rotate the deploy key {CHARTER_GHP_TOKEN}");
+    draft.constraints = vec![format!("must not log {CHARTER_GHP_TOKEN}")];
+    draft.acceptance = vec![format!("old token {CHARTER_GHP_TOKEN} revoked")];
+    draft.parent_intents = vec![format!("parent {CHARTER_GHP_TOKEN}")];
+    draft.env_manifest = format!("rustc 1.96.0 ; CI_TOKEN={CHARTER_GHP_TOKEN}");
+    draft.files_read = vec![hugit_contracts::context_envelope::FileRead {
+        path: format!("secrets/{CHARTER_GHP_TOKEN}.pem"),
+        hash: "sha256:".to_string() + &"a".repeat(64),
+    }];
+
+    let store = InMemoryColdStore::new();
+    let closed = close_envelope(&draft, CaptureLevel::default(), &store).expect("close at full");
+
+    // ABSENCE scan over every byte at rest — the envelope blob included.
+    for (blob_ref, bytes) in store.blobs() {
+        let text = String::from_utf8(bytes).expect("utf-8");
+        assert!(
+            !text.contains(CHARTER_GHP_TOKEN),
+            "ghp_ PAT leaked into stored blob {blob_ref}: {text}"
+        );
+    }
+
+    // And no surfaced envelope field carries it either.
+    let env = &closed.envelope;
+    assert_eq!(env.charter, REDACTED_MARKER, "charter must be scrubbed");
+    assert!(
+        env.constraints
+            .iter()
+            .all(|c| !c.contains(CHARTER_GHP_TOKEN))
+    );
+    assert!(
+        env.acceptance
+            .iter()
+            .all(|a| !a.contains(CHARTER_GHP_TOKEN))
+    );
+    assert!(
+        env.parent_intents
+            .iter()
+            .all(|p| !p.contains(CHARTER_GHP_TOKEN))
+    );
+    assert!(!env.snapshot.env_manifest.contains(CHARTER_GHP_TOKEN));
+    assert!(
+        env.snapshot
+            .files_read
+            .iter()
+            .all(|f| !f.path.contains(CHARTER_GHP_TOKEN)),
+        "files_read paths must be scrubbed"
+    );
+    // The content-address hash is load-bearing and must survive verbatim.
+    assert_eq!(
+        env.snapshot.files_read[0].hash,
+        "sha256:".to_string() + &"a".repeat(64),
+        "the file content-hash is a load-bearing ref and must NOT be redacted"
+    );
 }
 
 // ── ② capture-level gating ───────────────────────────────────────────────────

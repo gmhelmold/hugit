@@ -369,11 +369,15 @@ fn build_answer(entry: &LogEntry) -> Result<ProvenanceAnswer, ()> {
         .get("intent_id")
         .and_then(|v| v.as_str())
         .map(String::from);
-    let charter = payload_val
-        .get("charter")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    // Redact the surfaced charter at the view boundary — parity with the
+    // ledger projection (`ledger/mod.rs:104`) and the envelope write path.
+    // `why` is a read surface; one redaction law across every read surface.
+    let charter = hugit_ledger::redact_apply(
+        payload_val
+            .get("charter")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
+    );
 
     // Pull model + cost from the attestation chain (if provided).
     let (model, cost) = entry
