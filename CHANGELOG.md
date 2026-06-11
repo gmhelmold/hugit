@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(cli): **SOTA-audit Wave B — the wedge made visible + one porcelain law**
+  (audit Tier-2, P1-P8 closed). WB0: ONE canonical error shape
+  (`{"error":{kind,message,fix,…}}`) + ONE exit law (0/2/1) across ALL verbs —
+  the legacy four (why/impact/tournament/export) now speak stable JSON;
+  missing/corrupt logs are explicit structured errors, never a silent empty
+  world. WB2: `hugit checks show` (real hit-rate/memo-key aggregation,
+  honest nulls), `hugit checks key` (engine-parity memo key — agents predict
+  the cache), `hugit queue show` (union batches by campaign; verdict
+  null-disclosed until the recorder seam lands). New verbs: `pr list/abandon`
+  · `campaign list/abandon` · `intent list` (id recovery). Referential
+  symmetry (orchestrator⇒--run-id, human⇒--principal, ghost campaigns
+  refused), stable key-sets across idempotent re-runs, every fix-hint names
+  only verbs that exist, `suggested_fix` is dead, and ALL porcelain appends
+  route through the WA2 D14 guard (WA2b closed: subagent intent authorship
+  allowed-with-audit per the matrix; pr/campaign classes enforced).
+
 - feat(security)!: **SOTA-audit Wave A — the four security structurals closed**
   (audit: `docs/review/2026-06-11-sota-audit.md`). WA1 real redaction engine
   (known-prefix + Shannon-entropy detectors, EVERY envelope field scrubbed on
