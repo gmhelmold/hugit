@@ -240,6 +240,14 @@ pub enum PrError {
         /// The PR id.
         pr_id: String,
     },
+    /// An internal fault: a post-append projection failed to find the record that
+    /// was just appended. This is a bug (infallible by construction), not a user
+    /// error. Exits with the reserved internal-fault code (`1`), still as
+    /// structured JSON (`{"error":{"kind":"internal",…}}`).
+    Internal {
+        /// A short description of what went wrong (never user-supplied input).
+        message: String,
+    },
 }
 
 impl PrError {
@@ -259,6 +267,7 @@ impl PrError {
             PrError::AbandonUnknownPr { .. } => "unknown_pr",
             PrError::AbandonLanded { .. } => "pr_already_landed",
             PrError::SettleNotQueued { .. } => "pr_not_queued",
+            PrError::Internal { .. } => "internal",
         }
     }
 
@@ -377,6 +386,7 @@ impl PrError {
                 format!("hugit pr land --pr {pr_id} first, then --settle"),
             )
             .with_context("pr_id", json!(pr_id)),
+            PrError::Internal { message } => PorcelainError::internal(message.clone()),
         }
     }
 
@@ -488,7 +498,14 @@ pub fn open(log: &mut EventLog, args: &OpenArgs) -> Result<Value, PrError> {
         got: denied.reason.code().to_string(),
     })?;
 
-    let opened = find_pr_opened(log, &args.pr_id).expect("pr.opened was just appended for this id");
+    let opened = find_pr_opened(log, &args.pr_id).ok_or_else(|| PrError::Internal {
+        message: format!(
+            "pr.opened for '{}' not found after a successful append — \
+             the payload round-tripped through canonical_json into a form that \
+             parse_opened could not project back; this is a hugit internal bug",
+            args.pr_id
+        ),
+    })?;
     Ok(open_json(&opened, false))
 }
 
@@ -696,7 +713,14 @@ pub fn land(log: &mut EventLog, args: &LandArgs) -> Result<Value, PrError> {
         .entries()
         .iter()
         .position(|e| e.item_id() == item_id)
-        .expect("the entry just pushed is present in the batch") as u64;
+        .ok_or_else(|| PrError::Internal {
+            message: format!(
+                "item_id '{}' not found in the Batch after being pushed — \
+                 the queue engine reordered or dropped the entry; \
+                 this is a hugit internal bug",
+                item_id
+            ),
+        })? as u64;
 
     let payload = format!(
         "{{\"item_id\":{item},\"mode\":{mode},\"order_index\":{idx},\"pr_id\":{pr}}}",
@@ -1108,16 +1132,24 @@ pub fn find_pr_opened(log: &EventLog, pr_id: &str) -> Option<OpenedPr> {
 }
 
 /// Project the `pr.queued` for a PR id out of the log, if any.
+///
+/// Returns `None` when the PR has no `pr.queued` record OR when the PR has a
+/// terminal `pr.landed` event — a landed PR leaves the queue projection.
 pub fn find_pr_queued(log: &EventLog, pr_id: &str) -> Option<QueuedPr> {
     all_pr_queued(log).into_iter().find(|q| q.pr_id == pr_id)
 }
 
-/// Project every `pr.queued` on the log, in log (queue) order.
+/// Project every ACTIVE `pr.queued` on the log, in log (queue) order.
+///
+/// A PR whose `pr_id` appears in a terminal `pr.landed` event is excluded — a
+/// settled PR leaves the queue projection. This is the single filter point so
+/// both `pr show` and `queue show` agree by construction.
 pub fn all_pr_queued(log: &EventLog) -> Vec<QueuedPr> {
     log.records()
         .iter()
         .filter(|r| r.kind == PR_QUEUED_KIND)
         .filter_map(parse_queued)
+        .filter(|q| !pr_is_landed(log, &q.pr_id))
         .collect()
 }
 
@@ -1373,5 +1405,85 @@ mod tests {
         let again = open(&mut log, &open_args("7", "camp-a", &["i1"])).unwrap();
         assert_eq!(again["already_exists"], json!(true));
         assert_eq!(log.len(), n_before, "re-open appends no second event");
+    }
+
+    /// WG-PR fix 1: the `Internal` error variant renders as structured JSON with
+    /// `kind:"internal"` (the one-error-law reserved internal-fault code) rather
+    /// than panicking. This ensures both `.expect()` → `?` sites produce
+    /// machine-parseable output on a malformed-payload fault.
+    #[test]
+    fn internal_error_renders_structured_json_not_panic() {
+        let e = PrError::Internal {
+            message: "test internal fault".to_string(),
+        };
+        let v: Value = serde_json::from_str(&e.to_porcelain().to_json())
+            .expect("PrError::Internal renders valid JSON");
+        assert_eq!(
+            v["error"]["kind"], "internal",
+            "kind must be 'internal': {v}"
+        );
+        assert!(v["error"]["fix"].is_string(), "fix must be present: {v}");
+        assert!(
+            v["error"]["message"].is_string(),
+            "message must be present: {v}"
+        );
+        // It is an internal fault (exit 1), not a domain error (exit 2).
+        use crate::porcelain::INTERNAL_FAULT_EXIT;
+        assert_eq!(
+            e.to_porcelain().exit_code(),
+            std::process::ExitCode::from(INTERNAL_FAULT_EXIT)
+        );
+    }
+
+    /// WG-PR fix 2: `all_pr_queued` excludes PRs that have a terminal
+    /// `pr.landed` event — a settled PR leaves the queue projection.
+    #[test]
+    fn all_pr_queued_excludes_landed_prs() {
+        let mut log = EventLog::new();
+        // open + land PR "7".
+        open(&mut log, &open_args("7", "camp-a", &["i1"])).unwrap();
+        land(
+            &mut log,
+            &LandArgs {
+                pr_id: "7".to_string(),
+                recorded_at: 2000,
+            },
+        )
+        .unwrap();
+        // Before settlement: queued.
+        assert_eq!(all_pr_queued(&log).len(), 1, "one queued PR before settle");
+        // Settle → pr.landed.
+        settle(
+            &mut log,
+            &SettleArgs {
+                pr_id: "7".to_string(),
+                recorded_at: 3000,
+            },
+        )
+        .unwrap();
+        // After settlement: must NOT appear in all_pr_queued.
+        assert_eq!(
+            all_pr_queued(&log).len(),
+            0,
+            "landed PR must be excluded from all_pr_queued"
+        );
+        // find_pr_queued also returns None for the landed PR.
+        assert!(
+            find_pr_queued(&log, "7").is_none(),
+            "find_pr_queued returns None for a landed PR"
+        );
+        // pr show reflects queue.queued:false.
+        let shown = show(
+            &log,
+            &ShowArgs {
+                pr_id: "7".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            shown["queue"]["queued"],
+            json!(false),
+            "pr show queue.queued must be false after landing: {shown}"
+        );
     }
 }
