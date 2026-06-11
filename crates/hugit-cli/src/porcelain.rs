@@ -237,57 +237,76 @@ impl PorcelainError {
 // toward redaction in free text" law, not a regression.
 //
 // **Identifier fields are ADDRESSES, not free text** — {`campaign`, `intent_id`,
-// `pr_id`, `run_id`} are keys the rest of the flow looks up by. Scrubbing them
-// collapses two distinct 40-hex/high-entropy keys to one `[REDACTED]` (silent
+// `pr_id`, `run_id`} are keys the rest of the flow looks up by. Free-text-scrubbing
+// them collapses two distinct 40-hex/high-entropy keys to one `[REDACTED]` (silent
 // data loss) AND breaks addressing asymmetrically (open scrubs the key,
-// abandon/close look up the raw key). So these KEYS are exempt from the free-text
-// scrub here ([`is_identifier_key`]). This is CONTRACT-COUPLED with WH-IDENT,
-// which guarantees an identifier can never carry a known secret by VALIDATING it
-// at INPUT (reject empty + reject known-secret-prefix shapes). The split is
-// exact: WH-SCRUB exempts, WH-IDENT validates. (Free-text fields — charter /
-// reason / owner / summary / lens names — are NOT identifiers and still scrub.)
+// abandon/close look up the raw key). But BLANKET-exempting them (the WH-SCRUB
+// design) is a hole: the Round-5 adversaries reproduced a live leak —
+// `campaign open --campaign <xoxb-…>` / `check --pr <secret>` smuggled a
+// structurally-shaped credential into an identifier field and it reached the
+// forever-log VERBATIM. The exemption leaned on the `ident.rs` input validator,
+// which was both WEAKER than the engine (omitted `xoxb-`/`clp_`/`Bearer`, used
+// `starts_with` not substring, no trim) AND not called on every write path.
+//
+// WI-SCRUB makes the boundary itself safe: identifier values get a STRUCTURAL
+// scrub ([`structural_secret_scrub`] — the engine's prefix / connection-string /
+// JWT / PEM / keyword detectors), EXEMPT from only the bare-hex + entropy scan.
+// A `xoxb-`/`clp_`/`Bearer`/conn-string/JWT/PEM in an identifier REDACTS (no verb
+// can leak it — the security boundary no longer depends on per-verb validation);
+// a 40/64-hex content address or a dense high-entropy slug id SURVIVES verbatim
+// (no collapse, addressing stays symmetric). The `ident.rs` validator is now a UX
+// nicety (a clear error at input), not the security boundary; another WP owns it.
+// (Free-text fields — charter / reason / owner / summary / lens names — are NOT
+// identifiers and still get the full free-text scrub.)
 
 /// Recursively scrub EVERY user-supplied string VALUE in a porcelain payload
 /// through the redaction engine ([`crate::redaction::scrub`] →
 /// [`hugit_ledger::redact::apply`]), IN PLACE, BEFORE the payload is serialized
 /// and appended to the hash-chained log.
 ///
-/// Object KEYS are structural and never scrubbed. The exemption is decided
-/// per `(key, value)` as the tree descends ([`is_exempt`]): a digest-NAMED field
-/// is exempt ONLY IF its value is digest-SHAPED ([`is_digest_shaped`]), and the
-/// identifier-address fields ([`is_identifier_key`]) are exempt as keys. Every
-/// other string value scrubs. Arrays inherit their parent key's exemption;
-/// nested objects re-evaluate per child key.
+/// Object KEYS are structural and never scrubbed. The per-value scrub mode is
+/// decided per `(key, value)` as the tree descends ([`scrub_mode`]): a digest-NAMED
+/// field survives verbatim ONLY IF its value is digest-SHAPED ([`is_digest_shaped`]);
+/// an identifier-address field ([`is_identifier_key`]) gets the STRUCTURAL-secret
+/// scrub ([`structural_secret_scrub`] — a prefixed/conn-string/JWT/PEM secret
+/// redacts, a 40/64-hex address survives); every other string value gets the full
+/// free-text scrub. Arrays inherit their parent key's mode; nested objects
+/// re-evaluate per child key.
 ///
 /// This is THE seam: route every porcelain append through [`scrub_payload`]
 /// (directly or via [`scrub_to_canonical`]). A raw append of an un-scrubbed user
 /// payload is the forbidden path the WG-SCRUB / WH-SCRUB tests guard against.
 pub fn scrub_payload(value: &mut Value) {
-    scrub_value(value, false);
+    scrub_value(value, ScrubMode::FreeText);
 }
 
-/// Inner recursion. `exempt` is set when the value is reached via an exempt KEY
-/// (a digest key whose value is digest-shaped, or an identifier-address key), so
-/// its string content survives verbatim. Arrays propagate the parent's exemption.
-fn scrub_value(value: &mut Value, exempt: bool) {
+/// Inner recursion. `mode` is the scrub decision for the value reached at this
+/// node (re-evaluated per object child by [`scrub_mode`]):
+/// [`FreeText`](ScrubMode::FreeText) routes the string through the full engine,
+/// [`Verbatim`](ScrubMode::Verbatim) leaves a digest-shaped value untouched, and
+/// [`Structural`](ScrubMode::Structural) routes an identifier value through the
+/// structural detectors only (so a prefixed secret REDACTS but an address
+/// SURVIVES). Arrays propagate the parent's mode.
+fn scrub_value(value: &mut Value, mode: ScrubMode) {
     match value {
-        Value::String(s) => {
-            if !exempt {
-                *s = crate::redaction::scrub(s);
-            }
-        }
+        Value::String(s) => match mode {
+            ScrubMode::FreeText => *s = crate::redaction::scrub(s),
+            ScrubMode::Structural => *s = structural_secret_scrub(s),
+            ScrubMode::Verbatim => {}
+        },
         Value::Array(items) => {
             for item in items {
-                scrub_value(item, exempt);
+                scrub_value(item, mode);
             }
         }
         Value::Object(map) => {
             for (key, child) in map.iter_mut() {
-                // Re-evaluate exemption at EACH (key, value): a digest key
-                // exempts only a digest-SHAPED value; an identifier key is an
-                // address. Everything else (including a secret smuggled into a
-                // digest-named field) scrubs.
-                scrub_value(child, is_exempt(key, child));
+                // Re-evaluate the mode at EACH (key, value): a digest key keeps
+                // only a digest-SHAPED value verbatim; an identifier key gets the
+                // structural-secret scrub (a prefixed secret redacts, an address
+                // survives). Everything else (including a secret smuggled into a
+                // digest-named field) scrubs as free text.
+                scrub_value(child, scrub_mode(key, child));
             }
         }
         // Numbers / bools / null carry no user free-text — nothing to scrub.
@@ -295,33 +314,246 @@ fn scrub_value(value: &mut Value, exempt: bool) {
     }
 }
 
-/// Decide whether the string under `key` (carrying `value`) is EXEMPT from the
-/// free-text scrub. Two exempt classes:
+/// The per-value scrub decision as the tree descends: SCRUB the value through the
+/// free-text engine, leave it VERBATIM, or apply the STRUCTURAL-secret scrub
+/// (identifier fields). Decided per `(key, value)`.
+#[derive(Clone, Copy)]
+enum ScrubMode {
+    /// Route the string through the full free-text engine ([`crate::redaction::scrub`]).
+    FreeText,
+    /// Leave the string verbatim (a digest-SHAPED value under a digest key).
+    Verbatim,
+    /// Identifier-ADDRESS field: route through the STRUCTURAL detectors only
+    /// (prefix / connection-string / JWT / PEM / keyword), EXEMPT from the
+    /// bare-hex + entropy scan, so a `xoxb-`/`clp_`/`Bearer`/conn-string in an
+    /// identifier REDACTS while a 40/64-hex address or high-entropy slug SURVIVES
+    /// (no collapse, stays addressable). [WI-SCRUB]
+    Structural,
+}
+
+/// Decide how the string under `key` (carrying `value`) is scrubbed as the tree
+/// descends. Three modes ([`ScrubMode`]):
 ///
-/// 1. **Digest fields, value-gated** ([`is_digest_key`] AND [`is_digest_shaped`]):
-///    a content address is load-bearing, never a secret — but ONLY when its value
-///    is actually digest-shaped. A digest-NAMED field carrying a non-digest value
-///    (a secret smuggled via `--toolchain`/`--tree-hash`) is NOT exempt — it
-///    scrubs like any other value (WH-SCRUB, the Round-4 hole).
-/// 2. **Identifier-address fields** ([`is_identifier_key`]): keys the flow looks
-///    up by — exempt from free-text scrub so addressing stays consistent
-///    (contract-coupled with WH-IDENT, which validates them at input).
+/// 1. **Digest fields, value-gated** ([`is_digest_key`] AND [`is_digest_shaped`])
+///    → [`ScrubMode::Verbatim`]: a content address is load-bearing, never a
+///    secret — but ONLY when its value is actually digest-shaped. A digest-NAMED
+///    field carrying a non-digest value (a secret smuggled via
+///    `--toolchain`/`--tree-hash`) falls through to [`ScrubMode::FreeText`] and
+///    scrubs (WH-SCRUB, the Round-4 hole).
+/// 2. **Identifier-address fields** ([`is_identifier_key`]) →
+///    [`ScrubMode::Structural`]: keys the flow looks up by. They are NOT
+///    blanket-exempt (the Round-5 hole: a `xoxb-`/`clp_`/`Bearer`/conn-string in
+///    an identifier field reached the forever-log VERBATIM because the exemption
+///    relied on an input validator that was both WEAKER than the engine and not
+///    called on every write path). Instead the value is routed through the
+///    engine's STRUCTURAL detectors at the scrub boundary itself — no verb can
+///    leak a prefixed secret in an identifier — while the bare-hex/entropy scan
+///    is skipped so a 40/64-hex address (or a high-entropy slug id) SURVIVES
+///    verbatim (no collapse; addressing stays symmetric across open/abandon/close).
+/// 3. Everything else → [`ScrubMode::FreeText`].
 ///
-/// A non-string `value` under a digest key never carries free text, so the digest
-/// branch only fires for a string; identifier keys exempt their subtree as a key
-/// (an identifier value is always a string in practice).
-fn is_exempt(key: &str, value: &Value) -> bool {
+/// Identifier exemption is decided as a KEY (an identifier value is always a
+/// string in practice); the digest branch only fires for a string value.
+fn scrub_mode(key: &str, value: &Value) -> ScrubMode {
     if is_identifier_key(key) {
-        return true;
+        return ScrubMode::Structural;
     }
     if is_digest_key(key) {
-        // VALUE-GATED: a string value must be digest-shaped to be exempt; a
+        // VALUE-GATED: a string value must be digest-shaped to survive; a
         // non-string (array/object) under a digest key recurses and is decided
         // per descendant, so do not blanket-exempt it here.
         return match value {
-            Value::String(s) => is_digest_shaped(s),
-            _ => false,
+            Value::String(s) if is_digest_shaped(s) => ScrubMode::Verbatim,
+            _ => ScrubMode::FreeText,
         };
+    }
+    ScrubMode::FreeText
+}
+
+/// Apply the STRUCTURAL-secret scrub to an identifier-field value (WI-SCRUB).
+///
+/// The free-text engine ([`hugit_ledger::redact::apply`]) fires on FIVE detector
+/// classes; this routes an identifier value through the four **structural** ones —
+/// known-prefix credentials (`ghp_`/`xoxb-`/`clp_`/`AKIA`/`sk-`/…), the JWT
+/// (`eyJ`) and `Bearer ` prefixes, PEM private-key blocks, connection-string
+/// passwords, and the keyword-context detector (`token=…`) — but DELIBERATELY
+/// SKIPS the bare-hex + high-entropy scan. The result: a structurally-shaped
+/// secret smuggled into an identifier field REDACTS (no verb can leak it), while a
+/// 40/64-hex content-address or a dense high-entropy slug used as an address
+/// SURVIVES verbatim (so two distinct addresses never collapse to one
+/// `[REDACTED]` and the rest of the flow can still look them up).
+///
+/// Single-source-of-truth check: the engine has no public hook to run the
+/// structural detectors WITHOUT the entropy scan (only the all-in `apply` is
+/// public — verified 2026-06-11), and the engine MUST NOT be weakened, so the
+/// minimal composition lives here. Each branch mirrors a private `redact::apply`
+/// detector exactly; the bare-hex/entropy branch is the only one omitted.
+fn structural_secret_scrub(s: &str) -> String {
+    if is_structural_secret(s) {
+        hugit_ledger::redact::REDACTED.to_string()
+    } else {
+        // No structural detector fired — an address survives verbatim. The
+        // bare-hex/entropy scan is intentionally NOT run (an address must not
+        // collapse), so a 40/64-hex key or a high-entropy slug id is preserved.
+        s.to_string()
+    }
+}
+
+/// True iff `s` trips a STRUCTURAL secret detector — the four `redact::apply`
+/// detector classes that do NOT depend on entropy/bare-hex shape. Mirrors the
+/// engine's private `is_secret` minus its detector (5). Kept in lockstep with
+/// `hugit_ledger::redact`; the engine remains the law for free text.
+fn is_structural_secret(s: &str) -> bool {
+    // (1) the planted marker (same as the engine).
+    if s.contains(hugit_ledger::redact::SECRET_MARKER) {
+        return true;
+    }
+    // (2) known credential prefixes (substring match, as the engine does).
+    if KNOWN_SECRET_PREFIXES.iter().any(|p| s.contains(p)) {
+        return true;
+    }
+    // (2b) `sk-` with the engine's ≥20-token-char length gate.
+    if contains_sk_key(s) {
+        return true;
+    }
+    // PEM private-key blocks.
+    if s.contains("-----BEGIN") && s.contains("PRIVATE KEY") {
+        return true;
+    }
+    // (3) connection-string password.
+    if contains_connection_string_password(s) {
+        return true;
+    }
+    // (4) keyword-context secret (`token=…`, `password: …`).
+    if contains_keyword_context_secret(s) {
+        return true;
+    }
+    // (5) bare-hex + high-entropy scan — DELIBERATELY OMITTED so an address
+    //     (40/64-hex content address or a dense high-entropy slug) survives.
+    false
+}
+
+/// Known credential prefixes that are secrets by construction — the structural
+/// mirror of the engine's `KNOWN_PREFIXES` (case-sensitive, as issuers mint
+/// them). `sk-` is handled separately ([`contains_sk_key`]) with a length gate.
+const KNOWN_SECRET_PREFIXES: &[&str] = &[
+    "ghp_",
+    "gho_",
+    "ghs_",
+    "github_pat_",
+    "AKIA",
+    "xoxb-",
+    "xoxp-",
+    "xoxo-",
+    "xoxa-",
+    "xoxs-",
+    "clp_",
+    "Bearer ",
+    "eyJ",
+];
+
+/// Minimum run of base64/hex chars after `sk-` for the engine's `sk-` gate.
+const SK_MIN_SUFFIX_LEN: usize = 20;
+
+/// Recognised credential keywords (lowercase) for the keyword-context detector —
+/// mirrors the engine's `KEYWORD_PREFIXES`.
+const SECRET_KEYWORDS: &[&str] = &["password", "passwd", "secret", "token", "api_key", "pwd"];
+
+/// A char that can appear inside a base64/hex token run (engine's `is_token_char`).
+fn is_secret_token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=' || c == '-' || c == '_'
+}
+
+/// True iff `s` contains `sk-` followed by ≥ [`SK_MIN_SUFFIX_LEN`] token chars
+/// (mirrors the engine's `has_sk_key`). Short ids (`sk-256`, `sk-learn`) do NOT
+/// fire.
+fn contains_sk_key(s: &str) -> bool {
+    let needle = "sk-";
+    let mut search = s;
+    while let Some(pos) = search.find(needle) {
+        let after = &search[pos + needle.len()..];
+        let run_len = after
+            .chars()
+            .take_while(|&c| is_secret_token_char(c))
+            .count();
+        if run_len >= SK_MIN_SUFFIX_LEN {
+            return true;
+        }
+        let advance = pos + needle.len();
+        if advance >= search.len() {
+            break;
+        }
+        search = &search[advance..];
+    }
+    false
+}
+
+/// True iff `s` carries a URL with an embedded `user:password@host` (mirrors the
+/// engine's `has_connection_string_password`). A bare-hex address has no `://`,
+/// so this never fires on one.
+fn contains_connection_string_password(s: &str) -> bool {
+    let mut search = s;
+    while let Some(scheme_end) = search.find("://") {
+        let authority_start = scheme_end + 3;
+        if authority_start >= search.len() {
+            break;
+        }
+        let authority_str = &search[authority_start..];
+        let authority_len = authority_str
+            .find(['/', '?', '#'])
+            .unwrap_or(authority_str.len());
+        let authority = &authority_str[..authority_len];
+        if let Some(at_pos) = authority.find('@') {
+            let userinfo = &authority[..at_pos];
+            if let Some(colon_pos) = userinfo.find(':')
+                && !userinfo[colon_pos + 1..].is_empty()
+            {
+                return true;
+            }
+        }
+        search = &search[authority_start..];
+    }
+    false
+}
+
+/// True iff `s` contains a credential keyword immediately followed by `=`/`:` and
+/// a non-empty value (mirrors the engine's `has_keyword_context_secret`). An
+/// address has no `keyword=value` shape, so this never fires on one.
+fn contains_keyword_context_secret(s: &str) -> bool {
+    let lower = s.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    for kw in SECRET_KEYWORDS {
+        let mut pos = 0usize;
+        while pos < lower.len() {
+            let Some(kw_pos) = lower[pos..].find(kw) else {
+                break;
+            };
+            let abs_kw_start = pos + kw_pos;
+            let after_kw = abs_kw_start + kw.len();
+            let before_ok = abs_kw_start == 0 || !bytes[abs_kw_start - 1].is_ascii_alphanumeric();
+            if before_ok {
+                let mut sep_idx = after_kw;
+                while bytes
+                    .get(sep_idx)
+                    .is_some_and(|b| *b == b' ' || *b == b'\t')
+                {
+                    sep_idx += 1;
+                }
+                if let Some(sep_byte) = bytes.get(sep_idx)
+                    && (*sep_byte == b'=' || *sep_byte == b':')
+                {
+                    let value = s.get(sep_idx + 1..).unwrap_or("").trim_start();
+                    if !value.is_empty() {
+                        return true;
+                    }
+                }
+            }
+            let advance = abs_kw_start + kw.len();
+            if advance <= pos {
+                break;
+            }
+            pos = advance;
+        }
     }
     false
 }
@@ -385,15 +617,22 @@ fn is_digest_algo(algo: &str) -> bool {
 }
 
 /// True iff `key` names an identifier-ADDRESS field — a key the flow looks up by,
-/// not free text. Exempt from the free-text scrub so distinct keys never collapse
-/// to one `[REDACTED]` and addressing stays symmetric (open/abandon/close all see
-/// the same raw key).
+/// not free text. These get the STRUCTURAL-secret scrub ([`structural_secret_scrub`]),
+/// NOT the full free-text scrub: a prefixed/conn-string/JWT/PEM secret REDACTS,
+/// but a 40/64-hex content address (or a high-entropy slug id) SURVIVES verbatim
+/// so distinct keys never collapse to one `[REDACTED]` and addressing stays
+/// symmetric (open/abandon/close all see the same raw key).
 ///
-/// CONTRACT-COUPLED with WH-IDENT: these fields are exempt HERE because WH-IDENT
-/// validates them at INPUT (reject empty + reject known-secret-prefix shapes), so
-/// an identifier can never carry a known secret. WH-SCRUB exempts; WH-IDENT
-/// validates. Free-text fields (charter / reason / owner / summary / lens names)
-/// are NOT identifiers and still scrub.
+/// WI-SCRUB (adversarial Round 5) made the scrub boundary itself safe for these
+/// fields. The earlier WH-SCRUB design BLANKET-exempted them, leaning on WH-IDENT
+/// to validate at input — but that input validator was both WEAKER than the engine
+/// (omitted `xoxb-`/`clp_`/`Bearer`, used `starts_with` not substring, no trim) AND
+/// not called on every write path (`check --pr <secret>` never validated `pr_id`),
+/// so a secret in an identifier reached the forever-log VERBATIM. The structural
+/// scrub here closes that leak for ALL verbs at the boundary, independent of any
+/// per-verb validation; the `ident.rs` input validator remains a UX nicety (a clear
+/// error at input), owned by another WP. Free-text fields (charter / reason / owner
+/// / summary / lens names) are NOT identifiers and still scrub in full.
 pub fn is_identifier_key(key: &str) -> bool {
     matches!(key, "campaign" | "intent_id" | "pr_id" | "run_id")
 }
@@ -749,6 +988,130 @@ mod tests {
         assert!(!is_digest_shaped("deadbeef")); // 8 hex, too short
         assert!(!is_digest_shaped(&format!("token:{DIGEST_64}"))); // unknown algo
         assert!(!is_digest_shaped("postgres://u:p@h:5432/d"));
+    }
+
+    // ── WI-SCRUB (adversarial Round 5): structural-secret scrub for identifiers ─
+
+    /// A realistic Slack bot token (the prefix `ident.rs` omitted).
+    const SLACK: &str = "xoxb-2222222222-3333333333-abcdefghijklmnop";
+    /// A realistic CoreLink PAT (a prefix `ident.rs` omitted).
+    const CLP: &str = "clp_live_9f8e7d6c5b4a3210fedcba9876543210";
+
+    #[test]
+    fn prefixed_secret_in_an_identifier_field_now_redacts() {
+        // THE Round-5 hole: a structurally-shaped credential smuggled into an
+        // identifier field reached the forever-log VERBATIM under the blanket
+        // exemption. Every structural class now redacts AT THE BOUNDARY — no
+        // verb (check --pr, campaign --campaign, …) can leak it.
+        let mut v = json!({
+            "pr_id": SLACK,                                  // check --pr <xoxb-…>
+            "campaign": GHP,                                 // campaign open --campaign <ghp_…>
+            "intent_id": CLP,                                // <clp_…>
+            "run_id": "Bearer abc123def456ghi789jkl",        // Bearer token
+        });
+        scrub_payload(&mut v);
+        for key in ["pr_id", "campaign", "intent_id", "run_id"] {
+            assert_eq!(
+                v[key], REDACTED,
+                "a structural secret in identifier `{key}` MUST redact"
+            );
+        }
+    }
+
+    #[test]
+    fn connection_string_jwt_and_pem_in_identifiers_redact() {
+        let mut v = json!({
+            "campaign": "postgres://u:S3cr3tP4ssw0rdVeryLongRandomToken9999@h:5432/d",
+            "intent_id": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.abc123def",
+            "pr_id": "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBA...",
+            "run_id": "token=ghs_16C7e42F292c6912E7710c838347Ae178B4a",
+        });
+        scrub_payload(&mut v);
+        for key in ["campaign", "intent_id", "pr_id", "run_id"] {
+            assert_eq!(v[key], REDACTED, "structural secret in `{key}` redacts");
+        }
+    }
+
+    #[test]
+    fn hex_and_slug_addresses_survive_the_structural_scrub() {
+        // The address-survival half: a 40/64-hex content address and a dense
+        // high-entropy slug id (which the FULL engine would entropy-redact) MUST
+        // survive in an identifier field — distinct keys stay distinct + lookup-able.
+        let camp_a = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"; // 40-hex
+        let camp_b = "ffeeddccbbaa99887766554433221100ffeeddcc"; // distinct 40-hex
+        let memo_64 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let mut v = json!({
+            "campaign": camp_a,
+            "intent_id": "8Kp2mZ9qLx4vTn7wRj3sYb6cFd1gHe0", // high-entropy slug
+            "pr_id": memo_64,                                 // 64-hex
+            "run_id": "run-0011-2233",                        // plain slug
+        });
+        scrub_payload(&mut v);
+        assert_eq!(
+            v["campaign"], camp_a,
+            "40-hex address survives (no collapse)"
+        );
+        assert_ne!(
+            v["campaign"], camp_b,
+            "distinct 40-hex keys do NOT collapse"
+        );
+        assert_eq!(
+            v["intent_id"], "8Kp2mZ9qLx4vTn7wRj3sYb6cFd1gHe0",
+            "high-entropy slug survives (entropy scan exempt for identifiers)"
+        );
+        assert_eq!(v["pr_id"], memo_64, "64-hex address survives");
+        assert_eq!(v["run_id"], "run-0011-2233", "plain slug survives");
+    }
+
+    #[test]
+    fn structural_secret_scrub_predicate_splits_secrets_from_addresses() {
+        // Structural secrets redact.
+        assert!(is_structural_secret(GHP));
+        assert!(is_structural_secret(SLACK));
+        assert!(is_structural_secret(CLP));
+        assert!(is_structural_secret("Bearer abc123def456ghi789jkl"));
+        assert!(is_structural_secret(
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.abc"
+        ));
+        assert!(is_structural_secret(
+            "postgres://u:S3cr3tP4ssw0rdVeryLongRandomToken9999@h:5432/d"
+        ));
+        assert!(is_structural_secret("token=hunter2"));
+        assert!(is_structural_secret(
+            "sk-abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"
+        ));
+        assert!(is_structural_secret(
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIE"
+        ));
+        // Addresses + benign ids are NOT structural secrets (entropy/hex skipped).
+        assert!(!is_structural_secret(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ));
+        assert!(!is_structural_secret(
+            "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
+        ));
+        assert!(!is_structural_secret("8Kp2mZ9qLx4vTn7wRj3sYb6cFd1gHe0"));
+        assert!(!is_structural_secret("run-0011-2233"));
+        assert!(!is_structural_secret("sk-256")); // short sk- id survives
+    }
+
+    #[test]
+    fn digest_named_field_with_a_real_digest_still_survives_alongside_identifiers() {
+        // Cross-check: a sha256: digest field survives, and an identifier with a
+        // secret redacts, in the SAME payload (the two exemption classes compose).
+        let mut v = json!({
+            "tree_hash": format!("sha256:{DIGEST_64}"),
+            "memo_key": DIGEST_64,
+            "campaign": SLACK,
+        });
+        scrub_payload(&mut v);
+        assert_eq!(
+            v["tree_hash"],
+            format!("sha256:{DIGEST_64}"),
+            "sha256: survives"
+        );
+        assert_eq!(v["memo_key"], DIGEST_64, "64-hex digest survives");
+        assert_eq!(v["campaign"], REDACTED, "secret in identifier redacts");
     }
 
     #[test]
