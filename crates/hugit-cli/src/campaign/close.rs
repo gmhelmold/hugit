@@ -62,6 +62,7 @@ pub fn run(args: CloseArgs) -> Result<String, CampaignError> {
             "ledger": {
                 "done": world.ledger.done(key),
                 "proven": world.ledger.proven(key),
+                "rejected": world.ledger.rejected(key),
             },
             "rollup": rollup_json,
         })
@@ -158,6 +159,7 @@ pub fn run(args: CloseArgs) -> Result<String, CampaignError> {
         "ledger": {
             "done": world.ledger.done(key),
             "proven": world.ledger.proven(key),
+            "rejected": world.ledger.rejected(key),
         },
         "rollup": rollup_json,
     })
