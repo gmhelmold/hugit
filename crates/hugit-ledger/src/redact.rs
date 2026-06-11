@@ -7,7 +7,7 @@
 //!    kept for backward compatibility (existing fixtures plant it).
 //! 2. **Known-prefix credential patterns** — a hand-rolled, gitleaks-class
 //!    set of shapes that are secrets by construction: GitHub tokens
-//!    (`ghp_`/`gho_`/`github_pat_`), AWS access keys (`AKIA…`), Slack tokens
+//!    (`ghp_`/`gho_`/`ghs_`/`github_pat_`), AWS access keys (`AKIA…`), Slack tokens
 //!    (`xoxb-`/`xoxp-`/`xoxo-`/`xoxa-`/`xoxs-`), OpenAI-style keys
 //!    (`sk-` followed by ≥20 base64/hex chars — short identifiers are NOT
 //!    matched), CoreLink PATs (`clp_`), PEM private-key blocks
@@ -32,11 +32,22 @@
 //!    catches unprefixed secrets while leaving prose, code, and structured
 //!    hashes alone.
 //!
-//! **False-positive guard.** Content-address refs are load-bearing and must
-//! survive: a `cas:` ref and any bare 40/64-char hex digest (sha-1 / sha-256
-//! shapes) are EXEMPT from the entropy scan. They are honest references to
-//! deduped content, not secrets, and the integrity spine depends on them
-//! appearing verbatim in ledger/verdict output.
+//! **False-positive guard (context-scoped — WF-1).** Content-address refs are
+//! load-bearing and must survive, but ONLY in a content-address CONTEXT — never
+//! as a blanket bare-hex pass. A 40/64-char hex run is exempt from the entropy
+//! scan ONLY when it is *prefixed* by a content-address algorithm tag
+//! (`cas:` / `sha256:` / `sha1:` / any `<algo>:`). A **bare** 40/64-hex run in
+//! free text (a charter / acceptance / owner / campaign / reason) is NOT a
+//! content-address ref — it could be an HMAC, a Django `SECRET_KEY`, or a hex
+//! API key of exactly that shape — so it is subject to the entropy scan and
+//! redacts. We err toward redaction in free text.
+//!
+//! Structurally-typed hash fields (`files_read[].hash`, `commit`, `tree_hash`)
+//! are NOT author free text: their callers store them verbatim WITHOUT routing
+//! through [`apply`], so a bare digest in those positions never reaches this
+//! filter and survives by construction. The only bare-hex tokens that ever hit
+//! [`apply`] live inside free-text fields — exactly where a secret-shaped hex
+//! run must redact.
 //!
 //! The replacement is single-sourced from the canonical
 //! [`hugit_contracts::REDACTED_MARKER`] so it cannot drift from the CLI
@@ -76,6 +87,7 @@ const KEYWORD_PREFIXES: &[&str] = &["password", "passwd", "secret", "token", "ap
 const KNOWN_PREFIXES: &[&str] = &[
     "ghp_",
     "gho_",
+    "ghs_", // GitHub Actions / server-to-server token
     "github_pat_",
     "AKIA",
     "xoxb-",
@@ -234,12 +246,22 @@ fn has_keyword_context_secret(s: &str) -> bool {
                 !prev.is_ascii_alphanumeric()
             };
             if before_ok {
+                // Allow optional whitespace BEFORE the separator so
+                // `password = x` and `token : x` fire, not just `password=x`.
+                let bytes = lower.as_bytes();
+                let mut sep_idx = after_kw;
+                while bytes
+                    .get(sep_idx)
+                    .is_some_and(|b| *b == b' ' || *b == b'\t')
+                {
+                    sep_idx += 1;
+                }
                 // Now check the separator and value in the original string.
-                if let Some(sep_byte) = lower.as_bytes().get(after_kw)
+                if let Some(sep_byte) = bytes.get(sep_idx)
                     && (*sep_byte == b'=' || *sep_byte == b':')
                 {
-                    let value_start = after_kw + 1;
-                    // Skip optional leading whitespace.
+                    let value_start = sep_idx + 1;
+                    // Skip optional leading whitespace after the separator too.
                     let value = s.get(value_start..).unwrap_or("").trim_start();
                     if !value.is_empty() {
                         return true;
@@ -257,18 +279,52 @@ fn has_keyword_context_secret(s: &str) -> bool {
     false
 }
 
-// ── Detector (5): high-entropy token scan ────────────────────────────────────
+// ── Detector (5): high-entropy + bare-digest-shape token scan ─────────────────
 
-/// True iff `s` contains a long base64/hex run whose Shannon entropy clears the
-/// threshold — EXCLUDING content-address refs (`cas:` and bare 40/64-hex
-/// digests), which are load-bearing references, not secrets.
+/// True iff `s` contains a secret-shaped token run. A run fires when either:
+///
+/// - it clears the Shannon-entropy threshold (dense random keys), OR
+/// - it is a **bare** 40/64-hex run of content-address SHAPE that is NOT in a
+///   content-address context (WF-1) — a real HMAC / `SECRET_KEY` / hex API key
+///   sits well below the entropy floor (~3.7 bits/char), so the entropy scan
+///   alone would miss it. In free text such a run is secret-shaped and redacts;
+///   the same run with a `cas:`/`sha256:`/`sha1:`/`<algo>:` prefix is exempt.
+///
+/// The token splitter treats `:` as a separator, so a `sha256:<hex>` ref splits
+/// into `sha256` + `<hex>`. The prefix is therefore recovered from the byte
+/// immediately preceding the hex run in the ORIGINAL string: a digest run whose
+/// preceding context names a hash algorithm is exempt; a bare one is not.
 fn high_entropy_token(s: &str) -> bool {
-    for token in s.split(|c: char| !is_token_char(c)) {
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        // Skip separators.
+        if !is_token_char(bytes[i] as char) {
+            i += 1;
+            continue;
+        }
+        // Collect one maximal token run [start, end).
+        let start = i;
+        while i < bytes.len() && is_token_char(bytes[i] as char) {
+            i += 1;
+        }
+        let token = &s[start..i];
         if token.len() < ENTROPY_MIN_LEN {
             continue;
         }
+        // `cas:`-prefixed single token (e.g. `cas:abc…`) survives.
         if is_content_address_ref(token) {
             continue;
+        }
+        // Bare 40/64-hex of digest shape: exempt ONLY when the byte sequence
+        // immediately preceding the run is `<algo>:` (`sha256:`/`sha1:`/…) — the
+        // `:` that the token scanner treats as a separator. A bare run in free
+        // text is secret-shaped and redacts (WF-1).
+        if is_bare_hex_digest_shape(token) {
+            if preceding_context_is_digest_algo(bytes, start) {
+                continue;
+            }
+            return true;
         }
         if shannon_entropy(token) >= ENTROPY_THRESHOLD {
             return true;
@@ -277,22 +333,75 @@ fn high_entropy_token(s: &str) -> bool {
     false
 }
 
+/// True iff `token` is a bare 40- or 64-char run of hex digits (the sha-1 /
+/// sha-256 shapes). No prefix logic here — purely shape.
+fn is_bare_hex_digest_shape(token: &str) -> bool {
+    matches!(token.len(), 40 | 64) && token.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// True iff the bytes immediately before `run_start` form `<algo>:` where
+/// `<algo>` is a recognised content-address tag — i.e. the hex run is the
+/// payload of a `sha256:`/`sha1:`/`cas:`/… ref. This recovers the prefix that
+/// the `:`-splitting token scanner discarded.
+fn preceding_context_is_digest_algo(bytes: &[u8], run_start: usize) -> bool {
+    // The char right before the run must be `:`.
+    if run_start == 0 || bytes[run_start - 1] != b':' {
+        return false;
+    }
+    // Walk back over the algorithm name (alphanumerics + `-`).
+    let colon = run_start - 1; // index of the ':'
+    let mut algo_start = colon;
+    while algo_start > 0 {
+        let c = bytes[algo_start - 1];
+        if c.is_ascii_alphanumeric() || c == b'-' {
+            algo_start -= 1;
+        } else {
+            break;
+        }
+    }
+    // `colon` indexes the ':'; the algo is bytes[algo_start..colon].
+    if algo_start == colon {
+        return false; // empty algo (`:<hex>`)
+    }
+    let algo = std::str::from_utf8(&bytes[algo_start..colon]).unwrap_or("");
+    is_digest_algo(algo)
+}
+
 /// A character that can appear inside a base64/hex token run.
 fn is_token_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=' || c == '-' || c == '_'
 }
 
-/// True for content-address refs that must survive verbatim: a `cas:`-prefixed
-/// ref, or a bare 40/64-char hex digest (sha-1 / sha-256 shapes). These are
-/// honest references to deduped content; the integrity spine surfaces them.
+/// True for content-address refs that must survive verbatim — but ONLY in a
+/// content-address CONTEXT (WF-1). A digest is a ref iff it carries an explicit
+/// algorithm prefix: `cas:` (any payload) or `<algo>:<40|64-hex>` where `<algo>`
+/// is a recognised content-address tag. A **bare** 40/64-hex run (no prefix) is
+/// NOT treated as a ref here — in free text it could be an HMAC / SECRET_KEY /
+/// hex API key of exactly that shape, so it falls through to the entropy scan
+/// and redacts. Typed hash fields never reach [`apply`], so they are unaffected.
 fn is_content_address_ref(token: &str) -> bool {
     if token.starts_with("cas:") {
         return true;
     }
-    // Strip a leading algorithm prefix like `sha256:` so `sha256:<hex>` is also
-    // recognised as a digest ref.
-    let hex = token.rsplit(':').next().unwrap_or(token);
-    matches!(hex.len(), 40 | 64) && hex.bytes().all(|b| b.is_ascii_hexdigit())
+    // Require an explicit `<algo>:` prefix and a hex payload of digest shape.
+    // A bare hex run (no `:`) is deliberately NOT exempt.
+    let Some((algo, hex)) = token.split_once(':') else {
+        return false;
+    };
+    is_digest_algo(algo)
+        && matches!(hex.len(), 40 | 64)
+        && hex.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Recognised content-address algorithm tags for the prefixed-digest exemption.
+/// Case-insensitive (`sha256`/`SHA256` both count). A bare unknown prefix does
+/// NOT exempt — the prefix must name a hash family.
+fn is_digest_algo(algo: &str) -> bool {
+    let a = algo.to_ascii_lowercase();
+    matches!(
+        a.as_str(),
+        "sha1" | "sha256" | "sha-1" | "sha-256" | "sha512" | "sha-512" | "blake3" | "cas" | "oid"
+    )
 }
 
 /// Shannon entropy of a token in bits per character.
@@ -501,6 +610,23 @@ mod tests {
     }
 
     #[test]
+    fn keyword_with_spaces_around_eq_redacted() {
+        // WF-1: whitespace around the separator must still fire.
+        assert_eq!(apply("password = hunter2"), REDACTED);
+        assert_eq!(apply("token : some_value"), REDACTED);
+        assert_eq!(apply("API_KEY\t=\tabc123"), REDACTED);
+    }
+
+    #[test]
+    fn github_actions_token_ghs_redacted() {
+        // WF-1: `ghs_` (GitHub Actions / server-to-server) now a known prefix.
+        assert_eq!(
+            apply("token=ghs_16C7e42F292c6912E7710c838347Ae178B4a"),
+            REDACTED
+        );
+    }
+
+    #[test]
     fn keyword_passwd_eq_redacted() {
         assert_eq!(apply("passwd=abc123"), REDACTED);
     }
@@ -604,16 +730,19 @@ mod tests {
         assert_eq!(apply(s), s);
     }
 
+    // ── WF-1: a PREFIXED digest survives; a BARE hex secret in free text now
+    //          REDACTS (the exemption is content-address CONTEXT, not shape).
+
     #[test]
-    fn sha256_digest_survives() {
-        // A bare 64-hex sha-256 digest is load-bearing — must NOT be redacted.
-        let s = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    fn prefixed_sha256_digest_survives() {
+        // `sha256:<64-hex>` is a content-address ref — must NOT be redacted.
+        let s = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
         assert_eq!(apply(s), s);
     }
 
     #[test]
-    fn sha1_digest_survives() {
-        let s = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
+    fn prefixed_sha1_digest_survives() {
+        let s = "sha1:da39a3ee5e6b4b0d3255bfef95601890afd80709";
         assert_eq!(apply(s), s);
     }
 
@@ -630,10 +759,31 @@ mod tests {
     }
 
     #[test]
-    fn commit_message_with_hash_survives() {
-        // A realistic provenance line carrying a content-address ref.
-        let s = "landed intent a31f9c at tree 7777777777777777777777777777777777777777";
-        assert_eq!(apply(s), s);
+    fn bare_sha256_hex_secret_now_redacts() {
+        // WF-1 (was `sha256_digest_survives`, which BLESSED the leak): a BARE
+        // 64-hex run with no content-address prefix — could be an HMAC / Django
+        // SECRET_KEY / hex API key. In free text it clears the entropy floor
+        // and MUST redact. Err toward redaction.
+        let s = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        assert_eq!(apply(s), REDACTED);
+    }
+
+    #[test]
+    fn bare_sha1_hex_secret_now_redacts() {
+        // WF-1 (was `sha1_digest_survives`): a BARE 40-hex high-entropy run is
+        // no longer blessed; in free text it redacts.
+        let s = "3f786850e387550fdab836ed7e6dc881de23001b"; // sha1("a\n"), high entropy
+        assert_eq!(apply(s), REDACTED);
+    }
+
+    #[test]
+    fn charter_with_bare_hex_secret_redacts() {
+        // WF-1 proof: a real secret of exactly content-address SHAPE planted in
+        // a charter (free text) leaks no more. Both 40-hex and 64-hex variants.
+        let charter_64 = "Deploy with SECRET_KEY 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        assert_eq!(apply(charter_64), REDACTED);
+        let charter_40 = "rotate HMAC 3f786850e387550fdab836ed7e6dc881de23001b before merge";
+        assert_eq!(apply(charter_40), REDACTED);
     }
 
     // ── direct entropy-fn sanity ─────────────────────────────────────────────
@@ -649,14 +799,39 @@ mod tests {
 
     #[test]
     fn content_address_ref_recognised() {
+        // WF-1: only PREFIXED forms are content-address refs now. A BARE hex
+        // digest is NOT (it falls to the digest-shape detector in free text).
         assert!(is_content_address_ref(
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         ));
         assert!(is_content_address_ref(
-            "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+            "sha1:da39a3ee5e6b4b0d3255bfef95601890afd80709"
         ));
         assert!(is_content_address_ref("cas:anything-here"));
+        // Bare hex digests are NO LONGER refs by themselves.
+        assert!(!is_content_address_ref(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ));
+        assert!(!is_content_address_ref(
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+        ));
+        // Unknown prefix is not a content-address tag.
+        assert!(!is_content_address_ref(
+            "deadbeef:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ));
         assert!(!is_content_address_ref("8Kp2mZ9qLx4vTn7wRj3sYb6cFd1gHe0"));
+    }
+
+    #[test]
+    fn preceding_context_recovers_prefix() {
+        // The `:`-splitting scanner relies on this to keep `sha256:<hex>` exempt.
+        let s = "sha256:da39a3ee5e6b4b0d3255bfef95601890afd80709";
+        // run starts at index 7 (after `sha256:`).
+        assert!(preceding_context_is_digest_algo(s.as_bytes(), 7));
+        let bare = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
+        assert!(!preceding_context_is_digest_algo(bare.as_bytes(), 0));
+        let unknown = "xyz:da39a3ee5e6b4b0d3255bfef95601890afd80709";
+        assert!(!preceding_context_is_digest_algo(unknown.as_bytes(), 4));
     }
 
     // ── has_sk_key helper sanity ─────────────────────────────────────────────
