@@ -11,7 +11,7 @@
 
 use crate::redact;
 use hugit_contracts::event_record::EventRecord;
-use hugit_contracts::verdict_object::VerdictObject;
+use hugit_contracts::verdict_object::{Verdict, VerdictObject};
 use serde::{Deserialize, Serialize};
 
 /// The canonical redaction sentinel (view-boundary, ④).
@@ -34,9 +34,14 @@ pub struct LedgerEntry {
     pub recorded_at: u64,
     /// The deep-link target object identifier (content address or intent_id).
     pub deep_link_target: String,
-    /// Whether a verdict has been recorded for this intent (proven).
+    /// Whether a verdict with an APPROVE outcome has been recorded for this
+    /// intent.  A REJECT (or fix_first) verdict does NOT set `proven`.
     pub proven: bool,
-    /// The verdict view (redacted), if proven.
+    /// Whether a verdict with a non-approve (REJECT or fix_first) outcome has
+    /// been recorded for this intent.  Distinct from `proven` — a rejected
+    /// intent is landed but NOT proven.
+    pub rejected: bool,
+    /// The verdict view (redacted), if a verdict has been recorded.
     pub verdict: Option<VerdictView>,
 }
 
@@ -117,6 +122,7 @@ impl Ledger {
                     recorded_at: r.recorded_at,
                     deep_link_target,
                     proven: false,
+                    rejected: false,
                     verdict: None,
                 });
             }
@@ -125,12 +131,23 @@ impl Ledger {
         // Second pass: attach verdicts.
         // Match by raw intent id (via the internal index) so that redaction
         // of the surfaced field does not break the verdict linkage.
+        //
+        // WH-PROVEN: `proven` advances ONLY when the aggregate outcome is
+        // `Approve`.  A `Reject` or `FixFirst` verdict marks `rejected=true`
+        // and leaves `proven=false` — the intent is landed but NOT validated.
         for r in records {
             if r.kind == "verdict.recorded"
                 && let Ok(vo) = serde_json::from_str::<VerdictObject>(&r.payload)
                 && let Some(&idx) = raw_id_to_idx.get(&vo.intent)
             {
-                entries[idx].proven = true;
+                match vo.verdict {
+                    Verdict::Approve => {
+                        entries[idx].proven = true;
+                    }
+                    Verdict::Reject | Verdict::FixFirst => {
+                        entries[idx].rejected = true;
+                    }
+                }
                 entries[idx].verdict = Some(VerdictView::from_verdict_object(&vo));
             }
         }
@@ -158,9 +175,14 @@ impl Ledger {
         self.asked(campaign)
     }
 
-    /// Count of proven (verdict recorded) intents for a campaign.
+    /// Count of proven (approve-verdict recorded) intents for a campaign.
     pub fn proven(&self, campaign: &str) -> usize {
         self.by_campaign(campaign).filter(|e| e.proven).count()
+    }
+
+    /// Count of rejected (non-approve verdict recorded) intents for a campaign.
+    pub fn rejected(&self, campaign: &str) -> usize {
+        self.by_campaign(campaign).filter(|e| e.rejected).count()
     }
 }
 

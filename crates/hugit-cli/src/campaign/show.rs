@@ -21,10 +21,13 @@ pub fn run(args: ShowArgs) -> Result<String, CampaignError> {
     let prs = pr_list(&phases);
 
     // Asked→done→proven from the Ledger projection (the same view `hugit ledger`
-    // surfaces). `asked == done` (landing IS done); `proven` = verdict-recorded.
+    // surfaces). `asked == done` (landing IS done); `proven` = approve-verdict
+    // recorded; `rejected` = non-approve verdict recorded (WH-PROVEN: rejected
+    // work is visible, never silently sealed as proven).
     let ledger = json!({
         "done": world.ledger.done(key),
         "proven": world.ledger.proven(key),
+        "rejected": world.ledger.rejected(key),
     });
 
     let rollup_summary = match world.build_rollup(key, &phases)? {

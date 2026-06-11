@@ -624,6 +624,308 @@ fn item_9_dry_panel_without_store_records_nothing() {
     );
 }
 
+// ── WH-PROVEN: REJECT verdict must NOT set proven; rejection visible in show ──
+
+/// WH-PROVEN: A landed intent with a REJECT verdict must show `proven:0` in
+/// `campaign show` AND the `rejected` count must be >= 1.  The bug: the ledger
+/// previously set `proven=true` for ANY `verdict.recorded` regardless of the
+/// outcome, so a rejected intent was indistinguishable from an approved one.
+///
+/// This test drives the REAL binary end-to-end:
+///   campaign open → intent new → verdict (reject) → campaign show
+///     → proven == 0 AND rejected >= 1.
+#[test]
+fn wh_proven_reject_verdict_not_counted_as_proven() {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    fn hugit_bin() -> PathBuf {
+        PathBuf::from(env!("CARGO_BIN_EXE_hugit"))
+    }
+
+    let dir = scratch("wh-proven-reject");
+    let log = dir.join("log.json");
+    let store = dir.join("store.json");
+    let log_s = log.to_str().unwrap();
+    let store_s = store.to_str().unwrap();
+    let campaign = "camp-wh-reject";
+    let intent_id = "intent-wh-reject";
+
+    // Open the campaign.
+    let out = Command::new(hugit_bin())
+        .args([
+            "campaign",
+            "open",
+            "--log",
+            log_s,
+            "--campaign",
+            campaign,
+            "--charter",
+            "WH-PROVEN reject test",
+            "--owner",
+            "test@test.com",
+        ])
+        .output()
+        .expect("hugit binary runs");
+    assert!(out.status.success(), "campaign open succeeded");
+
+    // Land the intent.
+    let out = Command::new(hugit_bin())
+        .args([
+            "intent",
+            "new",
+            "--log",
+            log_s,
+            "--store",
+            store_s,
+            "--campaign",
+            campaign,
+            "--charter",
+            "wh reject intent",
+            "--id",
+            intent_id,
+        ])
+        .output()
+        .expect("hugit binary runs");
+    assert!(out.status.success(), "intent new succeeded");
+
+    // Record a REJECT verdict.
+    let (code, v) = run(&[
+        "verdict", "--log", log_s, "--store", "--intent", intent_id, "--lens", "security",
+        "--result", "reject",
+    ]);
+    assert_eq!(code, 0, "reject verdict recorded: {v}");
+    assert_eq!(v["aggregate"], "reject", "aggregate must be reject: {v}");
+
+    // campaign show: proven must be 0; rejected must be >= 1.
+    let out = Command::new(hugit_bin())
+        .args(["campaign", "show", "--log", log_s, "--campaign", campaign])
+        .output()
+        .expect("hugit binary runs");
+    assert!(out.status.success(), "campaign show succeeded");
+    let show: serde_json::Value =
+        serde_json::from_str(std::str::from_utf8(&out.stdout).unwrap().trim())
+            .expect("campaign show emits JSON");
+
+    let done = show["ledger"]["done"].as_u64().unwrap_or(0);
+    let proven = show["ledger"]["proven"].as_u64().unwrap_or(99);
+    let rejected = show["ledger"]["rejected"].as_u64().unwrap_or(0);
+
+    assert!(done >= 1, "done must be >= 1 (intent landed): {show}");
+    assert_eq!(
+        proven, 0,
+        "WH-PROVEN: a REJECT verdict must NOT count as proven (was {proven}): {show}"
+    );
+    assert!(
+        rejected >= 1,
+        "WH-PROVEN: rejected count must be >= 1 so rejection is visible in campaign show: {show}"
+    );
+}
+
+/// WH-PROVEN mixed: a panel with one approve + one reject (aggregate=reject)
+/// must show `proven:0` and `rejected>=1` in `campaign show`.
+#[test]
+fn wh_proven_mixed_reject_aggregate_not_proven() {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    fn hugit_bin() -> PathBuf {
+        PathBuf::from(env!("CARGO_BIN_EXE_hugit"))
+    }
+
+    let dir = scratch("wh-proven-mixed");
+    let log = dir.join("log.json");
+    let store = dir.join("store.json");
+    let log_s = log.to_str().unwrap();
+    let store_s = store.to_str().unwrap();
+    let campaign = "camp-wh-mixed";
+    let intent_id = "intent-wh-mixed";
+
+    // Open the campaign.
+    let out = Command::new(hugit_bin())
+        .args([
+            "campaign",
+            "open",
+            "--log",
+            log_s,
+            "--campaign",
+            campaign,
+            "--charter",
+            "WH-PROVEN mixed test",
+            "--owner",
+            "test@test.com",
+        ])
+        .output()
+        .expect("hugit binary runs");
+    assert!(out.status.success(), "campaign open succeeded");
+
+    // Land the intent.
+    let out = Command::new(hugit_bin())
+        .args([
+            "intent",
+            "new",
+            "--log",
+            log_s,
+            "--store",
+            store_s,
+            "--campaign",
+            campaign,
+            "--charter",
+            "wh mixed intent",
+            "--id",
+            intent_id,
+        ])
+        .output()
+        .expect("hugit binary runs");
+    assert!(out.status.success(), "intent new succeeded");
+
+    // Record a mixed panel: approve + reject → aggregate = reject.
+    let (code, v) = run(&[
+        "verdict",
+        "--log",
+        log_s,
+        "--store",
+        "--intent",
+        intent_id,
+        "--lens",
+        "security",
+        "--result",
+        "approve",
+        "--lens",
+        "contracts",
+        "--result",
+        "reject",
+    ]);
+    assert_eq!(code, 0, "mixed verdict recorded: {v}");
+    assert_eq!(
+        v["aggregate"], "reject",
+        "mixed panel aggregate must be reject: {v}"
+    );
+
+    // campaign show: proven must be 0; rejected must be >= 1.
+    let out = Command::new(hugit_bin())
+        .args(["campaign", "show", "--log", log_s, "--campaign", campaign])
+        .output()
+        .expect("hugit binary runs");
+    assert!(out.status.success(), "campaign show succeeded");
+    let show: serde_json::Value =
+        serde_json::from_str(std::str::from_utf8(&out.stdout).unwrap().trim())
+            .expect("campaign show emits JSON");
+
+    let proven = show["ledger"]["proven"].as_u64().unwrap_or(99);
+    let rejected = show["ledger"]["rejected"].as_u64().unwrap_or(0);
+
+    assert_eq!(
+        proven, 0,
+        "WH-PROVEN: mixed approve+reject panel (aggregate=reject) must NOT count as proven: {show}"
+    );
+    assert!(
+        rejected >= 1,
+        "WH-PROVEN: rejected count must be >= 1 for mixed approve+reject panel: {show}"
+    );
+}
+
+/// WH-PROVEN non-regression: approve verdict still sets proven >= 1.
+/// This is the same logical path as b3_b4 but expressed directly as the
+/// WH-PROVEN non-regression oracle.
+#[test]
+fn wh_proven_approve_non_regression() {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    fn hugit_bin() -> PathBuf {
+        PathBuf::from(env!("CARGO_BIN_EXE_hugit"))
+    }
+
+    let dir = scratch("wh-proven-approve");
+    let log = dir.join("log.json");
+    let store = dir.join("store.json");
+    let log_s = log.to_str().unwrap();
+    let store_s = store.to_str().unwrap();
+    let campaign = "camp-wh-approve";
+    let intent_id = "intent-wh-approve";
+
+    // Open the campaign.
+    let out = Command::new(hugit_bin())
+        .args([
+            "campaign",
+            "open",
+            "--log",
+            log_s,
+            "--campaign",
+            campaign,
+            "--charter",
+            "WH-PROVEN approve non-regression",
+            "--owner",
+            "test@test.com",
+        ])
+        .output()
+        .expect("hugit binary runs");
+    assert!(out.status.success(), "campaign open succeeded");
+
+    // Land the intent.
+    let out = Command::new(hugit_bin())
+        .args([
+            "intent",
+            "new",
+            "--log",
+            log_s,
+            "--store",
+            store_s,
+            "--campaign",
+            campaign,
+            "--charter",
+            "wh approve intent",
+            "--id",
+            intent_id,
+        ])
+        .output()
+        .expect("hugit binary runs");
+    assert!(out.status.success(), "intent new succeeded");
+
+    // Record an APPROVE verdict.
+    let (code, v) = run(&[
+        "verdict",
+        "--log",
+        log_s,
+        "--store",
+        "--intent",
+        intent_id,
+        "--lens",
+        "security",
+        "--result",
+        "approve",
+        "--lens",
+        "contracts",
+        "--result",
+        "approve",
+    ]);
+    assert_eq!(code, 0, "approve verdict recorded: {v}");
+    assert_eq!(v["aggregate"], "approve", "{v}");
+
+    // campaign show: proven must be >= 1; rejected must be 0.
+    let out = Command::new(hugit_bin())
+        .args(["campaign", "show", "--log", log_s, "--campaign", campaign])
+        .output()
+        .expect("hugit binary runs");
+    assert!(out.status.success(), "campaign show succeeded");
+    let show: serde_json::Value =
+        serde_json::from_str(std::str::from_utf8(&out.stdout).unwrap().trim())
+            .expect("campaign show emits JSON");
+
+    let proven = show["ledger"]["proven"].as_u64().unwrap_or(0);
+    let rejected = show["ledger"]["rejected"].as_u64().unwrap_or(99);
+
+    assert!(
+        proven >= 1,
+        "WH-PROVEN non-regression: approve verdict must set proven >= 1: {show}"
+    );
+    assert_eq!(
+        rejected, 0,
+        "WH-PROVEN non-regression: no rejected count for an approved intent: {show}"
+    );
+}
+
 // ── WG-DOCS test-quality addition ────────────────────────────────────────────
 
 /// A verdict re-run with a DIFFERENT lens set must append a NEW `verdict.recorded`
