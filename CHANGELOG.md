@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(security,cli): **Adversarial Round-1 fixes (Wave E)** — 7/7 refutation
+  fleet found real pendencies behind the premature "SOTA" claim; all closed.
+  E-REDACT: gitleaks-class redaction engine (connection strings, keyword-
+  context, sk- length-gate). E-CLI: redaction parity across read+write
+  surfaces — a real `ghp_` PAT in a charter no longer reaches `.hugit/
+  intents.json`, the hash-chained log, or any show/list (live-reproduced) —
+  plus pr verbs under the one error/exit law + verify_chain, campaign
+  show/list reject a missing --log (no silent empty world), why hint
+  corrected. E-GUARD + E-GUARD2: the D14 guard now wraps EVERY guarded-verb
+  mutation path (porcelain + mirror-land + undo + import_sidecar +
+  Serializer-undo + policy-emit) — full caller audit confirms no remaining
+  bypass; push stays raw-by-design. E-PINS: hand-authored byte-pins for 5
+  security-critical frozen contracts (de-launders the self-oracle). E-TESTS:
+  e2e four-altitude chain, mid-write cold-store fault, rollup-at-scale (1000+
+  intents). E-DOCS: CHANGELOG truth (18→17 packages, audit-closed→honest,
+  wedge claim downgraded to match reality), `docs/plan/2026-06-11-pending-
+  seams.md` register (recorder verbs · authn binding · coldtier erasure),
+  contract-1.2.0 propagated to corelink-runners + githugr with §12 amendment
+  logs. Gate green: 118 suites. Round 2 (fresh fleet) re-audits next.
+
 - fix(robustness): **SOTA-audit Wave C — Tier-3 hardening + Wave D records sweep**
   (audit Tier-1/2 fixed; Tier-4 records + transplant-naming tracked). WC1: porcelain file seam is atomic+locked (`.lock` create_new
   + tmp/fsync/rename) — the TOCTOU read-modify-write race is gone (proof: 2
