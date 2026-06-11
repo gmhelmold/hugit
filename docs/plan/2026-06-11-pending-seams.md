@@ -154,6 +154,86 @@ on `[self-hosted, mac, corelink-builder]`).
 
 ---
 
+## PS-6 — Queue batch-verdict → queue-show projection
+
+**Status:** DEFERRED — union-batch verdict seam not yet wired  
+**Adversarial finding:** Round-4 Cluster D (`docs/review/2026-06-11-adversarial-round-4.md`);
+WG-COHERENCE (Wave G) flagged the cross-module half but left `verdict: null` with a
+disclosure note; Round 4 confirmed no register entry existed.  
+**Governing docs:** `docs/review/2026-06-11-adversarial-round-4.md` §Cluster D;
+`crates/hugit-cli/src/queue/mod.rs` (VERDICT_NOTE disclosure); CHANGELOG wedge entry
+(corrected: queue show verdict remains null-disclosed; verdict.recorded flows to `proven`
+in campaign show, not to the queue projection).
+
+**What is deferred:**
+- `hugit queue show` emits `verdict: null` per entry and per batch, with an honest
+  `verdict_note` explaining the gap. The `verdict.recorded` event (emitted by
+  `hugit verdict --store`) flows to `proven` in `campaign show` (WG-COHERENCE),
+  NOT to the queue's per-entry or per-batch verdict field.
+- The missing half: wiring the union-batch verdict seam so that when a batch
+  completes (all PRs in a campaign land and receive a verdict), the queue
+  projection reflects the batch outcome in `verdict` and `implicated_pr`.
+- This is distinct from the already-closed PS-1 (recorder verbs): the
+  `verdict.recorded` producer is live; the projection from those records INTO the
+  queue batch view is the open seam.
+
+**Owner:** hugit techlead  
+**Acceptance criteria:**
+1. `hugit queue show` entries carry a real `verdict` once `verdict.recorded` events
+   cover the batch's intents (not null-disclosed); `implicated_pr` identifies the
+   PR implicated by a rejection.
+2. The queue projection and `campaign show` agree on the batch verdict for a
+   given campaign: both read from the same `verdict.recorded` events on the
+   canonical log.
+3. A test drives the full cycle: land a PR → record a verdict → `queue show`
+   reflects the batch outcome (non-null), coherent with `campaign show proven`.
+
+**Unblocked by:** no P2 dependency — purely a projection seam on the existing
+event log. Can be implemented in a future Wave once the other Round 4 code fixes
+(WH-SCRUB/WH-CHECK/WH-PROVEN) are merged.
+
+---
+
+## PS-7 — `toolchain-unprobed` fallback: cross-env false-hit risk (accepted, tracked)
+
+**Status:** TRACKED ACCEPTED RISK — no code change required; use `--toolchain`
+explicitly in multi-env fleets  
+**Adversarial finding:** Round-4 Cluster D (`docs/review/2026-06-11-adversarial-round-4.md`);
+noted as untracked cross-env false-hit vector.  
+**Governing docs:** `docs/review/2026-06-11-adversarial-round-4.md` §Cluster D;
+`crates/hugit-cli/tests/acceptance_wcheck.rs` `omitting_toolchain_yields_a_real_digest_axis`
+test (confirms the fallback is NOT the old `local-toolchain` constant).
+
+**What is tracked:**
+- When `--toolchain` is omitted and `rustc` is unavailable (e.g., a sandboxed CI
+  environment), the toolchain axis falls back to the constant `toolchain-unprobed`.
+- Two distinct rustc-less environments will share this constant → the same
+  memo key → a potential cross-env false cache hit (a result cached in env A is
+  served as a hit in env B, even if the real toolchain differs).
+- The distinct-marker approach (a per-env hash or hostname) was evaluated and
+  rejected: it would bust the cache for every distinct sandbox even when the
+  toolchain is genuinely identical, defeating the memoization value.
+
+**Accepted risk + mitigation:**
+- The risk is LOW in practice: environments without `rustc` typically do not run
+  Rust checks, and the `toolchain-unprobed` constant is clearly named (not a
+  fingerprint).
+- **Mitigation: always pass `--toolchain <digest>` explicitly in fleet-dispatch
+  contexts.** The `hugit-checks` executor accepts an arbitrary string as the
+  toolchain axis; agent orchestrators MUST supply a real toolchain identifier.
+- The `--toolchain` flag exists precisely for this case; fleet-facing docs should
+  note the requirement (DOCS seam, not a code change).
+
+**Owner:** hugit techlead — no code change required; document the fleet requirement
+in operator runbook when fleet-dispatch is wired.  
+**Acceptance criteria:**
+1. Operator / fleet-dispatch documentation notes that `--toolchain <digest>` is
+   REQUIRED in any environment where `rustc` may be absent or non-standard.
+2. No code change is needed for this seam — the fallback behaviour is acceptable
+   for single-env local runs and explicitly disclosed here.
+
+---
+
 ## Closed seams (reference — do not re-open without owner approval)
 
 | Seam | Shipped | Governing commit |

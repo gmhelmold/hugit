@@ -10,10 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - fix(security,cli): **Adversarial Round-3 fixes (Wave G) — wedge hardened to
   engine standards**. Round 3 (fresh 7-agent fleet) confirmed the spine held
   through all three rounds; the findings were the fast wedge wave's rough edges,
-  now closed. WG-SCRUB: redaction is now STRUCTURAL — `porcelain::scrub_payload`
-  at the single append boundary scrubs every user string before the hash chain,
-  so no porcelain verb can leak a secret (the per-verb gaps in check/verdict/pr
-  are closed at the root; digests survive). WG-CACHE: the `<log>.ac` local cache
+  now closed. WG-SCRUB: redaction is now STRUCTURAL — `porcelain::scrub_to_canonical`
+  (which calls `scrub_payload` internally) at the single append boundary
+  scrubs every user string before the hash chain, so no porcelain verb can
+  leak a secret (the per-verb gaps in check/verdict/pr are closed at the
+  root; digests survive). WG-CACHE: the `<log>.ac` local cache
   is tamper-evident (sha256 self-hash verified on read → a forged green is never
   served), real toolchain digest (no cross-toolchain false-hit), 300s exec
   timeout with child-kill (no lock starvation on a hung command),
@@ -39,9 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hits/executed/saved_ms) — the all-null negative-control note is gone.
   `hugit verdict --intent <id> --lens <l> --result approve|reject … [--store]`
   records a canonical `VerdictObject` (`verdict.recorded`) via the guarded
-  append seam, making `queue show`'s verdict real. `pr land --settle` emits
-  `pr.landed` so a campaign settles to `closed:true` via landed (not only
-  abandon). All appends route through the D14 `append_authorized` guard.
+  append seam; this flows to `proven` in campaign show. `queue show`'s
+  per-entry verdict remains null-disclosed (the union-batch verdict seam is
+  P2-tracked as PS-6). `pr land --settle` emits `pr.landed` so a campaign
+  settles to `closed:true` via landed (not only abandon). All appends route
+  through the D14 `append_authorized` guard.
   Built W0 (scaffold/contract freeze) → W-CHECK/W-VERDICT/W-PRLANDED (builders,
   stale-base) → W-INT (lead integration onto the frozen contract). The wedge is
   visible locally TODAY; P2 makes the cache fleet-shared.

@@ -8,8 +8,8 @@ The **git-compatible, LLM-native forge** — CoreLink expansion campaign #3.
 VCS + merge + CI designed for orchestrated agent fleets, built on CoreLink's
 production CAS (Cloudflare Workers/R2/D1/DO). Founded 2026-06-05.
 
-**Status (as of 2026-06-11, post Waves A/B/C/D/E+F + the wedge wave +
-adversarial rounds 1–3, Wave G in progress, Round 4 pending): the buildable
+**Status (as of 2026-06-11, post Waves A/B/C/D/E+F + the wedge wave + G +
+adversarial rounds 1–4, Wave H in progress, Round 5 pending): the buildable
 product is complete; adversarial hardening is ongoing, not closed.** A
 **17-package** Rust workspace (hugit-app + {ui,exit,sidecar} sub-crates = 4
 crates + 13 feature crates — verified by `cargo metadata --no-deps`
@@ -28,14 +28,15 @@ WF-AUTHZ ref-guard, WF-CLI2 ghost-record+TOCTOU). The wedge wave
 (W0→W-INT) is COMPLETE: `hugit check`/`verdict`/`pr.landed` are dispatched
 end-to-end; the memoized-CI wedge is observable locally TODAY (PS-1 closed,
 P2-independent). Round 3 (after Wave F + the wedge wave) found **7/7
-DO-NOT-SHIP** (spine confirmed held across all three rounds; Wave G hardens
-the wedge wave — Cluster A code, Cluster B docs). Round 4 pending after
-Wave G. `main` is green by local gate (fmt + clippy `--workspace
---all-targets --locked -D warnings` + test `--workspace --locked` + deny +
-audit); remote CI gate passes when it runs to completion, but the single
-self-hosted runner is contention-flaky (~42% of recent runs fail on
-SIGTERM/exit-127 infra failures, not code — HEAD may show `in_progress` or
-a false failure on CI). What remains to flip to end-to-end: **owner-gated
+DO-NOT-SHIP** (spine confirmed held across all three rounds; Wave G hardened
+the wedge wave — Cluster A code, Cluster B docs). Round 4 (after Wave G)
+found **7/7 DO-NOT-SHIP** (spine held a seventh time; Wave H is remediating
+Cluster A/B/C/D findings). Round 5 pending after Wave H. `main` is green by
+local gate (fmt + clippy `--workspace --all-targets --locked -D warnings` +
+test `--workspace --locked` + deny + audit); remote CI gate passes when it
+runs to completion, but the single self-hosted runner is contention-flaky
+(~26% of recent runs fail on SIGTERM/exit-127 infra failures, not code —
+HEAD may show `in_progress` or a false failure on CI). What remains to flip to end-to-end: **owner-gated
 infra** (P2 CoreLink tenant provisioning — see
 `docs/handoff/2026-06-08-corelink-p2-tenant-request.md` and the P2 ceiling
 request `docs/handoff/2026-06-11-corelink-p2-ceiling-request.md`). The
