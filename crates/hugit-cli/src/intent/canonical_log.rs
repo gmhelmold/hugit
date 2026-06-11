@@ -146,18 +146,39 @@ fn import_sidecar_authorized(
         .and_then(|id| PrincipalClass::classify(id))
         .unwrap_or(PrincipalClass::Worker);
 
-    // Build the intent.landed payload (same shape import_sidecar uses) and
+    // Extract the campaign key from the principal chain (WG-COHERENCE/B3):
+    // `intent new` stamps `campaign:<key>` first. The ledger keys `intent.landed`
+    // by this field; an absent campaign falls back to "default", making
+    // `by_campaign(key)` find nothing and `proven` stick at 0. Carrying it here
+    // ensures the ledger files the entry under the correct campaign.
+    let campaign = principal_chain
+        .iter()
+        .find(|s| s.starts_with("campaign:"))
+        .and_then(|s| s.strip_prefix("campaign:"))
+        .unwrap_or("")
+        .to_string();
+
+    // Build the intent.landed payload (carries `campaign` when present, B3) and
     // SCRUB-ON-APPEND (WG-SCRUB): route every user string value through the
-    // central scrubbing helper BEFORE the bytes reach the hash chain. The
-    // `intent new` verb already scrubs the sidecar at authorship; the central
-    // scrub is the structural backstop (idempotent) so this append can never
-    // leak even if a future caller builds a sidecar without pre-scrubbing.
-    let payload = crate::porcelain::scrub_to_canonical(serde_json::json!({
-        "intent_id": sidecar.intent_id,
-        "ref": ref_name,
-        "target": target,
-        "charter": sidecar.charter,
-    }));
+    // central scrubbing helper BEFORE the bytes reach the hash chain — the
+    // structural backstop so this append can never leak a secret.
+    let payload_value = if campaign.is_empty() {
+        serde_json::json!({
+            "intent_id": sidecar.intent_id,
+            "ref": ref_name,
+            "target": target,
+            "charter": sidecar.charter,
+        })
+    } else {
+        serde_json::json!({
+            "intent_id": sidecar.intent_id,
+            "ref": ref_name,
+            "target": target,
+            "charter": sidecar.charter,
+            "campaign": campaign,
+        })
+    };
+    let payload = crate::porcelain::scrub_to_canonical(payload_value);
 
     // Route through append_authorized (Endpoint::Push — always Allow; guard
     // is wired so no mutation is ever un-gated).

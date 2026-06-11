@@ -369,6 +369,233 @@ fn item_8_aggregate_all_approve_vs_any_reject() {
     assert_eq!(v["aggregate"], "reject", "any reject → reject: {v}");
 }
 
+// ── WG-COHERENCE B2: verdict on a ghost intent → intent_not_found exit-2 ────
+//
+// A log that carries at least one `intent.landed` record MUST reject a verdict
+// for an intent not present on that log. Exit-2, kind `intent_not_found`.
+
+#[test]
+fn b2_verdict_on_ghost_intent_is_intent_not_found_exit_2() {
+    use std::path::PathBuf;
+
+    fn hugit_bin() -> PathBuf {
+        PathBuf::from(env!("CARGO_BIN_EXE_hugit"))
+    }
+
+    let dir = scratch("b2-ghost");
+    let log = dir.join("log.json");
+    let store = dir.join("store.json");
+
+    // Seed the log with a REAL intent so the log has intent vocabulary.
+    let (seed_code, seed_v) = {
+        let out = std::process::Command::new(hugit_bin())
+            .args([
+                "intent",
+                "new",
+                "--log",
+                log.to_str().unwrap(),
+                "--store",
+                store.to_str().unwrap(),
+                "--campaign",
+                "camp-b2",
+                "--charter",
+                "real intent",
+                "--id",
+                "real-intent",
+            ])
+            .output()
+            .expect("hugit binary runs");
+        let v: serde_json::Value =
+            serde_json::from_str(std::str::from_utf8(&out.stdout).unwrap().trim())
+                .unwrap_or(serde_json::Value::Null);
+        (out.status.code().unwrap_or(-1), v)
+    };
+    assert_eq!(seed_code, 0, "seed intent succeeds: {seed_v}");
+
+    // Now attempt a verdict for a ghost intent that was NEVER created.
+    let (code, v) = run(&[
+        "verdict",
+        "--log",
+        log.to_str().unwrap(),
+        "--store",
+        "--intent",
+        "ghost-intent-that-does-not-exist",
+        "--lens",
+        "security",
+        "--result",
+        "approve",
+    ]);
+    assert_eq!(
+        code, 2,
+        "verdict on a ghost intent must exit 2 (intent_not_found): {v}"
+    );
+    assert_eq!(
+        v["error"]["kind"], "intent_not_found",
+        "canonical error kind: {v}"
+    );
+    // No verdict record must be appended for a ghost intent.
+    assert_eq!(
+        count_verdicts(&log),
+        0,
+        "no verdict.recorded for a ghost intent"
+    );
+}
+
+// ── WG-COHERENCE B2: verdict on a real landed intent succeeds (exit 0) ───────
+
+#[test]
+fn b2_verdict_on_real_landed_intent_succeeds() {
+    use std::path::PathBuf;
+
+    fn hugit_bin() -> PathBuf {
+        PathBuf::from(env!("CARGO_BIN_EXE_hugit"))
+    }
+
+    let dir = scratch("b2-real");
+    let log = dir.join("log.json");
+    let store = dir.join("store.json");
+
+    // Seed the log with a real intent.
+    let (seed_code, _) = {
+        let out = std::process::Command::new(hugit_bin())
+            .args([
+                "intent",
+                "new",
+                "--log",
+                log.to_str().unwrap(),
+                "--store",
+                store.to_str().unwrap(),
+                "--campaign",
+                "camp-b2r",
+                "--charter",
+                "a real intent to verdict",
+                "--id",
+                "real-intent-b2r",
+            ])
+            .output()
+            .expect("hugit binary runs");
+        (out.status.code().unwrap_or(-1), serde_json::Value::Null)
+    };
+    assert_eq!(seed_code, 0, "seed intent succeeds");
+
+    // Verdict on the real intent must succeed (exit 0, verdict_recorded).
+    let (code, v) = run(&[
+        "verdict",
+        "--log",
+        log.to_str().unwrap(),
+        "--store",
+        "--intent",
+        "real-intent-b2r",
+        "--lens",
+        "security",
+        "--result",
+        "approve",
+    ]);
+    assert_eq!(code, 0, "verdict on a real intent exits 0: {v}");
+    assert_eq!(v["verdict_recorded"], true, "{v}");
+    assert_eq!(count_verdicts(&log), 1, "verdict.recorded appended");
+}
+
+// ── WG-COHERENCE B3/B4: landed intent under campaign X with approve verdict
+//    → campaign show reports proven >= 1 (coherent with landed) ───────────────
+//
+// Root cause (B3): `intent new --log` omitted `campaign` from the
+// `intent.landed` payload, so the ledger filed the entry under "default" and
+// `by_campaign(key)` found nothing → proven stayed 0. The B3 fix carries the
+// campaign in the payload; the B4 fix (ledger already wires verdict.recorded →
+// proven) becomes reachable only after B3 is applied. This test proves both
+// halves together: landed:1 AND proven:1 for the same campaign.
+
+#[test]
+fn b3_b4_landed_intent_with_approve_verdict_shows_proven_in_campaign() {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    fn hugit_bin() -> PathBuf {
+        PathBuf::from(env!("CARGO_BIN_EXE_hugit"))
+    }
+
+    let dir = scratch("b3b4-proven");
+    let log = dir.join("log.json");
+    let store = dir.join("store.json");
+    let log_s = log.to_str().unwrap();
+    let store_s = store.to_str().unwrap();
+    let campaign = "camp-b3b4";
+    let intent_id = "intent-b3b4";
+
+    // Open the campaign.
+    let out = Command::new(hugit_bin())
+        .args([
+            "campaign",
+            "open",
+            "--log",
+            log_s,
+            "--campaign",
+            campaign,
+            "--charter",
+            "b3/b4 coherence test",
+            "--owner",
+            "test@test.com",
+        ])
+        .output()
+        .expect("hugit binary runs");
+    assert!(out.status.success(), "campaign open succeeded");
+
+    // Land the intent onto the same log, binding it to the campaign.
+    let out = Command::new(hugit_bin())
+        .args([
+            "intent",
+            "new",
+            "--log",
+            log_s,
+            "--store",
+            store_s,
+            "--campaign",
+            campaign,
+            "--charter",
+            "coherence intent",
+            "--id",
+            intent_id,
+        ])
+        .output()
+        .expect("hugit binary runs");
+    assert!(out.status.success(), "intent new succeeded");
+
+    // Record an approve verdict for the landed intent.
+    let (code, v) = run(&[
+        "verdict", "--log", log_s, "--store", "--intent", intent_id, "--lens", "security",
+        "--result", "approve",
+    ]);
+    assert_eq!(code, 0, "verdict recorded: {v}");
+    assert_eq!(v["aggregate"], "approve", "{v}");
+
+    // Now check campaign show: proven must be >= 1 (coherent with landed:1).
+    let out = Command::new(hugit_bin())
+        .args(["campaign", "show", "--log", log_s, "--campaign", campaign])
+        .output()
+        .expect("hugit binary runs");
+    assert!(out.status.success(), "campaign show succeeded");
+    let show: serde_json::Value =
+        serde_json::from_str(std::str::from_utf8(&out.stdout).unwrap().trim())
+            .expect("campaign show emits JSON");
+
+    let done = show["ledger"]["done"].as_u64().unwrap_or(0);
+    let proven = show["ledger"]["proven"].as_u64().unwrap_or(0);
+    assert!(
+        done >= 1,
+        "campaign show must report done >= 1 after intent.landed: {show}"
+    );
+    assert!(
+        proven >= 1,
+        "campaign show must report proven >= 1 after approve verdict for a landed intent \
+         (B3 fix: intent.landed carries campaign; B4 fix: verdict.recorded → proven): {show}"
+    );
+    assert_eq!(
+        done, proven,
+        "proven must equal done (one intent, one approve verdict): {show}"
+    );
+}
+
 // ── ⑨ dry panel: no --store appends nothing to the log ──────────────────────
 
 #[test]
