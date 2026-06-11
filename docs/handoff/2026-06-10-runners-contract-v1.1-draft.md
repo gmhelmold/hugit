@@ -7,6 +7,12 @@
 > READ-ONLY in this file; the amendment is ADDITIVE — a new section (§13)
 > plus the amendment log appended here. Nothing in §0–§12 is edited.
 >
+> **APPLIED** — 2026-06-10. Amendment applied to
+> `corelink-runners/docs/spec/hugit-integration-contract.md` @ 9796aa8
+> (branch `integ/seed-runner`, WP-R6). The live contract in corelink-runners
+> is the source of truth; this file is the historical draft + rationale
+> record. **CLOSED** — no further action needed from hugit's side.
+>
 > **How to apply:** replace the v1.0 header (first paragraph and the version
 > implied by the date) with the header below, append §13 and the amendment
 > log, commit on branch `integ/seed-runner` with the normal fixup discipline

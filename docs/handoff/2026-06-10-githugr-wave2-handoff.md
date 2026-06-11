@@ -31,7 +31,9 @@
   um a um: zero commits não-landados; as árvores sujas eram primeiras
   tentativas mortas pelos travamentos do Mac, supersedidas pelo que landou).
 
-Servir local: `cargo run -p hugit-web` em `../hugit` → `http://127.0.0.1:8790`.
+Servir local: `cargo run -p hugit-web` em `../githugr` → `http://127.0.0.1:8790`.
+(**hugit-web foi migrado para ../githugr**; não existe mais em ../hugit — ver
+`chore(workspace)!: hugit-web migrated OUT` no CHANGELOG de hugit.)
 
 ## 2. O plano da wave 2 (pronto, NÃO executado — todo seu)
 

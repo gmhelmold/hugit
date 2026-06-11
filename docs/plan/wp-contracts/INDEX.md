@@ -64,10 +64,12 @@ X1 tenant isolation red-team · L→M · opus · 90k — X2 attestation e2e · M
 ## Post-v1 follow-on (additive — register stays frozen)
 
 ADR-0001 (intent context envelope) adds net-new rework not in the built v1:
-**WP-F1** envelope contract freeze · **WP-F2** metrics+trajectory emission ·
+**WP-F1** envelope contract freeze · **WP-F1b** session altitude · **WP-F2**
+metrics+trajectory emission · **WP-F2b** orchestrator/campaign capture ·
 **WP-F3** projection+PR rollup. Contracts + impact map + sequence in
-`docs/plan/2026-06-09-adr-0001-context-envelope-rework.md`. **BLOCKED** on
-ADR-0001 §7 owner ratification.
+`docs/plan/2026-06-09-adr-0001-context-envelope-rework.md`.
+**COMPLETE** (ADR-0001 §7 fully ratified 2026-06-10; F-series built and
+gate-green; schema advanced to 1.2.0 — WA4 integer micro-USD).
 
 ## Rules of the register
 1. Every contract carries its acceptance items VERBATIM from decomposition

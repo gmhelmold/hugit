@@ -4,9 +4,15 @@
 > env gates, and failure semantics. Sources of truth: `crates/hugit-contracts`
 > (the IDL — Rust + JSON Schema + golden serde, frozen),
 > `../corelink-runners/docs/spec/hugit-integration-contract.md` (the fabric
-> seam, frozen from hugit's side), `docs/adr/0001` (context envelope),
+> seam, frozen from hugit's side; **v1.1** as of 2026-06-10, §13 envelope emission),
+> `docs/adr/0001` (context envelope),
 > `docs/adr/0002` (identity), `docs/handoff/2026-06-08-p2-go-live-runbook.md`
 > (what flips live). Production-state claims cite source repos — never memory.
+>
+> *Updated 2026-06-11 (post runner-transfer + ADR-0001 ratification):* §2
+> updated to reflect that `hugit-runner` transferred to `corelink-runners`
+> (WP-R4, 2026-06-10) and transcript blobs are retained forever by ratified
+> design (erasure via explicit tombstone only — no TTL).
 
 ```
             githugr (campaign #4, design)  ──reads──▶  hugit (THIS REPO, built)
@@ -28,17 +34,24 @@
 | PAT location | `~/.hugit/secrets/corelink/pat` (single-read; the secret-read-guard flags repeat reads — read once, hold in memory) |
 | Unconfigured behavior | client returns `NotConfigured` — **fail-closed**: never fabricates a hit, never silently executes-and-pretends |
 | Live smoke (P2 DoD) | `corelink_ac_smoke.rs`, 3 probes: miss→404 · put/get round-trip hit · cross-tenant→**403** |
-| CAS objects stored | context envelopes + transcript blobs (`cas:` refs, ADR-0001; deduped by content, redacted on write, TTL-bound) · pack objects (D2 wire protocol assembles packs from CAS) · export bundles (E5) |
+| CAS objects stored | context envelopes + transcript blobs (`cas:` refs, ADR-0001; deduped by content, redacted on write, **retained forever** — ADR-0001 §3 ratified 2026-06-10: no TTL/GC, erasure via tombstone only) · pack objects (D2 wire protocol assembles packs from CAS) · export bundles (E5) |
 | Tenancy | one CoreLink tenant for hugit (P2 request: tenant + AC namespace + CAS/R2 + PAT — `docs/handoff/2026-06-08-corelink-p2-tenant-request.md`) |
 | Non-interference bound | X6/X10: hugit load must not move other tenants' latency; caps set at the fabric/tenant level **before** load (preventive, not reactive) |
 
 ## 2. hugit → Runners (check execution) — contract frozen from our side
 
-Canonical: `../corelink-runners/docs/spec/hugit-integration-contract.md`.
-Client crates: `hugit-runner` (lease, fences, warm-boot orchestration, C2/C3/C5)
-+ `hugit-checks` (memo + results). IDL types (golden-pinned in
-`hugit-contracts`): `CheckDef`, `CheckResult`, `RunnerLease`, `FenceManifest`,
-`QueueApi`, `AttestationChain`.
+Canonical: `../corelink-runners/docs/spec/hugit-integration-contract.md`
+(**contract v1.1** — §13 envelope emission obligation added 2026-06-10 by
+WP-R6; the runner must emit per-job metrics consistent with `IntentMetrics`
+and expose capture hook points for the two-transcript imperative).
+`hugit-runner` **transferred to `corelink-runners`** (WP-R4, 2026-06-10) —
+the runner execution core (lease, isolation, warm boot, C2/C3/C5 suites)
+now lives in `../corelink-runners/crates/corelink-runner`; the seam is the
+**wire contract** (`conformance/` vectors byte-identical in both repos).
+hugit retains: the consumer seam (`hugit-checks`), the envelope producer
+(`hugit-ledger::envelope`), and the invariant proofs (against conformance
+fixtures). IDL types (golden-pinned in `hugit-contracts`): `CheckDef`,
+`CheckResult`, `RunnerLease`, `FenceManifest`, `QueueApi`, `AttestationChain`.
 
 | Aspect | Exact detail |
 |---|---|

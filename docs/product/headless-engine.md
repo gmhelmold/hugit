@@ -30,7 +30,7 @@ holds state of its own, never becomes load-bearing for correctness.
 | Campaign bundle + union-test (PRs of a campaign tested together) | `hugit-queue` + `hugit-checks` | none |
 | Memoized CI (cache-hit ⇒ 0 execution) | `hugit-checks` + CoreLink AC | none |
 | Intent (= enriched commit: charter, acceptance, sidecar) | `hugit-refstore` + `hugit-contracts::IntentSidecar` | none |
-| Context envelopes, 4 altitudes (intent · PR · campaign · session) | `hugit-runner::envelope` + `hugit-dogfood` (WP-F2/F2b) | none |
+| Context envelopes, 4 altitudes (intent · PR · campaign · session) | `hugit-ledger::envelope` + `hugit-dogfood` (WP-F2/F2b) | none |
 | Cost rollups (decomposed work/orchestration/verification/ci/waste) | `hugit-ledger::rollup` (WP-F3) | none |
 | Verdicts / adversarial panels | `hugit-contracts::VerdictObject` + ledger | none |
 | Provenance / why-blame / impact | `hugit-cli why·impact` + event-log | none |

@@ -16,8 +16,9 @@
 //!
 //! Token figures are zero by honesty: the deterministic in-process harness
 //! spawns no model, so zero is the measured spend (the token/cache-split
-//! capture itself is proven in `hugit-runner`'s WP-F2 acceptance with
-//! explicit recorder feeds).
+//! capture itself is proven in `hugit-ledger::envelope`'s WP-F2 acceptance
+//! with explicit recorder feeds — `hugit-runner` was transferred to
+//! `corelink-runners` in WP-R4; the envelope producer relocated here).
 //!
 //! Note the realistic warm-up: the intents run their checks BEFORE the
 //! landing wave evaluates unions over the same memo keys, so the wave's
