@@ -222,6 +222,27 @@ impl IntentStore {
         Ok(intents.intents().to_vec())
     }
 
+    /// Acquire the advisory exclusive lock for `path` and THEN load the store
+    /// under it — the WP-WC1 lock-before-load discipline (the same one
+    /// `hugit pr`/`hugit intent new --log` use on the canonical seam).
+    ///
+    /// Returns the held [`FileLock`] guard alongside the freshly-loaded store;
+    /// the caller (`intent new --store`) holds the guard across its idempotent
+    /// intent-id pre-check + [`save_locked`](Self::save_locked) so the whole
+    /// load→mutate→save is a single serialized critical section. Two concurrent
+    /// `intent new --store` for DIFFERENT intents on the same store now serialize
+    /// or fail structured ([`StoreError::Busy`]) — they no longer each load the
+    /// same chain and clobber on save (WF-CLI2 bug 2: the load→lock inversion the
+    /// per-write lock left open between two distinct `new`s).
+    ///
+    /// A missing `--store` bootstraps a fresh empty store (the `new` posture —
+    /// [`load`](Self::load), NOT [`load_existing`](Self::load_existing)).
+    pub fn lock_and_load(path: &Path) -> Result<(FileLock, Self), StoreError> {
+        let lock = FileLock::acquire(path).map_err(|e| store_lock_error(path, e))?;
+        let store = IntentStore::load(path)?;
+        Ok((lock, store))
+    }
+
     /// Persist the store back to `path` (events + corpora), pretty JSON so the
     /// on-disk artifact stays inspectable.
     ///
@@ -232,18 +253,33 @@ impl IntentStore {
     /// crash sees the whole old store or the whole new one — never a truncated
     /// file. The lock is released the moment the write returns.
     ///
-    /// Read-only verbs (`show`/`list`) use the lock-free [`load`](Self::load):
-    /// the atomic write means a reader never observes a half-written store even
-    /// without taking the lock. The residual load→mutate→save window between two
-    /// DISTINCT concurrent `new` intents is bounded by the atomic write (no
-    /// corruption, ever) plus the idempotent intent-id pre-check; the FULL
-    /// load→persist hold lives on the shared canonical `--log` seam
-    /// ([`crate::intent::canonical_log`]), which `intent new --log` drives under
-    /// a single lock held across the whole read-modify-write.
+    /// This is the SELF-LOCKING entry point (used where no broader lock is held);
+    /// `intent new --store` instead holds one lock across the whole
+    /// load→mutate→save via [`lock_and_load`](Self::lock_and_load) +
+    /// [`save_locked`](Self::save_locked) so two distinct concurrent `new`s
+    /// cannot clobber (WF-CLI2 bug 2).
     pub fn save(&self, path: &Path) -> Result<(), StoreError> {
         // Serialize the write itself behind the advisory lock (the guard drops
         // when this function returns, releasing it).
         let _lock = FileLock::acquire(path).map_err(|e| store_lock_error(path, e))?;
+        self.write_to(path)
+    }
+
+    /// Persist under a lock the CALLER already holds (acquired via
+    /// [`lock_and_load`](Self::lock_and_load)): the load→mutate→save runs as one
+    /// serialized critical section, killing the store-seam load→lock inversion
+    /// (WF-CLI2 bug 2). The `_lock` is borrowed only to make the held-lock
+    /// invariant a compile-time obligation — it is never released here (it drops
+    /// when the caller's guard does).
+    pub fn save_locked(&self, _lock: &FileLock, path: &Path) -> Result<(), StoreError> {
+        self.write_to(path)
+    }
+
+    /// Serialize the store and land it via the **atomic** temp-then-rename write.
+    /// Lock-free by itself — the lock is the caller's ([`save`](Self::save)
+    /// self-locks; [`save_locked`](Self::save_locked) relies on the caller-held
+    /// lock).
+    fn write_to(&self, path: &Path) -> Result<(), StoreError> {
         let mut sidecars: Vec<IntentSidecar> = self.sidecars.values().cloned().collect();
         sidecars.sort_by(|a, b| a.intent_id.cmp(&b.intent_id));
         let file = IntentStoreFile {

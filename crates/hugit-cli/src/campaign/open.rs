@@ -12,7 +12,11 @@ use super::output::CampaignError;
 use super::world::{KIND_CAMPAIGN_OPENED, World, append_authorized_and_persist};
 
 pub fn run(args: OpenArgs) -> Result<String, CampaignError> {
-    let world = World::load(&args.log)?;
+    // Lock BEFORE the load and hold it across the whole load→mutate→persist
+    // (WF-CLI2 bug 2: the load→lock inversion). `open` bootstraps a missing
+    // `--log` (an absent log is a legitimate fresh empty world), so it loads
+    // with `bootstrap = true`.
+    let (lock, world) = World::lock_and_load(&args.log, true)?;
 
     // Redaction parity (Wave E, P-REDACT-SURFACE): scrub the user-supplied
     // free-text fields through the hardened engine BEFORE they reach the
@@ -62,7 +66,15 @@ pub fn run(args: OpenArgs) -> Result<String, CampaignError> {
 
     // D14 guarded append: campaign.opened is a human-owned mutation; route
     // through append_authorized so the matrix gates it and denials are audited.
-    append_authorized_and_persist(&world, &args.log, KIND_CAMPAIGN_OPENED, &owner, payload, 0)?;
+    append_authorized_and_persist(
+        &lock,
+        &world,
+        &args.log,
+        KIND_CAMPAIGN_OPENED,
+        &owner,
+        payload,
+        0,
+    )?;
 
     Ok(json!({
         "campaign": args.campaign,

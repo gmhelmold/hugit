@@ -487,6 +487,22 @@ fn close_in_flight_hint_names_abandon_which_now_exists() {
     let world = write_world(&dir, &in_flight_world());
     let log = world.to_str().unwrap();
 
+    // Open first: WF-CLI2 bug 1 — `close` refuses a campaign with no
+    // `campaign.opened` record (`not_opened`) BEFORE the in-flight check, so the
+    // campaign must be opened to reach the in-flight refusal under test.
+    let (ok, _) = run(&[
+        "open",
+        "--log",
+        log,
+        "--campaign",
+        CAMPAIGN,
+        "--charter",
+        "c",
+        "--owner",
+        "u",
+    ]);
+    assert!(ok);
+
     let (ok, v) = run(&["close", "--log", log, "--campaign", CAMPAIGN]);
     assert!(!ok, "close must exit nonzero while PR is in-flight");
     assert_eq!(v["error"]["kind"], "in_flight_prs");
@@ -553,6 +569,22 @@ fn close_idempotent_rerun_carries_full_key_set() {
     let dir = scratch("close-keyset");
     let world = write_world(&dir, &settled_world());
     let log = world.to_str().unwrap();
+
+    // Open first: WF-CLI2 bug 1 — `close` refuses a campaign with no
+    // `campaign.opened` record (`not_opened`), so the campaign must be opened
+    // before it can be sealed.
+    let (ok, _) = run(&[
+        "open",
+        "--log",
+        log,
+        "--campaign",
+        CAMPAIGN,
+        "--charter",
+        "c",
+        "--owner",
+        "u",
+    ]);
+    assert!(ok);
 
     let (ok1, v1) = run(&["close", "--log", log, "--campaign", CAMPAIGN]);
     assert!(ok1, "first close: {v1}");

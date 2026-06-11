@@ -23,7 +23,13 @@ use super::show::{pr_list, progress_counts};
 use super::world::{KIND_CAMPAIGN_CLOSED, World, append_authorized_and_persist};
 
 pub fn run(args: CloseArgs) -> Result<String, CampaignError> {
-    let world = World::load(&args.log)?;
+    // Lock BEFORE the load and hold it across the whole load→mutate→persist
+    // (WF-CLI2 bug 2). `close` is a read-must-exist mutation: a missing `--log`
+    // is `log_not_found`/exit-2, never a bootstrapped empty world that would let
+    // a `campaign.closed` ghost-record be created from nothing for a campaign
+    // that never had a `campaign.opened` (WF-CLI2 bug 1) — so it loads with
+    // `bootstrap = false`.
+    let (lock, world) = World::lock_and_load(&args.log, false)?;
     let key = &args.campaign;
 
     let phases = world.pr_phases(key);
@@ -60,6 +66,24 @@ pub fn run(args: CloseArgs) -> Result<String, CampaignError> {
             "rollup": rollup_json,
         })
         .to_string());
+    }
+
+    // Must be opened before it can be closed (WF-CLI2 bug 1, the ghost-record
+    // guard — the same guard `abandon` already carries). A campaign with no
+    // `campaign.opened` record on the log is unknown: closing it would seal a
+    // campaign that never existed (a `campaign.closed` from nothing). Refuse
+    // with a structured `not_opened`/exit-2 rather than fabricating the seal.
+    // (An already-closed campaign was necessarily opened, so this guard sits
+    // after the idempotent-close fast path above.)
+    if !world.campaign_opened(key) {
+        return Err(CampaignError::new(
+            "not_opened",
+            format!(
+                "campaign '{key}' has no campaign.opened record on the log; \
+                 open it first"
+            ),
+            "run `hugit campaign open --campaign <key> …` to open the campaign",
+        ));
     }
 
     // Refuse to seal over unsettled work: any in-flight PR blocks the close
@@ -100,8 +124,9 @@ pub fn run(args: CloseArgs) -> Result<String, CampaignError> {
 
     // Append the seal record before printing (the seal must be on the log).
     // D14 guarded: close is a human-owned mutation; use the campaign owner for
-    // the principal chain. Fall back to the campaign key when no opened record
-    // is present (log-less campaigns are honest about missing context).
+    // the principal chain. The `not_opened` guard above guarantees an opened
+    // record exists, so `campaign_charter_owner` resolves; the `key` fallback is
+    // a defence-in-depth no-op (a malformed opened record with no owner field).
     let owner = world
         .campaign_charter_owner(key)
         .map(|(_, o)| o)
@@ -111,7 +136,15 @@ pub fn run(args: CloseArgs) -> Result<String, CampaignError> {
         "envelope_ref": campaign_envelope_ref,
     })
     .to_string();
-    append_authorized_and_persist(&world, &args.log, KIND_CAMPAIGN_CLOSED, &owner, payload, 0)?;
+    append_authorized_and_persist(
+        &lock,
+        &world,
+        &args.log,
+        KIND_CAMPAIGN_CLOSED,
+        &owner,
+        payload,
+        0,
+    )?;
 
     Ok(json!({
         "campaign": key,
