@@ -104,9 +104,17 @@ fn check_redacts_secrets_in_def_pr_and_principal_on_the_log() {
     std::fs::create_dir_all(&root).unwrap();
     bootstrap_log(log.to_str().unwrap());
 
-    // The adversary's exact repro: a PAT in `--def`/`--pr`/`--principal` and a
-    // connection string in `--cmd` (echoed into the def identity). `--store`
-    // forces the `check.recorded` append onto the hash-chained log.
+    // The adversary's exact repro for the FREE-TEXT vectors: a PAT in
+    // `--def`/`--principal` and a connection string in `--cmd` (echoed into the
+    // def identity). `--store` forces the `check.recorded` append onto the
+    // hash-chained log.
+    //
+    // WH-SCRUB note: `--pr` lands in the `pr_id` identifier-ADDRESS field, which
+    // is now EXEMPT from the free-text scrub (scrubbing it would collapse distinct
+    // addresses) — contract-coupled with WH-IDENT, which validates identifiers at
+    // INPUT (rejecting a secret-shaped id) so an address can never carry a known
+    // secret. `--pr` therefore no longer carries a planted secret here; the
+    // free-text leak vectors below remain the assertion.
     let out = run(&[
         "check",
         "--def",
@@ -123,7 +131,7 @@ fn check_redacts_secrets_in_def_pr_and_principal_on_the_log() {
         "--toolchain",
         "tc-fixed",
         "--pr",
-        &format!("pr-{PAT}"),
+        "pr-42",
         "--principal",
         &format!("orchestrator:{PAT}"),
     ]);

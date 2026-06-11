@@ -219,37 +219,56 @@ impl PorcelainError {
 // BEFORE the bytes reach the chain. A verb physically cannot forget a field: the
 // whole tree is scrubbed by construction.
 //
-// **Keys are structural, not user content** — the exemption is by KEY, mirroring
-// the envelope's own content-address survival rule (see `hugit_ledger::redact`):
-// a content-address/digest VALUE must survive verbatim (it is load-bearing,
-// never a secret), so the fields that carry one are exempt — [`is_digest_key`]:
-// `memo_key`, `tree_hash`, `commit`, any `*_digest`, and a `hash` field
-// (`files_read[].hash`). EVERYTHING else scrubs. A bare digest in a non-exempt
-// free-text field is (correctly) subject to the engine's entropy scan and may
-// redact — that is the engine's WF-1 "err toward redaction in free text" law, not
-// a regression.
+// **Keys are structural, not user content** — but the digest exemption is
+// VALUE-GATED, not key-gated (WH-SCRUB, adversarial Round 4). The envelope's own
+// content-address survival rule (see `hugit_ledger::redact`) says a digest VALUE
+// must survive verbatim because it is load-bearing, never a secret. That holds
+// ONLY when the value is ACTUALLY digest-shaped. A digest-NAMED field
+// (`memo_key`/`tree_hash`/`commit`/`*_digest`/`hash`) carrying a non-digest value
+// is the Round-4 hole: `hugit check --toolchain <ghp_…>` / `verdict --tree-hash
+// <ghp_…>` route a RAW user flag into a digest-named field, and a pure key-name
+// exemption persisted the secret VERBATIM in the forever-log (same class as the
+// Round-2 hex leak). The fix: a digest-named field is exempt from the scrub ONLY
+// IF its value is digest-shaped ([`is_digest_shaped`] — 64/40-hex OR a
+// `sha256:`/`cas:`/`<algo>:` content-address prefix). A real `memo_key` /
+// `sha256:abc…` survives; a smuggled secret in a digest-named field scrubs like
+// any other value. A bare digest in a non-digest-named free-text field is (still)
+// subject to the engine's entropy scan and may redact — the engine's WF-1 "err
+// toward redaction in free text" law, not a regression.
+//
+// **Identifier fields are ADDRESSES, not free text** — {`campaign`, `intent_id`,
+// `pr_id`, `run_id`} are keys the rest of the flow looks up by. Scrubbing them
+// collapses two distinct 40-hex/high-entropy keys to one `[REDACTED]` (silent
+// data loss) AND breaks addressing asymmetrically (open scrubs the key,
+// abandon/close look up the raw key). So these KEYS are exempt from the free-text
+// scrub here ([`is_identifier_key`]). This is CONTRACT-COUPLED with WH-IDENT,
+// which guarantees an identifier can never carry a known secret by VALIDATING it
+// at INPUT (reject empty + reject known-secret-prefix shapes). The split is
+// exact: WH-SCRUB exempts, WH-IDENT validates. (Free-text fields — charter /
+// reason / owner / summary / lens names — are NOT identifiers and still scrub.)
 
 /// Recursively scrub EVERY user-supplied string VALUE in a porcelain payload
 /// through the redaction engine ([`crate::redaction::scrub`] →
 /// [`hugit_ledger::redact::apply`]), IN PLACE, BEFORE the payload is serialized
 /// and appended to the hash-chained log.
 ///
-/// Object KEYS are structural and never scrubbed. A value under a digest KEY
-/// ([`is_digest_key`] — `memo_key`/`tree_hash`/`commit`/`*_digest`/`hash`) is
-/// EXEMPT (a content address is load-bearing and must survive verbatim); every
-/// other string value scrubs. Arrays and nested objects recurse, re-evaluating
-/// the exemption per key as they descend.
+/// Object KEYS are structural and never scrubbed. The exemption is decided
+/// per `(key, value)` as the tree descends ([`is_exempt`]): a digest-NAMED field
+/// is exempt ONLY IF its value is digest-SHAPED ([`is_digest_shaped`]), and the
+/// identifier-address fields ([`is_identifier_key`]) are exempt as keys. Every
+/// other string value scrubs. Arrays inherit their parent key's exemption;
+/// nested objects re-evaluate per child key.
 ///
 /// This is THE seam: route every porcelain append through [`scrub_payload`]
 /// (directly or via [`scrub_to_canonical`]). A raw append of an un-scrubbed user
-/// payload is the forbidden path the WG-SCRUB tests guard against.
+/// payload is the forbidden path the WG-SCRUB / WH-SCRUB tests guard against.
 pub fn scrub_payload(value: &mut Value) {
     scrub_value(value, false);
 }
 
-/// Inner recursion. `exempt` is set when the value is reached via a digest KEY,
-/// so its string content (and any nested strings under it — a digest is a leaf in
-/// practice, but the flag propagates honestly) survives verbatim.
+/// Inner recursion. `exempt` is set when the value is reached via an exempt KEY
+/// (a digest key whose value is digest-shaped, or an identifier-address key), so
+/// its string content survives verbatim. Arrays propagate the parent's exemption.
 fn scrub_value(value: &mut Value, exempt: bool) {
     match value {
         Value::String(s) => {
@@ -264,9 +283,11 @@ fn scrub_value(value: &mut Value, exempt: bool) {
         }
         Value::Object(map) => {
             for (key, child) in map.iter_mut() {
-                // Re-evaluate exemption at EACH key: a digest key under a
-                // non-exempt object exempts its own subtree, and vice-versa.
-                scrub_value(child, is_digest_key(key));
+                // Re-evaluate exemption at EACH (key, value): a digest key
+                // exempts only a digest-SHAPED value; an identifier key is an
+                // address. Everything else (including a secret smuggled into a
+                // digest-named field) scrubs.
+                scrub_value(child, is_exempt(key, child));
             }
         }
         // Numbers / bools / null carry no user free-text — nothing to scrub.
@@ -274,15 +295,107 @@ fn scrub_value(value: &mut Value, exempt: bool) {
     }
 }
 
-/// True iff `key` names a content-address / digest field whose VALUE must survive
-/// the scrub verbatim. This mirrors the envelope's own digest-survival rule
-/// (`hugit_ledger::redact`): a digest is load-bearing, never a secret.
+/// Decide whether the string under `key` (carrying `value`) is EXEMPT from the
+/// free-text scrub. Two exempt classes:
+///
+/// 1. **Digest fields, value-gated** ([`is_digest_key`] AND [`is_digest_shaped`]):
+///    a content address is load-bearing, never a secret — but ONLY when its value
+///    is actually digest-shaped. A digest-NAMED field carrying a non-digest value
+///    (a secret smuggled via `--toolchain`/`--tree-hash`) is NOT exempt — it
+///    scrubs like any other value (WH-SCRUB, the Round-4 hole).
+/// 2. **Identifier-address fields** ([`is_identifier_key`]): keys the flow looks
+///    up by — exempt from free-text scrub so addressing stays consistent
+///    (contract-coupled with WH-IDENT, which validates them at input).
+///
+/// A non-string `value` under a digest key never carries free text, so the digest
+/// branch only fires for a string; identifier keys exempt their subtree as a key
+/// (an identifier value is always a string in practice).
+fn is_exempt(key: &str, value: &Value) -> bool {
+    if is_identifier_key(key) {
+        return true;
+    }
+    if is_digest_key(key) {
+        // VALUE-GATED: a string value must be digest-shaped to be exempt; a
+        // non-string (array/object) under a digest key recurses and is decided
+        // per descendant, so do not blanket-exempt it here.
+        return match value {
+            Value::String(s) => is_digest_shaped(s),
+            _ => false,
+        };
+    }
+    false
+}
+
+/// True iff `key` names a content-address / digest field. NAME-only — pair with
+/// [`is_digest_shaped`] (the value gate) before exempting; a digest NAME alone no
+/// longer exempts (WH-SCRUB).
 ///
 /// The rule: exact `memo_key` / `tree_hash` / `commit`, any `*_digest` suffix
 /// (`def_digest`, `toolchain_digest`, `prompt_digest`, …), or a bare `hash`
-/// field (`files_read[].hash`). Everything else scrubs.
+/// field (`files_read[].hash`).
 pub fn is_digest_key(key: &str) -> bool {
     matches!(key, "memo_key" | "tree_hash" | "commit" | "hash") || key.ends_with("_digest")
+}
+
+/// True iff `value` is actually digest-SHAPED — the value gate for the digest
+/// exemption (WH-SCRUB). A field is exempt from scrub ONLY when BOTH its key names
+/// a digest AND its value matches this shape:
+///
+/// - a **bare** 40- or 64-char run of hex digits (sha-1 / sha-256), OR
+/// - a content-address ref with an explicit algorithm prefix: `sha256:<hex>` /
+///   `sha1:<hex>` / `cas:<payload>` / any recognised `<algo>:<40|64-hex>`.
+///
+/// A real `memo_key` (64-hex), a `sha256:abc…` ref, or a 40-hex `commit` survives;
+/// a `ghp_…` / JWT / connection-string smuggled into a digest-named field does NOT
+/// match → it falls through to the scrub. This is the local mirror of the ledger's
+/// own `is_bare_hex_digest_shape` / `is_content_address_ref` (private there);
+/// kept tight so a real digest survives and a secret-shaped value scrubs.
+fn is_digest_shaped(value: &str) -> bool {
+    is_bare_hex_digest(value) || is_content_address_ref(value)
+}
+
+/// A **bare** 40- or 64-char run of hex digits (no prefix) — the sha-1 / sha-256
+/// content-address shapes. Mirrors `hugit_ledger::redact::is_bare_hex_digest_shape`.
+fn is_bare_hex_digest(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// A content-address ref carrying an explicit algorithm prefix: `cas:<payload>`
+/// (any payload) or `<algo>:<40|64-hex>` where `<algo>` names a recognised hash
+/// family. Mirrors `hugit_ledger::redact::is_content_address_ref`.
+fn is_content_address_ref(value: &str) -> bool {
+    if value.starts_with("cas:") {
+        return true;
+    }
+    let Some((algo, hex)) = value.split_once(':') else {
+        return false;
+    };
+    is_digest_algo(algo)
+        && matches!(hex.len(), 40 | 64)
+        && hex.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Recognised content-address algorithm tags (case-insensitive). Mirrors the
+/// ledger's `is_digest_algo`. A bare unknown prefix does NOT exempt.
+fn is_digest_algo(algo: &str) -> bool {
+    matches!(
+        algo.to_ascii_lowercase().as_str(),
+        "sha1" | "sha256" | "sha-1" | "sha-256" | "sha512" | "sha-512" | "blake3" | "cas" | "oid"
+    )
+}
+
+/// True iff `key` names an identifier-ADDRESS field — a key the flow looks up by,
+/// not free text. Exempt from the free-text scrub so distinct keys never collapse
+/// to one `[REDACTED]` and addressing stays symmetric (open/abandon/close all see
+/// the same raw key).
+///
+/// CONTRACT-COUPLED with WH-IDENT: these fields are exempt HERE because WH-IDENT
+/// validates them at INPUT (reject empty + reject known-secret-prefix shapes), so
+/// an identifier can never carry a known secret. WH-SCRUB exempts; WH-IDENT
+/// validates. Free-text fields (charter / reason / owner / summary / lens names)
+/// are NOT identifiers and still scrub.
+pub fn is_identifier_key(key: &str) -> bool {
+    matches!(key, "campaign" | "intent_id" | "pr_id" | "run_id")
 }
 
 /// Scrub a payload [`Value`] ([`scrub_payload`]) and return it as a **canonical**
@@ -517,5 +630,145 @@ mod tests {
         );
         // Re-canonicalises to itself (stable wire bytes).
         assert_eq!(hugit_refstore::canonical_json(&out).unwrap(), out);
+    }
+
+    // ── WH-SCRUB (adversarial Round 4): the digest exemption is VALUE-gated ───
+
+    /// A real 64-hex content address (sha-256 of the empty string).
+    const DIGEST_64: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    /// A real 40-hex content address (sha-1 of the empty string).
+    const DIGEST_40: &str = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
+
+    #[test]
+    fn digest_named_field_with_a_secret_value_now_scrubs() {
+        // THE Round-4 hole: `check --toolchain <ghp_…>` routes a RAW user flag
+        // into `toolchain_digest`, `verdict --tree-hash <ghp_…>` into `tree_hash`.
+        // A pure key-name exemption persisted the secret VERBATIM. Value-gated:
+        // the value is NOT digest-shaped → it scrubs like any other value.
+        let mut v = json!({
+            "toolchain_digest": GHP,                       // check --toolchain <secret>
+            "tree_hash": format!("smuggled {GHP}"),        // verdict --tree-hash <secret>
+            "memo_key": "postgres://u:S3cr3tP4ssw0rdVeryLongRandomToken9999@h:5432/d",
+            "def_digest": GHP,
+            "hash": GHP,
+            "commit": GHP,
+        });
+        scrub_payload(&mut v);
+        for key in [
+            "toolchain_digest",
+            "tree_hash",
+            "memo_key",
+            "def_digest",
+            "hash",
+            "commit",
+        ] {
+            assert_eq!(
+                v[key], REDACTED,
+                "a non-digest-shaped value in digest-named `{key}` MUST scrub"
+            );
+        }
+    }
+
+    #[test]
+    fn real_digest_values_still_survive_the_value_gate() {
+        // The exemption MUST still hold for an actual content address: a 64-hex
+        // memo_key, a 40-hex commit, and prefixed `sha256:`/`cas:` refs survive.
+        let mut v = json!({
+            "memo_key": DIGEST_64,
+            "tree_hash": format!("sha256:{DIGEST_64}"),
+            "commit": DIGEST_40,
+            "toolchain_digest": format!("sha256:{DIGEST_64}"),
+            "def_digest": format!("cas:{DIGEST_64}"),
+            "hash": DIGEST_64,
+        });
+        scrub_payload(&mut v);
+        assert_eq!(v["memo_key"], DIGEST_64, "real 64-hex memo_key survives");
+        assert_eq!(
+            v["tree_hash"],
+            format!("sha256:{DIGEST_64}"),
+            "sha256: ref survives"
+        );
+        assert_eq!(v["commit"], DIGEST_40, "real 40-hex commit survives");
+        assert_eq!(v["def_digest"], format!("cas:{DIGEST_64}"), "cas: survives");
+        assert_eq!(v["hash"], DIGEST_64, "bare-hex hash survives");
+    }
+
+    #[test]
+    fn identifier_address_keys_are_exempt_and_do_not_collapse() {
+        // {campaign, intent_id, pr_id, run_id} are ADDRESSES, not free text:
+        // scrubbing them would collapse distinct high-entropy keys to one
+        // [REDACTED] (silent data loss) and break addressing. They are exempt
+        // (WH-IDENT validates them at input — exempt-but-validated).
+        let camp_a = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"; // 40-hex, high-entropy
+        let camp_b = "ffeeddccbbaa99887766554433221100ffeeddcc"; // distinct 40-hex
+        let mut v = json!({
+            "campaign": camp_a,
+            "intent_id": "8Kp2mZ9qLx4vTn7wRj3sYb6cFd1gHe0", // high-entropy id
+            "pr_id": "pr-9f8e7d6c",
+            "run_id": "run-0011-2233",
+        });
+        scrub_payload(&mut v);
+        // Two distinct campaign keys must stay distinct (no collapse).
+        assert_eq!(v["campaign"], camp_a, "campaign address survives (A)");
+        assert_ne!(v["campaign"], camp_b, "distinct keys do NOT collapse");
+        assert_eq!(
+            v["intent_id"], "8Kp2mZ9qLx4vTn7wRj3sYb6cFd1gHe0",
+            "intent_id high-entropy address survives (no entropy redaction)"
+        );
+        assert_eq!(v["pr_id"], "pr-9f8e7d6c", "pr_id address survives");
+        assert_eq!(v["run_id"], "run-0011-2233", "run_id address survives");
+    }
+
+    #[test]
+    fn a_secret_in_a_free_text_charter_still_redacts() {
+        // The identifier/digest exemptions must NOT widen into free text: a PAT
+        // in `charter`/`reason`/`owner`/`summary` still redacts.
+        let mut v = json!({
+            "charter": format!("ship with {GHP}"),
+            "reason": format!("rotating {GHP}"),
+            "owner": format!("ops {GHP}"),
+            "summary": format!("note {GHP}"),
+            "lens": format!("security {GHP}"),
+        });
+        scrub_payload(&mut v);
+        for key in ["charter", "reason", "owner", "summary", "lens"] {
+            assert_eq!(v[key], REDACTED, "free-text `{key}` still scrubs");
+        }
+    }
+
+    #[test]
+    fn is_digest_shaped_predicate() {
+        // Bare 40/64-hex and prefixed content-address refs are digest-shaped.
+        assert!(is_digest_shaped(DIGEST_64));
+        assert!(is_digest_shaped(DIGEST_40));
+        assert!(is_digest_shaped(&format!("sha256:{DIGEST_64}")));
+        assert!(is_digest_shaped(&format!("sha1:{DIGEST_40}")));
+        assert!(is_digest_shaped("cas:anything-here"));
+        // Secrets / short / unknown-prefix are NOT digest-shaped.
+        assert!(!is_digest_shaped(GHP));
+        assert!(!is_digest_shaped("deadbeef")); // 8 hex, too short
+        assert!(!is_digest_shaped(&format!("token:{DIGEST_64}"))); // unknown algo
+        assert!(!is_digest_shaped("postgres://u:p@h:5432/d"));
+    }
+
+    #[test]
+    fn is_identifier_key_set_is_exact() {
+        for k in ["campaign", "intent_id", "pr_id", "run_id"] {
+            assert!(is_identifier_key(k), "`{k}` is an identifier address");
+        }
+        // Free-text fields are NOT identifiers (`intent` is the reviewed change,
+        // `intent_ids` is plural — both still scrub).
+        for k in [
+            "charter",
+            "reason",
+            "owner",
+            "summary",
+            "lens",
+            "intent",
+            "intent_ids",
+            "name",
+        ] {
+            assert!(!is_identifier_key(k), "`{k}` is NOT an identifier address");
+        }
     }
 }
