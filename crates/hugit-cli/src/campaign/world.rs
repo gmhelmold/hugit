@@ -393,6 +393,12 @@ fn rollup_error(e: hugit_ledger::rollup::RollupError) -> CampaignError {
             e.to_string(),
             "supply the envelope at the altitude the rollup position requires",
         ),
+        RollupError::Overflow { .. } => CampaignError::new(
+            "cost_overflow",
+            e.to_string(),
+            "a cost/token accumulator overflowed u64 — the inputs are corrupt or \
+             tampered; the rollup refuses to emit a wrapped figure (fail-closed)",
+        ),
     }
 }
 
@@ -413,8 +419,8 @@ fn zero_ci() -> CiCost {
     CiCost {
         cache_hit: 0,
         exec: 0,
-        cost_usd: 0.0,
-        saved_usd: 0.0,
+        cost_usd_micros: 0,
+        saved_usd_micros: 0,
     }
 }
 

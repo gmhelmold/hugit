@@ -222,34 +222,35 @@ fn cost_decomposition_fixture() -> CostDecomposition {
         work: WorkCost {
             tokens: 96_146,
             tool_calls: 14,
-            cost_usd: 0.04,
+            cost_usd_micros: 40_000,
         },
         orchestration: OrchestrationCost {
             tokens: 244_400,
             tool_calls: 41,
             turns: 28,
-            cost_usd: 0.62,
+            cost_usd_micros: 620_000,
         },
         verification: VerificationCost {
             tokens: 30_000,
             verdict_panels: 3,
-            cost_usd: 0.05,
+            cost_usd_micros: 50_000,
         },
         ci: CiCost {
             cache_hit: 11,
             exec: 4,
-            cost_usd: 0.02,
-            saved_usd: 0.06,
+            cost_usd_micros: 20_000,
+            saved_usd_micros: 60_000,
         },
         waste: WasteCost {
             discarded_intents: 1,
             retried_agents: 1,
             tokens_not_landed: 18_000,
-            cost_usd: 0.03,
+            cost_usd_micros: 30_000,
         },
         total: TotalCost {
             tokens: 370_546,
-            cost_usd: 0.73,
+            // work + orch + verif + ci = 40_000 + 620_000 + 50_000 + 20_000.
+            cost_usd_micros: 730_000,
         },
     }
 }

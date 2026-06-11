@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.1.0",
+  "schema_version": "1.2.0",
   "altitude": "pr",
   "intent_id": "128",
   "commit": "f00df00df00df00df00df00df00df00df00df00d",
@@ -66,7 +66,7 @@
       }
     ],
     "model_turns": 28,
-    "cost_usd": 0.62
+    "cost_usd_micros": 620000
   },
   "verdicts_ref": "cas:5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed"
 }

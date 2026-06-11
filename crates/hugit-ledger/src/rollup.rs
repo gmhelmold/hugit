@@ -44,15 +44,16 @@
 //! # Honest gaps (inputs that do not exist in the seams yet — documented,
 //! # not faked)
 //!
-//! - `verification.tokens` / `verification.cost_usd` compute to `0`: the
-//!   verdict seam ([`VerdictObject`]) carries no token/cost fields, only the
-//!   panels themselves. `verdict_panels` is the real panel count.
+//! - `verification.tokens` / `verification.cost_usd_micros` compute to `0`:
+//!   the verdict seam ([`VerdictObject`]) carries no token/cost fields, only
+//!   the panels themselves. `verdict_panels` is the real panel count.
 //! - `efficiency.cost_per_net_kloc` computes to `0.0`: no projection seam
 //!   carries diff/LOC statistics (the `intent.landed` payload has
 //!   ref/target/charter only).
-//! - `ci.cost_usd` / `ci.saved_usd` are whatever the checks seam supplies;
-//!   when no pricing seam exists they are `0` and `cache_savings_pct`
-//!   honestly computes to `0.0` (the hit/exec **counts** are measured).
+//! - `ci.cost_usd_micros` / `ci.saved_usd_micros` are whatever the checks seam
+//!   supplies; when no pricing seam exists they are `0` and
+//!   `cache_savings_pct` honestly computes to `0.0` (the hit/exec **counts**
+//!   are measured).
 //! - `queue_wait_ms` / `human_touches` / `landed_at` are queue-seam state,
 //!   supplied via [`PrQueueInput`] (the landing queue owns them; the
 //!   envelope does not carry them).
@@ -93,6 +94,15 @@ pub enum RollupError {
         /// The subagent marker that triggered the rejection.
         agent_type: String,
     },
+    /// A money (micro-USD) or token accumulator overflowed `u64` while summing
+    /// across attempts / intents / PRs. **Saturate-or-error policy: ERROR**
+    /// (fail-closed, WA4) — the rollup refuses to emit a silently-wrapped
+    /// figure. `u64` micro-USD spans ~18.4 trillion USD, so an overflow here is
+    /// a tamper/garbage signal, not a real fleet bill; surfacing it is correct.
+    Overflow {
+        /// Which accumulator overflowed (e.g. `"work.cost_usd_micros"`).
+        field: &'static str,
+    },
 }
 
 impl std::fmt::Display for RollupError {
@@ -116,6 +126,11 @@ impl std::fmt::Display for RollupError {
                 "envelope '{intent_id}' at altitude {altitude:?} is subagent-authored \
                  (run {run_id}, agent_type '{agent_type}') — a PR/campaign author is \
                  never a subagent (D14)"
+            ),
+            RollupError::Overflow { field } => write!(
+                f,
+                "rollup accumulator '{field}' overflowed u64 — refusing to emit a \
+                 wrapped figure (fail-closed)"
             ),
         }
     }
@@ -204,13 +219,13 @@ pub fn pr_record(
     let mut work = WorkCost {
         tokens: 0,
         tool_calls: 0,
-        cost_usd: 0.0,
+        cost_usd_micros: 0,
     };
     let mut waste = WasteCost {
         discarded_intents: 0,
         retried_agents: 0,
         tokens_not_landed: 0,
-        cost_usd: 0.0,
+        cost_usd_micros: 0,
     };
     // First-pass yield bookkeeping: ids authored vs landed on the 1st attempt.
     let mut authored_ids: BTreeSet<&str> = attempts.iter().map(|(id, _)| *id).collect();
@@ -227,13 +242,26 @@ pub fn pr_record(
             let final_idx = final_attempt_idx(group);
             for (i, env) in group.iter().enumerate() {
                 if i == final_idx {
-                    work.tokens += env.metrics.tokens.total;
-                    work.tool_calls += env.metrics.tool_calls;
-                    work.cost_usd += env.metrics.cost_usd;
+                    work.tokens = add(work.tokens, env.metrics.tokens.total, "work.tokens")?;
+                    work.tool_calls =
+                        add(work.tool_calls, env.metrics.tool_calls, "work.tool_calls")?;
+                    work.cost_usd_micros = add(
+                        work.cost_usd_micros,
+                        env.metrics.cost_usd_micros,
+                        "work.cost_usd_micros",
+                    )?;
                 } else {
                     // …every earlier attempt is retried spend that never landed.
-                    waste.tokens_not_landed += env.metrics.tokens.total;
-                    waste.cost_usd += env.metrics.cost_usd;
+                    waste.tokens_not_landed = add(
+                        waste.tokens_not_landed,
+                        env.metrics.tokens.total,
+                        "waste.tokens_not_landed",
+                    )?;
+                    waste.cost_usd_micros = add(
+                        waste.cost_usd_micros,
+                        env.metrics.cost_usd_micros,
+                        "waste.cost_usd_micros",
+                    )?;
                 }
             }
             if group.len() <= 1 {
@@ -243,8 +271,16 @@ pub fn pr_record(
             // Discarded intent: every attempt is spend that never landed.
             waste.discarded_intents += 1;
             for env in group {
-                waste.tokens_not_landed += env.metrics.tokens.total;
-                waste.cost_usd += env.metrics.cost_usd;
+                waste.tokens_not_landed = add(
+                    waste.tokens_not_landed,
+                    env.metrics.tokens.total,
+                    "waste.tokens_not_landed",
+                )?;
+                waste.cost_usd_micros = add(
+                    waste.cost_usd_micros,
+                    env.metrics.cost_usd_micros,
+                    "waste.cost_usd_micros",
+                )?;
             }
         }
     }
@@ -261,17 +297,17 @@ pub fn pr_record(
         tokens: pr_envelope.metrics.tokens.total,
         tool_calls: pr_envelope.metrics.tool_calls,
         turns: pr_envelope.metrics.model_turns,
-        cost_usd: pr_envelope.metrics.cost_usd,
+        cost_usd_micros: pr_envelope.metrics.cost_usd_micros,
     };
 
     // ── verification: real panel count; spend has no seam yet (module docs).
     let verification = VerificationCost {
         tokens: 0,
         verdict_panels: verdicts.len() as u64,
-        cost_usd: 0.0,
+        cost_usd_micros: 0,
     };
 
-    let cost = decompose(work, orchestration, verification, ci, waste);
+    let cost = decompose(work, orchestration, verification, ci, waste)?;
 
     // ── time: span vs sum (deliberate; ADR-0001 §2.3).
     // First activity = earliest birth across the bundle's sessions (intents +
@@ -361,30 +397,30 @@ pub fn campaign_rollup(
     let mut work = WorkCost {
         tokens: 0,
         tool_calls: 0,
-        cost_usd: 0.0,
+        cost_usd_micros: 0,
     };
     let mut orchestration = OrchestrationCost {
         tokens: 0,
         tool_calls: 0,
         turns: 0,
-        cost_usd: 0.0,
+        cost_usd_micros: 0,
     };
     let mut verification = VerificationCost {
         tokens: 0,
         verdict_panels: 0,
-        cost_usd: 0.0,
+        cost_usd_micros: 0,
     };
     let mut ci = CiCost {
         cache_hit: 0,
         exec: 0,
-        cost_usd: 0.0,
-        saved_usd: 0.0,
+        cost_usd_micros: 0,
+        saved_usd_micros: 0,
     };
     let mut waste = WasteCost {
         discarded_intents: 0,
         retried_agents: 0,
         tokens_not_landed: 0,
-        cost_usd: 0.0,
+        cost_usd_micros: 0,
     };
     let mut pr_ids = Vec::with_capacity(prs.len());
     let mut intent_count = 0u64;
@@ -412,24 +448,72 @@ pub fn campaign_rollup(
             models_used = dedup_push(models_used, m);
         }
 
-        work.tokens += pr.cost.work.tokens;
-        work.tool_calls += pr.cost.work.tool_calls;
-        work.cost_usd += pr.cost.work.cost_usd;
-        orchestration.tokens += pr.cost.orchestration.tokens;
-        orchestration.tool_calls += pr.cost.orchestration.tool_calls;
-        orchestration.turns += pr.cost.orchestration.turns;
-        orchestration.cost_usd += pr.cost.orchestration.cost_usd;
-        verification.tokens += pr.cost.verification.tokens;
-        verification.verdict_panels += pr.cost.verification.verdict_panels;
-        verification.cost_usd += pr.cost.verification.cost_usd;
-        ci.cache_hit += pr.cost.ci.cache_hit;
-        ci.exec += pr.cost.ci.exec;
-        ci.cost_usd += pr.cost.ci.cost_usd;
-        ci.saved_usd += pr.cost.ci.saved_usd;
+        work.tokens = add(work.tokens, pr.cost.work.tokens, "work.tokens")?;
+        work.tool_calls = add(work.tool_calls, pr.cost.work.tool_calls, "work.tool_calls")?;
+        work.cost_usd_micros = add(
+            work.cost_usd_micros,
+            pr.cost.work.cost_usd_micros,
+            "work.cost_usd_micros",
+        )?;
+        orchestration.tokens = add(
+            orchestration.tokens,
+            pr.cost.orchestration.tokens,
+            "orchestration.tokens",
+        )?;
+        orchestration.tool_calls = add(
+            orchestration.tool_calls,
+            pr.cost.orchestration.tool_calls,
+            "orchestration.tool_calls",
+        )?;
+        orchestration.turns = add(
+            orchestration.turns,
+            pr.cost.orchestration.turns,
+            "orchestration.turns",
+        )?;
+        orchestration.cost_usd_micros = add(
+            orchestration.cost_usd_micros,
+            pr.cost.orchestration.cost_usd_micros,
+            "orchestration.cost_usd_micros",
+        )?;
+        verification.tokens = add(
+            verification.tokens,
+            pr.cost.verification.tokens,
+            "verification.tokens",
+        )?;
+        verification.verdict_panels = add(
+            verification.verdict_panels,
+            pr.cost.verification.verdict_panels,
+            "verification.verdict_panels",
+        )?;
+        verification.cost_usd_micros = add(
+            verification.cost_usd_micros,
+            pr.cost.verification.cost_usd_micros,
+            "verification.cost_usd_micros",
+        )?;
+        ci.cache_hit = add(ci.cache_hit, pr.cost.ci.cache_hit, "ci.cache_hit")?;
+        ci.exec = add(ci.exec, pr.cost.ci.exec, "ci.exec")?;
+        ci.cost_usd_micros = add(
+            ci.cost_usd_micros,
+            pr.cost.ci.cost_usd_micros,
+            "ci.cost_usd_micros",
+        )?;
+        ci.saved_usd_micros = add(
+            ci.saved_usd_micros,
+            pr.cost.ci.saved_usd_micros,
+            "ci.saved_usd_micros",
+        )?;
         waste.discarded_intents += pr.cost.waste.discarded_intents;
         waste.retried_agents += pr.cost.waste.retried_agents;
-        waste.tokens_not_landed += pr.cost.waste.tokens_not_landed;
-        waste.cost_usd += pr.cost.waste.cost_usd;
+        waste.tokens_not_landed = add(
+            waste.tokens_not_landed,
+            pr.cost.waste.tokens_not_landed,
+            "waste.tokens_not_landed",
+        )?;
+        waste.cost_usd_micros = add(
+            waste.cost_usd_micros,
+            pr.cost.waste.cost_usd_micros,
+            "waste.cost_usd_micros",
+        )?;
 
         agent_sum_ms += pr.time.agent_sum_ms;
         queue_wait_ms += pr.time.queue_wait_ms;
@@ -448,7 +532,7 @@ pub fn campaign_rollup(
         first_pass_total += pr.efficiency.first_pass_yield * authored;
     }
 
-    let cost = decompose(work, orchestration, verification, ci, waste);
+    let cost = decompose(work, orchestration, verification, ci, waste)?;
 
     // ── time: lead time — campaign opened (its session's birth) → last PR
     // landed; if nothing landed yet, the span runs to the campaign session's
@@ -495,9 +579,21 @@ pub fn campaign_rollup(
 // Shared computation
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// `a + b` over `u64`, fail-closed on overflow (WA4 saturate-or-error policy:
+/// **ERROR**). Used for every money (micro-USD) and token accumulator so a
+/// silent `u64` wrap can never reach a rollup figure.
+fn add(a: u64, b: u64, field: &'static str) -> Result<u64, RollupError> {
+    a.checked_add(b).ok_or(RollupError::Overflow { field })
+}
+
 /// Assemble the [`CostDecomposition`] with the `total` identity built in:
 /// `total = work + orchestration + verification + ci` — waste shown in its
 /// own line and excluded from total (ADR-0001 §2.3 JSONC).
+///
+/// Money is integer micro-USD (WA4): the identity is a **theorem over the
+/// integers** — `total.cost_usd_micros` is the exact `checked_add` sum of the
+/// four component micro-USD figures, with no floating-point epsilon. Overflow
+/// is an error, never a silent wrap.
 ///
 /// CI contributes no tokens to `total.tokens` (its spend is compute, not
 /// model tokens — the [`CiCost`] shape has no token field by design).
@@ -507,26 +603,47 @@ fn decompose(
     verification: VerificationCost,
     ci: CiCost,
     waste: WasteCost,
-) -> CostDecomposition {
+) -> Result<CostDecomposition, RollupError> {
+    let tokens = add(
+        add(work.tokens, orchestration.tokens, "total.tokens")?,
+        verification.tokens,
+        "total.tokens",
+    )?;
+    // total = work + orchestration + verification + ci, exact integer sum.
+    let cost_usd_micros = add(
+        add(
+            add(
+                work.cost_usd_micros,
+                orchestration.cost_usd_micros,
+                "total.cost_usd_micros",
+            )?,
+            verification.cost_usd_micros,
+            "total.cost_usd_micros",
+        )?,
+        ci.cost_usd_micros,
+        "total.cost_usd_micros",
+    )?;
     let total = TotalCost {
-        tokens: work.tokens + orchestration.tokens + verification.tokens,
-        cost_usd: work.cost_usd + orchestration.cost_usd + verification.cost_usd + ci.cost_usd,
+        tokens,
+        cost_usd_micros,
     };
-    CostDecomposition {
+    Ok(CostDecomposition {
         work,
         orchestration,
         verification,
         ci,
         waste,
         total,
-    }
+    })
 }
 
 /// Compute the [`Efficiency`] block from a decomposition + the first-pass
 /// yield.
 ///
-/// - `overhead_pct` = orchestration ÷ total, as a percentage. Computed over
-///   `cost_usd`; when total cost is `0` (no pricing data) it falls back to
+/// - `overhead_pct` = orchestration ÷ total, as a percentage. The money is
+///   integer micro-USD (WA4); the division to a percentage is **display-only**
+///   and computed into f64 at the very end (the accumulation that feeds it is
+///   exact-integer). When total cost is `0` (no pricing data) it falls back to
 ///   the token ratio so the lean-vs-bloated signal survives without a
 ///   pricing seam.
 /// - `cache_savings_pct` = CI saved ÷ would-be (saved + executed), as a
@@ -538,16 +655,21 @@ fn decompose(
 ///   ref/target/charter), so there is no net-kLOC denominator to compute
 ///   against. Documented, not faked.
 fn efficiency_from(cost: &CostDecomposition, first_pass_yield: f64) -> Efficiency {
-    let overhead_pct = if cost.total.cost_usd > 0.0 {
-        cost.orchestration.cost_usd / cost.total.cost_usd * 100.0
+    let overhead_pct = if cost.total.cost_usd_micros > 0 {
+        cost.orchestration.cost_usd_micros as f64 / cost.total.cost_usd_micros as f64 * 100.0
     } else if cost.total.tokens > 0 {
         cost.orchestration.tokens as f64 / cost.total.tokens as f64 * 100.0
     } else {
         0.0
     };
-    let would_be = cost.ci.saved_usd + cost.ci.cost_usd;
-    let cache_savings_pct = if would_be > 0.0 {
-        cost.ci.saved_usd / would_be * 100.0
+    // `saved + executed` can in principle overflow u64; for a display-only
+    // ratio, saturate (the percentage is meaningful even at the ceiling).
+    let would_be = cost
+        .ci
+        .saved_usd_micros
+        .saturating_add(cost.ci.cost_usd_micros);
+    let cache_savings_pct = if would_be > 0 {
+        cost.ci.saved_usd_micros as f64 / would_be as f64 * 100.0
     } else {
         0.0
     };

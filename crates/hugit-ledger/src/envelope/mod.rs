@@ -7,7 +7,7 @@
 //!
 //! - **Metrics** ([`hugit_contracts::IntentMetrics`]): tokens with the cache
 //!   split, `wall_ms`, `active_ms`, tool calls + per-tool breakdown, model
-//!   turns, derived `cost_usd` — measured by a [`TrajectoryRecorder`] over
+//!   turns, derived `cost_usd_micros` — measured by a [`TrajectoryRecorder`] over
 //!   the agent's born → die loop.
 //! - **The three trajectory altitudes** (ADR-0001 §2.1): the raw born → die
 //!   transcript and the task-scoped transcript go to the **cold object
@@ -277,11 +277,12 @@ impl TrajectoryRecorder {
         self.tokens.total += input + output + cache_read + cache_write;
     }
 
-    /// Close the recording — the agent dies now. `cost_usd` is the derived
-    /// COGS the harness computed for this run (shown for trust, never a
-    /// usage meter; 0.0 is the honest figure for a model-free hermetic run).
+    /// Close the recording — the agent dies now. `cost_usd_micros` is the
+    /// derived COGS in integer micro-USD (`1 USD = 1_000_000`) the harness
+    /// computed for this run (shown for trust, never a usage meter; `0` is the
+    /// honest figure for a model-free hermetic run). WA4 / schema 1.2.0.
     #[must_use]
-    pub fn finish(self, cost_usd: f64) -> RecordedTrajectory {
+    pub fn finish(self, cost_usd_micros: u64) -> RecordedTrajectory {
         let wall = self.started.elapsed();
         let died_at = self.born_at + u64::try_from(wall.as_millis()).unwrap_or(u64::MAX);
         let tool_calls = self.tool_counts.values().sum();
@@ -301,7 +302,7 @@ impl TrajectoryRecorder {
                     .map(|(tool, count)| ToolCount { tool, count })
                     .collect(),
                 model_turns: self.model_turns,
-                cost_usd,
+                cost_usd_micros,
             },
         }
     }
@@ -486,7 +487,7 @@ pub fn close_envelope<S: ColdBlobStore>(
             tool_calls: 0,
             tool_breakdown: vec![],
             model_turns: 0,
-            cost_usd: 0.0,
+            cost_usd_micros: 0,
         }
     };
 
@@ -623,7 +624,7 @@ pub fn close_session_envelope<S: ColdBlobStore>(
         tokens: m.tokens.total,
         tool_calls: m.tool_calls,
         turns: m.model_turns,
-        cost_usd: m.cost_usd,
+        cost_usd_micros: m.cost_usd_micros,
     };
     Ok(SessionEmission {
         envelope: closed.envelope,
@@ -688,7 +689,7 @@ mod tests {
                     count: 1,
                 }],
                 model_turns: 1,
-                cost_usd: 0.0,
+                cost_usd_micros: 0,
             },
             verdicts_ref: None,
         }
@@ -716,7 +717,7 @@ mod tests {
         rec.record_tool_call("Edit", "Edit(src/lib.rs) -> ok", Duration::from_millis(1));
         rec.add_tokens(100, 40, 60, 10);
         rec.add_tokens(50, 10, 0, 0);
-        let t = rec.finish(0.0);
+        let t = rec.finish(0);
 
         assert_eq!(t.metrics.tokens.input, 150);
         assert_eq!(t.metrics.tokens.output, 50);
@@ -753,7 +754,7 @@ mod tests {
             discarded_intents: 0,
             retried_agents: 0,
             tokens_not_landed: 0,
-            cost_usd: 0.0,
+            cost_usd_micros: 0,
         };
         let err = close_session_envelope(
             &draft(Altitude::Intent),
@@ -772,7 +773,7 @@ mod tests {
             discarded_intents: 2,
             retried_agents: 1,
             tokens_not_landed: 30,
-            cost_usd: 0.0,
+            cost_usd_micros: 0,
         };
         let emission = close_session_envelope(
             &draft(Altitude::Pr),
@@ -805,7 +806,7 @@ mod tests {
             discarded_intents: 0,
             retried_agents: 0,
             tokens_not_landed: 0,
-            cost_usd: 0.0,
+            cost_usd_micros: 0,
         };
         let emission = close_session_envelope(
             &draft(Altitude::Session),
@@ -872,7 +873,7 @@ mod tests {
             discarded_intents: 0,
             retried_agents: 0,
             tokens_not_landed: 0,
-            cost_usd: 0.0,
+            cost_usd_micros: 0,
         };
         let err = close_session_envelope(&session_no_raw, CaptureLevel::Full, &store, waste)
             .expect_err("the imperative holds at the session altitude too");

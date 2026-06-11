@@ -131,7 +131,7 @@ fn campaign_envelope_ref(envelope_ref: &str) -> Ev {
     )
 }
 
-fn metrics(tokens: u64, active_ms: u64, tool_calls: u64, turns: u64, cost: f64) -> Value {
+fn metrics(tokens: u64, active_ms: u64, tool_calls: u64, turns: u64, cost_micros: u64) -> Value {
     json!({
         "tokens": {
             "input": tokens / 2,
@@ -145,7 +145,7 @@ fn metrics(tokens: u64, active_ms: u64, tool_calls: u64, turns: u64, cost: f64) 
         "tool_calls": tool_calls,
         "tool_breakdown": [],
         "model_turns": turns,
-        "cost_usd": cost,
+        "cost_usd_micros": cost_micros,
     })
 }
 
@@ -220,7 +220,7 @@ fn settled_world() -> Vec<Ev> {
                 None,
                 T0,
                 T0 + 130_000,
-                metrics(5_000, 10_000, 10, 6, 0.20),
+                metrics(5_000, 10_000, 10, 6, 200_000),
             ),
         ),
         envelope_event(
@@ -234,7 +234,7 @@ fn settled_world() -> Vec<Ev> {
                 None,
                 T0,
                 T0 + 110_000,
-                metrics(20_000, 30_000, 40, 12, 0.50),
+                metrics(20_000, 30_000, 40, 12, 500_000),
             ),
         ),
         envelope_event(
@@ -248,7 +248,7 @@ fn settled_world() -> Vec<Ev> {
                 None,
                 T0 + 1_000,
                 T0 + 130_000,
-                metrics(10_000, 15_000, 20, 8, 0.25),
+                metrics(10_000, 15_000, 20, 8, 250_000),
             ),
         ),
         envelope_event(
@@ -262,7 +262,7 @@ fn settled_world() -> Vec<Ev> {
                 Some("orq-1"),
                 T0 + 10_000,
                 T0 + 80_000,
-                metrics(50_000, 60_000, 30, 8, 1.00),
+                metrics(50_000, 60_000, 30, 8, 1_000_000),
             ),
         ),
         envelope_event(
@@ -276,7 +276,7 @@ fn settled_world() -> Vec<Ev> {
                 Some("orq-1"),
                 T0 + 10_000,
                 T0 + 90_000,
-                metrics(45_000, 50_000, 25, 8, 0.90),
+                metrics(45_000, 50_000, 25, 8, 900_000),
             ),
         ),
         envelope_event(
@@ -290,7 +290,7 @@ fn settled_world() -> Vec<Ev> {
                 Some("orq-2"),
                 T0 + 20_000,
                 T0 + 100_000,
-                metrics(40_000, 55_000, 20, 8, 0.80),
+                metrics(40_000, 55_000, 20, 8, 800_000),
             ),
         ),
         campaign_envelope_ref("cas:campaign-envelope/auth-hardening"),

@@ -67,7 +67,20 @@ use serde::{Deserialize, Serialize};
 /// [`Altitude::Session`] as a fourth altitude. Additive amendment made the
 /// same day as the 1.0.0 freeze, while **zero producers existed** — no
 /// migration path was ever needed.
-pub const CONTEXT_ENVELOPE_SCHEMA_VERSION: &str = "1.1.0";
+///
+/// `1.2.0` — WA4 money-as-integer amendment (owner-ratified 2026-06-11,
+/// SOTA-audit Tier-3 money item, recommended decision "ok shoot it"). **Money
+/// leaves f64.** Every cost field — [`IntentMetrics::cost_usd_micros`] and the
+/// derived [`CostDecomposition`] family's `*_usd_micros` fields — becomes an
+/// integer **micro-USD** `u64` (`1 USD = 1_000_000` micro-USD). The cost
+/// identity `total = work + orchestration + verification + ci` is now a
+/// *theorem* over the integers — bit-exact, no floating-point epsilon — rather
+/// than an approximate float sum that drifted at scale. This is a clean
+/// **versioned break** of the 1.1.0 wire shape (`cost_usd: f64` is gone);
+/// correct because **zero producers exist in prod** — no migration path was
+/// ever needed. Display-only ratios (`overhead_pct`, `cache_savings_pct`) stay
+/// f64, computed from the integers at the end (division for display is fine).
+pub const CONTEXT_ENVELOPE_SCHEMA_VERSION: &str = "1.2.0";
 
 /// The altitude of the authored unit this envelope records (owner-directed
 /// 2026-06-10): `intent` = a commit (subagent-authored) · `pr` = a bundle of
@@ -213,10 +226,11 @@ pub struct ToolCount {
 }
 
 /// Per-unit measurement (ADR-0001 §2.2 `metrics` / §2.3 per-intent): the
-/// vocabulary of fleet accountability. `cost_usd` is derived COGS shown for
-/// trust — NOT what the customer is billed (never a usage meter).
+/// vocabulary of fleet accountability. `cost_usd_micros` is derived COGS shown
+/// for trust — NOT what the customer is billed (never a usage meter).
 ///
-/// Frozen by WP-F1 (ADR-0001).
+/// Frozen by WP-F1 (ADR-0001); money widened to integer micro-USD by the WA4
+/// amendment (schema 1.2.0, [`CONTEXT_ENVELOPE_SCHEMA_VERSION`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct IntentMetrics {
@@ -232,8 +246,10 @@ pub struct IntentMetrics {
     pub tool_breakdown: Vec<ToolCount>,
     /// Number of model turns.
     pub model_turns: u64,
-    /// Derived COGS in USD; NOT what the customer is billed.
-    pub cost_usd: f64,
+    /// Derived COGS in integer **micro-USD** (`1 USD = 1_000_000`); NOT what
+    /// the customer is billed. Integer minor units so the cost identity is
+    /// bit-exact (WA4 amendment, schema 1.2.0).
+    pub cost_usd_micros: u64,
 }
 
 /// The Intent Context Envelope — `context.json` (ADR-0001 §2.2).
@@ -351,8 +367,8 @@ pub struct WorkCost {
     pub tokens: u64,
     /// Total tool calls across the intents.
     pub tool_calls: u64,
-    /// Derived COGS in USD.
-    pub cost_usd: f64,
+    /// Derived COGS in integer micro-USD (`1 USD = 1_000_000`).
+    pub cost_usd_micros: u64,
 }
 
 /// The unit author's own coordination spend on top of the work: planning,
@@ -367,8 +383,8 @@ pub struct OrchestrationCost {
     pub tool_calls: u64,
     /// Model turns of the author's session.
     pub turns: u64,
-    /// Derived COGS in USD.
-    pub cost_usd: f64,
+    /// Derived COGS in integer micro-USD (`1 USD = 1_000_000`).
+    pub cost_usd_micros: u64,
 }
 
 /// Verification spend — the adversarial review panels.
@@ -380,8 +396,8 @@ pub struct VerificationCost {
     pub tokens: u64,
     /// Number of verdict panels run.
     pub verdict_panels: u64,
-    /// Derived COGS in USD.
-    pub cost_usd: f64,
+    /// Derived COGS in integer micro-USD (`1 USD = 1_000_000`).
+    pub cost_usd_micros: u64,
 }
 
 /// CI spend and the memoization economics.
@@ -393,10 +409,10 @@ pub struct CiCost {
     pub cache_hit: u64,
     /// Check executions actually run.
     pub exec: u64,
-    /// Derived COGS in USD of the executed checks.
-    pub cost_usd: f64,
-    /// USD saved by memoization (would-be cost of the cache hits).
-    pub saved_usd: f64,
+    /// Derived COGS in integer micro-USD of the executed checks.
+    pub cost_usd_micros: u64,
+    /// Micro-USD saved by memoization (would-be cost of the cache hits).
+    pub saved_usd_micros: u64,
 }
 
 /// Waste — spent-but-not-landed, shown not hidden (gross spend vs landed
@@ -411,8 +427,8 @@ pub struct WasteCost {
     pub retried_agents: u64,
     /// Tokens spent on work that never landed.
     pub tokens_not_landed: u64,
-    /// Derived COGS in USD of the waste.
-    pub cost_usd: f64,
+    /// Derived COGS in integer micro-USD of the waste.
+    pub cost_usd_micros: u64,
 }
 
 /// The total line: work + orchestration + verification + ci.
@@ -422,8 +438,8 @@ pub struct WasteCost {
 pub struct TotalCost {
     /// Total tokens.
     pub tokens: u64,
-    /// Total derived COGS in USD.
-    pub cost_usd: f64,
+    /// Total derived COGS in integer micro-USD.
+    pub cost_usd_micros: u64,
 }
 
 /// Cost decomposed by WHERE it went (ADR-0001 §2.3 `cost`) — work

@@ -176,7 +176,7 @@
       ]
     },
     "IntentMetrics": {
-      "description": "Per-unit measurement (ADR-0001 §2.2 `metrics` / §2.3 per-intent): the\nvocabulary of fleet accountability. `cost_usd` is derived COGS shown for\ntrust — NOT what the customer is billed (never a usage meter).\n\nFrozen by WP-F1 (ADR-0001).",
+      "description": "Per-unit measurement (ADR-0001 §2.2 `metrics` / §2.3 per-intent): the\nvocabulary of fleet accountability. `cost_usd_micros` is derived COGS shown\nfor trust — NOT what the customer is billed (never a usage meter).\n\nFrozen by WP-F1 (ADR-0001); money widened to integer micro-USD by the WA4\namendment (schema 1.2.0, [`CONTEXT_ENVELOPE_SCHEMA_VERSION`]).",
       "type": "object",
       "properties": {
         "active_ms": {
@@ -185,10 +185,11 @@
           "format": "uint64",
           "minimum": 0
         },
-        "cost_usd": {
-          "description": "Derived COGS in USD; NOT what the customer is billed.",
-          "type": "number",
-          "format": "double"
+        "cost_usd_micros": {
+          "description": "Derived COGS in integer **micro-USD** (`1 USD = 1_000_000`); NOT what\nthe customer is billed. Integer minor units so the cost identity is\nbit-exact (WA4 amendment, schema 1.2.0).",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
         },
         "model_turns": {
           "description": "Number of model turns.",
@@ -228,7 +229,7 @@
         "tool_calls",
         "tool_breakdown",
         "model_turns",
-        "cost_usd"
+        "cost_usd_micros"
       ]
     },
     "Snapshot": {

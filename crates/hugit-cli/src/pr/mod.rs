@@ -696,8 +696,8 @@ fn pr_record_for(log: &EventLog, opened: &OpenedPr) -> Option<Value> {
         CiCost {
             cache_hit: 0,
             exec: 0,
-            cost_usd: 0.0,
-            saved_usd: 0.0,
+            cost_usd_micros: 0,
+            saved_usd_micros: 0,
         },
         PrQueueInput::default(),
     )

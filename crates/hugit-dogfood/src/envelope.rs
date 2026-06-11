@@ -166,7 +166,7 @@ pub fn run_wave_with_envelope_capture<S: ColdBlobStore>(
             }
         ));
 
-        let t = rec.finish(0.0);
+        let t = rec.finish(0); // model-free hermetic dogfood run → 0 micro-USD.
         let summary = format!(
             "Ran the memoized check for {pr_id}: exit {}, {provenance}; \
              1 tool call, {} ms wall.",
@@ -245,7 +245,7 @@ pub fn run_wave_with_envelope_capture<S: ColdBlobStore>(
         report.landed.len(),
         cfg.entries.len()
     ));
-    let t = rec.finish(0.0);
+    let t = rec.finish(0); // model-free hermetic dogfood run → 0 micro-USD.
     let session_summary = format!(
         "Orchestrated a {}-PR wave: landed {}, excluded {}; {} local check executions.",
         cfg.entries.len(),
@@ -264,7 +264,7 @@ pub fn run_wave_with_envelope_capture<S: ColdBlobStore>(
         discarded_intents: report.excluded.len() as u64,
         retried_agents: 0,
         tokens_not_landed,
-        cost_usd: 0.0,
+        cost_usd_micros: 0,
     };
 
     // One session authored every landed PR: close the SAME session draft once

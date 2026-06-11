@@ -334,7 +334,7 @@ fn metrics(total: u64) -> IntentMetrics {
         tool_calls: 0,
         tool_breakdown: vec![],
         model_turns: 0,
-        cost_usd: 0.0,
+        cost_usd_micros: 0,
     }
 }
 
