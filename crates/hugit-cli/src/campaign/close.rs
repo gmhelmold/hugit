@@ -66,16 +66,16 @@ pub fn run(args: CloseArgs) -> Result<String, CampaignError> {
         None => Value::Null,
     };
 
-    // Envelope seal: honest unless a campaign envelope ref is available.
-    let envelope = world
-        .campaign_envelope_ref
+    // Envelope seal: honest unless a campaign envelope ref is captured on the log.
+    let campaign_envelope_ref = world.campaign_envelope_ref(key);
+    let envelope = campaign_envelope_ref
         .clone()
         .unwrap_or_else(|| "not_captured".to_string());
 
     // Append the seal record before printing (the seal must be on the log).
     let payload = json!({
         "campaign": key,
-        "envelope_ref": world.campaign_envelope_ref,
+        "envelope_ref": campaign_envelope_ref,
     })
     .to_string();
     append_and_persist(

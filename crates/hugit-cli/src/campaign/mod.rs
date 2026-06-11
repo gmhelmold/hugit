@@ -11,11 +11,14 @@
 //! Like `why`/`impact`/`export`, every subcommand operates on **local state via
 //! a `--log <path>` JSON file** — the CLI's hermetic, file-based seam over the
 //! engine. Live DO/CAS binding is the P2 disclosed seam, not this WP's. The
-//! input shape ([`world::WorldInput`]) carries the un-hashed events (the
-//! orchestrator's local event log, hash-chained through the REAL
-//! [`hugit_refstore::EventLog::append`] path) plus the captured envelopes and
-//! queue-bundle truth needed to drive the F3 rollup. `open`/`close` append a
-//! record and write the log back (`--log` doubles as the output path).
+//! `--log` file is the **one canonical on-disk seam every porcelain verb
+//! shares** (PC4): a JSON `[EventRecord, …]` array — the engine's
+//! [`hugit_refstore::EventLog`] shape. The campaign projects everything it needs
+//! (captured envelopes, PR bundles, the campaign envelope ref) **off the records
+//! on that log**, so a PR opened by `hugit pr open` and an intent landed by
+//! `hugit intent new --log` compose with these verbs on one shared file.
+//! `open`/`close` append a record and write the log back (`--log` doubles as
+//! the output path).
 //!
 //! ## Output convention
 //!
@@ -37,7 +40,6 @@ mod show;
 mod world;
 
 pub use output::CampaignError;
-pub use world::{Bundle, WorldInput};
 
 /// `hugit campaign <subcommand>` — the campaign lifecycle.
 #[derive(clap::Args, Debug)]

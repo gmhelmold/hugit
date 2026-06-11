@@ -54,6 +54,7 @@ fn sample(id: Option<&str>) -> NewIntent {
         id: id.map(str::to_string),
         agent: None,
         context_ref: None,
+        log: None,
     }
 }
 

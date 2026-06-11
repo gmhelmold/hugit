@@ -1,84 +1,43 @@
-//! The hermetic world seam for the campaign porcelain (WP-PC1).
+//! The hermetic world seam for the campaign porcelain (WP-PC1, canonical seam PC4).
 //!
-//! Mirrors the `export`/`why` file contract: a `--log` JSON file holding the
-//! orchestrator's local state. Events are **un-hashed intents to append** — the
-//! hash chain is computed by the REAL [`hugit_refstore::EventLog::append`], so a
-//! caller never forges `this_hash`/`prev_hash`. Captured [`ContextEnvelope`]s
-//! (the F1/F2 capture path's output) and the queue-bundle truth ride alongside,
-//! exactly as the F3 acceptance fixture assembles them — never hand-faked sums.
+//! The `--log` file is the **one canonical on-disk seam every porcelain verb
+//! shares**: a JSON `[EventRecord, …]` array — exactly the engine's
+//! [`hugit_refstore::EventLog`] shape (the hash-chained record array the
+//! refstore, dogfood, `hugit pr` and `hugit intent` all read/write). The log is
+//! the single source of truth; the campaign projects everything it needs —
+//! captured envelopes, PR bundles, the campaign envelope ref — **off the records
+//! on that log**, never from a parallel side-document. Captured
+//! [`ContextEnvelope`]s ride as `campaign.envelope` / `pr.envelope` /
+//! `intent.envelope` records (the same kinds the PC3 PR porcelain already
+//! appends), so a PR opened by `hugit pr open` and an intent landed by `hugit
+//! intent new --log` compose with `campaign show`/`close` on one shared file.
 
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
-
 use hugit_contracts::context_envelope::{Altitude, CampaignRollup, CiCost, ContextEnvelope};
+use hugit_contracts::event_record::EventRecord;
 use hugit_contracts::verdict_object::VerdictObject;
 use hugit_ledger::Ledger;
 use hugit_ledger::rollup::{PrPhase, PrQueueInput, campaign_rollup, pr_record};
 use hugit_refstore::intent::intents_from_log;
-use hugit_refstore::{EventLog, canonical_json};
+use hugit_refstore::{EventLog, verify_chain};
 
 use super::output::CampaignError;
 
-/// The on-disk world: the local event log + captured envelopes + queue truth.
+/// One PR bundle of a campaign — projected from the log's `pr.opened` records.
 ///
-/// Only `events` is required. `envelopes` / `bundles` / `campaign_envelope_ref`
-/// are the capture + queue seams; absent them, `close`/`show` degrade honestly
-/// (a progress-only seal, `"envelope":"not_captured"`, `"rollup":null`) rather
-/// than fabricating a rollup.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct WorldInput {
-    /// Un-hashed events to append, in order — the local event log.
-    #[serde(default)]
-    pub events: Vec<EventInput>,
-    /// Captured envelopes (campaign + PR + intent altitudes), if available.
-    #[serde(default)]
-    pub envelopes: Vec<ContextEnvelope>,
-    /// Queue-bundle truth: which intents belong to which PR + its phase. The
-    /// event payload deliberately does not carry PR↔intent membership (queue
-    /// state), so the orchestrator supplies it (PC3 owns its authoring).
-    #[serde(default)]
-    pub bundles: Vec<Bundle>,
-    /// `cas:` ref to the campaign's own captured envelope (the F2b envelope
-    /// seal). `null` until F2b emits it — then `close` includes it honestly.
-    #[serde(default)]
-    pub campaign_envelope_ref: Option<String>,
-}
-
-/// One un-hashed event (the `append` inputs; the chain is computed locally).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EventInput {
-    /// Event kind discriminator (e.g. `"pr.submitted"`, `"campaign.opened"`).
-    pub kind: String,
-    /// Ordered principal chain that produced the event.
-    #[serde(default)]
-    pub principal_chain: Vec<String>,
-    /// Opaque JSON payload, carried as a string.
-    pub payload: String,
-    /// Unix epoch ms when recorded (observability; excluded from the chain).
-    #[serde(default)]
-    pub recorded_at: u64,
-}
-
-/// One PR bundle of a campaign — the queue's truth (PC3 authors these).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The bundle is the queue's truth: which intents a PR proposes to land. PC4
+/// derives it from the canonical event log (the `pr.opened` payload carries
+/// `pr_id` + `intent_ids` + `campaign`) rather than a hand-authored side list,
+/// so `hugit pr open` and `hugit campaign` agree by construction.
+#[derive(Debug, Clone)]
 pub struct Bundle {
     /// The PR id.
     pub pr_id: String,
     /// The intent ids bundled in this PR.
-    #[serde(default)]
     pub intent_ids: Vec<String>,
-    /// Landing-queue phase: `"landed"` | `"in_flight"` | `"blocked"`.
-    pub phase: String,
-    /// Landing-queue wait, ms.
-    #[serde(default)]
-    pub queue_wait_ms: u64,
-    /// Human decisions/comments on the PR.
-    #[serde(default)]
-    pub human_touches: u64,
-    /// Unix ms when the PR landed; `0` when not landed.
-    #[serde(default)]
-    pub landed_at: u64,
+    /// Landing-queue phase: `landed` | `in_flight` | `blocked`.
+    pub phase: PrPhase,
 }
 
 /// The loaded + projected world for one campaign run.
@@ -87,12 +46,6 @@ pub struct World {
     pub log: EventLog,
     /// The asked→done→proven ledger projection.
     pub ledger: Ledger,
-    /// Captured envelopes, as loaded.
-    pub envelopes: Vec<ContextEnvelope>,
-    /// Queue-bundle truth, as loaded.
-    pub bundles: Vec<Bundle>,
-    /// Campaign envelope seal ref, if present.
-    pub campaign_envelope_ref: Option<String>,
 }
 
 /// The canonical event kinds the campaign porcelain appends (additive over the
@@ -101,40 +54,27 @@ pub struct World {
 pub const KIND_CAMPAIGN_OPENED: &str = "campaign.opened";
 /// `kind` for the close seal record.
 pub const KIND_CAMPAIGN_CLOSED: &str = "campaign.closed";
+/// `kind` carrying a captured campaign-altitude [`ContextEnvelope`] (payload is
+/// the envelope as canonical JSON), matching the PR porcelain's
+/// `pr.envelope` / `intent.envelope` convention.
+pub const KIND_CAMPAIGN_ENVELOPE: &str = "campaign.envelope";
+/// `kind` carrying the campaign envelope's CAS ref (the F2b seal pointer), as a
+/// `{"campaign","envelope_ref"}` payload — distinct from the envelope record
+/// itself, since [`ContextEnvelope`] denies unknown fields.
+pub const KIND_CAMPAIGN_ENVELOPE_REF: &str = "campaign.envelope_ref";
+/// `kind` carrying a captured PR-altitude envelope (shared with `hugit pr`).
+pub const KIND_PR_ENVELOPE: &str = "pr.envelope";
+/// `kind` carrying a captured intent-altitude envelope (shared with `hugit pr`).
+pub const KIND_INTENT_ENVELOPE: &str = "intent.envelope";
 
 impl World {
-    /// Read + parse the world file and build the real EventLog + projections.
+    /// Read + parse the canonical `[EventRecord, …]` log and build the real
+    /// projections. A missing file is an EMPTY log (so `open` may bootstrap it);
+    /// any other read/parse/chain fault fails closed.
     pub fn load(path: &Path) -> Result<World, CampaignError> {
-        let bytes =
-            std::fs::read(path).map_err(|e| CampaignError::io("read world file", path, &e))?;
-        let input: WorldInput =
-            serde_json::from_slice(&bytes).map_err(|e| CampaignError::parse(&e))?;
-        World::from_input(input)
-    }
-
-    /// Build the world from a parsed input — the real append + projection path.
-    pub fn from_input(input: WorldInput) -> Result<World, CampaignError> {
-        let mut log = EventLog::new();
-        for e in &input.events {
-            // append computes the hash chain — no forged hashes accepted. Payload
-            // is canonicalised (sorted keys, no whitespace) before chaining, per
-            // the EventRecord freeze; a non-JSON payload is chained verbatim.
-            let payload = canonical_json(&e.payload).unwrap_or_else(|| e.payload.clone());
-            log.append(
-                e.kind.clone(),
-                e.principal_chain.clone(),
-                payload,
-                e.recorded_at,
-            );
-        }
+        let log = load_canonical_log(path)?;
         let ledger = Ledger::from_records(log.records());
-        Ok(World {
-            log,
-            ledger,
-            envelopes: input.envelopes,
-            bundles: input.bundles,
-            campaign_envelope_ref: input.campaign_envelope_ref,
-        })
+        Ok(World { log, ledger })
     }
 
     /// Whether a `campaign.opened` record already names this key (idempotency).
@@ -164,10 +104,12 @@ impl World {
 
     /// The PR phases of this campaign, projected from the event log.
     ///
-    /// `pr.submitted` ∖ (`pr.landed` ∪ `pr.excluded`) is **in-flight**;
-    /// `pr.excluded` is **blocked**; `pr.landed` is **landed**. Only PRs whose
-    /// payload names this campaign are counted (PRs from other campaigns are
-    /// ignored). Returned sorted by pr_id for deterministic output.
+    /// A PR enters **in-flight** when proposed — whether by the legacy
+    /// `pr.submitted` kind or the live `hugit pr open` kind (`pr.opened`);
+    /// `pr.queued` (entered the landing queue via `hugit pr land`) keeps it
+    /// in-flight (queued is not yet landed). `pr.landed` settles it **landed**;
+    /// `pr.excluded` settles it **blocked**. Only PRs whose payload names this
+    /// campaign are counted. Returned sorted by pr_id for deterministic output.
     pub fn pr_phases(&self, key: &str) -> Vec<(String, PrPhase)> {
         use std::collections::BTreeMap;
         let mut phase: BTreeMap<String, PrPhase> = BTreeMap::new();
@@ -180,7 +122,9 @@ impl World {
                 continue;
             }
             match r.kind.as_str() {
-                "pr.submitted" => {
+                // Proposed — by either porcelain; first sight enters in-flight.
+                // `pr.queued` (entered the landing queue) is still unsettled.
+                "pr.submitted" | "pr.opened" | "pr.queued" => {
                     phase.entry(pr_id).or_insert(PrPhase::InFlight);
                 }
                 "pr.landed" => {
@@ -195,7 +139,7 @@ impl World {
         phase.into_iter().collect()
     }
 
-    /// The PRs of this campaign still **in-flight** (submitted, not settled).
+    /// The PRs of this campaign still **in-flight** (proposed/queued, not settled).
     pub fn in_flight_prs(&self, key: &str) -> Vec<String> {
         self.pr_phases(key)
             .into_iter()
@@ -204,33 +148,113 @@ impl World {
             .collect()
     }
 
-    /// Find the campaign-altitude envelope for `key`, if captured.
-    pub fn campaign_envelope(&self, key: &str) -> Option<&ContextEnvelope> {
-        self.envelopes
+    /// The PR bundles of this campaign, projected from `pr.opened` records on
+    /// the log (the queue's truth: pr_id → intent_ids), paired with each PR's
+    /// projected phase. Sorted by pr_id (deterministic).
+    pub fn bundles(&self, key: &str) -> Vec<Bundle> {
+        use std::collections::BTreeMap;
+        let phases: BTreeMap<String, PrPhase> = self.pr_phases(key).into_iter().collect();
+        let mut by_id: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for r in self.log.records() {
+            if r.kind != "pr.opened" {
+                continue;
+            }
+            let v: serde_json::Value = match serde_json::from_str(&r.payload) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if v.get("campaign").and_then(|c| c.as_str()) != Some(key) {
+                continue;
+            }
+            let pr_id = match v.get("pr_id").and_then(|p| p.as_str()) {
+                Some(p) => p.to_string(),
+                None => continue,
+            };
+            let intent_ids = v
+                .get("intent_ids")
+                .and_then(|x| x.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            // Latest pr.opened for the id wins (re-open robustness).
+            by_id.insert(pr_id, intent_ids);
+        }
+        by_id
+            .into_iter()
+            .map(|(pr_id, intent_ids)| {
+                let phase = phases.get(&pr_id).copied().unwrap_or(PrPhase::InFlight);
+                Bundle {
+                    pr_id,
+                    intent_ids,
+                    phase,
+                }
+            })
+            .collect()
+    }
+
+    /// The captured campaign envelope ref for `key`, if a `campaign.envelope`
+    /// record carries an `envelope_ref` (the F2b seal ref). `None` until
+    /// captured — then `close` includes it honestly; absent it the seal is
+    /// `not_captured`.
+    pub fn campaign_envelope_ref(&self, key: &str) -> Option<String> {
+        self.log
+            .records()
             .iter()
+            .filter(|r| r.kind == KIND_CAMPAIGN_ENVELOPE_REF)
+            .filter_map(|r| serde_json::from_str::<serde_json::Value>(&r.payload).ok())
+            .filter(|v| v.get("campaign").and_then(|c| c.as_str()) == Some(key))
+            .filter_map(|v| {
+                v.get("envelope_ref")
+                    .and_then(|c| c.as_str())
+                    .map(str::to_string)
+            })
+            .next_back()
+    }
+
+    /// The captured envelopes (campaign + PR + intent altitudes), projected off
+    /// the `*.envelope` records on the log.
+    fn envelopes(&self) -> Vec<ContextEnvelope> {
+        self.log
+            .records()
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r.kind.as_str(),
+                    KIND_CAMPAIGN_ENVELOPE | KIND_PR_ENVELOPE | KIND_INTENT_ENVELOPE
+                )
+            })
+            .filter_map(|r| serde_json::from_str::<ContextEnvelope>(&r.payload).ok())
+            .collect()
+    }
+
+    /// Find the campaign-altitude envelope for `key`, if captured.
+    fn campaign_envelope(&self, key: &str) -> Option<ContextEnvelope> {
+        self.envelopes()
+            .into_iter()
             .find(|e| e.altitude == Altitude::Campaign && e.intent_id == key)
     }
 
     /// Find the PR-altitude envelope for `pr_id`, if captured.
-    pub fn pr_envelope(&self, pr_id: &str) -> Option<&ContextEnvelope> {
-        self.envelopes
-            .iter()
+    fn pr_envelope(&self, pr_id: &str) -> Option<ContextEnvelope> {
+        self.envelopes()
+            .into_iter()
             .find(|e| e.altitude == Altitude::Pr && e.intent_id == pr_id)
     }
 
-    /// The captured intent-altitude envelopes whose id is in `intent_ids`
-    /// (includes every retry / discarded attempt sharing an id).
-    pub fn intent_envelopes(&self, intent_ids: &[String]) -> Vec<ContextEnvelope> {
-        self.envelopes
-            .iter()
+    /// The captured intent-altitude envelopes whose id is in `intent_ids`.
+    fn intent_envelopes(&self, intent_ids: &[String]) -> Vec<ContextEnvelope> {
+        self.envelopes()
+            .into_iter()
             .filter(|e| e.altitude == Altitude::Intent && intent_ids.contains(&e.intent_id))
-            .cloned()
             .collect()
     }
 
-    /// The intent ids of `bundle` that the event log projects as **landed** —
+    /// The intent ids of `intent_ids` the event log projects as **landed** —
     /// the queue's truth via [`intents_from_log`], not the bundle list itself.
-    pub fn landed_intent_ids(&self, intent_ids: &[String]) -> Result<Vec<String>, CampaignError> {
+    fn landed_intent_ids(&self, intent_ids: &[String]) -> Result<Vec<String>, CampaignError> {
         let projected = intents_from_log(&self.log).map_err(|e| {
             CampaignError::new(
                 "bad_log",
@@ -248,7 +272,7 @@ impl World {
 
     /// The verdict panels recorded for `intent_ids` (the D5 seam the Ledger
     /// itself reads), parsed from the log's `verdict.recorded` records.
-    pub fn verdicts_of(&self, intent_ids: &[String]) -> Vec<VerdictObject> {
+    fn verdicts_of(&self, intent_ids: &[String]) -> Vec<VerdictObject> {
         self.log
             .records()
             .iter()
@@ -262,18 +286,15 @@ impl World {
     /// decomposition + progress.
     ///
     /// Drives the WP-F3 projections (`pr_record` per bundle → `campaign_rollup`)
-    /// over the captured envelopes and the queue-bundle truth. Returns:
-    /// - `Ok(Some(rollup))` when a campaign envelope is captured — the rollup is
-    ///   computed, never faked;
-    /// - `Ok(None)` when no campaign envelope is captured (capture below the
-    ///   level that emits it, or pre-F2b) — the caller seals progress-only,
-    ///   honestly, with no fabricated cost;
-    /// - `Err(..)` when a captured envelope violates the F3 rules (e.g. a
-    ///   subagent-authored campaign/PR envelope — D14, fail-closed).
+    /// over the captured envelopes and the projected PR bundles. Returns:
+    /// - `Ok(Some(rollup))` when a campaign envelope is captured;
+    /// - `Ok(None)` when no campaign envelope is captured (sealed progress-only,
+    ///   honestly, with no fabricated cost);
+    /// - `Err(..)` when a captured envelope violates the F3 rules (D14).
     ///
     /// `phases` is the projected PR phase map (so the rollup's progress agrees
-    /// with what `show` reports). A bundle whose pr_id has no projected phase
-    /// falls back to its declared `phase` string.
+    /// with `show`). A bundle whose pr_id has no projected phase falls back to
+    /// the bundle's own projected phase.
     pub fn build_rollup(
         &self,
         key: &str,
@@ -284,17 +305,17 @@ impl World {
             None => return Ok(None),
         };
         let campaign_ref = self
-            .campaign_envelope_ref
-            .clone()
+            .campaign_envelope_ref(key)
             .unwrap_or_else(|| "not_captured".to_string());
 
-        let mut prs: Vec<(_, PrPhase)> = Vec::with_capacity(self.bundles.len());
-        for b in &self.bundles {
+        let bundles = self.bundles(key);
+        let mut prs: Vec<(_, PrPhase)> = Vec::with_capacity(bundles.len());
+        for b in &bundles {
             let pr_env = self.pr_envelope(&b.pr_id).ok_or_else(|| {
                 CampaignError::new(
                     "missing_pr_envelope",
                     format!("bundle '{}' has no captured pr-altitude envelope", b.pr_id),
-                    "capture the PR envelope (F2) or drop the bundle from the world file",
+                    "capture the PR envelope (pr.envelope record) before sealing",
                 )
             })?;
             // landed truth is PROJECTED from the log, never the bundle list.
@@ -303,34 +324,58 @@ impl World {
             let verdicts = self.verdicts_of(&b.intent_ids);
             let pr_ref = format!("cas:pr-envelope/{}", b.pr_id);
             let rec = pr_record(
-                pr_env,
+                &pr_env,
                 &pr_ref,
                 &intent_envs,
                 &landed,
                 &verdicts,
                 zero_ci(),
-                queue_input(b),
+                PrQueueInput::default(),
             )
             .map_err(rollup_error)?;
-            // Prefer the projected phase (agrees with `show`); else the declared.
+            // Prefer the projected phase (agrees with `show`); else the bundle's.
             let phase = phases
                 .iter()
                 .find(|(id, _)| id == &b.pr_id)
                 .map(|(_, p)| *p)
-                .or_else(|| parse_phase(&b.phase))
-                .ok_or_else(|| {
-                    CampaignError::new(
-                        "bad_phase",
-                        format!("bundle '{}' has unknown phase '{}'", b.pr_id, b.phase),
-                        "phase must be one of landed | in_flight | blocked",
-                    )
-                })?;
+                .unwrap_or(b.phase);
             prs.push((rec, phase));
         }
 
-        let rollup = campaign_rollup(campaign_env, &campaign_ref, &prs).map_err(rollup_error)?;
+        let rollup = campaign_rollup(&campaign_env, &campaign_ref, &prs).map_err(rollup_error)?;
         Ok(Some(rollup))
     }
+}
+
+/// Load the canonical `[EventRecord, …]` log at `path`, rehydrating + verifying
+/// the hash chain. A non-existent path is an EMPTY log (so the first `open`
+/// bootstraps it); any other read/parse/chain fault fails closed.
+fn load_canonical_log(path: &Path) -> Result<EventLog, CampaignError> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(EventLog::new()),
+        Err(e) => return Err(CampaignError::io("read log file", path, &e)),
+    };
+    let records: Vec<EventRecord> =
+        serde_json::from_slice(&bytes).map_err(|e| CampaignError::parse(&e))?;
+    let mut log = EventLog::new();
+    for record in records {
+        log.push_record(record).map_err(|e| {
+            CampaignError::new(
+                "rehydrate",
+                format!("event log does not rehydrate: {e}"),
+                "the --log file's records must form a gap-free, monotonic chain",
+            )
+        })?;
+    }
+    verify_chain(log.records()).map_err(|e| {
+        CampaignError::new(
+            "chain_broken",
+            format!("event log failed integrity verification: {e}"),
+            "the --log file's hash chain is tampered or corrupt",
+        )
+    })?;
+    Ok(log)
 }
 
 /// Lift an F3 [`hugit_ledger::rollup::RollupError`] into a structured campaign
@@ -362,28 +407,9 @@ fn pr_payload_fields(payload: &str) -> Option<(String, Option<String>)> {
     Some((pr_id, campaign))
 }
 
-/// Parse a [`Bundle`]'s phase string into a [`PrPhase`].
-pub fn parse_phase(s: &str) -> Option<PrPhase> {
-    match s {
-        "landed" => Some(PrPhase::Landed),
-        "in_flight" => Some(PrPhase::InFlight),
-        "blocked" => Some(PrPhase::Blocked),
-        _ => None,
-    }
-}
-
-/// The [`PrQueueInput`] for a bundle (queue-seam state the envelope omits).
-pub fn queue_input(b: &Bundle) -> PrQueueInput {
-    PrQueueInput {
-        queue_wait_ms: b.queue_wait_ms,
-        human_touches: b.human_touches,
-        landed_at: b.landed_at,
-    }
-}
-
 /// A zero CI cost — the checks-seam economics are out of PC1's scope (the
 /// rollup tolerates it: hit/exec counts are `0`, savings honestly `0.0`).
-pub fn zero_ci() -> CiCost {
+fn zero_ci() -> CiCost {
     CiCost {
         cache_hit: 0,
         exec: 0,
@@ -392,8 +418,10 @@ pub fn zero_ci() -> CiCost {
     }
 }
 
-/// Append a record to the log and serialise the world back to disk as a
-/// `WorldInput` (events re-emitted un-hashed; envelopes/bundles preserved).
+/// Append a record to the canonical log and persist it back to `path` as a
+/// pretty `[EventRecord, …]` array — the one canonical on-disk seam. The append
+/// goes through the REAL [`EventLog::append`] (no forged hashes); the payload is
+/// canonicalised before chaining, per the EventRecord freeze.
 pub fn append_and_persist(
     world: &World,
     path: &Path,
@@ -402,37 +430,21 @@ pub fn append_and_persist(
     payload: String,
     recorded_at: u64,
 ) -> Result<(), CampaignError> {
-    // Reconstruct the un-hashed event list from the current log, then add ours.
-    let mut events: Vec<EventInput> = world
-        .log
-        .records()
-        .iter()
-        .map(|r| EventInput {
-            kind: r.kind.clone(),
-            principal_chain: r.principal_chain.clone(),
-            payload: r.payload.clone(),
-            recorded_at: r.recorded_at,
-        })
-        .collect();
-    let payload = canonical_json(&payload).unwrap_or(payload);
-    events.push(EventInput {
-        kind: kind.to_string(),
-        principal_chain,
-        payload,
-        recorded_at,
-    });
-    let out = WorldInput {
-        events,
-        envelopes: world.envelopes.clone(),
-        bundles: world.bundles.clone(),
-        campaign_envelope_ref: world.campaign_envelope_ref.clone(),
-    };
-    let bytes = serde_json::to_vec_pretty(&out).map_err(|e| {
+    let mut log = world.log.clone();
+    let payload = hugit_refstore::canonical_json(&payload).unwrap_or(payload);
+    log.append(kind.to_string(), principal_chain, payload, recorded_at);
+    persist_log(path, &log)
+}
+
+/// Persist the canonical event log back to `path` as a pretty `[EventRecord, …]`
+/// array (the same shape [`World::load`] reads).
+pub fn persist_log(path: &Path, log: &EventLog) -> Result<(), CampaignError> {
+    let bytes = serde_json::to_vec_pretty(log.records()).map_err(|e| {
         CampaignError::new(
             "serialize",
-            format!("could not serialise the world: {e}"),
+            format!("could not serialise the event log: {e}"),
             "this is an internal error — report it",
         )
     })?;
-    std::fs::write(path, bytes).map_err(|e| CampaignError::io("write world file", path, &e))
+    std::fs::write(path, bytes).map_err(|e| CampaignError::io("write log file", path, &e))
 }
