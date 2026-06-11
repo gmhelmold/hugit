@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(security)!: **SOTA-audit Wave A — the four security structurals closed**
+  (audit: `docs/review/2026-06-11-sota-audit.md`). WA1 real redaction engine
+  (known-prefix + Shannon-entropy detectors, EVERY envelope field scrubbed on
+  the write path, `why`/ledger parity; content-address refs exempt with
+  proof). WA2 D14 guard wired onto the mutation path (`append_authorized`:
+  deny ⇒ no mutation + `authz.denied` audit record; authn binding honestly
+  disclosed as the identity/P2 seam) + feature-proof explicit `canonical_json`
+  (pinned `this_hash` byte-compatible). WA3 tombstone erasure on the REAL
+  cold-store trait (`GetOutcome::{Present,Erased,Absent}`, resurrection
+  refused, dedup-by-content disclosed, X12 re-pointed to production impls;
+  refstore provenance tier correctly excluded — the proof must survive).
+  WA4 money as integer micro-USD (**contract 1.2.0**, owner-ratified): 9
+  fields renamed, exact-integer cost identity, checked_add fail-closed,
+  hand-pinned goldens (generator no longer its own oracle). WA5 local
+  escape-law regression (7 red-team vector classes + cross-repo sentinel).
+
 - feat(workspace)!: **`hugit-runner` transferred OUT to ../corelink-runners**
   (WP-R4, runner-transfer campaign — owner-directed 2026-06-10: "hugit é
   basicamente um git, não faz sentido o runner ser feature do hugit"). The
