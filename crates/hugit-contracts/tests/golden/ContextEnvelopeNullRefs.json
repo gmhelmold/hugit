@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.1.0",
+  "schema_version": "1.2.0",
   "altitude": "intent",
   "intent_id": "a2f",
   "commit": "a2f0a2f0a2f0a2f0a2f0a2f0a2f0a2f0a2f0a2f0",
@@ -55,7 +55,7 @@
       }
     ],
     "model_turns": 3,
-    "cost_usd": 0.01
+    "cost_usd_micros": 10000
   },
   "verdicts_ref": null
 }

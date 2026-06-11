@@ -420,7 +420,7 @@ fn envelope_intent() -> ContextEnvelope {
                 },
             ],
             model_turns: 9,
-            cost_usd: 0.04,
+            cost_usd_micros: 40_000,
         },
         verdicts_ref: Some(
             "cas:4d5e4d5e4d5e4d5e4d5e4d5e4d5e4d5e4d5e4d5e4d5e4d5e4d5e4d5e4d5e4d5e".into(),
@@ -506,7 +506,7 @@ fn envelope_pr() -> ContextEnvelope {
                 },
             ],
             model_turns: 28,
-            cost_usd: 0.62,
+            cost_usd_micros: 620_000,
         },
         verdicts_ref: Some(
             "cas:5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed5eed".into(),
@@ -588,7 +588,7 @@ fn envelope_campaign() -> ContextEnvelope {
                 },
             ],
             model_turns: 64,
-            cost_usd: 1.85,
+            cost_usd_micros: 1_850_000,
         },
         verdicts_ref: None,
     }
@@ -673,7 +673,7 @@ fn envelope_session() -> ContextEnvelope {
                 },
             ],
             model_turns: 28,
-            cost_usd: 0.62,
+            cost_usd_micros: 620_000,
         },
         verdicts_ref: None,
     }
@@ -740,7 +740,7 @@ fn envelope_null_refs() -> ContextEnvelope {
                 },
             ],
             model_turns: 3,
-            cost_usd: 0.01,
+            cost_usd_micros: 10_000,
         },
         verdicts_ref: None,
     }

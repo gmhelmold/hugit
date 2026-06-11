@@ -83,9 +83,9 @@ pub fn rollup_summary(r: &hugit_contracts::context_envelope::CampaignRollup) -> 
         "pr_count": r.pr_count,
         "intent_count": r.intent_count,
         "agent_count": r.agent_count,
-        "cost_usd": r.cost.total.cost_usd,
+        "cost_usd_micros": r.cost.total.cost_usd_micros,
         "tokens": r.cost.total.tokens,
-        "waste_cost_usd": r.cost.waste.cost_usd,
+        "waste_cost_usd_micros": r.cost.waste.cost_usd_micros,
         "first_pass_yield": r.efficiency.first_pass_yield,
     })
 }

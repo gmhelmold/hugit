@@ -73,7 +73,7 @@ fn secret_bearing_draft(altitude: Altitude) -> EnvelopeDraft {
     );
     rec.record_tool_call("Bash", SURVIVOR_LINE, Duration::from_millis(1));
     rec.add_tokens(120, 30, 64, 8);
-    let t = rec.finish(0.0);
+    let t = rec.finish(0);
 
     EnvelopeDraft {
         altitude,
@@ -301,7 +301,7 @@ fn item_4b_one_session_many_prs_dedupes_the_session_blob() {
         discarded_intents: 1,
         retried_agents: 0,
         tokens_not_landed: 4_200,
-        cost_usd: 0.0,
+        cost_usd_micros: 0,
     };
 
     // ONE orchestrator session (same transcript + snapshot) authors TWO PRs:
@@ -356,7 +356,7 @@ fn item_4b_one_session_many_prs_dedupes_the_session_blob() {
             discarded_intents: 0,
             retried_agents: 0,
             tokens_not_landed: 0,
-            cost_usd: 0.0,
+            cost_usd_micros: 0,
         },
     )
     .expect("close campaign");
@@ -422,7 +422,7 @@ fn item_6_one_session_homes_the_four_altitude_family() {
         discarded_intents: 0,
         retried_agents: 0,
         tokens_not_landed: 0,
-        cost_usd: 0.0,
+        cost_usd_micros: 0,
     };
 
     // The shared session draft — same transcript/snapshot, only the altitude +

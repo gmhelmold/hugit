@@ -178,7 +178,7 @@ fn metrics(
     active_ms: u64,
     tool_calls: u64,
     turns: u64,
-    cost: f64,
+    cost_micros: u64,
 ) -> IntentMetrics {
     IntentMetrics {
         tokens: TokenCounts {
@@ -193,7 +193,7 @@ fn metrics(
         tool_calls,
         tool_breakdown: vec![],
         model_turns: turns,
-        cost_usd: cost,
+        cost_usd_micros: cost_micros,
     }
 }
 
@@ -255,7 +255,7 @@ fn intent_env(
     active_ms: u64,
     tokens: u64,
     tool_calls: u64,
-    cost: f64,
+    cost_micros: u64,
 ) -> ContextEnvelope {
     envelope(
         Altitude::Intent,
@@ -266,7 +266,7 @@ fn intent_env(
         Some(parent),
         born,
         died,
-        metrics(tokens, active_ms, tool_calls, 8, cost),
+        metrics(tokens, active_ms, tool_calls, 8, cost_micros),
     )
 }
 
@@ -283,7 +283,7 @@ fn pr128_envelope() -> ContextEnvelope {
         None,
         T0,
         T0 + 182_000,
-        metrics(20_000, 30_000, 40, 12, 0.50),
+        metrics(20_000, 30_000, 40, 12, 500_000),
     )
 }
 
@@ -300,7 +300,7 @@ fn pr128_intent_envelopes() -> Vec<ContextEnvelope> {
             60_000,
             50_000,
             30,
-            1.00,
+            1_000_000,
         ),
         // i-a2: a retried first attempt (waste) + the landed final attempt.
         intent_env(
@@ -313,7 +313,7 @@ fn pr128_intent_envelopes() -> Vec<ContextEnvelope> {
             25_000,
             20_000,
             12,
-            0.40,
+            400_000,
         ),
         intent_env(
             "i-a2",
@@ -325,7 +325,7 @@ fn pr128_intent_envelopes() -> Vec<ContextEnvelope> {
             60_000,
             45_000,
             25,
-            0.90,
+            900_000,
         ),
         intent_env(
             "i-a3",
@@ -337,7 +337,7 @@ fn pr128_intent_envelopes() -> Vec<ContextEnvelope> {
             60_000,
             40_000,
             20,
-            0.80,
+            800_000,
         ),
         // i-a9: authored but never landed — discarded spend (waste, shown).
         intent_env(
@@ -350,7 +350,7 @@ fn pr128_intent_envelopes() -> Vec<ContextEnvelope> {
             12_000,
             9_000,
             6,
-            0.18,
+            180_000,
         ),
     ]
 }
@@ -360,8 +360,8 @@ fn pr128_ci() -> CiCost {
     CiCost {
         cache_hit: 5,
         exec: 5,
-        cost_usd: 0.10,
-        saved_usd: 0.40,
+        cost_usd_micros: 100_000,
+        saved_usd_micros: 400_000,
     }
 }
 
@@ -378,7 +378,7 @@ fn pr129_envelope() -> ContextEnvelope {
         None,
         T0 + 200_000,
         T0 + 241_000,
-        metrics(0, 0, 0, 0, 0.0),
+        metrics(0, 0, 0, 0, 0),
     )
 }
 
@@ -394,7 +394,7 @@ fn pr129_intent_envelopes() -> Vec<ContextEnvelope> {
         20_000,
         30_000,
         14,
-        0.60,
+        600_000,
     )]
 }
 
@@ -402,8 +402,8 @@ fn pr129_ci() -> CiCost {
     CiCost {
         cache_hit: 3,
         exec: 1,
-        cost_usd: 0.05,
-        saved_usd: 0.15,
+        cost_usd_micros: 50_000,
+        saved_usd_micros: 150_000,
     }
 }
 
@@ -425,7 +425,7 @@ fn inflight_pr(
         None,
         born,
         born + 30_000,
-        metrics(5_000, 8_000, 10, 4, 0.10),
+        metrics(5_000, 8_000, 10, 4, 100_000),
     );
     (pr, vec![intent])
 }
@@ -434,8 +434,8 @@ fn zero_ci() -> CiCost {
     CiCost {
         cache_hit: 0,
         exec: 0,
-        cost_usd: 0.0,
-        saved_usd: 0.0,
+        cost_usd_micros: 0,
+        saved_usd_micros: 0,
     }
 }
 
@@ -449,7 +449,7 @@ fn campaign_envelope() -> ContextEnvelope {
         None,
         T0,
         T0 + 500_000,
-        metrics(0, 0, 0, 0, 0.0),
+        metrics(0, 0, 0, 0, 0),
     )
 }
 
@@ -513,13 +513,14 @@ fn pr_record_decomposition_adds_up() {
     // work = Σ landed final attempts (i-a1 + i-a2 final + i-a3).
     assert_eq!(rec.cost.work.tokens, 50_000 + 45_000 + 40_000);
     assert_eq!(rec.cost.work.tool_calls, 30 + 25 + 20);
-    assert!(approx(rec.cost.work.cost_usd, 1.00 + 0.90 + 0.80));
+    // Money is integer micro-USD: exact equality, no epsilon.
+    assert_eq!(rec.cost.work.cost_usd_micros, 1_000_000 + 900_000 + 800_000);
 
     // orchestration = the PR author's own session spend.
     assert_eq!(rec.cost.orchestration.tokens, 20_000);
     assert_eq!(rec.cost.orchestration.tool_calls, 40);
     assert_eq!(rec.cost.orchestration.turns, 12);
-    assert!(approx(rec.cost.orchestration.cost_usd, 0.50));
+    assert_eq!(rec.cost.orchestration.cost_usd_micros, 500_000);
 
     // verification: the REAL panel count; spend has no seam yet (honest 0).
     assert_eq!(rec.cost.verification.verdict_panels, 2);
@@ -533,34 +534,39 @@ fn pr_record_decomposition_adds_up() {
     assert_eq!(rec.cost.waste.discarded_intents, 1);
     assert_eq!(rec.cost.waste.retried_agents, 1);
     assert_eq!(rec.cost.waste.tokens_not_landed, 20_000 + 9_000);
-    assert!(approx(rec.cost.waste.cost_usd, 0.40 + 0.18));
+    assert_eq!(rec.cost.waste.cost_usd_micros, 400_000 + 180_000);
 
     // THE identity: total = work + orchestration + verification + ci,
-    // waste excluded (ADR JSONC).
+    // waste excluded (ADR JSONC). Money is integer micro-USD — the identity
+    // is a THEOREM, asserted with exact `assert_eq!` (no epsilon).
     assert_eq!(
         rec.cost.total.tokens,
         rec.cost.work.tokens + rec.cost.orchestration.tokens + rec.cost.verification.tokens
     );
-    assert!(approx(
-        rec.cost.total.cost_usd,
-        rec.cost.work.cost_usd
-            + rec.cost.orchestration.cost_usd
-            + rec.cost.verification.cost_usd
-            + rec.cost.ci.cost_usd
-    ));
+    assert_eq!(
+        rec.cost.total.cost_usd_micros,
+        rec.cost.work.cost_usd_micros
+            + rec.cost.orchestration.cost_usd_micros
+            + rec.cost.verification.cost_usd_micros
+            + rec.cost.ci.cost_usd_micros
+    );
     // Waste really is excluded: adding it would change the total.
-    assert!(rec.cost.waste.cost_usd > 0.0);
-    assert!(!approx(
-        rec.cost.total.cost_usd,
-        rec.cost.total.cost_usd + rec.cost.waste.cost_usd
-    ));
+    assert!(rec.cost.waste.cost_usd_micros > 0);
+    assert_ne!(
+        rec.cost.total.cost_usd_micros,
+        rec.cost.total.cost_usd_micros + rec.cost.waste.cost_usd_micros
+    );
 
     // Efficiency: overhead = orchestration ÷ total; first-pass yield = 2 of
-    // 4 authored ids landed without rework (i-a1, i-a3).
-    assert!(approx(rec.efficiency.overhead_pct, 0.50 / 3.30 * 100.0));
+    // 4 authored ids landed without rework (i-a1, i-a3). The ratio is
+    // display-only f64, computed from integer micro-USD.
+    assert!(approx(
+        rec.efficiency.overhead_pct,
+        500_000.0 / 3_300_000.0 * 100.0
+    ));
     assert!(approx(
         rec.efficiency.cache_savings_pct,
-        0.40 / 0.50 * 100.0
+        400_000.0 / 500_000.0 * 100.0
     ));
     assert!(approx(rec.efficiency.first_pass_yield, 2.0 / 4.0));
     // Honest gap: no LOC seam → 0.0, never a fabricated figure.
@@ -626,7 +632,7 @@ fn subagent_authored_pr_envelope_rejected() {
         Some("orq-014"), // spawned — a subagent
         T0,
         T0 + 10_000,
-        metrics(1_000, 1_000, 1, 1, 0.01),
+        metrics(1_000, 1_000, 1, 1, 10_000),
     );
     let err = pr_record(
         &subagent_pr,
@@ -658,7 +664,7 @@ fn subagent_authored_pr_envelope_rejected() {
         Some("orq-014"),
         T0,
         T0 + 10_000,
-        metrics(1_000, 1_000, 1, 1, 0.01),
+        metrics(1_000, 1_000, 1, 1, 10_000),
     );
     assert!(matches!(
         pr_record(
@@ -699,7 +705,7 @@ fn wrong_altitude_rejected() {
         500,
         100,
         1,
-        0.01,
+        10_000,
     );
     assert_eq!(
         pr_record(
@@ -789,17 +795,17 @@ fn null_refs_and_missing_envelope_tolerated() {
     // i-b2 (no envelope) contributes zero spend; only i-b1's is counted.
     assert_eq!(rec.intent_count, 2);
     assert_eq!(rec.cost.work.tokens, 30_000);
-    assert!(approx(rec.cost.work.cost_usd, 0.60));
+    assert_eq!(rec.cost.work.cost_usd_micros, 600_000);
     assert_eq!(rec.cost.waste.tokens_not_landed, 0);
     // Both ids landed without rework → first-pass yield 1.0.
     assert!(approx(rec.efficiency.first_pass_yield, 1.0));
     // No orchestration spend (human session metrics are zero) → overhead 0.
     assert!(approx(rec.efficiency.overhead_pct, 0.0));
-    // Identity holds here too.
-    assert!(approx(
-        rec.cost.total.cost_usd,
-        rec.cost.work.cost_usd + rec.cost.ci.cost_usd
-    ));
+    // Identity holds here too — exact integer micro-USD.
+    assert_eq!(
+        rec.cost.total.cost_usd_micros,
+        rec.cost.work.cost_usd_micros + rec.cost.ci.cost_usd_micros
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -859,7 +865,7 @@ fn campaign_rollup_over_multi_pr_campaign() {
             15_000,
             12_000,
             7,
-            0.24,
+            240_000,
         ),
     );
     let pr130 = pr_record(
@@ -893,7 +899,7 @@ fn campaign_rollup_over_multi_pr_campaign() {
             9_000,
             10_000,
             5,
-            0.20,
+            200_000,
         ),
     );
     let pr131 = pr_record(
@@ -968,24 +974,24 @@ fn campaign_rollup_over_multi_pr_campaign() {
             .map(|p| p.cost.waste.tokens_not_landed)
             .sum::<u64>()
     );
-    assert!(approx(
-        camp.cost.work.cost_usd,
-        all.iter().map(|p| p.cost.work.cost_usd).sum::<f64>()
-    ));
+    assert_eq!(
+        camp.cost.work.cost_usd_micros,
+        all.iter().map(|p| p.cost.work.cost_usd_micros).sum::<u64>()
+    );
 
     // THE identity at the third altitude too: total = work + orchestration +
-    // verification + ci; waste shown, excluded.
+    // verification + ci; waste shown, excluded. Integer micro-USD → exact.
     assert_eq!(
         camp.cost.total.tokens,
         camp.cost.work.tokens + camp.cost.orchestration.tokens + camp.cost.verification.tokens
     );
-    assert!(approx(
-        camp.cost.total.cost_usd,
-        camp.cost.work.cost_usd
-            + camp.cost.orchestration.cost_usd
-            + camp.cost.verification.cost_usd
-            + camp.cost.ci.cost_usd
-    ));
+    assert_eq!(
+        camp.cost.total.cost_usd_micros,
+        camp.cost.work.cost_usd_micros
+            + camp.cost.orchestration.cost_usd_micros
+            + camp.cost.verification.cost_usd_micros
+            + camp.cost.ci.cost_usd_micros
+    );
 
     // Time: lead time = campaign opened (T0) → last PR landed; agent_sum is
     // the Σ over PRs — and the fleet parallelism shows at this altitude too.
@@ -1008,6 +1014,7 @@ fn campaign_rollup_over_multi_pr_campaign() {
     // Overhead at the campaign altitude: orchestration ÷ total over the sums.
     assert!(approx(
         camp.efficiency.overhead_pct,
-        camp.cost.orchestration.cost_usd / camp.cost.total.cost_usd * 100.0
+        camp.cost.orchestration.cost_usd_micros as f64 / camp.cost.total.cost_usd_micros as f64
+            * 100.0
     ));
 }
