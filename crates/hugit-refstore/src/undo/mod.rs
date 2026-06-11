@@ -24,6 +24,7 @@
 //! [`EventLog::append`] extends the same hash chain, so the result re-verifies
 //! and the undo is itself part of history (and is itself undoable).
 
+use crate::authz::{AuditedGuard, Decision, DenyReason, Endpoint};
 use crate::intent::model::INTENT_LANDED_KIND;
 use crate::log::EventLog;
 use crate::replay::{ReplayError, replay_unchecked};
@@ -53,6 +54,13 @@ pub enum UndoError {
     Tamper(TamperError),
     /// Replaying the pre-target prefix failed.
     Replay(ReplayError),
+    /// The D14 guard denied the undo: `undo` is a Human-only stakeholder verb
+    /// (the matrix in [`crate::authz`]), and the issuing principal was not a
+    /// human (or was unrecognized). The compensating event was **not** appended;
+    /// an `authz.denied` audit record (③) was written instead, so the denial is
+    /// attributable. Fail-closed. Carries the [`DenyReason`] for the caller to
+    /// map to its own structured error.
+    Denied(DenyReason),
 }
 
 impl std::fmt::Display for UndoError {
@@ -70,6 +78,9 @@ impl std::fmt::Display for UndoError {
             }
             UndoError::Tamper(e) => write!(f, "undo refused: {e}"),
             UndoError::Replay(e) => write!(f, "undo prefix replay failed: {e}"),
+            UndoError::Denied(reason) => {
+                write!(f, "undo denied: {} (undo is Human-only)", reason.code())
+            }
         }
     }
 }
@@ -152,29 +163,62 @@ pub fn compute_compensation(log: &EventLog, target: u64) -> Result<Compensation,
     Ok(compensation)
 }
 
-/// Undo the operation at `target` by appending its compensating event to `log`.
+/// Undo the operation at `target` by appending its compensating event to `log`
+/// — **through the D14 authorization guard** (`undo` is a Human-only verb).
 ///
-/// Computes the compensator with [`compute_compensation`], then appends it via
-/// the frozen D1a [`EventLog::append`] — a normal append that extends the hash
-/// chain. The original event is untouched; both it and the compensator remain
-/// addressable. Returns the compensation that was applied.
+/// `undo` is one of the four mutating forge verbs the D14 matrix gates
+/// ([`crate::authz`]); the matrix declares it **Human-only** (a human stakeholder
+/// control — `authz/mod.rs` row `undo`). This production path therefore routes
+/// the authorization through the D14 [`AuditedGuard`] under [`Endpoint::Undo`],
+/// classifying the issuing `principal_chain` (the [`authorize`](crate::authz::authorize)
+/// chain route), rather than appending the compensator with the trusted raw
+/// [`EventLog::append`] — closing the bypass the adversarial round caught
+/// (P-GUARD-PATHS). Only a `human:`/`user:` actor is authorized; an
+/// orchestrator/worker/model — or an unrecognized/empty principal — is **denied**
+/// fail-closed: the compensating event is **not** appended, an `authz.denied`
+/// audit record is written by the guard (③), and [`UndoError::Denied`] carries
+/// the [`DenyReason`] (correctly distinguishing `not_permitted` from
+/// `unrecognized_principal`).
+///
+/// On allow: computes the compensator with [`compute_compensation`], appends it
+/// via the raw [`EventLog::append`] (a normal hash-chain extension), and returns
+/// the compensation. The original event is untouched; both it and the
+/// compensator remain addressable. (The guard authorizes and audits *denials*;
+/// the authorized compensating mutation is recorded by this verb, exactly as
+/// [`AuditedGuard`] is contracted — it audits only the denial.)
 ///
 /// `principal_chain` and `recorded_at` describe who issued the undo and when,
-/// exactly as for any other appended event.
+/// exactly as for any other appended event. An empty chain has no actor and is
+/// denied [`UnrecognizedPrincipal`](crate::authz::DenyReason::UnrecognizedPrincipal).
 pub fn undo(
     log: &mut EventLog,
     target: u64,
     principal_chain: Vec<String>,
     recorded_at: u64,
 ) -> Result<Compensation, UndoError> {
+    // Compute the compensator first (re-verifies the chain, fail-closed) so a
+    // denial does not even reach the append path on a malformed target.
     let comp = compute_compensation(log, target)?;
-    log.append(
-        comp.kind.clone(),
-        principal_chain,
-        comp.payload.clone(),
-        recorded_at,
-    );
-    Ok(comp)
+    // D14 guard on the chain-classified principal. The guard audits denials (③)
+    // into the same log; only an authorized (Human) actor proceeds to append the
+    // compensating event.
+    let decision = {
+        let mut guard = AuditedGuard::new(log);
+        let (decision, _audit) = guard.authorize(&principal_chain, Endpoint::Undo, recorded_at);
+        decision
+    };
+    match decision {
+        Decision::Allow => {
+            log.append(
+                comp.kind.clone(),
+                principal_chain,
+                comp.payload.clone(),
+                recorded_at,
+            );
+            Ok(comp)
+        }
+        Decision::Deny(reason) => Err(UndoError::Denied(reason)),
+    }
 }
 
 /// Canonical `ref.update` payload, byte-identical to the grammar D1a's replay
@@ -186,4 +230,98 @@ fn canonical_update(name: &str, target: &str) -> String {
 /// Canonical `ref.delete` payload (`{"ref":<name>}`).
 fn canonical_delete(name: &str) -> String {
     serde_json::json!({ "ref": name }).to_string()
+}
+
+#[cfg(test)]
+mod guard_tests {
+    //! D14 guard on the `undo` verb (P-GUARD-PATHS). `undo` is Human-only; a
+    //! non-human (or unrecognized) principal is denied + audited, and the
+    //! compensating event is never appended. A human undo still succeeds.
+    use super::*;
+    use crate::log::EventLog;
+
+    /// A log with two `ref.update`s on the same ref, so undoing seq 1 has a real
+    /// compensator (restore the ref to the seq-0 value). Built with the trusted
+    /// raw append (these are not the verb under guard).
+    fn two_update_log() -> EventLog {
+        let mut log = EventLog::new();
+        let r = "refs/heads/main";
+        log.append(
+            "ref.update",
+            vec!["user:gustavo".into()],
+            canonical_update(r, &"a".repeat(40)),
+            1,
+        );
+        log.append(
+            "ref.update",
+            vec!["user:gustavo".into()],
+            canonical_update(r, &"b".repeat(40)),
+            2,
+        );
+        log
+    }
+
+    #[test]
+    fn human_undo_succeeds() {
+        let mut log = two_update_log();
+        let before = log.len();
+        let comp = undo(&mut log, 1, vec!["user:gustavo".into()], 3).expect("a human may undo");
+        assert_eq!(comp.kind, "ref.update");
+        // exactly one event appended (the compensator), no audit record.
+        assert_eq!(log.len(), before + 1);
+        let last = log.records().last().unwrap();
+        assert_eq!(last.kind, "ref.update");
+        assert!(!log.records().iter().any(|r| r.kind == "authz.denied"));
+    }
+
+    #[test]
+    fn non_human_undo_denied_and_audited() {
+        // orchestrator, worker (subagent), and model are all denied for undo.
+        for actor in ["orchestrator:lead", "agent:runner-03", "model:claude"] {
+            let mut log = two_update_log();
+            let before = log.len();
+            let err =
+                undo(&mut log, 1, vec![actor.into()], 3).expect_err("non-human undo is denied");
+            match err {
+                UndoError::Denied(DenyReason::NotPermitted { .. }) => {}
+                other => panic!("expected NotPermitted denial for {actor}, got {other:?}"),
+            }
+            // The compensating event was NOT appended; only the audit record was.
+            assert_eq!(
+                log.len(),
+                before + 1,
+                "only the authz.denied audit was appended"
+            );
+            let last = log.records().last().unwrap();
+            assert_eq!(last.kind, "authz.denied");
+            assert!(last.payload.contains("\"endpoint\":\"undo\""));
+            // No new ref.update/ref.delete compensator slipped onto the log.
+            assert_eq!(
+                log.records()
+                    .iter()
+                    .filter(|r| r.kind == "ref.update")
+                    .count(),
+                2,
+                "no compensating ref.update appended on a denied undo"
+            );
+        }
+    }
+
+    #[test]
+    fn unrecognized_principal_undo_denied() {
+        let mut log = two_update_log();
+        let err =
+            undo(&mut log, 1, vec!["queue".into()], 3).expect_err("unrecognized principal denied");
+        assert!(matches!(
+            err,
+            UndoError::Denied(DenyReason::UnrecognizedPrincipal)
+        ));
+        // empty chain → also unrecognized, denied.
+        let mut log2 = two_update_log();
+        let err2 = undo(&mut log2, 1, vec![], 3).expect_err("empty chain denied");
+        assert!(matches!(
+            err2,
+            UndoError::Denied(DenyReason::UnrecognizedPrincipal)
+        ));
+    }
 }

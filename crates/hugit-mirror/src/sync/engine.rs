@@ -21,6 +21,7 @@
 use std::collections::BTreeMap;
 
 use hugit_proto::{RawPush, record_external_change};
+use hugit_refstore::authz::{AuditedGuard, Decision, Endpoint};
 use hugit_refstore::intent::{INTENT_LANDED_KIND, RAW_PUSH_KINDS};
 use hugit_refstore::{EventLog, RefState, TamperError, replay, verify_chain};
 
@@ -65,6 +66,18 @@ pub enum SyncError {
     /// refused (fail-closed; never served off a tampered log).
     #[error("forge chain verification failed: {0}")]
     Tamper(String),
+    /// The D14 guard denied the land: advancing the protected branch through the
+    /// queue is the **orchestrator's** integration verb (the matrix in
+    /// [`hugit_refstore::authz`] — `land` is Orchestrator-only), and the issuing
+    /// principal was not an orchestrator (a subagent/worker/model/human, or an
+    /// unrecognized principal). The `intent.landed` event was **not** appended;
+    /// an `authz.denied` audit record (③) was written instead, so the denial is
+    /// attributable. Fail-closed. Carries the denial reason code.
+    #[error("land denied: {reason} (land is Orchestrator-only)")]
+    LandDenied {
+        /// The D14 denial reason code (`not_permitted` | `unrecognized_principal`).
+        reason: &'static str,
+    },
 }
 
 impl From<TamperError> for SyncError {
@@ -403,6 +416,24 @@ impl BidirSync {
     /// event (the ref-advancing intent kind). It is intentionally the sole
     /// constructor of a `main`-advancing append; the GitHub-ingest path has no
     /// branch that can move the protected ref.
+    ///
+    /// # D14 guard — `land` is the orchestrator's verb (P-GUARD-PATHS closed)
+    ///
+    /// `land` is one of the four mutating forge verbs the D14 matrix gates
+    /// ([`hugit_refstore::authz`]); the matrix declares it **Orchestrator-only**
+    /// (the integration verb — `authz/mod.rs` row `land`). This production path
+    /// therefore routes the authorization through the D14 [`AuditedGuard`] under
+    /// [`Endpoint::Land`], classifying the issuing `principal_chain` (the
+    /// chain-classified [`authorize`](hugit_refstore::authz::authorize) route),
+    /// rather than appending the `intent.landed` with the trusted raw
+    /// [`EventLog::append`] — closing the bypass the adversarial round caught
+    /// (the CLI `pr land` already routes through the guard; this engine path had
+    /// bypassed it). Only an `orchestrator:`/`orch:` actor is authorized; a
+    /// subagent (`worker:`/`agent:`), model, human, or unrecognized/empty
+    /// principal is **denied** fail-closed: no `intent.landed` is appended, `main`
+    /// does **not** advance, authority is **not** re-arbitrated, an `authz.denied`
+    /// audit record is written by the guard (③), and [`SyncError::LandDenied`] is
+    /// returned. The forge is never left half-applied.
     pub fn land_via_queue(
         &mut self,
         intent_id: &str,
@@ -419,11 +450,27 @@ impl BidirSync {
         })
         .to_string();
         let canonical = hugit_refstore::canonical_json(&payload).unwrap_or_else(|| payload.clone());
-        self.log
-            .append(INTENT_LANDED_KIND, principal_chain, canonical, recorded_at);
-        // The forge becomes the (sole) authoritative side for main on a land.
-        self.authority.arbitrate(&self.protected);
-        Ok(())
+
+        // D14 guard on the chain-classified principal. The guard audits denials
+        // (③) into the same forge log; only an authorized (Orchestrator) actor
+        // proceeds to append the ref-advancing `intent.landed` and re-arbitrate.
+        let decision = {
+            let mut guard = AuditedGuard::new(&mut self.log);
+            let (decision, _audit) = guard.authorize(&principal_chain, Endpoint::Land, recorded_at);
+            decision
+        };
+        match decision {
+            Decision::Allow => {
+                self.log
+                    .append(INTENT_LANDED_KIND, principal_chain, canonical, recorded_at);
+                // The forge becomes the (sole) authoritative side for main on a land.
+                self.authority.arbitrate(&self.protected);
+                Ok(())
+            }
+            Decision::Deny(reason) => Err(SyncError::LandDenied {
+                reason: reason.code(),
+            }),
+        }
     }
 
     // ── rule 1: mirror a forge-side branch update out to GitHub ─────────────
@@ -642,9 +689,75 @@ mod tests {
     #[test]
     fn main_advances_only_via_queue() {
         let mut s = BidirSync::new();
-        s.land_via_queue("i1", &oid('c'), "land it", vec!["queue".into()], 1)
-            .unwrap();
+        // land is the orchestrator's verb (D14): an orchestrator-class principal
+        // is authorized and advances main.
+        s.land_via_queue(
+            "i1",
+            &oid('c'),
+            "land it",
+            vec!["orchestrator:lead".into()],
+            1,
+        )
+        .unwrap();
         assert_eq!(s.forge_tip("refs/heads/main").unwrap(), Some(oid('c')));
+    }
+
+    #[test]
+    fn land_denied_for_subagent_is_audited_and_main_unmoved() {
+        // P-GUARD-PATHS: a subagent (worker class) cannot land via the mirror
+        // path. The land is DENIED, main does NOT advance, authority is NOT
+        // re-arbitrated, and the denial is AUDITED into the forge log (③).
+        let mut s = BidirSync::new();
+        let before = s.log.len();
+        let err = s
+            .land_via_queue(
+                "i1",
+                &oid('c'),
+                "land it",
+                vec!["agent:runner-03".into()],
+                1,
+            )
+            .unwrap_err();
+        assert_eq!(
+            err,
+            SyncError::LandDenied {
+                reason: "not_permitted"
+            }
+        );
+        // main did NOT advance.
+        assert_eq!(s.forge_tip("refs/heads/main").unwrap(), None);
+        // The denial is audited: exactly one `authz.denied` was appended, and NO
+        // `intent.landed` was appended.
+        assert_eq!(
+            s.log.len(),
+            before + 1,
+            "only the audit record was appended"
+        );
+        let audit = s.log.records().last().unwrap();
+        assert_eq!(audit.kind, "authz.denied");
+        assert!(audit.payload.contains("\"endpoint\":\"land\""));
+        assert!(audit.payload.contains("\"class\":\"worker\""));
+        assert!(
+            !s.log.records().iter().any(|r| r.kind == INTENT_LANDED_KIND),
+            "no intent.landed must be appended on a denied land"
+        );
+    }
+
+    #[test]
+    fn land_denied_for_unrecognized_principal() {
+        // A bare/unclassifiable principal (no `class:` prefix) is unrecognized →
+        // denied fail-closed, audited with the unrecognized_principal reason.
+        let mut s = BidirSync::new();
+        let err = s
+            .land_via_queue("i1", &oid('c'), "land", vec!["queue".into()], 1)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            SyncError::LandDenied {
+                reason: "unrecognized_principal"
+            }
+        );
+        assert_eq!(s.forge_tip("refs/heads/main").unwrap(), None);
     }
 
     #[test]
@@ -697,7 +810,7 @@ mod tests {
             .unwrap();
         assert!(!s.authority().is_symmetric_for_main());
         // landing via the queue arbitrates main → Forge (never GitHub).
-        s.land_via_queue("i1", &oid('c'), "land", vec!["queue".into()], 2)
+        s.land_via_queue("i1", &oid('c'), "land", vec!["orchestrator:lead".into()], 2)
             .unwrap();
         assert_eq!(
             s.authority().authority_for("refs/heads/main"),
