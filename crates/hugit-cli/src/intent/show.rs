@@ -59,6 +59,25 @@ pub fn run(input: ShowIntent, store_path: &Path) -> Result<Value, PorcelainError
     // Verdicts: present only when a panel actually recorded one.
     let verdict = store.verdicts.get(&input.intent_id);
 
+    // Campaign: extracted from the principal chain (`campaign:<key>` entry).
+    // Explicit null when not recorded — never invented.
+    let campaign: Option<String> = intent
+        .principal_chain
+        .iter()
+        .find_map(|p| p.strip_prefix("campaign:").map(str::to_string));
+
+    // Agent: extracted from the principal chain (`agent:<id>` or `orch:<id>`).
+    // Explicit null when not recorded.
+    let agent: Option<String> = intent.principal_chain.iter().find_map(|p| {
+        p.strip_prefix("agent:")
+            .or_else(|| p.strip_prefix("orch:"))
+            .or_else(|| p.strip_prefix("orchestrator:"))
+            .map(str::to_string)
+    });
+
+    // Stable key-set: ALL fields are present on every show call, whether the
+    // data was captured or not.  Absent optional data is explicit `null` —
+    // never missing keys, never invented values.
     Ok(json!({
         "intent_id": intent.intent_id,
         // The native projection off the real event log (the authoritative spine).
@@ -68,10 +87,13 @@ pub fn run(input: ShowIntent, store_path: &Path) -> Result<Value, PorcelainError
         "seq": intent.seq,
         "recorded_at": intent.recorded_at,
         "principal_chain": intent.principal_chain,
+        // Derived convenience fields (always present, null when not extractable).
+        "campaign": campaign,
+        "agent": agent,
         // The non-authoritative sidecar corpus — null when no corpus is stored.
         "acceptance": sidecar.map(|s| s.acceptance.clone()).unwrap_or_default(),
         "authoritative": sidecar.map(|s| s.authoritative).unwrap_or(false),
-        // Envelope ref + verdicts: honestly absent until captured (never faked).
+        // Envelope ref + verdicts: honestly null/empty until captured (never faked).
         "context_ref": context_ref,
         "verdicts": match verdict {
             Some(v) => vec![v.clone()],

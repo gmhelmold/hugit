@@ -70,12 +70,20 @@ pub struct NewIntent {
 }
 
 /// The stable result object printed by `intent new`.
+///
+/// **Key-set invariant (WB0):** the same fields are present on EVERY run,
+/// whether this is a first landing (`already_exists:false`) or an idempotent
+/// re-run (`already_exists:true`).  No field is ever silently dropped.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct NewResult {
     /// The id of the (now-landed) intent.
     pub intent_id: String,
     /// `true` when the intent already existed (idempotent re-run), else `false`.
     pub already_exists: bool,
+    /// The campaign this intent is bound to (same value, first-run and re-run).
+    pub campaign: String,
+    /// The authoring agent token (same value, first-run and re-run).
+    pub agent: String,
 }
 
 /// Derive a deterministic intent id from the authored content, so an identical
@@ -158,9 +166,13 @@ pub fn run(input: NewIntent, store_path: &Path) -> Result<NewResult, PorcelainEr
         if let Some(log_path) = input.log.as_deref() {
             canonical_log::land_intent(log_path, &sidecar, &principal_chain, now_ms())?;
         }
+        // Return the SAME key-set as the first-run path (WB0 stable key-set
+        // invariant): campaign and agent are always present, never dropped.
         return Ok(NewResult {
             intent_id,
             already_exists: true,
+            campaign: input.campaign.clone(),
+            agent: agent.clone(),
         });
     }
 
@@ -205,6 +217,8 @@ pub fn run(input: NewIntent, store_path: &Path) -> Result<NewResult, PorcelainEr
     Ok(NewResult {
         intent_id,
         already_exists: false,
+        campaign: input.campaign.clone(),
+        agent: agent.clone(),
     })
 }
 
