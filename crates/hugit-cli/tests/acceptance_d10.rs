@@ -467,3 +467,77 @@ fn item_1b_why_line_symbol_attribution() {
         "line 30 (in no range) must be LineUnresolved, got {err:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Redaction parity (WA1) — the charter surfaced by `why` passes through the
+// SAME view-boundary redaction as the ledger projection. One redaction law
+// across every read surface; a secret in a charter never surfaces verbatim.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn why_charter_is_redacted_parity_with_ledger() {
+    // A `ghp_`-style PAT planted in a charter (no `SECRET:` marker — the real
+    // detector set catches it by prefix shape).
+    const PAT: &str = "ghp_16C7e42F292c6912E7710c838347Ae178B4a";
+
+    let event = fixture_event(
+        1,
+        INTENT_LANDED_KIND,
+        vec!["alice@example.com".to_string()],
+        serde_json::json!({
+            "intent_id": "intent-secret-001",
+            "charter": format!("rotate deploy key {PAT}"),
+            "path": "src/auth/mod.rs"
+        }),
+    );
+    let entries = vec![LogEntry {
+        record: event,
+        attestation: None,
+        sidecar: None,
+    }];
+
+    let q = WhyQuery {
+        path: "src/auth/mod.rs".to_string(),
+        line: None,
+        symbol: None,
+    };
+    let answer = resolve_why(&q, &entries).expect("why must resolve");
+
+    assert!(
+        !answer.charter.contains(PAT),
+        "the surfaced charter must NOT leak the PAT verbatim; got {:?}",
+        answer.charter
+    );
+    // Parity: it is replaced with the canonical sentinel, exactly as the
+    // ledger projection (`ledger/mod.rs:104`) and the envelope write path do.
+    assert_eq!(
+        answer.charter,
+        hugit_contracts::REDACTED_MARKER,
+        "why must apply the canonical redaction sentinel"
+    );
+
+    // A benign charter still surfaces verbatim (redaction is targeted, not
+    // blanket — the read surface stays useful).
+    let benign = fixture_event(
+        1,
+        INTENT_LANDED_KIND,
+        vec!["bob@example.com".to_string()],
+        serde_json::json!({
+            "intent_id": "intent-clean-002",
+            "charter": "Add feature flag support",
+            "path": "src/flags/mod.rs"
+        }),
+    );
+    let entries = vec![LogEntry {
+        record: benign,
+        attestation: None,
+        sidecar: None,
+    }];
+    let q = WhyQuery {
+        path: "src/flags/mod.rs".to_string(),
+        line: None,
+        symbol: None,
+    };
+    let answer = resolve_why(&q, &entries).expect("why must resolve benign");
+    assert_eq!(answer.charter, "Add feature flag support");
+}

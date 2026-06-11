@@ -408,6 +408,13 @@ fn redact_transcript(lines: &[String]) -> String {
         .join("\n")
 }
 
+/// Redact each element of a string vector on the write path (the
+/// `constraints` / `acceptance` / `parent_intents` envelope fields). Per
+/// element — a non-secret entry survives intact (the X3 lesson).
+fn redact_each(items: &[String]) -> Vec<String> {
+    items.iter().map(|s| crate::redact::apply(s)).collect()
+}
+
 /// Close an authored unit: gate by `level`, redact on the write path, store
 /// the trajectory blobs in the cold store, and store the envelope itself —
 /// returning it with its `context_ref`.
@@ -506,6 +513,14 @@ pub fn close_envelope<S: ColdBlobStore>(
         }
     }
 
+    // Redaction on the WRITE path is total: EVERY string field that carries
+    // author-supplied text is routed through [`crate::redact::apply`] before
+    // the envelope is serialized and stored, so the module's "never a byte
+    // un-redacted" claim is literally true (the charter/constraints/
+    // acceptance/parent_intents/env_manifest/files_read-paths were previously
+    // persisted verbatim — a `ghp_`-style secret in a charter rode through).
+    // Exempt by design: `redaction_policy` (a policy identifier, not author
+    // text) and `summary` (already scrubbed above).
     let envelope = ContextEnvelope {
         schema_version: CONTEXT_ENVELOPE_SCHEMA_VERSION.to_string(),
         altitude: draft.altitude,
@@ -513,11 +528,11 @@ pub fn close_envelope<S: ColdBlobStore>(
         commit: draft.commit.clone(),
         tree_hash: draft.tree_hash.clone(),
         authorship: draft.authorship.clone(),
-        charter: draft.charter.clone(),
+        charter: crate::redact::apply(&draft.charter),
         campaign: draft.campaign.clone(),
-        constraints: draft.constraints.clone(),
-        acceptance: draft.acceptance.clone(),
-        parent_intents: draft.parent_intents.clone(),
+        constraints: redact_each(&draft.constraints),
+        acceptance: redact_each(&draft.acceptance),
+        parent_intents: redact_each(&draft.parent_intents),
         trajectory: Trajectory {
             raw_transcript_ref,
             task_transcript_ref,
@@ -526,9 +541,16 @@ pub fn close_envelope<S: ColdBlobStore>(
             redaction_policy: REDACTION_POLICY_DEFAULT.to_string(),
         },
         snapshot: Snapshot {
-            files_read: draft.files_read.clone(),
+            files_read: draft
+                .files_read
+                .iter()
+                .map(|f| FileRead {
+                    path: crate::redact::apply(&f.path),
+                    hash: f.hash.clone(),
+                })
+                .collect(),
             prompt_ref,
-            env_manifest: draft.env_manifest.clone(),
+            env_manifest: crate::redact::apply(&draft.env_manifest),
         },
         metrics,
         verdicts_ref: draft.verdicts_ref.clone(),
