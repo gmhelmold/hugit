@@ -105,7 +105,9 @@ fn item_2_why_error_exits_nonzero() {
     )
     .unwrap();
 
-    // Query a path that is NOT in the log → NotFound → non-zero exit.
+    // Query a path that is NOT in the log → NotFound → non-zero exit. Under the
+    // WB0 one-law convergence the error is the canonical JSON envelope on
+    // STDOUT (agents parse stdout, never stderr), exit 2.
     let out = Command::new(hugit_bin())
         .args([
             "why",
@@ -121,9 +123,12 @@ fn item_2_why_error_exits_nonzero() {
         !out.status.success(),
         "hugit why on an unresolvable query MUST exit non-zero"
     );
+    assert_eq!(out.status.code(), Some(2), "structured error exits 2");
+    let v: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).expect("error is JSON");
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("error"),
-        "an error must be reported on stderr"
+        v["error"]["kind"].is_string() && v["error"]["fix"].is_string(),
+        "the canonical error envelope is on stdout"
     );
 }
 
@@ -185,9 +190,13 @@ fn item_4_tournament_runs_and_caps() {
         "tournament within cap must exit 0; stderr: {}",
         String::from_utf8_lossy(&ok.stderr)
     );
+    // Under the WB0 one-law convergence the report is stable JSON (was plain
+    // text): the human `candidates=3` summary became `"candidates":3`.
     let stdout = String::from_utf8_lossy(&ok.stdout);
-    assert!(
-        stdout.contains("candidates=3"),
+    let v: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("tournament report is JSON");
+    assert_eq!(
+        v["candidates"], 3,
         "tournament must produce N candidates, got: {stdout}"
     );
 
@@ -263,9 +272,10 @@ fn item_5_export_runs_end_to_end() {
 //       HUGIT_VERBS (binary → registry). Detected via count equality + per-verb
 //       membership.
 //
-// The dispatched surface is exactly: why, impact, tournament, export.
-// Changing HUGIT_VERBS without wiring the verb in main.rs (or vice-versa) turns
-// this test RED immediately.
+// The dispatched surface is the legacy verbs (why/impact/tournament/export),
+// the flow porcelain (campaign/intent/pr), and the WB0 wedge stubs
+// (checks/queue) — exactly HUGIT_VERBS. Changing HUGIT_VERBS without wiring the
+// verb in main.rs (or vice-versa) turns this test RED immediately.
 #[test]
 fn item_6_canonical_registry_equals_dispatched_surface() {
     // ── (a) registry → binary: every HUGIT_VERBS entry must appear in --help ──

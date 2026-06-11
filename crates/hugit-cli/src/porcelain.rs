@@ -1,40 +1,217 @@
-//! Porcelain shared helpers (WP-PC0 scaffold).
+//! Porcelain shared helpers — **the one error law + the one exit-code law**
+//! (WP-WB0, SOTA-fix Wave B; PC0 scaffold before it).
 //!
-//! Single-sources the JSON-on-stdout conventions the flow porcelain
-//! (`campaign` / `intent` / `pr`) shares: stable JSON always (a `--human`
-//! pretty mode lands later), and a structured error envelope carrying an honest
-//! `kind` + the owning WP so callers (LLMs) get a machine-parseable signal
-//! rather than a fake success.
+//! # The LLM-first contract
 //!
-//! The scaffold's stubs route through [`not_implemented`] so PC1/PC2/PC3 inherit
-//! one error shape and replace behavior, not wiring.
+//! hugit's primary typist is an orchestrated agent, so the machine shape IS the
+//! contract. Every porcelain verb — flow (`campaign`/`intent`/`pr`) AND legacy
+//! (`why`/`impact`/`tournament`/`export`) — converges on ONE error envelope and
+//! ONE exit-code law. An agent parsing stdout always gets a machine-parseable
+//! signal, never a fake success and never a bare string.
+//!
+//! ## One error law (THE canonical shape)
+//!
+//! A structured (non-crash) error is a single JSON object on **stdout**:
+//!
+//! ```json
+//! {"error":{"kind":"…","message":"…","fix":"…", …context}}
+//! ```
+//!
+//! - **nested** under a top-level `"error"` key (never a flat `{"kind":…}`),
+//! - `kind` — a stable, machine-matchable error class (snake_case),
+//! - `message` — the human/agent-readable description,
+//! - **`fix`** is THE remediation key (NEVER `suggested_fix` — the P2 audit's
+//!   schism: the legacy `intent` envelope still spells it `suggested_fix`; that
+//!   module is the next WP's to converge — see the note in [`PorcelainError`]),
+//! - any further keys are flat **context** folded into the `error` object
+//!   (e.g. `"detail"`, `"path"`, `"seq"`), via [`PorcelainError::with_context`].
+//!
+//! ## One exit-code law
+//!
+//! - **`0`** — success.
+//! - **`2`** — a structured user/domain error (the envelope above on stdout).
+//!   This is [`PORCELAIN_ERROR_EXIT`].
+//! - **`1`** — RESERVED for an internal fault (a bug, not the caller's input).
+//!   An internal fault is ALSO emitted as JSON, with `kind:"internal"`, so even
+//!   a crash-class fault stays machine-parseable. This is [`INTERNAL_FAULT_EXIT`].
+//!
+//! Module WPs converge on this law by constructing [`PorcelainError`] (or the
+//! [`internal`] helper) and rendering with [`PorcelainError::to_json`] /
+//! [`PorcelainError::exit_code`]. The PC0 stub shape ([`not_implemented`]) is a
+//! `PorcelainError` of `kind:"not_implemented"` carrying the owning `wp`.
 
 use std::process::ExitCode;
 
-/// The process exit code for a structured (non-crash) command error.
-///
-/// `0` = success, `1` is reserved for the binary's generic library-error path
-/// (`main.rs`), `2` = a structured porcelain error emitted as JSON on stdout.
+use serde_json::{Value, json};
+
+/// The process exit code for a structured (non-crash) user/domain error — the
+/// `{"error":{…}}` envelope on stdout. The one error law's exit code.
 pub const PORCELAIN_ERROR_EXIT: u8 = 2;
+
+/// The process exit code RESERVED for an internal fault (a bug, not bad input).
+/// Also emitted as JSON (`kind:"internal"`) so even a fault stays parseable.
+pub const INTERNAL_FAULT_EXIT: u8 = 1;
+
+/// THE canonical structured porcelain error — rendered as `{"error":{…}}` JSON
+/// on stdout, exit [`PORCELAIN_ERROR_EXIT`] (or [`INTERNAL_FAULT_EXIT`] for the
+/// `internal` kind).
+///
+/// One shape for every verb. `fix` is THE remediation key (never
+/// `suggested_fix`). Extra structured context is folded flat into the `error`
+/// object via [`with_context`](PorcelainError::with_context).
+///
+/// # Convergence note (the P2 audit)
+///
+/// The flow porcelain has two pre-existing error types that this law supersedes:
+/// `campaign::CampaignError` (already `fix`-keyed, nested — compatible) and
+/// `intent`'s `error::PorcelainError` (spells the remediation `suggested_fix` —
+/// the divergence the audit flagged). Converging the `intent`/`pr`/`campaign`
+/// CALL SITES onto this type is the next WP's; WB0 establishes the shape here +
+/// converges the legacy verbs (`why`/`impact`/`tournament`/`export`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PorcelainError {
+    /// Stable, machine-matchable error class (snake_case).
+    kind: &'static str,
+    /// Human/agent-readable description of what went wrong.
+    message: String,
+    /// THE remediation the caller (an agent) can act on. Never `suggested_fix`.
+    fix: String,
+    /// Extra structured context, folded flat into the `error` object on render.
+    context: Vec<(&'static str, Value)>,
+    /// Whether this is an internal fault (exit `1`) rather than a user/domain
+    /// error (exit `2`). Set only via [`PorcelainError::internal`].
+    internal: bool,
+}
+
+impl PorcelainError {
+    /// A `kind` + `message` + `fix` error (the common case), exit
+    /// [`PORCELAIN_ERROR_EXIT`].
+    pub fn new(kind: &'static str, message: impl Into<String>, fix: impl Into<String>) -> Self {
+        PorcelainError {
+            kind,
+            message: message.into(),
+            fix: fix.into(),
+            context: Vec::new(),
+            internal: false,
+        }
+    }
+
+    /// An **internal fault** (a bug, not the caller's input): `kind:"internal"`,
+    /// exit [`INTERNAL_FAULT_EXIT`]. Still emitted as JSON so a fault stays
+    /// machine-parseable.
+    pub fn internal(message: impl Into<String>) -> Self {
+        PorcelainError {
+            kind: "internal",
+            message: message.into(),
+            fix: "this is an internal hugit bug; report it with the command + inputs".to_string(),
+            context: Vec::new(),
+            internal: true,
+        }
+    }
+
+    /// Fold a flat structured context key into the `error` object (e.g.
+    /// `("path", json!("src/a.rs"))`). Repeatable; insertion order preserved.
+    pub fn with_context(mut self, key: &'static str, value: Value) -> Self {
+        self.context.push((key, value));
+        self
+    }
+
+    /// Render THE canonical `{"error":{"kind","message","fix", …context}}`
+    /// envelope (the stable wire shape).
+    pub fn to_json(&self) -> String {
+        let mut error = json!({
+            "kind": self.kind,
+            "message": self.message,
+            "fix": self.fix,
+        });
+        if let Some(map) = error.as_object_mut() {
+            for (k, v) in &self.context {
+                map.insert((*k).to_string(), v.clone());
+            }
+        }
+        json!({ "error": error }).to_string()
+    }
+
+    /// The process exit code under the one exit-code law: `1` for an internal
+    /// fault, else `2` for a structured user/domain error.
+    pub fn exit_code(&self) -> ExitCode {
+        if self.internal {
+            ExitCode::from(INTERNAL_FAULT_EXIT)
+        } else {
+            ExitCode::from(PORCELAIN_ERROR_EXIT)
+        }
+    }
+
+    /// The error's stable `kind` (for call-site convergence + tests).
+    pub fn kind(&self) -> &'static str {
+        self.kind
+    }
+
+    /// An I/O fault reading/writing a `--log`/`--store` path (user/domain).
+    pub fn io(action: &str, path: &std::path::Path, e: &std::io::Error) -> Self {
+        PorcelainError::new(
+            "io",
+            format!("{action} {}: {e}", path.display()),
+            "check the --log path exists and is readable/writable",
+        )
+    }
+
+    /// A malformed/truncated `--log` file (not valid canonical JSON). The one
+    /// input-error law's `parse_log` kind — never silently an empty world.
+    pub fn parse_log(path: &std::path::Path, e: &serde_json::Error) -> Self {
+        PorcelainError::new(
+            "parse_log",
+            format!("--log file {} is not valid JSON: {e}", path.display()),
+            "the --log file must be a canonical JSON [EventRecord, …] array \
+             (the engine's EventLog shape, shared by every porcelain verb); \
+             a truncated/corrupt file is rejected, never read as an empty world",
+        )
+        .with_context("path", json!(path.display().to_string()))
+    }
+
+    /// A `--log` FILE that does not exist (the path is absent on disk). Explicit
+    /// — NEVER silently an empty world (the P5 audit finding). Exit `2`.
+    pub fn log_not_found(path: &std::path::Path) -> Self {
+        PorcelainError::new(
+            "log_not_found",
+            format!("--log file does not exist: {}", path.display()),
+            "create the log first (e.g. `hugit intent new --log <path>` \
+             bootstraps it) or point --log at an existing canonical \
+             [EventRecord, …] file",
+        )
+        .with_context("path", json!(path.display().to_string()))
+    }
+}
 
 /// Emit the canonical NOT-IMPLEMENTED error as JSON on **stdout** and return the
 /// structured-error exit code.
 ///
 /// Shape (stable contract for callers): `{"error":{"kind":"not_implemented",
-/// "wp":"PC1"}}`. Honest stub — never a fake success. `wp` names the work
-/// package that will replace the stub with the real projection.
+/// "wp":"…","message":…,"fix":…}}`. Honest stub — never a fake success. `wp`
+/// names the work package that will replace the stub with the real projection.
 pub fn not_implemented(wp: &str) -> ExitCode {
     println!("{}", not_implemented_json(wp));
     ExitCode::from(PORCELAIN_ERROR_EXIT)
 }
 
+/// The canonical NOT-IMPLEMENTED [`PorcelainError`] for `wp` — a `PorcelainError`
+/// of `kind:"not_implemented"` carrying the owning WP token as flat context.
+fn not_implemented_error(wp: &str) -> PorcelainError {
+    PorcelainError::new(
+        "not_implemented",
+        "this verb is a scaffold stub; its projection is not implemented yet",
+        "track the owning work package; the stub never returns a fake success",
+    )
+    .with_context("wp", json!(wp))
+}
+
 /// The canonical NOT-IMPLEMENTED JSON line for `wp` (the stable wire shape).
 ///
 /// Split out from [`not_implemented`] so the exact contract can be asserted in
-/// tests without capturing stdout. Hand-built — the two-field object IS the
-/// contract; `wp` is a fixed ASCII WP token, never untrusted input.
+/// tests without capturing stdout. `wp` is a fixed ASCII WP token, never
+/// untrusted input.
 pub fn not_implemented_json(wp: &str) -> String {
-    format!(r#"{{"error":{{"kind":"not_implemented","wp":"{wp}"}}}}"#)
+    not_implemented_error(wp).to_json()
 }
 
 #[cfg(test)]
@@ -42,10 +219,66 @@ mod tests {
     use super::*;
 
     #[test]
-    fn not_implemented_json_is_the_stable_shape() {
-        assert_eq!(
-            not_implemented_json("PC1"),
-            r#"{"error":{"kind":"not_implemented","wp":"PC1"}}"#
-        );
+    fn error_json_is_the_one_canonical_shape() {
+        let e = PorcelainError::new("k", "m", "f");
+        let v: Value = serde_json::from_str(&e.to_json()).unwrap();
+        // nested under "error", with fix (NOT suggested_fix) as THE key.
+        assert_eq!(v["error"]["kind"], "k");
+        assert_eq!(v["error"]["message"], "m");
+        assert_eq!(v["error"]["fix"], "f");
+        assert!(v["error"].get("suggested_fix").is_none());
+        assert!(v.get("kind").is_none(), "must be nested, never flat");
+    }
+
+    #[test]
+    fn context_folds_flat_into_the_error_object() {
+        let e = PorcelainError::new("k", "m", "f")
+            .with_context("path", json!("src/a.rs"))
+            .with_context("seq", json!(7));
+        let v: Value = serde_json::from_str(&e.to_json()).unwrap();
+        assert_eq!(v["error"]["path"], "src/a.rs");
+        assert_eq!(v["error"]["seq"], 7);
+    }
+
+    #[test]
+    fn user_error_is_exit_two() {
+        let e = PorcelainError::new("k", "m", "f");
+        assert_eq!(e.exit_code(), ExitCode::from(PORCELAIN_ERROR_EXIT));
+        assert_eq!(PORCELAIN_ERROR_EXIT, 2);
+    }
+
+    #[test]
+    fn internal_fault_is_kind_internal_and_exit_one() {
+        let e = PorcelainError::internal("the rollup accumulator overflowed");
+        let v: Value = serde_json::from_str(&e.to_json()).unwrap();
+        assert_eq!(v["error"]["kind"], "internal");
+        assert!(v["error"]["fix"].is_string());
+        assert_eq!(e.exit_code(), ExitCode::from(INTERNAL_FAULT_EXIT));
+        assert_eq!(INTERNAL_FAULT_EXIT, 1);
+    }
+
+    #[test]
+    fn log_not_found_is_explicit_not_an_empty_world() {
+        let e = PorcelainError::log_not_found(std::path::Path::new("/no/such.json"));
+        let v: Value = serde_json::from_str(&e.to_json()).unwrap();
+        assert_eq!(v["error"]["kind"], "log_not_found");
+        assert_eq!(v["error"]["path"], "/no/such.json");
+    }
+
+    #[test]
+    fn parse_log_carries_the_path_context() {
+        let bad: serde_json::Error = serde_json::from_str::<Value>("{trunc").unwrap_err();
+        let e = PorcelainError::parse_log(std::path::Path::new("/x/log.json"), &bad);
+        let v: Value = serde_json::from_str(&e.to_json()).unwrap();
+        assert_eq!(v["error"]["kind"], "parse_log");
+        assert_eq!(v["error"]["path"], "/x/log.json");
+    }
+
+    #[test]
+    fn not_implemented_json_is_the_canonical_envelope() {
+        let v: Value = serde_json::from_str(&not_implemented_json("WB2")).unwrap();
+        assert_eq!(v["error"]["kind"], "not_implemented");
+        assert_eq!(v["error"]["wp"], "WB2");
+        assert!(v["error"]["fix"].is_string());
     }
 }

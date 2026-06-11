@@ -1,10 +1,14 @@
-//! The real `hugit` binary (WP-R-cli defect #1).
+//! The real `hugit` binary (WP-R-cli defect #1; converged onto the one error /
+//! exit law by WP-WB0).
 //!
 //! A thin clap dispatch shell over the existing `hugit_cli` library verbs. The
-//! binary OWNS no behavior — it parses arguments, calls the library, prints the
-//! result, and maps success/failure to the process exit code (0 on success,
-//! non-zero on any error). The wired verbs (`why`, `impact`, `tournament`,
-//! `export`) run end-to-end against the real library functions.
+//! binary OWNS no behavior — it parses arguments, calls the library, emits the
+//! result as STABLE JSON on stdout, and maps the outcome to the process exit
+//! code under the one exit-code law (`0` success · `2` structured user/domain
+//! error · `1` internal fault). The wired verbs (`why`, `impact`, `tournament`,
+//! `export`) run end-to-end against the real library functions and emit the
+//! canonical `{"error":{…}}` envelope on failure — the SAME law the flow
+//! porcelain (`campaign`/`intent`/`pr`) already uses.
 //!
 //! Git-proximate by mandate: every verb token is drawn from
 //! [`hugit_cli::HUGIT_VERBS`], the single canonical registry the namespace-law
@@ -17,10 +21,13 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 use hugit_cli::campaign::{self, CampaignArgs};
+use hugit_cli::checks::{self, ChecksArgs};
 use hugit_cli::export::{self, AccountState, Corpus};
 use hugit_cli::impact::{ImpactQuery, compute_impact};
 use hugit_cli::intent::{self, IntentArgs};
+use hugit_cli::porcelain::PorcelainError;
 use hugit_cli::pr::{self, PrArgs};
+use hugit_cli::queue::{self, QueueArgs};
 use hugit_cli::tournament::{MAX_N_POLICY, produce_candidates};
 use hugit_cli::why::resolver::LogEntry;
 use hugit_cli::why::{WhyQuery, resolve_why};
@@ -29,6 +36,7 @@ use hugit_checks::affected::{BuildGraph, Ecosystem, PackageNode};
 use hugit_contracts::{AttestationChain, EventRecord, IntentSidecar};
 
 use serde::Deserialize;
+use serde_json::json;
 
 /// `hugit` — the git-compatible, LLM-native forge CLI.
 #[derive(Parser, Debug)]
@@ -56,6 +64,10 @@ enum Command {
     Intent(IntentArgs),
     /// Pull-request lifecycle: open / land / show (WP-PC3).
     Pr(PrArgs),
+    /// Memoized-CI checks: show / key — make the CI wedge visible (WP-WB2 stub).
+    Checks(ChecksArgs),
+    /// Landing-queue state: show — make the union-batch wedge visible (WP-WB2 stub).
+    Queue(QueueArgs),
 }
 
 // ── why ────────────────────────────────────────────────────────────────────
@@ -87,10 +99,23 @@ struct WhyLogEntryInput {
     sidecar: Option<IntentSidecar>,
 }
 
-fn run_why(args: WhyArgs) -> Result<(), String> {
-    let bytes = std::fs::read(&args.log).map_err(|e| format!("read log {:?}: {e}", args.log))?;
-    let raw: Vec<WhyLogEntryInput> =
-        serde_json::from_slice(&bytes).map_err(|e| format!("parse log: {e}"))?;
+/// Read a `--log` file under the one input-error law: a missing FILE is an
+/// explicit `log_not_found` (NEVER silently an empty world — the P5 finding); a
+/// malformed/truncated file is a `parse_log` error. Both are exit-2 structured
+/// errors. `parse` deserialises the read bytes into the verb's input type.
+fn read_log<T: for<'de> Deserialize<'de>>(path: &std::path::Path) -> Result<T, PorcelainError> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(PorcelainError::log_not_found(path));
+        }
+        Err(e) => return Err(PorcelainError::io("read log", path, &e)),
+    };
+    serde_json::from_slice(&bytes).map_err(|e| PorcelainError::parse_log(path, &e))
+}
+
+fn run_why(args: WhyArgs) -> Result<String, PorcelainError> {
+    let raw: Vec<WhyLogEntryInput> = read_log(&args.log)?;
     let entries: Vec<LogEntry> = raw
         .into_iter()
         .map(|r| LogEntry {
@@ -105,10 +130,16 @@ fn run_why(args: WhyArgs) -> Result<(), String> {
         line: args.line,
         symbol: args.symbol,
     };
-    let answer = resolve_why(&query, &entries).map_err(|e| e.to_string())?;
-    let json = serde_json::to_string_pretty(&answer).map_err(|e| e.to_string())?;
-    println!("{json}");
-    Ok(())
+    let answer = resolve_why(&query, &entries).map_err(|e| {
+        PorcelainError::new(
+            "unresolved",
+            e.to_string(),
+            "query a path/line/symbol attributed by a record on the --log file; \
+             why never widens or fabricates an answer",
+        )
+    })?;
+    serde_json::to_string(&answer)
+        .map_err(|e| PorcelainError::internal(format!("serialise why answer: {e}")))
 }
 
 // ── impact ───────────────────────────────────────────────────────────────────
@@ -140,11 +171,34 @@ struct PackageInput {
     direct_deps: Vec<String>,
 }
 
-fn run_impact(args: ImpactArgs) -> Result<(), String> {
-    let bytes =
-        std::fs::read(&args.graph).map_err(|e| format!("read graph {:?}: {e}", args.graph))?;
-    let input: GraphInput =
-        serde_json::from_slice(&bytes).map_err(|e| format!("parse graph: {e}"))?;
+fn run_impact(args: ImpactArgs) -> Result<String, PorcelainError> {
+    // The build graph is a JSON file under the same input-error law: a missing
+    // FILE is explicit (never an empty graph silently), a malformed one is a
+    // parse error. Both exit 2.
+    let bytes = match std::fs::read(&args.graph) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(PorcelainError::new(
+                "graph_not_found",
+                format!("--graph file does not exist: {}", args.graph.display()),
+                "point --graph at an existing build-graph JSON file",
+            )
+            .with_context("path", json!(args.graph.display().to_string())));
+        }
+        Err(e) => return Err(PorcelainError::io("read graph", &args.graph, &e)),
+    };
+    let input: GraphInput = serde_json::from_slice(&bytes).map_err(|e| {
+        PorcelainError::new(
+            "parse_graph",
+            format!(
+                "--graph file {} is not valid JSON: {e}",
+                args.graph.display()
+            ),
+            "the --graph file must be a JSON build-graph \
+             {ecosystem, root_manifests, packages[]} object",
+        )
+        .with_context("path", json!(args.graph.display().to_string()))
+    })?;
 
     let ecosystem = match input.ecosystem.as_str() {
         "cargo" | "Cargo" => Ecosystem::Cargo,
@@ -169,10 +223,15 @@ fn run_impact(args: ImpactArgs) -> Result<(), String> {
     let query = ImpactQuery {
         changed_paths: args.paths,
     };
-    let result = compute_impact(&query, &graph).map_err(|e| e.to_string())?;
-    let json = serde_json::to_string_pretty(&result).map_err(|e| e.to_string())?;
-    println!("{json}");
-    Ok(())
+    let result = compute_impact(&query, &graph).map_err(|e| {
+        PorcelainError::new(
+            "empty_graph",
+            e.to_string(),
+            "supply a non-empty build graph (at least one package node)",
+        )
+    })?;
+    serde_json::to_string(&result)
+        .map_err(|e| PorcelainError::internal(format!("serialise impact result: {e}")))
 }
 
 // ── tournament ────────────────────────────────────────────────────────────────
@@ -187,15 +246,22 @@ struct TournamentArgs {
     intent: String,
 }
 
-fn run_tournament(args: TournamentArgs) -> Result<(), String> {
+fn run_tournament(args: TournamentArgs) -> Result<String, PorcelainError> {
     if args.n == 0 {
-        return Err("tournament requires -n >= 1".to_string());
+        return Err(PorcelainError::new(
+            "invalid_argument",
+            "tournament requires -n >= 1",
+            "pass -n with a value between 1 and the policy cap",
+        ));
     }
     if args.n > MAX_N_POLICY {
-        return Err(format!(
-            "tournament -n {} exceeds policy cap {MAX_N_POLICY}",
-            args.n
-        ));
+        return Err(PorcelainError::new(
+            "policy_cap_exceeded",
+            format!("tournament -n {} exceeds policy cap {MAX_N_POLICY}", args.n),
+            format!("pass -n at most {MAX_N_POLICY}"),
+        )
+        .with_context("requested", json!(args.n))
+        .with_context("cap", json!(MAX_N_POLICY)));
     }
     let intent = IntentSidecar {
         intent_id: args.intent,
@@ -208,19 +274,18 @@ fn run_tournament(args: TournamentArgs) -> Result<(), String> {
     let labels: Vec<String> = (0..args.n).map(|i| format!("strat-{i}")).collect();
     let strategies: Vec<&str> = labels.iter().map(String::as_str).collect();
     let candidates = produce_candidates(&intent, &strategies);
-    // Candidate is not a serde type; emit a deterministic plain-text summary.
-    println!(
-        "intent={} candidates={}",
-        intent.intent_id,
-        candidates.len()
-    );
-    for c in &candidates {
-        println!(
-            "  #{} strategy={} ref={} selected={}",
-            c.index, c.strategy, c.candidate_ref, c.selected
-        );
-    }
-    Ok(())
+    // Candidate is not a serde type; emit a stable JSON report (was plain text).
+    let report = json!({
+        "intent": intent.intent_id,
+        "candidates": candidates.len(),
+        "fanout": candidates.iter().map(|c| json!({
+            "index": c.index,
+            "strategy": c.strategy,
+            "candidate_ref": c.candidate_ref,
+            "selected": c.selected,
+        })).collect::<Vec<_>>(),
+    });
+    Ok(report.to_string())
 }
 
 // ── export ────────────────────────────────────────────────────────────────────
@@ -256,10 +321,8 @@ struct ExportEventInput {
     recorded_at: u64,
 }
 
-fn run_export(args: ExportArgs) -> Result<(), String> {
-    let bytes = std::fs::read(&args.log).map_err(|e| format!("read log {:?}: {e}", args.log))?;
-    let input: ExportLogInput =
-        serde_json::from_slice(&bytes).map_err(|e| format!("parse log: {e}"))?;
+fn run_export(args: ExportArgs) -> Result<String, PorcelainError> {
+    let input: ExportLogInput = read_log(&args.log)?;
 
     let mut event_log = hugit_refstore::EventLog::new();
     for e in input.events {
@@ -270,25 +333,40 @@ fn run_export(args: ExportArgs) -> Result<(), String> {
         event_log,
         ..Corpus::default()
     };
-    let artifact =
-        export::export(&corpus, &args.out, AccountState::Active).map_err(|e| e.to_string())?;
-    println!(
-        "exported: git_dir={} json={} peak_buffered={}",
-        artifact.git_dir.display(),
-        artifact.json_path.display(),
-        artifact.peak_buffered
-    );
-    Ok(())
+    let artifact = export::export(&corpus, &args.out, AccountState::Active).map_err(|e| {
+        PorcelainError::new(
+            "export_failed",
+            e.to_string(),
+            "fix the corpus/out path the error names; export fails closed, \
+             never writing a partial artifact",
+        )
+    })?;
+    // The success line is now stable JSON: the artifact paths + the redaction
+    // manifest's content digest (the seal) + the bounded-memory proof.
+    let report = json!({
+        "exported": {
+            "git_dir": artifact.git_dir.display().to_string(),
+            "envelope_json": artifact.json_path.display().to_string(),
+            "redaction_manifest": artifact.manifest_path.display().to_string(),
+            "schema_version": artifact.envelope.schema.version,
+            "peak_buffered": artifact.peak_buffered,
+            "peak_serialize_scratch": artifact.peak_serialize_scratch,
+        }
+    });
+    Ok(report.to_string())
 }
 
 // ── dispatch ──────────────────────────────────────────────────────────────────
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    // The flow-porcelain verbs (campaign/intent/pr) own their own exit code:
-    // they emit a structured JSON envelope on stdout (NOT-IMPLEMENTED stubs at
-    // PC0; real projections at PC1/PC2/PC3) and return an ExitCode directly,
-    // so they bypass the Result→exit-code mapping the library verbs use.
+    // ONE law for every verb. The flow-porcelain verbs (campaign/intent/pr) and
+    // the wedge stubs (checks/queue) own their own exit code internally and
+    // return an ExitCode directly. The legacy library verbs (why/impact/
+    // tournament/export) now ALSO converge on the law: each returns
+    // `Result<String /*stable JSON*/, PorcelainError>`, emitted here as JSON on
+    // stdout — success line OR the canonical `{"error":{…}}` envelope — under
+    // the one exit-code law (0 success · 2 user/domain error · 1 internal).
     let result = match cli.command {
         Command::Why(a) => run_why(a),
         Command::Impact(a) => run_impact(a),
@@ -297,12 +375,19 @@ fn main() -> ExitCode {
         Command::Campaign(a) => return campaign::run(a),
         Command::Intent(a) => return intent::run(a),
         Command::Pr(a) => return pr::run(a),
+        Command::Checks(a) => return checks::run(a),
+        Command::Queue(a) => return queue::run(a),
     };
     match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(msg) => {
-            eprintln!("hugit: error: {msg}");
-            ExitCode::FAILURE
+        Ok(json) => {
+            println!("{json}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            // The error is JSON on STDOUT (the agent parses stdout, never a fake
+            // success), exit per the law.
+            println!("{}", err.to_json());
+            err.exit_code()
         }
     }
 }

@@ -10,17 +10,22 @@
 //!   - `tournament/` — `hugit tournament -n N` fan-out: N candidates, judge
 //!     panel, budget-bounded (WP-D13)
 //!   - `export/`     — `hugit export` + the exit proof (WP-E5)
-//!   - `porcelain`   — shared JSON-on-stdout conventions for the flow porcelain (WP-PC0)
+//!   - `porcelain`   — THE one error/exit law + shared JSON-on-stdout conventions
+//!     for every verb (flow + legacy) (WP-PC0 scaffold; WP-WB0 one-law convergence)
 //!   - `campaign/`   — `hugit campaign open/close/show` (WP-PC1; scaffold WP-PC0)
 //!   - `intent/`     — `hugit intent new/show` (WP-PC2; scaffold WP-PC0)
 //!   - `pr/`         — `hugit pr open/land/show` (WP-PC3; scaffold WP-PC0)
+//!   - `checks/`     — `hugit checks show/key` (WP-WB2; honest stub WP-WB0)
+//!   - `queue/`      — `hugit queue show` (WP-WB2; honest stub WP-WB0)
 
 pub mod campaign;
+pub mod checks;
 pub mod export;
 pub mod impact;
 pub mod intent;
 pub mod porcelain;
 pub mod pr;
+pub mod queue;
 pub mod tournament;
 pub mod verdict;
 pub mod why;
@@ -62,6 +67,12 @@ pub const HUGIT_VERBS: &[&str] = &[
     "campaign", // hugit campaign open/close/show — campaign lifecycle (PC1)
     "intent",   // hugit intent new/show         — intent ceremony (PC2)
     "pr",       // hugit pr open/land/show        — pull-request lifecycle (PC3)
+    // Wedge-visibility verbs (SOTA-fix Wave B) — dispatched as honest
+    // NOT-IMPLEMENTED stubs at WB0 (clap skeletons); WB2 fills the projection.
+    // LIVE the moment main.rs routes them (the no-drift oracle asserts
+    // dispatched == registry), so they belong here, not in RESERVED.
+    "checks", // hugit checks show/key          — memoized-CI visibility (WB2)
+    "queue",  // hugit queue show               — landing-queue visibility (WB2)
 ];
 
 /// Planned hugit verb tokens that are RESERVED but NOT yet dispatched.
