@@ -913,7 +913,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "hugit-contracts",
- "hugit-runner",
  "sha2",
 ]
 
@@ -931,7 +930,6 @@ dependencies = [
  "hugit-dogfood",
  "hugit-ledger",
  "hugit-refstore",
- "hugit-runner",
  "serde",
  "serde_json",
  "sha2",

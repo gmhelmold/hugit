@@ -1,11 +1,11 @@
 # hugit-invariants — Squad-X cross-cutting invariant test crate.
 #
 # Houses red-team / invariant suites that hold ACROSS production crates without
-# owning any production path. WP-X4 is the supply-chain invariant: runner
-# images are content-pinned + integrity-verified at spawn, App deps are pinned
-# + verified in CI, and a tampered/unpinned image fails CLOSED before any
-# tenant work. The crate consumes the spawn surface (hugit-runner / C2) and the
-# frozen RunnerLease (hugit-contracts) read-only; it modifies neither.
+# owning any production path. WP-X4's spawn-surface oracle transferred to
+# corelink-runners with the execution core (WP-R4, runner-transfer campaign);
+# hugit's X4 surface is now the wire-level conformance oracle over the shared
+# `conformance/` vectors + the frozen hugit-contracts types — no hugit-runner
+# dependency remains (the seam is the wire contract, never a crate link).
 #
 # Layout note: the package root is `crates/hugit-invariants/`, but every source
 # file lives under a per-WP subtree (`x4/`) so the WP-X4 claim ("only x4/ paths
@@ -28,7 +28,6 @@ path = "lib.rs"
 
 [dependencies]
 hugit-contracts = { path = "../hugit-contracts" }
-hugit-runner = { path = "../hugit-runner" }
 # WP-X5 (namespace law) consumes the REAL CLI verb registry
 # (`hugit_cli::HUGIT_VERBS`) read-only — never a hand-copied list (which would
 # rot). Deriving the no-shadow oracle from the single canonical registry makes
@@ -84,7 +83,6 @@ hugit-dogfood = { path = "../hugit-dogfood" }
 
 [dev-dependencies]
 hugit-contracts = { path = "../hugit-contracts" }
-hugit-runner = { path = "../hugit-runner" }
 # WP-X3 (context privacy) consumes the D11 journal + redaction surfaces and the
 # frozen ExportSchema read-only. Dev-only: used by the x3 acceptance oracle.
 hugit-ledger = { path = "../hugit-ledger" }
@@ -94,13 +92,15 @@ hugit-refstore = { path = "../hugit-refstore" }
 serde_json = { workspace = true }
 serde = { workspace = true }
 
-# The acceptance oracle lives under the x4/ subtree (not the default
-# `tests/` dir) so all WP-X4 sources stay inside the owned claim. An explicit
+# WP-X4 since WP-R4: the spawn-surface oracle moved to corelink-runners with
+# the runner core; hugit keeps the wire-level conformance assertion pinning
+# the shared conformance/ vectors byte-exact against the frozen contracts.
+# The oracle lives under the x4/ subtree (the WP's owned claim); an explicit
 # target is required because cargo only auto-discovers `tests/*.rs` at the
 # package root.
 [[test]]
-name = "acceptance_x4"
-path = "x4/tests/acceptance_x4.rs"
+name = "acceptance_x4_wire"
+path = "x4/tests/acceptance_x4_wire.rs"
 
 # WP-X3 acceptance oracle — context privacy (sources under x3/, oracle includes
 # x3/privacy.rs via #[path]).

@@ -9,23 +9,25 @@
 //!   ④ `item_4_broker_down_fail_closed` — when the secret store is unreachable
 //!      the operation **fails CLOSED**; there is no credential-on-runner
 //!      fallback.
-//!   ⑤ `item_5_escape_redteam_all_attacks_contained` — the active escape
-//!      red-team (traversal / symlink / out-of-fence / fork-bomb / disk-fill /
-//!      fence-materialized-escape) is run against live containers and **every**
-//!      vector is contained; none can reach another lease or starve the box;
-//!      box residue is **0**. The fence-materialized-escape vector is the one
-//!      where the fence itself (classify + sparse materialize), not the Docker
-//!      namespace, is the control — it would escape under a no-op classifier.
+//!   ⑤ — TRANSFERRED (WP-R4, runner-transfer campaign): the active escape
+//!      red-team (`RedTeamHarness`, six vectors incl. the load-bearing
+//!      fence-materialized-escape) moved to corelink-runners WITH the fence
+//!      enforcement half (`materialize`/`enforce`) it drives, so the
+//!      assertion keeps red-teaming the REAL classifier in its new home —
+//!      relocated, never weakened (the X4 disposition, R0 freeze).
 //!   ⑥ `item_6_positive_path_via_broker_credential_absent` — a job completes a
 //!      credential-needing operation **via the broker** successfully, and the
 //!      raw credential is **provably absent** during AND after (env/proc/disk
 //!      scan clean).
 //!
-//! **Box-dependent**: items ⑤ and ⑥ drive the live runner box pinned by
+//! **Box-dependent**: item ⑥ drives the live runner box pinned by
 //! `HUGIT_RUNNER_HOST` (the suite exports `91.99.11.196`). When the box is
-//! unreachable they **FAIL** (not skip) — per contract. They skip only when
+//! unreachable it **FAILS** (not skip) — per contract. It skips only when
 //! `HUGIT_RUNNER_HOST` is unset (the bare cargo gate lane). Items ②③④ are
-//! deterministic and never touch the box.
+//! deterministic and never touch the box. The box lane's transport is a
+//! test-local transcription of the transferred runner's `SshBox` (the live
+//! seam impl is the runner product across the wire — disclosed; this oracle
+//! carries its own copy so the lane stays runnable, gated exactly as before).
 //!
 //! Box-sharing: WP-C5a / C2b run on the same box. Everything here is namespaced
 //! with the prefix `hugit-c5b-`; spawn/probe/teardown touch only that prefix.
@@ -34,13 +36,11 @@
 use std::collections::BTreeMap;
 
 use hugit_contracts::{RunnerLease, RunnerState};
-use hugit_fence::broker::redteam::{AttackVector, ContainerLimits, RedTeamHarness, RedTeamOutcome};
 use hugit_fence::broker::{
     AuditOutcome, Broker, BrokerOp, BrokerRequest, InMemoryStore, SecretRef, fail_closed_audit,
     scan_credential_absent,
 };
-use hugit_runner::isolation::RunningContainer;
-use hugit_runner::lease::{BoxExec, SshBox};
+use hugit_fence::seam::{BoxExec, CmdOutput, RunningContainer};
 
 const IMAGE: &str = "alpine:3.20";
 /// All box artifacts for this WP carry this prefix (box-sharing isolation).
@@ -55,9 +55,102 @@ fn box_lane_active() -> bool {
         .is_some_and(|h| !h.trim().is_empty())
 }
 
+/// The box-gated lane's transport: a test-local implementation of the fence
+/// wire seam over `ssh`, transcribed verbatim from the transferred runner's
+/// `SshBox::run` (hugit-runner `src/lease.rs` @ the WP-R4 transfer commit;
+/// now the runner product in corelink-runners). The PRODUCTION live impl of
+/// the seam is the runner product across the wire (disclosed); this copy
+/// exists only so the env-gated acceptance lane stays runnable with the
+/// exact same transport semantics (BatchMode, pin-on-first-use known_hosts,
+/// ConnectTimeout, unconditional single-quoting).
+struct SshSeam {
+    /// `user@host` target for ssh.
+    target: String,
+    /// Optional identity file path.
+    identity: Option<String>,
+}
+
+impl SshSeam {
+    /// Construct from `HUGIT_RUNNER_HOST`, defaulting the user to `root` and
+    /// the identity to `~/.ssh/hugit-runner-01` when that file exists.
+    fn from_env() -> Option<Self> {
+        let host = std::env::var("HUGIT_RUNNER_HOST")
+            .ok()
+            .filter(|h| !h.trim().is_empty())?;
+        let identity = std::env::var("HOME").ok().and_then(|home| {
+            let p = format!("{home}/.ssh/hugit-runner-01");
+            std::path::Path::new(&p).exists().then_some(p)
+        });
+        Some(Self {
+            target: format!("root@{host}"),
+            identity,
+        })
+    }
+
+    /// Pinned `known_hosts` path (trust-on-first-use, pin thereafter).
+    fn known_hosts_path() -> String {
+        if let Ok(p) = std::env::var("HUGIT_RUNNER_KNOWN_HOSTS")
+            && !p.trim().is_empty()
+        {
+            return p;
+        }
+        match std::env::var("HOME") {
+            Ok(home) if !home.trim().is_empty() => format!("{home}/.hugit/known_hosts"),
+            _ => ".hugit/known_hosts".to_string(),
+        }
+    }
+
+    /// POSIX single-quote a command vector into one remote shell string —
+    /// every argument unconditionally quoted (no "looks-safe" passthrough).
+    fn shell_join(argv: &[&str]) -> String {
+        argv.iter()
+            .map(|a| {
+                if a.is_empty() {
+                    "''".to_string()
+                } else {
+                    format!("'{}'", a.replace('\'', r"'\''"))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+impl BoxExec for SshSeam {
+    fn run(&self, argv: &[&str]) -> anyhow::Result<CmdOutput> {
+        use anyhow::Context;
+        let remote = Self::shell_join(argv);
+        let known_hosts = Self::known_hosts_path();
+        let mut cmd = std::process::Command::new("ssh");
+        if let Some(id) = &self.identity {
+            cmd.arg("-i").arg(id);
+        }
+        // pin-on-first-use: accept-new records the host key on first contact
+        // and verifies against the pinned UserKnownHostsFile thereafter.
+        cmd.arg("-o")
+            .arg("BatchMode=yes")
+            .arg("-o")
+            .arg("StrictHostKeyChecking=accept-new")
+            .arg("-o")
+            .arg(format!("UserKnownHostsFile={known_hosts}"))
+            .arg("-o")
+            .arg("ConnectTimeout=15")
+            .arg(&self.target)
+            .arg(&remote);
+        let out = cmd
+            .output()
+            .with_context(|| format!("failed to spawn ssh to {}", self.target))?;
+        Ok(CmdOutput {
+            code: out.status.code(),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        })
+    }
+}
+
 /// Connect to the live box; FAIL (panic) if it is unreachable, per contract.
-fn live_box() -> SshBox {
-    let boxx = SshBox::from_env().expect("HUGIT_RUNNER_HOST must be set inside the box lane");
+fn live_box() -> SshSeam {
+    let boxx = SshSeam::from_env().expect("HUGIT_RUNNER_HOST must be set inside the box lane");
     let ping = boxx
         .run(&["docker", "version", "--format", "{{.Server.Version}}"])
         .expect("ssh to runner box failed to spawn");
@@ -73,7 +166,7 @@ fn live_box() -> SshBox {
 }
 
 /// Ensure the job image is present on the box.
-fn ensure_image(boxx: &SshBox) {
+fn ensure_image(boxx: &SshSeam) {
     let pull = boxx
         .run(&["docker", "pull", IMAGE])
         .expect("docker pull failed to spawn");
@@ -94,7 +187,7 @@ fn fresh_name(slug: &str) -> String {
 }
 
 /// Spawn a `hugit-c5b-`-prefixed, network-isolated idle job container.
-fn spawn_job(boxx: &SshBox, name: &str) -> RunningContainer {
+fn spawn_job(boxx: &SshSeam, name: &str) -> RunningContainer {
     let out = boxx
         .run(&[
             "docker",
@@ -119,7 +212,7 @@ fn spawn_job(boxx: &SshBox, name: &str) -> RunningContainer {
 }
 
 /// Force-remove a `hugit-c5b-`-prefixed container (idempotent, prefix-scoped).
-fn teardown_job(boxx: &SshBox, name: &str) {
+fn teardown_job(boxx: &SshSeam, name: &str) {
     assert!(
         name.starts_with(PREFIX),
         "refusing to tear down non-c5b container {name}"
@@ -234,56 +327,12 @@ fn item_4_broker_down_fail_closed() {
     assert!(!format!("{err}").contains("k=") || !format!("{err}").contains("material"));
 }
 
-// ── ⑤ active escape red-team: all five vectors contained, residue 0 ──────────
-#[test]
-fn item_5_escape_redteam_all_attacks_contained() {
-    if !box_lane_active() {
-        return;
-    }
-    let boxx = live_box();
-    ensure_image(&boxx);
-
-    let mut harness = RedTeamHarness::new(&boxx, IMAGE, ContainerLimits::default());
-
-    // Genuinely attempt every escape against live containers.
-    let result = (|| {
-        let reports = harness.run_all().map_err(|e| format!("run_all: {e}"))?;
-        // Every one of the six vectors must be contained.
-        let covered: Vec<AttackVector> = reports.iter().map(|r| r.vector).collect();
-        for v in AttackVector::all() {
-            if !covered.contains(&v) {
-                return Err(format!("attack vector {} was not exercised", v.slug()));
-            }
-        }
-        // The fence-as-the-control vector MUST be exercised: it materializes a
-        // real FenceManifest and reads an out-of-fence path in the SAME
-        // container. This is the only vector that would ESCAPE if classify()
-        // were a no-op constant Inside, so its presence + containment is the
-        // honest proof the fence (not just the Docker namespace) holds.
-        if !covered.contains(&AttackVector::FenceMaterializedEscape) {
-            return Err("fence_materialized_escape vector must be exercised".to_string());
-        }
-        for r in &reports {
-            if r.outcome != RedTeamOutcome::Contained {
-                return Err(format!(
-                    "ESCAPE: vector {} was NOT contained — {}",
-                    r.vector.slug(),
-                    r.evidence
-                ));
-            }
-        }
-        Ok(())
-    })();
-
-    // Always tear down + verify residue, regardless of outcome (prefix-scoped).
-    let residue = harness.teardown_all().expect("teardown must reach the box");
-    result.expect("escape red-team: all vectors contained");
-    assert!(
-        residue.is_zero(),
-        "box must have ZERO hugit-c5b-* residue; remaining: {:?}",
-        residue.remaining
-    );
-}
+// ── ⑤ TRANSFERRED (WP-R4): the escape red-team harness + its acceptance ──────
+// moved to corelink-runners with the fence enforcement half it drives
+// (materialize/enforce + RedTeamHarness, all six vectors incl. the
+// load-bearing fence-materialized-escape and the hermetic FakeFsBox oracle).
+// The assertions run unmodified against the same production code in the new
+// home — relocated, never weakened.
 
 // ── ⑥ positive path via the broker, credential provably absent ───────────────
 #[test]
