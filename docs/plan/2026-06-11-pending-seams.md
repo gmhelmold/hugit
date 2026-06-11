@@ -234,6 +234,120 @@ in operator runbook when fleet-dispatch is wired.
 
 ---
 
+---
+
+## PS-8 — Event-log cryptographic authentication (P2 server-side)
+
+**Status:** DEFERRED — P2 server-side seam; local chain is tamper-EVIDENT, not tamper-PROOF  
+**Adversarial finding:** Round-5 Cluster C (`docs/review/2026-06-11-adversarial-round-5.md`);
+convergence synthesizer (opus3) — strongest blocker of the round.  
+**Governing docs:** `docs/review/2026-06-11-adversarial-round-5.md` §Cluster C;
+`docs/handoff/2026-06-11-corelink-p2-ceiling-request.md` Seams D/E;
+`crates/hugit-cli/src/checks/run.rs` ~540 (honest AC HMAC disclosure — the peer claim).
+
+**What is deferred:**
+- The local hash chain (`verify_chain` in `hugit_refstore::tamper`) detects **partial
+  or incomplete corruption** (a naive byte-flip, a dropped record, an out-of-order
+  insertion) and provides ordering + append-immutability once published. It does NOT
+  prevent a competent local rewriter: an actor with full write access to the shared
+  `--log` file can recompute the unkeyed SHA-256 chain forward and forge contents that
+  pass `verify_chain` (e.g., reject→approve, failing-check→green). This is physics for
+  a local file — no local unkeyed crypto stops the local writer.
+- The real authentication against a competent rewriter is **server-side (P2)**: the
+  CoreLink per-repo Durable Object event-log (Seam D) enforces server-side single-writer
+  append-only chaining, and the transparency log (Seam E) provides an externally-verifiable
+  inclusion proof. Together these are the peer of the AC HMAC seam (Seam A) — each seam
+  is honestly disclosed in the AC layer (`run.rs` ~540); this register entry makes the
+  event-log disclosure match that same honesty level.
+
+**Owner:** hugit techlead (requires P2 CoreLink tenant — Seams D + E of the p2-ceiling request)  
+**Acceptance criteria:**
+1. The per-repo DO (Seam D) enforces server-side append-only chaining: a client cannot
+   submit a rewritten chain that overwrites existing records; the server rejects any
+   append that would alter a committed `this_hash`.
+2. The transparency log (Seam E) provides an externally-verifiable inclusion proof for
+   the event log, so a third party can confirm the log was not rewritten after a given
+   `seq`/`this_hash` was published.
+3. A competent local rewrite (recomputed chain, altered payloads) is detected and
+   rejected by the server when the client attempts to submit the forged log.
+4. `verify_chain` continues to run on every read for partial-corruption detection
+   (ordering, dropped/inserted records) — this is orthogonal to server-side auth and
+   remains the local defence.
+
+**Unblocked by:** P2 CoreLink tenant provisioning; Seams D + E of
+`docs/handoff/2026-06-11-corelink-p2-ceiling-request.md`.
+
+---
+
+## Accepted local-tier risks (tracked, no code change required)
+
+The following risks were flagged by Round-5 adversarial agents (Cluster D) and accepted
+after review. They are tracked here so the audit trail is complete and future waves can
+reassess if conditions change.
+
+### AR-1 — Check double-exec window (accepted)
+
+**Source:** Round-5 Cluster D (`docs/review/2026-06-11-adversarial-round-5.md`);
+Wave H (WH-CHECK) introduced lock-only-cache (lock held only for cache ops, not across
+execute), which opened a bounded double-exec window between the cache miss and the
+store-back. Wave G's "lookup-before-decision lock (no double-exec)" was superseded by
+this design.
+
+**Accepted risk:** Two concurrent `hugit check` invocations on the same memo key may
+both execute (both cache-miss, both run, both store). The second store is idempotent
+(dedup on memo_key + cache_hit → no KPI inflation; the result is byte-identical for the
+same inputs). Log integrity is unaffected. The window is bounded to the execution
+duration of the check command.
+
+**Mitigation:** Idempotent store-back (WH-CHECK). Acceptable for a local-file Action
+Cache; fleet-shared AC (P2 Seam A) inherits its own idempotent PUT semantics from the
+CoreLink AC contract (409 on divergent body, no-op on identical).
+
+### AR-2 — `kill(1)` binary portability (accepted)
+
+**Source:** Round-5 Cluster D. `hugit check` uses `kill(1)` (via the system `kill`
+command) to terminate child process groups on timeout. This is POSIX-portable but relies
+on the `kill` binary being available at `/usr/bin/kill` or on `PATH`.
+
+**Accepted risk:** On a minimal container or unusual platform where `kill(1)` is absent,
+the timeout orphan-kill falls back to a softer termination path. The check may not
+terminate cleanly, but log integrity is not affected (the record is either written or
+not; no partial write).
+
+**Mitigation:** The self-hosted runner (`corelink-builder`, a macOS box) has `kill(1)`.
+Accepted for the current deployment target; flag for reassessment if hugit ships on
+non-POSIX targets.
+
+### AR-3 — No log rate-limit or quota (accepted)
+
+**Source:** Round-5 Cluster D. The local event log (`--log` file) has no rate-limit or
+quota on appends. A runaway agent or a misconfigured fleet can write an unbounded log.
+
+**Accepted risk:** The local log is a single flat file with atomic appends; an unbounded
+log grows the file but does not corrupt the chain. The risk is operational (disk space,
+projection latency) not integrity-related. Fleet orchestrators are responsible for
+log rotation and quota enforcement at the workflow level.
+
+**Mitigation:** Accepted for the local-tier; the P2 DO (Seam D) inherits DO storage
+limits from Cloudflare, providing a natural ceiling. No code change needed.
+
+### AR-4 — Orphan grandchild accumulation (accepted)
+
+**Source:** Round-5 Cluster D. When a `hugit check` child process group is killed on
+timeout, grandchildren spawned by the check command (e.g., rustc spawned by cargo) that
+have already migrated to a different process group are not guaranteed to be killed.
+
+**Accepted risk:** Orphaned grandchildren consume CPU/memory until they exit naturally.
+They do not affect log integrity, memo-key correctness, or chain validity. The bounded
+execution duration cap (WH-CHECK 300s) limits the worst-case accumulation window.
+
+**Mitigation:** The process-group kill (WH-CHECK) catches the common case; true
+grandchild orphans are an OS-level concern accepted for the local runner tier. The
+Cloudflare Workers-based P2 execution model (Seam D/runners) does not have this problem
+(container isolation).
+
+---
+
 ## Closed seams (reference — do not re-open without owner approval)
 
 | Seam | Shipped | Governing commit |

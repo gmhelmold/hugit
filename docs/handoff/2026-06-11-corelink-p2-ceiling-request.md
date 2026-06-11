@@ -3,26 +3,28 @@
 > **From:** hugit TechLead · **Date:** 2026-06-11 · **Status:** OPEN, owner-gated
 > **Supersedes scope of:** `docs/handoff/2026-06-08-corelink-p2-tenant-request.md`
 > (the tenant-provisioning request) — that doc stands; this one **adds the six
-> live-infra seams** that four adversarial audit rounds proved are the *only*
+> live-infra seams** that five adversarial audit rounds proved are the *only*
 > things standing between hugit and a shippable production forge.
 >
 > **Read this first if you read nothing else (§0).** Everything below is
 > evidence-driven: each ask cites the adversarial finding that proves hugit
 > cannot close it from the code side. Nothing here waits on hugit — §9 shows
 > every hugit-side seam is built, hermetically proven, and `NotWired`-gated,
-> waiting only for the values you hand back. Round 4 ran 2026-06-11; the
-> wedge EXECUTE path is being hardened in Wave H.
+> waiting only for the values you hand back. Round 5 ran 2026-06-11; Wave H
+> complete; Wave I remediating Round 5 findings.
 
 ---
 
 ## 0. Executive summary — what I need, in one screen
 
-hugit's engine is **code-complete; adversarial hardening is ongoing (Round 4
-complete, Wave H remediating, Round 5 pending)**: four fresh-context
+hugit's engine is **code-complete; adversarial hardening is ongoing (Round 5
+complete, Wave I remediating, Round 6 pending)**: five fresh-context
 7-agent refutation rounds (`docs/review/2026-06-11-adversarial-round-1.md`,
-`-round-2.md`, `-round-3.md`, `-round-4.md`) confirmed the integrity spine
-(hash-chained log, D14 authz, redaction, money) holds; the spine held through
-all four rounds; Wave H hardens the wedge EXECUTE path (Round 4 findings). The rounds + a full live-seam inventory
+`-round-2.md`, `-round-3.md`, `-round-4.md`, `-round-5.md`) confirmed the
+integrity spine (hash-chained log, D14 authz, redaction, money) holds; the
+spine held through all five rounds; Wave H complete; Wave I hardens the
+honesty claims, forge state-machine coherence, and identifier-redaction
+coupling (Round 5 findings). The rounds + a full live-seam inventory
 (`docs/interop.md`, whitepaper §5 truth-table, every `NotWired` code site)
 establish that hugit's path to a **production** forge is gated entirely on
 CoreLink infrastructure. This document enumerates **literally all of it** — the
@@ -53,7 +55,10 @@ hardening that ride the same tenant, **C** on the identity timeline (ADR-0002).
 The hugit thesis is *memoize by content, price flat; agent work is legible and
 accountable*. Four fresh-context refutation rounds confirmed the
 **legible/accountable** half is built: envelopes capture, the Ledger rolls up
-cost, provenance is signed, the log is tamper-evident. But the rounds also
+cost, provenance is signed, the local hash chain is tamper-EVIDENT (detects
+partial corruption + ordering; cryptographic authentication against a competent
+rewriter is the P2 server-side seam PS-8, peer of the AC HMAC — see §5 below).
+But the rounds also
 reproduced, on the live binary, that the **memoize** half — the wedge a
 customer pays for — is **invisible end-to-end** because the cache it reads has
 no live transport (Seam A). Separately they showed two *correctness-of-claim*
@@ -402,5 +407,6 @@ in `CLAUDE.md` and the pending-seams register (`docs/plan/2026-06-11-pending-sea
 
 *Cross-references: tenant provisioning `docs/handoff/2026-06-08-corelink-p2-tenant-request.md`
 · identity `docs/handoff/2026-06-09-hugr-identity-rollout.md` + `docs/adr/0002-hugr-identity.md`
-· evidence `docs/review/2026-06-11-adversarial-round-{1,2,3}.md` · seam register
-`docs/plan/2026-06-11-pending-seams.md` · the interop seam map `docs/interop.md`.*
+· evidence `docs/review/2026-06-11-adversarial-round-{1,2,3,4,5}.md` · seam register
+`docs/plan/2026-06-11-pending-seams.md` (PS-8: event-log cryptographic authentication)
+· the interop seam map `docs/interop.md`.*

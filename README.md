@@ -4,21 +4,24 @@
 > fix the workflow.
 
 **Status (2026-06-11): build complete; adversarial hardening ongoing (Wave H
-in progress, Round 5 pending).** A **17-package** Rust workspace (hugit-app +
-{ui,exit,sidecar} sub-crates = 4 app crates + 13 feature crates) implements
-all 67 work-packages of decomposition v2.0. The codebase has been through
-SOTA-audit waves A/B/C/D/E/F/G + the memoized-CI wedge wave, 2 component
-migrations (hugit-web → githugr; hugit-runner → corelink-runners), and
-schema 1.2.0 (money as integer micro-USD). Four adversarial rounds (fresh
-7-agent fleets) each returned 7/7 DO-NOT-SHIP; Waves E+F+wedge+G remediated
-Rounds 1+2+3; the spine held through all four rounds. Wave H is remediating
-Round 4 findings (Clusters A–D). `main` is green by local gate (fmt + clippy
-`--workspace --all-targets --locked -D warnings` + test `--workspace --locked`
-+ deny + audit); remote CI gate passes when it runs to completion, but the
-single self-hosted runner is contention-flaky (~26% of recent runs fail on
-SIGTERM/exit-127 infra failures, not code). What remains is owner-gated infra
-(P2 CoreLink tenant provisioning). See **[CLAUDE.md](CLAUDE.md)** for the
-live source of truth.
+complete, Wave I in progress, Round 6 pending).** A **17-package** Rust
+workspace (hugit-app + {ui,exit,sidecar} sub-crates = 4 app crates + 13
+feature crates) implements all 67 work-packages of decomposition v2.0. The
+codebase has been through SOTA-audit waves A/B/C/D/E/F/G/H + the
+memoized-CI wedge wave, 2 component migrations (hugit-web → githugr;
+hugit-runner → corelink-runners), and schema 1.2.0 (money as integer
+micro-USD). Five adversarial rounds (fresh 7-agent fleets) each returned
+7/7 DO-NOT-SHIP; Waves E+F+wedge+G+H remediated Rounds 1–4; the spine held
+through all five rounds. Wave I is remediating Round 5 findings (honesty
+gap: event-log hash chain tamper-EVIDENT not tamper-PROOF — PS-8 tracks
+log-auth as P2 seam; plus forge state-machine coherence and
+identifier-redaction coupling). `main` is green by local gate (fmt + clippy
+`--workspace --all-targets --locked -D warnings` + test `--workspace
+--locked` + deny + audit); remote CI gate passes when it runs to completion,
+but the single self-hosted runner is contention-flaky (~35% of recent runs
+fail — includes both infra failures and a code fmt failure at HEAD before
+hotfix eec3eab). What remains is owner-gated infra (P2 CoreLink tenant
+provisioning). See **[CLAUDE.md](CLAUDE.md)** for the live source of truth.
 
 ## What hugit is
 

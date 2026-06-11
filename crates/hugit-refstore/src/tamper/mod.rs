@@ -75,6 +75,26 @@ impl std::error::Error for TamperError {}
 ///    fields — catches content alteration.
 ///
 /// `Ok(())` means the chain is intact. Any `Err` is a fail-closed tamper signal.
+///
+/// # Honesty caveat — UNKEYED chain (tamper-EVIDENT, not tamper-PROOF)
+///
+/// This chain uses an **unkeyed** SHA-256 hash (a public, deterministic function).
+/// It detects **partial or incomplete tampering** — a naive byte-flip, a dropped
+/// record, an out-of-order insertion — and provides ordering + append-immutability
+/// once a log is published to the server. What it does NOT prevent: a writer with
+/// full read+write access to the log file can recompute the chain forward (using
+/// the same public formula) and produce a forged log that passes this verifier,
+/// e.g. changing a reject verdict to approve. This is physics for a local file;
+/// no local unkeyed crypto stops the local writer.
+///
+/// Cryptographic authentication against a competent rewriter is the **P2
+/// server-side seam (PS-8)**: the CoreLink per-repo Durable Object event-log
+/// (Seam D of `docs/handoff/2026-06-11-corelink-p2-ceiling-request.md`) enforces
+/// server-side append-only chaining, and the transparency log (Seam E) provides
+/// an externally-verifiable inclusion proof. These are the peer of the AC HMAC
+/// seam (Seam A, honestly disclosed in `crates/hugit-cli/src/checks/run.rs`).
+/// This function's role is local partial-tamper detection — it remains correct
+/// and necessary for that purpose. Logic is UNCHANGED.
 pub fn verify_chain(records: &[EventRecord]) -> Result<(), TamperError> {
     let mut prev_this = GENESIS_PREV_HASH.to_string();
 
