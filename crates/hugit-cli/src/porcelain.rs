@@ -199,6 +199,107 @@ impl PorcelainError {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Scrub-on-append — THE structural redaction seam (WP-WG-SCRUB)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// THE forbidden path is a porcelain verb that appends a USER-supplied string to
+// the hash-chained, append-only `--log` WITHOUT routing it through the redaction
+// engine first. The chain is forever: a `ghp_…`/JWT/conn-string appended verbatim
+// is unredactable (re-hashing would break the chain), so the secret leaks for the
+// life of the log.
+//
+// Per-FIELD redaction (Wave E) was fragile: each new verb had to remember to
+// scrub each new field, and the wedge wave's new verbs (`check`, `verdict`,
+// `pr abandon/queued/landed`, …) forgot — two fresh adversaries reproduced a live
+// `ghp_…` leak. The fix is STRUCTURAL: every porcelain append builds a
+// `serde_json::Value` payload and hands it to [`scrub_payload`], which recursively
+// replaces EVERY user string value with the engine's wholesale
+// [`REDACTED`](hugit_ledger::redact::REDACTED) sentinel when any detector fires —
+// BEFORE the bytes reach the chain. A verb physically cannot forget a field: the
+// whole tree is scrubbed by construction.
+//
+// **Keys are structural, not user content** — the exemption is by KEY, mirroring
+// the envelope's own content-address survival rule (see `hugit_ledger::redact`):
+// a content-address/digest VALUE must survive verbatim (it is load-bearing,
+// never a secret), so the fields that carry one are exempt — [`is_digest_key`]:
+// `memo_key`, `tree_hash`, `commit`, any `*_digest`, and a `hash` field
+// (`files_read[].hash`). EVERYTHING else scrubs. A bare digest in a non-exempt
+// free-text field is (correctly) subject to the engine's entropy scan and may
+// redact — that is the engine's WF-1 "err toward redaction in free text" law, not
+// a regression.
+
+/// Recursively scrub EVERY user-supplied string VALUE in a porcelain payload
+/// through the redaction engine ([`crate::redaction::scrub`] →
+/// [`hugit_ledger::redact::apply`]), IN PLACE, BEFORE the payload is serialized
+/// and appended to the hash-chained log.
+///
+/// Object KEYS are structural and never scrubbed. A value under a digest KEY
+/// ([`is_digest_key`] — `memo_key`/`tree_hash`/`commit`/`*_digest`/`hash`) is
+/// EXEMPT (a content address is load-bearing and must survive verbatim); every
+/// other string value scrubs. Arrays and nested objects recurse, re-evaluating
+/// the exemption per key as they descend.
+///
+/// This is THE seam: route every porcelain append through [`scrub_payload`]
+/// (directly or via [`scrub_to_canonical`]). A raw append of an un-scrubbed user
+/// payload is the forbidden path the WG-SCRUB tests guard against.
+pub fn scrub_payload(value: &mut Value) {
+    scrub_value(value, false);
+}
+
+/// Inner recursion. `exempt` is set when the value is reached via a digest KEY,
+/// so its string content (and any nested strings under it — a digest is a leaf in
+/// practice, but the flag propagates honestly) survives verbatim.
+fn scrub_value(value: &mut Value, exempt: bool) {
+    match value {
+        Value::String(s) => {
+            if !exempt {
+                *s = crate::redaction::scrub(s);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                scrub_value(item, exempt);
+            }
+        }
+        Value::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                // Re-evaluate exemption at EACH key: a digest key under a
+                // non-exempt object exempts its own subtree, and vice-versa.
+                scrub_value(child, is_digest_key(key));
+            }
+        }
+        // Numbers / bools / null carry no user free-text — nothing to scrub.
+        _ => {}
+    }
+}
+
+/// True iff `key` names a content-address / digest field whose VALUE must survive
+/// the scrub verbatim. This mirrors the envelope's own digest-survival rule
+/// (`hugit_ledger::redact`): a digest is load-bearing, never a secret.
+///
+/// The rule: exact `memo_key` / `tree_hash` / `commit`, any `*_digest` suffix
+/// (`def_digest`, `toolchain_digest`, `prompt_digest`, …), or a bare `hash`
+/// field (`files_read[].hash`). Everything else scrubs.
+pub fn is_digest_key(key: &str) -> bool {
+    matches!(key, "memo_key" | "tree_hash" | "commit" | "hash") || key.ends_with("_digest")
+}
+
+/// Scrub a payload [`Value`] ([`scrub_payload`]) and return it as a **canonical**
+/// JSON string (sorted keys, no insignificant whitespace — the byte shape the
+/// hash chain covers), ready to hand to `append`/`append_authorized`.
+///
+/// This is the one-call convenience for the porcelain append sites: build the
+/// `Value`, call [`scrub_to_canonical`], append the result. The canonicalisation
+/// re-uses [`hugit_refstore::canonical_json`] so the appended bytes match what the
+/// rest of the flow porcelain emits; if (impossibly) re-canonicalisation fails the
+/// compact serialization is returned unchanged.
+pub fn scrub_to_canonical(mut value: Value) -> String {
+    scrub_payload(&mut value);
+    let compact = value.to_string();
+    hugit_refstore::canonical_json(&compact).unwrap_or(compact)
+}
+
 /// Emit the canonical NOT-IMPLEMENTED error as JSON on **stdout** and return the
 /// structured-error exit code.
 ///

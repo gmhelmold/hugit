@@ -146,14 +146,18 @@ fn import_sidecar_authorized(
         .and_then(|id| PrincipalClass::classify(id))
         .unwrap_or(PrincipalClass::Worker);
 
-    // Build the intent.landed payload (same shape import_sidecar uses).
-    let payload = serde_json::json!({
+    // Build the intent.landed payload (same shape import_sidecar uses) and
+    // SCRUB-ON-APPEND (WG-SCRUB): route every user string value through the
+    // central scrubbing helper BEFORE the bytes reach the hash chain. The
+    // `intent new` verb already scrubs the sidecar at authorship; the central
+    // scrub is the structural backstop (idempotent) so this append can never
+    // leak even if a future caller builds a sidecar without pre-scrubbing.
+    let payload = crate::porcelain::scrub_to_canonical(serde_json::json!({
         "intent_id": sidecar.intent_id,
         "ref": ref_name,
         "target": target,
         "charter": sidecar.charter,
-    })
-    .to_string();
+    }));
 
     // Route through append_authorized (Endpoint::Push — always Allow; guard
     // is wired so no mutation is ever un-gated).
