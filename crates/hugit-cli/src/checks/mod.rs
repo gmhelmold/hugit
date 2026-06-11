@@ -159,6 +159,12 @@ pub struct CheckArgs {
     /// CoreLink AC swaps in behind the same `ActionCache` seam at P2.
     #[arg(long)]
     pub ac: Option<PathBuf>,
+    /// Bound the check execution to this many seconds (default 300). A command
+    /// that runs past the deadline is killed and the run is a structured
+    /// `check_timeout` error (exit 2) — so a hang (`sleep infinity`) can never
+    /// block forever holding the `--log` lock.
+    #[arg(long)]
+    pub timeout_secs: Option<u64>,
 }
 
 /// `hugit check` — run a memoized CI check for real (W-CHECK EXECUTE path).
