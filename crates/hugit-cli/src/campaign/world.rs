@@ -171,6 +171,35 @@ impl World {
         World::load(path)
     }
 
+    /// Acquire the advisory exclusive lock for `path` and THEN load the world
+    /// under it — the WP-WC1 lock-before-load discipline (the same one
+    /// `hugit pr`/`hugit intent new --log` use on the canonical seam).
+    ///
+    /// Returns the held [`FileLock`] guard alongside the freshly-loaded
+    /// [`World`]; the caller holds the guard across its idempotency checks +
+    /// [`append_authorized_and_persist`] so the whole load→mutate→persist is
+    /// serialized. A second writer racing the same `--log` finds the lock present
+    /// and gets the structured `log_busy` rather than clobbering this writer's
+    /// snapshot (the load→lock-inversion TOCTOU is dead — the lock no longer
+    /// trails the load: WF-CLI2 bug 2).
+    ///
+    /// `bootstrap` selects the loader the verb needs:
+    /// - `true` ⇒ [`World::load`] — a missing `--log` is a fresh empty world
+    ///   (the `open` bootstrap, which legitimately starts an absent log);
+    /// - `false` ⇒ [`World::load_existing`] — a missing `--log` is
+    ///   `log_not_found`/exit-2 (the `close`/`abandon` read-must-exist contract:
+    ///   a mutation on a never-opened log is NOT bootstrapped from nothing —
+    ///   WF-CLI2 bug 1, the ghost-record guard).
+    pub fn lock_and_load(path: &Path, bootstrap: bool) -> Result<(FileLock, World), CampaignError> {
+        let lock = FileLock::acquire(path).map_err(lock_campaign_error)?;
+        let world = if bootstrap {
+            World::load(path)?
+        } else {
+            World::load_existing(path)?
+        };
+        Ok((lock, world))
+    }
+
     /// Whether a `campaign.opened` record already names this key (idempotency).
     pub fn campaign_opened(&self, key: &str) -> bool {
         self.has_campaign_record(KIND_CAMPAIGN_OPENED, key)
@@ -618,7 +647,19 @@ fn zero_ci() -> CiCost {
 /// matches the "campaign owner decides" semantics. A denial (which can only
 /// happen if the asserted class were somehow not human) is mapped to a
 /// structured `CampaignError` and the audit record is persisted alongside it.
+///
+/// **Lock discipline (WF-CLI2 bug 2).** The caller MUST already hold the
+/// advisory exclusive `<path>.lock` — acquired BEFORE the load via
+/// [`World::lock_and_load`] — and pass the held [`FileLock`] guard as `_lock`.
+/// The previous version re-acquired the lock HERE, AFTER `world` had been loaded
+/// unlocked, then cloned that pre-lock snapshot: two concurrent writers each
+/// loaded the same chain and clobbered each other on persist (the load→lock
+/// inversion the WC1 lock did not cover for the campaign verbs). Threading the
+/// caller-held lock makes the whole load→mutate→persist a single serialized
+/// critical section, exactly the `pr`/`canonical_log` pattern WC1 established.
+/// The atomic write below keeps the persist truncation-proof.
 pub fn append_authorized_and_persist(
+    _lock: &FileLock,
     world: &World,
     path: &Path,
     kind: &str,
@@ -627,12 +668,6 @@ pub fn append_authorized_and_persist(
     recorded_at: u64,
 ) -> Result<(), CampaignError> {
     use hugit_refstore::{Endpoint, PrincipalClass};
-    // Serialize the append+persist behind the advisory exclusive lock (WP-WC1):
-    // a campaign mutation racing another verb on the same `--log` gets the
-    // structured `log_busy` rather than clobbering. The guard releases when this
-    // function returns (or on any early `?`). The atomic write below makes the
-    // persist truncation-proof; together they kill the campaign-seam TOCTOU.
-    let _lock = FileLock::acquire(path).map_err(lock_campaign_error)?;
     let mut log = world.log.clone();
     let payload = hugit_refstore::canonical_json(&payload).unwrap_or(payload);
     let principal_chain = vec![format!("user:{owner}")];

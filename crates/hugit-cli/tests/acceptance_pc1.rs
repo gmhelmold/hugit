@@ -74,6 +74,21 @@ fn ev(kind: &'static str, payload: Value) -> Ev {
     Ev { kind, payload }
 }
 
+/// A `campaign.opened` record (charter + human owner) — the same record
+/// `hugit campaign open` writes. WF-CLI2 bug 1: `close` now refuses a campaign
+/// with no `campaign.opened` on the log (`not_opened`/exit-2, the ghost-record
+/// guard), so a fixture world that will be closed MUST carry this record.
+fn campaign_opened() -> Ev {
+    ev(
+        "campaign.opened",
+        json!({
+            "campaign": CAMPAIGN,
+            "charter": "harden the auth border",
+            "owner": "gustavo@humangr.com",
+        }),
+    )
+}
+
 /// A `pr.opened` record (the bundle + in-flight onset) carrying the PR's
 /// intent ids — the same record `hugit pr open` writes, so the campaign derives
 /// the bundle from the log.
@@ -201,6 +216,7 @@ fn envelope(
 /// envelope capture — the settled, fully-captured happy path.
 fn settled_world() -> Vec<Ev> {
     vec![
+        campaign_opened(),
         pr_opened("PR-1", &["i-a1", "i-a2"]),
         pr_opened("PR-2", &["i-b1"]),
         landed_intent("i-a1", T0 + 100_000),
@@ -300,6 +316,7 @@ fn settled_world() -> Vec<Ev> {
 /// The same campaign with PR-2 STILL IN-FLIGHT (proposed, not settled).
 fn in_flight_world() -> Vec<Ev> {
     vec![
+        campaign_opened(),
         pr_opened("PR-1", &["i-a1"]),
         pr_opened("PR-2", &["i-b1"]),
         landed_intent("i-a1", T0 + 100_000),
@@ -505,6 +522,7 @@ fn close_seals_progress_only_when_no_envelope_captured() {
     let world = write_world(
         &dir,
         &[
+            campaign_opened(),
             pr_opened("PR-1", &["i-a1"]),
             landed_intent("i-a1", T0 + 100_000),
             pr_landed("PR-1"),

@@ -163,7 +163,14 @@ pub fn run(input: NewIntent, store_path: &Path) -> Result<NewResult, PorcelainEr
     // bound to the campaign — honest provenance, not invented.
     let principal_chain = vec![format!("campaign:{campaign}"), format!("agent:{agent}")];
 
-    let mut store = IntentStore::load(store_path).map_err(PorcelainError::from_store)?;
+    // Lock the `--store` BEFORE the load and hold it across the whole
+    // load→mutate→save (WF-CLI2 bug 2: the store-seam load→lock inversion — two
+    // concurrent `intent new --store` for distinct intents each loaded the same
+    // chain and clobbered on save). The guard releases on Drop / any early
+    // return. The `--log` reconciliation below locks its OWN, DISTINCT file
+    // (`--log` ≠ `--store`), so there is no deadlock between the two seams.
+    let (store_lock, mut store) =
+        IntentStore::lock_and_load(store_path).map_err(PorcelainError::from_store)?;
 
     // Idempotency: if this id already landed in the store, return it unchanged
     // (exit 0). When a shared `--log` is given, still reconcile it (so an intent
@@ -215,7 +222,9 @@ pub fn run(input: NewIntent, store_path: &Path) -> Result<NewResult, PorcelainEr
     if !context_ref.is_empty() {
         store.envelopes.insert(intent_id.clone(), context_ref);
     }
-    store.save(store_path).map_err(PorcelainError::from_store)?;
+    store
+        .save_locked(&store_lock, store_path)
+        .map_err(PorcelainError::from_store)?;
 
     // Also land `intent.landed` on the shared canonical log when `--log` is
     // given — the one on-disk seam every porcelain verb shares (PC4). Idempotent
