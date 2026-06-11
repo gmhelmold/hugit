@@ -29,6 +29,7 @@ use hugit_contracts::event_record::EventRecord;
 use hugit_refstore::EventLog;
 use serde_json::Value;
 
+use super::filelock::{self, FileLock, LockError};
 use super::{
     AbandonArgs, AuthorKind, LandArgs, ListArgs, OpenArgs, PrError, ShowArgs, abandon, land, list,
     open, show,
@@ -185,6 +186,14 @@ fn run_open(a: OpenCliArgs) -> ExitCode {
         }
     };
 
+    // Hold the advisory exclusive lock across the whole load→mutate→persist
+    // (WP-WC1): two concurrent `pr` verbs on one `--log` serialize or fail
+    // `log_busy`, never clobber (TOCTOU dead). The guard drops on return.
+    let _lock = match acquire_lock(&a.log) {
+        Ok(lock) => lock,
+        Err(code) => return code,
+    };
+
     // `open` is the one verb that may start from an absent log (it creates it).
     let mut log = match load_log_or_empty(&a.log) {
         Ok(log) => log,
@@ -211,6 +220,10 @@ fn run_open(a: OpenCliArgs) -> ExitCode {
 }
 
 fn run_land(a: LandCliArgs) -> ExitCode {
+    let _lock = match acquire_lock(&a.log) {
+        Ok(lock) => lock,
+        Err(code) => return code,
+    };
     let mut log = match load_log(&a.log) {
         Ok(log) => log,
         Err(code) => return code,
@@ -255,6 +268,10 @@ fn run_list(a: ListCliArgs) -> ExitCode {
 }
 
 fn run_abandon(a: AbandonCliArgs) -> ExitCode {
+    let _lock = match acquire_lock(&a.log) {
+        Ok(lock) => lock,
+        Err(code) => return code,
+    };
     let mut log = match load_log(&a.log) {
         Ok(log) => log,
         Err(code) => return code,
@@ -301,11 +318,42 @@ fn load_log_or_empty(path: &PathBuf) -> Result<EventLog, ExitCode> {
 }
 
 /// Persist the event log back to `path` as a pretty JSON `[EventRecord, …]`
-/// array (the same shape [`load_log`] reads).
+/// array (the same shape [`load_log`] reads), via the **atomic**
+/// temp-file-then-rename write (WP-WC1) — a reader or a crash sees the whole old
+/// log or the whole new one, never a truncated file. The advisory lock is held
+/// by the caller (`run_open`/`run_land`/`run_abandon`) across load→persist.
 fn persist_log(path: &PathBuf, log: &EventLog) -> Result<(), ExitCode> {
     let json = serde_json::to_string_pretty(log.records())
         .map_err(|e| io_fail(format!("serialize log: {e}")))?;
-    std::fs::write(path, json).map_err(|e| io_fail(format!("write log {path:?}: {e}")))
+    filelock::atomic_write(path, json.as_bytes()).map_err(|e| match e {
+        LockError::Busy { .. } => emit_log_busy(path),
+        LockError::Io { .. } => io_fail(format!("write log {path:?}: {e}")),
+    })
+}
+
+/// Acquire the advisory exclusive lock for `path` (WP-WC1), to be held across a
+/// mutating verb's load→mutate→persist. On a live holder, emits the structured
+/// `log_busy` error on stdout (exit `2` — a retry-able domain condition); on an
+/// I/O fault, the generic seam-fault path (`hugit: error:` on stderr, exit `1`).
+fn acquire_lock(path: &PathBuf) -> Result<FileLock, ExitCode> {
+    FileLock::acquire(path).map_err(|e| match e {
+        LockError::Busy { .. } => emit_log_busy(path),
+        LockError::Io { .. } => io_fail(format!("lock log {path:?}: {e}")),
+    })
+}
+
+/// Emit the canonical `log_busy` porcelain error on stdout and the
+/// structured-domain exit code (`2`). A busy lock is a transient, retry-able
+/// condition another `hugit` verb holds — never a clobber.
+fn emit_log_busy(path: &PathBuf) -> ExitCode {
+    let err = crate::porcelain::PorcelainError::new(
+        "log_busy",
+        format!("the --log file {path:?} is locked by another hugit verb"),
+        "another `hugit` process holds the log lock; retry once it releases \
+         (a stale lock is auto-reclaimed after a short window)",
+    );
+    println!("{}", err.to_json());
+    err.exit_code()
 }
 
 // ── emit helpers ───────────────────────────────────────────────────────────────

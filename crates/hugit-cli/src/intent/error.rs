@@ -66,8 +66,21 @@ impl PorcelainError {
                 "the --store file is corrupt or tampered; point --store at a clean store"
             }
             StoreError::Serialize(_) => "internal: the store could not be serialised",
+            // The advisory lock is held by another live `hugit` verb (WP-WC1) —
+            // retry-able, never a clobber.
+            StoreError::Busy { .. } => {
+                "another `hugit` process holds the store lock; retry once it \
+                 releases (a stale lock is auto-reclaimed after a short window)"
+            }
         };
-        Self::new("store_error", e.to_string(), fix)
+        // A busy lock is a transient, retry-able condition, not a corrupt store
+        // — surface it under its own machine-matchable kind.
+        let kind = if matches!(e, StoreError::Busy { .. }) {
+            "store_busy"
+        } else {
+            "store_error"
+        };
+        Self::new(kind, e.to_string(), fix)
     }
 
     /// Serialise to the stable single-object JSON wire shape:
