@@ -388,7 +388,17 @@ fn scrub_mode(key: &str, value: &Value) -> ScrubMode {
 /// public — verified 2026-06-11), and the engine MUST NOT be weakened, so the
 /// minimal composition lives here. Each branch mirrors a private `redact::apply`
 /// detector exactly; the bare-hex/entropy branch is the only one omitted.
-fn structural_secret_scrub(s: &str) -> String {
+///
+/// **Public for the principal-chain seam (WJ-UNIFY).** Most identifier fields
+/// reach the log inside the JSON payload, where [`scrub_payload`] applies this
+/// scrub automatically by key ([`is_identifier_key`]). But a few identifier
+/// values (`pr`'s `--run-id`/`--principal`) are stamped into the event's
+/// `principal_chain`, which `append`/`append_authorized` hash VERBATIM (it is
+/// NOT a JSON payload, so [`scrub_payload`] never sees it). Those call sites
+/// apply this SAME structural scrub before building the chain, so a prefixed
+/// secret in `--run-id`/`--principal` REDACTS while a bare-hex/slug address
+/// SURVIVES — identical treatment to the payload, one boundary, no collapse.
+pub fn structural_secret_scrub(s: &str) -> String {
     if is_structural_secret(s) {
         hugit_ledger::redact::REDACTED.to_string()
     } else {
@@ -634,7 +644,12 @@ fn is_digest_algo(algo: &str) -> bool {
 /// error at input), owned by another WP. Free-text fields (charter / reason / owner
 /// / summary / lens names) are NOT identifiers and still scrub in full.
 pub fn is_identifier_key(key: &str) -> bool {
-    matches!(key, "campaign" | "intent_id" | "pr_id" | "run_id")
+    // `id` is the bare identifier key a payload may carry (e.g. `intent new
+    // --id`'s explicit id, before it is renamed `intent_id`); WJ-UNIFY adds it
+    // so the explicit `--id` address gets the same structural-not-collapse scrub
+    // as `intent_id`/`pr_id`/`campaign`/`run_id`. A prefixed secret redacts; a
+    // ULID/40-hex/slug address survives — one boundary, every identifier key.
+    matches!(key, "campaign" | "intent_id" | "pr_id" | "run_id" | "id")
 }
 
 /// Scrub a payload [`Value`] ([`scrub_payload`]) and return it as a **canonical**
@@ -1116,7 +1131,7 @@ mod tests {
 
     #[test]
     fn is_identifier_key_set_is_exact() {
-        for k in ["campaign", "intent_id", "pr_id", "run_id"] {
+        for k in ["campaign", "intent_id", "pr_id", "run_id", "id"] {
             assert!(is_identifier_key(k), "`{k}` is an identifier address");
         }
         // Free-text fields are NOT identifiers (`intent` is the reviewed change,
