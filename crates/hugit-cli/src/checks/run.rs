@@ -193,7 +193,15 @@ fn resolve_def(args: &CheckArgs) -> Result<CheckDef, PorcelainError> {
         // busts the memo key (WG-CACHE: the old `local-toolchain` constant made
         // axis 3 fake, hitting a green cached under Rust A under Rust B).
         toolchain_ref: resolve_toolchain_digest(args),
-        env_manifest: String::new(),
+        // The env axis (K-RUN stale-green fix): the check command runs through
+        // `sh -c` inheriting the FULL ambient environment, so a result-affecting
+        // env var (e.g. RUSTFLAGS) changes the gate's outcome. The old hardcoded
+        // empty manifest meant such a change did NOT bust the memo key → a stale
+        // GREEN was served with zero execution. We snapshot a canonical, sorted
+        // allowlist of result-affecting vars into this axis (it folds into
+        // def_digest → memo_key via `compute_def_digest`), so a change to any of
+        // them is a MISS, while an UNLISTED var leaves the hit-rate intact.
+        env_manifest: result_affecting_env_manifest(),
         glob_set,
     };
     // Normalize the def_digest canonically through the parser/validator so a
@@ -205,6 +213,70 @@ fn resolve_def(args: &CheckArgs) -> Result<CheckDef, PorcelainError> {
             "this is an internal def-construction fault; report it",
         )
     })
+}
+
+/// The exact (case-sensitive) names of environment variables DECLARED
+/// result-affecting for a Rust gate run: they change what the compiler/linker/
+/// toolchain does, so a change to any of them must bust the memo key. Anything
+/// NOT on this allowlist (and not under an allowlisted prefix below) is DECLARED
+/// not-result-affecting — capturing the full environment (PWD/SHLVL/TERM/…)
+/// would destroy the hit-rate, since those churn between invocations without
+/// changing the gate's outcome.
+const RESULT_AFFECTING_ENV_EXACT: &[&str] = &[
+    "RUSTFLAGS",
+    "RUSTDOCFLAGS",
+    "RUSTC",
+    "RUSTC_WRAPPER",
+    "RUSTUP_TOOLCHAIN",
+    "CC",
+    "CXX",
+    "CFLAGS",
+    "CXXFLAGS",
+    "LDFLAGS",
+    "AR",
+];
+
+/// Name PREFIXES whose every member is DECLARED result-affecting: the cargo /
+/// rustc / cargo-build environment namespaces all steer the build (target dir,
+/// build flags, registry, jobs, profile overrides, …). A var matching any of
+/// these prefixes is folded into the env axis.
+const RESULT_AFFECTING_ENV_PREFIXES: &[&str] = &["CARGO_", "RUST_", "CARGO_BUILD_"];
+
+/// Build the CANONICAL, SORTED env-axis manifest from the result-affecting
+/// allowlist (K-RUN stale-green fix). Only vars that are actually SET are
+/// emitted, as a deterministic `KEY=VALUE\n` string sorted by key, so the
+/// manifest is reproducible across invocations on an unchanged environment (a
+/// legit warm HIT still happens) and changes the instant any allowlisted var's
+/// presence or value changes (the stale GREEN is busted).
+///
+/// SCOPE (disclosed residual): env vars OUTSIDE this allowlist are DECLARED
+/// not-result-affecting — they do NOT enter the memo key. This is the honest
+/// trade that preserves the hit-rate (capturing the whole environment would make
+/// nearly every run a miss). An unlisted variable that DOES affect a check's
+/// result is therefore a disclosed residual seam (e.g. a custom `MY_GATE_MODE`
+/// read by an ad-hoc `--cmd`): it would not bust the key. The orchestrator
+/// records such a class as a pending-seam — this function never silently widens
+/// the allowlist to cover one.
+fn result_affecting_env_manifest() -> String {
+    let mut pairs: Vec<(String, String)> = std::env::vars()
+        .filter(|(k, _)| {
+            RESULT_AFFECTING_ENV_EXACT.contains(&k.as_str())
+                || RESULT_AFFECTING_ENV_PREFIXES
+                    .iter()
+                    .any(|p| k.starts_with(p))
+        })
+        .collect();
+    // Sort by key for a canonical, order-independent manifest. (`std::env::vars`
+    // order is unspecified; sorting makes the digest stable.)
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut manifest = String::new();
+    for (k, v) in pairs {
+        manifest.push_str(&k);
+        manifest.push('=');
+        manifest.push_str(&v);
+        manifest.push('\n');
+    }
+    manifest
 }
 
 /// Snapshot the workspace files under `root` whose path matches `glob_set` into
@@ -1147,8 +1219,33 @@ fn map_lock_error(e: LockError) -> PorcelainError {
 }
 
 /// Map an executor [`ExecError`] into the canonical porcelain envelope.
+///
+/// TAXONOMY (K-RUN flaky-gate fix): the RETRYABLE lock-exhaustion error
+/// (`acquire_ac_lock` gives up after its bounded retry budget while the `.ac`
+/// stayed locked by a concurrent `hugit check`) must surface as the structured
+/// retryable `kind:"ac_busy"`, NOT collapse into the generic terminal
+/// `ac_error`. Collapsing it broke the contention loser's expected kind: under
+/// `--workspace` parallel load the retry budget exhausts → a terminal
+/// `ac_error` → the acceptance assertion (`kind == "ac_busy" || "log_busy"`)
+/// failed non-deterministically. The busy error is constructed in
+/// `acquire_ac_lock` as `AcError::Transport` whose message begins `ac_busy:`
+/// (the one place lock-exhaustion is raised), so we detect that prefix and
+/// preserve the retryable kind. Only GENUINE unreadable/unwritable/misconfig AC
+/// faults remain `ac_error`.
 fn map_exec_error(e: ExecError) -> PorcelainError {
     match e {
+        // Retryable lock-exhaustion: the contention loser. Preserve `ac_busy` so
+        // it is a clean retryable kind, never a terminal `ac_error`.
+        ExecError::Ac(hugit_checks::client::ac::AcError::Transport(ref msg))
+            if msg.starts_with("ac_busy:") =>
+        {
+            PorcelainError::new(
+                "ac_busy",
+                format!("the Action Cache store is contended: {msg}"),
+                "another `hugit check` holds the AC-store lock; retry once it \
+                 releases (a stale lock is auto-reclaimed after a short window)",
+            )
+        }
         ExecError::Ac(ac) => PorcelainError::new(
             "ac_error",
             format!("the Action Cache layer failed: {ac}"),
@@ -1362,6 +1459,104 @@ mod tests {
         validate_axis("rustc-1.96.0-abc123def456", "--toolchain")
             .expect("a rustc-version-shaped toolchain marker passes the door");
         validate_axis("clippy", "--def").expect("a built-in def name passes the door");
+    }
+
+    #[test]
+    fn env_manifest_captures_only_allowlisted_result_affecting_vars() {
+        // K-RUN env-axis fix. A change to an ALLOWLISTED var must change the
+        // manifest (→ a different def_digest → memo-key bust → MISS, no stale
+        // green). A change to an UNLISTED var (e.g. PWD/FOO) must NOT, so the
+        // hit-rate is preserved. This test mutates process env, so it asserts on
+        // the snapshot the function returns rather than racing other tests; the
+        // var names used here (HUGIT_KRUN_*) are private to this test.
+        //
+        // SAFETY: set_var/remove_var are unsafe in the 2024 edition (env mutation
+        // is not thread-safe). This test runs single-threaded reasoning over its
+        // own private var names; we save/restore to avoid leaking into siblings.
+        let listed = "RUSTFLAGS";
+        let unlisted = "HUGIT_KRUN_NOT_AN_AXIS";
+        let saved_listed = std::env::var(listed).ok();
+        let saved_unlisted = std::env::var(unlisted).ok();
+
+        unsafe {
+            std::env::set_var(listed, "-C target-cpu=native");
+            std::env::remove_var(unlisted);
+        }
+        let m_a = result_affecting_env_manifest();
+        assert!(
+            m_a.contains("RUSTFLAGS=-C target-cpu=native"),
+            "an allowlisted var is captured into the env axis: {m_a:?}"
+        );
+        assert!(m_a.ends_with('\n'), "each pair is newline-terminated");
+
+        // Changing the allowlisted var changes the manifest (memo-key bust).
+        unsafe {
+            std::env::set_var(listed, "-C opt-level=3");
+        }
+        let m_b = result_affecting_env_manifest();
+        assert_ne!(
+            m_a, m_b,
+            "a change to an allowlisted var changes the manifest (busts the key)"
+        );
+
+        // An unlisted var never enters the manifest (hit-rate preserved).
+        unsafe {
+            std::env::set_var(unlisted, "anything");
+        }
+        let m_c = result_affecting_env_manifest();
+        assert!(
+            !m_c.contains(unlisted),
+            "an unlisted var is DECLARED not-result-affecting — never in the axis: {m_c:?}"
+        );
+        assert!(
+            m_c.contains("RUSTFLAGS=-C opt-level=3"),
+            "the unlisted-var change did not perturb the allowlisted capture: {m_c:?}"
+        );
+
+        // Manifest is canonical/sorted: keys appear in lexicographic order.
+        unsafe {
+            std::env::set_var("CARGO_TERM_COLOR", "never");
+        }
+        let m_d = result_affecting_env_manifest();
+        let keys: Vec<&str> = m_d.lines().filter_map(|l| l.split('=').next()).collect();
+        let mut sorted = keys.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            keys, sorted,
+            "the manifest is sorted by key (canonical): {m_d:?}"
+        );
+
+        // Restore the environment we mutated.
+        unsafe {
+            match saved_listed {
+                Some(v) => std::env::set_var(listed, v),
+                None => std::env::remove_var(listed),
+            }
+            match saved_unlisted {
+                Some(v) => std::env::set_var(unlisted, v),
+                None => std::env::remove_var(unlisted),
+            }
+            std::env::remove_var("CARGO_TERM_COLOR");
+        }
+    }
+
+    #[test]
+    fn ac_busy_lock_exhaustion_maps_to_retryable_kind_not_terminal_ac_error() {
+        // K-RUN taxonomy fix: the contention loser's lock-exhaustion error
+        // (`acquire_ac_lock` → AcError::Transport("ac_busy: …")) must surface as
+        // the RETRYABLE structured `kind:"ac_busy"`, never collapse to the
+        // generic terminal `ac_error` — otherwise the concurrent acceptance test
+        // fails non-deterministically under parallel load.
+        let busy = ExecError::Ac(hugit_checks::client::ac::AcError::Transport(
+            "ac_busy: the AC store /tmp/x.ac stayed locked by another hugit check".to_string(),
+        ));
+        assert_eq!(map_exec_error(busy).kind(), "ac_busy");
+
+        // A genuine unreadable/unwritable/misconfig AC fault stays `ac_error`.
+        let fault = ExecError::Ac(hugit_checks::client::ac::AcError::Transport(
+            "AC store write: permission denied".to_string(),
+        ));
+        assert_eq!(map_exec_error(fault).kind(), "ac_error");
     }
 
     #[test]
