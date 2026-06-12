@@ -2,9 +2,16 @@
 //!
 //! Identifier fields (`--campaign`, `--owner`, `--pr`, `--id`, `--run-id`) are
 //! ADDRESSES, not free text.  WH-SCRUB exempts them from the scrub engine so
-//! addressing stays consistent — but that exemption is only safe when every
-//! identifier is validated at INPUT so an exempt field can never carry a secret
-//! or be empty.
+//! addressing stays consistent — but that exemption is only safe when the
+//! structural-secret scrub in porcelain.rs enforces the boundary.
+//!
+//! ⚠ This validator is a UX hint (early rejection of obvious credential shapes
+//! — e.g. `ghp_`, `sk-`, PEM headers).  The SECURITY boundary is the
+//! structural-secret scrub in `porcelain.rs`; do not weaken that on the
+//! assumption this validator is sufficient.  This file only rejects identifiers
+//! that are already non-empty and carry a recognisable credential shape; bare
+//! hex, ULIDs, slugs, and URLs without embedded credentials all pass through
+//! to the central scrub boundary unchanged.
 //!
 //! ## Two rules
 //!

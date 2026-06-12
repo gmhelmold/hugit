@@ -348,6 +348,71 @@ Cloudflare Workers-based P2 execution model (Seam D/runners) does not have this 
 
 ---
 
+## PS-9 — Intent store vs. log: `intent show`/`intent list` read a cwd-global index (owner decision pending)
+
+**Status:** TRACKED — design decision pending owner input; DO NOT fix the code until the owner decides  
+**Adversarial finding:** Round-6 Cluster D (`docs/review/2026-06-11-adversarial-round-6.md`);
+product-correctness seam for multi-log agent fleets.  
+**Governing docs:** `docs/review/2026-06-11-adversarial-round-6.md` §Cluster D;
+`crates/hugit-cli/src/intent/` (show/list verbs); `docs/plan/decomposition.md` (intent design).
+
+**What is tracked:**
+
+`hugit intent show` and `hugit intent list` read from the cwd-global
+`.hugit/intents.json` store — an index that spans ALL logs that have ever
+written intents under the current working directory. This gives a cross-log
+merged view and shows `landed: null` for intents whose PRs have not yet
+landed (decoupled from any specific `--log` file). The `--log` flag is NOT
+consulted for these two verbs; the intent store is maintained independently
+of the event log.
+
+**The design question (two options):**
+
+1. **Per-log store (current default for writes; show/list diverge):** intent
+   records are written to a per-log store keyed by `--log` path AND to the
+   cwd-global index. `intent show`/`intent list` only surface intents whose
+   source log matches the active `--log` flag. Upside: scoped to the current
+   workflow. Downside: a multi-log fleet (N agents, N log files) cannot get a
+   merged view across campaigns; each agent only sees its own log's intents.
+
+2. **cwd-global index (current show/list behaviour):** `intent show`/`intent
+   list` read the cwd-global `.hugit/intents.json` without filtering by
+   `--log`. Upside: an orchestrator at the repo root sees ALL intents from ALL
+   agents' logs in one `intent list` call — the natural multi-log fleet view.
+   Downside: if two agents write conflicting intent IDs to separate logs, the
+   merged index may surface both, with no log-scoping to disambiguate.
+
+**The multi-log-fleet UX problem:**
+
+In a fleet of N concurrent agents (N worktrees, N `--log` files), the
+`intent list` verb is the orchestrator's primary view of what work is queued.
+If the view is per-log, the orchestrator must call `intent list --log <path>`
+once per agent log to get the full picture — O(N) calls, no merged projection.
+If the view is cwd-global, one call suffices, but `landed: null` for a PR
+that landed in a different log's workflow may appear as "not yet landed" in
+the global view even if the intent IS landed in its own log.
+
+**Owner decision required:**
+
+- Should `intent show`/`intent list` be scoped to `--log` (per-log, N-call
+  fleet model) or cwd-global (one-call orchestrator view)?
+- Is `landed: null` for cross-log intents an acceptable state in the global
+  index, or should the store track which log owns which intent?
+- If cwd-global wins: should `intent list` expose a `--log <path>` filter
+  flag to let callers scope the view when needed?
+
+**Owner:** owner decision pending — do not change the code until decided.  
+**Acceptance criteria (after owner decision):**
+1. The chosen model is documented in `docs/plan/decomposition.md` and the
+   CLI `--help` text for `intent show`/`intent list`.
+2. If per-log: `intent list` without `--log` either errors or defaults to the
+   cwd global index with a clear disclosure; fleet docs note the N-call pattern.
+3. If cwd-global: `landed: null` is documented as the expected state for
+   intents whose owning log has not yet recorded a `pr.landed` event; the
+   index TTL/rotation strategy is defined.
+
+---
+
 ## Closed seams (reference — do not re-open without owner approval)
 
 | Seam | Shipped | Governing commit |

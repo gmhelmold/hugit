@@ -8,8 +8,8 @@ The **git-compatible, LLM-native forge** — CoreLink expansion campaign #3.
 VCS + merge + CI designed for orchestrated agent fleets, built on CoreLink's
 production CAS (Cloudflare Workers/R2/D1/DO). Founded 2026-06-05.
 
-**Status (as of 2026-06-11, post Waves A/B/C/D/E+F + the wedge wave + G + H +
-adversarial rounds 1–5, Wave I in progress, Round 6 pending): the buildable
+**Status (as of 2026-06-12, post Waves A/B/C/D/E+F + the wedge wave + G + H + I +
+adversarial rounds 1–6, Wave J in progress, Round 7 pending): the buildable
 product is complete; adversarial hardening is ongoing, not closed.** A
 **17-package** Rust workspace (hugit-app + {ui,exit,sidecar} sub-crates = 4
 crates + 13 feature crates — verified by `cargo metadata --no-deps`
@@ -30,17 +30,27 @@ end-to-end; the memoized-CI wedge is observable locally TODAY (PS-1 closed,
 P2-independent). Round 3 (after Wave F + the wedge wave) found **7/7
 DO-NOT-SHIP** (spine confirmed held across all three rounds; Wave G hardened
 the wedge wave — Cluster A code, Cluster B docs). Round 4 (after Wave G)
-found **7/7 DO-NOT-SHIP** (spine held a seventh time; Wave H remediated
-Cluster A/B/C/D findings — complete). Round 5 (after Wave H) found **7/7
-DO-NOT-SHIP** (spine held an 8th time; strongest finding: event-log hash
-chain is tamper-EVIDENT not tamper-PROOF — honesty gap, not a code defect;
-PS-8 tracks log-auth as P2 seam; Wave I remediating). Round 6 pending after
-Wave I. `main` is green by local gate (fmt + clippy `--workspace
---all-targets --locked -D warnings` + test `--workspace --locked` + deny +
-audit); remote CI gate passes when it runs to completion, but the single
-self-hosted runner is contention-flaky (~35% of recent runs fail — includes
-both infra failures and a code fmt failure at HEAD before hotfix eec3eab;
-HEAD may show `in_progress` or a failure on CI). What remains to flip to end-to-end: **owner-gated
+found **7/7 DO-NOT-SHIP** (Wave H remediated Cluster A/B/C/D findings —
+complete). Round 5 (after Wave H) found **7/7 DO-NOT-SHIP** (strongest
+finding: event-log hash chain is tamper-EVIDENT not tamper-PROOF — honesty
+gap, not a code defect; PS-8 tracks log-auth as P2 seam; Wave I remediated).
+Round 6 (after Wave I) found **7/7 DO-NOT-SHIP** (root cause: Wave I's
+single structural scrub boundary was verified on one verb and asserted for
+all — per-verb identifier pre-scrubs in pr/intent/verdict bypass or precede
+the central boundary; Wave J remediating; Round 7 pending). The integrity
+spine has held under every adversarial round (1–6) plus the SOTA audit.
+`main` is green by the LOCAL gate (fmt + clippy `--workspace --all-targets
+--locked -D warnings` + test `--workspace --locked` + deny + audit),
+verified by real exit code (not a piped tail); remote CI on HEAD may be
+in_progress — a concluded remote green is the source of truth and is
+pending. There were two code-gate failures at the Wave-H/I boundary: a fmt
+failure (hotfixed eec3eab) and a clippy `collapsible_if` failure that
+survived the fmt hotfix and was closed by WI-PR (3e49c14, via the Rust
+let-chain collapse) — both traced to a piped gate-check that masked the real
+exit code; gates are now read bare. The single self-hosted runner is
+contention-flaky (~37% of recent runs fail — infra failures dominate; the
+two code failures at the Wave-H/I boundary are closed; HEAD may show
+`in_progress` or a false failure on CI). What remains to flip to end-to-end: **owner-gated
 infra** (P2 CoreLink tenant provisioning — see
 `docs/handoff/2026-06-08-corelink-p2-tenant-request.md` and the P2 ceiling
 request `docs/handoff/2026-06-11-corelink-p2-ceiling-request.md`). The
