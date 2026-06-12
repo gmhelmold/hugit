@@ -993,3 +993,288 @@ fn item_10_different_lens_set_appends_new_record_not_false_dedup() {
         "two verdicts on the log — a different lens set appends a NEW record, not a false-dedup"
     );
 }
+
+// ── WJ-VERDICT (adversarial Round 6, Cluster B): dedup against the LATEST
+//    verdict ONLY — a revision that returns to a prior state must APPEND ───────
+
+/// `approve → reject → approve` for the SAME intent + lens set: the 3rd verdict
+/// (the operator's FINAL action) must APPEND, not false-dedup against the 1st.
+/// After the revision the campaign projection is latest-wins: `proven:1,
+/// rejected:0`. The old `.rfind`-over-all-history dedup swallowed the final
+/// approve → ledger latest = reject → `proven:0` (WRONG; reproduced live).
+#[test]
+fn wj_dedup_latest_only_approve_reject_approve_proven_one() {
+    use std::process::Command;
+
+    let dir = scratch("wj-arr");
+    let log = dir.join("log.json");
+    let store = dir.join("store.json");
+    let log_s = log.to_str().unwrap();
+    let store_s = store.to_str().unwrap();
+    let campaign = "camp-wj-arr";
+    let intent_id = "intent-wj-arr";
+
+    // Open campaign + land intent so campaign show projects a ledger.
+    let out = Command::new(hugit_bin())
+        .args([
+            "campaign",
+            "open",
+            "--log",
+            log_s,
+            "--campaign",
+            campaign,
+            "--charter",
+            "wj latest-wins test",
+            "--owner",
+            "test@test.com",
+        ])
+        .output()
+        .expect("hugit runs");
+    assert!(out.status.success(), "campaign open");
+    let out = Command::new(hugit_bin())
+        .args([
+            "intent",
+            "new",
+            "--log",
+            log_s,
+            "--store",
+            store_s,
+            "--campaign",
+            campaign,
+            "--charter",
+            "wj intent",
+            "--id",
+            intent_id,
+        ])
+        .output()
+        .expect("hugit runs");
+    assert!(out.status.success(), "intent new");
+
+    let verdict_args = |result: &str| {
+        [
+            "verdict".to_string(),
+            "--log".to_string(),
+            log_s.to_string(),
+            "--store".to_string(),
+            "--intent".to_string(),
+            intent_id.to_string(),
+            "--lens".to_string(),
+            "security".to_string(),
+            "--result".to_string(),
+            result.to_string(),
+        ]
+    };
+    let run_owned = |args: &[String]| -> serde_json::Value {
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        run(&refs).1
+    };
+
+    // approve #1 — fresh.
+    let v1 = run_owned(&verdict_args("approve"));
+    assert_eq!(v1["already_recorded"], false, "approve#1 fresh: {v1}");
+    // reject #2 — fresh (latest differs).
+    let v2 = run_owned(&verdict_args("reject"));
+    assert_eq!(v2["already_recorded"], false, "reject#2 fresh: {v2}");
+    // approve #3 — the FINAL action. Latest is reject, so this is a legitimate
+    // revision and MUST append (NOT false-dedup against approve#1).
+    let v3 = run_owned(&verdict_args("approve"));
+    assert_eq!(
+        v3["already_recorded"], false,
+        "approve#3 (returning to a prior state) MUST append, not false-dedup: {v3}"
+    );
+    assert_eq!(
+        count_verdicts(&log),
+        3,
+        "three verdict.recorded events: approve, reject, approve"
+    );
+
+    // campaign show: latest-wins → proven:1, rejected:0.
+    let out = Command::new(hugit_bin())
+        .args(["campaign", "show", "--log", log_s, "--campaign", campaign])
+        .output()
+        .expect("hugit runs");
+    let show: serde_json::Value =
+        serde_json::from_str(std::str::from_utf8(&out.stdout).unwrap().trim())
+            .expect("campaign show JSON");
+    assert_eq!(
+        show["ledger"]["proven"].as_u64(),
+        Some(1),
+        "latest-wins: final approve governs → proven:1: {show}"
+    );
+    assert_eq!(
+        show["ledger"]["rejected"].as_u64(),
+        Some(0),
+        "latest-wins: the superseded reject must NOT count → rejected:0: {show}"
+    );
+}
+
+/// True idempotency is preserved: an IMMEDIATE re-run (no intervening different
+/// verdict) is still `already_recorded` and appends nothing.
+#[test]
+fn wj_immediate_rerun_is_still_already_recorded() {
+    let dir = scratch("wj-idem");
+    let log = dir.join("log.json");
+    write_empty_log(&log);
+
+    let args = [
+        "verdict",
+        "--log",
+        log.to_str().unwrap(),
+        "--store",
+        "--intent",
+        "intent-wj-idem",
+        "--lens",
+        "security",
+        "--result",
+        "approve",
+    ];
+    let (c1, v1) = run(&args);
+    assert_eq!(c1, 0, "first record: {v1}");
+    assert_eq!(v1["already_recorded"], false, "first is fresh: {v1}");
+
+    // Immediate identical re-run — the latest verdict already equals the wanted
+    // set, so this is a true idempotent no-op.
+    let (c2, v2) = run(&args);
+    assert_eq!(c2, 0, "re-run: {v2}");
+    assert_eq!(
+        v2["already_recorded"], true,
+        "an immediate identical re-run is still already_recorded: {v2}"
+    );
+    assert_eq!(
+        count_verdicts(&log),
+        1,
+        "no duplicate appended on the no-op"
+    );
+}
+
+/// approve → approve (no intervening verdict) is idempotent on the SECOND call —
+/// the latest already equals the wanted set.
+#[test]
+fn wj_approve_then_approve_is_idempotent() {
+    let dir = scratch("wj-aa");
+    let log = dir.join("log.json");
+    write_empty_log(&log);
+    let args = [
+        "verdict",
+        "--log",
+        log.to_str().unwrap(),
+        "--store",
+        "--intent",
+        "intent-wj-aa",
+        "--lens",
+        "security",
+        "--result",
+        "approve",
+    ];
+    let (_, v1) = run(&args);
+    assert_eq!(v1["already_recorded"], false, "approve#1 fresh: {v1}");
+    let (_, v2) = run(&args);
+    assert_eq!(
+        v2["already_recorded"], true,
+        "approve#2 with no intervening verdict is true idempotency: {v2}"
+    );
+    assert_eq!(count_verdicts(&log), 1, "one event after approve→approve");
+}
+
+// ── WJ-VERDICT (Cluster A): --intent / --lens secrets must NOT leak ───────────
+
+/// A prefixed secret smuggled as `--intent` OR `--lens` must be REDACTED in the
+/// `verdict.recorded` payload on the forever-log — zero verbatim occurrences.
+#[test]
+fn wj_intent_and_lens_secret_zero_verbatim_in_log() {
+    let dir = scratch("wj-leak");
+    let log = dir.join("log.json");
+    write_empty_log(&log);
+
+    // sk-proj-… is the OpenAI-style prefixed secret shape (≥20 token chars).
+    let secret = "sk-proj-AAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let (code, _v) = run(&[
+        "verdict",
+        "--log",
+        log.to_str().unwrap(),
+        "--store",
+        "--intent",
+        secret,
+        "--lens",
+        secret,
+        "--result",
+        "approve",
+    ]);
+    assert_eq!(code, 0, "verdict records");
+
+    let raw = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        !raw.contains(secret),
+        "the --intent/--lens secret must NOT appear verbatim in the forever-log: {raw}"
+    );
+    assert!(
+        !raw.contains("sk-proj-"),
+        "no fragment of the sk- secret survives in the log: {raw}"
+    );
+    // The payload still round-trips; the secret fields are [REDACTED].
+    let records = read_log(&log);
+    let rec = records
+        .iter()
+        .find(|r| r.kind == VERDICT_RECORDED_KIND)
+        .expect("a verdict.recorded event");
+    let vo: VerdictObject = serde_json::from_str(&rec.payload).expect("payload round-trips");
+    assert_eq!(vo.intent, "[REDACTED]", "intent secret redacted: {:?}", vo);
+    assert!(
+        vo.claims_checked.iter().all(|c| !c.contains("sk-proj-")),
+        "lens-name secret redacted in claims_checked: {:?}",
+        vo.claims_checked
+    );
+}
+
+/// A secret smuggled as `--intent` that does NOT resolve (`intent_not_found`)
+/// must NOT be echoed back raw in the error message or context — it is routed
+/// through the redaction engine first.
+#[test]
+fn wj_intent_not_found_error_does_not_echo_secret() {
+    use std::process::Command;
+
+    let dir = scratch("wj-echo");
+    let log = dir.join("log.json");
+    let store = dir.join("store.json");
+    let log_s = log.to_str().unwrap();
+
+    // Seed a REAL landed intent so the log has intent vocabulary (the guard
+    // only fires when at least one intent.landed exists).
+    let out = Command::new(hugit_bin())
+        .args([
+            "intent",
+            "new",
+            "--log",
+            log_s,
+            "--store",
+            store.to_str().unwrap(),
+            "--campaign",
+            "camp-wj-echo",
+            "--charter",
+            "real",
+            "--id",
+            "real-intent",
+        ])
+        .output()
+        .expect("hugit runs");
+    assert!(out.status.success(), "seed intent");
+
+    // ghp_… is a known credential prefix. Verdict for it must be intent_not_found
+    // (no such landed intent) AND the error must not echo the raw secret.
+    let secret = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let (code, v) = run(&[
+        "verdict", "--log", log_s, "--store", "--intent", secret, "--lens", "security", "--result",
+        "approve",
+    ]);
+    assert_eq!(code, 2, "intent_not_found exit-2: {v}");
+    assert_eq!(v["error"]["kind"], "intent_not_found", "{v}");
+    let blob = v.to_string();
+    assert!(
+        !blob.contains(secret) && !blob.contains("ghp_"),
+        "the intent_not_found error must NOT echo the raw secret: {blob}"
+    );
+    assert_eq!(
+        v["error"]["intent"], "[REDACTED]",
+        "the echoed intent is scrubbed: {v}"
+    );
+}
