@@ -398,15 +398,161 @@ fn scrub_mode(key: &str, value: &Value) -> ScrubMode {
 /// apply this SAME structural scrub before building the chain, so a prefixed
 /// secret in `--run-id`/`--principal` REDACTS while a bare-hex/slug address
 /// SURVIVES — identical treatment to the payload, one boundary, no collapse.
+///
+/// ## DENY-BY-DEFAULT (L-A, adversarial Round 8 — the class-killing inversion)
+///
+/// The polarity is INVERTED. The historical design was a secret ALLOWLIST:
+/// "redact iff the value matches a known credential prefix, else survive." That
+/// is open by default — every prefix-less high-entropy credential (an AWS
+/// 40-char base64 secret key, a SendGrid `SG.`, a Stripe `rk_live_`, a dense
+/// 32-char base64 token) rode an identifier field VERBATIM into the forever
+/// hash-chained log. It was the 6th instance of "an exemption is a hole": a
+/// positive secret-recognition gate is open to everything it fails to recognise,
+/// and secrets are an OPEN set (every SaaS mints a new prefix).
+///
+/// We now allowlist ADDRESSES (a CLOSED set) instead: an identifier value
+/// survives verbatim ONLY if it PROVES it is a bounded safe-address shape
+/// ([`is_safe_identifier_shape`]); anything else REDACTS. A new credential
+/// format invented tomorrow does not open a hole, because the gate never asks
+/// "is this a known secret?" — it asks "is this a known address?", and a random
+/// credential is not. Address survival (distinct keys must not collapse —
+/// WJ-UNIFY) is honoured: every legitimate address shape (40/64-hex, ULID,
+/// `cas:<digest>`, kebab/snake slug, integer, short human name) passes.
 pub fn structural_secret_scrub(s: &str) -> String {
-    if is_structural_secret(s) {
-        hugit_ledger::redact::REDACTED.to_string()
-    } else {
-        // No structural detector fired — an address survives verbatim. The
-        // bare-hex/entropy scan is intentionally NOT run (an address must not
-        // collapse), so a 40/64-hex key or a high-entropy slug id is preserved.
+    if is_safe_identifier_shape(s) {
+        // Provably a bounded safe-address shape — survives verbatim (an address
+        // must not collapse, or the wedge lands the wrong PR — WJ-UNIFY).
         s.to_string()
+    } else {
+        // Deny-by-default: not provably an address ⇒ REDACT. This catches every
+        // prefix-less high-entropy credential the old secret-allowlist missed.
+        hugit_ledger::redact::REDACTED.to_string()
     }
+}
+
+/// The CLOSED set of address shapes an identifier may legitimately take and
+/// still survive unredacted (L-A). Deny-by-default: NOT on this list ⇒ redact.
+///
+/// Designed to be GENEROUS (a legit id wrongly redacted breaks the address), so
+/// it accepts every shape the flow actually addresses by:
+///
+/// - a 40/64-hex git-sha / content address, or a `cas:`/`<algo>:` content-address
+///   ref ([`is_digest_shaped`] — exits early; a real CID is high-entropy and MUST
+///   survive);
+/// - a ULID (Crockford base32, 26 chars), git short-hash (7–40 hex), pure
+///   integers, kebab/snake/dotted slugs and short human names — the bounded
+///   identifier charset (`[A-Za-z0-9._@:/+-]`), gated so it does NOT admit a
+///   high-entropy credential blob.
+///
+/// REJECTS (→ redact): anything that trips a STRUCTURAL secret detector
+/// ([`is_structural_secret`] — prefix/JWT/PEM/conn-string/keyword), AND any
+/// value that is BOTH long (≥ the credential length floor) AND high Shannon
+/// entropy AND not digest-shaped — i.e. a 40-char dense base64 AWS key, a
+/// SendGrid/Stripe token, a 32-char dense base64 blob. When in doubt we prefer
+/// redaction (security); the entropy floor is tuned so the legitimate address
+/// shapes above all clear it.
+pub fn is_safe_identifier_shape(s: &str) -> bool {
+    let t = s.trim();
+    if t.is_empty() {
+        // An empty/whitespace value carries no secret and MUST pass through
+        // UNCHANGED (return safe → the scrub is a no-op). Turning `""` into the
+        // sentinel would mask emptiness from downstream checks — e.g. `pr open`'s
+        // empty-`--run-id` binding test reads an empty run-id as "unbound" and
+        // refuses; a `[REDACTED]` would look bound. Emptiness is the door's
+        // separate `invalid_argument` rule, not the secret scrub's job.
+        return true;
+    }
+    // A structural credential shape is never an address — redact.
+    if is_structural_secret(t) {
+        return false;
+    }
+    // A 40/64-hex digest or a `cas:`/`<algo>:` content-address ref is the
+    // canonical high-entropy address that MUST survive (a real CID clears the
+    // entropy floor — exit early before the entropy gate below would reject it).
+    if is_digest_shaped(t) {
+        return true;
+    }
+    // A ULID is the canonical intent-id shape — 26-char Crockford base32 — and is
+    // high-entropy by construction (~4.6 bits/char), so it would trip the generic
+    // entropy gate below. Recognise it EXPLICITLY as a structured address so it
+    // survives. The Crockford base32 charset (no `I`/`L`/`O`/`U`) and the exact
+    // length-26 are a narrow, closed shape; a credential is overwhelmingly not
+    // length-26 base32 (the same accepted-residual class as a bare hex CID).
+    if is_ulid_shaped(t) {
+        return true;
+    }
+    // Bounded identifier charset only — a value outside it is not an address the
+    // flow uses. `@`, `:`, `/`, `.` are the address punctuation the flow uses
+    // (emails, branch refs, scoped ids); `_`/`-` are slug separators. (`+`/`=`
+    // base64 padding chars are admitted to the charset but caught by the entropy
+    // gate below if they form a dense blob.)
+    if !t
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '@' | ':' | '/' | '+' | '-'))
+    {
+        return false;
+    }
+    // The one place the entropy signal belongs for identifiers: an identifier is
+    // not allowed to BE a long, dense, high-entropy non-hex blob (an AWS /
+    // SendGrid / Stripe key). A long LOW-entropy slug
+    // (`feature/long-descriptive-branch-name`) survives; a long dense random run
+    // redacts. Short values (< the credential floor) and structured hex
+    // addresses (handled above) always survive.
+    if t.len() >= IDENT_ENTROPY_MIN_LEN && ident_shannon_entropy(t) >= IDENT_ENTROPY_THRESHOLD {
+        return false;
+    }
+    true
+}
+
+/// True iff `s` is a ULID — exactly 26 chars of Crockford base32
+/// (`0-9A-HJKMNP-TV-Z`, i.e. no `I`/`L`/`O`/`U`). The canonical hugit intent-id
+/// shape; high-entropy by construction so it needs an EXPLICIT survival path
+/// (the generic entropy gate would otherwise redact it). A credential is
+/// overwhelmingly not length-26 Crockford base32, so this is a narrow, closed
+/// address shape (the same accepted-residual class as a bare hex content-id).
+fn is_ulid_shaped(s: &str) -> bool {
+    s.len() == 26
+        && s.bytes().all(|b| {
+            b.is_ascii_digit()
+                || matches!(b,
+                    b'A'..=b'H' | b'J' | b'K' | b'M' | b'N' | b'P'..=b'T' | b'V'..=b'Z')
+        })
+}
+
+/// Minimum length before the identifier entropy gate considers a value a
+/// possible credential blob. Mirrors the engine's `ENTROPY_MIN_LEN` (20) so a
+/// short id is never entropy-rejected; a 40-char AWS key clears it.
+const IDENT_ENTROPY_MIN_LEN: usize = 20;
+
+/// Shannon-entropy threshold (bits/char) above which a long identifier run is
+/// treated as a credential blob rather than an address. A ULID (Crockford
+/// base32, structured) and human slugs sit well under; a dense random base64
+/// AWS/SendGrid/Stripe key clears it. Set slightly above the engine's free-text
+/// 4.0 so a ULID's structured base32 still SURVIVES (it is a real address) while
+/// a 40-char dense mixed-case base64 key redacts.
+const IDENT_ENTROPY_THRESHOLD: f64 = 4.5;
+
+/// Shannon entropy (bits/char) of an identifier value — a local mirror of the
+/// engine's private `shannon_entropy`, used only by the identifier address gate.
+fn ident_shannon_entropy(s: &str) -> f64 {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() {
+        return 0.0;
+    }
+    let mut counts = [0usize; 256];
+    for &b in bytes {
+        counts[b as usize] += 1;
+    }
+    let len = bytes.len() as f64;
+    let mut entropy = 0.0;
+    for &count in counts.iter() {
+        if count == 0 {
+            continue;
+        }
+        let p = count as f64 / len;
+        entropy -= p * p.log2();
+    }
+    entropy
 }
 
 /// True iff `s` trips a STRUCTURAL secret detector — the four `redact::apply`
@@ -991,14 +1137,14 @@ mod tests {
     #[test]
     fn identifier_address_keys_are_exempt_and_do_not_collapse() {
         // {campaign, intent_id, pr_id, run_id} are ADDRESSES, not free text:
-        // scrubbing them would collapse distinct high-entropy keys to one
-        // [REDACTED] (silent data loss) and break addressing. They are exempt
-        // (WH-IDENT validates them at input — exempt-but-validated).
-        let camp_a = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"; // 40-hex, high-entropy
+        // scrubbing them would collapse distinct keys to one [REDACTED] (silent
+        // data loss) and break addressing. Under L-A deny-by-default, a value
+        // survives iff it is a PROVABLE address shape (40/64-hex, ULID, slug, …).
+        let camp_a = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"; // 40-hex
         let camp_b = "ffeeddccbbaa99887766554433221100ffeeddcc"; // distinct 40-hex
         let mut v = json!({
             "campaign": camp_a,
-            "intent_id": "8Kp2mZ9qLx4vTn7wRj3sYb6cFd1gHe0", // high-entropy id
+            "intent_id": "01HQXW8ZK4M9P2N7R3T5V6Y8BC", // ULID address survives
             "pr_id": "pr-9f8e7d6c",
             "run_id": "run-0011-2233",
         });
@@ -1007,8 +1153,8 @@ mod tests {
         assert_eq!(v["campaign"], camp_a, "campaign address survives (A)");
         assert_ne!(v["campaign"], camp_b, "distinct keys do NOT collapse");
         assert_eq!(
-            v["intent_id"], "8Kp2mZ9qLx4vTn7wRj3sYb6cFd1gHe0",
-            "intent_id high-entropy address survives (no entropy redaction)"
+            v["intent_id"], "01HQXW8ZK4M9P2N7R3T5V6Y8BC",
+            "intent_id ULID address survives (explicit ULID shape)"
         );
         assert_eq!(v["pr_id"], "pr-9f8e7d6c", "pr_id address survives");
         assert_eq!(v["run_id"], "run-0011-2233", "run_id address survives");
@@ -1114,15 +1260,16 @@ mod tests {
 
     #[test]
     fn hex_and_slug_addresses_survive_the_structural_scrub() {
-        // The address-survival half: a 40/64-hex content address and a dense
-        // high-entropy slug id (which the FULL engine would entropy-redact) MUST
-        // survive in an identifier field — distinct keys stay distinct + lookup-able.
+        // The address-survival half: a 40/64-hex content address, a ULID, and a
+        // plain slug MUST survive in an identifier field — distinct keys stay
+        // distinct + lookup-able. (L-A: a dense high-entropy NON-address blob no
+        // longer survives — see `dense_high_entropy_blob_in_identifier_redacts`.)
         let camp_a = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"; // 40-hex
         let camp_b = "ffeeddccbbaa99887766554433221100ffeeddcc"; // distinct 40-hex
         let memo_64 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
         let mut v = json!({
             "campaign": camp_a,
-            "intent_id": "8Kp2mZ9qLx4vTn7wRj3sYb6cFd1gHe0", // high-entropy slug
+            "intent_id": "01HQXW8ZK4M9P2N7R3T5V6Y8BC",        // ULID address
             "pr_id": memo_64,                                 // 64-hex
             "run_id": "run-0011-2233",                        // plain slug
         });
@@ -1136,11 +1283,67 @@ mod tests {
             "distinct 40-hex keys do NOT collapse"
         );
         assert_eq!(
-            v["intent_id"], "8Kp2mZ9qLx4vTn7wRj3sYb6cFd1gHe0",
-            "high-entropy slug survives (entropy scan exempt for identifiers)"
+            v["intent_id"], "01HQXW8ZK4M9P2N7R3T5V6Y8BC",
+            "ULID address survives (explicit ULID shape, not entropy-redacted)"
         );
         assert_eq!(v["pr_id"], memo_64, "64-hex address survives");
         assert_eq!(v["run_id"], "run-0011-2233", "plain slug survives");
+    }
+
+    #[test]
+    fn dense_high_entropy_blob_in_identifier_redacts() {
+        // L-A deny-by-default: a prefix-less high-entropy credential riding an
+        // identifier field (the Round-8 root — AWS/SendGrid/Stripe/dense base64
+        // keys carry no listed prefix, so the old secret-allowlist let them
+        // through VERBATIM) now REDACTS. It is not a provable address shape.
+        let aws = "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY123"; // 41-char AWS key shape
+        let b64 = "aB3xZ9qL2mK7pR4tY8wN6vC1dF5gH0jS"; // 32-char dense base64
+        let blob = "8Kp2mZ9qLx4vTn7wRj3sYb6cFd1gHe0"; // 31-char dense base64
+        for (key, val) in [("campaign", aws), ("intent_id", b64), ("pr_id", blob)] {
+            let mut v = json!({ key: val });
+            scrub_payload(&mut v);
+            assert_eq!(
+                v[key], REDACTED,
+                "a dense high-entropy blob in identifier `{key}` MUST redact (L-A)"
+            );
+        }
+    }
+
+    #[test]
+    fn is_safe_identifier_shape_splits_addresses_from_blobs() {
+        // Addresses SURVIVE (true).
+        assert!(is_safe_identifier_shape(
+            "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
+        )); // 40-hex
+        assert!(is_safe_identifier_shape(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        )); // 64-hex
+        assert!(is_safe_identifier_shape("01HQXW8ZK4M9P2N7R3T5V6Y8BC")); // ULID
+        assert!(is_safe_identifier_shape("auth-hardening")); // slug
+        assert!(is_safe_identifier_shape("feature/login")); // branch ref
+        assert!(is_safe_identifier_shape(
+            "feature/long-descriptive-branch-name"
+        )); // long low-entropy slug
+        assert!(is_safe_identifier_shape("pr-9f8e7d6c"));
+        assert!(is_safe_identifier_shape("run-0011-2233"));
+        assert!(is_safe_identifier_shape("42")); // pure integer
+        assert!(is_safe_identifier_shape("gustavo@humangr.com")); // email
+        assert!(is_safe_identifier_shape("sk-256")); // short non-key sk- id
+        // Blobs / credentials REDACT (false).
+        assert!(!is_safe_identifier_shape(
+            "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY123"
+        )); // AWS
+        assert!(!is_safe_identifier_shape(
+            "aB3xZ9qL2mK7pR4tY8wN6vC1dF5gH0jS"
+        )); // 32-char base64
+        assert!(!is_safe_identifier_shape("8Kp2mZ9qLx4vTn7wRj3sYb6cFd1gHe0")); // 31-char dense blob
+        assert!(!is_safe_identifier_shape(GHP)); // structural secret
+        assert!(!is_safe_identifier_shape(
+            "SG.aBcDeFgHiJkLmNoPqRsTuV.wXyZ0123456789aBcDeFgHiJkLmNoPqRsTuVwXyZ012"
+        )); // SendGrid
+        assert!(!is_safe_identifier_shape(
+            "rk_live_51HxYzAbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
+        )); // Stripe
     }
 
     #[test]

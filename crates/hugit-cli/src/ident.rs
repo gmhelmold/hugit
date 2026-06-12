@@ -2,18 +2,20 @@
 //! detector-unified at WJ-INT (adversarial Round-6 residual).
 //!
 //! Identifier fields (`--campaign`, `--owner`, `--pr`, `--id`, `--run-id`) are
-//! ADDRESSES, not free text.  The scrub boundary in `porcelain.rs` exempts them
-//! from the bare-hex + entropy scan so addressing stays consistent — but that
-//! exemption is only safe when the STRUCTURAL-secret scrub there still redacts a
-//! prefixed/conn-string/JWT/PEM secret in an identifier field.
+//! ADDRESSES, not free text.  The scrub boundary in `porcelain.rs` is now
+//! DENY-BY-DEFAULT (L-A, adversarial Round 8): an identifier value survives
+//! verbatim ONLY if it is a PROVABLE safe-address shape
+//! ([`crate::porcelain::is_safe_identifier_shape`] — 40/64-hex / `cas:`/`<algo>:`
+//! content address, ULID, bounded-charset low-entropy slug); anything else —
+//! including a prefix-less high-entropy credential — is `[REDACTED]`.  This door
+//! shares that one gate, so it stays in lockstep with the boundary.
 //!
-//! ⚠ This validator is the door (an early, clear rejection of obvious credential
-//! shapes — a clean exit-2 at input instead of a `[REDACTED]` at rest).  The
-//! SECURITY boundary is the structural-secret scrub in `porcelain.rs`; do not
-//! weaken that on the assumption this validator is sufficient.  This file only
-//! rejects identifiers that carry a recognisable credential shape; bare hex,
-//! ULIDs, slugs, and URLs without embedded credentials all pass through to the
-//! central scrub boundary unchanged.
+//! ⚠ This validator is the door (an early, clear rejection at input — a clean
+//! exit-2 instead of a `[REDACTED]` at rest).  The SECURITY boundary is the scrub
+//! in `porcelain.rs`; do not weaken it on the assumption this validator is
+//! sufficient.  Bare hex, ULIDs, and low-entropy slugs pass the door (they are
+//! provable addresses); a high-entropy credential blob is now rejected here too,
+//! because the boundary it mirrors would redact it.
 //!
 //! ## Two rules
 //!
@@ -31,15 +33,16 @@
 //!    structural-secret detector the scrub boundary uses:
 //!    [`crate::porcelain::structural_secret_scrub`].  The value (trimmed) is
 //!    rejected with `secret_in_identifier` / exit-2 **iff** scrubbing it changes
-//!    it — i.e. iff a structural detector (known-prefix credential, `sk-…` key,
-//!    PEM block, connection-string password, keyword-context) fired.  The door
-//!    and the engine can therefore never drift apart again.
+//!    it — i.e. iff it is NOT a provable safe-address shape (a known-prefix
+//!    credential, `sk-…` key, PEM block, connection-string, keyword-context, OR
+//!    — since L-A — a prefix-less high-entropy credential blob).  The door and
+//!    the boundary share the one gate, so they can never drift apart.
 //!
-//!    ⚠ Bare 40-hex / 64-hex / ULID / slug ADDRESSES are NOT rejected — the
-//!    structural scrub deliberately exempts the bare-hex + entropy scan, so a
-//!    high-entropy content-address survives the door exactly as it survives the
-//!    scrub boundary.  Only the structural credential SHAPES the engine knows
-//!    are rejected.
+//!    ⚠ Bare 40-hex / 64-hex content addresses, ULIDs, and low-entropy slug
+//!    ADDRESSES are NOT rejected — they are provable address shapes the gate
+//!    blesses, so they survive the door exactly as they survive the scrub
+//!    boundary.  Only non-address values (credential shapes + dense high-entropy
+//!    blobs) are rejected.
 //!
 //! ## One shared function
 //!
