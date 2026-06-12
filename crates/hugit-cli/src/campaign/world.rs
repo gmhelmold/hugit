@@ -19,8 +19,8 @@ use hugit_contracts::event_record::EventRecord;
 use hugit_contracts::verdict_object::VerdictObject;
 use hugit_ledger::Ledger;
 use hugit_ledger::rollup::{PrPhase, PrQueueInput, campaign_rollup, pr_record};
+use hugit_refstore::EventLog;
 use hugit_refstore::intent::intents_from_log;
-use hugit_refstore::{EventLog, verify_chain};
 
 use super::output::CampaignError;
 use crate::pr::filelock::{self, FileLock, LockError};
@@ -604,24 +604,21 @@ fn load_canonical_log(path: &Path) -> Result<EventLog, CampaignError> {
     };
     let records: Vec<EventRecord> =
         serde_json::from_slice(&bytes).map_err(|e| CampaignError::parse(&e))?;
-    let mut log = EventLog::new();
-    for record in records {
-        log.push_record(record).map_err(|e| {
-            CampaignError::new(
-                "rehydrate",
-                format!("event log does not rehydrate: {e}"),
-                "the --log file's records must form a gap-free, monotonic chain",
-            )
-        })?;
-    }
-    verify_chain(log.records()).map_err(|e| {
-        CampaignError::new(
+    // PS-13: rehydrate + verify through the SINGLE chokepoint
+    // (`checks::rehydrate_and_verify`); a tampered chain fails closed as
+    // `chain_broken`/exit-2, never re-implementing the verify loop here.
+    crate::checks::rehydrate_and_verify(records).map_err(|fault| match fault {
+        crate::checks::ChainLoadFault::Rehydrate(e) => CampaignError::new(
+            "rehydrate",
+            format!("event log does not rehydrate: {e}"),
+            "the --log file's records must form a gap-free, monotonic chain",
+        ),
+        crate::checks::ChainLoadFault::ChainBroken(e) => CampaignError::new(
             "chain_broken",
             format!("event log failed integrity verification: {e}"),
             "the --log file's hash chain is tampered or corrupt",
-        )
-    })?;
-    Ok(log)
+        ),
+    })
 }
 
 /// Lift an F3 [`hugit_ledger::rollup::RollupError`] into a structured campaign

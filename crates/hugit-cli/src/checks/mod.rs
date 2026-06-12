@@ -375,12 +375,60 @@ fn aggregate_kpis(rows: &[CheckRow]) -> Value {
     })
 }
 
+/// PS-13 — the single read-path chokepoint fault. Distinguishes the two ways a
+/// deserialised set of `[EventRecord, …]` can fail to become an authoritative
+/// [`EventLog`]: a non-monotonic/gappy `seq` (`Rehydrate`) and a tampered/corrupt
+/// hash chain (`ChainBroken`). Each disk loader maps this into its OWN error
+/// type (`crate::porcelain::PorcelainError`, `intent::error::PorcelainError`,
+/// `campaign::output::CampaignError`, or a `pr` `ExitCode`) — but NONE of them
+/// re-implements the `EventLog::new() + push_record + verify_chain` sequence,
+/// which lives in exactly ONE place: [`rehydrate_and_verify`].
+#[derive(Debug)]
+pub enum ChainLoadFault {
+    /// A record's `seq` broke the append-only invariant on rehydrate.
+    Rehydrate(String),
+    /// The hash chain failed integrity verification (tampered/reordered).
+    ChainBroken(String),
+}
+
+/// PS-13 — THE single verified-loader chokepoint. Turn an already-deserialised
+/// `[EventRecord, …]` vector into a hash-chain-VERIFIED [`EventLog`].
+///
+/// This is the ONE production function in `hugit-cli` that runs the
+/// `EventLog::new() + push_record + verify_chain` rehydrate-and-verify sequence
+/// for a log read from disk. Every read verb (`checks`/`queue`/`tournament` via
+/// [`load_event_log`]; `pr`, `campaign`, `intent new`, `intent list`, `export`,
+/// `why`) routes its disk load through this function, so a NEW read verb cannot
+/// project an unverified log without calling it — the recurring "a new read verb
+/// forgot `verify_chain`" root (why/export R7, intent list R8) becomes
+/// structurally unreachable. The `no_unverified_log_projection` source invariant
+/// (test) holds the line: `verify_chain` for a disk load appears in this file
+/// only.
+///
+/// A tampered chain is [`ChainLoadFault::ChainBroken`]; a non-monotonic `seq` is
+/// [`ChainLoadFault::Rehydrate`]. The caller maps the fault into its own error
+/// taxonomy (all surface exit-2).
+pub(crate) fn rehydrate_and_verify(
+    records: Vec<hugit_contracts::event_record::EventRecord>,
+) -> Result<EventLog, ChainLoadFault> {
+    let mut log = EventLog::new();
+    for record in records {
+        log.push_record(record)
+            .map_err(|e| ChainLoadFault::Rehydrate(e.to_string()))?;
+    }
+    // Fail closed on a tampered / corrupt chain — the SINGLE verify gate every
+    // disk read-path passes through.
+    hugit_refstore::verify_chain(log.records())
+        .map_err(|e| ChainLoadFault::ChainBroken(e.to_string()))?;
+    Ok(log)
+}
+
 /// Read `path` (a JSON `[EventRecord, …]` array) into an [`EventLog`], rehydrating
-/// **and verifying** the hash chain. Every fault is the canonical
-/// [`PorcelainError`] (exit `2`): `log_not_found` (absent file — NEVER silently
-/// an empty world), `parse_log` (malformed JSON), `io` (other read fault),
-/// `internal` (a record whose seq breaks the append-only invariant), and
-/// `chain_broken` (the hash chain is tampered/corrupt).
+/// **and verifying** the hash chain via the [`rehydrate_and_verify`] chokepoint.
+/// Every fault is the canonical [`PorcelainError`] (exit `2`): `log_not_found`
+/// (absent file — NEVER silently an empty world), `parse_log` (malformed JSON),
+/// `io` (other read fault), `internal` (a record whose seq breaks the
+/// append-only invariant), and `chain_broken` (the hash chain is tampered/corrupt).
 ///
 /// WF-3: this loader (shared by `checks show` AND `queue show` — the latter
 /// calls it through [`crate::queue`]; and `tournament --log`'s existence check)
@@ -398,21 +446,16 @@ pub fn load_event_log(path: &Path) -> Result<EventLog, PorcelainError> {
     };
     let records: Vec<hugit_contracts::event_record::EventRecord> =
         serde_json::from_slice(&bytes).map_err(|e| PorcelainError::parse_log(path, &e))?;
-    let mut log = EventLog::new();
-    for record in records {
-        log.push_record(record).map_err(|e| {
+    rehydrate_and_verify(records).map_err(|fault| match fault {
+        ChainLoadFault::Rehydrate(e) => {
             PorcelainError::internal(format!("rehydrate log {}: {e}", path.display()))
-        })?;
-    }
-    // Fail closed on a tampered / corrupt chain (the siblings verify; so must we).
-    hugit_refstore::verify_chain(log.records()).map_err(|e| {
-        PorcelainError::new(
+        }
+        ChainLoadFault::ChainBroken(e) => PorcelainError::new(
             "chain_broken",
             format!("log {} failed integrity verification: {e}", path.display()),
             "the --log file's hash chain is tampered or corrupt",
-        )
-    })?;
-    Ok(log)
+        ),
+    })
 }
 
 /// A short (12-char) prefix of a memo key for scannable display. The full key is
