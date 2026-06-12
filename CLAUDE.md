@@ -9,7 +9,7 @@ VCS + merge + CI designed for orchestrated agent fleets, built on CoreLink's
 production CAS (Cloudflare Workers/R2/D1/DO). Founded 2026-06-05.
 
 **Status (as of 2026-06-12, post Waves A/B/C/D/E+F + the wedge wave + G + H + I +
-adversarial rounds 1–6, Wave J in progress, Round 7 pending): the buildable
+J + WK-AC + Wave K, adversarial rounds 1–7 closed, Round 8 pending): the buildable
 product is complete; adversarial hardening is ongoing, not closed.** A
 **17-package** Rust workspace (hugit-app + {ui,exit,sidecar} sub-crates = 4
 crates + 13 feature crates — verified by `cargo metadata --no-deps`
@@ -36,14 +36,38 @@ finding: event-log hash chain is tamper-EVIDENT not tamper-PROOF — honesty
 gap, not a code defect; PS-8 tracks log-auth as P2 seam; Wave I remediated).
 Round 6 (after Wave I) found **7/7 DO-NOT-SHIP** (root cause: Wave I's
 single structural scrub boundary was verified on one verb and asserted for
-all — per-verb identifier pre-scrubs in pr/intent/verdict bypass or precede
-the central boundary; Wave J remediating; Round 7 pending). The integrity
-spine has held under every adversarial round (1–6) plus the SOTA audit.
-`main` is green by the LOCAL gate (fmt + clippy `--workspace --all-targets
---locked -D warnings` + test `--workspace --locked` + deny + audit),
-verified by real exit code (not a piped tail); remote CI on HEAD may be
-in_progress — a concluded remote green is the source of truth and is
-pending. There were two code-gate failures at the Wave-H/I boundary: a fmt
+all; Wave J remediated — the structural detector is now reused by both the
+ident door and the ledger engine, with a per-verb secret MATRIX as the
+permanent guard, then WK-AC closed an `.ac` toolchain leak the matrix
+itself found). Round 7 (after Wave J + WK-AC) found **7/7 DO-NOT-SHIP** —
+and unlike Rounds 2–6 (which skewed to honesty-gaps once the spine held),
+Round 7 surfaced **multiple confirmed CODE defects**, orchestrator-verified
+by live reproduction: (1) a `cas:` exemption that leaked a PAT verbatim
+(exemption-is-a-hole #5, pre-existing since WH-SCRUB); (2) `hugit why`/`export`
+skipped `verify_chain` (read-path integrity + a PS-8 overclaim); (3) verdict
+rejection-laundering by lens substitution; (4) wedge stale-green from an
+uncaptured env axis; (5) `export` raw-append D14 bypass; (6) an
+`ac_busy`→`ac_error` taxonomy collapse that made the concurrency gate
+flaky. **Wave K (`def8a18`) remediated all of them** (K-SCRUB · K-CHAIN ·
+K-VERDICT · K-RUN · K-ERRLAW2, each cold-verified by live attack
+reproduction + a stressed gate); residuals tracked as AR-5/PS-11/PS-12.
+Round 8 (fresh fleet on the integrated state) is pending. The integrity
+spine has held under every adversarial round (1–7) plus the SOTA audit.
+`main` (HEAD `def8a18`, Wave K) is green by the LOCAL gate (fmt + clippy
+`--workspace --all-targets --locked -D warnings` = 0/0 + test
+`--workspace --locked` = 1200 tests / 135 suites, 0 failed + `cargo deny
+check` = 0), read by real bare exit code. **Honest Round-7 correction:** the
+earlier "green, verified by real exit code" claim on the Wave J + WK-AC push
+(`bd95162`) was over-stated — the workspace gate was load-FLAKY
+(`concurrent_checks…` could surface a terminal `ac_error` under parallel
+load) and that push's CI went RED on the `deny` step (exit 127 =
+`cargo-deny` absent on the runner, PS-12 infra). Wave K's K-RUN fixed the
+taxonomy (stress-verified 10/10 + the full workspace run); `cargo audit` is
+not installed locally and the runner lacks `cargo-deny`, so the advisory
+gate is LOCAL-verified via `cargo deny check` only (PS-12). A concluded
+remote green is the source of truth and remains pending on the runner-tooling
+gap. Lesson banked: a fresh adversarial round must run BEFORE a push, and a
+green claim requires a STRESSED flaky-path, not one lucky run. There were two code-gate failures at the Wave-H/I boundary: a fmt
 failure (hotfixed eec3eab) and a clippy `collapsible_if` failure that
 survived the fmt hotfix and was closed by WI-PR (3e49c14, via the Rust
 let-chain collapse) — both traced to a piped gate-check that masked the real

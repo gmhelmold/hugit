@@ -272,7 +272,12 @@ convergence synthesizer (opus3) — strongest blocker of the round.
    rejected by the server when the client attempts to submit the forged log.
 4. `verify_chain` continues to run on every read for partial-corruption detection
    (ordering, dropped/inserted records) — this is orthogonal to server-side auth and
-   remains the local defence.
+   remains the local defence. **(Round 7 honesty correction, closed by Wave K / K-CHAIN
+   `def8a18`):** this criterion was momentarily FALSE — `hugit why` and `hugit export`
+   were two read paths that skipped `verify_chain` and projected a tampered log as
+   authoritative. Both now verify the chain and return `chain_broken` exit-2 on
+   corruption (tests `tampered_chain_is_chain_broken_exit_two_on_{why,export}`); the
+   every-read claim is true again.
 
 **Unblocked by:** P2 CoreLink tenant provisioning; Seams D + E of
 `docs/handoff/2026-06-11-corelink-p2-ceiling-request.md`.
@@ -345,6 +350,28 @@ execution duration cap (WH-CHECK 300s) limits the worst-case accumulation window
 grandchild orphans are an OS-level concern accepted for the local runner tier. The
 Cloudflare Workers-based P2 execution model (Seam D/runners) does not have this problem
 (container isolation).
+
+### AR-5 — Unprefixed high-entropy credential in an identifier field (accepted physics)
+
+**Source:** Round-7 (`docs/review/2026-06-12-adversarial-round-7.md`, finding #9). Identifier
+fields (`--campaign`/`--id`/`--pr`/`--run-id`/`--tree-hash`) are stored UNREDACTED by design —
+they are addresses, not free text — and the structural-secret door rejects only values that
+carry a recognized credential PREFIX/shape (`ghp_`, `xoxb-`, `sk-`, `Bearer`, `AKIA`, `eyJ`,
+PEM, conn-string, `cas:<credential>`). An UNPREFIXED high-entropy string (e.g. a generic
+40-char API key with no vendor marker) in an identifier field therefore survives verbatim.
+
+**Accepted risk:** A random 40-char credential with no structural marker is
+**information-theoretically indistinguishable** from a legitimate address (a ULID, a 40-hex
+SHA, a content-address). Adding an entropy heuristic to the door would reject real addresses
+(false positives that break addressability — the one thing identifiers must preserve). The
+decided posture (lead, 2026-06-12): **do NOT add an entropy heuristic**; accept that an
+unprefixed secret deliberately smuggled into an identifier field is the operator's error,
+not a redaction defect. The forever-log's defence is the prefix/shape detector (closes every
+*recognizable* credential class) plus operator discipline. Revisit only if a forcing function
+(a real vendor token format with no prefix) appears.
+
+**Not mitigated by code; tracked as accepted.** The matrix tests the recognizable classes;
+the unprefixed-entropy class is documented here as out-of-scope-by-physics.
 
 ---
 
@@ -444,10 +471,54 @@ identically. Tracked; no code change required until P2.
 
 ---
 
+## PS-11 — Check `env_manifest` captures only an allowlist; ad-hoc `--cmd` custom env vars are not keyed
+
+K-RUN (`def8a18`, Round 7 finding #4) closed the wedge stale-green by folding a CANONICAL,
+SORTED snapshot of an ALLOWLIST of result-affecting env vars into the memo key (`RUSTFLAGS`,
+`RUSTDOCFLAGS`, `RUSTC*`, `RUSTUP_TOOLCHAIN`, `CC`/`CXX`/`CFLAGS`/`CXXFLAGS`/`LDFLAGS`/`AR`,
+and the `CARGO_`/`RUST_`/`CARGO_BUILD_` prefixes). A change to any of those now busts the key.
+
+**The residual (disclosed, by design):** an **ad-hoc `--cmd` check that reads a CUSTOM env var
+NOT on the allowlist** (e.g. `MY_GATE_MODE`) is still served a warm HIT when only that var
+changes — a missed-miss for that specific check. Full-environment capture was rejected because
+it would fold `PWD`/`SHLVL`/etc. into the key and destroy the hit-rate (the wedge's value).
+
+**Owner/lead decision pending — the proposed fix (K-RUN escalation):** an opt-in
+`--env-axis <VAR>` flag (repeatable) that adds caller-named vars to the keyed manifest, so an
+ad-hoc check can declare exactly the env it depends on. Until then the allowlist covers the
+realistic Rust/Cargo toolchain vectors; an ad-hoc check with a custom env dependency must
+either use an allowlisted var or accept the documented residual. Do NOT silently widen the
+allowlist (that is the "exemption is a hole" failure mode in reverse — an over-broad key
+destroys the wedge).
+
+---
+
+## PS-12 — Self-hosted runner is missing `cargo-deny` / `cargo-audit` (CI gate cannot run the advisory check)
+
+**Source:** Round-7 — CI run 27422619640 (the Wave J + WK-AC push) concluded FAILURE; the
+failing step was `gates/deny` exit **127** (`cargo-deny` binary not found on the self-hosted
+runner). Locally `cargo deny check` passes (exit 0) and covers the RustSec advisory DB; the
+standalone `cargo-audit` is also absent locally. So the advisory gate runs LOCALLY but the
+self-hosted runner cannot run it — a green LOCAL gate is not reproduced on CI for that step.
+
+**Owner:** infra (self-hosted runner provisioning).  
+**Acceptance criteria:** install `cargo-deny` (and `cargo-audit`) on the `corelink-builder`
+runner image so the `gates` job runs the full advisory check; until then the advisory gate is
+LOCAL-verified only, and a `deny`-step CI red of exit 127 is a known infra gap, NOT a code or
+dependency failure. (Distinct from the test/clippy gates, which DO run on the runner.)
+
+---
+
 ## Closed seams (reference — do not re-open without owner approval)
 
 | Seam | Shipped | Governing commit |
 |---|---|---|
+| **`cas:` exemption secret leak** — any `cas:`-prefixed value in a digest field was blanket-exempted from the detector, so `verdict --tree-hash "cas:ghp_…"` stored a PAT verbatim in the forever-log (pre-existing since WH-SCRUB). Round-7 finding #1. | 2026-06-12 (K-SCRUB) | merge `def8a18`; value-gate the `cas:` exemption (run the ONE detector on the payload) + `--tree-hash` door + matrix (`verdict_tree_hash_cas_credential_does_not_survive`). |
+| **`hugit why` / `hugit export` skipped `verify_chain`** — two read paths projected a tampered log as authoritative provenance; PS-8 AC4 was momentarily false. Round-7 findings #2/#5. | 2026-06-12 (K-CHAIN) | merge `def8a18`; both now verify the chain → `chain_broken` exit 2 (`tampered_chain_is_chain_broken_exit_two_on_{why,export}`). |
+| **Verdict rejection-laundering by lens substitution** — `latest-record-wins` let an approve under a novel `--lens` name erase a prior reject from the projection. Round-7 finding #3. | 2026-06-12 (K-VERDICT) | merge `def8a18`; **reject-sticky** resolution (a reject clears only on a SAME-lens re-approval) + post-seal append guard (`campaign_sealed` exit 2). Owner-decided rule. |
+| **Wedge stale-green** — `env_manifest` hardcoded empty, so a result-changing env/`RUSTFLAGS` change did not bust the memo key (missed-miss). Round-7 finding #4. | 2026-06-12 (K-RUN) | merge `def8a18`; allowlist of result-affecting env folded into the key. Residual (custom ad-hoc vars) tracked as PS-11. |
+| **`ac_busy`→`ac_error` taxonomy collapse (flaky gate)** — the retryable lock-exhaustion was flattened to terminal `ac_error`, making `concurrent_checks…` non-deterministic under `--workspace` load. Round-7 finding #6. | 2026-06-12 (K-RUN) | merge `def8a18`; busy path preserves retryable `ac_busy`/`log_busy` kind. Stress-verified 10/10 + full workspace run. |
+| **`pr` I/O fault bare error + `intent new` non-atomic commit** — `pr open/land/abandon` I/O faults emitted bare stderr exit 1 (not structured exit 2); `intent new` saved `--store` before the `--log` append (divergence on log failure). Round-7 findings #7/#8. | 2026-06-12 (K-ERRLAW2) | merge `def8a18`; structured `io_error` exit 2 + log-gated store commit (no orphan, retry converges). |
 | **`.ac` Action-Cache toolchain-digest secret leak** — secret-shaped `--toolchain`/`--def` persisted verbatim into `<log>.ac` (bypassing the `--log` WG-SCRUB seam). FOUND by the WJ-INT per-verb secret matrix; CLOSED by WK-AC (door reject + `FileAc` write-boundary guard). | 2026-06-12 (WK-AC) | merge `d04e199`; tests `check_toolchain_secret_rejected_at_door_and_never_in_ac`, `write_boundary_guard_refuses_a_secret_toolchain_axis`. Defense-in-depth completeness tracked as PS-10. |
 | **PS-1 — Recorder verbs (`hugit check` / `hugit verdict` / `pr.landed`)** | 2026-06-11 (wedge wave W0→W-INT) | CHANGELOG `8b3c9c1` (wedge entry); CHANGELOG WB2 entry (checks show); see note below |
 | `cost_usd f64 → cost_usd_micros u64` (WA4, contract 1.2.0) | 2026-06-11 | CHANGELOG WA4 entry; corelink-runners contract §12 amendment |
