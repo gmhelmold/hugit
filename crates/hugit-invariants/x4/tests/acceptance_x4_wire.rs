@@ -15,7 +15,9 @@
 //! hugit's copy:
 //!
 //! 1. `conformance/manifest.sha256` lists exactly the frozen vector set
-//!    (`RunnerLease.json`, `FenceManifest.json`), and every committed vector
+//!    (`RunnerLease.json`, `FenceManifest.json`, `IntentMetrics.json` —
+//!    the third added by the contract v1.2.0 §13.4 amendment), and every
+//!    committed vector
 //!    hashes to its manifest digest **byte-exactly** — any drift on either
 //!    repo's copy breaks this (or the twin golden in corelink-runners)
 //!    immediately, since both repos commit the SAME `manifest.sha256`.
@@ -27,7 +29,7 @@
 
 use std::path::{Path, PathBuf};
 
-use hugit_contracts::{FenceManifest, RunnerLease};
+use hugit_contracts::{FenceManifest, IntentMetrics, RunnerLease};
 use sha2::{Digest, Sha256};
 
 /// Workspace-root `conformance/` directory, resolved from this crate's
@@ -52,8 +54,13 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-/// The frozen vector set (R0): exactly these two files, in manifest order.
-const VECTORS: [&str; 2] = ["RunnerLease.json", "FenceManifest.json"];
+/// The frozen vector set, in manifest order: R0 (two) plus the §13.4
+/// `IntentMetrics` vector (contract v1.2.0 amendment, schema 1.2.0).
+const VECTORS: [&str; 3] = [
+    "RunnerLease.json",
+    "FenceManifest.json",
+    "IntentMetrics.json",
+];
 
 // ── ① the manifest pins every vector byte-exactly ────────────────────────────
 #[test]
@@ -78,7 +85,7 @@ fn item_1_manifest_pins_every_vector_byte_exact() {
     let names: Vec<&str> = pinned.iter().map(|(_, n)| n.as_str()).collect();
     assert_eq!(
         names, VECTORS,
-        "manifest must list exactly the frozen R0 vector set"
+        "manifest must list exactly the frozen vector set"
     );
 
     // Every committed vector hashes to its pinned digest, byte-exactly.
@@ -136,6 +143,30 @@ fn item_2_fence_manifest_vector_round_trips_through_frozen_type() {
         raw,
         re,
         "FenceManifest wire round-trip is not byte-exact: hugit's frozen type \
+         and the committed vector disagree (byte difference: raw {} bytes, re {} bytes)",
+        raw.len(),
+        re.len(),
+    );
+}
+
+#[test]
+fn item_2_intent_metrics_vector_round_trips_through_frozen_type() {
+    let raw = String::from_utf8(read("IntentMetrics.json")).expect("vector is utf-8");
+    let metrics: IntentMetrics = serde_json::from_str(&raw)
+        .expect("IntentMetrics vector must parse through the frozen type (deny_unknown_fields)");
+    // Re-serialize and append the trailing newline that the committed vector
+    // carries (POSIX text-file convention: serde_json::to_string_pretty does
+    // NOT add a trailing newline, but the committed vector does). The comparison
+    // is byte-exact — trim_end() is intentionally absent so any trailing-byte
+    // drift (added or removed whitespace) immediately breaks this assertion.
+    let re = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&metrics).expect("frozen IntentMetrics serializes")
+    );
+    assert_eq!(
+        raw,
+        re,
+        "IntentMetrics wire round-trip is not byte-exact: hugit's frozen type \
          and the committed vector disagree (byte difference: raw {} bytes, re {} bytes)",
         raw.len(),
         re.len(),
