@@ -15,6 +15,12 @@
 //!   JSON (cost decomposition + progress).  When `--allow-rejected` was used,
 //!   the output carries `"sealed_with_rejected":true` and `"rejected_count":N`
 //!   so downstream tooling sees the non-clean seal.
+//! - **WJ-CLOSE**: `sealed_with_rejected` and `rejected_count` are persisted
+//!   INTO the `campaign.closed` payload at seal time — making the seal
+//!   condition a durable, immutable audit-trail fact.  The idempotent re-close
+//!   path reads these values FROM the persisted payload rather than re-deriving
+//!   them from the live ledger, so a post-close verdict revision cannot rewrite
+//!   the historical seal fact.
 //! - **Envelope seal**: prints `"envelope":"not_captured"` honestly unless a
 //!   campaign envelope ref is available in the world (F2b emits it in dogfood
 //!   waves — if present, the ref is included).
@@ -43,8 +49,13 @@ pub fn run(args: CloseArgs) -> Result<String, CampaignError> {
     // Idempotent close: already sealed → exit 0, no duplicate record.
     // Stable key-set (P8): the re-run shape carries all the same keys as the
     // first-run shape — null over absent where projection is not available.
-    // WI-PROVEN2: carry sealed_with_rejected/rejected_count in the idempotent
-    // path too so the key-set is identical to the first-run path.
+    //
+    // WJ-CLOSE: read sealed_with_rejected / rejected_count from the PERSISTED
+    // campaign.closed payload (the seal-time truth), NOT from the current live
+    // ledger.  A post-close verdict revision must not rewrite the seal fact: the
+    // durable payload is the immutable audit record of the condition AT SEAL TIME.
+    // Fall back to live-ledger derivation only for pre-WJ-CLOSE records that
+    // pre-date the field (backward compat, no new assertions).
     if world.campaign_closed(key) {
         let rollup = world.build_rollup(key, &phases)?;
         let rollup_json = match &rollup {
@@ -60,12 +71,21 @@ pub fn run(args: CloseArgs) -> Result<String, CampaignError> {
         let envelope = world
             .campaign_envelope_ref(key)
             .unwrap_or_else(|| "not_captured".to_string());
-        let rejected_count = world.ledger.rejected(key);
+
+        // Prefer the persisted seal-time condition; fall back to the live ledger
+        // only for pre-WJ-CLOSE records that lack the field (backward compat).
+        let (sealed_with_rejected, rejected_count) = world
+            .campaign_closed_seal_condition(key)
+            .unwrap_or_else(|| {
+                let live_rejected = world.ledger.rejected(key) as u64;
+                (live_rejected > 0, live_rejected)
+            });
+
         return Ok(json!({
             "campaign": key,
             "closed": true,
             "already_closed": true,
-            "sealed_with_rejected": rejected_count > 0,
+            "sealed_with_rejected": sealed_with_rejected,
             "rejected_count": rejected_count,
             "envelope": envelope,
             "progress": progress_counts(&phases),
@@ -155,11 +175,21 @@ pub fn run(args: CloseArgs) -> Result<String, CampaignError> {
         .clone()
         .unwrap_or_else(|| "not_captured".to_string());
 
+    // When --allow-rejected was used to seal over rejected work, surface that
+    // explicitly in the output so downstream tooling sees the non-clean seal.
+    // `sealed_with_rejected:false` when the campaign closed cleanly.
+    let sealed_with_rejected = rejected_count > 0 && args.allow_rejected;
+
     // Append the seal record before printing (the seal must be on the log).
     // D14 guarded: close is a human-owned mutation; use the campaign owner for
     // the principal chain. The `not_opened` guard above guarantees an opened
     // record exists, so `campaign_charter_owner` resolves; the `key` fallback is
     // a defence-in-depth no-op (a malformed opened record with no owner field).
+    //
+    // WJ-CLOSE: persist sealed_with_rejected + rejected_count INTO the payload
+    // so the seal condition is a durable audit-trail fact.  Booleans and counts
+    // are not secrets; they pass through the same append_authorized / scrub
+    // boundary as the existing fields (the scrub is idempotent on plain values).
     let owner = world
         .campaign_charter_owner(key)
         .map(|(_, o)| o)
@@ -167,6 +197,8 @@ pub fn run(args: CloseArgs) -> Result<String, CampaignError> {
     let payload = json!({
         "campaign": key,
         "envelope_ref": campaign_envelope_ref,
+        "sealed_with_rejected": sealed_with_rejected,
+        "rejected_count": rejected_count,
     })
     .to_string();
     append_authorized_and_persist(
@@ -178,11 +210,6 @@ pub fn run(args: CloseArgs) -> Result<String, CampaignError> {
         payload,
         0,
     )?;
-
-    // When --allow-rejected was used to seal over rejected work, surface that
-    // explicitly in the output so downstream tooling sees the non-clean seal.
-    // `sealed_with_rejected:false` when the campaign closed cleanly.
-    let sealed_with_rejected = rejected_count > 0 && args.allow_rejected;
 
     Ok(json!({
         "campaign": key,
