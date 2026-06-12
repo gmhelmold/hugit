@@ -537,7 +537,7 @@ from PS-12's tooling gap which is closed.)
 
 ---
 
-## PS-13 — Read-path `verify_chain` is enforced per-loader, not at one chokepoint (defence-in-depth)
+## PS-13 — Read-path `verify_chain` per-loader, not one chokepoint (RESOLVED 2026-06-12 — Wave M / M-1)
 
 **Source:** Round 8 C2 (the read-path class audit). Every log read MUST `verify_chain` before
 projecting content as authoritative. This is TRUE on `integ/wave-l` for all five current loaders
@@ -552,9 +552,20 @@ behind three consecutive corrections of the PS-8 "every read" claim (R5/R7/R8).
 is the ONLY way to obtain a projectable log; make the raw `EventLog::new() + push_record` read
 pattern `pub(crate)`/unreachable from verbs, so forgetting is a COMPILE error (the same
 "close-by-construction" pattern Wave L applied to redaction (L-A), the append door (L-D / C4),
-and the seal guard (L-D / C5-F2)). **Owner/lead decision pending** — schedule as a follow-up WP
-(small, mechanical: converge five loaders onto one function) once Round 9 confirms the live holes
-are closed.
+and the seal guard (L-D / C5-F2)).
+
+**RESOLVED (2026-06-12, Wave M / M-1):** the single chokepoint exists —
+`checks::rehydrate_and_verify` is the SOLE production site of `EventLog::new() + push_record +
+verify_chain`; `load_event_log` delegates to it. The four canonical loaders (`intent/list`,
+`intent/canonical_log`, `pr/cli`, `campaign/world`) AND the M-3 `intent/new.rs` reconcile path all
+route through it, and a source-invariant test (`canonical_log_loaders_route_through_the_chokepoint`)
+FAILS THE BUILD if any of those files hand-rolls `verify_chain(`/`.push_record(` — so forgetting is
+now a compile error. `why`/`export` read DIFFERENT on-disk shapes and verify their own with their
+own `verify_chain` (documented special-shape siblings, intentionally outside the canonical set);
+`export::restore_from_bytes` skips verify but is not CLI-wired (dead, R10-2 F-2). Round 10 (class 2)
+cold-verified every read verb tampered→`chain_broken` exit-2 incl. the reconcile (fail-closed on a
+tampered log). The PS-8 "every read verifies" claim is now STRUCTURALLY guaranteed for the canonical
+loaders, not just true-today.
 
 ---
 
@@ -594,10 +605,15 @@ UUID / integer / `intent-<16hex>` / slug → survive. Regression specimens added
 **Residual after the hybrid (accepted physics, documented):** a LOW-entropy base32 value (e.g. a
 repetitive TOTP seed, Shannon ≈ 3.4) is neither all-hex nor structural-secret-shaped and clears
 the entropy gate — indistinguishable from a legit slug, so it survives. This is the irreducible
-boundary (you cannot tell a low-entropy base32 secret from a low-entropy base32 address). The
-two scrub engines (`porcelain` identifier door / `redact.rs` free-text) remain hand-kept-in-lockstep
-(R9-3, P2 — a shared-predicate refactor is the long-term close); the PS-14 hybrid is identifier-door
-only (free-text hex tightening is a higher-over-scrub trade, not in scope).
+boundary (you cannot tell a low-entropy base32 secret from a low-entropy base32 address). **R9-3
+RESOLVED (2026-06-12, Wave M / M-2):** the two scrub engines no longer drift by hand — the shared
+structural-secret / content-address-shape / entropy primitives now live in ONE module
+(`crates/hugit-ledger/src/secret_shape.rs`); `porcelain.rs` (identifier door) and `redact.rs`
+(free-text) both call it, keeping their DISTINCT policies (door deny-by-default 4.5 + {40,64}-hex
+pin; free-text 4.0 + bare-hex exemption) but on a single source of truth. Round 10 (class 1)
+cold-verified ZERO behavior drift (a pre-M2 vs post-M2 binary differential was byte-identical over
+162 inputs × 2 layers). The PS-14 hybrid remains identifier-door only (free-text hex tightening is
+a higher-over-scrub trade, not in scope).
 
 ---
 

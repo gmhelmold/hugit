@@ -79,10 +79,20 @@ ids, and slugs stay generous (cold-verified end-to-end). **All 6 classes are
 now CONVERGED** — zero P0/P1 code holes; only tracked seams remain. With
 owner sign-off, `integ/wave-l` was merged to `main` (HEAD `3aa62a4`) and
 pushed; CI run `27440432238` concluded `success` with ALL gates green on the
-runner (incl. `deny`/`audit` — PS-12 resolved). Residuals tracked: PS-11 (closed by L-C hermetic),
-PS-13 (read-path single-chokepoint refactor, defence-in-depth), PS-14
-(redaction tuning, owner), C3 FS/network/clock (P2 runner sandbox),
-C5-F3 intent two-phase reverse-atomicity (P2/P3 seam).
+runner (incl. `deny`/`audit` — PS-12 resolved). **Wave M (post-convergence
+hardening, 2026-06-12) followed**: M-1 closed PS-13 (a single
+`checks::rehydrate_and_verify` read chokepoint + a build-failing
+source-invariant — forgetting `verify_chain` is now a compile error), M-2
+closed R9-3 (the two scrub engines unified onto one `secret_shape.rs` source
+of truth — Round 10 proved ZERO behavior drift via a pre/post binary
+differential), M-3 hardened C5-F3 (intent two-phase commit is now
+atomic-or-recoverable: log-first, atomic store write, self-healing reconcile;
+reduced MEDIUM→LOW). **Round 10** (fresh 4-agent confirmation fleet) found
+**4/4 CONVERGED, zero DO-NOT-SHIP** — Wave M introduced no regression and no
+new hole (the M-3 reconcile fails closed on a tampered log, respects the seal
+guard, is idempotent). Residuals tracked: PS-14 (redaction tuning, owner-DECIDED
+hybrid), C3 FS/network/clock (P2 runner sandbox), C5-F3 (now LOW, P2/P3 seam),
+the caller-asserted principal (P2 identity seam).
 The integrity spine has held under every adversarial round (1–7) plus the
 SOTA audit.
 `main` (HEAD `def8a18`, Wave K) is green by the LOCAL gate (fmt + clippy
