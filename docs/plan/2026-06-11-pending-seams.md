@@ -556,6 +556,43 @@ are closed.
 
 ---
 
+## PS-14 — Deny-by-default identifier scrub: the safe-shape allowlist exempts ANY-length hex / numeric / low-per-char-entropy values (OWNER TUNING DECISION)
+
+**Source:** Round 9 C1 re-audit. Wave L / L-A inverted the identifier scrub to deny-by-default
+(`is_safe_identifier_shape` — a value survives verbatim only if it proves a bounded safe-address
+shape). This **CLOSED the Round-8 P0** (prefix-less dense SaaS keys — AWS/SendGrid/Stripe/base64
+— are now rejected/redacted, cold-verified). The residual: the safe-shape gate uses an entropy
+threshold (≈4.5 bits/char) as the discriminator for charset values, but **hex has a per-char
+entropy CEILING of log2(16)=4.0 < 4.5**, so ANY-length hex always passes — not just the {40,64}-hex
+content-address/digest shapes. The R9 auditor live-confirmed that a 32-hex API key, a 50-hex
+secret, a base32 TOTP seed, and a 24-digit numeric secret **survive verbatim** at rest. They are
+indistinguishable from a legit address (a 64-hex *could* be a sha256 OR a key) on the **physics
+boundary**, but the survivor band is **WIDER than the "{40,64}-hex irreducible residual" the L-A
+docs/matrix claimed** — so this is at minimum a documented-residual honesty correction, and a
+genuine tuning knob.
+
+**Severity:** P1 (honesty/seam) — **NOT a P0 class re-open** (deny-by-default holds; dense
+credentials are caught). **No autonomous code change made:** tightening the gate (e.g. length-pin
+the hex exemption to {40,64}, cap numeric length, raise/replace the entropy rule) risks
+**over-scrubbing legit short identifiers** — git short-hashes (7–12 hex), small integer `--pr`/
+`--run-id` values, short slugs — which is a correctness/UX regression. That security-vs-over-scrub
+trade is the **owner's call**.
+
+**Owner decision pending — options:**
+1. **Accept + document** the wider survivor band honestly (a hex/numeric value indistinguishable
+   from an address is irreducible physics); keep the generous allowlist (no over-scrub).
+2. **Tighten** the hex exemption to known digest lengths {40,64} (+ a numeric-length cap), accept
+   the over-scrub risk on non-standard-length legit hex ids, and add a low-entropy specimen to the
+   `acceptance_wj_matrix` guard.
+3. **Hybrid** — length-pin hex to {40,64} but keep integers/short slugs generous (covers the
+   common legit-id cases while catching odd-length hex/long-numeric secrets).
+
+Also tracked: the guard matrix (`acceptance_wj_matrix`) lacks a low-entropy/odd-length-hex
+specimen (R9-2), and the two scrub engines (`porcelain` / `redact.rs`) remain hand-kept-in-lockstep
+(R9-3, P2) — both fold into whichever option is chosen.
+
+---
+
 ## Closed seams (reference — do not re-open without owner approval)
 
 | Seam | Shipped | Governing commit |
@@ -569,7 +606,7 @@ are closed.
 | **`.ac` Action-Cache toolchain-digest secret leak** — secret-shaped `--toolchain`/`--def` persisted verbatim into `<log>.ac` (bypassing the `--log` WG-SCRUB seam). FOUND by the WJ-INT per-verb secret matrix; CLOSED by WK-AC (door reject + `FileAc` write-boundary guard). | 2026-06-12 (WK-AC) | merge `d04e199`; tests `check_toolchain_secret_rejected_at_door_and_never_in_ac`, `write_boundary_guard_refuses_a_secret_toolchain_axis`. Defense-in-depth completeness tracked as PS-10. |
 | **Round-8 C1 — prefix-less secret leaks through identifier-address fields** — a credential with no known prefix (AWS/SendGrid/Stripe/32-char base64) rode any identifier field (`--id`/`--run-id`/`--principal`/`--campaign`/`--pr`) verbatim into the forever-log + local store; the scrub was a secret-PREFIX allowlist (open-by-default). The 6th "exemption is a hole" instance / the AR-5 reframe. | 2026-06-12 (Wave L / L-A, `integ/wave-l` — **pending merge to main**) | **Polarity inverted to DENY-BY-DEFAULT** (`porcelain::structural_secret_scrub`): an identifier value survives verbatim ONLY if it proves a bounded safe-address shape (`is_safe_identifier_shape`: ULID, sha-hex, `cas:`/digest, low-entropy slug, integer), else the door rejects (`secret_in_identifier` exit 2) or the payload boundary redacts. Cold-verified: AWS key in `--id`→exit 2, in `--charter`→`[REDACTED]`; ULID survives. Matrix `acceptance_wj_matrix` extended with prefix-less specimens. |
 | **Round-8 C2 — `hugit intent list --log` skipped `verify_chain`** — a third read path projected a tampered log as authoritative landed-state. | 2026-06-12 (Wave L / L-B, `integ/wave-l` — **pending merge**) | `resolve_landed` now verifies the chain → `chain_broken` exit 2 (`acceptance_round8_readpath`). Structural residual (per-loader, not one chokepoint) tracked as **PS-13**. |
-| **Round-8 C3 — wedge stale-green from cwd / arbitrary env / PATH** — the memo key tried to ENUMERATE the inputs of a non-hermetic `sh -c`; cwd, an unlisted env var, and PATH were uncaptured → cached PASS where a real run FAILs. | 2026-06-12 (Wave L / L-C, `integ/wave-l` — **pending merge**) | **Hermetic execution** in `ProcessRunner::run`: `env_clear()` + captured allowlist only, `cwd` pinned to `--root`, PATH pinned + hashed into the env axis. cwd/env/PATH changes now MISS (cold-verified). FS/network/clock = disclosed P2 runner-sandbox seam. Supersedes the PS-11 allowlist residual. |
+| **Round-8 C3 — wedge stale-green from cwd / arbitrary env / PATH** (+ **Round-9: stdin**) — the memo key tried to ENUMERATE the inputs of a non-hermetic `sh -c`; cwd, an unlisted env var, PATH, and (found in the R9 re-audit) **stdin** were uncaptured → cached PASS where a real run FAILs. | 2026-06-12 (Wave L / L-C + R9-C3, `integ/wave-l` — **pending merge**) | **Hermetic execution** in `ProcessRunner::run`: `env_clear()` + captured allowlist only, `cwd` pinned to `--root`, PATH pinned + hashed into the env axis, **stdin nulled** (`Stdio::null()`). cwd/env/PATH/stdin changes now MISS or are deterministic (cold-verified; test `stdin_is_nulled_not_inherited`). FS/network/clock = disclosed P2 runner-sandbox seam. Supersedes the PS-11 allowlist residual. |
 | **Round-8 C5-F1 — within-record lens-substitution launders a sticky reject** — `verdict --lens X reject --lens X approve` in ONE call projected `proven:1 rejected:0` (the ledger fold was last-wins within a record; K-VERDICT only fixed cross-record). | 2026-06-12 (Wave L / L-D, `integ/wave-l` — **pending merge**) | The fold is reject-sticky WITHIN a record (`merge_lens_outcome`); the recorder refuses a conflicting duplicate-lens input (`duplicate_lens` exit 2). Cold-verified; legit single reject / multi-lens / cross-record clear all intact. |
 | **Round-8 C5-F2 — a SEALED campaign was not terminal** — the post-seal guard was point-local to `verdict`; `intent new`/`pr open|land|settle|abandon` still appended into a closed campaign. | 2026-06-12 (Wave L / L-D, `integ/wave-l` — **pending merge**) | A single shared seal guard enforced at the `hugit-refstore` append chokepoint, so ALL campaign-scoped verbs inherit it → `campaign_sealed` exit 2. Cold-verified across intent + pr; `done` stays put. Compound: clean-seal over a reject now requires `--allow-rejected`. |
 | **Round-8 C4 — the raw `EventLog::append` door was workspace-`pub`** — "every verb routes through `append_authorized`" was enforced by prose, not types (latent; Round-7 export bug was this door). | 2026-06-12 (Wave L / L-D, `integ/wave-l` — **pending merge**) | `append` demoted to `pub(crate)`; cross-crate users routed through `append_authorized` or a typed closed-enum `append_external_change(ExternalChangeKind)` shim; test-only raw access is the `#[cfg(feature="test-support")]` `append_for_test`. A forged cross-crate raw `pr.opened` no longer compiles. |

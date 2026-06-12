@@ -65,11 +65,21 @@ hermetic check execution · `pub(crate)` append door + typed shim · single
 seal-guard chokepoint + within-record reject-sticky fold · typed
 `AcError::Busy` + clap envelope) on branch `integ/wave-l`
 (L-A·L-B·L-C·L-D), each live-attack cold-verified by the orchestrator.
-Round 9 (re-audit the same matrices to confirm convergence = zero P0/P1
-code holes) is PENDING; `integ/wave-l` is NOT yet merged and the push is
-HELD until Round 9 converges + owner sign-off. Residuals tracked:
-PS-11 (now closed by L-C hermetic), PS-13 (read-path single-chokepoint
-refactor, defence-in-depth), C3 FS/network/clock (P2 runner sandbox).
+**Round 9 (the convergence re-audit, fresh 6-agent fleet) RAN** — 5 of 6
+classes CONVERGED on first pass (read-path · authz · state-machine ·
+error-law matrices clean by live repro; redaction's P0 closed). The one
+residual CODE hole it surfaced — a C3 `stdin` stale-green the L-C hermetic
+fix missed (`stdin` was inherited, not nulled) — was fixed and cold-verified
+(R9-C3: `.stdin(Stdio::null())`, test `stdin_is_nulled_not_inherited`). The
+SOLE open item is an **owner tuning decision** (PS-14): the deny-by-default
+redaction safe-shape allowlist exempts ANY-length hex/numeric, so the
+survivor band is wider than the documented {40,64}-hex residual — a
+security-vs-over-scrub knob, not a P0 (dense SaaS keys ARE rejected).
+`integ/wave-l` is NOT yet merged; the push is HELD until owner sign-off +
+the PS-14 decision. Residuals tracked: PS-11 (closed by L-C hermetic),
+PS-13 (read-path single-chokepoint refactor, defence-in-depth), PS-14
+(redaction tuning, owner), C3 FS/network/clock (P2 runner sandbox),
+C5-F3 intent two-phase reverse-atomicity (P2/P3 seam).
 The integrity spine has held under every adversarial round (1–7) plus the
 SOTA audit.
 `main` (HEAD `def8a18`, Wave K) is green by the LOCAL gate (fmt + clippy
@@ -78,10 +88,11 @@ SOTA audit.
 check` = 0), read by real bare exit code. The Wave L integration branch
 `integ/wave-l` (3 docs/audit commits + L-A·L-B·L-C·L-D) is green by the same
 LOCAL gate (fmt + clippy `--workspace --all-targets --locked -D warnings` =
-0/0 + test `--workspace --locked` = **1233 tests / 140 suites, 0 failed**),
-read by real bare exit code; it merges to `main` only after Round 9 confirms
-convergence (the lesson banked below — a fresh adversarial round runs BEFORE
-any push). **Honest Round-7 correction:** the
+0/0 + test `--workspace --locked` = **1234 tests / 140 suites, 0 failed**),
+read by real bare exit code; it merges to `main` only after owner sign-off +
+the PS-14 redaction-tuning decision (the lesson banked below — a fresh
+adversarial round runs BEFORE any push; Round 9 has run and converged 5/6,
+the 6th being a tuning decision, not a code hole). **Honest Round-7 correction:** the
 earlier "green, verified by real exit code" claim on the Wave J + WK-AC push
 (`bd95162`) was over-stated — the workspace gate was load-FLAKY
 (`concurrent_checks…` could surface a terminal `ac_error` under parallel
