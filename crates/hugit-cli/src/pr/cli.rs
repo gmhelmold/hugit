@@ -390,25 +390,22 @@ fn load_log(path: &PathBuf) -> Result<EventLog, ExitCode> {
     };
     let records: Vec<EventRecord> = serde_json::from_slice(&bytes)
         .map_err(|e| emit_porcelain(&PorcelainError::parse_log(path, &e)))?;
-    let mut log = EventLog::new();
-    for record in records {
-        log.push_record(record).map_err(|e| {
-            emit_porcelain(&PorcelainError::new(
-                "rehydrate",
-                format!("rehydrate log {path:?}: {e}"),
-                "the --log file's records must form a gap-free, monotonic chain",
-            ))
-        })?;
-    }
-    // Fail closed on a tampered / corrupt chain (the siblings verify; so must we).
-    hugit_refstore::verify_chain(log.records()).map_err(|e| {
-        emit_porcelain(&PorcelainError::new(
+    // PS-13: rehydrate + verify the chain through the SINGLE chokepoint
+    // (`checks::rehydrate_and_verify`) rather than re-implementing the
+    // `EventLog::new() + push_record + verify_chain` loop here. A tampered chain
+    // is `chain_broken`/exit-2 (the siblings verify; so must we).
+    crate::checks::rehydrate_and_verify(records).map_err(|fault| match fault {
+        crate::checks::ChainLoadFault::Rehydrate(e) => emit_porcelain(&PorcelainError::new(
+            "rehydrate",
+            format!("rehydrate log {path:?}: {e}"),
+            "the --log file's records must form a gap-free, monotonic chain",
+        )),
+        crate::checks::ChainLoadFault::ChainBroken(e) => emit_porcelain(&PorcelainError::new(
             "chain_broken",
             format!("log {path:?} failed integrity verification: {e}"),
             "the --log file's hash chain is tampered or corrupt",
-        ))
-    })?;
-    Ok(log)
+        )),
+    })
 }
 
 /// Like [`load_log`], but a missing file yields a fresh empty log (the `open`

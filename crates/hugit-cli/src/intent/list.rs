@@ -176,30 +176,26 @@ fn resolve_landed(log_path: &Path) -> Result<std::collections::HashSet<String>, 
         )
     })?;
 
-    let mut log = hugit_refstore::EventLog::new();
-    for record in records {
-        log.push_record(record).map_err(|e| {
-            PorcelainError::new(
-                "rehydrate",
-                format!("rehydrate log {}: {e}", log_path.display()),
-                "the --log file's records must form a gap-free, monotonic chain",
-            )
-        })?;
-    }
-
-    // THE FIX (L-B): verify the hash chain before projecting landed state.
-    // The original code omitted this call, so a tampered payload was projected
-    // as authoritative.  Every sibling read-path (checks/pr/campaign/verdict/
-    // queue) calls verify_chain; intent list must too.
-    hugit_refstore::verify_chain(log.records()).map_err(|e| {
-        PorcelainError::new(
+    // PS-13 (was the L-B fix): rehydrate + verify the chain through the SINGLE
+    // chokepoint (`checks::rehydrate_and_verify`) every read-path shares — never
+    // re-implementing the `EventLog::new() + push_record + verify_chain` loop
+    // here, which is how this verb shipped the R8 hole in the first place. A
+    // tampered chain is `chain_broken`/exit-2, never projected as authoritative
+    // landed state.
+    let log = crate::checks::rehydrate_and_verify(records).map_err(|fault| match fault {
+        crate::checks::ChainLoadFault::Rehydrate(e) => PorcelainError::new(
+            "rehydrate",
+            format!("rehydrate log {}: {e}", log_path.display()),
+            "the --log file's records must form a gap-free, monotonic chain",
+        ),
+        crate::checks::ChainLoadFault::ChainBroken(e) => PorcelainError::new(
             "chain_broken",
             format!(
                 "log {} failed integrity verification: {e}",
                 log_path.display()
             ),
             "the --log file's hash chain is tampered or corrupt",
-        )
+        ),
     })?;
 
     let ids = intents_from_log(&log)

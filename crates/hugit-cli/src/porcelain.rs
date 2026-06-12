@@ -451,291 +451,24 @@ pub fn structural_secret_scrub(s: &str) -> String {
 /// SendGrid/Stripe token, a 32-char dense base64 blob. When in doubt we prefer
 /// redaction (security); the entropy floor is tuned so the legitimate address
 /// shapes above all clear it.
-pub fn is_safe_identifier_shape(s: &str) -> bool {
-    let t = s.trim();
-    if t.is_empty() {
-        // An empty/whitespace value carries no secret and MUST pass through
-        // UNCHANGED (return safe → the scrub is a no-op). Turning `""` into the
-        // sentinel would mask emptiness from downstream checks — e.g. `pr open`'s
-        // empty-`--run-id` binding test reads an empty run-id as "unbound" and
-        // refuses; a `[REDACTED]` would look bound. Emptiness is the door's
-        // separate `invalid_argument` rule, not the secret scrub's job.
-        return true;
-    }
-    // A structural credential shape is never an address — redact.
-    if is_structural_secret(t) {
-        return false;
-    }
-    // A 40/64-hex digest or a `cas:`/`<algo>:` content-address ref is the
-    // canonical high-entropy address that MUST survive (a real CID clears the
-    // entropy floor — exit early before the entropy gate below would reject it).
-    if is_digest_shaped(t) {
-        return true;
-    }
-    // A ULID is the canonical intent-id shape — 26-char Crockford base32 — and is
-    // high-entropy by construction (~4.6 bits/char), so it would trip the generic
-    // entropy gate below. Recognise it EXPLICITLY as a structured address so it
-    // survives. The Crockford base32 charset (no `I`/`L`/`O`/`U`) and the exact
-    // length-26 are a narrow, closed shape; a credential is overwhelmingly not
-    // length-26 base32 (the same accepted-residual class as a bare hex CID).
-    if is_ulid_shaped(t) {
-        return true;
-    }
-    // Bounded identifier charset only — a value outside it is not an address the
-    // flow uses. `@`, `:`, `/`, `.` are the address punctuation the flow uses
-    // (emails, branch refs, scoped ids); `_`/`-` are slug separators. (`+`/`=`
-    // base64 padding chars are admitted to the charset but caught by the entropy
-    // gate below if they form a dense blob.)
-    if !t
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '@' | ':' | '/' | '+' | '-'))
-    {
-        return false;
-    }
-    // PS-14 (Round-9 C1 tuning — owner-chosen HYBRID: hex exemption pinned to the
-    // known digest lengths {40,64}, integers and slugs left generous). The 40/64-hex
-    // digests and `cas:` refs already survived above (`is_digest_shaped`). A long
-    // BARE hex run of ANY OTHER length — equivalently any long all-`[0-9a-fA-F]`
-    // run, which also subsumes a long all-NUMERIC run — is not a known address
-    // shape, and the generic entropy gate below CANNOT catch it (hex tops out at
-    // 4.0 bits/char and decimal at ~3.32, both under the threshold). So a 32/50-hex
-    // API key or a 24-digit numeric secret would otherwise leak verbatim. Treat
-    // such a value as a credential → redact. SHORT numerics (`--pr 7`, a CI
-    // `--run-id 12345`) stay safe (len < the floor); prefixed ids (`intent-<16hex>`),
-    // UUIDs (hyphens → not all-hex), and slugs (letters/punctuation) are unaffected.
-    // (A LOW-entropy base32 value remains the accepted physics residual —
-    // indistinguishable from a slug; tracked in PS-14.)
-    if t.len() >= IDENT_ENTROPY_MIN_LEN && t.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return false;
-    }
-    // The one place the entropy signal belongs for identifiers: an identifier is
-    // not allowed to BE a long, dense, high-entropy non-hex blob (an AWS /
-    // SendGrid / Stripe key). A long LOW-entropy slug
-    // (`feature/long-descriptive-branch-name`) survives; a long dense random run
-    // redacts. Short values (< the credential floor) and structured hex
-    // addresses (handled above) always survive.
-    if t.len() >= IDENT_ENTROPY_MIN_LEN && ident_shannon_entropy(t) >= IDENT_ENTROPY_THRESHOLD {
-        return false;
-    }
-    true
-}
-
-/// True iff `s` is a ULID — exactly 26 chars of Crockford base32
-/// (`0-9A-HJKMNP-TV-Z`, i.e. no `I`/`L`/`O`/`U`). The canonical hugit intent-id
-/// shape; high-entropy by construction so it needs an EXPLICIT survival path
-/// (the generic entropy gate would otherwise redact it). A credential is
-/// overwhelmingly not length-26 Crockford base32, so this is a narrow, closed
-/// address shape (the same accepted-residual class as a bare hex content-id).
-fn is_ulid_shaped(s: &str) -> bool {
-    s.len() == 26
-        && s.bytes().all(|b| {
-            b.is_ascii_digit()
-                || matches!(b,
-                    b'A'..=b'H' | b'J' | b'K' | b'M' | b'N' | b'P'..=b'T' | b'V'..=b'Z')
-        })
-}
-
-/// Minimum length before the identifier entropy gate considers a value a
-/// possible credential blob. Mirrors the engine's `ENTROPY_MIN_LEN` (20) so a
-/// short id is never entropy-rejected; a 40-char AWS key clears it.
-const IDENT_ENTROPY_MIN_LEN: usize = 20;
-
-/// Shannon-entropy threshold (bits/char) above which a long identifier run is
-/// treated as a credential blob rather than an address. A ULID (Crockford
-/// base32, structured) and human slugs sit well under; a dense random base64
-/// AWS/SendGrid/Stripe key clears it. Set slightly above the engine's free-text
-/// 4.0 so a ULID's structured base32 still SURVIVES (it is a real address) while
-/// a 40-char dense mixed-case base64 key redacts.
-const IDENT_ENTROPY_THRESHOLD: f64 = 4.5;
-
-/// Shannon entropy (bits/char) of an identifier value — a local mirror of the
-/// engine's private `shannon_entropy`, used only by the identifier address gate.
-fn ident_shannon_entropy(s: &str) -> f64 {
-    let bytes = s.as_bytes();
-    if bytes.is_empty() {
-        return 0.0;
-    }
-    let mut counts = [0usize; 256];
-    for &b in bytes {
-        counts[b as usize] += 1;
-    }
-    let len = bytes.len() as f64;
-    let mut entropy = 0.0;
-    for &count in counts.iter() {
-        if count == 0 {
-            continue;
-        }
-        let p = count as f64 / len;
-        entropy -= p * p.log2();
-    }
-    entropy
-}
-
-/// True iff `s` trips a STRUCTURAL secret detector — the four `redact::apply`
-/// detector classes that do NOT depend on entropy/bare-hex shape. Mirrors the
-/// engine's private `is_secret` minus its detector (5). Kept in lockstep with
-/// `hugit_ledger::redact`; the engine remains the law for free text.
-fn is_structural_secret(s: &str) -> bool {
-    // (1) the planted marker (same as the engine).
-    if s.contains(hugit_ledger::redact::SECRET_MARKER) {
-        return true;
-    }
-    // (2) known credential prefixes (substring match, as the engine does).
-    if KNOWN_SECRET_PREFIXES.iter().any(|p| s.contains(p)) {
-        return true;
-    }
-    // (2b) `sk-` with the engine's ≥20-token-char length gate.
-    if contains_sk_key(s) {
-        return true;
-    }
-    // PEM private-key blocks.
-    if s.contains("-----BEGIN") && s.contains("PRIVATE KEY") {
-        return true;
-    }
-    // (3) connection-string password.
-    if contains_connection_string_password(s) {
-        return true;
-    }
-    // (4) keyword-context secret (`token=…`, `password: …`).
-    if contains_keyword_context_secret(s) {
-        return true;
-    }
-    // (5) bare-hex + high-entropy scan — DELIBERATELY OMITTED so an address
-    //     (40/64-hex content address or a dense high-entropy slug) survives.
-    false
-}
-
-/// Known credential prefixes that are secrets by construction — the structural
-/// mirror of the engine's `KNOWN_PREFIXES` (case-sensitive, as issuers mint
-/// them). `sk-` is handled separately ([`contains_sk_key`]) with a length gate.
-const KNOWN_SECRET_PREFIXES: &[&str] = &[
-    "ghp_",
-    "gho_",
-    "ghs_",
-    "github_pat_",
-    "AKIA",
-    "xoxb-",
-    "xoxp-",
-    "xoxo-",
-    "xoxa-",
-    "xoxs-",
-    "clp_",
-    "Bearer ",
-    "eyJ",
-];
-
-/// Minimum run of base64/hex chars after `sk-` for the engine's `sk-` gate.
-const SK_MIN_SUFFIX_LEN: usize = 20;
-
-/// Recognised credential keywords (lowercase) for the keyword-context detector —
-/// mirrors the engine's `KEYWORD_PREFIXES`.
-const SECRET_KEYWORDS: &[&str] = &["password", "passwd", "secret", "token", "api_key", "pwd"];
-
-/// A char that can appear inside a base64/hex token run (engine's `is_token_char`).
-fn is_secret_token_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=' || c == '-' || c == '_'
-}
-
-/// True iff `s` contains an `sk-` API key (mirrors the engine's `has_sk_key`):
-/// the suffix run (including `-`/`_`) is ≥ [`SK_MIN_SUFFIX_LEN`] token chars, OR
-/// it is the OpenAI project-key marker `proj-<non-empty id>` (so a short
-/// `sk-proj-leaklens99999` redacts). Short non-key ids (`sk-256`, `sk-learn`)
-/// do NOT fire. Kept in lockstep with `hugit_ledger::redact::has_sk_key`.
-fn contains_sk_key(s: &str) -> bool {
-    let needle = "sk-";
-    let mut search = s;
-    while let Some(pos) = search.find(needle) {
-        let after = &search[pos + needle.len()..];
-        let run: String = after
-            .chars()
-            .take_while(|&c| is_secret_token_char(c))
-            .collect();
-        if run.chars().count() >= SK_MIN_SUFFIX_LEN {
-            return true;
-        }
-        if let Some(id) = run.strip_prefix("proj-")
-            && !id.is_empty()
-        {
-            return true;
-        }
-        let advance = pos + needle.len();
-        if advance >= search.len() {
-            break;
-        }
-        search = &search[advance..];
-    }
-    false
-}
-
-/// True iff `s` carries a URL with an embedded `user:password@host` (mirrors the
-/// engine's `has_connection_string_password`). A bare-hex address has no `://`,
-/// so this never fires on one.
-fn contains_connection_string_password(s: &str) -> bool {
-    let mut search = s;
-    while let Some(scheme_end) = search.find("://") {
-        let authority_start = scheme_end + 3;
-        if authority_start >= search.len() {
-            break;
-        }
-        let authority_str = &search[authority_start..];
-        let authority_len = authority_str
-            .find(['/', '?', '#'])
-            .unwrap_or(authority_str.len());
-        let authority = &authority_str[..authority_len];
-        if let Some(at_pos) = authority.find('@') {
-            let userinfo = &authority[..at_pos];
-            if let Some(colon_pos) = userinfo.find(':')
-                && !userinfo[colon_pos + 1..].is_empty()
-            {
-                return true;
-            }
-        }
-        search = &search[authority_start..];
-    }
-    false
-}
-
-/// True iff `s` contains a credential keyword immediately followed by `=`/`:` and
-/// a non-empty value (mirrors the engine's `has_keyword_context_secret`). An
-/// address has no `keyword=value` shape, so this never fires on one.
-fn contains_keyword_context_secret(s: &str) -> bool {
-    let lower = s.to_ascii_lowercase();
-    let bytes = lower.as_bytes();
-    for kw in SECRET_KEYWORDS {
-        let mut pos = 0usize;
-        while pos < lower.len() {
-            let Some(kw_pos) = lower[pos..].find(kw) else {
-                break;
-            };
-            let abs_kw_start = pos + kw_pos;
-            let after_kw = abs_kw_start + kw.len();
-            let before_ok = abs_kw_start == 0 || !bytes[abs_kw_start - 1].is_ascii_alphanumeric();
-            if before_ok {
-                let mut sep_idx = after_kw;
-                while bytes
-                    .get(sep_idx)
-                    .is_some_and(|b| *b == b' ' || *b == b'\t')
-                {
-                    sep_idx += 1;
-                }
-                if let Some(sep_byte) = bytes.get(sep_idx)
-                    && (*sep_byte == b'=' || *sep_byte == b':')
-                {
-                    let value = s.get(sep_idx + 1..).unwrap_or("").trim_start();
-                    if !value.is_empty() {
-                        return true;
-                    }
-                }
-            }
-            let advance = abs_kw_start + kw.len();
-            if advance <= pos {
-                break;
-            }
-            pos = advance;
-        }
-    }
-    false
-}
+///
+/// R9-3 (Wave M / M-2): the policy BODY is single-sourced from
+/// [`hugit_ledger::secret_shape::is_safe_identifier_shape`] (next to the shared
+/// structural / shape / entropy primitives it is built on), so the identifier
+/// door and the payload boundary call ONE implementation and cannot drift. This
+/// `pub use` keeps the symbol on the porcelain surface (callers, `ident.rs`, and
+/// the `acceptance_wj_matrix` reference `porcelain::is_safe_identifier_shape`).
+///
+/// R9-3 also retired the hand-mirrored porcelain structural-secret copy
+/// (`KNOWN_SECRET_PREFIXES`, `contains_sk_key`,
+/// `contains_connection_string_password`, `contains_keyword_context_secret`,
+/// `is_secret_token_char`, `SECRET_KEYWORDS`, `SK_MIN_SUFFIX_LEN`) and the
+/// content-address-shape copy (`is_bare_hex_digest`, `is_content_address_ref`,
+/// `is_cas_payload_shaped`, `is_digest_algo`, the local `is_ulid_shaped` /
+/// `ident_shannon_entropy` / `IDENT_ENTROPY_*`): all those primitives are
+/// single-sourced from [`hugit_ledger::secret_shape`], so the door, the payload
+/// boundary, and the free-text engine share ONE detector and cannot drift.
+pub use hugit_ledger::secret_shape::is_safe_identifier_shape;
 
 /// True iff `key` names a content-address / digest field. NAME-only — pair with
 /// [`is_digest_shaped`] (the value gate) before exempting; a digest NAME alone no
@@ -749,85 +482,17 @@ pub fn is_digest_key(key: &str) -> bool {
 }
 
 /// True iff `value` is actually digest-SHAPED — the value gate for the digest
-/// exemption (WH-SCRUB). A field is exempt from scrub ONLY when BOTH its key names
-/// a digest AND its value matches this shape:
+/// exemption (WH-SCRUB): a bare 40/64-hex run OR a value-gated `cas:`/`<algo>:`
+/// content-address ref. A real `memo_key`/`sha256:…`/`cas:<64-hex>` survives; a
+/// `ghp_…`/JWT/conn-string smuggled into a digest-named field does NOT match → it
+/// scrubs.
 ///
-/// - a **bare** 40- or 64-char run of hex digits (sha-1 / sha-256), OR
-/// - a content-address ref with an explicit algorithm prefix: `sha256:<hex>` /
-///   `sha1:<hex>` / `cas:<payload>` / any recognised `<algo>:<40|64-hex>`.
-///
-/// A real `memo_key` (64-hex), a `sha256:abc…` ref, or a 40-hex `commit` survives;
-/// a `ghp_…` / JWT / connection-string smuggled into a digest-named field does NOT
-/// match → it falls through to the scrub. This is the local mirror of the ledger's
-/// own `is_bare_hex_digest_shape` / `is_content_address_ref` (private there);
-/// kept tight so a real digest survives and a secret-shaped value scrubs.
-fn is_digest_shaped(value: &str) -> bool {
-    is_bare_hex_digest(value) || is_content_address_ref(value)
-}
-
-/// A **bare** 40- or 64-char run of hex digits (no prefix) — the sha-1 / sha-256
-/// content-address shapes. Mirrors `hugit_ledger::redact::is_bare_hex_digest_shape`.
-fn is_bare_hex_digest(value: &str) -> bool {
-    matches!(value.len(), 40 | 64) && value.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-/// A content-address ref carrying an explicit algorithm prefix: `cas:<payload>`
-/// or `<algo>:<40|64-hex>` where `<algo>` names a recognised hash family.
-///
-/// VALUE-GATED (K-SCRUB, the Round-7 hole — the 5th "an exemption is a hole"):
-/// the `cas:` prefix no longer blanket-exempts ANY payload. The payload after the
-/// `cas:` prefix must be a genuine content-address SHAPE
-/// ([`is_cas_payload_shaped`]) — a bare 40/64-hex run or a base32 CID — AND must
-/// not trip a structural-secret detector ([`is_structural_secret`]). A
-/// `cas:ghp_…` / `cas:<JWT>` / `cas:<conn-string>` is NOT a content address: it
-/// falls through here and scrubs to `[REDACTED]`, never stored verbatim. A real
-/// `cas:<64-hex>` (or base32 CID) still survives — addressability preserved.
-///
-/// Mirrors `hugit_ledger::redact::is_content_address_ref` (kept in lockstep).
-fn is_content_address_ref(value: &str) -> bool {
-    if let Some(payload) = value.strip_prefix("cas:") {
-        // VALUE-GATE: a `cas:` ref survives only when its payload is genuinely
-        // content-address shaped AND not structurally a secret. Both gates: the
-        // shape rejects credential charsets (`_`, uppercase prefixes); the
-        // structural detector is the authoritative belt-and-braces guard.
-        return is_cas_payload_shaped(payload) && !is_structural_secret(payload);
-    }
-    let Some((algo, hex)) = value.split_once(':') else {
-        return false;
-    };
-    is_digest_algo(algo)
-        && matches!(hex.len(), 40 | 64)
-        && hex.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-/// True iff `payload` (the part after a `cas:` prefix) is a genuine
-/// content-address SHAPE: either a bare 40/64-char hex run (sha-1 / sha-256) or a
-/// base32 content-id (lowercase `[a-z2-7]`, the CIDv1/multibase-b charset, of a
-/// content-address-plausible length). A credential smuggled behind `cas:` (`ghp_…`,
-/// a JWT, a connection string) does NOT match this charset/length, so it is not a
-/// content address. Mirrors `hugit_ledger::redact::is_cas_payload_shaped`.
-fn is_cas_payload_shaped(payload: &str) -> bool {
-    // Bare hex content address (sha-1 / sha-256).
-    if matches!(payload.len(), 40 | 64) && payload.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return true;
-    }
-    // base32 content-id: lowercase RFC-4648 base32 charset (`a-z2-7`), of a
-    // content-address-plausible length (a CIDv1 base32 of a sha-256 is ~59
-    // chars; allow the 32–64 band that real content ids fall in).
-    matches!(payload.len(), 32..=64)
-        && payload
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b))
-}
-
-/// Recognised content-address algorithm tags (case-insensitive). Mirrors the
-/// ledger's `is_digest_algo`. A bare unknown prefix does NOT exempt.
-fn is_digest_algo(algo: &str) -> bool {
-    matches!(
-        algo.to_ascii_lowercase().as_str(),
-        "sha1" | "sha256" | "sha-1" | "sha-256" | "sha512" | "sha-512" | "blake3" | "cas" | "oid"
-    )
-}
+/// R9-3 (Wave M / M-2): single-sourced from
+/// [`hugit_ledger::secret_shape::is_digest_shaped`] (the `is_bare_hex_digest` /
+/// `is_content_address_ref` / `is_cas_payload_shaped` / `is_digest_algo`
+/// hand-mirrored porcelain copies are GONE), so the digest value-gate cannot
+/// drift from the engine's `cas:` value-gate (K-SCRUB).
+use hugit_ledger::secret_shape::is_digest_shaped;
 
 /// True iff `key` names an identifier-ADDRESS field — a key the flow looks up by,
 /// not free text. These get the STRUCTURAL-secret scrub ([`structural_secret_scrub`]),
@@ -904,6 +569,9 @@ pub fn not_implemented_json(wp: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // R9-3: these primitives now live in the single-source module; the existing
+    // tests reference them by name, so import them directly here.
+    use hugit_ledger::secret_shape::{is_content_address_ref, is_structural_secret};
 
     #[test]
     fn error_json_is_the_one_canonical_shape() {

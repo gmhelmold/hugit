@@ -29,7 +29,9 @@
 use std::path::{Path, PathBuf};
 
 use hugit_contracts::IntentSidecar;
-use hugit_refstore::intent::import_sidecar;
+use hugit_contracts::event_record::EventRecord;
+use hugit_refstore::EventLog;
+use hugit_refstore::intent::{import_sidecar, intents_from_log};
 use sha2::{Digest, Sha256};
 
 use super::canonical_log;
@@ -116,6 +118,30 @@ fn derive_intent_id(charter: &str, campaign: &str, acceptance: &[String], agent:
 ///
 /// Idempotent: a duplicate id (explicit or content-derived) returns the
 /// existing intent with `already_exists:true` and exit 0.
+///
+/// ## Two-phase commit atomicity (C5-F3 / M-3)
+///
+/// `intent new --log L --store S` is a two-phase write: it appends the
+/// `intent.landed` record to the hash-chained, append-only `--log` (the
+/// **source of truth**, via [`canonical_log::land_intent`]) AND saves the
+/// intent into the `--store`. The two cannot be made a single atomic write
+/// across two files; the design instead guarantees **atomic-or-recoverable**:
+///
+/// 1. **Each individual write is atomic** — the store save lands via
+///    temp-file-then-rename ([`IntentStore::save_locked`]), and the log append
+///    likewise; a crash mid-write never tears a file.
+/// 2. **The writes are ORDERED log-first** (K-ERRLAW2, preserved): the log
+///    append runs BEFORE the store save. So the only divergence a mid-commit
+///    failure can produce is **log-ahead** (the intent is on the authoritative
+///    `--log` but not yet in the `--store`) — NEVER **store-ahead** (a phantom
+///    intent in the store that the log never saw). If the log append itself
+///    fails, NOTHING is committed (no orphan store entry).
+/// 3. **A log-ahead state is self-healing.** Before this run lands anything,
+///    [`reconcile_store_from_log`] replays any `intent.landed` present on the
+///    `--log` but missing from the `--store` back into the store and persists
+///    it. So the NEXT `intent new`/`intent list` over the same pair reconciles
+///    the store from the log automatically — the divergence is transient, never
+///    permanent, and the log (source of truth) is the one that drives.
 pub fn run(input: NewIntent, store_path: &Path) -> Result<NewResult, PorcelainError> {
     if input.charter.trim().is_empty() {
         return Err(PorcelainError::new(
@@ -198,6 +224,18 @@ pub fn run(input: NewIntent, store_path: &Path) -> Result<NewResult, PorcelainEr
     let (store_lock, mut store) =
         IntentStore::lock_and_load(store_path).map_err(PorcelainError::from_store)?;
 
+    // ── Two-phase recovery (C5-F3 / M-3) ──────────────────────────────────────
+    // Before this run lands anything, heal any LOG-AHEAD divergence left by a
+    // previous run that crashed/failed AFTER the `--log` append committed but
+    // BEFORE its store save landed. The `--log` is the append-only source of
+    // truth; any `intent.landed` present there but missing from the `--store` is
+    // replayed back into the store and persisted, so a prior failure window is
+    // reconciled HERE (idempotently) rather than persisting as a permanent
+    // store↔log divergence. No-op when `--log` is absent or already in sync.
+    if let Some(log_path) = input.log.as_deref() {
+        reconcile_store_from_log(&mut store, &store_lock, store_path, log_path)?;
+    }
+
     // Idempotency: if this id already landed in the store, return it unchanged
     // (exit 0). When a shared `--log` is given, still reconcile it (so an intent
     // already in the store is also present on the shared canonical log).
@@ -257,9 +295,18 @@ pub fn run(input: NewIntent, store_path: &Path) -> Result<NewResult, PorcelainEr
         canonical_log::land_intent(log_path, &sidecar, &principal_chain, recorded_at)?;
     }
 
-    // Log append succeeded (or was absent).  Now durably commit the store.
+    // Log append succeeded (or was absent).  Now durably commit the store via
+    // the ATOMIC temp-then-rename write (no torn/partial store ever lands).
     // Record the non-authoritative sidecar corpus and the disclosed envelope
     // ref (when given) by intent_id — one lifecycle, one id.
+    //
+    // C5-F3 / M-3 recovery contract: should THIS atomic save fail after the log
+    // append above committed, the result is a transient LOG-AHEAD state (the
+    // intent is on the authoritative `--log`, absent from the `--store`). It is
+    // NOT a permanent divergence: the next `intent new`/`intent list` over this
+    // pair runs `reconcile_store_from_log` first and backfills the store from
+    // the log. We surface the error (the caller's "not created in store yet"
+    // belief is honest for this run), never a silent store-ahead phantom.
     store.sidecars.insert(intent_id.clone(), sidecar.clone());
     if !context_ref.is_empty() {
         store.envelopes.insert(intent_id.clone(), context_ref);
@@ -280,6 +327,149 @@ pub fn run(input: NewIntent, store_path: &Path) -> Result<NewResult, PorcelainEr
 /// honestly labelled `authored:<id>` (never a fake 40-hex git sha).
 fn authored_target(intent_id: &str) -> String {
     format!("authored:{intent_id}")
+}
+
+/// Reconcile the `--store` from the authoritative `--log` (C5-F3 / M-3).
+///
+/// The `--log` is the append-only source of truth. A previous `intent new` that
+/// failed AFTER its log append committed but BEFORE its store save landed leaves
+/// a **log-ahead** state: an `intent.landed` is on the `--log` but absent from
+/// the `--store`. This replays every such missing intent back into the store's
+/// own event log (via the real [`import_sidecar`] append, preserving the
+/// hash-chained spine) plus a best-effort sidecar (the log carries the intent's
+/// `charter`/provenance; the non-authoritative `acceptance`/`context_ref`
+/// corpus is honestly empty when only the log survived), then persists the store
+/// **atomically**.
+///
+/// Idempotent and direction-safe:
+/// - It only ADDS to the store intents the LOG already has, so it can never
+///   create a store-ahead phantom (an intent the log never saw).
+/// - `import_sidecar` is itself idempotency-guarded (a `DuplicateIntentId` for an
+///   intent already in the store's log is skipped), so re-running is a no-op once
+///   the store is in sync.
+/// - When nothing is missing, the store is left untouched (no needless write).
+fn reconcile_store_from_log(
+    store: &mut IntentStore,
+    store_lock: &crate::pr::filelock::FileLock,
+    store_path: &Path,
+    log_path: &Path,
+) -> Result<(), PorcelainError> {
+    // Load the canonical `--log` and rehydrate + VERIFY its hash chain, so a
+    // tampered/corrupt log fails closed here rather than seeding the store with
+    // forged intents. A missing log is an empty log (nothing to reconcile). This
+    // mirrors `canonical_log`'s own loader (which is private to that module); we
+    // only READ the log here (the reconcile never writes the `--log`), so there
+    // is no orchestration change to the append seam.
+    let log = load_log_verified(log_path)?;
+    let log_intents = intents_from_log(&log).map_err(|e| {
+        PorcelainError::new(
+            "chain_broken",
+            format!("project intents from --log: {e}"),
+            "the --log file's intent records must be well-formed",
+        )
+    })?;
+
+    let mut healed = false;
+    for intent in log_intents.intents() {
+        // Already present in the store's own log? Then there is no divergence to
+        // heal for this id.
+        let present = store
+            .intent_for(&intent.intent_id)
+            .map_err(PorcelainError::from_store)?
+            .is_some();
+        if present {
+            continue;
+        }
+
+        // Log-ahead: this intent exists on the authoritative --log but not in the
+        // store. Replay it into the store's event log (the real append path) and
+        // record a best-effort sidecar so the store's projection agrees with the
+        // log's source of truth.
+        let sidecar = IntentSidecar {
+            intent_id: intent.intent_id.clone(),
+            charter: intent.charter.clone(),
+            // Not recoverable from the log alone (the log carries existence +
+            // charter + provenance, not the full B6 corpus). Honestly empty —
+            // the original `intent new` that crashed pre-store-save is the only
+            // place that knew them; a re-run with the same inputs re-supplies
+            // them via normal landing (idempotent on id).
+            acceptance: Vec::new(),
+            context_ref: String::new(),
+            authoritative: false,
+        };
+        import_sidecar(
+            &mut store.log,
+            &sidecar,
+            AUTHORED_REF,
+            &authored_target(&intent.intent_id),
+            intent.principal_chain.clone(),
+            intent.recorded_at,
+        )
+        .map_err(|e| {
+            PorcelainError::new(
+                "store_error",
+                format!("reconcile store from --log: {e}"),
+                "the --log and --store could not be reconciled; inspect both files",
+            )
+        })?;
+        store.sidecars.insert(intent.intent_id.clone(), sidecar);
+        healed = true;
+    }
+
+    if healed {
+        store
+            .save_locked(store_lock, store_path)
+            .map_err(PorcelainError::from_store)?;
+    }
+    Ok(())
+}
+
+/// Load + chain-verify the canonical `--log` for the C5-F3 reconcile (READ-only).
+///
+/// A non-existent file is a fresh empty log (nothing to reconcile). Any
+/// read/parse/rehydrate fault, or a broken hash chain, fails closed with a
+/// structured error — so a reconcile can never seed the store from a tampered
+/// log. This is the read half of `canonical_log`'s own private loader; the
+/// reconcile path NEVER writes the `--log`, so the append seam is untouched.
+fn load_log_verified(path: &Path) -> Result<EventLog, PorcelainError> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(EventLog::new()),
+        Err(e) => {
+            return Err(PorcelainError::new(
+                "io",
+                format!("read --log {}: {e}", path.display()),
+                "check the --log path exists and is readable",
+            ));
+        }
+    };
+    let records: Vec<EventRecord> = serde_json::from_slice(&bytes).map_err(|e| {
+        PorcelainError::new(
+            "parse",
+            format!("parse --log {}: {e}", path.display()),
+            "the --log file must be a canonical JSON [EventRecord, …] array",
+        )
+    })?;
+    // PS-13 chokepoint (Wave M integration): the reconcile's rehydrate+verify
+    // routes through the SINGLE verified loader `checks::rehydrate_and_verify`
+    // (the sole production site of `push_record` + `verify_chain`) rather than
+    // hand-rolling it — so this read path cannot drift from the chain-integrity
+    // law and a future edit here that forgot to verify would break the build.
+    crate::checks::rehydrate_and_verify(records).map_err(|e| match e {
+        crate::checks::ChainLoadFault::Rehydrate(m) => PorcelainError::new(
+            "rehydrate",
+            format!("rehydrate --log {}: {m}", path.display()),
+            "the --log file's records must form a gap-free, monotonic chain",
+        ),
+        crate::checks::ChainLoadFault::ChainBroken(m) => PorcelainError::new(
+            "chain_broken",
+            format!(
+                "--log {} failed integrity verification: {m}",
+                path.display()
+            ),
+            "the --log file's hash chain is tampered or corrupt",
+        ),
+    })
 }
 
 /// Bootstrap the store's parent directory (mkdir -p) so a first-run

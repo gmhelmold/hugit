@@ -31,9 +31,9 @@ use std::path::Path;
 
 use hugit_contracts::IntentSidecar;
 use hugit_contracts::event_record::EventRecord;
+use hugit_refstore::EventLog;
 use hugit_refstore::authz::{Endpoint, PrincipalClass};
 use hugit_refstore::intent::{INTENT_LANDED_KIND, intents_from_log};
-use hugit_refstore::{EventLog, verify_chain};
 
 use super::error::PorcelainError;
 use crate::pr::filelock::{self, FileLock, LockError};
@@ -249,24 +249,21 @@ fn load(path: &Path) -> Result<EventLog, PorcelainError> {
              (the engine's EventLog shape, shared by every porcelain verb)",
         )
     })?;
-    let mut log = EventLog::new();
-    for record in records {
-        log.push_record(record).map_err(|e| {
-            PorcelainError::new(
-                "rehydrate",
-                format!("rehydrate log {}: {e}", path.display()),
-                "the --log file's records must form a gap-free, monotonic chain",
-            )
-        })?;
-    }
-    verify_chain(log.records()).map_err(|e| {
-        PorcelainError::new(
+    // PS-13: rehydrate + verify through the SINGLE chokepoint
+    // (`checks::rehydrate_and_verify`); a tampered chain fails closed as
+    // `chain_broken`/exit-2, never re-implementing the verify loop here.
+    crate::checks::rehydrate_and_verify(records).map_err(|fault| match fault {
+        crate::checks::ChainLoadFault::Rehydrate(e) => PorcelainError::new(
+            "rehydrate",
+            format!("rehydrate log {}: {e}", path.display()),
+            "the --log file's records must form a gap-free, monotonic chain",
+        ),
+        crate::checks::ChainLoadFault::ChainBroken(e) => PorcelainError::new(
             "chain_broken",
             format!("log {} failed integrity verification: {e}", path.display()),
             "the --log file's hash chain is tampered or corrupt",
-        )
-    })?;
-    Ok(log)
+        ),
+    })
 }
 
 /// Persist the log back to `path` as a pretty `[EventRecord, …]` array, via the

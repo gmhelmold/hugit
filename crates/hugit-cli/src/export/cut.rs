@@ -80,7 +80,15 @@ impl Cut {
             .collect();
         // A prefix of a valid hash chain is itself a valid chain; re-verify
         // fail-closed so we never export off a tampered snapshot.
-        verify_chain(&records).map_err(|e| CutError::Tamper(e.to_string()))?;
+        //
+        // PS-13 chokepoint exemption (`readpath-verify-exempt`): this is NOT a
+        // disk read — it re-verifies a PREFIX of an `EventLog` that was already
+        // loaded through the single chokepoint (`run_export` → `load_event_log`
+        // → `rehydrate_and_verify`). It is defence-in-depth over an in-memory
+        // snapshot, not a verb's read-path load, so it does not route through
+        // `checks::rehydrate_and_verify` (which rebuilds a whole log from
+        // records — a cut is a sub-range, not a fresh disk load).
+        verify_chain(&records).map_err(|e| CutError::Tamper(e.to_string()))?; // readpath-verify-exempt
         Ok(Self { records })
     }
 
