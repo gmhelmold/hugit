@@ -128,39 +128,99 @@ impl Ledger {
             }
         }
 
-        // Second pass: attach verdicts.
+        // Second pass: attach verdicts — REJECT-STICKY resolution (K-VERDICT).
+        //
+        // Ownership rule (decided, do not relitigate):
+        //
+        //   A reject is STICKY: once any lens has rejected an intent, that
+        //   intent stays `rejected` (and NOT `proven`) regardless of later
+        //   approvals under a DIFFERENT lens name.  A reject is cleared ONLY
+        //   by a later approval of the **same lens** that issued the reject
+        //   (i.e. the same reviewer dimension re-ran and now approves).
+        //
+        // Implementation: accumulate a per-lens map (lens_name → latest
+        // Verdict for that lens) across ALL `verdict.recorded` events for an
+        // intent, processing them in log (seq) order.  Each event's
+        // `claims_checked` vector carries "lens:result" entries; each entry
+        // updates the map entry for that lens.  The final per-lens map is the
+        // canonical state:
+        //
+        //   - If ANY entry is Reject or FixFirst → rejected=true, proven=false
+        //   - Else if ANY entry is Approve       → proven=true,  rejected=false
+        //   - Else (no entries at all)           → unchanged (no verdict yet)
+        //
+        // This closes the laundering bypass: an `approve` under a novel lens
+        // name cannot clear an outstanding `reject` from a different lens.
+        //
+        // The last `VerdictView` for the intent (the most-recent
+        // `verdict.recorded` record) is surfaced for display; the resolution
+        // flags are governed by the per-lens fold above, not by that view.
+        //
         // Match by raw intent id (via the internal index) so that redaction
         // of the surfaced field does not break the verdict linkage.
-        //
-        // WI-PROVEN2 / latest-verdict-wins: records are in log (seq) order;
-        // iterating forward means each subsequent `verdict.recorded` for the
-        // same intent overwrites the previous one.  The LAST verdict on the
-        // log is authoritative — `proven` and `rejected` are MUTUALLY
-        // EXCLUSIVE: only the latest verdict outcome governs.
-        //
-        // WH-PROVEN: `proven` is true ONLY when the LATEST outcome is
-        // `Approve`.  A `Reject` or `FixFirst` revision clears `proven` and
-        // sets `rejected=true`.  An `Approve` revision clears `rejected` and
-        // sets `proven=true`.  The two flags are never simultaneously true.
+
+        // Per-intent per-lens accumulator: raw_intent_id → BTreeMap<lens, Verdict>.
+        let mut lens_state: std::collections::HashMap<
+            usize,
+            std::collections::BTreeMap<String, Verdict>,
+        > = std::collections::HashMap::new();
+
         for r in records {
             if r.kind == "verdict.recorded"
                 && let Ok(vo) = serde_json::from_str::<VerdictObject>(&r.payload)
                 && let Some(&idx) = raw_id_to_idx.get(&vo.intent)
             {
-                match vo.verdict {
-                    Verdict::Approve => {
-                        // Latest verdict is approve: proven=true, rejected cleared.
-                        entries[idx].proven = true;
-                        entries[idx].rejected = false;
-                    }
-                    Verdict::Reject | Verdict::FixFirst => {
-                        // Latest verdict is non-approve: rejected=true, proven cleared.
-                        entries[idx].rejected = true;
-                        entries[idx].proven = false;
+                // Update the per-lens map for this intent from claims_checked.
+                // Each entry has the form "lens:result"; parse it and update.
+                //
+                // Backward-compat fallback: if no `claims_checked` entries are
+                // parseable as "lens:result" pairs (either the list is empty or
+                // all entries lack the colon separator — e.g. legacy or fixture
+                // records), fall back to the stored aggregate verdict on the
+                // "panel" pseudo-lens so the record still contributes to the
+                // resolution.  This preserves the existing latest-wins semantics
+                // for callers that do not populate `claims_checked` with lens
+                // details (legacy records, test fixtures, pre-K-VERDICT records).
+                let per_lens = lens_state.entry(idx).or_default();
+                let mut parsed_any = false;
+                for claim in &vo.claims_checked {
+                    if let Some((lens, result_str)) = claim.split_once(':') {
+                        let outcome = match result_str {
+                            "approve" => Verdict::Approve,
+                            "fix_first" => Verdict::FixFirst,
+                            _ => Verdict::Reject,
+                        };
+                        per_lens.insert(lens.to_string(), outcome);
+                        parsed_any = true;
                     }
                 }
+                if !parsed_any {
+                    // Backward-compat fallback: treat the whole record as a
+                    // single "panel" lens using the stored aggregate outcome.
+                    per_lens.insert("panel".to_string(), vo.verdict.clone());
+                }
+                // Update the display view to the most-recent record (the last
+                // one wins for the VerdictView field — display only).
                 entries[idx].verdict = Some(VerdictView::from_verdict_object(&vo));
             }
+        }
+
+        // Third pass: resolve per-lens maps into proven/rejected flags.
+        for (idx, per_lens) in &lens_state {
+            let any_reject = per_lens
+                .values()
+                .any(|v| matches!(v, Verdict::Reject | Verdict::FixFirst));
+            let any_approve = per_lens.values().any(|v| matches!(v, Verdict::Approve));
+            if any_reject {
+                // Any outstanding reject wins — reject is sticky.
+                entries[*idx].rejected = true;
+                entries[*idx].proven = false;
+            } else if any_approve {
+                // All rejects have been cleared by same-lens re-approvals.
+                entries[*idx].proven = true;
+                entries[*idx].rejected = false;
+            }
+            // Else: no verdicts at all (shouldn't happen here, but safe to skip).
         }
 
         Ledger { entries }

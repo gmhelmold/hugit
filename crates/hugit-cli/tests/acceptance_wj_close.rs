@@ -198,10 +198,21 @@ fn f_closed_payload_carries_sealed_with_rejected_and_count() {
 // ── G: seal-time immutability — post-close verdict revision ──────────────────
 
 /// WJ-CLOSE G: after sealing with `--allow-rejected` over a rejected intent,
-/// revising the verdict (reject→approve) MUST NOT rewrite the historical seal
-/// fact.  Both the idempotent `campaign close` and `campaign show` must still
-/// report `sealed_with_rejected:true` (seal-time truth), even though the live
-/// ledger now shows proven:1, rejected:0.
+/// the seal fact is immutable.  The K-VERDICT post-seal guard enforces this
+/// structurally: any post-close `verdict --store` attempt is refused with
+/// `campaign_sealed`/exit-2, so the log (and therefore the projection) cannot
+/// be mutated after the seal.
+///
+/// This test verifies:
+/// 1. The payload on disk carries `sealed_with_rejected:true` immediately after
+///    close (pre-existing WJ-CLOSE assertion).
+/// 2. A post-close `verdict --store` attempt is refused with
+///    `campaign_sealed`/exit-2 (K-VERDICT post-seal guard — the structural
+///    immutability guarantee: rejection is impossible by construction, not just
+///    by projection isolation).
+/// 3. The idempotent re-close still reports the seal-time truth from the
+///    persisted payload, with the live ledger unchanged (the refused revision
+///    left the log intact — rejected:1).
 #[test]
 fn g_post_close_verdict_revision_does_not_rewrite_seal_fact() {
     let dir = scratch("g-immutable");
@@ -235,50 +246,65 @@ fn g_post_close_verdict_revision_does_not_rewrite_seal_fact() {
         "WJ-CLOSE G setup: payload must carry rejected_count:1: {payload}"
     );
 
-    // Post-close revision: approve the previously-rejected intent.
-    record_verdict(log_s, intent_id, "approve");
+    // K-VERDICT post-seal guard: a post-close `verdict --store` attempt MUST be
+    // refused with `campaign_sealed`/exit-2 — the mutation never reaches the log.
+    let post_close_out = Command::new(hugit_bin())
+        .args([
+            "verdict", "--log", log_s, "--store", "--intent", intent_id, "--lens", "security",
+            "--result", "approve",
+        ])
+        .output()
+        .expect("hugit runs");
+    let post_close_code = post_close_out.status.code().unwrap_or(-1);
+    let post_close_v: serde_json::Value =
+        serde_json::from_str(std::str::from_utf8(&post_close_out.stdout).unwrap().trim())
+            .unwrap_or(serde_json::Value::Null);
+    assert_eq!(
+        post_close_code, 2,
+        "WJ-CLOSE G: post-close verdict --store MUST exit 2 (campaign_sealed): {post_close_v}"
+    );
+    assert_eq!(
+        post_close_v["error"]["kind"], "campaign_sealed",
+        "WJ-CLOSE G: error kind must be campaign_sealed: {post_close_v}"
+    );
 
-    // Live ledger now shows proven:1, rejected:0.  Idempotent close must still
-    // report the SEAL-TIME truth, NOT the current live ledger.
+    // Idempotent close: the seal-time truth is preserved from the persisted payload.
+    // The refused revision left the log intact, so the live ledger still shows rejected:1.
     let (code2, v2) = campaign_close(log_s, campaign, false);
     assert_eq!(code2, 0, "WJ-CLOSE G: idempotent close must exit 0: {v2}");
     assert_eq!(v2["already_closed"], true, "must be already_closed: {v2}");
     assert_eq!(
         v2["sealed_with_rejected"], true,
-        "WJ-CLOSE G: idempotent close must report seal-time sealed_with_rejected:true \
-         (NOT the current live ledger value false): {v2}"
+        "WJ-CLOSE G: idempotent close must report seal-time sealed_with_rejected:true: {v2}"
     );
     assert_eq!(
         v2["rejected_count"].as_u64().unwrap_or(0),
         1,
-        "WJ-CLOSE G: idempotent close must report seal-time rejected_count:1 \
-         (NOT the current live ledger value 0): {v2}"
+        "WJ-CLOSE G: idempotent close must report seal-time rejected_count:1: {v2}"
     );
 
-    // The live ledger in the idempotent response now shows the revised verdict.
+    // The live ledger is unchanged: the post-close revision was blocked.
+    // rejected:1 because the log was never mutated.
     assert_eq!(
-        v2["ledger"]["proven"].as_u64().unwrap_or(0),
-        1,
-        "WJ-CLOSE G: live ledger.proven must reflect the post-close revision (1): {v2}"
-    );
-    assert_eq!(
-        v2["ledger"]["rejected"].as_u64().unwrap_or(99),
+        v2["ledger"]["proven"].as_u64().unwrap_or(99),
         0,
-        "WJ-CLOSE G: live ledger.rejected must reflect the post-close revision (0): {v2}"
+        "WJ-CLOSE G: live ledger.proven must be 0 (revision was blocked, log unchanged): {v2}"
+    );
+    assert!(
+        v2["ledger"]["rejected"].as_u64().unwrap_or(0) >= 1,
+        "WJ-CLOSE G: live ledger.rejected must be >= 1 (revision was blocked, log unchanged): {v2}"
     );
 
     // campaign show must also report the seal-time truth for the seal fact.
     let show = campaign_show(log_s, campaign);
     assert_eq!(
         show["sealed_with_rejected"], true,
-        "WJ-CLOSE G: campaign show must report seal-time sealed_with_rejected:true \
-         even after post-close revision: {show}"
+        "WJ-CLOSE G: campaign show must report seal-time sealed_with_rejected:true: {show}"
     );
     assert_eq!(
         show["seal_rejected_count"].as_u64().unwrap_or(0),
         1,
-        "WJ-CLOSE G: campaign show must report seal-time seal_rejected_count:1 \
-         even after post-close revision: {show}"
+        "WJ-CLOSE G: campaign show must report seal-time seal_rejected_count:1: {show}"
     );
 }
 
