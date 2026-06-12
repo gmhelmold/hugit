@@ -19,6 +19,48 @@ use serde::{Deserialize, Serialize};
 /// Re-exported from [`crate::redact::REDACTED`] — single source of truth.
 pub use crate::redact::REDACTED;
 
+/// Sticky-merge a lens outcome into a within-record per-lens accumulator (C5-F1).
+///
+/// Reject is sticky WITHIN one record: once a lens has resolved to
+/// [`Verdict::Reject`] or [`Verdict::FixFirst`] for this record, a later
+/// same-lens [`Verdict::Approve`] in the SAME record must NOT overwrite it.
+/// This closes the within-record lens-substitution laundering attack
+/// (`--lens sec --result reject --lens sec --result approve` in one call): the
+/// trailing approve can no longer silently clear the earlier reject via a
+/// last-wins `insert`.
+///
+/// Merge table for a given lens (existing slot vs. incoming):
+///   - slot is Reject/FixFirst, incoming Approve  → keep slot (sticky)
+///   - slot is Reject/FixFirst, incoming Reject/FixFirst → keep slot (still rejected)
+///   - slot is Approve, incoming Reject/FixFirst   → take incoming (reject wins)
+///   - slot is Approve, incoming Approve           → unchanged
+///   - slot empty                                  → take incoming
+///
+/// NOTE: this governs only the WITHIN-record fold. Cross-record clearing (a
+/// same-lens re-approval in a LATER record) is intentionally preserved by the
+/// caller committing each record's resolution with a plain insert.
+fn merge_lens_outcome(
+    slot: &mut std::collections::BTreeMap<String, Verdict>,
+    lens: &str,
+    incoming: Verdict,
+) {
+    use std::collections::btree_map::Entry;
+    match slot.entry(lens.to_string()) {
+        Entry::Vacant(v) => {
+            v.insert(incoming);
+        }
+        Entry::Occupied(mut o) => {
+            let existing_rejects = matches!(o.get(), Verdict::Reject | Verdict::FixFirst);
+            let incoming_approve = matches!(incoming, Verdict::Approve);
+            // Sticky: an existing reject is NOT cleared by a later same-record
+            // approve. Otherwise the incoming outcome takes effect.
+            if !(existing_rejects && incoming_approve) {
+                o.insert(incoming);
+            }
+        }
+    }
+}
+
 /// One entry in the ledger — an intent at its current lifecycle stage.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LedgerEntry {
@@ -182,6 +224,24 @@ impl Ledger {
                 // for callers that do not populate `claims_checked` with lens
                 // details (legacy records, test fixtures, pre-K-VERDICT records).
                 let per_lens = lens_state.entry(idx).or_default();
+                // C5-F1: reject-sticky WITHIN a record, clear-able ACROSS records.
+                //
+                // A single `verdict.recorded` record may carry the SAME lens more
+                // than once in its `claims_checked` vector (e.g. a single
+                // `verdict --lens sec --result reject --lens sec --result approve`
+                // call). The within-record fold MUST be reject-sticky: once a
+                // lens resolves to Reject/FixFirst inside ONE record, a later
+                // same-lens Approve in the SAME record must NOT clear it —
+                // otherwise a trailing approve launders a sticky reject (the
+                // last-wins `insert` bug). We therefore fold this record's claims
+                // into a per-RECORD scratch map with a sticky merge, then commit
+                // each lens's resolved outcome into the cross-record `per_lens`
+                // state. Cross-record clearing is preserved: committing a
+                // same-lens Approve from a LATER record overwrites an earlier
+                // Reject in `per_lens` (the legit re-approval path K-VERDICT
+                // added), because the scratch map is rebuilt per record.
+                let mut this_record: std::collections::BTreeMap<String, Verdict> =
+                    std::collections::BTreeMap::new();
                 let mut parsed_any = false;
                 for claim in &vo.claims_checked {
                     if let Some((lens, result_str)) = claim.split_once(':') {
@@ -190,14 +250,22 @@ impl Ledger {
                             "fix_first" => Verdict::FixFirst,
                             _ => Verdict::Reject,
                         };
-                        per_lens.insert(lens.to_string(), outcome);
+                        merge_lens_outcome(&mut this_record, lens, outcome);
                         parsed_any = true;
                     }
                 }
                 if !parsed_any {
                     // Backward-compat fallback: treat the whole record as a
                     // single "panel" lens using the stored aggregate outcome.
-                    per_lens.insert("panel".to_string(), vo.verdict.clone());
+                    merge_lens_outcome(&mut this_record, "panel", vo.verdict.clone());
+                }
+                // Commit this record's per-lens resolution into the cross-record
+                // state. A plain insert here is correct and intended: a later
+                // record's outcome for a lens supersedes an earlier record's
+                // outcome for the SAME lens (cross-record clear). Within-record
+                // stickiness was already enforced by `merge_lens_outcome` above.
+                for (lens, outcome) in this_record {
+                    per_lens.insert(lens, outcome);
                 }
                 // Update the display view to the most-recent record (the last
                 // one wins for the VerdictView field — display only).

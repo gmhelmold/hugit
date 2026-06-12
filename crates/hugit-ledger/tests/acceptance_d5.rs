@@ -32,7 +32,7 @@ fn build_log(events: &[(&str, Vec<&str>, String)]) -> Vec<EventRecord> {
     let mut records = Vec::new();
     for (i, (kind, principals, payload)) in events.iter().enumerate() {
         let chain: Vec<String> = principals.iter().map(|s| s.to_string()).collect();
-        let r = log.append(*kind, chain, payload.clone(), 1_000_000 + i as u64);
+        let r = log.append_for_test(*kind, chain, payload.clone(), 1_000_000 + i as u64);
         records.push(r);
     }
     records
@@ -668,7 +668,7 @@ fn item_5_two_zoom_toggle_mutually_consistent() {
             "charter": format!("charter for intent {i}"),
         })
         .to_string();
-        log.append(
+        log.append_for_test(
             "intent.landed",
             vec!["agent".to_string()],
             payload,
@@ -683,7 +683,7 @@ fn item_5_two_zoom_toggle_mutually_consistent() {
             "target": format!("sha:raw{i:03}"),
         })
         .to_string();
-        log.append(
+        log.append_for_test(
             "ref.update",
             vec!["human".to_string()],
             payload,

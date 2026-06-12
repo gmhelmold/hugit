@@ -68,7 +68,7 @@ fn seed_three_intents() -> (EventLog, Vec<DeepLink>, ObjectStore) {
     // Intent 1
     let id1 = format!("{TENANT_A}intent-alpha");
     let hash1 = "sha256:object-alpha-0001";
-    log.append(
+    log.append_for_test(
         "intent.landed",
         vec!["agent:planner".to_string()],
         intent_landed_payload(&id1, hash1),
@@ -79,7 +79,7 @@ fn seed_three_intents() -> (EventLog, Vec<DeepLink>, ObjectStore) {
     // Intent 2
     let id2 = format!("{TENANT_A}intent-beta");
     let hash2 = "sha256:object-beta-0002";
-    log.append(
+    log.append_for_test(
         "intent.landed",
         vec!["agent:executor".to_string()],
         intent_landed_payload(&id2, hash2),
@@ -90,7 +90,7 @@ fn seed_three_intents() -> (EventLog, Vec<DeepLink>, ObjectStore) {
     // Intent 3
     let id3 = format!("{TENANT_A}intent-gamma");
     let hash3 = "sha256:object-gamma-0003";
-    log.append(
+    log.append_for_test(
         "intent.landed",
         vec!["agent:executor".to_string(), "human:reviewer".to_string()],
         intent_landed_payload(&id3, hash3),

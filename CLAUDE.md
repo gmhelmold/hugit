@@ -9,7 +9,9 @@ VCS + merge + CI designed for orchestrated agent fleets, built on CoreLink's
 production CAS (Cloudflare Workers/R2/D1/DO). Founded 2026-06-05.
 
 **Status (as of 2026-06-12, post Waves A/B/C/D/E+F + the wedge wave + G + H + I +
-J + WK-AC + Wave K, adversarial rounds 1–7 closed, Round 8 pending): the buildable
+J + WK-AC + Wave K, adversarial rounds 1–7 closed; Round 8 = the SEVERE class
+sweep RAN and Wave L remediated all 6 classes on branch `integ/wave-l` —
+Round 9 re-audit + merge PENDING, push HELD): the buildable
 product is complete; adversarial hardening is ongoing, not closed.** A
 **17-package** Rust workspace (hugit-app + {ui,exit,sidecar} sub-crates = 4
 crates + 13 feature crates — verified by `cargo metadata --no-deps`
@@ -51,12 +53,49 @@ uncaptured env axis; (5) `export` raw-append D14 bypass; (6) an
 flaky. **Wave K (`def8a18`) remediated all of them** (K-SCRUB · K-CHAIN ·
 K-VERDICT · K-RUN · K-ERRLAW2, each cold-verified by live attack
 reproduction + a stressed gate); residuals tracked as AR-5/PS-11/PS-12.
-Round 8 (fresh fleet on the integrated state) is pending. The integrity
-spine has held under every adversarial round (1–7) plus the SOTA audit.
+**Round 8 (the SEVERE class sweep, 2026-06-12) ran** — a method shift from
+point-finding to exhaustive root-cause CLASS audits (6 SOTA reports in
+`docs/review/round8/`), commissioned after the owner judged the prior fix
+waves to be band-aiding instances rather than killing the class. All 6
+classes (redaction · read-path · memo-key · authz · state-machine ·
+error-law) shared ONE root: open-by-default + enforced-by-convention /
+per-verb. **Wave L remediated all six STRUCTURALLY** (close-by-construction:
+deny-by-default identifier scrub · verified-loader on `intent list` ·
+hermetic check execution · `pub(crate)` append door + typed shim · single
+seal-guard chokepoint + within-record reject-sticky fold · typed
+`AcError::Busy` + clap envelope) on branch `integ/wave-l`
+(L-A·L-B·L-C·L-D), each live-attack cold-verified by the orchestrator.
+**Round 9 (the convergence re-audit, fresh 6-agent fleet) RAN** — 5 of 6
+classes CONVERGED on first pass (read-path · authz · state-machine ·
+error-law matrices clean by live repro; redaction's P0 closed). The one
+residual CODE hole it surfaced — a C3 `stdin` stale-green the L-C hermetic
+fix missed (`stdin` was inherited, not nulled) — was fixed and cold-verified
+(R9-C3: `.stdin(Stdio::null())`, test `stdin_is_nulled_not_inherited`). The
+last item — PS-14 (the deny-by-default safe-shape allowlist exempted
+ANY-length hex/numeric) — was **DECIDED by the owner (the HYBRID) and
+implemented**: hex/numeric is exempt only at the {40,64} digest lengths, so
+odd-length-hex / long-numeric secrets redact while integers, UUIDs, prefixed
+ids, and slugs stay generous (cold-verified end-to-end). **All 6 classes are
+now CONVERGED** — zero P0/P1 code holes; only tracked seams remain. With
+owner sign-off, `integ/wave-l` merges to `main` and pushes (CI may go red
+ONLY on the `deny` step — PS-12 runner-tooling infra gap, not a code
+failure). Residuals tracked: PS-11 (closed by L-C hermetic),
+PS-13 (read-path single-chokepoint refactor, defence-in-depth), PS-14
+(redaction tuning, owner), C3 FS/network/clock (P2 runner sandbox),
+C5-F3 intent two-phase reverse-atomicity (P2/P3 seam).
+The integrity spine has held under every adversarial round (1–7) plus the
+SOTA audit.
 `main` (HEAD `def8a18`, Wave K) is green by the LOCAL gate (fmt + clippy
 `--workspace --all-targets --locked -D warnings` = 0/0 + test
 `--workspace --locked` = 1200 tests / 135 suites, 0 failed + `cargo deny
-check` = 0), read by real bare exit code. **Honest Round-7 correction:** the
+check` = 0), read by real bare exit code. The Wave L integration branch
+`integ/wave-l` (3 docs/audit commits + L-A·L-B·L-C·L-D) is green by the same
+LOCAL gate (fmt + clippy `--workspace --all-targets --locked -D warnings` =
+0/0 + test `--workspace --locked` = **1234 tests / 140 suites, 0 failed**),
+read by real bare exit code; it merges to `main` only after owner sign-off +
+the PS-14 redaction-tuning decision (the lesson banked below — a fresh
+adversarial round runs BEFORE any push; Round 9 has run and converged 5/6,
+the 6th being a tuning decision, not a code hole). **Honest Round-7 correction:** the
 earlier "green, verified by real exit code" claim on the Wave J + WK-AC push
 (`bd95162`) was over-stated — the workspace gate was load-FLAKY
 (`concurrent_checks…` could surface a terminal `ac_error` under parallel

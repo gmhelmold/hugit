@@ -61,7 +61,7 @@ fn this_hash_matches_cross_crate_pin() {
 #[test]
 fn append_path_matches_pin() {
     let mut log = EventLog::new();
-    let rec = log.append(
+    let rec = log.append_for_test(
         PIN_KIND,
         principal_chain_fixture(),
         PIN_PAYLOAD,
@@ -70,7 +70,7 @@ fn append_path_matches_pin() {
     assert_eq!(rec.this_hash, PIN_THIS_HASH_EXPECTED);
     // recorded_at must NOT affect the hash.
     let mut log2 = EventLog::new();
-    let rec2 = log2.append(PIN_KIND, principal_chain_fixture(), PIN_PAYLOAD, 999);
+    let rec2 = log2.append_for_test(PIN_KIND, principal_chain_fixture(), PIN_PAYLOAD, 999);
     assert_eq!(
         rec.this_hash, rec2.this_hash,
         "recorded_at must not be hashed"
@@ -157,7 +157,7 @@ fn canonical_json_byte_compat_with_pinned_this_hash() {
     );
 
     let mut log = EventLog::new();
-    let rec = log.append(
+    let rec = log.append_for_test(
         PIN_KIND,
         principal_chain_fixture(),
         canonical,

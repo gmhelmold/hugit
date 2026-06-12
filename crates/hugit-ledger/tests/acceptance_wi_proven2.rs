@@ -28,7 +28,7 @@ fn build_log(events: &[(&str, String)]) -> Vec<EventRecord> {
     let mut log = EventLog::new();
     let mut records = Vec::new();
     for (i, (kind, payload)) in events.iter().enumerate() {
-        let r = log.append(
+        let r = log.append_for_test(
             *kind,
             vec!["agent".to_string()],
             payload.clone(),

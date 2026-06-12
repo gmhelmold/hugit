@@ -31,7 +31,9 @@ path = "src/main.rs"
 
 [dev-dependencies]
 hugit-contracts = { path = "../hugit-contracts" }
-hugit-refstore = { path = "../hugit-refstore" }
+# C4-F1: test fixtures build synthetic event logs via the `test-support`
+# raw-append shim; the production raw door stays `pub(crate)`.
+hugit-refstore = { path = "../hugit-refstore", features = ["test-support"] }
 # WP-PC3 acceptance: drive `pr open/land/show` over the REAL event log
 # (EventLog) and the REAL landing queue (LandableEntry / Batch) — no
 # hand-faked queue or projection state.

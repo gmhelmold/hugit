@@ -402,14 +402,14 @@ fn item_3_wrong_merge_turns_oracle_red() {
     // Construct a synthetic soak result that has exactly one wrong-merge event.
     let mut log = EventLog::new();
     // A legitimate landing.
-    log.append(
+    log.append_for_test(
         "pr.landed",
         vec!["harness".to_string()],
         r#"{"pr_id":"pr-0","union_verdict":"green"}"#,
         1,
     );
     // A wrong-merge: landed but union verdict was red.
-    log.append(
+    log.append_for_test(
         "pr.landed",
         vec!["harness".to_string()],
         r#"{"pr_id":"pr-1","union_verdict":"red"}"#,

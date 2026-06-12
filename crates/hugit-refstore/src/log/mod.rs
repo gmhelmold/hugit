@@ -371,7 +371,19 @@ impl EventLog {
     /// `policy`) MUST route through [`append_authorized`](EventLog::append_authorized)
     /// so the D14 matrix gates the mutation and denials are audited. Calling this
     /// directly for a guarded verb is the bypass S3 flagged — don't.
-    pub fn append(
+    ///
+    /// # `pub(crate)` (C4-F1)
+    ///
+    /// This raw door is **`pub(crate)`**: it is reachable ONLY from inside
+    /// `hugit-refstore` (the guarded `append_authorized`, the per-call-guarded
+    /// `undo`/`Serializer` paths, the `AuditedGuard` audit-emit, fixtures). A
+    /// cross-crate caller can no longer reach it — the discipline "every verb
+    /// routes through the guard" is now enforced by `rustc`, not by review prose
+    /// (Round 8, Class 4, F-1). The two legitimate CROSS-crate raw needs
+    /// (`hugit-proto` raw-push, `hugit-mirror` external-change) go through the
+    /// typed [`append_external_change`](EventLog::append_external_change) shim,
+    /// which is *structurally incapable* of emitting a guarded kind.
+    pub(crate) fn append(
         &mut self,
         kind: impl Into<String>,
         principal_chain: Vec<String>,
@@ -444,6 +456,52 @@ impl EventLog {
                 })
             }
         }
+    }
+
+    /// Test-only raw append (C4-F1) — builds synthetic logs in cross-crate test
+    /// fixtures **without** exposing the production raw door.
+    ///
+    /// Gated behind the `test-support` cargo feature, wired ONLY as a
+    /// `[dev-dependencies]` feature in the consuming crates. It is `#[doc(hidden)]`
+    /// and carries `_for_test` in its name so it can never be mistaken for a
+    /// production append. Production cross-crate callers have exactly two doors:
+    /// [`append_authorized`](EventLog::append_authorized) (guarded) and
+    /// [`append_external_change`](EventLog::append_external_change) (typed,
+    /// closed-kind). The bare [`append`](EventLog::append) remains `pub(crate)`.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn append_for_test(
+        &mut self,
+        kind: impl Into<String>,
+        principal_chain: Vec<String>,
+        payload: impl Into<String>,
+        recorded_at: u64,
+    ) -> EventRecord {
+        self.append(kind, principal_chain, payload, recorded_at)
+    }
+
+    /// Append an **external change** event through a TYPED, closed-kind shim
+    /// (C4-F1) — the only legitimate CROSS-crate raw-append entry point.
+    ///
+    /// `kind` is an [`ExternalChangeKind`](crate::intent::ExternalChangeKind), a
+    /// closed enum whose only members are `ref.update` / `ref.delete`. So a
+    /// caller of this shim is *structurally incapable* of emitting an
+    /// `intent.landed` / `pr.*` / `verdict.*` event — the type system, not a
+    /// runtime `debug_assert`, enforces it. This replaces the bare
+    /// [`append`](EventLog::append) (now `pub(crate)`) for the two real
+    /// cross-crate raw needs: `hugit-proto`'s raw-push recorders and
+    /// `hugit-mirror`'s external-change path. Provenance is the caller's
+    /// `principal_chain` (the external-change paths fail closed on an empty
+    /// chain BEFORE calling this — attribution is their invariant, not this
+    /// shim's).
+    pub fn append_external_change(
+        &mut self,
+        kind: crate::intent::ExternalChangeKind,
+        principal_chain: Vec<String>,
+        payload: impl Into<String>,
+        recorded_at: u64,
+    ) -> EventRecord {
+        self.append(kind.as_kind(), principal_chain, payload, recorded_at)
     }
 
     /// Append a pre-formed [`EventRecord`] (e.g. rehydrated from storage),

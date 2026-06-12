@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(security,cli,ledger): **Round-8 SEVERE class sweep + Wave L — six root-cause
+  classes closed by construction** (branch `integ/wave-l`; pending Round 9 re-audit
+  + merge to `main`; push HELD). After the owner judged the prior fix waves to be
+  band-aiding instances rather than killing the class, Round 8 shifted method from
+  point-finding to **exhaustive root-cause CLASS audits** (6 SOTA reports,
+  `docs/review/round8/`). All six classes shared ONE root — *open-by-default,
+  enforced by convention/per-verb* — and Wave L closes each *by construction*:
+  **L-A (C1 redaction)** inverts the identifier scrub to **deny-by-default** — a
+  value survives verbatim only if it proves a bounded safe-address shape
+  (`is_safe_identifier_shape`), else the door rejects (`secret_in_identifier` exit-2)
+  or the boundary redacts; a prefix-less AWS/SendGrid/Stripe/base64 credential in any
+  identifier field no longer leaks, while ULID/sha-hex/`cas:`/slug addresses survive.
+  **L-B (C2 read-path)** routes `intent list` through `verify_chain` (a tampered log
+  → `chain_broken` exit-2); the single-chokepoint loader refactor is tracked PS-13.
+  **L-C (C3 memo-key + C6 error-law)** makes check execution **hermetic**
+  (`env_clear` + captured allowlist, `cwd` pinned to `--root`, PATH pinned + hashed
+  into the env axis) so cwd/env/PATH changes can no longer serve a stale green
+  (FS/network/clock remain the disclosed P2 runner-sandbox seam); and makes
+  retryability a **type** (`AcError::Busy` matched exhaustively in `map_exec_error`,
+  the `starts_with("ac_busy:")` string-sniff deleted) plus a structured
+  `invalid_arguments` envelope for clap arg errors (`try_parse`). **L-D (C5
+  state-machine + C4 authz)** makes the per-lens verdict fold **reject-sticky within
+  a record** (and the recorder refuses a conflicting duplicate-lens →
+  `duplicate_lens` exit-2), enforces a **single seal-guard chokepoint** at the
+  `hugit-refstore` append boundary so a SEALED campaign is terminal for ALL verbs
+  (`campaign_sealed` exit-2), and demotes the raw `EventLog::append` door to
+  `pub(crate)` with a typed closed-enum `append_external_change(ExternalChangeKind)`
+  shim (test-only raw access behind a `#[cfg(feature="test-support")]` `append_for_test`).
+  Each fix was cold-verified by live attack reproduction by the orchestrator; the
+  full workspace gate is green (fmt + clippy `--workspace --all-targets --locked
+  -D warnings` = 0/0 + test `--workspace --locked` = **1233 / 140 suites, 0 failed**).
+
 - fix(security,cli): **Adversarial Round-5 fixes (Wave I) — identifier-redaction
   hardened structurally, forge state-machine coherence, log-auth honestly scoped**.
   Round 5 (fresh 7-agent fleet + a convergence synthesizer) held the spine an 8th

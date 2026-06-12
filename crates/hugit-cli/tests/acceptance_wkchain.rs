@@ -52,7 +52,7 @@ fn run(args: &[&str]) -> (i32, Value) {
 fn write_why_log(path: &std::path::Path, events: &[(&str, Value)]) {
     let mut log = EventLog::new();
     for (kind, payload) in events {
-        log.append(*kind, vec![], payload.to_string(), 0);
+        log.append_for_test(*kind, vec![], payload.to_string(), 0);
     }
     let entries: Vec<Value> = log
         .records()
@@ -67,7 +67,7 @@ fn write_why_log(path: &std::path::Path, events: &[(&str, Value)]) {
 fn write_canonical_log(path: &std::path::Path, events: &[(&str, Value)]) {
     let mut log = EventLog::new();
     for (kind, payload) in events {
-        log.append(*kind, vec![], payload.to_string(), 0);
+        log.append_for_test(*kind, vec![], payload.to_string(), 0);
     }
     std::fs::write(path, serde_json::to_string_pretty(log.records()).unwrap()).unwrap();
 }
@@ -167,7 +167,7 @@ fn well_formed_why_log_still_resolves_after_k_chain() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// A tampered export input log is rejected as `chain_broken`/exit-2. Before
-/// K-CHAIN, `export` rebuilt an EventLog from raw `.append()` over an
+/// K-CHAIN, `export` rebuilt an EventLog from raw `.append_for_test()` over an
 /// `{events:[…]}` format with no chain verification — arbitrary/forged events
 /// could enter the export corpus unchecked. Now export reads the canonical
 /// `[EventRecord, …]` format and runs `verify_chain`, so a tampered input is

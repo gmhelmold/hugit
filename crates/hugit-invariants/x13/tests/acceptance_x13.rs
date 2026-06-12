@@ -53,7 +53,7 @@ fn git_objects() -> Vec<&'static str> {
 /// canonical `hugit_ledger::deeplink::resolve` can follow.
 fn ledger_records() -> Vec<EventRecord> {
     let mut log = EventLog::new();
-    log.append(
+    log.append_for_test(
         "intent.landed",
         vec!["human:owner".to_string()],
         serde_json::json!({
@@ -326,13 +326,13 @@ fn item_2_attestation_chain_followable_over_tombstone_after_erasure() {
     // `verify_chain` still verifies AND following the surviving link reaches a
     // tombstone — the human follows to a truthful endpoint.
     let mut log = EventLog::new();
-    log.append(
+    log.append_for_test(
         "tree.snapshot",
         vec!["agent:planner".to_string()],
         serde_json::json!({ "object": A }).to_string(),
         1_000,
     );
-    let link = log.append(
+    let link = log.append_for_test(
         "object.link",
         vec!["human:owner".to_string()],
         serde_json::json!({ "object": B }).to_string(),

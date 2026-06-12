@@ -21,7 +21,7 @@
 use std::collections::BTreeMap;
 
 use hugit_proto::{RawPush, record_external_change};
-use hugit_refstore::authz::{AuditedGuard, Decision, Endpoint};
+use hugit_refstore::authz::{AuditedGuard, Decision, Endpoint, PrincipalClass};
 use hugit_refstore::intent::{INTENT_LANDED_KIND, RAW_PUSH_KINDS};
 use hugit_refstore::{EventLog, RefState, TamperError, replay, verify_chain};
 
@@ -461,8 +461,30 @@ impl BidirSync {
         };
         match decision {
             Decision::Allow => {
+                // C4-F1: the raw `EventLog::append` door is now `pub(crate)` and
+                // unreachable cross-crate. This land emits an INTENT kind (not an
+                // external change), so the typed external-change shim is the wrong
+                // door — route through the guarded `append_authorized` instead.
+                // The chain already classified Allow under `Land` above (the
+                // audit-on-deny path), so re-asserting the classified class here
+                // is consistent: `append_authorized` re-checks the matrix and
+                // appends through the in-crate guarded primitive.
+                let class = principal_chain
+                    .last()
+                    .and_then(|id| PrincipalClass::classify(id))
+                    .unwrap_or(PrincipalClass::Worker);
                 self.log
-                    .append(INTENT_LANDED_KIND, principal_chain, canonical, recorded_at);
+                    .append_authorized(
+                        class,
+                        Endpoint::Land,
+                        INTENT_LANDED_KIND,
+                        principal_chain,
+                        canonical,
+                        recorded_at,
+                    )
+                    .map_err(|denied| SyncError::LandDenied {
+                        reason: denied.reason.code(),
+                    })?;
                 // The forge becomes the (sole) authoritative side for main on a land.
                 self.authority.arbitrate(&self.protected);
                 Ok(())

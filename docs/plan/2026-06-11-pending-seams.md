@@ -278,6 +278,19 @@ convergence synthesizer (opus3) — strongest blocker of the round.
    authoritative. Both now verify the chain and return `chain_broken` exit-2 on
    corruption (tests `tampered_chain_is_chain_broken_exit_two_on_{why,export}`); the
    every-read claim is true again.
+   **(Round 8 honesty correction, closed by Wave L / L-B `integ/wave-l`):** the
+   every-read claim was STILL false — `hugit intent list --log` (`intent::list::
+   resolve_landed`) was a THIRD read path that rehydrated and projected landed-state
+   WITHOUT `verify_chain`. Fixed: `resolve_landed` now verifies the chain → tampered
+   log yields `chain_broken` exit-2 (test `acceptance_round8_readpath.rs`). **Structural
+   residual (defence-in-depth, NOT a live hole):** `verify_chain` is still called
+   ad-hoc per loader — five loaders (`intent/list`, `intent/canonical_log`, `pr/cli`,
+   `campaign/world`, `export/cut`) each duplicate the read→verify pattern inline rather
+   than routing through one `load_verified_log` chokepoint. All five now verify
+   correctly, but a NEW read verb can still forget. The single-chokepoint refactor that
+   makes forgetting structurally impossible is tracked as **PS-13** below. This is the
+   third consecutive round (R5/R7/R8) the "every read" claim has needed a correction —
+   the per-verb pattern is the recurring root; PS-13 closes it.
 
 **Unblocked by:** P2 CoreLink tenant provisioning; Seams D + E of
 `docs/handoff/2026-06-11-corelink-p2-ceiling-request.md`.
@@ -491,6 +504,19 @@ either use an allowlisted var or accept the documented residual. Do NOT silently
 allowlist (that is the "exemption is a hole" failure mode in reverse — an over-broad key
 destroys the wedge).
 
+**Wave L / L-C update (Round 8 C3 — the stale-green RESIDUAL is now CLOSED, not just narrowed):**
+the K-RUN allowlist was an *enumerate-the-inputs* approach (a denylist-of-the-unknown — the
+recurring root). L-C replaced it with **hermetic execution**: the check spawn now `env_clear()`s
+and sets ONLY the captured allowlist + a pinned, hashed `PATH`, and pins `cwd` to `--root`. A
+custom var NOT on the allowlist (e.g. `MY_GATE_MODE`) is therefore **CLEARED before the spawn**,
+so the check reads it UNSET deterministically — it can no longer produce a stale HIT off-key.
+The missed-miss is gone. What REMAINS of PS-11 is purely a *feature* request, not a soundness
+hole: a check that LEGITIMATELY needs a custom env var must declare it (the `--env-axis` opt-in
+above) since it is now cleared rather than silently inherited. The soundness scope L-C does NOT
+close — files outside `--root`, network, the clock — is the disclosed **P2 runner-sandbox seam**
+(see PS-8's family / the corelink-runners seeded-rootfs); the local executor mirrors that
+contract's soundness for cwd/env/PATH and does not exceed it.
+
 ---
 
 ## PS-12 — Self-hosted runner is missing `cargo-deny` / `cargo-audit` (CI gate cannot run the advisory check)
@@ -509,6 +535,70 @@ dependency failure. (Distinct from the test/clippy gates, which DO run on the ru
 
 ---
 
+## PS-13 — Read-path `verify_chain` is enforced per-loader, not at one chokepoint (defence-in-depth)
+
+**Source:** Round 8 C2 (the read-path class audit). Every log read MUST `verify_chain` before
+projecting content as authoritative. This is TRUE on `integ/wave-l` for all five current loaders
+(`intent/list`, `intent/canonical_log`, `pr/cli`, `campaign/world`, `export/cut`) — but each
+calls `verify_chain` AD-HOC after its own inline read→rehydrate loop. A NEW read verb can forget,
+exactly as `why`/`export` (Round 7) and `intent list` (Round 8) did. This is the recurring root
+behind three consecutive corrections of the PS-8 "every read" claim (R5/R7/R8).
+
+**Status:** NOT a live hole (all five verify correctly; cold-verified by tamper-repro on
+`intent list` + the existing `why`/`export` tests). This is a **structural-hardening** item.
+**Proposed fix:** a single `load_verified_log()` that performs read→rehydrate→`verify_chain` and
+is the ONLY way to obtain a projectable log; make the raw `EventLog::new() + push_record` read
+pattern `pub(crate)`/unreachable from verbs, so forgetting is a COMPILE error (the same
+"close-by-construction" pattern Wave L applied to redaction (L-A), the append door (L-D / C4),
+and the seal guard (L-D / C5-F2)). **Owner/lead decision pending** — schedule as a follow-up WP
+(small, mechanical: converge five loaders onto one function) once Round 9 confirms the live holes
+are closed.
+
+---
+
+## PS-14 — Deny-by-default identifier scrub: hex/numeric exemption tuning (DECIDED 2026-06-12 — hybrid implemented; low-entropy-base32 residual accepted)
+
+**Source:** Round 9 C1 re-audit. Wave L / L-A inverted the identifier scrub to deny-by-default
+(`is_safe_identifier_shape` — a value survives verbatim only if it proves a bounded safe-address
+shape). This **CLOSED the Round-8 P0** (prefix-less dense SaaS keys — AWS/SendGrid/Stripe/base64
+— are now rejected/redacted, cold-verified). The residual: the safe-shape gate uses an entropy
+threshold (≈4.5 bits/char) as the discriminator for charset values, but **hex has a per-char
+entropy CEILING of log2(16)=4.0 < 4.5**, so ANY-length hex always passes — not just the {40,64}-hex
+content-address/digest shapes. The R9 auditor live-confirmed that a 32-hex API key, a 50-hex
+secret, a base32 TOTP seed, and a 24-digit numeric secret **survive verbatim** at rest. They are
+indistinguishable from a legit address (a 64-hex *could* be a sha256 OR a key) on the **physics
+boundary**, but the survivor band is **WIDER than the "{40,64}-hex irreducible residual" the L-A
+docs/matrix claimed** — so this is at minimum a documented-residual honesty correction, and a
+genuine tuning knob.
+
+**Severity:** P1 (honesty/seam) — **NOT a P0 class re-open** (deny-by-default holds; dense
+credentials are caught). **No autonomous code change made:** tightening the gate (e.g. length-pin
+the hex exemption to {40,64}, cap numeric length, raise/replace the entropy rule) risks
+**over-scrubbing legit short identifiers** — git short-hashes (7–12 hex), small integer `--pr`/
+`--run-id` values, short slugs — which is a correctness/UX regression. That security-vs-over-scrub
+trade is the **owner's call**.
+
+**DECIDED (owner, 2026-06-12): the HYBRID — implemented.** `is_safe_identifier_shape` now
+redacts any BARE all-hex/all-numeric value of length ≥ 20 that is NOT a {40,64}-hex digest
+(those, plus `cas:` refs and ULIDs, survive at `is_digest_shaped`/`is_ulid_shaped` above). This
+catches odd-length hex (32/50) and long-numeric (24-digit) secrets while keeping INTEGERS and
+SLUGS generous: short integers (`--pr 7`, a CI `--run-id 12345`) are below the length floor;
+UUIDs (hyphens → not all-hex), prefixed ids (hugit's own `intent-<16hex>`), bare ≤19-char short
+hashes, and slugs are untouched. Cold-verified end-to-end through the identifier door: 32-hex /
+50-hex / 24-digit-numeric → `secret_in_identifier` exit 2 (not stored); 40-hex / 64-hex / ULID /
+UUID / integer / `intent-<16hex>` / slug → survive. Regression specimens added to the
+`is_safe_identifier_shape` unit test (R9-2 guard-matrix gap closed).
+
+**Residual after the hybrid (accepted physics, documented):** a LOW-entropy base32 value (e.g. a
+repetitive TOTP seed, Shannon ≈ 3.4) is neither all-hex nor structural-secret-shaped and clears
+the entropy gate — indistinguishable from a legit slug, so it survives. This is the irreducible
+boundary (you cannot tell a low-entropy base32 secret from a low-entropy base32 address). The
+two scrub engines (`porcelain` identifier door / `redact.rs` free-text) remain hand-kept-in-lockstep
+(R9-3, P2 — a shared-predicate refactor is the long-term close); the PS-14 hybrid is identifier-door
+only (free-text hex tightening is a higher-over-scrub trade, not in scope).
+
+---
+
 ## Closed seams (reference — do not re-open without owner approval)
 
 | Seam | Shipped | Governing commit |
@@ -520,6 +610,13 @@ dependency failure. (Distinct from the test/clippy gates, which DO run on the ru
 | **`ac_busy`→`ac_error` taxonomy collapse (flaky gate)** — the retryable lock-exhaustion was flattened to terminal `ac_error`, making `concurrent_checks…` non-deterministic under `--workspace` load. Round-7 finding #6. | 2026-06-12 (K-RUN) | merge `def8a18`; busy path preserves retryable `ac_busy`/`log_busy` kind. Stress-verified 10/10 + full workspace run. |
 | **`pr` I/O fault bare error + `intent new` non-atomic commit** — `pr open/land/abandon` I/O faults emitted bare stderr exit 1 (not structured exit 2); `intent new` saved `--store` before the `--log` append (divergence on log failure). Round-7 findings #7/#8. | 2026-06-12 (K-ERRLAW2) | merge `def8a18`; structured `io_error` exit 2 + log-gated store commit (no orphan, retry converges). |
 | **`.ac` Action-Cache toolchain-digest secret leak** — secret-shaped `--toolchain`/`--def` persisted verbatim into `<log>.ac` (bypassing the `--log` WG-SCRUB seam). FOUND by the WJ-INT per-verb secret matrix; CLOSED by WK-AC (door reject + `FileAc` write-boundary guard). | 2026-06-12 (WK-AC) | merge `d04e199`; tests `check_toolchain_secret_rejected_at_door_and_never_in_ac`, `write_boundary_guard_refuses_a_secret_toolchain_axis`. Defense-in-depth completeness tracked as PS-10. |
+| **Round-8 C1 — prefix-less secret leaks through identifier-address fields** — a credential with no known prefix (AWS/SendGrid/Stripe/32-char base64) rode any identifier field (`--id`/`--run-id`/`--principal`/`--campaign`/`--pr`) verbatim into the forever-log + local store; the scrub was a secret-PREFIX allowlist (open-by-default). The 6th "exemption is a hole" instance / the AR-5 reframe. | 2026-06-12 (Wave L / L-A, `integ/wave-l` — **pending merge to main**) | **Polarity inverted to DENY-BY-DEFAULT** (`porcelain::structural_secret_scrub`): an identifier value survives verbatim ONLY if it proves a bounded safe-address shape (`is_safe_identifier_shape`: ULID, sha-hex, `cas:`/digest, low-entropy slug, integer), else the door rejects (`secret_in_identifier` exit 2) or the payload boundary redacts. Cold-verified: AWS key in `--id`→exit 2, in `--charter`→`[REDACTED]`; ULID survives. Matrix `acceptance_wj_matrix` extended with prefix-less specimens. |
+| **Round-8 C2 — `hugit intent list --log` skipped `verify_chain`** — a third read path projected a tampered log as authoritative landed-state. | 2026-06-12 (Wave L / L-B, `integ/wave-l` — **pending merge**) | `resolve_landed` now verifies the chain → `chain_broken` exit 2 (`acceptance_round8_readpath`). Structural residual (per-loader, not one chokepoint) tracked as **PS-13**. |
+| **Round-8 C3 — wedge stale-green from cwd / arbitrary env / PATH** (+ **Round-9: stdin**) — the memo key tried to ENUMERATE the inputs of a non-hermetic `sh -c`; cwd, an unlisted env var, PATH, and (found in the R9 re-audit) **stdin** were uncaptured → cached PASS where a real run FAILs. | 2026-06-12 (Wave L / L-C + R9-C3, `integ/wave-l` — **pending merge**) | **Hermetic execution** in `ProcessRunner::run`: `env_clear()` + captured allowlist only, `cwd` pinned to `--root`, PATH pinned + hashed into the env axis, **stdin nulled** (`Stdio::null()`). cwd/env/PATH/stdin changes now MISS or are deterministic (cold-verified; test `stdin_is_nulled_not_inherited`). FS/network/clock = disclosed P2 runner-sandbox seam. Supersedes the PS-11 allowlist residual. |
+| **Round-8 C5-F1 — within-record lens-substitution launders a sticky reject** — `verdict --lens X reject --lens X approve` in ONE call projected `proven:1 rejected:0` (the ledger fold was last-wins within a record; K-VERDICT only fixed cross-record). | 2026-06-12 (Wave L / L-D, `integ/wave-l` — **pending merge**) | The fold is reject-sticky WITHIN a record (`merge_lens_outcome`); the recorder refuses a conflicting duplicate-lens input (`duplicate_lens` exit 2). Cold-verified; legit single reject / multi-lens / cross-record clear all intact. |
+| **Round-8 C5-F2 — a SEALED campaign was not terminal** — the post-seal guard was point-local to `verdict`; `intent new`/`pr open|land|settle|abandon` still appended into a closed campaign. | 2026-06-12 (Wave L / L-D, `integ/wave-l` — **pending merge**) | A single shared seal guard enforced at the `hugit-refstore` append chokepoint, so ALL campaign-scoped verbs inherit it → `campaign_sealed` exit 2. Cold-verified across intent + pr; `done` stays put. Compound: clean-seal over a reject now requires `--allow-rejected`. |
+| **Round-8 C4 — the raw `EventLog::append` door was workspace-`pub`** — "every verb routes through `append_authorized`" was enforced by prose, not types (latent; Round-7 export bug was this door). | 2026-06-12 (Wave L / L-D, `integ/wave-l` — **pending merge**) | `append` demoted to `pub(crate)`; cross-crate users routed through `append_authorized` or a typed closed-enum `append_external_change(ExternalChangeKind)` shim; test-only raw access is the `#[cfg(feature="test-support")]` `append_for_test`. A forged cross-crate raw `pr.opened` no longer compiles. |
+| **Round-8 C6 — `clap` arg errors bypassed the error envelope** — malformed invocations emitted bare `error:` stderr (no `{kind,fix}`); retryability was a string convention (`starts_with("ac_busy:")`). | 2026-06-12 (Wave L / L-C, `integ/wave-l` — **pending merge**) | `Cli::try_parse()` renders the structured `invalid_arguments` envelope exit 2; retryability is the TYPED `AcError::Busy` matched exhaustively in `map_exec_error` (string-sniff deleted). HTTP 429/503 busy path is typed but exercised only at P2 (local `.ac` is the live path). |
 | **PS-1 — Recorder verbs (`hugit check` / `hugit verdict` / `pr.landed`)** | 2026-06-11 (wedge wave W0→W-INT) | CHANGELOG `8b3c9c1` (wedge entry); CHANGELOG WB2 entry (checks show); see note below |
 | `cost_usd f64 → cost_usd_micros u64` (WA4, contract 1.2.0) | 2026-06-11 | CHANGELOG WA4 entry; corelink-runners contract §12 amendment |
 | D14 authz guard wired to CLI mutation path (interim) | 2026-06-11 (WA2) | CHANGELOG WA2 entry |

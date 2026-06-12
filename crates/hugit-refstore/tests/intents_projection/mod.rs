@@ -36,7 +36,7 @@ pub fn build_50_intent_log() -> EventLog {
     let mut log = EventLog::new();
     for i in 0..50u64 {
         let principal_chain = vec![format!("agent:runner-{:02}", i % 4), "user:gustavo".into()];
-        log.append(
+        log.append_for_test(
             "intent.landed",
             principal_chain,
             intent_payload(i),
@@ -61,7 +61,7 @@ pub fn build_mixed_log() -> (EventLog, usize, usize) {
         let recorded_at = 1_717_000_000_000 + i;
         if i % 3 == 0 {
             // raw push — external change, NEVER an intent.
-            log.append(
+            log.append_for_test(
                 "ref.update",
                 principal_chain,
                 raw_push_payload(i),
@@ -70,14 +70,14 @@ pub fn build_mixed_log() -> (EventLog, usize, usize) {
             raw_push_count += 1;
         } else if i % 7 == 0 {
             // inert event — advances the chain, no altitude row.
-            log.append(
+            log.append_for_test(
                 "checkpoint.noted",
                 principal_chain,
                 format!(r#"{{"note":"cp-{i}"}}"#),
                 recorded_at,
             );
         } else {
-            log.append(
+            log.append_for_test(
                 "intent.landed",
                 principal_chain,
                 intent_payload(i),

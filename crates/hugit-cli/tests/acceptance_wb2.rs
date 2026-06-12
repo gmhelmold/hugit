@@ -54,7 +54,7 @@ fn write_log(path: &std::path::Path, events: &[(&str, Value)]) {
         // `append` computes the hash chain; payload is canonical JSON (sorted by
         // serde_json::to_string over a json! object is sufficient for the read,
         // which re-parses the payload string).
-        log.append(*kind, vec![], payload.to_string(), 0);
+        log.append_for_test(*kind, vec![], payload.to_string(), 0);
     }
     let json = serde_json::to_string_pretty(log.records()).unwrap();
     std::fs::write(path, json).unwrap();

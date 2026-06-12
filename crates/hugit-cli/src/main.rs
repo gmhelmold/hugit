@@ -443,7 +443,48 @@ fn run_export(args: ExportArgs) -> Result<String, PorcelainError> {
 // ── dispatch ──────────────────────────────────────────────────────────────────
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    // Route clap's own parse failures through the ONE error law (Round-8 C6 F-2).
+    // `Cli::parse()` would let clap print a bare English `error:` to STDERR and
+    // exit before `main`'s match — bypassing the envelope choke-point, so an
+    // orchestrating agent parsing STDOUT for `{"error":{"kind",…}}` gets nothing.
+    // `try_parse()` returns the error here so a bad invocation emits the SAME
+    // structured `{"error":{"kind":"invalid_arguments",…}}` envelope on stdout +
+    // exit 2 as every other user/domain error.
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            use clap::error::ErrorKind;
+            // `--help` / `--version` are NOT errors: clap renders the help/version
+            // text into the error and these kinds are the success path. Print it
+            // verbatim to stdout and exit 0 (clap's normal contract).
+            if matches!(
+                e.kind(),
+                ErrorKind::DisplayHelp
+                    | ErrorKind::DisplayVersion
+                    | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+            ) {
+                print!("{e}");
+                return ExitCode::SUCCESS;
+            }
+            // A genuine argument/subcommand/value-parse error: render the canonical
+            // envelope on STDOUT and exit 2 (the user/domain error law). clap's own
+            // message (the English `error: …`) becomes the envelope `message`; the
+            // `fix` points at `--help`.
+            let message = e
+                .to_string()
+                .trim_end_matches('\n')
+                .replace('\n', " ")
+                .trim()
+                .to_string();
+            let err = PorcelainError::new(
+                "invalid_arguments",
+                message,
+                "run `hugit --help` (or `hugit <verb> --help`) for the correct usage",
+            );
+            println!("{}", err.to_json());
+            return err.exit_code();
+        }
+    };
     // ONE law for every verb. The flow-porcelain verbs (campaign/intent/pr) and
     // the wedge stubs (checks/queue) own their own exit code internally and
     // return an ExitCode directly. The legacy library verbs (why/impact/

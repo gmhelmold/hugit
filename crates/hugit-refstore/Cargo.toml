@@ -11,3 +11,20 @@ hugit-contracts = { path = "../hugit-contracts" }
 sha2 = { workspace = true }
 hex = { workspace = true }
 serde_json = { workspace = true }
+
+[features]
+# C4-F1: the raw `EventLog::append` door is `pub(crate)` so no PRODUCTION
+# cross-crate caller can bypass the D14 guard. Cross-crate TEST fixtures that
+# build synthetic event logs (arbitrary kinds/principals, no real verb) opt in
+# to a `#[doc(hidden)]` raw-append shim via this dev-only feature. Enabling it
+# from a `[dependencies]` table is a misuse — it is wired only as a
+# `[dev-dependencies]` feature in the consuming crates.
+test-support = []
+
+[dev-dependencies]
+# C4-F1: refstore's OWN integration tests (`tests/*.rs`) link against the crate
+# as an external dependency, so they need the `test-support` feature explicitly
+# to reach the `append_for_test` shim (the production raw door is `pub(crate)`).
+# This self dev-dependency enables the feature for the integration-test target
+# only; it does NOT enable it for the library's normal compilation.
+hugit-refstore = { path = ".", features = ["test-support"] }

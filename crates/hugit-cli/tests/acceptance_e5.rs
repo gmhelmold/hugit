@@ -44,7 +44,7 @@ fn scratch(tag: &str) -> PathBuf {
 fn fixture_corpus() -> Corpus {
     let mut log = EventLog::new();
     // intent.landed #1
-    log.append(
+    log.append_for_test(
         "intent.landed",
         vec!["alice".into()],
         serde_json::json!({
@@ -57,7 +57,7 @@ fn fixture_corpus() -> Corpus {
         1000,
     );
     // intent.landed #2
-    log.append(
+    log.append_for_test(
         "intent.landed",
         vec!["bob".into()],
         serde_json::json!({
@@ -70,7 +70,7 @@ fn fixture_corpus() -> Corpus {
         2000,
     );
     // raw push (external change, not an intent)
-    log.append(
+    log.append_for_test(
         "ref.update",
         vec!["ci".into()],
         serde_json::json!({ "ref": "refs/heads/ci", "target": "cccc3333" }).to_string(),
@@ -560,13 +560,13 @@ fn item_9_live_consistency_cut() {
 
     let mut live = corpus.event_log.clone();
     // Concurrent landings + mirror sync + event append land AFTER the cut.
-    live.append(
+    live.append_for_test(
         "intent.landed",
         vec!["carol".into()],
         serde_json::json!({"intent_id":"I-3","ref":"refs/heads/late","target":"dddd","charter":"late"}).to_string(),
         9000,
     );
-    live.append("mirror.sync", vec!["sys".into()], "{}".to_string(), 9100);
+    live.append_for_test("mirror.sync", vec!["sys".into()], "{}".to_string(), 9100);
 
     // The cut never sees the post-cut events.
     let cut_after = Cut::take_to(&live, cut.seq_bound()).unwrap();
@@ -645,7 +645,7 @@ fn item_4b_real_export_bounded_memory() {
     })
     .to_string();
     for i in 0..400 {
-        log.append(
+        log.append_for_test(
             "intent.landed",
             vec![format!("author-{i}")],
             big_payload.clone(),
@@ -769,7 +769,7 @@ fn item_5c_malformed_ref_payload_fails_export() {
     let mut log = EventLog::new();
     // A real landed intent first (so a naive empty-refs export would still look
     // "successful").
-    log.append(
+    log.append_for_test(
         "intent.landed",
         vec!["alice".into()],
         serde_json::json!({"intent_id":"I-1","ref":"refs/heads/main","target":"aaaa","charter":"c"})
@@ -778,7 +778,7 @@ fn item_5c_malformed_ref_payload_fails_export() {
     );
     // A ref.update whose payload is valid JSON but MISSING the `target` field —
     // a malformed ref payload. The hash chain stays valid; replay must reject it.
-    log.append(
+    log.append_for_test(
         "ref.update",
         vec!["ci".into()],
         serde_json::json!({ "ref": "refs/heads/broken" }).to_string(),

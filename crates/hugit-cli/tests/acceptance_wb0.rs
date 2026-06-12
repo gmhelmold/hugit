@@ -35,7 +35,7 @@ fn scratch(tag: &str) -> PathBuf {
 fn write_why_log(path: &std::path::Path, events: &[(&str, Value)]) {
     let mut log = EventLog::new();
     for (kind, payload) in events {
-        log.append(*kind, vec![], payload.to_string(), 0);
+        log.append_for_test(*kind, vec![], payload.to_string(), 0);
     }
     let entries: Vec<Value> = log
         .records()
@@ -50,7 +50,7 @@ fn write_why_log(path: &std::path::Path, events: &[(&str, Value)]) {
 fn write_canonical_log(path: &std::path::Path, events: &[(&str, Value)]) {
     let mut log = EventLog::new();
     for (kind, payload) in events {
-        log.append(*kind, vec![], payload.to_string(), 0);
+        log.append_for_test(*kind, vec![], payload.to_string(), 0);
     }
     std::fs::write(path, serde_json::to_string_pretty(log.records()).unwrap()).unwrap();
 }

@@ -24,18 +24,18 @@ fn build_10k_log() -> EventLog {
                 let bucket = i % 64;
                 let payload =
                     format!(r#"{{"ref":"refs/heads/branch-{bucket}","target":"oid-{i:064x}"}}"#);
-                log.append("ref.update", principal_chain, payload, recorded_at);
+                log.append_for_test("ref.update", principal_chain, payload, recorded_at);
             }
             // ref.delete — occasionally drop a ref (may be a no-op; still chained).
             3 => {
                 let bucket = i % 64;
                 let payload = format!(r#"{{"ref":"refs/heads/branch-{bucket}"}}"#);
-                log.append("ref.delete", principal_chain, payload, recorded_at);
+                log.append_for_test("ref.delete", principal_chain, payload, recorded_at);
             }
             // inert event — advances the chain, does not touch ref state.
             _ => {
                 let payload = format!(r#"{{"note":"checkpoint-{i}"}}"#);
-                log.append("checkpoint.noted", principal_chain, payload, recorded_at);
+                log.append_for_test("checkpoint.noted", principal_chain, payload, recorded_at);
             }
         }
     }

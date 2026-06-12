@@ -32,16 +32,16 @@ fn build_log(n: u64) -> EventLog {
                 let bucket = i % 64;
                 let payload =
                     format!(r#"{{"ref":"refs/heads/branch-{bucket}","target":"oid-{i:064x}"}}"#);
-                log.append("ref.update", principal_chain, payload, recorded_at);
+                log.append_for_test("ref.update", principal_chain, payload, recorded_at);
             }
             3 => {
                 let bucket = i % 64;
                 let payload = format!(r#"{{"ref":"refs/heads/branch-{bucket}"}}"#);
-                log.append("ref.delete", principal_chain, payload, recorded_at);
+                log.append_for_test("ref.delete", principal_chain, payload, recorded_at);
             }
             _ => {
                 let payload = format!(r#"{{"note":"checkpoint-{i}"}}"#);
-                log.append("checkpoint.noted", principal_chain, payload, recorded_at);
+                log.append_for_test("checkpoint.noted", principal_chain, payload, recorded_at);
             }
         }
     }
@@ -184,13 +184,13 @@ fn item_4_undo_restores_preserves_history() {
     // (1) Undo an UPDATE that overwrote an existing ref → restores prior target.
     let mut log = EventLog::new();
     let pc = vec!["user:gustavo".to_string()];
-    log.append(
+    log.append_for_test(
         "ref.update",
         pc.clone(),
         r#"{"ref":"refs/heads/main","target":"oid-A"}"#,
         1,
     );
-    log.append(
+    log.append_for_test(
         "ref.update",
         pc.clone(),
         r#"{"ref":"refs/heads/main","target":"oid-B"}"#,
@@ -200,7 +200,7 @@ fn item_4_undo_restores_preserves_history() {
     let before_overwrite = {
         // state after only the first append
         let mut l = EventLog::new();
-        l.append(
+        l.append_for_test(
             "ref.update",
             pc.clone(),
             r#"{"ref":"refs/heads/main","target":"oid-A"}"#,
@@ -242,7 +242,7 @@ fn item_4_undo_restores_preserves_history() {
 
     // (2) Undo a CREATE (ref did not exist before) → compensator DELETES it.
     let mut log2 = EventLog::new();
-    log2.append(
+    log2.append_for_test(
         "ref.update",
         pc.clone(),
         r#"{"ref":"refs/heads/feature","target":"oid-X"}"#,
@@ -267,13 +267,13 @@ fn item_4_undo_restores_preserves_history() {
 
     // (3) Undo a DELETE → compensator restores the deleted ref's prior target.
     let mut log3 = EventLog::new();
-    log3.append(
+    log3.append_for_test(
         "ref.update",
         pc.clone(),
         r#"{"ref":"refs/heads/x","target":"oid-1"}"#,
         1,
     );
-    log3.append("ref.delete", pc.clone(), r#"{"ref":"refs/heads/x"}"#, 2);
+    log3.append_for_test("ref.delete", pc.clone(), r#"{"ref":"refs/heads/x"}"#, 2);
     assert_eq!(replay(&log3).unwrap().get("refs/heads/x"), None);
     undo(&mut log3, 1, pc.clone(), 3).expect("undo delete");
     assert_eq!(
@@ -289,7 +289,7 @@ fn item_4_undo_restores_preserves_history() {
 
     // (5) An inert event has nothing to compensate (fail-loud, not silent).
     let mut log4 = EventLog::new();
-    log4.append("checkpoint.noted", pc.clone(), r#"{"note":"hi"}"#, 1);
+    log4.append_for_test("checkpoint.noted", pc.clone(), r#"{"note":"hi"}"#, 1);
     assert!(
         compute_compensation(&log4, 0).is_err(),
         "inert event: nothing to undo"
@@ -316,14 +316,14 @@ fn item_4_undo_folds_intent_landed_ref_mutations() {
     //     undo the landing → must RESTORE the prior oid, not delete the ref.
     let mut log = EventLog::new();
     // seq 0: raw update sets refs/heads/main -> oid-A.
-    log.append(
+    log.append_for_test(
         "ref.update",
         pc.clone(),
         r#"{"ref":"refs/heads/main","target":"oid-A"}"#,
         1,
     );
     // seq 1: a landed intent advances refs/heads/main -> oid-B.
-    log.append(
+    log.append_for_test(
         "intent.landed",
         pc.clone(),
         r#"{"intent_id":"I1","ref":"refs/heads/main","target":"oid-B","charter":"land"}"#,
@@ -354,13 +354,13 @@ fn item_4_undo_folds_intent_landed_ref_mutations() {
     // (2) Undo of a RAW update whose ref was previously set BY a landed intent
     //     must restore the intent's oid (the prior state includes the intent).
     let mut log2 = EventLog::new();
-    log2.append(
+    log2.append_for_test(
         "intent.landed",
         pc.clone(),
         r#"{"intent_id":"I2","ref":"refs/heads/x","target":"oid-1","charter":"land"}"#,
         1,
     );
-    log2.append(
+    log2.append_for_test(
         "ref.update",
         pc.clone(),
         r#"{"ref":"refs/heads/x","target":"oid-2"}"#,
@@ -379,7 +379,7 @@ fn item_4_undo_folds_intent_landed_ref_mutations() {
 
     // (3) A landed intent is itself directly undoable (it is a ref mutation).
     let mut log3 = EventLog::new();
-    log3.append(
+    log3.append_for_test(
         "intent.landed",
         pc.clone(),
         r#"{"intent_id":"I3","ref":"refs/heads/feat","target":"oid-Z","charter":"land"}"#,

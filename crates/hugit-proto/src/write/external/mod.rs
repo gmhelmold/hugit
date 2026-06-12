@@ -17,7 +17,7 @@
 
 use hugit_contracts::event_record::EventRecord;
 use hugit_refstore::EventLog;
-use hugit_refstore::intent::{INTENT_LANDED_KIND, RAW_PUSH_KINDS};
+use hugit_refstore::intent::{ExternalChangeKind, INTENT_LANDED_KIND, RAW_PUSH_KINDS};
 
 use crate::write::json_str;
 
@@ -66,6 +66,17 @@ impl RawPush {
         match self {
             RawPush::Update { .. } => REF_UPDATE_KIND,
             RawPush::Delete { .. } => REF_DELETE_KIND,
+        }
+    }
+
+    /// The TYPED external-change kind (C4-F1) — the closed-enum companion to
+    /// [`kind`](RawPush::kind), used to route the append through the
+    /// [`EventLog::append_external_change`] shim so this path is *structurally
+    /// incapable* of emitting an intent/pr/verdict kind.
+    pub fn external_kind(&self) -> ExternalChangeKind {
+        match self {
+            RawPush::Update { .. } => ExternalChangeKind::RefUpdate,
+            RawPush::Delete { .. } => ExternalChangeKind::RefDelete,
         }
     }
 
@@ -154,11 +165,21 @@ pub fn record_external_change(
         return Err(ExternalChangeError::MissingAttribution);
     }
 
-    let record = log.append(push.kind(), principal_chain, push.payload(), recorded_at);
+    // C4-F1: route through the TYPED external-change shim. `push.external_kind()`
+    // is a closed [`ExternalChangeKind`], so this append can ONLY emit
+    // `ref.update`/`ref.delete` — the raw `EventLog::append` door is now
+    // `pub(crate)` and unreachable from this crate, making the no-fake-intent
+    // guarantee a compile-time fact rather than a runtime `debug_assert`.
+    let record = log.append_external_change(
+        push.external_kind(),
+        principal_chain,
+        push.payload(),
+        recorded_at,
+    );
 
     // Structural guarantee for ⑤: the recorded kind is an external-change kind,
-    // never an intent. An attempt to record an intent kind here is impossible —
-    // `push.kind()` only ever returns a RAW_PUSH_KINDS value.
+    // never an intent. Now enforced by the type of `push.external_kind()`; the
+    // assertion is kept as a belt-and-braces cross-check.
     debug_assert_ne!(record.kind, INTENT_LANDED_KIND);
 
     let attribution = Attribution {

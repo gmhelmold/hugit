@@ -116,6 +116,110 @@ fn builtin_glob_set() -> Vec<String> {
 /// than colliding with a hashed identity.
 const TOOLCHAIN_PROBE_UNAVAILABLE: &str = "toolchain-unprobed";
 
+// ── hermetic execution env (Round-8 C3) ────────────────────────────────────────
+//
+// The memo wedge memoizes a NON-HERMETIC `sh -c` — a process free to read cwd,
+// the whole environment, PATH, and the entire filesystem. Trying to ENUMERATE the
+// inputs of such a process is impossible (the input set is open), so an uncaptured
+// input (cwd, an unlisted env var, PATH) produced a STALE GREEN: a warm HIT served
+// `exit:0` where a real run would FAIL. The class-killing fix is to make the spawn
+// HERMETIC for the LOCAL scope so the captured axes ARE the complete input set by
+// construction:
+//   1. cwd is PINNED to the canonical `--root` (the tree-axis root).
+//   2. the env is CLEARED then reconstructed from ONLY the captured allowlist, so
+//      a var the check reads is either IN the key (captured) or ABSENT (reads
+//      empty, deterministically) — never an ambient leak.
+//   3. PATH is pinned to the resolved ambient PATH and FOLDED (hashed) into the
+//      env-manifest axis, so a PATH change busts the memo key.
+// The captured set is folded into `def.env_manifest` → `compute_def_digest` → the
+// memo key, so any change to a captured var/PATH is a MISS by construction.
+//
+// OUT OF LOCAL SCOPE (disclosed P2 runner-sandbox seam — NOT closed here):
+// whole-filesystem confinement (files outside `--root`, pruned dirs), network, and
+// clock. Those require the runner-side isolated rootfs (campaign #1) where the
+// action physically cannot read outside the seeded tree axis. The local executor
+// mirrors that contract's SOUNDNESS for cwd/env/PATH; it does not exceed it.
+
+/// Exact env-var NAMES that can change a Rust gate's RESULT and are therefore
+/// captured into the memo key (folded into `env_manifest`) AND set on the hermetic
+/// spawn. An ambient var NOT on this list (and not matching a captured prefix) is
+/// CLEARED before the spawn, so it can never silently change a check's outcome
+/// off-key. Sorted lookups keep the manifest deterministic.
+const RESULT_AFFECTING_ENV_EXACT: &[&str] = &[
+    // `HOME` is captured (not cleared): the toolchain derives `CARGO_HOME`/
+    // `RUSTUP_HOME` defaults (`~/.cargo`, `~/.rustup`) from it, so clearing it
+    // would break the built-in `cargo` gates. Pinned into the key (its value is a
+    // captured axis), so a HOME change is a MISS — present AND in-key.
+    "HOME",
+    "CC",
+    "CXX",
+    "AR",
+    // Native-build flags (merged from K-RUN's allowlist): result-affecting for any
+    // `cc`/`c++`/link step a check shells out to. Captured (not cleared) so a flag
+    // change busts the memo key AND native (cc-rs) gates still build.
+    "CFLAGS",
+    "CXXFLAGS",
+    "LDFLAGS",
+    "RUSTFLAGS",
+    "RUSTDOCFLAGS",
+    "RUSTC_WRAPPER",
+    "RUSTC_BOOTSTRAP",
+    "SOURCE_DATE_EPOCH",
+    "LANG",
+    "LC_ALL",
+    "TZ",
+];
+
+/// Env-var NAME PREFIXES that can change a Rust gate's result (the `CARGO_*`,
+/// `RUST_*`, `CARGO_BUILD_*`, `RUSTUP_*`, `LC_*` families). A var whose name starts
+/// with any of these is captured + set; everything else is cleared.
+const RESULT_AFFECTING_ENV_PREFIXES: &[&str] =
+    &["CARGO_", "CARGO_BUILD_", "RUST_", "RUSTUP_", "LC_"];
+
+/// Whether an env-var name is in the result-affecting allowlist (exact OR prefix).
+/// `PATH` is handled separately (pinned + hashed into the axis), so it is NOT in
+/// this predicate.
+fn is_result_affecting_env(name: &str) -> bool {
+    RESULT_AFFECTING_ENV_EXACT.contains(&name)
+        || RESULT_AFFECTING_ENV_PREFIXES
+            .iter()
+            .any(|p| name.starts_with(p))
+}
+
+/// The captured, hermetic env for a spawn: every ambient var whose name is in the
+/// result-affecting allowlist, PLUS `PATH` (pinned), sorted by name for
+/// determinism. This is the EXACT set that is (a) folded into the memo-key axis via
+/// [`env_manifest_axis`] and (b) set on the spawned `Command` after `env_clear()`.
+/// Because (a) and (b) come from the same source, "captured == present": the memo
+/// key's env axis is the complete spawn env.
+fn captured_hermetic_env() -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = std::env::vars()
+        .filter(|(k, _)| k == "PATH" || is_result_affecting_env(k))
+        .collect();
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    pairs
+}
+
+/// Serialize the captured hermetic env into the deterministic `env_manifest` axis
+/// string folded into `compute_def_digest`. PATH's VALUE is hashed (it is long and
+/// machine-specific, but a change must bust the key — F-MK5), so the manifest
+/// carries `PATH=<sha256(value)>`; every other captured var carries its literal
+/// `NAME=VALUE`. Newline-joined over the sorted pairs so the axis is canonical: a
+/// changed value, a changed PATH, an added or removed captured var all change the
+/// axis → a different memo key → a MISS (never a stale green).
+fn env_manifest_axis(captured: &[(String, String)]) -> String {
+    let mut lines: Vec<String> = Vec::with_capacity(captured.len());
+    for (k, v) in captured {
+        if k == "PATH" {
+            let digest = hex::encode(Sha256::digest(v.as_bytes()));
+            lines.push(format!("PATH=sha256:{digest}"));
+        } else {
+            lines.push(format!("{k}={v}"));
+        }
+    }
+    lines.join("\n")
+}
+
 /// Resolve the toolchain digest (third memo axis) for this run.
 ///
 /// An explicit `--toolchain` wins verbatim (the caller content-addressed it). When
@@ -156,7 +260,12 @@ fn default_toolchain_digest() -> String {
 /// name is the ad-hoc form and REQUIRES `--cmd` (fail-closed: a def with no
 /// command can never execute, so we refuse rather than memoize an empty action).
 /// The `def_digest` is canonicalized by the parser so the memo key is honest.
-fn resolve_def(args: &CheckArgs) -> Result<CheckDef, PorcelainError> {
+///
+/// `env_manifest` carries the captured hermetic env axis (Round-8 C3): the set of
+/// result-affecting env vars + the hashed PATH that the hermetic spawn will set, so
+/// a change to any captured var/PATH busts the memo key. It MUST be set before
+/// validation (the digest folds it).
+fn resolve_def(args: &CheckArgs, env_manifest: String) -> Result<CheckDef, PorcelainError> {
     let (command, glob_set) = match builtin_command(&args.def) {
         Some(cmd) => (cmd.to_string(), builtin_glob_set()),
         None => {
@@ -193,15 +302,16 @@ fn resolve_def(args: &CheckArgs) -> Result<CheckDef, PorcelainError> {
         // busts the memo key (WG-CACHE: the old `local-toolchain` constant made
         // axis 3 fake, hitting a green cached under Rust A under Rust B).
         toolchain_ref: resolve_toolchain_digest(args),
-        // The env axis (K-RUN stale-green fix): the check command runs through
-        // `sh -c` inheriting the FULL ambient environment, so a result-affecting
-        // env var (e.g. RUSTFLAGS) changes the gate's outcome. The old hardcoded
-        // empty manifest meant such a change did NOT bust the memo key → a stale
-        // GREEN was served with zero execution. We snapshot a canonical, sorted
-        // allowlist of result-affecting vars into this axis (it folds into
-        // def_digest → memo_key via `compute_def_digest`), so a change to any of
-        // them is a MISS, while an UNLISTED var leaves the hit-rate intact.
-        env_manifest: result_affecting_env_manifest(),
+        // The hermetic env axis (Round-8 C3, built on K-RUN's allowlist): a
+        // canonical sorted manifest of the result-affecting env vars PLUS the
+        // hashed PATH the spawn will set. The check command runs through `sh -c`,
+        // so a result-affecting env var (e.g. RUSTFLAGS) or a PATH change alters
+        // the gate's outcome; folding them into this axis (→ def_digest → memo_key
+        // via the validator below) makes any such change a MISS, while an UNLISTED
+        // var leaves the hit-rate intact. Supersedes K-RUN's inline
+        // `result_affecting_env_manifest()` — the value now also pins PATH so a
+        // stale GREEN can no longer be served when the resolved binary changes.
+        env_manifest,
         glob_set,
     };
     // Normalize the def_digest canonically through the parser/validator so a
@@ -215,69 +325,14 @@ fn resolve_def(args: &CheckArgs) -> Result<CheckDef, PorcelainError> {
     })
 }
 
-/// The exact (case-sensitive) names of environment variables DECLARED
-/// result-affecting for a Rust gate run: they change what the compiler/linker/
-/// toolchain does, so a change to any of them must bust the memo key. Anything
-/// NOT on this allowlist (and not under an allowlisted prefix below) is DECLARED
-/// not-result-affecting — capturing the full environment (PWD/SHLVL/TERM/…)
-/// would destroy the hit-rate, since those churn between invocations without
-/// changing the gate's outcome.
-const RESULT_AFFECTING_ENV_EXACT: &[&str] = &[
-    "RUSTFLAGS",
-    "RUSTDOCFLAGS",
-    "RUSTC",
-    "RUSTC_WRAPPER",
-    "RUSTUP_TOOLCHAIN",
-    "CC",
-    "CXX",
-    "CFLAGS",
-    "CXXFLAGS",
-    "LDFLAGS",
-    "AR",
-];
-
-/// Name PREFIXES whose every member is DECLARED result-affecting: the cargo /
-/// rustc / cargo-build environment namespaces all steer the build (target dir,
-/// build flags, registry, jobs, profile overrides, …). A var matching any of
-/// these prefixes is folded into the env axis.
-const RESULT_AFFECTING_ENV_PREFIXES: &[&str] = &["CARGO_", "RUST_", "CARGO_BUILD_"];
-
-/// Build the CANONICAL, SORTED env-axis manifest from the result-affecting
-/// allowlist (K-RUN stale-green fix). Only vars that are actually SET are
-/// emitted, as a deterministic `KEY=VALUE\n` string sorted by key, so the
-/// manifest is reproducible across invocations on an unchanged environment (a
-/// legit warm HIT still happens) and changes the instant any allowlisted var's
-/// presence or value changes (the stale GREEN is busted).
-///
-/// SCOPE (disclosed residual): env vars OUTSIDE this allowlist are DECLARED
-/// not-result-affecting — they do NOT enter the memo key. This is the honest
-/// trade that preserves the hit-rate (capturing the whole environment would make
-/// nearly every run a miss). An unlisted variable that DOES affect a check's
-/// result is therefore a disclosed residual seam (e.g. a custom `MY_GATE_MODE`
-/// read by an ad-hoc `--cmd`): it would not bust the key. The orchestrator
-/// records such a class as a pending-seam — this function never silently widens
-/// the allowlist to cover one.
-fn result_affecting_env_manifest() -> String {
-    let mut pairs: Vec<(String, String)> = std::env::vars()
-        .filter(|(k, _)| {
-            RESULT_AFFECTING_ENV_EXACT.contains(&k.as_str())
-                || RESULT_AFFECTING_ENV_PREFIXES
-                    .iter()
-                    .any(|p| k.starts_with(p))
-        })
-        .collect();
-    // Sort by key for a canonical, order-independent manifest. (`std::env::vars`
-    // order is unspecified; sorting makes the digest stable.)
-    pairs.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut manifest = String::new();
-    for (k, v) in pairs {
-        manifest.push_str(&k);
-        manifest.push('=');
-        manifest.push_str(&v);
-        manifest.push('\n');
-    }
-    manifest
-}
+// NOTE (Wave-L integration): K-RUN's `result_affecting_env_manifest()` and its
+// duplicate `RESULT_AFFECTING_ENV_EXACT`/`RESULT_AFFECTING_ENV_PREFIXES` consts
+// were removed here — superseded by L-C's hermetic env path above
+// (`captured_hermetic_env` + `env_manifest_axis`), which sets the spawn env
+// hermetically (`env_clear` + the captured allowlist) AND folds that SAME
+// captured set + the hashed PATH into the memo-key axis, so "captured == present"
+// by construction. The native-build vars K-RUN covered (CFLAGS/CXXFLAGS/LDFLAGS)
+// were merged into the single `RESULT_AFFECTING_ENV_EXACT` allowlist above.
 
 /// Snapshot the workspace files under `root` whose path matches `glob_set` into
 /// the `(rel_path, content)` map [`run_memoized`] hashes for the tree axis.
@@ -429,6 +484,18 @@ struct ProcessRunner {
     /// The per-check execution ceiling. On expiry the child is killed and the run
     /// is a structured timeout — never a memoized result.
     timeout: Duration,
+    /// The canonical `--root` the check's cwd is PINNED to (Round-8 C3 hermetic
+    /// exec). The spawn's cwd == the tree-axis root, so a relative-path check reads
+    /// the SAME files the tree axis hashed — never a different file per ambient
+    /// cwd. `None` keeps the legacy (inherited-cwd) behaviour for the in-process
+    /// unit tests that do not exercise cwd sensitivity.
+    root: Option<PathBuf>,
+    /// The captured hermetic env: the EXACT `(name, value)` set folded into the
+    /// memo key's env axis (`env_manifest`). The spawn is `env_clear()`ed then
+    /// reconstructed from ONLY these, so a var the check reads is either captured
+    /// (in the key) or absent (reads empty) — never an off-key ambient leak.
+    /// `None` keeps the legacy inherited-env behaviour for the unit tests.
+    env: Option<Vec<(String, String)>>,
 }
 
 impl CheckRunner for ProcessRunner {
@@ -460,8 +527,38 @@ impl CheckRunner for ProcessRunner {
         // the wall-time ceiling).
         let mut command = shell_command(&def.command);
         command
+            // HERMETIC stdin (Round-8 C3 / Round-9 close): stdin is NULL, never
+            // inherited. An inherited stdin is an uncaptured, result-affecting input
+            // — a check that reads it (`read x; …`) would otherwise produce a
+            // STALE GREEN (a warm HIT served when the ambient stdin flips), since
+            // stdin is not in the memo key. Nulling it makes a stdin read a
+            // deterministic EOF, so stdin can never change a check's outcome off-key.
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
+
+        // HERMETIC EXECUTION (Round-8 C3): pin cwd + clear/reconstruct env so the
+        // captured memo axes ARE the complete input set for the local scope.
+        //
+        // (1) Pin cwd to the canonical `--root`. The tree axis snapshots files
+        //     under `--root`; pinning the spawn's cwd there means a check using
+        //     RELATIVE paths reads exactly those files — never a different file per
+        //     ambient cwd (closes F-MK1). `--root` is canonicalized by the caller.
+        if let Some(root) = &self.root {
+            command.current_dir(root);
+        }
+        // (2) Clear the inherited environment, then set ONLY the captured allowlist
+        //     vars + the pinned PATH. After this, any var the check reads is either
+        //     IN the memo key (captured into `env_manifest`) or ABSENT (reads
+        //     empty, deterministically) — never a silent off-key ambient input
+        //     (closes F-MK2 for unlisted vars and F-MK5 for PATH, whose value is
+        //     also hashed into the env axis so a PATH change busts the key).
+        if let Some(env) = &self.env {
+            command.env_clear();
+            for (k, v) in env {
+                command.env(k, v);
+            }
+        }
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -895,10 +992,12 @@ fn acquire_ac_lock(path: &Path) -> Result<FileLock, hugit_checks::client::ac::Ac
             }
         }
     }
-    Err(AcError::Transport(format!(
-        "ac_busy: the AC store {} stayed locked by another hugit check",
-        path.display()
-    )))
+    Err(AcError::Busy {
+        detail: format!(
+            "the AC store {} stayed locked by another hugit check",
+            path.display()
+        ),
+    })
 }
 
 /// Reject a memo-axis flag value (`--def`/`--toolchain`) that carries a
@@ -942,7 +1041,14 @@ pub fn run(args: &CheckArgs) -> Result<Value, PorcelainError> {
         validate_axis(tc, "--toolchain")?;
     }
 
-    let def = resolve_def(args)?;
+    // Capture the hermetic env ONCE (Round-8 C3): the result-affecting allowlist
+    // vars + PATH the spawn will set. Fold it into `env_manifest` so a change to any
+    // captured var (or PATH, whose value is hashed) busts the memo key — the same
+    // set is set on the spawn below, so "captured == present".
+    let captured_env = captured_hermetic_env();
+    let env_manifest = env_manifest_axis(&captured_env);
+
+    let def = resolve_def(args, env_manifest)?;
     // Axis 3 is taken from the resolved def's `toolchain_ref` — the SAME value
     // `resolve_def` baked into axis 2 (`compute_def_digest` hashes `toolchain_ref`)
     // — so the two axes can never disagree. When `--toolchain` is omitted this is
@@ -975,8 +1081,15 @@ pub fn run(args: &CheckArgs) -> Result<Value, PorcelainError> {
     let excluded = state_file_exclusions(&[&args.log, &ac_path]);
     let files = snapshot_tree(&root, &def.glob_set, &excluded);
     let ac = select_ac(args)?;
+    // The canonical `--root` the hermetic spawn pins its cwd to (Round-8 C3). Pin
+    // to the SAME real path the tree axis snapshotted; a canonicalize failure (a
+    // `--root` that does not exist) falls back to the raw path so the spawn still
+    // has a defined cwd rather than silently inheriting the ambient one.
+    let canonical_root = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
     let runner = ProcessRunner {
         timeout: Duration::from_secs(args.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS)),
+        root: Some(canonical_root),
+        env: Some(captured_env),
     };
 
     // The wedge: derive the three-axis key, look it up, execute-on-miss + store.
@@ -1220,33 +1333,38 @@ fn map_lock_error(e: LockError) -> PorcelainError {
 
 /// Map an executor [`ExecError`] into the canonical porcelain envelope.
 ///
-/// TAXONOMY (K-RUN flaky-gate fix): the RETRYABLE lock-exhaustion error
-/// (`acquire_ac_lock` gives up after its bounded retry budget while the `.ac`
-/// stayed locked by a concurrent `hugit check`) must surface as the structured
-/// retryable `kind:"ac_busy"`, NOT collapse into the generic terminal
-/// `ac_error`. Collapsing it broke the contention loser's expected kind: under
-/// `--workspace` parallel load the retry budget exhausts → a terminal
-/// `ac_error` → the acceptance assertion (`kind == "ac_busy" || "log_busy"`)
-/// failed non-deterministically. The busy error is constructed in
-/// `acquire_ac_lock` as `AcError::Transport` whose message begins `ac_busy:`
-/// (the one place lock-exhaustion is raised), so we detect that prefix and
-/// preserve the retryable kind. Only GENUINE unreadable/unwritable/misconfig AC
-/// faults remain `ac_error`.
+/// Retryability is a TYPE, not a string convention (Round-8 C6 root fix; this
+/// supersedes the K-RUN `starts_with("ac_busy:")` band-aid). The AC layer's
+/// retryable `Busy` variant is matched STRUCTURALLY here and surfaces as a
+/// retryable `ac_busy` kind; every other `AcError` is a terminal `ac_error`. The
+/// exhaustive inner match means the compiler forces every NEW `AcError` variant to
+/// be consciously classified retryable-or-terminal — a retryable case can never
+/// again silently collapse to a terminal kind under fleet-shared-cache contention
+/// (the flaky-gate failure mode that broke the contention loser's expected kind
+/// under `--workspace` parallel load).
 fn map_exec_error(e: ExecError) -> PorcelainError {
+    use hugit_checks::client::ac::AcError;
     match e {
-        // Retryable lock-exhaustion: the contention loser. Preserve `ac_busy` so
-        // it is a clean retryable kind, never a terminal `ac_error`.
-        ExecError::Ac(hugit_checks::client::ac::AcError::Transport(ref msg))
-            if msg.starts_with("ac_busy:") =>
-        {
-            PorcelainError::new(
-                "ac_busy",
-                format!("the Action Cache store is contended: {msg}"),
-                "another `hugit check` holds the AC-store lock; retry once it \
-                 releases (a stale lock is auto-reclaimed after a short window)",
-            )
-        }
-        ExecError::Ac(ac) => PorcelainError::new(
+        // RETRYABLE: AC-file lock exhaustion or an HTTP 429/503 from the live AC.
+        // A typed arm — no `starts_with("ac_busy:")` string-sniff (deleted).
+        ExecError::Ac(AcError::Busy { detail }) => PorcelainError::new(
+            "ac_busy",
+            format!("the Action Cache is busy (retryable): {detail}"),
+            "another hugit check holds the AC store, or the live AC is rate-limited; \
+             retry shortly",
+        ),
+        // TERMINAL: every other AcError is a genuine fault, not contention. The
+        // explicit variant list (not a wildcard) keeps the exhaustiveness guard:
+        // a future variant fails to compile until it is classified above or here.
+        ExecError::Ac(
+            ac @ (AcError::NotWired(_)
+            | AcError::Transport(_)
+            | AcError::NotConfigured(_)
+            | AcError::Status(_)
+            | AcError::Decode(_)
+            | AcError::DigestMismatch { .. }
+            | AcError::InvalidKey(_)),
+        ) => PorcelainError::new(
             "ac_error",
             format!("the Action Cache layer failed: {ac}"),
             "the local AC store is unreadable/unwritable, or the live AC is \
@@ -1297,13 +1415,13 @@ mod tests {
 
     #[test]
     fn ad_hoc_def_requires_cmd() {
-        let err = resolve_def(&args_for("echo-check", None)).unwrap_err();
+        let err = resolve_def(&args_for("echo-check", None), String::new()).unwrap_err();
         assert_eq!(err.kind(), "unknown_def");
     }
 
     #[test]
     fn ad_hoc_def_with_cmd_builds_a_valid_def() {
-        let def = resolve_def(&args_for("echo-check", Some("true"))).unwrap();
+        let def = resolve_def(&args_for("echo-check", Some("true")), String::new()).unwrap();
         assert_eq!(def.command, "true");
         // The def_digest was canonicalized (non-empty) by the validator.
         assert!(!def.def_digest.is_empty());
@@ -1321,6 +1439,8 @@ mod tests {
     fn process_runner_captures_real_exit_and_duration() {
         let runner = ProcessRunner {
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+            root: None,
+            env: None,
         };
         let def = CheckDef {
             def_digest: String::new(),
@@ -1350,6 +1470,8 @@ mod tests {
         // test fast while still proving the kill path.
         let runner = ProcessRunner {
             timeout: Duration::from_secs(1),
+            root: None,
+            env: None,
         };
         let def = CheckDef {
             def_digest: String::new(),
@@ -1369,6 +1491,79 @@ mod tests {
             start.elapsed() < Duration::from_secs(10),
             "the timeout fired promptly, not after the full sleep"
         );
+    }
+
+    // ── Round-8 C6: typed ac_busy taxonomy ──────────────────────────────────────
+
+    #[test]
+    fn ac_busy_lock_exhaustion_maps_to_retryable_kind() {
+        // The lock-exhaustion path returns the TYPED `AcError::Busy` variant; the
+        // mapper classifies it as the RETRYABLE `ac_busy` kind via a typed arm —
+        // no string-sniffing (`starts_with("ac_busy:")` is deleted).
+        use hugit_checks::client::ac::AcError;
+        let e = ExecError::Ac(AcError::Busy {
+            detail: "the AC store stayed locked".to_string(),
+        });
+        let p = map_exec_error(e);
+        assert_eq!(p.kind(), "ac_busy", "a busy AC is retryable, not terminal");
+    }
+
+    #[test]
+    fn ac_http_429_503_map_to_retryable_busy() {
+        // The HTTP fleet-shared-cache 429/503 conditions are TYPED `Busy` and so
+        // map to the retryable `ac_busy` kind — the exact collapse-to-terminal the
+        // Round-7/8 audits flagged. (These are produced at the ureq boundary as
+        // `AcError::Busy`; here we assert the CLI-side classification.)
+        use hugit_checks::client::ac::AcError;
+        for detail in ["AC GET returned HTTP 429", "AC PUT returned HTTP 503"] {
+            let p = map_exec_error(ExecError::Ac(AcError::Busy {
+                detail: detail.to_string(),
+            }));
+            assert_eq!(p.kind(), "ac_busy", "{detail} is retryable");
+        }
+    }
+
+    #[test]
+    fn terminal_ac_errors_map_to_ac_error() {
+        // A NON-busy AcError (e.g. a 401 bad-PAT status) is TERMINAL `ac_error`.
+        use hugit_checks::client::ac::AcError;
+        let p = map_exec_error(ExecError::Ac(AcError::Status(401)));
+        assert_eq!(p.kind(), "ac_error", "a 401 is a terminal fault, not busy");
+        let p2 = map_exec_error(ExecError::Ac(AcError::Transport("tls".into())));
+        assert_eq!(p2.kind(), "ac_error", "a transport fault is terminal");
+    }
+
+    // ── Round-8 C3: hermetic env axis ───────────────────────────────────────────
+
+    #[test]
+    fn env_manifest_axis_hashes_path_and_busts_on_change() {
+        // PATH's VALUE is hashed into the axis (F-MK5): two different PATHs yield
+        // two different axes, so the memo key differs → a MISS, never a stale hit.
+        let a = env_manifest_axis(&[("PATH".to_string(), "/binok:/usr/bin".to_string())]);
+        let b = env_manifest_axis(&[("PATH".to_string(), "/binbad:/usr/bin".to_string())]);
+        assert!(a.starts_with("PATH=sha256:"), "PATH value is hashed: {a}");
+        assert_ne!(a, b, "a PATH change changes the env axis (busts the key)");
+    }
+
+    #[test]
+    fn env_manifest_axis_captures_allowlisted_value_change() {
+        // An allowlisted var's value is folded literally; a change busts the key.
+        let a = env_manifest_axis(&[("RUSTFLAGS".to_string(), "-C opt-level=0".to_string())]);
+        let b = env_manifest_axis(&[("RUSTFLAGS".to_string(), "-C opt-level=3".to_string())]);
+        assert_ne!(a, b, "a RUSTFLAGS change changes the env axis");
+    }
+
+    #[test]
+    fn unallowlisted_env_var_is_not_captured() {
+        // A var off the allowlist (and not PATH) is NOT in the captured set, so it
+        // is cleared at the spawn — never an off-key ambient input.
+        assert!(!is_result_affecting_env("GATE_MODE"));
+        assert!(!is_result_affecting_env("SSH_AUTH_SOCK"));
+        // Allowlisted names + families ARE captured.
+        assert!(is_result_affecting_env("RUSTFLAGS"));
+        assert!(is_result_affecting_env("CARGO_HOME")); // CARGO_ prefix
+        assert!(is_result_affecting_env("RUSTUP_TOOLCHAIN")); // RUSTUP_ prefix
+        assert!(is_result_affecting_env("HOME"));
     }
 
     #[test]
@@ -1463,9 +1658,11 @@ mod tests {
 
     #[test]
     fn env_manifest_captures_only_allowlisted_result_affecting_vars() {
-        // K-RUN env-axis fix. A change to an ALLOWLISTED var must change the
-        // manifest (→ a different def_digest → memo-key bust → MISS, no stale
-        // green). A change to an UNLISTED var (e.g. PWD/FOO) must NOT, so the
+        // Wave-L C3 hermetic env axis (ported from K-RUN's manifest test onto
+        // `env_manifest_axis(&captured_hermetic_env())`). A change to an
+        // ALLOWLISTED var must change the manifest (→ a different def_digest →
+        // memo-key bust → MISS, no stale green). A change to an UNLISTED var
+        // (e.g. PWD/FOO) must NOT, so the
         // hit-rate is preserved. This test mutates process env, so it asserts on
         // the snapshot the function returns rather than racing other tests; the
         // var names used here (HUGIT_KRUN_*) are private to this test.
@@ -1482,18 +1679,21 @@ mod tests {
             std::env::set_var(listed, "-C target-cpu=native");
             std::env::remove_var(unlisted);
         }
-        let m_a = result_affecting_env_manifest();
+        let m_a = env_manifest_axis(&captured_hermetic_env());
         assert!(
             m_a.contains("RUSTFLAGS=-C target-cpu=native"),
             "an allowlisted var is captured into the env axis: {m_a:?}"
         );
-        assert!(m_a.ends_with('\n'), "each pair is newline-terminated");
+        assert!(
+            m_a.lines().any(|l| l == "RUSTFLAGS=-C target-cpu=native"),
+            "the allowlisted var is a discrete, well-formed manifest line: {m_a:?}"
+        );
 
         // Changing the allowlisted var changes the manifest (memo-key bust).
         unsafe {
             std::env::set_var(listed, "-C opt-level=3");
         }
-        let m_b = result_affecting_env_manifest();
+        let m_b = env_manifest_axis(&captured_hermetic_env());
         assert_ne!(
             m_a, m_b,
             "a change to an allowlisted var changes the manifest (busts the key)"
@@ -1503,7 +1703,7 @@ mod tests {
         unsafe {
             std::env::set_var(unlisted, "anything");
         }
-        let m_c = result_affecting_env_manifest();
+        let m_c = env_manifest_axis(&captured_hermetic_env());
         assert!(
             !m_c.contains(unlisted),
             "an unlisted var is DECLARED not-result-affecting — never in the axis: {m_c:?}"
@@ -1517,7 +1717,7 @@ mod tests {
         unsafe {
             std::env::set_var("CARGO_TERM_COLOR", "never");
         }
-        let m_d = result_affecting_env_manifest();
+        let m_d = env_manifest_axis(&captured_hermetic_env());
         let keys: Vec<&str> = m_d.lines().filter_map(|l| l.split('=').next()).collect();
         let mut sorted = keys.clone();
         sorted.sort_unstable();
@@ -1540,24 +1740,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn ac_busy_lock_exhaustion_maps_to_retryable_kind_not_terminal_ac_error() {
-        // K-RUN taxonomy fix: the contention loser's lock-exhaustion error
-        // (`acquire_ac_lock` → AcError::Transport("ac_busy: …")) must surface as
-        // the RETRYABLE structured `kind:"ac_busy"`, never collapse to the
-        // generic terminal `ac_error` — otherwise the concurrent acceptance test
-        // fails non-deterministically under parallel load.
-        let busy = ExecError::Ac(hugit_checks::client::ac::AcError::Transport(
-            "ac_busy: the AC store /tmp/x.ac stayed locked by another hugit check".to_string(),
-        ));
-        assert_eq!(map_exec_error(busy).kind(), "ac_busy");
-
-        // A genuine unreadable/unwritable/misconfig AC fault stays `ac_error`.
-        let fault = ExecError::Ac(hugit_checks::client::ac::AcError::Transport(
-            "AC store write: permission denied".to_string(),
-        ));
-        assert_eq!(map_exec_error(fault).kind(), "ac_error");
-    }
+    // (K-RUN's `ac_busy_lock_exhaustion_maps_to_retryable_kind_not_terminal_ac_error`
+    // was removed here: it asserted the OLD string-path contract
+    // — `AcError::Transport("ac_busy: …")` → retryable — which the Round-8 C6 typed
+    // taxonomy deliberately drops. Retryability is now ONLY the typed `AcError::Busy`
+    // variant, covered by `ac_busy_lock_exhaustion_maps_to_retryable_kind` and
+    // `terminal_ac_errors_map_to_ac_error` above.)
 
     #[test]
     fn tamper_evident_cache_treats_a_flipped_exit_as_a_miss() {

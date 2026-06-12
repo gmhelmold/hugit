@@ -77,7 +77,27 @@ const SK_PROJ: &str = "sk-proj-leaklens99999";
 /// Connection string with an embedded password.
 const CONN: &str = "postgres://dbuser:S3cr3tLeakPassw0rd@db.internal:5432/app";
 
-/// Every secret specimen + a label, for matrix iteration.
+// ── PREFIX-LESS high-entropy specimens (the Round-8 / L-A ROOT) ──────────────
+// These carry NO prefix in any allowlist; under the OLD secret-allowlist they
+// rode EVERY identifier field VERBATIM into the forever-log (the confirmed live
+// leak: AWS key in `--id` → store count 2). L-A's deny-by-default address gate
+// now redacts them at rest (or the door rejects them at input). They are the
+// authoritative addition F3 demanded — the matrix now enumerates the threat
+// model, not the secret allowlist.
+//
+/// AWS secret access key shape — 41-char dense base64, no prefix.
+const AWS: &str = "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY123";
+/// SendGrid API key shape — `SG.` + two dense base64 segments (no listed prefix).
+const SENDGRID: &str = "SG.aBcDeFgHiJkLmNoPqRsTuV.wXyZ0123456789aBcDeFgHiJkLmNoPqRsTuVwXyZ012";
+/// Stripe restricted live key shape — `rk_live_` + dense alnum (no listed prefix).
+const STRIPE: &str = "rk_live_51HxYzAbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+/// Dense 32-char base64 token — no prefix at all.
+const B64: &str = "aB3xZ9qL2mK7pR4tY8wN6vC1dF5gH0jS";
+
+/// Every secret specimen + a label, for matrix iteration. The first six are
+/// prefixed/structural (caught by the old allowlist); the last four are the
+/// PREFIX-LESS high-entropy specimens L-A closes (the Round-8 root class). EVERY
+/// identifier field × EVERY specimen must be door-rejected OR `[REDACTED]`.
 fn secrets() -> Vec<(&'static str, &'static str)> {
     vec![
         ("ghp_", GHP),
@@ -86,6 +106,10 @@ fn secrets() -> Vec<(&'static str, &'static str)> {
         ("Bearer", BEARER),
         ("sk-proj-", SK_PROJ),
         ("conn-string", CONN),
+        ("aws-prefixless", AWS),
+        ("sendgrid-prefixless", SENDGRID),
+        ("stripe-prefixless", STRIPE),
+        ("base64-prefixless", B64),
     ]
 }
 
@@ -100,6 +124,10 @@ fn secret_needle(secret: &str) -> &str {
         BEARER => "abc123def456ghi789jklmnop",
         SK_PROJ => "leaklens99999",
         CONN => "S3cr3tLeakPassw0rd",
+        AWS => "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY123",
+        SENDGRID => "wXyZ0123456789aBcDeFgHiJkLmNoPqRsTuVwXyZ012",
+        STRIPE => "51HxYzAbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
+        B64 => "aB3xZ9qL2mK7pR4tY8wN6vC1dF5gH0jS",
         other => other,
     }
 }
@@ -946,6 +974,144 @@ fn tournament_intent_error_is_scrubbed_matrix() {
         assert!(
             s.contains("intent_not_found"),
             "the error is intent_not_found ({label}): {s}"
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// L-A (adversarial Round 8) — DENY-BY-DEFAULT: the prefix-less-credential ROOT
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The Round-8 class root: a prefix-less high-entropy credential (AWS 40-char
+// base64 secret key, SendGrid `SG.`, Stripe `rk_live_`, a dense 32-char base64
+// token) rode EVERY identifier field VERBATIM into the forever-log under the old
+// secret-allowlist. The control proved it was the EXEMPTION, not a detector gap:
+// the SAME AWS key in a FREE-TEXT field redacted (count 0), but in `--id` it rode
+// through (store count 2). These tests assert the inversion CLOSED the root over
+// the REAL binary: every prefix-less specimen × the explicit AWS-in-every-field
+// repro → count 0 at rest; and the legitimate addresses still survive.
+
+/// THE live repro the audit reproduced, run over the real binary: the AWS key in
+/// EVERY identifier field of intent/pr/campaign/check must leave ZERO verbatim
+/// bytes at rest (door-rejected OR `[REDACTED]`). This is the count-0 closure.
+#[test]
+fn la_prefixless_aws_key_in_every_identifier_field_is_zero_at_rest() {
+    // intent --id and --campaign
+    {
+        let dir = scratch("la-intent-id");
+        let store = dir.join("store.json");
+        let out = new_intent(store.to_str().unwrap(), "camp-x", AWS);
+        assert_door_or_rest(&dir, &out, AWS, "L-A intent --id=AWS");
+    }
+    {
+        let dir = scratch("la-intent-camp");
+        let store = dir.join("store.json");
+        let out = new_intent(store.to_str().unwrap(), AWS, "ok-id");
+        assert_door_or_rest(&dir, &out, AWS, "L-A intent --campaign=AWS");
+    }
+    // pr --pr, --campaign, --run-id
+    for (field, args) in [
+        ("--pr", (AWS, "camp-x", "run-1")),
+        ("--campaign", ("pr-1", AWS, "run-1")),
+        ("--run-id", ("pr-1", "camp-x", AWS)),
+    ] {
+        let dir = scratch(&format!("la-pr-{}", field.trim_start_matches('-')));
+        let log = dir.join("log.json");
+        let (pr, camp, run) = args;
+        let out = open_pr(log.to_str().unwrap(), pr, camp, run, "i1");
+        assert_door_or_rest(&dir, &out, AWS, &format!("L-A pr {field}=AWS"));
+    }
+    // pr --principal (author-kind human + principal carries the key)
+    {
+        let dir = scratch("la-pr-principal");
+        let log = dir.join("log.json");
+        let out = run(&[
+            "pr",
+            "open",
+            "--log",
+            log.to_str().unwrap(),
+            "--pr",
+            "pr-1",
+            "--campaign",
+            "camp-x",
+            "--author-kind",
+            "human",
+            "--principal",
+            AWS,
+            "--intent",
+            "i1",
+        ]);
+        assert_door_or_rest(&dir, &out, AWS, "L-A pr --principal=AWS");
+    }
+    // campaign --campaign
+    {
+        let dir = scratch("la-camp");
+        let log = dir.join("log.json");
+        let out = open_campaign(log.to_str().unwrap(), AWS, "alice");
+        assert_door_or_rest(&dir, &out, AWS, "L-A campaign --campaign=AWS");
+    }
+    // check --pr
+    {
+        let dir = scratch("la-check-pr");
+        let log = dir.join("log.json");
+        std::fs::write(&log, "[]").unwrap();
+        let out = run_check(
+            &dir,
+            log.to_str().unwrap(),
+            "adhoc-check",
+            "true",
+            AWS,
+            "ops",
+            "tc-1",
+        );
+        assert_door_or_rest(&dir, &out, AWS, "L-A check --pr=AWS");
+    }
+}
+
+/// Every prefix-less high-entropy specimen (AWS / SendGrid / Stripe / dense
+/// base64) in the `--id` identifier field is door-rejected OR `[REDACTED]` —
+/// zero verbatim at rest. (The full per-field × per-specimen coverage is in the
+/// `*_field_matrix` tests, which now iterate the extended `secrets()` set; this
+/// pins the class root explicitly on the identifier field that leaked.)
+#[test]
+fn la_every_prefixless_specimen_in_id_is_zero_at_rest() {
+    for (label, secret) in secrets() {
+        let dir = scratch(&format!("la-spec-{}", label.replace(['/', ' ', '.'], "_")));
+        let store = dir.join("store.json");
+        let out = new_intent(store.to_str().unwrap(), "camp-x", secret);
+        assert_door_or_rest(&dir, &out, secret, &format!("L-A intent --id={label}"));
+    }
+}
+
+/// The ADDRESS-SURVIVAL half (no over-scrub): a ULID, a 40-hex sha, a slug, a
+/// `cas:<64hex>`, and a small integer in the SAME identifier fields SURVIVE
+/// verbatim (grep ≥ 1). A legit id wrongly redacted would break the address.
+#[test]
+fn la_legitimate_addresses_survive_in_identifier_fields() {
+    const CAS64: &str = "cas:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    // intent --id: ULID, 40-hex sha, slug, cas:, integer.
+    for (tag, addr) in [
+        ("ulid", ULID),
+        ("hex40", HEX40),
+        ("slug", "auth-hardening"),
+        ("cas64", CAS64),
+        ("integer", "42"),
+    ] {
+        let dir = scratch(&format!("la-addr-{tag}"));
+        let store = dir.join("store.json");
+        let out = new_intent(store.to_str().unwrap(), "camp-x", addr);
+        assert!(
+            out.status.success(),
+            "L-A address `{tag}` (`{addr}`) must be accepted as --id: {out:?}"
+        );
+        let bytes = at_rest_bytes(&dir);
+        assert!(
+            bytes.contains(addr),
+            "L-A address `{tag}` (`{addr}`) must SURVIVE verbatim at rest:\n{bytes}"
+        );
+        assert!(
+            !bytes.contains(REDACTED),
+            "L-A address `{tag}` must NOT collapse to the sentinel:\n{bytes}"
         );
     }
 }

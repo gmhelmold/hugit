@@ -234,6 +234,13 @@ fn run_open(a: OpenCliArgs) -> ExitCode {
         Err(code) => return code,
     };
 
+    // Terminal-seal precondition (C5-F2): a PR may not be OPENED into a sealed
+    // campaign. Route through the SHARED chokepoint every campaign-scoped verb
+    // uses (the campaign is the `--campaign` the PR is being opened under).
+    if let Err(code) = guard_campaign_not_sealed(&log, &a.campaign) {
+        return code;
+    }
+
     let open_args = OpenArgs {
         pr_id: a.pr_id,
         campaign: a.campaign,
@@ -262,6 +269,16 @@ fn run_land(a: LandCliArgs) -> ExitCode {
         Ok(log) => log,
         Err(code) => return code,
     };
+    // Terminal-seal precondition (C5-F2): a PR may not be landed/settled into a
+    // sealed campaign. Resolve the PR's campaign from its `pr.opened` record and
+    // route through the shared chokepoint. An unknown PR (no `pr.opened`) is left
+    // to the land/settle path's own `UnknownPr` error — the seal guard is a
+    // no-op when the campaign can't be resolved.
+    if let Some(opened) = super::find_pr_opened(&log, &a.pr_id)
+        && let Err(code) = guard_campaign_not_sealed(&log, &opened.campaign)
+    {
+        return code;
+    }
     // `--settle` is the land-confirm settlement step (appends `pr.landed`);
     // without it, `land` enqueues (`pr.queued`). Both run through the SAME
     // guarded append + atomic-lock + persist seam.
@@ -326,6 +343,14 @@ fn run_abandon(a: AbandonCliArgs) -> ExitCode {
         Ok(log) => log,
         Err(code) => return code,
     };
+    // Terminal-seal precondition (C5-F2): a PR may not be abandoned into a sealed
+    // campaign (a sealed campaign is immutable — even the terminal `pr.abandoned`
+    // append is refused). Resolve the campaign from the PR's `pr.opened`.
+    if let Some(opened) = super::find_pr_opened(&log, &a.pr_id)
+        && let Err(code) = guard_campaign_not_sealed(&log, &opened.campaign)
+    {
+        return code;
+    }
     let abandon_args = AbandonArgs {
         pr_id: a.pr_id,
         reason: a.reason,
@@ -462,6 +487,28 @@ fn emit_io_error(msg: String, path: &PathBuf) -> ExitCode {
     err.exit_code()
 }
 
+// ── the shared terminal-seal precondition (C5-F2) ────────────────────────────
+
+/// Refuse a campaign-scoped `pr` mutation when its campaign is sealed, via the
+/// ONE shared chokepoint [`crate::campaign::seal_guard::guard_not_sealed`].
+///
+/// On a sealed campaign this emits the canonical `campaign_sealed` porcelain
+/// error on stdout (exit `2`) and returns `Err(code)`; on an open campaign it
+/// returns `Ok(())` and the verb proceeds. The campaign key is scrubbed before
+/// it reaches the error message (the same redaction posture the rest of the verb
+/// applies to identifiers).
+fn guard_campaign_not_sealed(log: &EventLog, campaign: &str) -> Result<(), ExitCode> {
+    match crate::campaign::seal_guard::guard_not_sealed(log, campaign) {
+        Ok(()) => Ok(()),
+        Err(v) => {
+            let safe_campaign = crate::redaction::scrub(&v.campaign);
+            let err = crate::porcelain::PorcelainError::new(v.kind(), v.message(), v.fix())
+                .with_context("campaign", serde_json::json!(safe_campaign));
+            Err(emit_porcelain(&err))
+        }
+    }
+}
+
 // ── emit helpers ───────────────────────────────────────────────────────────────
 
 /// Emit a success projection as JSON on stdout, exit 0.
@@ -520,7 +567,18 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         let mut log = EventLog::new();
-        log.append("pr.opened", vec![], "{}".to_string(), 1);
+        // C4-F1: the raw `EventLog::append` door is now `pub(crate)`; this test
+        // seeds one record through the guarded `append_authorized` (Orchestrator/
+        // Push — always Allow) exactly as a real `pr open` would.
+        log.append_authorized(
+            hugit_refstore::PrincipalClass::Orchestrator,
+            hugit_refstore::Endpoint::Push,
+            "pr.opened",
+            vec!["orchestrator:test".to_string()],
+            "{}".to_string(),
+            1,
+        )
+        .expect("orchestrator is authorized to open a pr");
         persist_log(&path, &log).expect("persist");
 
         let reloaded = load_log(&path).expect("reload");

@@ -30,7 +30,7 @@ serde_json = { workspace = true }
 hugit-contracts = { path = "../hugit-contracts" }
 hugit-queue     = { path = "../hugit-queue" }
 hugit-checks    = { path = "../hugit-checks" }
-hugit-refstore  = { path = "../hugit-refstore" }
+hugit-refstore  = { path = "../hugit-refstore", features = ["test-support"] }
 hugit-ledger    = { path = "../hugit-ledger" }
 serde_json      = { workspace = true }
 
