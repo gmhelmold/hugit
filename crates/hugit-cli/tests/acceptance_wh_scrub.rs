@@ -90,11 +90,17 @@ fn assert_no_pat(path: &std::path::Path, ctx: &str) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // THE Round-4 hole #1 — `check --toolchain <secret>` → the `toolchain_digest`
-// field. A digest-NAMED field; key-exempt under WG-SCRUB; the raw flag leaked.
+// field. SUPERSEDED by WK-AC: `--toolchain` is a memo AXIS the cache keys on, so
+// it CANNOT be scrubbed at rest (scrubbing it would bust every cache hit — the
+// recomputed memo_key would not match). The fix is to REJECT a secret-shaped axis
+// at the DOOR (exit-2 `secret_in_identifier`), never to store-then-scrub it. So a
+// secret `--toolchain` no longer reaches the log/`.ac` at all — it is refused at
+// input. (The `.ac` closure is proven end-to-end in
+// `acceptance_wj_matrix::check_toolchain_secret_rejected_at_door_and_never_in_ac`.)
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn check_toolchain_secret_redacts_in_the_toolchain_digest_field() {
+fn check_toolchain_secret_is_rejected_at_the_door() {
     let dir = scratch("check-tc");
     let log = dir.join("log.json");
     let ac = dir.join("ac");
@@ -102,7 +108,8 @@ fn check_toolchain_secret_redacts_in_the_toolchain_digest_field() {
     std::fs::create_dir_all(&root).unwrap();
     bootstrap_log(log.to_str().unwrap());
 
-    // The PAT is routed RAW into `--toolchain`, which becomes `toolchain_digest`.
+    // The PAT is routed RAW into `--toolchain`, the third memo axis. WK-AC rejects
+    // a secret-shaped axis at the door rather than persisting+scrubbing it.
     let out = run(&[
         "check",
         "--def",
@@ -119,26 +126,29 @@ fn check_toolchain_secret_redacts_in_the_toolchain_digest_field() {
         "--toolchain",
         PAT,
     ]);
-    assert!(
-        out.status.success(),
-        "check --store exits 0: {}",
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a secret --toolchain is rejected at the door (exit 2): {}",
         stdout_of(&out)
     );
-    assert_no_pat(&log, "check --toolchain");
+    assert!(
+        stdout_of(&out).contains("secret_in_identifier"),
+        "the door surfaces the structured secret_in_identifier error: {}",
+        stdout_of(&out)
+    );
 
-    // The persisted toolchain_digest field specifically carries the sentinel.
-    let records: serde_json::Value = serde_json::from_slice(&std::fs::read(&log).unwrap()).unwrap();
-    let row = records
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|r| r["kind"] == "check.recorded")
-        .expect("a check.recorded row is on the log");
-    let payload: serde_json::Value =
-        serde_json::from_str(row["payload"].as_str().unwrap()).unwrap();
-    assert_eq!(
-        payload["toolchain_digest"], REDACTED,
-        "a secret smuggled into toolchain_digest is scrubbed, not key-exempt: {payload}"
+    // Nothing was persisted: the PAT is NOWHERE at rest (log absent of it; the
+    // `.ac` was never written behind the rejected door).
+    let log_bytes = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !log_bytes.contains(PAT),
+        "the rejected toolchain secret never reached the --log:\n{log_bytes}"
+    );
+    let ac_bytes = std::fs::read_to_string(&ac).unwrap_or_default();
+    assert!(
+        !ac_bytes.contains(PAT),
+        "the rejected toolchain secret never reached the .ac:\n{ac_bytes}"
     );
 }
 

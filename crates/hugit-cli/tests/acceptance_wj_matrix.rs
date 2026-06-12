@@ -125,14 +125,11 @@ fn at_rest_bytes(dir: &Path) -> String {
     acc
 }
 
-/// Bytes at rest EXCLUDING the `<log>.ac` Action-Cache sidecar. The AC store is
-/// a SEPARATE write path inside the engine's `run_memoized` (checks logic) that
-/// does NOT route through the porcelain scrub boundary — a structural secret in
-/// `check --toolchain` therefore lands verbatim in `<log>.ac` today (a KNOWN
-/// residual this suite pins in `check_toolchain_leaks_into_ac_known_residual_escalate`
-/// and ESCALATES — it is OUTSIDE the WJ-INT fence, which owns the scrub boundary
-/// the `--log` + `.hugit/*` stores go through). This view asserts the boundary
-/// WJ-INT actually owns is clean.
+/// Bytes at rest EXCLUDING the `<log>.ac` Action-Cache sidecar. This view asserts
+/// the WJ-INT scrub boundary (the `--log` + `.hugit/*` stores) is clean. The `.ac`
+/// sidecar is a SEPARATE engine write path; it is now ALSO asserted clean directly
+/// via [`assert_ac_clean`] (WK-AC closed the toolchain-digest leak — the door
+/// rejects a secret-shaped axis and the FileAc write boundary is fail-closed).
 fn at_rest_bytes_excluding_ac(dir: &Path) -> String {
     let mut acc = String::new();
     collect(dir, &mut acc, &|p| !p.to_string_lossy().ends_with(".ac"));
@@ -171,6 +168,22 @@ fn assert_no_secret_at_rest(dir: &Path, secret: &str, ctx: &str) {
     assert!(
         !bytes.contains(secret),
         "{ctx}: secret `{secret}` leaked VERBATIM at rest:\n{bytes}"
+    );
+}
+
+/// Assert the `<log>.ac` Action-Cache sidecar carries ZERO verbatim bytes of
+/// `secret` (WK-AC closure). The `.ac` is the engine write path that USED to leak
+/// a secret-shaped memo axis (`toolchain_digest`) verbatim; it is now guarded by
+/// the door (`validate_axis`) + the fail-closed FileAc write boundary, so it must
+/// be clean for EVERY structural secret shape, permanently. The file may be absent
+/// (door-rejected before any AC write) — an absent file is trivially clean.
+fn assert_ac_clean(dir: &Path, secret: &str, ctx: &str) {
+    let mut acc = String::new();
+    collect(dir, &mut acc, &|p| p.to_string_lossy().ends_with(".ac"));
+    let needle = secret_needle(secret);
+    assert!(
+        !acc.contains(needle) && !acc.contains(secret),
+        "{ctx}: the .ac sidecar leaked the secret VERBATIM:\n{acc}"
     );
 }
 
@@ -556,6 +569,9 @@ fn check_def_field_matrix() {
             "tc-1",
         );
         assert_door_or_rest(&dir, &out, secret, &format!("check --def={label}"));
+        // WK-AC: a secret-shaped --def is rejected at the door, so the def_digest
+        // axis can never reach the `.ac` either.
+        assert_ac_clean(&dir, secret, &format!("check --def={label} [.ac]"));
     }
 }
 
@@ -642,31 +658,28 @@ fn check_toolchain_field_matrix() {
             secret,
         );
         assert_door_or_rest(&dir, &out, secret, &format!("check --toolchain={label}"));
+        // WK-AC: the `.ac` sidecar is now permanently clean for the toolchain axis
+        // (the door rejects + the write boundary is fail-closed).
+        assert_ac_clean(&dir, secret, &format!("check --toolchain={label} [.ac]"));
     }
 }
 
-/// KNOWN RESIDUAL — ESCALATE (out of the WJ-INT fence).
+/// WK-AC CLOSURE: the `.ac` toolchain-digest leak is fixed.
 ///
-/// `check --toolchain <structural-secret>` is correctly `[REDACTED]` in the
-/// `--log` event payload (the porcelain scrub boundary WJ-INT owns redacts the
-/// `toolchain_digest` digest-named field when its value is NOT digest-shaped).
-/// BUT the engine's Action Cache (`run_memoized` → `FileAc`) caches the full
-/// `CheckResult` — including the RAW `toolchain_digest` — into `<log>.ac` on a
-/// SEPARATE write path that does NOT route through the scrub boundary. So the
-/// secret survives VERBATIM in `<log>.ac`.
-///
-/// This is checks/engine logic (`crates/hugit-cli/src/checks/run.rs` +
-/// `hugit-checks`), OUTSIDE the WJ-INT owned-files fence (ident.rs / redact.rs /
-/// main.rs tournament path). This test PINS the current reality so the leak is
-/// recorded, not hidden — and so the fix is detectable: when the `.ac` write is
-/// routed through the structural scrub, this assertion flips and the test fails,
-/// signalling the residual is closed (update it to assert cleanliness then).
+/// A secret-shaped `--toolchain` is now REJECTED at the door (`validate_axis` in
+/// `checks/run.rs` reuses the shared structural detector → exit-2
+/// `secret_in_identifier`), AND — defense-in-depth — the FileAc write boundary
+/// is fail-closed (it refuses to persist any memo axis carrying a secret shape).
+/// So the secret NEVER reaches the `<log>.ac` sidecar verbatim. A LEGIT toolchain
+/// digest still runs, the `.ac` is written normally, and a warm re-run is a real
+/// cache HIT (the memo axis is preserved — the fix rejects secret input, it does
+/// NOT scrub a stored axis, so the cache is intact).
 #[test]
-fn check_toolchain_leaks_into_ac_known_residual_escalate() {
-    let dir = scratch("check-ac-residual");
+fn check_toolchain_secret_rejected_at_door_and_never_in_ac() {
+    let dir = scratch("check-ac-closure");
     let log = dir.join("log.json");
     std::fs::write(&log, "[]").unwrap();
-    let _ = run_check(
+    let out = run_check(
         &dir,
         log.to_str().unwrap(),
         "adhoc-check",
@@ -676,22 +689,80 @@ fn check_toolchain_leaks_into_ac_known_residual_escalate() {
         GHP,
     );
 
-    // The WJ-owned boundary (the --log) IS clean — the secret is redacted there.
+    // The door rejects it: exit-2, structured `secret_in_identifier`.
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a secret --toolchain is rejected at the door (exit 2): {out:?}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("secret_in_identifier"),
+        "the door surfaces the structured secret_in_identifier error:\n{stdout}"
+    );
+
+    // The `--log` is clean (no recording happened).
     let log_bytes = std::fs::read_to_string(&log).unwrap();
     assert!(
         !log_bytes.contains(secret_needle(GHP)),
-        "WJ boundary: the --log MUST redact a toolchain secret:\n{log_bytes}"
+        "the --log MUST NOT carry the rejected toolchain secret:\n{log_bytes}"
     );
 
-    // The engine's `.ac` sidecar leaks it (the KNOWN residual). If this file ever
-    // stops containing the raw secret, the leak was fixed — flip this assertion.
+    // CLOSURE: the `<log>.ac` sidecar carries ZERO verbatim bytes of the secret —
+    // the door rejected before any AC write, and the write boundary is fail-closed
+    // behind it. (The file may not even exist; if it does it is clean.)
     let ac = dir.join("log.json.ac");
     let ac_bytes = std::fs::read_to_string(&ac).unwrap_or_default();
     assert!(
-        ac_bytes.contains(secret_needle(GHP)),
-        "RESIDUAL PINNED: if the .ac no longer leaks the toolchain secret, the \
-         engine AC-store fix landed — update this test to assert .ac cleanliness. \
-         .ac bytes:\n{ac_bytes}"
+        !ac_bytes.contains(secret_needle(GHP)) && !ac_bytes.contains(GHP),
+        "CLOSURE: the .ac MUST NOT leak the toolchain secret:\n{ac_bytes}"
+    );
+
+    // A LEGIT toolchain digest still runs, writes the `.ac`, and a warm re-run is
+    // a real cache HIT — the fix rejects secret INPUT, it never scrubs a stored
+    // axis, so the memo key + cache survive.
+    let dir2 = scratch("check-ac-closure-legit");
+    let log2 = dir2.join("log.json");
+    std::fs::write(&log2, "[]").unwrap();
+    let legit_tc = "rustc-1.96.0-abc123def456";
+    let cold = run_check(
+        &dir2,
+        log2.to_str().unwrap(),
+        "adhoc-check",
+        "true",
+        "pr-1",
+        "ops",
+        legit_tc,
+    );
+    assert!(cold.status.success(), "a legit toolchain runs: {cold:?}");
+    let cold_json = String::from_utf8_lossy(&cold.stdout);
+    assert!(
+        cold_json.contains("\"cache_hit\":false") || cold_json.contains("\"cache_hit\": false"),
+        "the cold run is a MISS:\n{cold_json}"
+    );
+    // The `.ac` is written normally and carries the legit digest verbatim.
+    let ac2 = dir2.join("log.json.ac");
+    let ac2_bytes =
+        std::fs::read_to_string(&ac2).expect("the .ac is written for a legit toolchain");
+    assert!(
+        ac2_bytes.contains(legit_tc),
+        "the legit toolchain digest survives in the .ac (axis preserved):\n{ac2_bytes}"
+    );
+    // Warm re-run: same inputs → a real cache HIT (the cache still works).
+    let warm = run_check(
+        &dir2,
+        log2.to_str().unwrap(),
+        "adhoc-check",
+        "true",
+        "pr-1",
+        "ops",
+        legit_tc,
+    );
+    assert!(warm.status.success(), "the warm re-run succeeds: {warm:?}");
+    let warm_json = String::from_utf8_lossy(&warm.stdout);
+    assert!(
+        warm_json.contains("\"cache_hit\":true") || warm_json.contains("\"cache_hit\": true"),
+        "the warm re-run is a cache HIT — the cache still works:\n{warm_json}"
     );
 }
 
