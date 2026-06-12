@@ -527,6 +527,13 @@ impl CheckRunner for ProcessRunner {
         // the wall-time ceiling).
         let mut command = shell_command(&def.command);
         command
+            // HERMETIC stdin (Round-8 C3 / Round-9 close): stdin is NULL, never
+            // inherited. An inherited stdin is an uncaptured, result-affecting input
+            // — a check that reads it (`read x; …`) would otherwise produce a
+            // STALE GREEN (a warm HIT served when the ambient stdin flips), since
+            // stdin is not in the memo key. Nulling it makes a stdin read a
+            // deterministic EOF, so stdin can never change a check's outcome off-key.
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 

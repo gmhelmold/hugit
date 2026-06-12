@@ -311,3 +311,61 @@ fn write_shim(path: &Path, code: i32) {
 
 #[cfg(not(unix))]
 fn write_shim(_path: &Path, _code: i32) {}
+
+/// Round-9 close — stdin uncaptured (a local-scope stale-green the Round-8 L-C
+/// fix missed). The hermetic spawn pins cwd + clears env, but stdin was INHERITED,
+/// so a check that reads it (`read x; …`) could serve a STALE GREEN when the
+/// ambient stdin flipped (stdin is not a memo axis). The fix nulls the child's
+/// stdin → a stdin read is a deterministic EOF, so stdin can never change a
+/// check's outcome off-key. Here we FEED the PASSING value to the `hugit`
+/// process's OWN stdin and assert the check still FAILS — proving the spawned
+/// child saw NULL, not the forwarded bytes (an inherited stdin would have GREENed
+/// and cached it).
+#[test]
+fn stdin_is_nulled_not_inherited() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let dir = scratch("stdin");
+    let root = seed_tree(&dir);
+    let log = dir.join("log.json");
+    let ac = dir.join("ac.json");
+    write_empty_log(&log);
+
+    let mut c = Command::new(hugit_bin());
+    c.args([
+        "check",
+        "--def",
+        "adhoc-r8",
+        "--cmd",
+        "read x; [ \"$x\" = pass ]",
+        "--log",
+        log.to_str().unwrap(),
+        "--ac",
+        ac.to_str().unwrap(),
+        "--root",
+        root.to_str().unwrap(),
+        "--store",
+    ])
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+
+    let mut child = c.spawn().expect("hugit spawns");
+    // Feed the PASSING value to hugit's OWN stdin. hugit does not read it, and the
+    // check's child gets Stdio::null — so `read x` sees EOF, x is empty, and the
+    // check is RED. (Tolerate EPIPE: the point is the child never sees these bytes.)
+    let _ = child.stdin.take().unwrap().write_all(b"pass\n");
+    let out = child.wait_with_output().expect("hugit completes");
+    let v: Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap_or(Value::Null);
+
+    assert!(!hit(&v), "run is a cold MISS: {v:?}");
+    assert_ne!(
+        exit_of(&v),
+        0,
+        "the check's child saw NULL stdin (EOF), not the forwarded `pass` — a \
+         stdin-reading check is deterministically RED and can never cache a \
+         stdin-driven stale green: {v:?}"
+    );
+}
