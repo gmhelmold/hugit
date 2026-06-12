@@ -71,12 +71,15 @@ error-law matrices clean by live repro; redaction's P0 closed). The one
 residual CODE hole it surfaced — a C3 `stdin` stale-green the L-C hermetic
 fix missed (`stdin` was inherited, not nulled) — was fixed and cold-verified
 (R9-C3: `.stdin(Stdio::null())`, test `stdin_is_nulled_not_inherited`). The
-SOLE open item is an **owner tuning decision** (PS-14): the deny-by-default
-redaction safe-shape allowlist exempts ANY-length hex/numeric, so the
-survivor band is wider than the documented {40,64}-hex residual — a
-security-vs-over-scrub knob, not a P0 (dense SaaS keys ARE rejected).
-`integ/wave-l` is NOT yet merged; the push is HELD until owner sign-off +
-the PS-14 decision. Residuals tracked: PS-11 (closed by L-C hermetic),
+last item — PS-14 (the deny-by-default safe-shape allowlist exempted
+ANY-length hex/numeric) — was **DECIDED by the owner (the HYBRID) and
+implemented**: hex/numeric is exempt only at the {40,64} digest lengths, so
+odd-length-hex / long-numeric secrets redact while integers, UUIDs, prefixed
+ids, and slugs stay generous (cold-verified end-to-end). **All 6 classes are
+now CONVERGED** — zero P0/P1 code holes; only tracked seams remain. With
+owner sign-off, `integ/wave-l` merges to `main` and pushes (CI may go red
+ONLY on the `deny` step — PS-12 runner-tooling infra gap, not a code
+failure). Residuals tracked: PS-11 (closed by L-C hermetic),
 PS-13 (read-path single-chokepoint refactor, defence-in-depth), PS-14
 (redaction tuning, owner), C3 FS/network/clock (P2 runner sandbox),
 C5-F3 intent two-phase reverse-atomicity (P2/P3 seam).

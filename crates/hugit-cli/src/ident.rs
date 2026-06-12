@@ -257,8 +257,12 @@ mod tests {
 
     #[test]
     fn sixty_four_hex_key_is_valid() {
+        // A genuine 64-hex (sha-256) content-address MUST be valid. (This string
+        // was previously 66 chars — mislabeled "64-hex" — which the PS-14 hybrid
+        // correctly redacts as an odd-length non-digest hex; corrected to a real
+        // 64-hex so it tests the intended {40,64} digest exemption.)
         validate_identifier(
-            "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678aabbccddeeff00112233445566",
+            "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678aabbccddeeff001122334455",
             "--campaign",
         )
         .expect("64-hex must be a valid identifier");

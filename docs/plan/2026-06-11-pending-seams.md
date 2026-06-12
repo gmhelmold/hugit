@@ -556,7 +556,7 @@ are closed.
 
 ---
 
-## PS-14 — Deny-by-default identifier scrub: the safe-shape allowlist exempts ANY-length hex / numeric / low-per-char-entropy values (OWNER TUNING DECISION)
+## PS-14 — Deny-by-default identifier scrub: hex/numeric exemption tuning (DECIDED 2026-06-12 — hybrid implemented; low-entropy-base32 residual accepted)
 
 **Source:** Round 9 C1 re-audit. Wave L / L-A inverted the identifier scrub to deny-by-default
 (`is_safe_identifier_shape` — a value survives verbatim only if it proves a bounded safe-address
@@ -578,18 +578,24 @@ the hex exemption to {40,64}, cap numeric length, raise/replace the entropy rule
 `--run-id` values, short slugs — which is a correctness/UX regression. That security-vs-over-scrub
 trade is the **owner's call**.
 
-**Owner decision pending — options:**
-1. **Accept + document** the wider survivor band honestly (a hex/numeric value indistinguishable
-   from an address is irreducible physics); keep the generous allowlist (no over-scrub).
-2. **Tighten** the hex exemption to known digest lengths {40,64} (+ a numeric-length cap), accept
-   the over-scrub risk on non-standard-length legit hex ids, and add a low-entropy specimen to the
-   `acceptance_wj_matrix` guard.
-3. **Hybrid** — length-pin hex to {40,64} but keep integers/short slugs generous (covers the
-   common legit-id cases while catching odd-length hex/long-numeric secrets).
+**DECIDED (owner, 2026-06-12): the HYBRID — implemented.** `is_safe_identifier_shape` now
+redacts any BARE all-hex/all-numeric value of length ≥ 20 that is NOT a {40,64}-hex digest
+(those, plus `cas:` refs and ULIDs, survive at `is_digest_shaped`/`is_ulid_shaped` above). This
+catches odd-length hex (32/50) and long-numeric (24-digit) secrets while keeping INTEGERS and
+SLUGS generous: short integers (`--pr 7`, a CI `--run-id 12345`) are below the length floor;
+UUIDs (hyphens → not all-hex), prefixed ids (hugit's own `intent-<16hex>`), bare ≤19-char short
+hashes, and slugs are untouched. Cold-verified end-to-end through the identifier door: 32-hex /
+50-hex / 24-digit-numeric → `secret_in_identifier` exit 2 (not stored); 40-hex / 64-hex / ULID /
+UUID / integer / `intent-<16hex>` / slug → survive. Regression specimens added to the
+`is_safe_identifier_shape` unit test (R9-2 guard-matrix gap closed).
 
-Also tracked: the guard matrix (`acceptance_wj_matrix`) lacks a low-entropy/odd-length-hex
-specimen (R9-2), and the two scrub engines (`porcelain` / `redact.rs`) remain hand-kept-in-lockstep
-(R9-3, P2) — both fold into whichever option is chosen.
+**Residual after the hybrid (accepted physics, documented):** a LOW-entropy base32 value (e.g. a
+repetitive TOTP seed, Shannon ≈ 3.4) is neither all-hex nor structural-secret-shaped and clears
+the entropy gate — indistinguishable from a legit slug, so it survives. This is the irreducible
+boundary (you cannot tell a low-entropy base32 secret from a low-entropy base32 address). The
+two scrub engines (`porcelain` identifier door / `redact.rs` free-text) remain hand-kept-in-lockstep
+(R9-3, P2 — a shared-predicate refactor is the long-term close); the PS-14 hybrid is identifier-door
+only (free-text hex tightening is a higher-over-scrub trade, not in scope).
 
 ---
 

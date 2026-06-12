@@ -492,6 +492,22 @@ pub fn is_safe_identifier_shape(s: &str) -> bool {
     {
         return false;
     }
+    // PS-14 (Round-9 C1 tuning — owner-chosen HYBRID: hex exemption pinned to the
+    // known digest lengths {40,64}, integers and slugs left generous). The 40/64-hex
+    // digests and `cas:` refs already survived above (`is_digest_shaped`). A long
+    // BARE hex run of ANY OTHER length — equivalently any long all-`[0-9a-fA-F]`
+    // run, which also subsumes a long all-NUMERIC run — is not a known address
+    // shape, and the generic entropy gate below CANNOT catch it (hex tops out at
+    // 4.0 bits/char and decimal at ~3.32, both under the threshold). So a 32/50-hex
+    // API key or a 24-digit numeric secret would otherwise leak verbatim. Treat
+    // such a value as a credential → redact. SHORT numerics (`--pr 7`, a CI
+    // `--run-id 12345`) stay safe (len < the floor); prefixed ids (`intent-<16hex>`),
+    // UUIDs (hyphens → not all-hex), and slugs (letters/punctuation) are unaffected.
+    // (A LOW-entropy base32 value remains the accepted physics residual —
+    // indistinguishable from a slug; tracked in PS-14.)
+    if t.len() >= IDENT_ENTROPY_MIN_LEN && t.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return false;
+    }
     // The one place the entropy signal belongs for identifiers: an identifier is
     // not allowed to BE a long, dense, high-entropy non-hex blob (an AWS /
     // SendGrid / Stripe key). A long LOW-entropy slug
@@ -1344,6 +1360,24 @@ mod tests {
         assert!(!is_safe_identifier_shape(
             "rk_live_51HxYzAbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
         )); // Stripe
+        // PS-14 (Round-9 hybrid tuning): the hex/numeric exemption is pinned to the
+        // {40,64} digest lengths. A long BARE hex of ANY OTHER length, or a long
+        // numeric run, now REDACTS — the entropy gate could not catch it (hex tops
+        // out at 4.0, decimal at ~3.32 bits/char, both under the threshold).
+        assert!(!is_safe_identifier_shape(
+            "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
+        )); // 32-hex (not a {40,64} digest) → redacts
+        assert!(!is_safe_identifier_shape(
+            "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5"
+        )); // 50-hex (odd length) → redacts
+        assert!(!is_safe_identifier_shape("123456789012345678901234")); // 24-digit numeric → redacts
+        // ...but the legit id shapes the hybrid deliberately keeps generous SURVIVE:
+        assert!(is_safe_identifier_shape(
+            "550e8400-e29b-41d4-a716-446655440000"
+        )); // UUID (hyphens → not all-hex)
+        assert!(is_safe_identifier_shape("intent-a1b2c3d4e5f6a7b8")); // hugit's own intent-<16hex>
+        assert!(is_safe_identifier_shape("a1b2c3d4e5f6a7b8")); // bare 16-hex short hash (< floor)
+        assert!(is_safe_identifier_shape("123456789")); // CI run-id / short integer (< floor)
     }
 
     #[test]
