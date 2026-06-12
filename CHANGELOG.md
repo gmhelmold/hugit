@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(security,cli): **Adversarial Round-5 fixes (Wave I) — identifier-redaction
+  hardened structurally, forge state-machine coherence, log-auth honestly scoped**.
+  Round 5 (fresh 7-agent fleet + a convergence synthesizer) held the spine an 8th
+  time; findings were the identifier-redaction coupling, multi-step state-machine
+  coherence, and one honesty gap. WI-SCRUB: identifier fields {campaign,intent_id,
+  pr_id,run_id} are no longer blanket-exempt from scrub — their value routes
+  through the engine's STRUCTURAL secret detectors (prefix/connection-string/JWT/
+  PEM) at the single boundary, exempt ONLY bare-hex/entropy, so a `xoxb-`/`clp_`/
+  `Bearer`/`ghp_` smuggled into ANY identifier field of ANY verb redacts while a
+  40/64-hex address survives (no per-verb-validator dependence; the exemption-is-a-
+  hole class is closed structurally). WI-PR: `pr land` is idempotent on a terminal
+  landed PR (no post-terminal `pr.queued` corruption); `pr open` validates intent
+  existence (no phantom-intent PR); `intent new` bootstraps `.hugit/`. WI-PROVEN2:
+  verdict revision resolves latest-wins (`proven` XOR `rejected` per intent — an
+  approve-then-reject no longer leaves `proven` stuck); `campaign close` soft-gates
+  rejected work (`campaign_has_rejected` exit-2 by default, `--allow-rejected`
+  seals with `sealed_with_rejected:true`). WI-HONESTY: PS-8 tracks event-log
+  cryptographic authentication as a P2 server-side seam (the local unkeyed chain
+  is tamper-EVIDENT, not tamper-PROOF against a competent rewriter — disclosed with
+  the SAME honesty as the AC HMAC seam); accepted-risk register entries (double-exec,
+  kill-portability, rate-limit, orphan); status truth. WI-TESTS + follow-up: killed
+  the concurrency/symlink/hit_rate test theater (tests now fail if the fix regresses).
+  Also hotfixed a fmt-RED + clippy-RED HEAD (a piped gate-check had masked both).
+
 - fix(security,cli): **Adversarial Round-4 fixes (Wave H) — wedge EXECUTE path
   hardened**. Round 4 (fresh 7-agent fleet) held the spine a 7th time; findings
   concentrated in the fast-built EXECUTE path + the scrub exemption + the proven
