@@ -26,6 +26,7 @@ pub mod journal;
 pub mod ledger;
 pub mod redact;
 pub mod rollup;
+pub mod secret_shape;
 pub mod watch;
 
 pub use deeplink::{ResolveResult, resolve};

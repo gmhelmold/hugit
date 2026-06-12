@@ -53,52 +53,33 @@
 //! [`hugit_contracts::REDACTED_MARKER`] so it cannot drift from the CLI
 //! export redaction.
 
+// The structural-secret / content-address-shape / entropy PRIMITIVES this
+// engine builds on are single-sourced from `secret_shape` (R9-3, Wave M / M-2),
+// so the free-text engine and the identifier door can no longer drift. This
+// module keeps its OWN free-text POLICY (the 4.0 threshold + the bare-hex
+// exemption in `high_entropy_token`), built on those shared primitives.
+use crate::secret_shape::{
+    ENTROPY_MIN_LEN, SECRET_MARKER as SHARED_SECRET_MARKER, is_bare_hex_digest_shape,
+    is_content_address_ref, is_digest_algo, is_structural_secret, is_token_char, shannon_entropy,
+};
+
 /// The planted-secret prefix that triggers redaction (the marker path).
-pub const SECRET_MARKER: &str = "SECRET:";
+/// Single-sourced from [`secret_shape::SECRET_MARKER`].
+pub const SECRET_MARKER: &str = SHARED_SECRET_MARKER;
 
 /// The redaction sentinel rendered in ledger/verdict views. Single-sourced from
 /// the canonical [`hugit_contracts::REDACTED_MARKER`] so it cannot drift from the
 /// CLI export redaction.
 pub const REDACTED: &str = hugit_contracts::REDACTED_MARKER;
 
-/// Minimum length of a base64/hex token run before the entropy scan considers
-/// it (short runs are noise — variable names, hex colours, etc.).
-const ENTROPY_MIN_LEN: usize = 20;
-
 /// Shannon-entropy threshold (bits/char) above which a long token run is
 /// treated as a credential. Random base64 approaches ~6.0 bits/char; a
 /// 64-hex digest sits near ~4.0; English prose runs well under 3.0. 4.0 keeps
 /// hex digests below the line (and they are exempted regardless) while
-/// catching the dense alphabet of real keys.
+/// catching the dense alphabet of real keys. This is the FREE-TEXT engine's own
+/// policy threshold (the identifier door uses a stricter 4.5 — they differ on
+/// purpose, but both build on the one shared [`secret_shape::shannon_entropy`]).
 const ENTROPY_THRESHOLD: f64 = 4.0;
-
-/// Minimum run of base64/hex chars that must follow `sk-` for the prefix to
-/// be treated as a real API key rather than a short identifier or prose word.
-const SK_MIN_SUFFIX_LEN: usize = 20;
-
-/// Keyword prefixes (lowercase) that gate the keyword-context detector.
-/// Each keyword is followed by `=` or `:` and a value in the field being
-/// scanned — the value is considered a credential regardless of entropy.
-const KEYWORD_PREFIXES: &[&str] = &["password", "passwd", "secret", "token", "api_key", "pwd"];
-
-/// Known credential prefixes that are secrets by construction (except `sk-`,
-/// which is handled separately with a length gate). A field containing any of
-/// these (case-sensitive, as the issuers mint them) is redacted wholesale.
-const KNOWN_PREFIXES: &[&str] = &[
-    "ghp_",
-    "gho_",
-    "ghs_", // GitHub Actions / server-to-server token
-    "github_pat_",
-    "AKIA",
-    "xoxb-",
-    "xoxp-",
-    "xoxo-",
-    "xoxa-",
-    "xoxs-",
-    "clp_",
-    "Bearer ",
-    "eyJ", // JWT header (base64 of `{"`)
-];
 
 /// Apply view-boundary redaction to a string field.
 ///
@@ -114,190 +95,16 @@ pub fn apply(s: &str) -> String {
 
 /// True iff any detector classifies `s` as secret-bearing.
 fn is_secret(s: &str) -> bool {
-    // (1) marker path
-    if s.contains(SECRET_MARKER) {
+    // (1)–(4): the structural detector classes — single-sourced from
+    // `secret_shape` (marker / known-prefix / `sk-` gate / PEM / conn-string /
+    // keyword-context). These are entropy-independent and shared verbatim with
+    // the identifier door.
+    if is_structural_secret(s) {
         return true;
     }
-    // (2) known prefixes — substring match (a secret embedded mid-line counts)
-    if KNOWN_PREFIXES.iter().any(|p| s.contains(p)) {
-        return true;
-    }
-    // (2b) sk- with length gate: only fire if followed by ≥SK_MIN_SUFFIX_LEN
-    //      base64/hex chars. This prevents `sk-256` or `src/sk-learn/` from
-    //      triggering.
-    if has_sk_key(s) {
-        return true;
-    }
-    // PEM private-key blocks: `-----BEGIN … PRIVATE KEY` (the `BEGIN ` prefix
-    // is not in the table because we gate on the PRIVATE-KEY phrasing).
-    if s.contains("-----BEGIN") && s.contains("PRIVATE KEY") {
-        return true;
-    }
-    // (3) connection-string detector — runs before tokenisation
-    if has_connection_string_password(s) {
-        return true;
-    }
-    // (4) keyword-context detector
-    if has_keyword_context_secret(s) {
-        return true;
-    }
-    // (5) high-entropy scan over base64/hex runs, with the cas-ref exemption.
+    // (5) high-entropy scan over base64/hex runs, with the cas-ref exemption —
+    // the FREE-TEXT engine's own policy (threshold 4.0 + bare-hex exemption).
     high_entropy_token(s)
-}
-
-// ── Detector (2b): sk- with length gate ──────────────────────────────────────
-
-/// True iff `s` contains an `sk-` API key. The suffix run after `sk-` is the
-/// maximal run of [`is_token_char`] chars — which INCLUDES `-` and `_`, so the
-/// modern hyphenated `sk-proj-<id>` format is one continuous run (the old scan
-/// already counts `-`/`_`; this keeps that behaviour explicit). The key fires
-/// when EITHER:
-///
-/// - the suffix run is ≥ [`SK_MIN_SUFFIX_LEN`] token chars (a dense classic
-///   `sk-<base64>` key), OR
-/// - the suffix is the OpenAI **project-key** format `proj-<id>` with a
-///   non-empty `<id>` — a strong structural marker (like `ghp_`), so a SHORT
-///   `sk-proj-leaklens99999` redacts even though its 18-char run sits just under
-///   the generic length gate (WJ-INT, Round-6 residual). We err toward redaction
-///   in free text (the WF-1 policy).
-///
-/// Short non-key `sk-` words (`sk-256`, `sk-learn`, bare `sk-`) do NOT match:
-/// their run is below the gate AND they carry no `proj-` marker.
-fn has_sk_key(s: &str) -> bool {
-    let needle = "sk-";
-    let mut search = s;
-    while let Some(pos) = search.find(needle) {
-        let after = &search[pos + needle.len()..];
-        // The suffix run includes `-`/`_` (is_token_char), so `proj-…` is one run.
-        let run: String = after.chars().take_while(|&c| is_token_char(c)).collect();
-        if run.chars().count() >= SK_MIN_SUFFIX_LEN {
-            return true;
-        }
-        // OpenAI project-key marker: `sk-proj-<non-empty id>` is a key regardless
-        // of the generic length gate (the `proj-` marker is the structural signal).
-        if let Some(id) = run.strip_prefix("proj-")
-            && !id.is_empty()
-        {
-            return true;
-        }
-        // Advance past this occurrence to find any further ones.
-        let advance = pos + needle.len();
-        if advance >= search.len() {
-            break;
-        }
-        search = &search[advance..];
-    }
-    false
-}
-
-// ── Detector (3): connection-string password ──────────────────────────────────
-
-/// True iff `s` contains a URL with an embedded password in the authority.
-///
-/// Hand-scan (no regex, std only):
-/// 1. Find `://` — marks the start of the authority.
-/// 2. Within the authority (up to the next `/`, `?`, `#`, or end-of-string),
-///    look for `:` followed by `@` — the segment between `:` and `@` is the
-///    password. An empty password segment (`user:@host`) is not treated as a
-///    secret (no value = no credential).
-fn has_connection_string_password(s: &str) -> bool {
-    let mut search = s;
-    while let Some(scheme_end) = search.find("://") {
-        // Authority starts after `://`
-        let authority_start = scheme_end + 3;
-        if authority_start >= search.len() {
-            break;
-        }
-        let authority_str = &search[authority_start..];
-        // Authority ends at the first `/`, `?`, `#`, or end-of-string.
-        let authority_len = authority_str
-            .find(['/', '?', '#'])
-            .unwrap_or(authority_str.len());
-        let authority = &authority_str[..authority_len];
-
-        // Check for `@` in the authority — only then is there a userinfo block.
-        if let Some(at_pos) = authority.find('@') {
-            let userinfo = &authority[..at_pos];
-            // A `:` in userinfo separates user from password.
-            if let Some(colon_pos) = userinfo.find(':') {
-                let password = &userinfo[colon_pos + 1..];
-                // Non-empty password segment = credential present.
-                if !password.is_empty() {
-                    return true;
-                }
-            }
-        }
-
-        // Advance past this `://` to search for further occurrences.
-        let advance = authority_start;
-        if advance >= search.len() {
-            break;
-        }
-        search = &search[advance..];
-    }
-    false
-}
-
-// ── Detector (4): keyword-context secret ─────────────────────────────────────
-
-/// True iff `s` contains a keyword from [`KEYWORD_PREFIXES`] (case-insensitive)
-/// immediately followed by `=` or `:` and at least one non-whitespace character.
-///
-/// Scans the lowercased form for each keyword, then validates the separator and
-/// value in the original string to avoid allocating the whole lowercased copy
-/// for each check.
-fn has_keyword_context_secret(s: &str) -> bool {
-    // Work on a lowercase copy once to avoid repeated allocations.
-    let lower = s.to_ascii_lowercase();
-    for kw in KEYWORD_PREFIXES {
-        let mut pos = 0usize;
-        while pos < lower.len() {
-            let Some(kw_pos) = lower[pos..].find(kw) else {
-                break;
-            };
-            let abs_kw_start = pos + kw_pos;
-            let after_kw = abs_kw_start + kw.len();
-            // Check that the character BEFORE the keyword (if any) is a word
-            // boundary — we don't want `notapassword=x` to fire on `password`.
-            // Underscore IS allowed as a separator (env-var convention:
-            // `DB_PASSWORD`, `APP_SECRET`), so only block alphanumeric chars
-            // immediately preceding the keyword.
-            let before_ok = abs_kw_start == 0 || {
-                let prev = lower.as_bytes()[abs_kw_start - 1];
-                !prev.is_ascii_alphanumeric()
-            };
-            if before_ok {
-                // Allow optional whitespace BEFORE the separator so
-                // `password = x` and `token : x` fire, not just `password=x`.
-                let bytes = lower.as_bytes();
-                let mut sep_idx = after_kw;
-                while bytes
-                    .get(sep_idx)
-                    .is_some_and(|b| *b == b' ' || *b == b'\t')
-                {
-                    sep_idx += 1;
-                }
-                // Now check the separator and value in the original string.
-                if let Some(sep_byte) = bytes.get(sep_idx)
-                    && (*sep_byte == b'=' || *sep_byte == b':')
-                {
-                    let value_start = sep_idx + 1;
-                    // Skip optional leading whitespace after the separator too.
-                    let value = s.get(value_start..).unwrap_or("").trim_start();
-                    if !value.is_empty() {
-                        return true;
-                    }
-                }
-            }
-            // Advance past this occurrence.
-            let advance = abs_kw_start + kw.len();
-            if advance <= pos {
-                break; // safety: ensure progress
-            }
-            pos = advance;
-        }
-    }
-    false
 }
 
 // ── Detector (5): high-entropy + bare-digest-shape token scan ─────────────────
@@ -354,12 +161,6 @@ fn high_entropy_token(s: &str) -> bool {
     false
 }
 
-/// True iff `token` is a bare 40- or 64-char run of hex digits (the sha-1 /
-/// sha-256 shapes). No prefix logic here — purely shape.
-fn is_bare_hex_digest_shape(token: &str) -> bool {
-    matches!(token.len(), 40 | 64) && token.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
 /// True iff the bytes immediately before `run_start` form `<algo>:` where
 /// `<algo>` is a recognised content-address tag — i.e. the hex run is the
 /// payload of a `sha256:`/`sha1:`/`cas:`/… ref. This recovers the prefix that
@@ -388,106 +189,13 @@ fn preceding_context_is_digest_algo(bytes: &[u8], run_start: usize) -> bool {
     is_digest_algo(algo)
 }
 
-/// A character that can appear inside a base64/hex token run.
-fn is_token_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=' || c == '-' || c == '_'
-}
-
-/// True for content-address refs that must survive verbatim — but ONLY in a
-/// content-address CONTEXT (WF-1). A digest is a ref iff it carries an explicit
-/// algorithm prefix: `cas:<payload>` or `<algo>:<40|64-hex>` where `<algo>`
-/// is a recognised content-address tag. A **bare** 40/64-hex run (no prefix) is
-/// NOT treated as a ref here — in free text it could be an HMAC / SECRET_KEY /
-/// hex API key of exactly that shape, so it falls through to the entropy scan
-/// and redacts. Typed hash fields never reach [`apply`], so they are unaffected.
-///
-/// VALUE-GATED (K-SCRUB, the Round-7 hole): the `cas:` prefix no longer
-/// blanket-exempts ANY payload. The payload must be a genuine content-address
-/// SHAPE ([`is_cas_payload_shaped`]) AND must not trip a structural-secret
-/// detector. A `cas:ghp_…` / `cas:<JWT>` / `cas:<conn-string>` is NOT a content
-/// address → it is not a ref here and redacts. A real `cas:<64-hex>` (or base32
-/// CID) survives. Kept in lockstep with `porcelain::is_content_address_ref`.
-fn is_content_address_ref(token: &str) -> bool {
-    if let Some(payload) = token.strip_prefix("cas:") {
-        return is_cas_payload_shaped(payload) && !is_structural_secret(payload);
-    }
-    // Require an explicit `<algo>:` prefix and a hex payload of digest shape.
-    // A bare hex run (no `:`) is deliberately NOT exempt.
-    let Some((algo, hex)) = token.split_once(':') else {
-        return false;
-    };
-    is_digest_algo(algo)
-        && matches!(hex.len(), 40 | 64)
-        && hex.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-/// True iff `payload` (the part after a `cas:` prefix) is a genuine
-/// content-address SHAPE: a bare 40/64-char hex run (sha-1 / sha-256) or a base32
-/// content-id (lowercase RFC-4648 `[a-z2-7]`, of a content-address-plausible
-/// length). A credential smuggled behind `cas:` does NOT match this
-/// charset/length. Kept in lockstep with `porcelain::is_cas_payload_shaped`.
-fn is_cas_payload_shaped(payload: &str) -> bool {
-    if matches!(payload.len(), 40 | 64) && payload.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return true;
-    }
-    matches!(payload.len(), 32..=64)
-        && payload
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b))
-}
-
-/// True iff `s` trips a STRUCTURAL secret detector — the credential-prefix / PEM /
-/// connection-string / keyword-context classes that do NOT depend on entropy or
-/// bare-hex shape. This is the value-gate guard for the `cas:` exemption: even a
-/// content-address-charset payload that happens to carry a known credential prefix
-/// (`ghp_`/`xoxb-`/`Bearer `/…) is NOT a content address. The bare-hex/entropy
-/// scan is intentionally NOT consulted (a real CID is high-entropy and must
-/// survive). Reuses the same detectors [`is_secret`] runs (1)–(4).
-fn is_structural_secret(s: &str) -> bool {
-    s.contains(SECRET_MARKER)
-        || KNOWN_PREFIXES.iter().any(|p| s.contains(p))
-        || has_sk_key(s)
-        || (s.contains("-----BEGIN") && s.contains("PRIVATE KEY"))
-        || has_connection_string_password(s)
-        || has_keyword_context_secret(s)
-}
-
-/// Recognised content-address algorithm tags for the prefixed-digest exemption.
-/// Case-insensitive (`sha256`/`SHA256` both count). A bare unknown prefix does
-/// NOT exempt — the prefix must name a hash family.
-fn is_digest_algo(algo: &str) -> bool {
-    let a = algo.to_ascii_lowercase();
-    matches!(
-        a.as_str(),
-        "sha1" | "sha256" | "sha-1" | "sha-256" | "sha512" | "sha-512" | "blake3" | "cas" | "oid"
-    )
-}
-
-/// Shannon entropy of a token in bits per character.
-fn shannon_entropy(token: &str) -> f64 {
-    let bytes = token.as_bytes();
-    if bytes.is_empty() {
-        return 0.0;
-    }
-    let mut counts = [0usize; 256];
-    for &b in bytes {
-        counts[b as usize] += 1;
-    }
-    let len = bytes.len() as f64;
-    let mut entropy = 0.0;
-    for &count in counts.iter() {
-        if count == 0 {
-            continue;
-        }
-        let p = count as f64 / len;
-        entropy -= p * p.log2();
-    }
-    entropy
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `super::*` already re-exports `is_content_address_ref` and `shannon_entropy`
+    // (used by the engine). `has_sk_key` / `has_connection_string_password` are
+    // test-only here, so import them directly from the single-source module.
+    use crate::secret_shape::{has_connection_string_password, has_sk_key};
 
     // ── marker path (existing tests rely on it) ──────────────────────────────
 
