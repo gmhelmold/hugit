@@ -215,31 +215,28 @@ fn full_wedge_chain_campaign_intent_pr_check_verdict_proven() {
 
     // ── Step 7: warm re-run (identical inputs) ───────────────────────────────
     //
-    // The shipped behaviour may be either:
-    //   (a) a genuine cache HIT (`cache_hit:true, local_executions:0`) — the
-    //       warm-re-run path is serviced from the AC store, OR
-    //   (b) `already_recorded:true, stored:false` — WH-CHECK dedup landed and
-    //       the verb returns early to avoid a duplicate log append.
-    // Both are correct.  We assert the STABLE invariants only.
+    // The wedge's CORE promise: a 2nd identical `check --store` is a genuine
+    // cache HIT — serviced from the AC store with ZERO local execution, same
+    // memo key. (The cold MISS is (key,false); this warm run is (key,true) — a
+    // distinct dedup tuple, so WH-CHECK records it as the HIT row, NOT an
+    // already_recorded no-op. A no-op/miss here would be the wedge FAILING, so
+    // we assert the HIT positively rather than accepting "hit OR deduped".)
     let (warm_code, warm) = run(check_args);
     assert_eq!(warm_code, 0, "step 7: warm re-run exits 0: {warm}");
-    let is_hit = warm["cache_hit"].as_bool() == Some(true);
-    let is_deduped = warm["already_recorded"].as_bool() == Some(true);
-    assert!(
-        is_hit || is_deduped,
-        "step 7: warm re-run is either a cache HIT or a deduped already_recorded: {warm}"
+    assert_eq!(
+        warm["cache_hit"].as_bool(),
+        Some(true),
+        "step 7: warm re-run with identical inputs MUST be a cache HIT (the wedge): {warm}"
     );
-    if is_hit {
-        assert_eq!(
-            warm["local_executions"], 0,
-            "a HIT performs zero local execution: {warm}"
-        );
-        assert_eq!(
-            warm["memo_key"].as_str().unwrap_or(""),
-            cold_key,
-            "identical inputs key to the same memo key: {warm}"
-        );
-    }
+    assert_eq!(
+        warm["local_executions"], 0,
+        "step 7: a HIT performs zero local execution: {warm}"
+    );
+    assert_eq!(
+        warm["memo_key"].as_str().unwrap_or(""),
+        cold_key,
+        "step 7: identical inputs key to the same memo key: {warm}"
+    );
     assert_chain_verifies(&log);
 
     // ── Step 8: checks show — real hit_rate > 0 ──────────────────────────────
@@ -257,16 +254,15 @@ fn full_wedge_chain_campaign_intent_pr_check_verdict_proven() {
         "step 8: at least one check.recorded on the log: {show}"
     );
     let kpis = &show["kpis"];
-    // A HIT row makes hit_rate_pct non-null and > 0; a MISS-only log gives null.
-    // We assert whatever is observable given step 7's shipped behaviour.
-    if is_hit {
-        assert!(
-            !kpis["hit_rate_pct"].is_null(),
-            "step 8: with a HIT row, hit_rate_pct is non-null: {kpis}"
-        );
-        let rate = kpis["hit_rate_pct"].as_f64().unwrap_or(0.0);
-        assert!(rate > 0.0, "step 8: hit_rate_pct > 0 after a HIT: {kpis}");
-    }
+    // Step 7 proved a HIT row landed (cold MISS + warm HIT), so the wedge KPI
+    // is UNCONDITIONALLY non-null and > 0 here — no is_hit/deduped escape hatch
+    // (that branch masked a possible warm-miss; killed in WI-TESTS follow-up).
+    assert!(
+        !kpis["hit_rate_pct"].is_null(),
+        "step 8: with a HIT row on the log, hit_rate_pct is non-null: {kpis}"
+    );
+    let rate = kpis["hit_rate_pct"].as_f64().unwrap_or(0.0);
+    assert!(rate > 0.0, "step 8: hit_rate_pct > 0 after a HIT: {kpis}");
     // Regardless of the warm-run outcome, executed is >= 1 (the cold run).
     assert!(
         !kpis["executed"].is_null(),
