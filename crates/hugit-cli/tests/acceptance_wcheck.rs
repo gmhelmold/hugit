@@ -50,6 +50,21 @@ fn run(args: &[&str]) -> (i32, Value) {
     (out.status.code().unwrap_or(-1), v)
 }
 
+/// Run `hugit <args>` with `RUSTFLAGS` set to `rustflags`, returning
+/// `(exit_code, parsed_stdout_json)`. Used by the env-axis stale-green test:
+/// `RUSTFLAGS` is on the result-affecting allowlist, so changing it between two
+/// otherwise-identical runs must bust the memo key (a MISS, not a stale green).
+fn run_with_rustflags(args: &[&str], rustflags: &str) -> (i32, Value) {
+    let out = Command::new(hugit_bin())
+        .args(args)
+        .env("RUSTFLAGS", rustflags)
+        .output()
+        .expect("hugit binary runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: Value = serde_json::from_str(stdout.trim()).unwrap_or(Value::Null);
+    (out.status.code().unwrap_or(-1), v)
+}
+
 /// Bootstrap an empty canonical `[EventRecord, …]` log file at `path`. An empty
 /// JSON array is the legitimate "no events yet" world the recorder appends to.
 fn write_empty_log(path: &Path) {
@@ -438,6 +453,57 @@ fn saved_ms_is_positive_after_warm_hit_on_slow_command() {
     assert!(
         saved >= 1,
         "saved_ms > 0 after a warm HIT on a slow command: {show}"
+    );
+}
+
+/// K-RUN [SHIP-BLOCKER] — the stale-green close: the check command runs through
+/// `sh -c` inheriting the FULL ambient environment, so a result-affecting env var
+/// changes the gate's outcome. Before the fix the env axis was hardcoded empty,
+/// so a change to (e.g.) `RUSTFLAGS` did NOT bust the memo key → a stale GREEN
+/// was served with ZERO execution. This proves the env axis now busts the key:
+/// a cold MISS under one RUSTFLAGS, then the SAME args under a DIFFERENT RUSTFLAGS
+/// is a fresh MISS (cache_hit:false) — not a laundered hit. An UNCHANGED env is
+/// still a warm HIT (the hit-rate is preserved — we capture only an allowlist).
+#[test]
+fn changing_a_result_affecting_env_var_busts_the_memo_key_no_stale_green() {
+    let dir = scratch("env-axis");
+    let log = dir.join("log.json");
+    let ac = dir.join("ac.json");
+    write_empty_log(&log);
+    let root = seed_tree(&dir);
+
+    // A command whose RESULT depends on RUSTFLAGS (read straight from the env the
+    // shell inherits). With RUSTFLAGS=green it exits 0; with anything else, 1.
+    let cmd = r#"test "$RUSTFLAGS" = green"#;
+    let args = check_args("env-check", cmd, &log, &ac, &root);
+    let r: Vec<&str> = args.iter().map(String::as_str).collect();
+
+    // Cold run under RUSTFLAGS=green → MISS, executes, exits 0 (green).
+    let (code, cold) = run_with_rustflags(&r, "green");
+    assert_eq!(code, 0, "verb reports outcome: {cold}");
+    assert_eq!(cold["cache_hit"], false, "cold run is a MISS: {cold}");
+    assert_eq!(
+        cold["ok"], true,
+        "RUSTFLAGS=green ⇒ the command is green: {cold}"
+    );
+
+    // Same args, UNCHANGED env (RUSTFLAGS=green) → warm HIT (hit-rate preserved).
+    let (_, warm) = run_with_rustflags(&r, "green");
+    assert_eq!(
+        warm["cache_hit"], true,
+        "an UNCHANGED allowlisted env is still a warm HIT: {warm}"
+    );
+
+    // Same args, CHANGED RUSTFLAGS=red → the env axis busts the key: a fresh MISS
+    // that EXECUTES the now-red command. NOT a stale green served from the cache.
+    let (_, changed) = run_with_rustflags(&r, "red");
+    assert_eq!(
+        changed["cache_hit"], false,
+        "a CHANGED result-affecting env var is a MISS, never a stale green: {changed}"
+    );
+    assert_eq!(
+        changed["ok"], false,
+        "the re-executed command reflects the now-red env (exit 1): {changed}"
     );
 }
 
