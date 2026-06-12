@@ -142,6 +142,15 @@ fn charter_excerpt(charter: &str) -> String {
 }
 
 /// Load the canonical log at `path` and return the set of landed intent ids.
+///
+/// Routes through the engine's [`hugit_refstore::verify_chain`] — the same
+/// primitive every sibling read-path (checks/pr/campaign/verdict/queue) calls
+/// — so the hash chain is ALWAYS verified before projecting landed state.
+/// A tampered chain propagates as `chain_broken`/exit-2, never silently read.
+///
+/// A *missing* file is treated as zero landed intents (the log has not been
+/// created yet; `--log` is optional for `intent list`).  Every other fault
+/// (tampered chain, malformed JSON, I/O error) is re-raised as exit-2.
 fn resolve_landed(log_path: &Path) -> Result<std::collections::HashSet<String>, PorcelainError> {
     let bytes = match std::fs::read(log_path) {
         Ok(b) => b,
@@ -161,7 +170,7 @@ fn resolve_landed(log_path: &Path) -> Result<std::collections::HashSet<String>, 
     let records: Vec<hugit_contracts::event_record::EventRecord> = serde_json::from_slice(&bytes)
         .map_err(|e| {
         PorcelainError::new(
-            "parse",
+            "parse_log",
             format!("parse log {}: {e}", log_path.display()),
             "the --log file must be a canonical JSON [EventRecord, …] array",
         )
@@ -177,6 +186,21 @@ fn resolve_landed(log_path: &Path) -> Result<std::collections::HashSet<String>, 
             )
         })?;
     }
+
+    // THE FIX (L-B): verify the hash chain before projecting landed state.
+    // The original code omitted this call, so a tampered payload was projected
+    // as authoritative.  Every sibling read-path (checks/pr/campaign/verdict/
+    // queue) calls verify_chain; intent list must too.
+    hugit_refstore::verify_chain(log.records()).map_err(|e| {
+        PorcelainError::new(
+            "chain_broken",
+            format!(
+                "log {} failed integrity verification: {e}",
+                log_path.display()
+            ),
+            "the --log file's hash chain is tampered or corrupt",
+        )
+    })?;
 
     let ids = intents_from_log(&log)
         .map(|il| il.intents().iter().map(|i| i.intent_id.clone()).collect())
