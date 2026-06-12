@@ -96,6 +96,12 @@ pub struct CloseArgs {
     /// The campaign key to close.
     #[arg(long)]
     pub campaign: String,
+    /// Allow sealing a campaign that has rejected intents.  Without this flag
+    /// `close` refuses with `campaign_has_rejected`/exit-2 when any intent
+    /// carries a non-approve latest verdict — an operator must explicitly
+    /// acknowledge that rejected work is being sealed over (WI-PROVEN2).
+    #[arg(long, default_value_t = false)]
+    pub allow_rejected: bool,
 }
 
 /// `hugit campaign show` — progress projection (read-only).
