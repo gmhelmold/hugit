@@ -203,6 +203,38 @@ fn record(args: VerdictArgs) -> Result<Value, PorcelainError> {
         lens_verdicts.push((name.clone(), v));
     }
 
+    // ── Reject duplicate-lens-with-conflicting-result at the door (C5-F1) ──────
+    // Defense-in-depth for the within-record lens-substitution launder: a single
+    // call must not carry the SAME lens twice with DIFFERENT results
+    // (`--lens security --result reject --lens security --result approve`). The
+    // ledger fold is now reject-sticky within a record (the source of truth), but
+    // we also refuse the conflicting input here so the record never stores a
+    // self-contradictory `claims_checked` vector in the first place. A repeated
+    // lens with the SAME result is harmless (idempotent) and allowed.
+    {
+        use std::collections::BTreeMap;
+        let mut seen: BTreeMap<&str, &Verdict> = BTreeMap::new();
+        for (name, v) in &lens_verdicts {
+            if let Some(prev) = seen.get(name.as_str())
+                && *prev != v
+            {
+                let safe_lens = crate::redaction::scrub(name);
+                return Err(PorcelainError::new(
+                    "duplicate_lens",
+                    format!(
+                        "lens '{safe_lens}' appears more than once in this call with \
+                         conflicting --result values: a single verdict cannot both \
+                         reject and approve the same lens"
+                    ),
+                    "pass each --lens at most once per call (or repeat it with the \
+                     same --result); to revise a prior verdict, record it in a later call",
+                )
+                .with_context("lens", json!(safe_lens)));
+            }
+            seen.insert(name.as_str(), v);
+        }
+    }
+
     let aggregate = aggregate_verdict(&lens_verdicts);
     let lens_verdicts_json: Vec<Value> = lens_verdicts
         .iter()
@@ -270,22 +302,20 @@ fn record(args: VerdictArgs) -> Result<Value, PorcelainError> {
     // log, error `campaign_sealed` / exit-2.  A log with no `intent.landed`
     // records (pre-intent or tests-only logs) is permissive — the vocabulary is
     // absent, not wrong.
-    if let Some(campaign_key) = campaign_for_intent(&log, intent)
-        && campaign_is_sealed(&log, &campaign_key)
-    {
-        let safe_intent = crate::redaction::scrub(intent);
-        let safe_campaign = crate::redaction::scrub(&campaign_key);
-        return Err(PorcelainError::new(
-            "campaign_sealed",
-            format!(
-                "campaign '{safe_campaign}' is sealed (campaign.closed on log): cannot \
-                 record a verdict for intent '{safe_intent}' after the campaign is closed"
-            ),
-            "reopen or create a new campaign if further verdict revisions are needed",
-        )
-        .with_context("intent", json!(safe_intent))
-        .with_context("campaign", json!(safe_campaign))
-        .with_context("log", json!(path.display().to_string())));
+    if let Some(campaign_key) = campaign_for_intent(&log, intent) {
+        // Route through the SHARED terminal-seal chokepoint (C5-F2): the same
+        // `guard_not_sealed` every campaign-scoped mutation verb now calls. The
+        // seal-detection logic lives once in `campaign::seal_guard`, so verdict,
+        // intent, and pr cannot drift on what "sealed" means (the K-VERDICT guard
+        // was point-local to this verb; it is now the shared precondition).
+        if let Err(v) = crate::campaign::seal_guard::guard_not_sealed(&log, &campaign_key) {
+            let safe_intent = crate::redaction::scrub(intent);
+            let safe_campaign = crate::redaction::scrub(&v.campaign);
+            return Err(PorcelainError::new(v.kind(), v.message(), v.fix())
+                .with_context("intent", json!(safe_intent))
+                .with_context("campaign", json!(safe_campaign))
+                .with_context("log", json!(path.display().to_string())));
+        }
     }
 
     // ── Idempotency check ─────────────────────────────────────────────────────
@@ -471,12 +501,6 @@ fn find_existing_verdict(
     })
 }
 
-/// The `campaign.closed` event kind — matches
-/// [`crate::campaign::world::KIND_CAMPAIGN_CLOSED`].  Inlined here to keep the
-/// verdict module free from a campaign-module dependency; the two strings are
-/// locked together by the same acceptance test that drives both paths.
-const KIND_CAMPAIGN_CLOSED: &str = "campaign.closed";
-
 /// Look up the campaign key for `intent_id` from the first `intent.landed`
 /// record on the log that names it.  Returns `None` if no `intent.landed` record
 /// exists for this id or if the payload has no `campaign` field (permissive —
@@ -500,25 +524,6 @@ fn campaign_for_intent(log: &hugit_refstore::EventLog, intent_id: &str) -> Optio
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string)
         })
-}
-
-/// Check whether a `campaign.closed` record exists on the log for `campaign_key`.
-///
-/// Used by the post-seal guard (K-VERDICT): if the campaign is sealed, new
-/// verdict appends are refused with `campaign_sealed`/exit-2.
-fn campaign_is_sealed(log: &hugit_refstore::EventLog, campaign_key: &str) -> bool {
-    log.records().iter().any(|r| {
-        r.kind == KIND_CAMPAIGN_CLOSED
-            && serde_json::from_str::<serde_json::Value>(&r.payload)
-                .ok()
-                .and_then(|v| {
-                    v.get("campaign")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string)
-                })
-                .as_deref()
-                == Some(campaign_key)
-    })
 }
 
 /// Check whether an `intent.landed` record for `intent_id` exists on the log.

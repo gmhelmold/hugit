@@ -35,7 +35,8 @@ pub mod projection;
 
 pub use import::{ImportError, import_sidecar};
 pub use model::{
-    INTENT_LANDED_KIND, Intent, IntentLog, IntentModelError, RAW_PUSH_KINDS, intents_from_log,
+    ExternalChangeKind, INTENT_LANDED_KIND, Intent, IntentLog, IntentModelError, RAW_PUSH_KINDS,
+    intents_from_log,
 };
 pub use projection::{
     Altitude, GitCommit, MachineHistory, ProjectionError, ProjectionRow, project, project_machine,

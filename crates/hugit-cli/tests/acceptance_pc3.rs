@@ -328,7 +328,7 @@ fn append_envelope(log: &mut EventLog, env: ContextEnvelope) {
     };
     let payload = serde_json::to_string(&env).unwrap();
     let canonical = hugit_refstore::canonical_json(&payload).unwrap();
-    log.append(kind, vec![], canonical, 3_000);
+    log.append_for_test(kind, vec![], canonical, 3_000);
 }
 
 fn metrics(total: u64) -> IntentMetrics {

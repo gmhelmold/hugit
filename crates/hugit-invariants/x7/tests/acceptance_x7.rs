@@ -63,19 +63,19 @@ fn producer_signing_key() -> SigningKey {
 /// `SUBJECT_OBJECT`, returning the records and the object-link seq.
 fn seed_provenance() -> (Vec<EventRecord>, u64) {
     let mut log = EventLog::new();
-    log.append(
+    log.append_for_test(
         "tree.snapshot",
         vec!["agent:planner".to_string()],
         object_link_payload("sha256:tree-root"),
         1_000,
     );
-    let link = log.append(
+    let link = log.append_for_test(
         OBJECT_LINK_KIND,
         vec!["agent:executor".to_string(), "human:owner".to_string()],
         object_link_payload(SUBJECT_OBJECT),
         2_000,
     );
-    log.append(
+    log.append_for_test(
         "check.result",
         vec!["runner:box-01".to_string()],
         object_link_payload("sha256:check-out"),

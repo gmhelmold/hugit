@@ -335,7 +335,7 @@ fn write_world(dir: &std::path::Path, events: &[Ev]) -> PathBuf {
     for (i, e) in events.iter().enumerate() {
         let payload = e.payload.to_string();
         let payload = canonical_json(&payload).unwrap_or(payload);
-        log.append(
+        log.append_for_test(
             e.kind.to_string(),
             vec![
                 "user:gustavo@humangr.com".to_string(),

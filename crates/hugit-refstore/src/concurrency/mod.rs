@@ -97,6 +97,13 @@ pub enum SubmitError {
     /// Surfaced (not swallowed) so a corrupt critical section can never be
     /// mistaken for a successful, lost-then-forgotten append.
     WriterPoisoned,
+    /// The D14 guard DENIED the submission (C4-F2): the operation's principal is
+    /// not permitted to append at the `Push` endpoint. The op is **not** on the
+    /// chain; the denial was audited (`authz.denied`, ③).
+    Denied {
+        /// The stable denial reason code (from [`crate::authz::DenyReason`]).
+        reason: &'static str,
+    },
 }
 
 impl std::fmt::Display for SubmitError {
@@ -108,6 +115,9 @@ impl std::fmt::Display for SubmitError {
             ),
             SubmitError::WriterPoisoned => {
                 write!(f, "writer mutex poisoned by a panicking submitter")
+            }
+            SubmitError::Denied { reason } => {
+                write!(f, "submission denied by the D14 guard: {reason}")
             }
         }
     }
@@ -377,8 +387,32 @@ impl Serializer {
             .log
             .lock()
             .map_err(|_| SubmitError::WriterPoisoned)?;
-        let record = log.append(op.kind, op.principal_chain, op.payload, op.recorded_at);
-        Ok(record)
+        // ── D14 guard (C4-F2) ────────────────────────────────────────────────
+        // `submit` is the generic mutating writer and the natural home for a
+        // future `push` verb; Round 8 (Class 4, F-2) flagged that it raw-appended
+        // an arbitrary `Op.kind`/`principal_chain`/`payload` with NO authorization
+        // while its sibling `undo` was guarded. We close that asymmetry: authorize
+        // `op.principal_chain` through the same [`AuditedGuard`] under
+        // [`Endpoint::Push`] (the universal git verb a raw push rides) BEFORE the
+        // append — on a denial the guard writes an `authz.denied` audit record (③)
+        // into this same log under the one lock and the op is NOT appended. This
+        // pre-fences a future CLI `push` from re-opening the Round-7 raw-append
+        // class. The authorize→append is one indivisible critical section.
+        let decision = {
+            let mut guard = AuditedGuard::new(&mut log);
+            let (decision, _audit) =
+                guard.authorize(&op.principal_chain, Endpoint::Push, op.recorded_at);
+            decision
+        };
+        match decision {
+            Decision::Allow => {
+                let record = log.append(op.kind, op.principal_chain, op.payload, op.recorded_at);
+                Ok(record)
+            }
+            Decision::Deny(reason) => Err(SubmitError::Denied {
+                reason: reason.code(),
+            }),
+        }
         // `log` drops first (lock released), then `_permit` (in-flight count
         // decremented) — every path, including the `?` error and any panic.
     }

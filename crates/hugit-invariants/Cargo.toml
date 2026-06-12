@@ -88,7 +88,9 @@ hugit-contracts = { path = "../hugit-contracts" }
 hugit-ledger = { path = "../hugit-ledger" }
 # WP-X12 acceptance oracle re-includes x12/erasure.rs via #[path] and drives the
 # canonical refstore surface directly (verify_chain / compute_this_hash / EventLog).
-hugit-refstore = { path = "../hugit-refstore" }
+# C4-F1: the acceptance oracles build synthetic logs via the `test-support`
+# raw-append shim (production raw door is `pub(crate)`).
+hugit-refstore = { path = "../hugit-refstore", features = ["test-support"] }
 serde_json = { workspace = true }
 serde = { workspace = true }
 

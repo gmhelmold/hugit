@@ -19,3 +19,6 @@ hex = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# C4-F1: ledger test fixtures build synthetic event logs via the `test-support`
+# raw-append shim (the production raw door is `pub(crate)`).
+hugit-refstore = { path = "../hugit-refstore", features = ["test-support"] }

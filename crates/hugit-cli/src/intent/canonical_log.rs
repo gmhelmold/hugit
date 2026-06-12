@@ -91,6 +91,28 @@ pub fn land_intent(
 
     let mut log = load(path)?;
 
+    // ── Terminal-seal precondition (C5-F2) ────────────────────────────────────
+    // A sealed campaign is terminal: `intent new --log` must NOT append an
+    // `intent.landed` into a campaign that already has a `campaign.closed` on
+    // this log (Round 8 F2 — post-seal `intent.landed` mutated `done` AFTER the
+    // immutable seal). Route through the SAME shared chokepoint `verdict` and
+    // `pr` use, so no campaign-scoped verb can drift on the seal rule. The
+    // campaign key is the one this intent is being filed under — `intent new`
+    // stamps `campaign:<key>` at the head of the principal chain. This guard
+    // runs BEFORE both the idempotent-reconcile and the fresh-landing branches,
+    // so a sealed campaign refuses every `intent new --log` into it.
+    let campaign_key = principal_chain
+        .iter()
+        .find_map(|s| s.strip_prefix("campaign:"))
+        .unwrap_or("");
+    if !campaign_key.is_empty()
+        && let Err(v) = crate::campaign::seal_guard::guard_not_sealed(&log, campaign_key)
+    {
+        let safe_campaign = crate::redaction::scrub(&v.campaign);
+        return Err(PorcelainError::new(v.kind(), v.message(), v.fix())
+            .with_context("campaign", serde_json::json!(safe_campaign)));
+    }
+
     // Idempotent on the shared log: an intent already landed here is left as-is.
     let already = intents_from_log(&log)
         .map(|p| p.by_id(&sidecar.intent_id).is_some())

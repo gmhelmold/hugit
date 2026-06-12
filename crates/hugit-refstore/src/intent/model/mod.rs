@@ -29,6 +29,36 @@ pub const INTENT_LANDED_KIND: &str = "intent.landed";
 /// an *external change*; WP-D4 never fabricates an intent from it.
 pub const RAW_PUSH_KINDS: [&str; 2] = ["ref.update", "ref.delete"];
 
+/// The **closed** set of event kinds a cross-crate raw external-change emitter is
+/// allowed to append (C4-F1).
+///
+/// This is the type-level companion to [`RAW_PUSH_KINDS`]: the
+/// [`EventLog::append_external_change`](crate::EventLog::append_external_change)
+/// shim takes this enum, NOT a free `impl Into<String>`, so a cross-crate
+/// raw-push recorder (`hugit-proto`, `hugit-mirror`) is *structurally incapable*
+/// of emitting `intent.landed` / `pr.*` / `verdict.*`. It replaces the prior
+/// runtime, debug-only `debug_assert_ne!` guard with a compile-time one — the
+/// only legitimate cross-crate raw-append need once
+/// [`EventLog::append`](crate::EventLog::append) is `pub(crate)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalChangeKind {
+    /// A ref *update* — `ref.update` (a ref now points at a new target oid).
+    RefUpdate,
+    /// A ref *delete* — `ref.delete` (a ref was removed).
+    RefDelete,
+}
+
+impl ExternalChangeKind {
+    /// The frozen wire string for this external-change kind — always a member of
+    /// [`RAW_PUSH_KINDS`], never an intent/pr/verdict kind.
+    pub fn as_kind(self) -> &'static str {
+        match self {
+            ExternalChangeKind::RefUpdate => "ref.update",
+            ExternalChangeKind::RefDelete => "ref.delete",
+        }
+    }
+}
+
 /// A native Intent object, projected out of one `intent.landed` event.
 ///
 /// The `seq` ties the intent back to its exact position on the event log, so the

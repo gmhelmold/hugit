@@ -20,6 +20,7 @@ use hugit_queue::core::{
     AffectedSet, Batch, EntryState, MemoCheck, UnionVerdict, evaluate_union, land_in_order,
     landed_in_order,
 };
+use hugit_refstore::authz::{Endpoint, PrincipalClass};
 use hugit_refstore::{EventLog, canonical_json};
 
 /// Configuration for a 5-PR wave.
@@ -168,12 +169,21 @@ pub fn run_wave_with_ac(cfg: &WaveConfig, ac: &InMemoryAc) -> WaveReport {
     for pr_id in &landed {
         let payload_raw = format!(r#"{{"pr_id":"{pr_id}","union_verdict":"green"}}"#);
         let payload = canonical_json(&payload_raw).unwrap_or_else(|| payload_raw.clone());
-        event_log.append(
-            "pr.landed",
-            vec!["dogfood-harness".to_string()],
-            payload,
-            0, // deterministic recorded_at for hermetic tests
-        );
+        // C4-F1: the raw `EventLog::append` door is now `pub(crate)`. The dogfood
+        // harness represents the orchestrator landing PRs, so route the synthetic
+        // `pr.landed` audit emit through the guarded `append_authorized`
+        // (Orchestrator/Land — always Allow for that matrix cell). Unwrap is
+        // sound: the Land cell never denies for Orchestrator.
+        event_log
+            .append_authorized(
+                PrincipalClass::Orchestrator,
+                Endpoint::Land,
+                "pr.landed",
+                vec!["dogfood-harness".to_string()],
+                payload,
+                0, // deterministic recorded_at for hermetic tests
+            )
+            .expect("orchestrator is authorized to land in the dogfood harness");
     }
 
     WaveReport {

@@ -50,21 +50,21 @@ const SUBSTITUTE_OBJECT: &str = "sha256:attacker-substitute-9999";
 fn seed_provenance_and_store() -> (Vec<EventRecord>, ObjectStore, u64) {
     let mut log = EventLog::new();
     // genesis: a workspace snapshot event.
-    log.append(
+    log.append_for_test(
         "tree.snapshot",
         vec!["agent:planner".to_string()],
         object_link_payload("sha256:tree-root"),
         1_000,
     );
     // the object-link event: provenance references SUBJECT_OBJECT by content hash.
-    let link = log.append(
+    let link = log.append_for_test(
         OBJECT_LINK_KIND,
         vec!["agent:executor".to_string(), "human:owner".to_string()],
         object_link_payload(SUBJECT_OBJECT),
         2_000,
     );
     // a later event chained on top (proves the link sits mid-chain).
-    log.append(
+    log.append_for_test(
         "check.result",
         vec!["runner:box-01".to_string()],
         object_link_payload("sha256:check-out"),
@@ -438,19 +438,19 @@ fn seed_provenance_and_real_store<S: ColdBlobStore>(
     let subject_ref = store.put(subject_bytes).expect("put subject bytes");
 
     let mut log = EventLog::new();
-    log.append(
+    log.append_for_test(
         "tree.snapshot",
         vec!["agent:planner".to_string()],
         object_link_payload("cas:tree-root"),
         1_000,
     );
-    let link = log.append(
+    let link = log.append_for_test(
         OBJECT_LINK_KIND,
         vec!["agent:executor".to_string(), "human:owner".to_string()],
         object_link_payload(&subject_ref),
         2_000,
     );
-    log.append(
+    log.append_for_test(
         "check.result",
         vec!["runner:box-01".to_string()],
         object_link_payload("cas:check-out"),

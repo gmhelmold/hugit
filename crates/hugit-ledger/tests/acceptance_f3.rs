@@ -85,7 +85,7 @@ fn build_world_log() -> EventLog {
         })
         .to_string();
         let payload = canonical_json(&payload_raw).expect("valid JSON");
-        log.append("intent.landed", principal_chain(), payload, *at);
+        log.append_for_test("intent.landed", principal_chain(), payload, *at);
     }
     for (idx, (id, at)) in [
         ("i-a1", T0 + 183_000),
@@ -107,7 +107,7 @@ fn build_world_log() -> EventLog {
         };
         let payload_raw = serde_json::to_string(&vo).expect("VerdictObject serializes");
         let payload = canonical_json(&payload_raw).expect("valid JSON");
-        log.append("verdict.recorded", principal_chain(), payload, *at);
+        log.append_for_test("verdict.recorded", principal_chain(), payload, *at);
     }
     log
 }

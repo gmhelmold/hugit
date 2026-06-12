@@ -17,6 +17,7 @@
 
 use hugit_contracts::EventRecord;
 use hugit_refstore::EventLog;
+use hugit_refstore::authz::{Endpoint, PrincipalClass};
 
 use crate::{
     SoakConfig,
@@ -190,12 +191,20 @@ impl SoakDriver {
                 submitted_all.push(pr_id.clone());
                 let payload = hugit_refstore::canonical_json(&format!(r#"{{"pr_id":"{pr_id}"}}"#))
                     .unwrap_or_else(|| format!(r#"{{"pr_id":"{pr_id}"}}"#));
-                audit_log.append(
-                    "pr.submitted",
-                    vec!["dogfood-soak".to_string()],
-                    payload,
-                    wave_idx as u64,
-                );
+                // C4-F1: route the synthetic audit emit through the guarded
+                // `append_authorized` (the raw door is now `pub(crate)`). The
+                // soak harness drives the orchestrator landing queue, so
+                // Orchestrator/Land is the faithful, always-Allow cell.
+                audit_log
+                    .append_authorized(
+                        PrincipalClass::Orchestrator,
+                        Endpoint::Land,
+                        "pr.submitted",
+                        vec!["dogfood-soak".to_string()],
+                        payload,
+                        wave_idx as u64,
+                    )
+                    .expect("orchestrator is authorized in the dogfood soak harness");
             }
 
             let report = run_wave(&wave_cfg);
@@ -207,12 +216,16 @@ impl SoakDriver {
                     r#"{{"pr_id":"{pr_id}","union_verdict":"green"}}"#
                 ))
                 .unwrap_or_else(|| format!(r#"{{"pr_id":"{pr_id}","union_verdict":"green"}}"#));
-                audit_log.append(
-                    "pr.landed",
-                    vec!["dogfood-soak".to_string()],
-                    payload,
-                    wave_idx as u64,
-                );
+                audit_log
+                    .append_authorized(
+                        PrincipalClass::Orchestrator,
+                        Endpoint::Land,
+                        "pr.landed",
+                        vec!["dogfood-soak".to_string()],
+                        payload,
+                        wave_idx as u64,
+                    )
+                    .expect("orchestrator is authorized in the dogfood soak harness");
             }
 
             // Emit pr.excluded events.
@@ -222,12 +235,16 @@ impl SoakDriver {
                     r#"{{"pr_id":"{pr_id}","reason":"union_fail"}}"#
                 ))
                 .unwrap_or_else(|| format!(r#"{{"pr_id":"{pr_id}","reason":"union_fail"}}"#));
-                audit_log.append(
-                    "pr.excluded",
-                    vec!["dogfood-soak".to_string()],
-                    payload,
-                    wave_idx as u64,
-                );
+                audit_log
+                    .append_authorized(
+                        PrincipalClass::Orchestrator,
+                        Endpoint::Land,
+                        "pr.excluded",
+                        vec!["dogfood-soak".to_string()],
+                        payload,
+                        wave_idx as u64,
+                    )
+                    .expect("orchestrator is authorized in the dogfood soak harness");
             }
         }
 

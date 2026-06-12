@@ -48,14 +48,14 @@ fn count_kind(log: &EventLog, kind: &str) -> usize {
 /// `pr open --campaign` validates against — written here through the raw log).
 fn open_campaign(log: &mut EventLog, key: &str) {
     let payload = format!("{{\"campaign\":{}}}", json!(key));
-    log.append(CAMPAIGN_OPENED_KIND, vec![], payload, 500);
+    log.append_for_test(CAMPAIGN_OPENED_KIND, vec![], payload, 500);
 }
 
 /// Append a `pr.landed` record naming `pr_id` (the disclosed landing seam — the
 /// pr porcelain never writes it; `abandon` only READS it to refuse).
 fn land_externally(log: &mut EventLog, pr_id: &str) {
     let payload = format!("{{\"pr_id\":{}}}", json!(pr_id));
-    log.append(PR_LANDED_KIND, vec![], payload, 600);
+    log.append_for_test(PR_LANDED_KIND, vec![], payload, 600);
 }
 
 // ── referential symmetry (audit P5) ─────────────────────────────────────────────

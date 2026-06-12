@@ -16,16 +16,18 @@
 //! # Raw push ≠ intent (the source-of-truth bar, D3⑤ leg)
 //!
 //! A raw `git push` carries **no provenance**. It is recorded with one of the
-//! frozen [`RAW_PUSH_KINDS`] (`ref.update` / `ref.delete`) and a payload that
-//! carries *only* `{"ref", "target"}` — **never** an `intent_id`, and never the
-//! [`INTENT_LANDED_KIND`]. Synthesising an intent for a raw push is structurally
-//! impossible here: this module has no code path that emits `intent.landed`.
+//! frozen [`RAW_PUSH_KINDS`](hugit_refstore::intent::RAW_PUSH_KINDS)
+//! (`ref.update` / `ref.delete`) and a payload that carries *only*
+//! `{"ref", "target"}` — **never** an `intent_id`, and never the
+//! [`INTENT_LANDED_KIND`](hugit_refstore::intent::INTENT_LANDED_KIND).
+//! Synthesising an intent for a raw push is structurally impossible here: this
+//! module emits only [`ExternalChangeKind`](hugit_refstore::intent::ExternalChangeKind)
+//! events via the typed shim — it has no code path that emits `intent.landed`.
 
-use hugit_refstore::intent::INTENT_LANDED_KIND;
+use hugit_refstore::intent::ExternalChangeKind;
 use hugit_refstore::log::EventLog;
 use std::collections::BTreeMap;
 
-use crate::write::external::{REF_DELETE_KIND, REF_UPDATE_KIND};
 use crate::write::json_str;
 
 /// A git object id (40-char lowercase hex SHA-1), the CAS key for one object.
@@ -113,7 +115,7 @@ pub fn store_objects(cas: &mut dyn Cas, objects: &[CasObject]) {
 /// freshly-appended [`EventRecord`].
 ///
 /// The payload is canonical raw-push JSON `{"ref":<name>,"target":<oid>}` — it
-/// carries **no** `intent_id` and the event kind is [`REF_UPDATE_KIND`], so the
+/// carries **no** `intent_id` and the event kind is `ref.update`, so the
 /// intent altitude ([`hugit_refstore::intent`]) reads it as an *external
 /// change*, never an intent. This is the only ref-write primitive in the push
 /// path; it appends, it never rewrites.
@@ -124,12 +126,18 @@ pub fn record_ref_update(
     target_oid: &str,
     recorded_at: u64,
 ) -> hugit_contracts::event_record::EventRecord {
-    debug_assert_ne!(
-        REF_UPDATE_KIND, INTENT_LANDED_KIND,
-        "raw push must never use the intent kind"
-    );
+    // C4-F1: the type-level external-change shim replaces the bare `log.append`.
+    // `ExternalChangeKind::RefUpdate` can only ever map to `ref.update` — the
+    // raw door (`EventLog::append`) is now `pub(crate)` and unreachable here, so
+    // this recorder is *structurally incapable* of emitting an intent kind (the
+    // prior `debug_assert_ne!` is now a compile-time guarantee).
     let payload = raw_push_payload(ref_name, target_oid);
-    log.append(REF_UPDATE_KIND, principal_chain, payload, recorded_at)
+    log.append_external_change(
+        ExternalChangeKind::RefUpdate,
+        principal_chain,
+        payload,
+        recorded_at,
+    )
 }
 
 /// Record a raw-push ref *delete* as an append-only D1 event.
@@ -140,7 +148,12 @@ pub fn record_ref_delete(
     recorded_at: u64,
 ) -> hugit_contracts::event_record::EventRecord {
     let payload = format!(r#"{{"ref":{}}}"#, json_str(ref_name));
-    log.append(REF_DELETE_KIND, principal_chain, payload, recorded_at)
+    log.append_external_change(
+        ExternalChangeKind::RefDelete,
+        principal_chain,
+        payload,
+        recorded_at,
+    )
 }
 
 /// Canonical raw-push update payload: `{"ref":<name>,"target":<oid>}`.
@@ -157,9 +170,10 @@ pub fn raw_push_payload(ref_name: &str, target_oid: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use hugit_refstore::intent::RAW_PUSH_KINDS;
+    use hugit_refstore::intent::{INTENT_LANDED_KIND, RAW_PUSH_KINDS};
 
     use super::*;
+    use crate::write::external::REF_UPDATE_KIND;
 
     #[test]
     fn cas_put_is_idempotent_on_oid() {

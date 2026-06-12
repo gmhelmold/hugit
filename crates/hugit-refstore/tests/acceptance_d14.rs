@@ -304,7 +304,7 @@ fn wa2_subagent_cannot_append_pr_opened_through_guard() {
 fn wa2_guarded_append_keeps_chain_intact_on_deny() {
     let mut log = EventLog::new();
     // First a legitimate append so the chain is non-trivial.
-    log.append("ref.update", chain("user:gustavo"), r#"{"r":1}"#, 1);
+    log.append_for_test("ref.update", chain("user:gustavo"), r#"{"r":1}"#, 1);
     let head_before = log.head_hash();
 
     let _ = log.append_authorized(
