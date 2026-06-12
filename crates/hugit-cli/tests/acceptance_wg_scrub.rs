@@ -96,7 +96,7 @@ fn assert_log_clean(path: &std::path::Path, ctx: &str) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn check_redacts_secrets_in_def_pr_and_principal_on_the_log() {
+fn check_redacts_free_text_secrets_in_principal_and_cmd_on_the_log() {
     let dir = scratch("check");
     let log = dir.join("log.json");
     let ac = dir.join("ac");
@@ -105,8 +105,8 @@ fn check_redacts_secrets_in_def_pr_and_principal_on_the_log() {
     bootstrap_log(log.to_str().unwrap());
 
     // The adversary's exact repro for the FREE-TEXT vectors: a PAT in
-    // `--def`/`--principal` and a connection string in `--cmd` (echoed into the
-    // def identity). `--store` forces the `check.recorded` append onto the
+    // `--principal` and a connection string in `--cmd` (echoed into the def
+    // identity). `--store` forces the `check.recorded` append onto the
     // hash-chained log.
     //
     // WH-SCRUB note: `--pr` lands in the `pr_id` identifier-ADDRESS field, which
@@ -115,10 +115,16 @@ fn check_redacts_secrets_in_def_pr_and_principal_on_the_log() {
     // INPUT (rejecting a secret-shaped id) so an address can never carry a known
     // secret. `--pr` therefore no longer carries a planted secret here; the
     // free-text leak vectors below remain the assertion.
+    //
+    // WK-AC note: `--def` is a memo AXIS (it keys the cache via `def_digest`), so
+    // a secret-shaped `--def` is now REJECTED at the door (exit-2), not scrubbed
+    // at rest — the door rejection is covered by the WK-AC matrix. So `--def`
+    // carries a NON-secret name here; the free-text scrub vector this test owns is
+    // `--principal` (the principal-chain string), which remains scrubbed at rest.
     let out = run(&[
         "check",
         "--def",
-        &format!("deploy-{PAT}"),
+        "deploy-check",
         "--cmd",
         &format!("echo {CONN}; true"),
         "--log",

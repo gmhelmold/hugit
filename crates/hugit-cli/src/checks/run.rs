@@ -680,6 +680,37 @@ struct FileAc {
     path: PathBuf,
 }
 
+/// Fail-closed write-boundary guard (WK-AC, defense-in-depth): refuse to persist
+/// a [`CheckResult`] whose memo axes carry a structural-secret shape.
+///
+/// The three memo axes (`tree_hash`, `def_digest`, `toolchain_digest`) are the
+/// content-address the cache keys on — `verify_hit` recomputes the memo key from
+/// them, so they are stored UNREDACTED. A secret in an axis therefore can NOT be
+/// scrubbed (that would destroy every cache hit); the only safe action is to
+/// REFUSE the persist. We reuse the ONE shared structural detector
+/// ([`crate::porcelain::structural_secret_scrub`] — secret iff scrubbing changes
+/// the value) so this never drifts weaker than the door or the engine. In
+/// practice only `toolchain_digest` can trip (the other two are computed hashes),
+/// but all three are guarded uniformly — an exemption is a hole.
+fn guard_axes_not_secret(result: &CheckResult) -> Result<(), hugit_checks::client::ac::AcError> {
+    use hugit_checks::client::ac::AcError;
+    for (field, value) in [
+        ("tree_hash", result.tree_hash.as_str()),
+        ("def_digest", result.def_digest.as_str()),
+        ("toolchain_digest", result.toolchain_digest.as_str()),
+    ] {
+        if crate::porcelain::structural_secret_scrub(value) != value {
+            return Err(AcError::Transport(format!(
+                "AC store refused: memo axis `{field}` carries a structural-secret \
+                 shape — an axis is a content-address stored unredacted, so a \
+                 credential in it cannot be persisted (it would also be unscrubbable \
+                 without busting the cache key)"
+            )));
+        }
+    }
+    Ok(())
+}
+
 impl FileAc {
     /// Construct a file-backed AC over `path`. No lock is held by the backend
     /// itself — each `lookup`/`store` op takes the lock only for its own short
@@ -733,6 +764,16 @@ impl ActionCache for FileAc {
 
     fn store(&self, result: &CheckResult) -> Result<(), hugit_checks::client::ac::AcError> {
         use hugit_checks::client::ac::AcError;
+        // WRITE-BOUNDARY GUARD (WK-AC, defense-in-depth, fail-closed): before any
+        // bytes touch the `.ac` file, REFUSE to persist a CheckResult whose memo
+        // axes carry a structural-secret shape. An axis is a content-address the
+        // cache keys on — it CANNOT be scrubbed (that would bust `verify_hit`), so
+        // the only safe action is to refuse the write entirely. The DOOR
+        // (`validate_axis` in `run`) is the primary line; this is the belt-and-
+        // suspenders so NO future code path can leak an axis to the `.ac` even if
+        // the door is bypassed. tree_hash/def_digest are computed hashes (never
+        // secret), but we guard all three uniformly — an exemption is a hole.
+        guard_axes_not_secret(result)?;
         // Lock the whole read-modify-write of the cache file so two concurrent
         // stores merge instead of clobbering, then release. The lock is taken HERE
         // (per-op), never held across the execute that produced `result`.
@@ -788,6 +829,18 @@ fn acquire_ac_lock(path: &Path) -> Result<FileLock, hugit_checks::client::ac::Ac
     )))
 }
 
+/// Reject a memo-axis flag value (`--def`/`--toolchain`) that carries a
+/// structural-secret shape (WK-AC door). Reuses the ONE shared detector
+/// ([`crate::ident::validate_identifier`] → `structural_secret_scrub`) the
+/// identifier verbs use, so the door can never drift weaker than the engine.
+/// An axis is an ADDRESS the cache keys on — it is stored unredacted (scrubbing
+/// it would bust every hit), so a credential-shaped value is refused at input
+/// with the structured `secret_in_identifier`/exit-2 error rather than persisted.
+fn validate_axis(value: &str, field_name: &str) -> Result<(), PorcelainError> {
+    crate::ident::validate_identifier(value, field_name)
+        .map_err(|e| PorcelainError::new(e.kind, e.message, e.fix))
+}
+
 /// `hugit check` — resolve → memoize → execute-on-miss → (with `--store`) record.
 ///
 /// The full wedge in one verb: derive the def + tree snapshot, run it through
@@ -796,6 +849,27 @@ fn acquire_ac_lock(path: &Path) -> Result<FileLock, hugit_checks::client::ac::Ac
 /// canonical log through the guarded, lock-serialized, atomic seam. Returns the
 /// stable-JSON outcome (the recorded row + the cache verdict) for the agent.
 pub fn run(args: &CheckArgs) -> Result<Value, PorcelainError> {
+    // DOOR (WK-AC, primary): `--toolchain` and `--def` are memo AXES, not free
+    // text — a structurally-secret value cannot be SCRUBBED at rest (it is the
+    // content-address `verify_hit` recomputes the memo key from; scrubbing it
+    // would destroy every cache hit). So we REJECT a secret-shaped axis at the
+    // door with the SAME structured exit-2 `secret_in_identifier` error the
+    // identifier verbs emit, reusing the ONE shared detector
+    // (`crate::ident::validate_identifier` → `structural_secret_scrub`) so the
+    // door can never drift weaker than the engine ("an exemption is a hole").
+    //
+    // `--cmd` is a SHELL COMMAND (free text — may legitimately reference a
+    // token); it is NOT validated here — it is scrubbed at rest on the `--log`.
+    // `--toolchain` is OPTIONAL: only validate when explicitly given + non-empty
+    // (omitted ⇒ the real active-toolchain digest, a computed hash, never a
+    // secret). A legit toolchain digest (hex sha256, `rustc 1.96.0 (hash)`)
+    // passes because the structural detector is bare-hex/entropy-EXEMPT and only
+    // trips on credential PREFIXES.
+    validate_axis(&args.def, "--def")?;
+    if let Some(tc) = args.toolchain.as_deref().filter(|t| !t.trim().is_empty()) {
+        validate_axis(tc, "--toolchain")?;
+    }
+
     let def = resolve_def(args)?;
     // Axis 3 is taken from the resolved def's `toolchain_ref` — the SAME value
     // `resolve_def` baked into axis 2 (`compute_def_digest` hashes `toolchain_ref`)
@@ -1198,6 +1272,96 @@ mod tests {
             start.elapsed() < Duration::from_secs(10),
             "the timeout fired promptly, not after the full sleep"
         );
+    }
+
+    #[test]
+    fn write_boundary_guard_refuses_a_secret_toolchain_axis() {
+        // LAYER 2 (WK-AC): the FileAc store is fail-closed independently of the
+        // door. A CheckResult carrying a structural-secret `toolchain_digest` is
+        // REFUSED at the write boundary — never persisted to the `.ac` — even
+        // though the door (validate_axis) was never invoked here.
+        let dir = std::env::temp_dir().join(format!("hugit-wkac-unit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ac_path = dir.join("ac.json");
+
+        let secret_tc = "ghp_16C7e42F292c6912E7710c838347Ae178B4a";
+        let key = hugit_refstore::compute_memo_key("tree", "def", secret_tc);
+        let leaky = CheckResult {
+            memo_key: key,
+            tree_hash: "tree".to_string(),
+            def_digest: "def".to_string(),
+            toolchain_digest: secret_tc.to_string(),
+            exit: 0,
+            artifacts: vec![],
+            stdout_ref: String::new(),
+            stderr_ref: String::new(),
+            duration_ms: 1,
+            runner_ref: "local".to_string(),
+            produced_at: 0,
+        };
+
+        let ac = FileAc::new(ac_path.clone());
+        let err = ac
+            .store(&leaky)
+            .expect_err("a secret toolchain axis must be REFUSED at the write boundary");
+        assert!(
+            matches!(err, hugit_checks::client::ac::AcError::Transport(ref m) if m.contains("toolchain_digest")),
+            "the refusal names the offending axis: {err:?}"
+        );
+        // The `.ac` file must NOT have been written with the secret (fail-closed).
+        let ac_bytes = std::fs::read_to_string(&ac_path).unwrap_or_default();
+        assert!(
+            !ac_bytes.contains("16C7e42F292c6912E7710c838347Ae178B4a"),
+            "the refused secret never reached the .ac:\n{ac_bytes}"
+        );
+
+        // A legit (hex) toolchain axis stores normally — the guard is shape-gated,
+        // not a blanket block (the cache still works).
+        let tc = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let key2 = hugit_refstore::compute_memo_key("tree", "def", tc);
+        let clean = CheckResult {
+            memo_key: key2.clone(),
+            tree_hash: "tree".to_string(),
+            def_digest: "def".to_string(),
+            toolchain_digest: tc.to_string(),
+            exit: 0,
+            artifacts: vec![],
+            stdout_ref: String::new(),
+            stderr_ref: String::new(),
+            duration_ms: 1,
+            runner_ref: "local".to_string(),
+            produced_at: 0,
+        };
+        ac.store(&clean)
+            .expect("a legit hex toolchain axis stores normally");
+        assert!(
+            ac.lookup(&key2).unwrap().is_some(),
+            "the legit entry is a HIT — the cache still works"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_axis_rejects_secret_shapes_but_passes_legit_digests() {
+        // The door reuses the shared structural detector: credential PREFIXES are
+        // rejected (exit-2 secret_in_identifier); hex digests / `rustc …(hash)` /
+        // slugs pass (bare-hex + entropy EXEMPT).
+        assert_eq!(
+            validate_axis("ghp_16C7e42F292c6912E7710c838347Ae178B4a", "--toolchain")
+                .unwrap_err()
+                .kind(),
+            "secret_in_identifier"
+        );
+        validate_axis(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "--toolchain",
+        )
+        .expect("a 64-hex toolchain digest passes the door");
+        validate_axis("rustc-1.96.0-abc123def456", "--toolchain")
+            .expect("a rustc-version-shaped toolchain marker passes the door");
+        validate_axis("clippy", "--def").expect("a built-in def name passes the door");
     }
 
     #[test]
