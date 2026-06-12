@@ -474,19 +474,26 @@ fn is_secret_token_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=' || c == '-' || c == '_'
 }
 
-/// True iff `s` contains `sk-` followed by ≥ [`SK_MIN_SUFFIX_LEN`] token chars
-/// (mirrors the engine's `has_sk_key`). Short ids (`sk-256`, `sk-learn`) do NOT
-/// fire.
+/// True iff `s` contains an `sk-` API key (mirrors the engine's `has_sk_key`):
+/// the suffix run (including `-`/`_`) is ≥ [`SK_MIN_SUFFIX_LEN`] token chars, OR
+/// it is the OpenAI project-key marker `proj-<non-empty id>` (so a short
+/// `sk-proj-leaklens99999` redacts). Short non-key ids (`sk-256`, `sk-learn`)
+/// do NOT fire. Kept in lockstep with `hugit_ledger::redact::has_sk_key`.
 fn contains_sk_key(s: &str) -> bool {
     let needle = "sk-";
     let mut search = s;
     while let Some(pos) = search.find(needle) {
         let after = &search[pos + needle.len()..];
-        let run_len = after
+        let run: String = after
             .chars()
             .take_while(|&c| is_secret_token_char(c))
-            .count();
-        if run_len >= SK_MIN_SUFFIX_LEN {
+            .collect();
+        if run.chars().count() >= SK_MIN_SUFFIX_LEN {
+            return true;
+        }
+        if let Some(id) = run.strip_prefix("proj-")
+            && !id.is_empty()
+        {
             return true;
         }
         let advance = pos + needle.len();

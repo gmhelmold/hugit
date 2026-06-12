@@ -1,17 +1,19 @@
-//! Identifier validation — WH-IDENT (adversarial Round-4, Cluster A).
+//! Identifier validation — WH-IDENT (adversarial Round-4, Cluster A);
+//! detector-unified at WJ-INT (adversarial Round-6 residual).
 //!
 //! Identifier fields (`--campaign`, `--owner`, `--pr`, `--id`, `--run-id`) are
-//! ADDRESSES, not free text.  WH-SCRUB exempts them from the scrub engine so
-//! addressing stays consistent — but that exemption is only safe when the
-//! structural-secret scrub in porcelain.rs enforces the boundary.
+//! ADDRESSES, not free text.  The scrub boundary in `porcelain.rs` exempts them
+//! from the bare-hex + entropy scan so addressing stays consistent — but that
+//! exemption is only safe when the STRUCTURAL-secret scrub there still redacts a
+//! prefixed/conn-string/JWT/PEM secret in an identifier field.
 //!
-//! ⚠ This validator is a UX hint (early rejection of obvious credential shapes
-//! — e.g. `ghp_`, `sk-`, PEM headers).  The SECURITY boundary is the
-//! structural-secret scrub in `porcelain.rs`; do not weaken that on the
-//! assumption this validator is sufficient.  This file only rejects identifiers
-//! that are already non-empty and carry a recognisable credential shape; bare
-//! hex, ULIDs, slugs, and URLs without embedded credentials all pass through
-//! to the central scrub boundary unchanged.
+//! ⚠ This validator is the door (an early, clear rejection of obvious credential
+//! shapes — a clean exit-2 at input instead of a `[REDACTED]` at rest).  The
+//! SECURITY boundary is the structural-secret scrub in `porcelain.rs`; do not
+//! weaken that on the assumption this validator is sufficient.  This file only
+//! rejects identifiers that carry a recognisable credential shape; bare hex,
+//! ULIDs, slugs, and URLs without embedded credentials all pass through to the
+//! central scrub boundary unchanged.
 //!
 //! ## Two rules
 //!
@@ -20,15 +22,24 @@
 //!    not create a log entry from nothing (the same ghost-record principle as
 //!    the WF-CLI2 `close`/`abandon` ghost-record fix).
 //!
-//! 2. **No known-secret prefix shape**: identifiers that match a known
-//!    credential-prefix pattern (`ghp_` / `gho_` / `ghs_` / `github_pat_` /
-//!    `sk-` / `AKIA` / `eyJ` JWT-start / `-----BEGIN` PEM / connection-string
-//!    `://…@`) are rejected with `secret_in_identifier` / exit-2 and a hint
-//!    explaining that identifiers are stored UNREDACTED.
+//! 2. **No structural-secret shape — by REUSING the engine's detector**: rule 2
+//!    no longer carries a hand-maintained prefix list (which drifted WEAKER than
+//!    the redaction engine — it omitted `xoxb-`/`xoxp-`/other Slack, `clp_`
+//!    CoreLink PATs, `Bearer `, used `starts_with` not substring, and never
+//!    trimmed whitespace, so `intent new --id xoxb-…` PASSED the door and was
+//!    stored VERBATIM in `.hugit/intents.json`).  Instead it asks the SAME
+//!    structural-secret detector the scrub boundary uses:
+//!    [`crate::porcelain::structural_secret_scrub`].  The value (trimmed) is
+//!    rejected with `secret_in_identifier` / exit-2 **iff** scrubbing it changes
+//!    it — i.e. iff a structural detector (known-prefix credential, `sk-…` key,
+//!    PEM block, connection-string password, keyword-context) fired.  The door
+//!    and the engine can therefore never drift apart again.
 //!
-//!    ⚠ Bare 40-hex or 64-hex strings are NOT rejected — a 40-hex campaign key
-//!    is a legitimate content-address and MUST be allowed.  Only recognisable
-//!    credential SHAPES are rejected; high-entropy hex is an address.
+//!    ⚠ Bare 40-hex / 64-hex / ULID / slug ADDRESSES are NOT rejected — the
+//!    structural scrub deliberately exempts the bare-hex + entropy scan, so a
+//!    high-entropy content-address survives the door exactly as it survives the
+//!    scrub boundary.  Only the structural credential SHAPES the engine knows
+//!    are rejected.
 //!
 //! ## One shared function
 //!
@@ -59,8 +70,8 @@ pub struct IdentError {
 
 /// Validate a single identifier value at verb entry.
 ///
-/// Returns `Ok(())` when the value is non-empty and does not match any
-/// known-credential-prefix shape.
+/// Returns `Ok(())` when the value is non-empty and trips NO structural-secret
+/// detector (so a bare-hex / ULID / slug address passes through).
 ///
 /// Returns `Err(IdentError)` (kind `invalid_argument` or
 /// `secret_in_identifier`) when either rule is violated.
@@ -79,48 +90,30 @@ pub fn validate_identifier(value: &str, field_name: &str) -> Result<(), IdentErr
         });
     }
 
-    // Rule 2 — reject known-credential-prefix shapes.
+    // Rule 2 — reject structural-secret shapes by REUSING the engine's detector.
     //
-    // Patterns chosen to match token SHAPES, not arbitrary entropy:
-    //   • ghp_ / gho_ / ghs_  — GitHub PAT prefixes (classic / OAuth / server)
-    //   • github_pat_           — fine-grained GitHub PATs
-    //   • sk-                   — OpenAI-style secret-key prefix
-    //   • AKIA                  — AWS access-key prefix
-    //   • eyJ                   — JWT (base64url of `{"` always starts with this)
-    //   • -----BEGIN            — PEM block (private key / cert)
-    //   • ://…@                 — connection-string with embedded credentials
+    // The door and the scrub boundary share ONE detector
+    // ([`crate::porcelain::structural_secret_scrub`]) so they can never drift:
+    // an identifier whose trimmed value would be SCRUBBED at the boundary (a
+    // known-prefix credential — ghp_/gho_/ghs_/github_pat_/AKIA/xoxb-/xoxp-/…/
+    // clp_/Bearer/eyJ, an `sk-…` key, a PEM private-key block, a
+    // `://user:pass@` connection string, or a `keyword=value` context secret)
+    // is rejected here with a clear exit-2 at the door — BEFORE it is stored
+    // verbatim in `.hugit/intents.json` or the forever-log.
     //
-    // We do NOT reject bare high-entropy hex (40-hex is a valid git sha / campaign
-    // key — it MUST be allowed as an address).
-    let prefixes: &[&str] = &[
-        "ghp_",
-        "gho_",
-        "ghs_",
-        "github_pat_",
-        "sk-",
-        "AKIA",
-        "eyJ",
-        "-----BEGIN",
-    ];
-    for &prefix in prefixes {
-        if value.starts_with(prefix) {
-            return Err(IdentError {
-                kind: "secret_in_identifier",
-                message: format!(
-                    "{field_name} looks like a credential (starts with '{prefix}'): \
-                     identifiers are stored unredacted in the forever-log"
-                ),
-                fix: SECRET_HINT,
-            });
-        }
-    }
-    // Connection-string pattern: scheme://…@… (embedded password)
-    if value.contains("://") && value.contains('@') {
+    // The structural scrub deliberately EXEMPTS the bare-hex + entropy scan, so
+    // a 40/64-hex content address, a ULID, or a high-entropy slug id is NOT a
+    // structural secret and passes through unchanged (it MUST — it is an
+    // address). We trim first so leading/trailing whitespace cannot smuggle a
+    // prefix past a naive `starts_with`.
+    let trimmed = value.trim();
+    if crate::porcelain::structural_secret_scrub(trimmed) != trimmed {
         return Err(IdentError {
             kind: "secret_in_identifier",
             message: format!(
-                "{field_name} looks like a connection string with embedded credentials \
-                 (contains '://' and '@'): identifiers are stored unredacted"
+                "{field_name} looks like a credential (it trips the redaction \
+                 engine's structural-secret detector): identifiers are stored \
+                 unredacted in the forever-log"
             ),
             fix: SECRET_HINT,
         });
@@ -175,8 +168,52 @@ mod tests {
     }
 
     #[test]
-    fn sk_dash_prefix_is_secret() {
-        let e = validate_identifier("sk-abc123", "--campaign").unwrap_err();
+    fn sk_real_key_is_secret() {
+        // A real `sk-` key (≥20 token chars after the prefix) trips the engine's
+        // length-gated `sk-` detector. A SHORT `sk-…` id (e.g. `sk-256`,
+        // `sk-learn`) is NOT a secret and survives — see `sk_short_id_is_valid`.
+        let e =
+            validate_identifier("sk-abcdefghijklmnopqrstuvwxyz0123456789ABCDEF", "--campaign")
+                .unwrap_err();
+        assert_eq!(e.kind, "secret_in_identifier");
+    }
+
+    #[test]
+    fn slack_bot_token_is_secret() {
+        // WJ-INT: `xoxb-` was OMITTED by the old hand-list — it now rejects via
+        // the unified engine detector (was accepted + stored verbatim).
+        let e = validate_identifier("xoxb-2222-3333-abcdefghij", "--id").unwrap_err();
+        assert_eq!(e.kind, "secret_in_identifier");
+    }
+
+    #[test]
+    fn slack_user_token_is_secret() {
+        let e = validate_identifier("xoxp-1111-2222-aaaaaaaaaaaa", "--campaign").unwrap_err();
+        assert_eq!(e.kind, "secret_in_identifier");
+    }
+
+    #[test]
+    fn corelink_pat_is_secret() {
+        // `clp_` was OMITTED by the old hand-list — now rejected via the engine.
+        let e =
+            validate_identifier("clp_live_9f8e7d6c5b4a3210fedcba9876543210", "--campaign")
+                .unwrap_err();
+        assert_eq!(e.kind, "secret_in_identifier");
+    }
+
+    #[test]
+    fn bearer_token_is_secret() {
+        // `Bearer ` was OMITTED by the old hand-list — now rejected.
+        let e = validate_identifier("Bearer abc123def456ghi789jkl", "--pr").unwrap_err();
+        assert_eq!(e.kind, "secret_in_identifier");
+    }
+
+    #[test]
+    fn leading_whitespace_cannot_smuggle_a_prefix() {
+        // The old `starts_with` (no trim) let `" ghp_…"` slip past the door; the
+        // unified validator trims first, so a padded prefix is still rejected.
+        let e = validate_identifier("   ghp_16C7e42F292c6912E7710c838347Ae178B4a", "--campaign")
+            .unwrap_err();
         assert_eq!(e.kind, "secret_in_identifier");
     }
 
@@ -229,6 +266,27 @@ mod tests {
         validate_identifier("gustavo@humangr.com", "--owner").expect("email must be valid");
         validate_identifier("PR-1", "--pr").expect("PR id must be valid");
         validate_identifier("intent-abc123def", "--id").expect("intent id must be valid");
+    }
+
+    #[test]
+    fn ulid_address_is_valid() {
+        // A ULID is a legitimate high-entropy address — the structural scrub
+        // exempts the entropy scan, so it MUST pass the door.
+        validate_identifier("01HQXW8ZK4M9P2N7R3T5V6Y8BC", "--id").expect("ULID must be valid");
+    }
+
+    #[test]
+    fn short_sk_id_is_valid() {
+        // `sk-256` / `sk-learn` are short `sk-` words below the engine's 20-char
+        // gate — NOT secrets, so they survive the door (no over-trigger).
+        validate_identifier("sk-256", "--id").expect("short sk- id must be valid");
+        validate_identifier("sk-learn", "--id").expect("sk-learn must be valid");
+    }
+
+    #[test]
+    fn slash_slug_branch_name_is_valid() {
+        // A git-style ref name with a `/` is an address, not a credential.
+        validate_identifier("feature/login", "--id").expect("branch slug must be valid");
     }
 
     #[test]
