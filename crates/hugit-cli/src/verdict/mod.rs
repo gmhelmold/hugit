@@ -245,6 +245,36 @@ fn record(args: VerdictArgs) -> Result<Value, PorcelainError> {
         .with_context("log", json!(path.display().to_string())));
     }
 
+    // ── Post-seal append guard (K-VERDICT) ────────────────────────────────────
+    // If the intent belongs to a campaign that has been sealed (`campaign.closed`
+    // on the log), refuse to append a new verdict.  A sealed campaign is an
+    // immutable audit trail fact; a post-close verdict revision would silently
+    // mutate the projection AFTER the seal (the `sealed_with_rejected` payload
+    // was already written at close time and would diverge from the live ledger).
+    //
+    // Resolution rule: look up the intent's campaign from its `intent.landed`
+    // record.  If a `campaign.closed` event for that campaign is already on the
+    // log, error `campaign_sealed` / exit-2.  A log with no `intent.landed`
+    // records (pre-intent or tests-only logs) is permissive — the vocabulary is
+    // absent, not wrong.
+    if let Some(campaign_key) = campaign_for_intent(&log, intent)
+        && campaign_is_sealed(&log, &campaign_key)
+    {
+        let safe_intent = crate::redaction::scrub(intent);
+        let safe_campaign = crate::redaction::scrub(&campaign_key);
+        return Err(PorcelainError::new(
+            "campaign_sealed",
+            format!(
+                "campaign '{safe_campaign}' is sealed (campaign.closed on log): cannot \
+                 record a verdict for intent '{safe_intent}' after the campaign is closed"
+            ),
+            "reopen or create a new campaign if further verdict revisions are needed",
+        )
+        .with_context("intent", json!(safe_intent))
+        .with_context("campaign", json!(safe_campaign))
+        .with_context("log", json!(path.display().to_string())));
+    }
+
     // ── Idempotency check ─────────────────────────────────────────────────────
     if let Some(existing) = find_existing_verdict(&log, intent, &lens_verdicts) {
         return Ok(json!({
@@ -425,6 +455,56 @@ fn find_existing_verdict(
     Some(ExistingVerdict {
         lens_verdicts_json,
         aggregate_json,
+    })
+}
+
+/// The `campaign.closed` event kind — matches
+/// [`crate::campaign::world::KIND_CAMPAIGN_CLOSED`].  Inlined here to keep the
+/// verdict module free from a campaign-module dependency; the two strings are
+/// locked together by the same acceptance test that drives both paths.
+const KIND_CAMPAIGN_CLOSED: &str = "campaign.closed";
+
+/// Look up the campaign key for `intent_id` from the first `intent.landed`
+/// record on the log that names it.  Returns `None` if no `intent.landed` record
+/// exists for this id or if the payload has no `campaign` field (permissive —
+/// the vocabulary is absent, not wrong).
+///
+/// Used by the post-seal guard (K-VERDICT): a verdict for an intent whose
+/// campaign is sealed must be refused.
+fn campaign_for_intent(log: &hugit_refstore::EventLog, intent_id: &str) -> Option<String> {
+    log.records()
+        .iter()
+        .filter(|r| r.kind == hugit_refstore::intent::INTENT_LANDED_KIND)
+        .filter_map(|r| serde_json::from_str::<serde_json::Value>(&r.payload).ok())
+        .filter(|v| {
+            v.get("intent_id")
+                .and_then(serde_json::Value::as_str)
+                .map(|id| id == intent_id)
+                .unwrap_or(false)
+        })
+        .find_map(|v| {
+            v.get("campaign")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+}
+
+/// Check whether a `campaign.closed` record exists on the log for `campaign_key`.
+///
+/// Used by the post-seal guard (K-VERDICT): if the campaign is sealed, new
+/// verdict appends are refused with `campaign_sealed`/exit-2.
+fn campaign_is_sealed(log: &hugit_refstore::EventLog, campaign_key: &str) -> bool {
+    log.records().iter().any(|r| {
+        r.kind == KIND_CAMPAIGN_CLOSED
+            && serde_json::from_str::<serde_json::Value>(&r.payload)
+                .ok()
+                .and_then(|v| {
+                    v.get("campaign")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
+                .as_deref()
+                == Some(campaign_key)
     })
 }
 
