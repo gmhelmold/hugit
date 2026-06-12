@@ -35,10 +35,30 @@ pub fn run(args: ShowArgs) -> Result<String, CampaignError> {
         None => Value::Null,
     };
 
+    // WJ-CLOSE: when the campaign is sealed, surface the seal-time condition
+    // from the durable campaign.closed payload.  A post-close verdict revision
+    // must not rewrite the historical seal fact — `campaign show` reads the
+    // persisted value, not the live ledger.
+    let (sealed_with_rejected, seal_rejected_count) = if world.campaign_closed(key) {
+        world
+            .campaign_closed_seal_condition(key)
+            .unwrap_or_else(|| {
+                // Pre-WJ-CLOSE payload (field absent) — fall back to live ledger
+                // for backward compat; the field will not be historically accurate
+                // for seals that predate WJ-CLOSE but will not panic.
+                let live = world.ledger.rejected(key) as u64;
+                (live > 0, live)
+            })
+    } else {
+        (false, 0)
+    };
+
     Ok(json!({
         "campaign": key,
         "opened": world.campaign_opened(key),
         "closed": world.campaign_closed(key),
+        "sealed_with_rejected": sealed_with_rejected,
+        "seal_rejected_count": seal_rejected_count,
         "progress": progress,
         "prs": prs,
         "ledger": ledger,

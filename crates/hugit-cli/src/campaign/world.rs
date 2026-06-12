@@ -210,6 +210,39 @@ impl World {
         self.has_campaign_record(KIND_CAMPAIGN_CLOSED, key)
     }
 
+    /// Project the **seal-time** `sealed_with_rejected` and `rejected_count`
+    /// from the durable `campaign.closed` payload, if a closed record exists.
+    ///
+    /// These fields are written into the payload AT SEAL TIME (WJ-CLOSE) and
+    /// are the immutable audit-trail facts about the seal condition — independent
+    /// of any post-close verdict revision.  Returns `None` if no
+    /// `campaign.closed` record exists, or if the fields are absent (a
+    /// pre-WJ-CLOSE seal record that predates this field).
+    pub fn campaign_closed_seal_condition(&self, key: &str) -> Option<(bool, u64)> {
+        self.log
+            .records()
+            .iter()
+            .find(|r| {
+                r.kind == KIND_CAMPAIGN_CLOSED
+                    && serde_json::from_str::<serde_json::Value>(&r.payload)
+                        .ok()
+                        .and_then(|v| {
+                            v.get("campaign")
+                                .and_then(|c| c.as_str())
+                                .map(str::to_string)
+                        })
+                        .as_deref()
+                        == Some(key)
+            })
+            .and_then(|r| {
+                let v: serde_json::Value = serde_json::from_str(&r.payload).ok()?;
+                let sealed_with_rejected =
+                    v.get("sealed_with_rejected").and_then(|x| x.as_bool())?;
+                let rejected_count = v.get("rejected_count").and_then(|x| x.as_u64())?;
+                Some((sealed_with_rejected, rejected_count))
+            })
+    }
+
     /// Whether a `campaign.abandoned` record already names this key.
     pub fn campaign_abandoned(&self, key: &str) -> bool {
         self.has_campaign_record(KIND_CAMPAIGN_ABANDONED, key)
