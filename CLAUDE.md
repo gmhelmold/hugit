@@ -77,9 +77,9 @@ implemented**: hex/numeric is exempt only at the {40,64} digest lengths, so
 odd-length-hex / long-numeric secrets redact while integers, UUIDs, prefixed
 ids, and slugs stay generous (cold-verified end-to-end). **All 6 classes are
 now CONVERGED** — zero P0/P1 code holes; only tracked seams remain. With
-owner sign-off, `integ/wave-l` merges to `main` and pushes (CI may go red
-ONLY on the `deny` step — PS-12 runner-tooling infra gap, not a code
-failure). Residuals tracked: PS-11 (closed by L-C hermetic),
+owner sign-off, `integ/wave-l` was merged to `main` (HEAD `3aa62a4`) and
+pushed; CI run `27440432238` concluded `success` with ALL gates green on the
+runner (incl. `deny`/`audit` — PS-12 resolved). Residuals tracked: PS-11 (closed by L-C hermetic),
 PS-13 (read-path single-chokepoint refactor, defence-in-depth), PS-14
 (redaction tuning, owner), C3 FS/network/clock (P2 runner sandbox),
 C5-F3 intent two-phase reverse-atomicity (P2/P3 seam).
@@ -102,11 +102,18 @@ earlier "green, verified by real exit code" claim on the Wave J + WK-AC push
 load) and that push's CI went RED on the `deny` step (exit 127 =
 `cargo-deny` absent on the runner, PS-12 infra). Wave K's K-RUN fixed the
 taxonomy (stress-verified 10/10 + the full workspace run); `cargo audit` is
-not installed locally and the runner lacks `cargo-deny`, so the advisory
-gate is LOCAL-verified via `cargo deny check` only (PS-12). A concluded
-remote green is the source of truth and remains pending on the runner-tooling
-gap. Lesson banked: a fresh adversarial round must run BEFORE a push, and a
-green claim requires a STRESSED flaky-path, not one lucky run. There were two code-gate failures at the Wave-H/I boundary: a fmt
+not installed locally and the runner lacked `cargo-deny`, so the advisory
+gate was LOCAL-verified via `cargo deny check` only (PS-12). **RESOLVED
+2026-06-12 (Wave L push, run `27440432238`): the concluded REMOTE green is
+now achieved** — the `gates` job ran `fmt`/`clippy`/`test`/`deny`/`audit`
+ALL green on the self-hosted runner (the workflow now provisions
+`cargo-deny`/`cargo-audit` via `taiki-e/install-action`), concluding
+`success`. So Wave K + Wave L on `main` (HEAD `3aa62a4`) is green by the
+runner-concluded gate, not merely local — PS-12 closed. (One post-run
+cache-save step flaked then succeeded on retry — the residual runner
+contention noise, not a code gate.) Lesson banked: a fresh adversarial round
+must run BEFORE a push, and a green claim requires a STRESSED flaky-path,
+not one lucky run. There were two code-gate failures at the Wave-H/I boundary: a fmt
 failure (hotfixed eec3eab) and a clippy `collapsible_if` failure that
 survived the fmt hotfix and was closed by WI-PR (3e49c14, via the Rust
 let-chain collapse) — both traced to a piped gate-check that masked the real

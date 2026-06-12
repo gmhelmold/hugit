@@ -519,19 +519,21 @@ contract's soundness for cwd/env/PATH and does not exceed it.
 
 ---
 
-## PS-12 — Self-hosted runner is missing `cargo-deny` / `cargo-audit` (CI gate cannot run the advisory check)
+## PS-12 — Self-hosted runner missing `cargo-deny` / `cargo-audit` (RESOLVED 2026-06-12)
 
 **Source:** Round-7 — CI run 27422619640 (the Wave J + WK-AC push) concluded FAILURE; the
 failing step was `gates/deny` exit **127** (`cargo-deny` binary not found on the self-hosted
 runner). Locally `cargo deny check` passes (exit 0) and covers the RustSec advisory DB; the
-standalone `cargo-audit` is also absent locally. So the advisory gate runs LOCALLY but the
-self-hosted runner cannot run it — a green LOCAL gate is not reproduced on CI for that step.
+standalone `cargo-audit` was also absent locally. So the advisory gate ran LOCALLY but the
+self-hosted runner could not run it — a green LOCAL gate was not reproduced on CI for that step.
 
-**Owner:** infra (self-hosted runner provisioning).  
-**Acceptance criteria:** install `cargo-deny` (and `cargo-audit`) on the `corelink-builder`
-runner image so the `gates` job runs the full advisory check; until then the advisory gate is
-LOCAL-verified only, and a `deny`-step CI red of exit 127 is a known infra gap, NOT a code or
-dependency failure. (Distinct from the test/clippy gates, which DO run on the runner.)
+**RESOLVED (2026-06-12, Wave L push — CI run `27440432238`):** the workflow now provisions the
+advisory tooling on the runner via `taiki-e/install-action`; the `gates` job ran
+`fmt`/`clippy`/`test`/`deny`/`audit` ALL green on `corelink-builder` and concluded `success`.
+The advisory gate is now runner-verified, not LOCAL-only — the "concluded remote green is the
+source of truth" caveat in CLAUDE.md is closed. (Residual: the runner remains contention-flaky —
+one post-run cache-save step flaked then succeeded on retry; tracked as ambient infra, distinct
+from PS-12's tooling gap which is closed.)
 
 ---
 
