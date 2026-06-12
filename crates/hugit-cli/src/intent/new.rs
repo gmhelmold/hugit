@@ -138,21 +138,34 @@ pub fn run(input: NewIntent, store_path: &Path) -> Result<NewResult, PorcelainEr
     }
 
     // Redaction parity (Wave E, P-REDACT-SURFACE): scrub every user-supplied
-    // free-text field through the hardened engine BEFORE it reaches the sidecar,
+    // FREE-TEXT field through the hardened engine BEFORE it reaches the sidecar,
     // the store, or the hash-chained `--log` payload. The log is append-only and
     // forever — redact-before-append is the only fix (a secret hashed into the
     // chain is unredactable later). Validation above ran on the raw input so an
-    // all-whitespace charter still errors; the id is derived from the REDACTED
-    // content so idempotency is stable (both runs scrub identically).
+    // all-whitespace charter still errors.
     let charter = crate::redaction::scrub(&input.charter);
     let campaign = crate::redaction::scrub(&input.campaign);
     let acceptance = crate::redaction::scrub_all(&input.acceptance);
     let agent_raw = input.agent.unwrap_or_else(|| DEFAULT_AGENT.to_string());
     let agent = crate::redaction::scrub(&agent_raw);
+
+    // WJ-UNIFY: the explicit `--id` is an identifier ADDRESS, NOT free text — it
+    // must survive VERBATIM so the intent stays addressable end-to-end (`verdict
+    // --intent <id>` must resolve it; advancing it to proven depends on the id
+    // matching). The OLD `crate::redaction::scrub(&id)` here routed it through the
+    // FULL free-text engine, which redacted a bare ULID/40-hex to `[REDACTED]`:
+    // distinct ULID intents collapsed to one (`already_exists` on the 2nd/3rd)
+    // and `verdict --intent <real-ULID>` saw `intent_not_found` → proven stuck at
+    // 0. Input is validated for secret SHAPES by `ident::validate_identifier`
+    // above; the id is structurally scrubbed at the ONE central boundary when the
+    // `intent.landed` payload is appended (`canonical_log::land_intent` routes it
+    // through `scrub_to_canonical`, which redacts a prefixed secret in the
+    // `intent_id` key while a ULID/hex address survives). So the id is taken RAW
+    // here; an auto-derived id (no `--id`) is a content hash of the REDACTED
+    // free-text fields, so idempotency stays stable.
     let intent_id = input
         .id
         .clone()
-        .map(|id| crate::redaction::scrub(&id))
         .unwrap_or_else(|| derive_intent_id(&charter, &campaign, &acceptance, &agent));
 
     let context_ref = crate::redaction::scrub(&input.context_ref.unwrap_or_default());

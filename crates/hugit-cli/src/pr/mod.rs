@@ -457,13 +457,13 @@ pub struct OpenArgs {
 /// at all keeps the old permissive behavior (an early fixture log without the
 /// campaign seam in use opts out of the check).
 pub fn open(log: &mut EventLog, args: &OpenArgs) -> Result<Value, PrError> {
-    // WG-SCRUB: scrub every user-supplied field ONCE at entry, then use the
-    // scrubbed view for BOTH the lookups/joins AND the hash-chained payload. The
-    // scrub is deterministic, so a secret-shaped id/campaign scrubs identically
-    // in every record — the projection joins stay stable (scrubbed == scrubbed)
-    // while no secret ever persists to the forever-log. Free-text vectors
-    // (`--campaign`/`--run-id`/`--principal`/`--intent`) are closed here; the id
-    // round-trips because lookup + store both see the scrubbed value.
+    // WJ-UNIFY: normalise the args at entry through the ONE structural identifier
+    // scrub (not the full free-text engine). Identifier ADDRESSES
+    // (`pr_id`/`campaign`/`run_id`/`principal`) get `structural_secret_scrub`: a
+    // bare 40/64-hex/slug address SURVIVES verbatim (no collapse → no wrong-PR
+    // landing), a prefixed secret REDACTS. The lookup key and the stored payload
+    // value are then identical, so the join stays symmetric and the central
+    // boundary (`scrub_to_canonical` on the payload) re-applies the same scrub.
     let args = &scrub_open_args(args);
     // Idempotency: look for an existing pr.opened for this id.
     if let Some(existing) = find_pr_opened(log, &args.pr_id) {
@@ -683,10 +683,14 @@ pub struct LandArgs {
 /// Idempotent: a PR already queued returns `"already_queued":true` (exit 0),
 /// no second `pr.queued` is appended, and the original position is reported.
 pub fn land(log: &mut EventLog, args: &LandArgs) -> Result<Value, PrError> {
-    // WG-SCRUB: scrub the id at entry so it matches the scrubbed id `pr open`
-    // stored (deterministic scrub → stable join) and never persists a secret.
+    // WJ-UNIFY: the pr_id is an identifier ADDRESS — use it RAW so it joins the
+    // raw id `pr open` stored, and let the ONE central structural boundary
+    // (`scrub_to_canonical` on the payload below) redact a prefixed secret while
+    // a 40/64-hex/slug address SURVIVES. Pre-scrubbing it through the full engine
+    // (the old behaviour) collapsed a bare-hex id to `[REDACTED]`, so a DIFFERENT
+    // 40-hex `--pr` resolved to the collapsed record and landed the WRONG PR.
     let args = &LandArgs {
-        pr_id: crate::redaction::scrub(&args.pr_id),
+        pr_id: crate::porcelain::structural_secret_scrub(&args.pr_id),
         recorded_at: args.recorded_at,
     };
     let opened = find_pr_opened(log, &args.pr_id).ok_or_else(|| PrError::UnknownPr {
@@ -865,9 +869,11 @@ pub struct SettleArgs {
 /// SAME D14-guarded [`EventLog::append_authorized`] seam (under the opened PR's
 /// author class — orchestrator/human) `pr land`/`pr open` use.
 pub fn settle(log: &mut EventLog, args: &SettleArgs) -> Result<Value, PrError> {
-    // WG-SCRUB: scrub the id at entry (see `land`).
+    // WJ-UNIFY: the pr_id is an identifier ADDRESS — use it RAW (see `land`); the
+    // central structural boundary on the payload below redacts a prefixed secret
+    // while a bare-hex/slug address survives. No full-engine pre-scrub (collapse).
     let args = &SettleArgs {
-        pr_id: crate::redaction::scrub(&args.pr_id),
+        pr_id: crate::porcelain::structural_secret_scrub(&args.pr_id),
         recorded_at: args.recorded_at,
     };
     let opened = find_pr_opened(log, &args.pr_id).ok_or_else(|| PrError::UnknownPr {
@@ -954,10 +960,13 @@ pub struct AbandonArgs {
 /// Idempotent: re-abandoning an already-abandoned PR appends no second event and
 /// returns `"already_abandoned":true` (exit 0).
 pub fn abandon(log: &mut EventLog, args: &AbandonArgs) -> Result<Value, PrError> {
-    // WG-SCRUB: scrub the id (stable join, see `land`) AND the `--reason` free
-    // text (the adversary's headline leak vector) at entry, so neither persists.
+    // WJ-UNIFY: the pr_id is an identifier ADDRESS — use it RAW (stable join, see
+    // `land`); the central structural boundary on the payload below redacts a
+    // prefixed secret while a bare-hex/slug address survives (no collapse). The
+    // `--reason` is genuine FREE TEXT (the adversary's headline leak vector) — it
+    // KEEPS the full free-text engine scrub at entry so no secret persists.
     let args = &AbandonArgs {
-        pr_id: crate::redaction::scrub(&args.pr_id),
+        pr_id: crate::porcelain::structural_secret_scrub(&args.pr_id),
         reason: crate::redaction::scrub(&args.reason),
         recorded_at: args.recorded_at,
     };
@@ -1408,18 +1417,59 @@ fn author_principal_chain(
     }
 }
 
-/// Return a copy of `args` with every user-supplied string field scrubbed
-/// through the redaction engine (WG-SCRUB). Identifiers (`pr_id`) scrub too —
-/// deterministically, so the projection joins stay stable while no secret
-/// persists. Called ONCE at the top of [`open`] so lookups + payload + echo all
-/// agree on the redacted view.
+/// Return a copy of `args` with the IDENTIFIER-ADDRESS fields routed through the
+/// STRUCTURAL scrub (WJ-UNIFY) and the remaining user strings left for the ONE
+/// central boundary to scrub on append.
+///
+/// **The WJ-UNIFY fix.** `pr_id`/`campaign`/`run_id` are identifier ADDRESSES
+/// (the keys the rest of the flow looks up by). Pre-scrubbing them through the
+/// FULL free-text engine — as this did before — collapsed a bare 40/64-hex
+/// `pr_id`/`campaign` to a single `[REDACTED]`: two distinct content-address PRs
+/// became one record, so `pr land --pr <B>` resolved to the collapsed `A`'s
+/// record and landed the WRONG PR. The fix routes every identifier through the
+/// ONE structural boundary instead:
+///
+/// - `pr_id`/`campaign` get the STRUCTURAL scrub here — the SAME scrub the
+///   central boundary (`crate::porcelain::scrub_to_canonical`, keyed by
+///   `crate::porcelain::is_identifier_key`) applies to these keys on append. A
+///   bare 40/64-hex/slug address is a NO-OP (survives verbatim, no collapse → no
+///   wrong-PR landing); a prefixed secret REDACTS. Applying it here too keeps the
+///   LOOKUP key (`find_pr_opened`) symmetric with the STORED payload value, so a
+///   re-open/land/abandon joins the right record and the post-append projection
+///   finds what it just wrote (a prefixed-secret id round-trips as `[REDACTED]`
+///   on BOTH sides; two distinct addresses never collapse to one).
+/// - `run_id`/`principal` ALSO feed the event's `principal_chain`, which
+///   `append_authorized` hashes VERBATIM (it is not a JSON payload, so the
+///   central `scrub_payload` never sees it). Those are routed through the SAME
+///   [`structural_secret_scrub`](crate::porcelain::structural_secret_scrub) here
+///   so a prefixed secret in `--run-id`/`--principal` still REDACTS in the chain
+///   while a bare-hex/slug address SURVIVES — one boundary, no per-verb bypass.
+/// - `intent_ids` keep the existing free-text scrub (they are validated against
+///   the log and are not the WJ-UNIFY collapse vector).
+///
+/// Called ONCE at the top of [`open`] so lookups + payload + echo agree.
 fn scrub_open_args(args: &OpenArgs) -> OpenArgs {
     OpenArgs {
-        pr_id: crate::redaction::scrub(&args.pr_id),
-        campaign: crate::redaction::scrub(&args.campaign),
+        // Identifier addresses: STRUCTURALLY scrubbed (NOT the full free-text
+        // engine) — the SAME scrub the central boundary applies to these keys on
+        // append. A bare 40/64-hex/slug address is a no-op (survives, no
+        // collapse); a prefixed secret redacts to the sentinel. Doing it here too
+        // keeps the LOOKUP key (`find_pr_opened`) symmetric with the STORED
+        // payload value, so a re-open/land/abandon joins the right record and the
+        // post-append projection finds what it just wrote.
+        pr_id: crate::porcelain::structural_secret_scrub(&args.pr_id),
+        campaign: crate::porcelain::structural_secret_scrub(&args.campaign),
         author_kind: args.author_kind,
-        run_id: args.run_id.as_deref().map(crate::redaction::scrub),
-        principal: args.principal.as_deref().map(crate::redaction::scrub),
+        // Principal-chain identifiers: structurally scrubbed here (the chain is
+        // hashed verbatim by append_authorized, outside the payload boundary).
+        run_id: args
+            .run_id
+            .as_deref()
+            .map(crate::porcelain::structural_secret_scrub),
+        principal: args
+            .principal
+            .as_deref()
+            .map(crate::porcelain::structural_secret_scrub),
         intent_ids: crate::redaction::scrub_all(&args.intent_ids),
         recorded_at: args.recorded_at,
     }

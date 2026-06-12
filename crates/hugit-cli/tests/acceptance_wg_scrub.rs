@@ -238,17 +238,25 @@ fn pr_abandon_redacts_secret_in_reason_on_the_log() {
 // LEAK VECTOR 4 — `hugit pr open` (--campaign / --run-id / --principal)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// WJ-UNIFY contract (was: `pr_open_redacts_secrets_in_campaign_runid_principal`).
+///
+/// The WG-SCRUB era routed `pr open`'s `--campaign`/`--run-id` through the FULL
+/// free-text engine, which redacted EVERY high-entropy value — including a bare
+/// 40-hex content ADDRESS. That collapsed two distinct addresses to one
+/// `[REDACTED]` (the wrong-PR-landing bug). The WI/WJ contract: a PREFIXED secret
+/// (`ghp_`/`xoxb-`/conn-string) in an identifier field REDACTS, but a 40-hex /
+/// slug ADDRESS SURVIVES verbatim. This test pins BOTH halves.
 #[test]
-fn pr_open_redacts_secrets_in_campaign_runid_principal_on_the_log() {
+fn pr_open_redacts_prefixed_secret_but_keeps_address_in_campaign_runid() {
     let dir = scratch("pr-open");
-    let log = dir.join("log.json");
-    let log_s = log.to_str().unwrap();
 
+    // (a) A PREFIXED secret in --campaign + --principal REDACTS (0 verbatim).
+    let log_a = dir.join("log-secret.json");
     let out = run(&[
         "pr",
         "open",
         "--log",
-        log_s,
+        log_a.to_str().unwrap(),
         "--pr",
         "1",
         "--campaign",
@@ -262,10 +270,50 @@ fn pr_open_redacts_secrets_in_campaign_runid_principal_on_the_log() {
     ]);
     assert!(
         out.status.success(),
-        "pr open (human) exits 0: {}",
+        "pr open (human, prefixed secret) exits 0: {}",
         stdout_of(&out)
     );
-    assert_log_clean(&log, "pr open");
+    assert_log_clean(&log_a, "pr open (prefixed secret)");
+
+    // (b) A bare 40-hex ADDRESS in --campaign + --run-id SURVIVES verbatim — it
+    // is a content address, not a secret; collapsing it broke addressing.
+    let log_b = dir.join("log-addr.json");
+    let camp_addr = "abcdef0123456789abcdef0123456789abcdef01"; // 40-hex
+    let run_addr = "1234567890abcdef1234567890abcdef12345678"; // 40-hex
+    let out = run(&[
+        "pr",
+        "open",
+        "--log",
+        log_b.to_str().unwrap(),
+        "--pr",
+        "2",
+        "--campaign",
+        camp_addr,
+        "--author-kind",
+        "orchestrator",
+        "--run-id",
+        run_addr,
+        "--intent",
+        "i1",
+    ]);
+    assert!(
+        out.status.success(),
+        "pr open (orchestrator, 40-hex address) exits 0: {}",
+        stdout_of(&out)
+    );
+    let bytes = std::fs::read_to_string(&log_b).unwrap();
+    assert!(
+        bytes.contains(camp_addr),
+        "the 40-hex campaign address must SURVIVE verbatim (no collapse):\n{bytes}"
+    );
+    assert!(
+        bytes.contains(run_addr),
+        "the 40-hex run_id address must SURVIVE verbatim (no collapse):\n{bytes}"
+    );
+    assert!(
+        !bytes.contains(REDACTED),
+        "no identifier address may be redacted to the sentinel:\n{bytes}"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
