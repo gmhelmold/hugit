@@ -225,16 +225,23 @@ fn record(args: VerdictArgs) -> Result<Value, PorcelainError> {
         .iter()
         .any(|r| r.kind == hugit_refstore::intent::INTENT_LANDED_KIND);
     if has_any_intent_landed && !intent_is_on_log(&log, intent) {
+        // The intent did not resolve, so it is echoed back in the error — route
+        // it through the redaction engine first so a prefixed/JWT/PEM/conn-string
+        // secret smuggled as `--intent` never lands raw in the error message or
+        // context (WJ-VERDICT, Round-6 Cluster A leak). This is an UNRESOLVED id
+        // (not a lookup key), so the full free-text engine is safe here — a real
+        // address still survives for a genuine-typo diagnostic.
+        let safe_intent = crate::redaction::scrub(intent);
         return Err(PorcelainError::new(
             "intent_not_found",
             format!(
-                "no intent.landed record for intent '{intent}' on the log: cannot record a \
+                "no intent.landed record for intent '{safe_intent}' on the log: cannot record a \
                  verdict for a nonexistent intent"
             ),
             "run `hugit intent new --log <path> --id <id> …` first, or check the \
              --intent id is spelled correctly",
         )
-        .with_context("intent", json!(intent))
+        .with_context("intent", json!(safe_intent))
         .with_context("log", json!(path.display().to_string())));
     }
 
@@ -361,12 +368,23 @@ struct ExistingVerdict {
     aggregate_json: Value,
 }
 
-/// Project the most-recent `verdict.recorded` for `intent` from the log whose
-/// `claims_checked` exactly matches the supplied `lens_verdicts` (same lens
-/// names AND same results, same order).
+/// Dedup against the **LATEST** `verdict.recorded` for `intent` ONLY (WJ-VERDICT).
 ///
-/// Returns `Some` only on an exact match — a re-run with different verdicts is
-/// a new recording.
+/// The campaign projection is **latest-wins**: the most-recent verdict for an
+/// intent governs its `proven`/`rejected` state. The recorder's idempotency
+/// MUST agree with that contract, so dedup is decided against the LATEST verdict
+/// for the intent, never against all history:
+///
+/// - If the most-recent `verdict.recorded` for this intent has the SAME
+///   `claims_checked` (same lens names AND results, same order) as the wanted
+///   set, the call is a true idempotent no-op → `Some` (`already_recorded`).
+/// - If the latest differs — even when an EARLIER verdict matched the wanted set
+///   — this is a legitimate revision (including one that returns to a prior
+///   state, e.g. `approve → reject → approve`) → `None` (APPEND, so latest-wins
+///   is honored). The old `.rfind` over all history swallowed the final verdict:
+///   `approve → reject → approve` matched the 1st approve and refused the 3rd,
+///   leaving the ledger latest = reject → `proven:0` though the operator's final
+///   action was approve (adversarial Round 6, Cluster B — reproduced).
 fn find_existing_verdict(
     log: &hugit_refstore::EventLog,
     intent: &str,
@@ -378,29 +396,35 @@ fn find_existing_verdict(
         .map(|(name, v)| format!("{}:{}", name, verdict_to_str(v)))
         .collect();
 
-    let existing: Option<VerdictObject> = log
+    // The LATEST verdict.recorded for THIS intent (last in chain order), then
+    // gate idempotency on it. dedup only when the most-recent verdict already
+    // equals the wanted set; an earlier match with a differing latest is a
+    // legitimate revision and MUST append.
+    let latest: VerdictObject = log
         .records()
         .iter()
         .filter(|r| r.kind == VERDICT_RECORDED_KIND)
         .filter_map(|r| serde_json::from_str::<VerdictObject>(&r.payload).ok())
-        .rfind(|vo| vo.intent == intent && vo.claims_checked == wanted);
+        .rfind(|vo| vo.intent == intent)?;
 
-    existing.map(|vo| {
-        let lens_verdicts_json: Vec<Value> = vo
-            .claims_checked
-            .iter()
-            .filter_map(|claim| {
-                let mut parts = claim.splitn(2, ':');
-                let lens = parts.next()?.to_string();
-                let result = parts.next()?.to_string();
-                Some(json!({ "lens": lens, "result": result }))
-            })
-            .collect();
-        let aggregate_json = json!(verdict_to_str(&vo.verdict));
-        ExistingVerdict {
-            lens_verdicts_json,
-            aggregate_json,
-        }
+    if latest.claims_checked != wanted {
+        return None;
+    }
+
+    let lens_verdicts_json: Vec<Value> = latest
+        .claims_checked
+        .iter()
+        .filter_map(|claim| {
+            let mut parts = claim.splitn(2, ':');
+            let lens = parts.next()?.to_string();
+            let result = parts.next()?.to_string();
+            Some(json!({ "lens": lens, "result": result }))
+        })
+        .collect();
+    let aggregate_json = json!(verdict_to_str(&latest.verdict));
+    Some(ExistingVerdict {
+        lens_verdicts_json,
+        aggregate_json,
     })
 }
 
@@ -524,6 +548,68 @@ mod recorder_tests {
         let log = make_log_with_verdict("intent-1", "security", "approve");
         let lens_verdicts = vec![("security".to_string(), Verdict::Reject)];
         assert!(find_existing_verdict(&log, "intent-1", &lens_verdicts).is_none());
+    }
+
+    /// Append a second `verdict.recorded` onto an existing log (same machinery as
+    /// the recorder) so a multi-verdict history can be built in-test.
+    fn append_verdict(log: &mut EventLog, intent: &str, lens: &str, result: &str) {
+        use hugit_refstore::{Endpoint, PrincipalClass};
+        let lens_verdict = parse_verdict(result).unwrap();
+        let claims_checked = vec![format!("{}:{}", lens, verdict_to_str(&lens_verdict))];
+        let agg = aggregate_verdict(&[(lens.to_string(), lens_verdict.clone())]);
+        let vo = VerdictObject {
+            intent: intent.to_string(),
+            tree_hash: String::new(),
+            lens: "panel".to_string(),
+            model: "porcelain".to_string(),
+            prompt_digest: "0".repeat(64),
+            verdict: agg,
+            claims_checked,
+            evidence_refs: Vec::new(),
+        };
+        let payload = hugit_refstore::canonical_json(&serde_json::to_string(&vo).unwrap()).unwrap();
+        log.append_authorized(
+            PrincipalClass::Orchestrator,
+            Endpoint::Land,
+            VERDICT_RECORDED_KIND,
+            vec!["orchestrator:test".to_string()],
+            payload,
+            0,
+        )
+        .unwrap();
+    }
+
+    /// WJ-VERDICT: dedup is decided against the LATEST verdict only. After
+    /// approve→reject, a third approve must NOT dedup against the earlier approve
+    /// (the latest is reject) — it is a legitimate revision and must append.
+    #[test]
+    fn find_existing_verdict_dedups_latest_only_not_history() {
+        let mut log = make_log_with_verdict("intent-1", "security", "approve");
+        append_verdict(&mut log, "intent-1", "security", "reject");
+        // The wanted set is approve — it MATCHES the 1st record but the LATEST is
+        // reject, so no idempotent match: the revision must append.
+        let wanted = vec![("security".to_string(), Verdict::Approve)];
+        assert!(
+            find_existing_verdict(&log, "intent-1", &wanted).is_none(),
+            "approve must NOT false-dedup against an earlier approve when the latest is reject"
+        );
+        // Conversely, the wanted set EQUAL to the latest (reject) IS idempotent.
+        let wanted_reject = vec![("security".to_string(), Verdict::Reject)];
+        assert!(
+            find_existing_verdict(&log, "intent-1", &wanted_reject).is_some(),
+            "a re-run equal to the LATEST verdict is a true idempotent no-op"
+        );
+    }
+
+    /// Dedup is per-intent: the latest verdict for a DIFFERENT intent never
+    /// governs this intent's idempotency.
+    #[test]
+    fn find_existing_verdict_is_per_intent() {
+        let mut log = make_log_with_verdict("intent-1", "security", "approve");
+        append_verdict(&mut log, "intent-2", "security", "reject");
+        // intent-1's latest is still its approve, so an approve re-run dedups.
+        let wanted = vec![("security".to_string(), Verdict::Approve)];
+        assert!(find_existing_verdict(&log, "intent-1", &wanted).is_some());
     }
 
     #[test]
