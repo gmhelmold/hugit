@@ -238,19 +238,28 @@ fn pr_abandon_redacts_secret_in_reason_on_the_log() {
 // LEAK VECTOR 4 — `hugit pr open` (--campaign / --run-id / --principal)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// WJ-UNIFY contract (was: `pr_open_redacts_secrets_in_campaign_runid_principal`).
+/// WJ-UNIFY + WJ-INT contract (was: `pr_open_redacts_secrets_in_campaign_runid_principal`).
 ///
 /// The WG-SCRUB era routed `pr open`'s `--campaign`/`--run-id` through the FULL
 /// free-text engine, which redacted EVERY high-entropy value — including a bare
 /// 40-hex content ADDRESS. That collapsed two distinct addresses to one
 /// `[REDACTED]` (the wrong-PR-landing bug). The WI/WJ contract: a PREFIXED secret
-/// (`ghp_`/`xoxb-`/conn-string) in an identifier field REDACTS, but a 40-hex /
+/// (`ghp_`/`xoxb-`/conn-string) in an identifier field is handled, but a 40-hex /
 /// slug ADDRESS SURVIVES verbatim. This test pins BOTH halves.
+///
+/// WJ-INT note: `--campaign`/`--run-id` are DOOR-validated identifier fields, so
+/// a structurally-secret value is now rejected at the door (exit-2
+/// `secret_in_identifier`) BEFORE any write — the secret never reaches the log at
+/// all (strictly stronger than redact-at-rest). The contract is door-OR-rest: the
+/// secret is rejected at the door OR `[REDACTED]` at rest. Either way 0 verbatim.
 #[test]
 fn pr_open_redacts_prefixed_secret_but_keeps_address_in_campaign_runid() {
     let dir = scratch("pr-open");
 
-    // (a) A PREFIXED secret in --campaign + --principal REDACTS (0 verbatim).
+    // (a) A PREFIXED secret in --campaign is now DOOR-rejected (exit-2): the
+    // forever-log is never created, so the secret cannot leak. (The door covers
+    // the identifier fields it validates; the central scrub boundary covers the
+    // rest — see the matrix suite `acceptance_wj_matrix.rs` for the full grid.)
     let log_a = dir.join("log-secret.json");
     let out = run(&[
         "pr",
@@ -268,12 +277,20 @@ fn pr_open_redacts_prefixed_secret_but_keeps_address_in_campaign_runid() {
         "--intent",
         &format!("intent-{PAT}"),
     ]);
-    assert!(
-        out.status.success(),
-        "pr open (human, prefixed secret) exits 0: {}",
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "pr open with a prefixed secret in --campaign is DOOR-rejected: {}",
         stdout_of(&out)
     );
-    assert_log_clean(&log_a, "pr open (prefixed secret)");
+    assert!(
+        stdout_of(&out).contains("secret_in_identifier"),
+        "the door rejection names secret_in_identifier: {}",
+        stdout_of(&out)
+    );
+    // Door-rejected before any write — the log was never created (clean by
+    // non-existence). `assert_log_clean` reads an absent file as empty.
+    assert_log_clean(&log_a, "pr open (prefixed secret, door-rejected)");
 
     // (b) A bare 40-hex ADDRESS in --campaign + --run-id SURVIVES verbatim — it
     // is a content address, not a secret; collapsing it broke addressing.
@@ -325,23 +342,44 @@ fn pr_queued_and_landed_redact_secret_pr_id_on_the_log() {
     let dir = scratch("pr-land");
     let log = dir.join("log.json");
     let log_s = log.to_str().unwrap();
-    // The pr_id itself is a user string flowing into pr.queued / pr.landed.
+    // The pr_id itself is a user string that flows into pr.opened / pr.queued /
+    // pr.landed. A structurally-secret pr_id is now DOOR-rejected at `pr open`
+    // (WJ-INT: `--pr` is a door-validated identifier), so the secret never
+    // reaches the queued/landed records — strictly stronger than redact-at-rest.
     let pr = format!("pr-{PAT}");
-    assert!(open_pr(log_s, &pr, "run-1").status.success());
+    let open = open_pr(log_s, &pr, "run-1");
+    assert_eq!(
+        open.status.code(),
+        Some(2),
+        "pr open with a secret-shaped --pr is DOOR-rejected: {}",
+        stdout_of(&open)
+    );
+    assert!(
+        stdout_of(&open).contains("secret_in_identifier"),
+        "the door rejection names secret_in_identifier: {}",
+        stdout_of(&open)
+    );
+    // The log was never created (door-rejected before any write) — clean.
+    assert_log_clean(&log, "pr open (secret pr_id, door-rejected)");
 
-    let land = run(&["pr", "land", "--log", log_s, "--pr", &pr]);
+    // And a CLEAN pr_id still flows through queued + landed without leaking the
+    // unrelated PAT (the redact-at-rest path for the non-identifier fields is
+    // unaffected): open → land → settle, all exit-0, log carries no PAT.
+    let clean_pr = "pr-clean-1";
+    assert!(open_pr(log_s, clean_pr, "run-1").status.success());
+    let land = run(&["pr", "land", "--log", log_s, "--pr", clean_pr]);
     assert!(
         land.status.success(),
         "pr land exits 0: {}",
         stdout_of(&land)
     );
-    let settle = run(&["pr", "land", "--log", log_s, "--pr", &pr, "--settle"]);
+    let settle = run(&["pr", "land", "--log", log_s, "--pr", clean_pr, "--settle"]);
     assert!(
         settle.status.success(),
         "pr land --settle exits 0: {}",
         stdout_of(&settle)
     );
-    assert_log_clean(&log, "pr queued/landed");
+    assert_log_clean(&log, "pr queued/landed (clean id)");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

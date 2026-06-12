@@ -325,16 +325,23 @@ fn run_tournament(args: TournamentArgs) -> Result<String, PorcelainError> {
             .iter()
             .any(|i| i.intent_id == args.intent);
         if !exists {
+            // The intent did not resolve, so it is echoed back in the error —
+            // route it through the redaction engine first so a prefixed/JWT/PEM/
+            // conn-string secret smuggled as `--intent` never lands raw in the
+            // error message or context (WJ-INT, Round-6 residual; mirrors the
+            // WJ-VERDICT intent_not_found fix). An unresolved id is not a lookup
+            // key, so the full free-text engine is safe — a real address still
+            // survives for a genuine-typo diagnostic.
+            let safe_intent = hugit_cli::redaction::scrub(&args.intent);
             return Err(PorcelainError::new(
                 "intent_not_found",
                 format!(
-                    "intent '{}' is not on the --log file (no landed intent by that id)",
-                    args.intent
+                    "intent '{safe_intent}' is not on the --log file (no landed intent by that id)"
                 ),
                 "create/land the intent first (`hugit intent new --log <path> …`) \
                  or pass an --intent id that exists on the log",
             )
-            .with_context("intent", json!(args.intent))
+            .with_context("intent", json!(safe_intent))
             .with_context("log", json!(log_path.display().to_string())));
         }
     }

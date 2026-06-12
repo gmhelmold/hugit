@@ -147,16 +147,37 @@ fn is_secret(s: &str) -> bool {
 
 // ── Detector (2b): sk- with length gate ──────────────────────────────────────
 
-/// True iff `s` contains `sk-` followed by ≥ [`SK_MIN_SUFFIX_LEN`] characters
-/// that are all base64/hex-alphabet chars. Short tokens like `sk-256` or
-/// `sk-learn` are NOT matched.
+/// True iff `s` contains an `sk-` API key. The suffix run after `sk-` is the
+/// maximal run of [`is_token_char`] chars — which INCLUDES `-` and `_`, so the
+/// modern hyphenated `sk-proj-<id>` format is one continuous run (the old scan
+/// already counts `-`/`_`; this keeps that behaviour explicit). The key fires
+/// when EITHER:
+///
+/// - the suffix run is ≥ [`SK_MIN_SUFFIX_LEN`] token chars (a dense classic
+///   `sk-<base64>` key), OR
+/// - the suffix is the OpenAI **project-key** format `proj-<id>` with a
+///   non-empty `<id>` — a strong structural marker (like `ghp_`), so a SHORT
+///   `sk-proj-leaklens99999` redacts even though its 18-char run sits just under
+///   the generic length gate (WJ-INT, Round-6 residual). We err toward redaction
+///   in free text (the WF-1 policy).
+///
+/// Short non-key `sk-` words (`sk-256`, `sk-learn`, bare `sk-`) do NOT match:
+/// their run is below the gate AND they carry no `proj-` marker.
 fn has_sk_key(s: &str) -> bool {
     let needle = "sk-";
     let mut search = s;
     while let Some(pos) = search.find(needle) {
         let after = &search[pos + needle.len()..];
-        let run_len = after.chars().take_while(|&c| is_token_char(c)).count();
-        if run_len >= SK_MIN_SUFFIX_LEN {
+        // The suffix run includes `-`/`_` (is_token_char), so `proj-…` is one run.
+        let run: String = after.chars().take_while(|&c| is_token_char(c)).collect();
+        if run.chars().count() >= SK_MIN_SUFFIX_LEN {
+            return true;
+        }
+        // OpenAI project-key marker: `sk-proj-<non-empty id>` is a key regardless
+        // of the generic length gate (the `proj-` marker is the structural signal).
+        if let Some(id) = run.strip_prefix("proj-")
+            && !id.is_empty()
+        {
             return true;
         }
         // Advance past this occurrence to find any further ones.
@@ -701,6 +722,41 @@ mod tests {
     fn sk_path_component_survives() {
         // A source-tree path that happens to contain `sk-` — must not fire.
         let s = "src/sk-learn/model.rs";
+        assert_eq!(apply(s), s);
+    }
+
+    #[test]
+    fn sk_proj_short_hyphenated_key_redacts() {
+        // WJ-INT (Round-6 residual): the modern `sk-proj-<id>` format leaked when
+        // SHORT — the run after `sk-` (`proj-leaklens99999`, 18 chars) sat just
+        // under the generic 20-char gate. The `proj-` marker now forces redaction.
+        assert_eq!(apply("sk-proj-leaklens99999"), REDACTED);
+        // Even embedded in a free-text field (e.g. a verdict lens name).
+        assert_eq!(apply("lens sk-proj-leaklens99999 review"), REDACTED);
+    }
+
+    #[test]
+    fn sk_proj_long_real_key_redacts() {
+        // A genuine long project key: `sk-proj-` + ≥48 chars.
+        assert_eq!(
+            apply("sk-proj-aBcDeF0123456789ghIjKlMnOpQrStUvWxYz0123456789AbCd"),
+            REDACTED
+        );
+    }
+
+    #[test]
+    fn sk_learn_word_survives_alongside_proj_rule() {
+        // The `proj-` rule must NOT over-trigger on short non-key `sk-` words:
+        // `sk-learn`'s suffix is `learn` (no `proj-` marker, below the gate).
+        assert_eq!(apply("use sk-learn here"), "use sk-learn here");
+    }
+
+    #[test]
+    fn sk_proj_bare_marker_without_id_survives() {
+        // `sk-proj-` with NOTHING after the marker is not a key (empty id) and is
+        // below the length gate — it survives (no over-trigger on the bare marker).
+        let s = "sk-proj-";
+        assert!(!has_sk_key(s));
         assert_eq!(apply(s), s);
     }
 

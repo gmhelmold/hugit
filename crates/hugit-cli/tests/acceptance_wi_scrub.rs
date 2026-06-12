@@ -166,8 +166,13 @@ fn campaign_open_slack_token_redacts_in_the_campaign_field_no_verbatim() {
     let log = dir.join("log.json");
     let log_s = log.to_str().unwrap();
 
-    // The Slack token is the `--campaign` identifier — it passes the weak input
-    // validator (which omits xoxb-) and reaches the log.
+    // The Slack token is the `--campaign` identifier. WI-SCRUB proved the scrub
+    // BOUNDARY redacts it at rest even though the (then-weak) input validator
+    // omitted `xoxb-`. WJ-INT closed that drift: `ident.rs` now reuses the SAME
+    // structural detector as the boundary, so `xoxb-` is rejected at the DOOR
+    // (exit-2 `secret_in_identifier`) BEFORE any write — strictly stronger than
+    // redact-at-rest. The door-OR-rest contract holds: rejected at the door OR
+    // `[REDACTED]` at rest — 0 verbatim either way.
     let out = run(&[
         "campaign",
         "open",
@@ -180,21 +185,23 @@ fn campaign_open_slack_token_redacts_in_the_campaign_field_no_verbatim() {
         "--owner",
         "o@h.com",
     ]);
-    assert!(
-        out.status.success(),
-        "campaign open exits 0 (xoxb- passes the weak input validator): {}",
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "campaign open with a Slack token in --campaign is DOOR-rejected (WJ-INT): {}",
         stdout_of(&out)
     );
-
+    assert!(
+        stdout_of(&out).contains("secret_in_identifier"),
+        "the door rejection names secret_in_identifier: {}",
+        stdout_of(&out)
+    );
+    // Door-rejected before any write — the log was never created, so the Slack
+    // token cannot have leaked verbatim.
     let bytes = read_log(&log);
     assert!(
         !bytes.contains(SLACK),
-        "a Slack token in --campaign must NOT persist verbatim in the forever-log:\n{bytes}"
-    );
-    let payload = payload_of(&bytes, "campaign.opened");
-    assert_eq!(
-        payload["campaign"], REDACTED,
-        "a structural secret in the campaign identifier is scrubbed at the boundary: {payload}"
+        "a Slack token in --campaign must NOT persist verbatim (door-rejected):\n{bytes}"
     );
 }
 
