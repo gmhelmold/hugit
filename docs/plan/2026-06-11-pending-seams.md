@@ -413,10 +413,42 @@ the global view even if the intent IS landed in its own log.
 
 ---
 
+## PS-10 — AC write-boundary axis guard lives only on the CLI `FileAc` (defense-in-depth completeness)
+
+WK-AC (2026-06-12) closed the live `.ac` toolchain-digest leak with **two**
+layers: (1) the DOOR — `hugit check --toolchain`/`--def` now reject a
+structurally-secret value at input (exit-2 `secret_in_identifier`), reusing the
+one `porcelain::structural_secret_scrub` detector; and (2) a fail-closed
+write-boundary guard inside the CLI's `FileAc::store` that refuses to persist a
+`CheckResult` whose any memo axis (`tree_hash`/`def_digest`/`toolchain_digest`)
+is structurally a secret (refuse, never scrub — scrubbing an axis would change
+the recomputed `memo_key` and break every cache HIT).
+
+**The remaining seam (NOT an open leak):** layer-2 lives in `hugit-cli`
+(`FileAc`), not on the shared `hugit_checks::client::ac::ActionCache::store`
+trait — so the `InMemoryAc` (test) and `HttpAcClient` (P2) backends do not yet
+carry the axis guard. This is defense-in-depth completeness, not a live hole:
+the DOOR (layer 1) rejects a secret `--toolchain`/`--def` for **every** CLI verb
+before any backend is reached, so no secret axis can arrive at the in-memory or
+HTTP backend via the CLI surface. The guard is single-crate today because the
+detector lives in `hugit-cli`/`hugit-ledger` and `hugit-checks` does not depend
+on them.
+
+**Owner:** accepted as-is for the local tier.  
+**Acceptance criteria (when the P2 live AC / `HttpAcClient` is wired):** hoist a
+structural-secret axis predicate into a crate `hugit-checks` can depend on
+(e.g. `hugit-ledger`), and move the fail-closed axis guard onto the shared
+`ActionCache::store` trait — mirroring how `verify_hit` is shared across all
+three backends (`ac.rs` doc) — so the in-memory and HTTP backends enforce it
+identically. Tracked; no code change required until P2.
+
+---
+
 ## Closed seams (reference — do not re-open without owner approval)
 
 | Seam | Shipped | Governing commit |
 |---|---|---|
+| **`.ac` Action-Cache toolchain-digest secret leak** — secret-shaped `--toolchain`/`--def` persisted verbatim into `<log>.ac` (bypassing the `--log` WG-SCRUB seam). FOUND by the WJ-INT per-verb secret matrix; CLOSED by WK-AC (door reject + `FileAc` write-boundary guard). | 2026-06-12 (WK-AC) | merge `d04e199`; tests `check_toolchain_secret_rejected_at_door_and_never_in_ac`, `write_boundary_guard_refuses_a_secret_toolchain_axis`. Defense-in-depth completeness tracked as PS-10. |
 | **PS-1 — Recorder verbs (`hugit check` / `hugit verdict` / `pr.landed`)** | 2026-06-11 (wedge wave W0→W-INT) | CHANGELOG `8b3c9c1` (wedge entry); CHANGELOG WB2 entry (checks show); see note below |
 | `cost_usd f64 → cost_usd_micros u64` (WA4, contract 1.2.0) | 2026-06-11 | CHANGELOG WA4 entry; corelink-runners contract §12 amendment |
 | D14 authz guard wired to CLI mutation path (interim) | 2026-06-11 (WA2) | CHANGELOG WA2 entry |
