@@ -261,6 +261,13 @@ fn canonical_log_loaders_route_through_the_chokepoint() {
         src.join("intent").join("canonical_log.rs"),
         src.join("pr").join("cli.rs"),
         src.join("campaign").join("world.rs"),
+        // The M-3 reconcile read path (`reconcile_store_from_log`) also reads the
+        // canonical `[EventRecord,…]` `--log`; it was routed through the chokepoint
+        // at Wave-M integration, so it too may not hand-roll the loader (R10-2 F-1).
+        // (`why`/`export` read DIFFERENT on-disk shapes and verify them with their
+        // own `verify_chain` — documented special-shape siblings, not canonical
+        // loaders, so intentionally NOT in this set.)
+        src.join("intent").join("new.rs"),
     ];
 
     let mut offenders: Vec<String> = Vec::new();
