@@ -242,6 +242,22 @@ pub fn run(input: NewIntent, store_path: &Path) -> Result<NewResult, PorcelainEr
         )
     })?;
 
+    // K-ERRLAW2 / divergence safety: attempt the `--log` append FIRST (the
+    // authoritative shared seam that `pr open` and `campaign` read).  If the log
+    // append fails (disk full, permission denied, log_busy), we return the
+    // structured error WITHOUT persisting the store — the caller's "not created"
+    // belief is then correct, and a retry of the exact command converges:
+    //   - the log's already-landed check makes a re-append a no-op,
+    //   - the store save is idempotent on the same id.
+    // Committing the store BEFORE the log was the bug: a log failure left an
+    // orphaned `--store` entry the caller could never see via `--log`, so
+    // `pr open --intent <id> --log <same>` returned `intent_not_found` despite
+    // the store having the entry.
+    if let Some(log_path) = input.log.as_deref() {
+        canonical_log::land_intent(log_path, &sidecar, &principal_chain, recorded_at)?;
+    }
+
+    // Log append succeeded (or was absent).  Now durably commit the store.
     // Record the non-authoritative sidecar corpus and the disclosed envelope
     // ref (when given) by intent_id — one lifecycle, one id.
     store.sidecars.insert(intent_id.clone(), sidecar.clone());
@@ -251,13 +267,6 @@ pub fn run(input: NewIntent, store_path: &Path) -> Result<NewResult, PorcelainEr
     store
         .save_locked(&store_lock, store_path)
         .map_err(PorcelainError::from_store)?;
-
-    // Also land `intent.landed` on the shared canonical log when `--log` is
-    // given — the one on-disk seam every porcelain verb shares (PC4). Idempotent
-    // on the log too: an intent already on it is left untouched.
-    if let Some(log_path) = input.log.as_deref() {
-        canonical_log::land_intent(log_path, &sidecar, &principal_chain, recorded_at)?;
-    }
 
     Ok(NewResult {
         intent_id,
@@ -306,4 +315,120 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// K-ERRLAW2 divergence safety: if the `--log` append fails, the `--store`
+    /// must NOT contain the orphaned intent.
+    ///
+    /// Setup: writable `--store` dir, non-existent/unwritable `--log` dir → the
+    /// log append fails, the store save must be skipped, and the exit is a
+    /// structured error (not a silent success).  A retry once the log dir is
+    /// writable must succeed and leave store + log in agreement.
+    #[test]
+    fn log_fail_leaves_no_orphaned_store_entry_and_retry_converges() {
+        use std::path::PathBuf;
+
+        let base = std::env::temp_dir().join(format!(
+            "hugit-errlaw2-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&base).expect("create base dir");
+
+        // Store lives in a writable subdir.
+        let store_dir = base.join("store");
+        std::fs::create_dir_all(&store_dir).expect("create store dir");
+        let store_path: PathBuf = store_dir.join("intents.json");
+
+        // Log is inside a subdirectory that does NOT exist → the lock+create
+        // inside `canonical_log::land_intent` will fail with an I/O error.
+        let log_dir = base.join("log_nonexistent_subdir");
+        // deliberately do NOT create log_dir
+        let log_path: PathBuf = log_dir.join("events.json");
+
+        let input = NewIntent {
+            charter: "divergence safety test".to_string(),
+            campaign: "test-campaign".to_string(),
+            acceptance: vec!["store is clean on log failure".to_string()],
+            id: Some("intent-divergence-test-0001".to_string()),
+            agent: None,
+            context_ref: None,
+            log: Some(log_path.clone()),
+        };
+
+        // --- first run: log dir is missing → should error, store must be empty ---
+        let result = run(input, &store_path);
+        assert!(
+            result.is_err(),
+            "K-ERRLAW2: a missing log dir must produce a structured error, not Ok"
+        );
+        // Confirm the store does NOT contain the orphaned intent.
+        if store_path.exists() {
+            let (_, store) =
+                IntentStore::lock_and_load(&store_path).expect("load store for inspection");
+            let found = store
+                .intent_for("intent-divergence-test-0001")
+                .expect("query store");
+            assert!(
+                found.is_none(),
+                "K-ERRLAW2: no orphaned store entry must exist after a log-append failure"
+            );
+        }
+        // Store file should not even exist yet (no successful save).
+        // (If the store file does exist but is empty/no entry, that's also fine —
+        // the assertion above already covers the absence of the specific entry.)
+
+        // --- create the log dir so the retry can succeed ---
+        std::fs::create_dir_all(&log_dir).expect("create log dir for retry");
+
+        let input2 = NewIntent {
+            charter: "divergence safety test".to_string(),
+            campaign: "test-campaign".to_string(),
+            acceptance: vec!["store is clean on log failure".to_string()],
+            id: Some("intent-divergence-test-0001".to_string()),
+            agent: None,
+            context_ref: None,
+            log: Some(log_path.clone()),
+        };
+
+        let result2 = run(input2, &store_path);
+        assert!(
+            result2.is_ok(),
+            "K-ERRLAW2: retry with writable log must succeed; got: {result2:?}"
+        );
+        let out = result2.unwrap();
+        assert_eq!(out.intent_id, "intent-divergence-test-0001");
+        assert!(!out.already_exists);
+
+        // Store and log must now agree: the intent is in both.
+        let (_, store) = IntentStore::lock_and_load(&store_path).expect("load store after retry");
+        let in_store = store
+            .intent_for("intent-divergence-test-0001")
+            .expect("query store")
+            .is_some();
+        assert!(
+            in_store,
+            "K-ERRLAW2: intent must be in store after successful retry"
+        );
+
+        assert!(
+            log_path.exists(),
+            "K-ERRLAW2: log file must exist after retry"
+        );
+        let log_bytes = std::fs::read(&log_path).expect("read log");
+        let log_str = String::from_utf8(log_bytes).expect("log is utf-8");
+        assert!(
+            log_str.contains("intent-divergence-test-0001"),
+            "K-ERRLAW2: intent id must be in log after retry"
+        );
+
+        // cleanup
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

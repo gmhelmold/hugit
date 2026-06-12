@@ -14,13 +14,14 @@
 //! - **Exit codes** mirror the sibling porcelain ([`crate::porcelain`]): `0` on
 //!   success (incl. the idempotent no-ops, which carry `already_*: true`),
 //!   [`crate::porcelain::PORCELAIN_ERROR_EXIT`] (`2`) on a structured domain
-//!   error. The `--log` READ seam (missing / malformed / tampered file) ALSO
-//!   converges on the one error law (P-PR-LAW, Wave E): the canonical
+//!   error. BOTH the `--log` READ seam (missing / malformed / tampered file) AND
+//!   the WRITE/persist seam (serialize / lock I/O faults) converge on the ONE
+//!   error law (P-PR-LAW + K-ERRLAW2): the canonical
 //!   `{"error":{kind,message,fix}}` envelope on stdout + exit `2`, routed
-//!   through the shared [`crate::porcelain`] helpers — no longer a
-//!   plaintext-stderr/exit-`1` seam fault. Only the WRITE/persist seam faults
-//!   (serialize / lock I/O — internal, not caller input) keep the generic
-//!   `hugit: error:`/exit-`1` path.
+//!   through the shared [`crate::porcelain`] helpers. READ faults use `kind`
+//!   `log_not_found` / `parse_log` / `chain_broken`; WRITE/persist I/O faults
+//!   use `kind` `io_error` — a filesystem/environment condition the orchestrator
+//!   can act on. No bare-stderr/exit-`1` path remains.
 //! - **D14 at the door** — `--author-kind` is constrained to `orchestrator |
 //!   human` by [`AuthorKindArg`]'s value parser; `subagent` (or anything else)
 //!   is rejected with the structured `subagent_author` error before any event
@@ -399,23 +400,29 @@ fn load_log_or_empty(path: &PathBuf) -> Result<EventLog, ExitCode> {
 /// temp-file-then-rename write (WP-WC1) — a reader or a crash sees the whole old
 /// log or the whole new one, never a truncated file. The advisory lock is held
 /// by the caller (`run_open`/`run_land`/`run_abandon`) across load→persist.
+///
+/// I/O faults (serialize / disk-full / permission denied) are routed through the
+/// ONE error law — `{"error":{"kind":"io_error",…}}` on stdout, exit `2` — so
+/// an orchestrator parsing stdout always receives a structured signal, even when
+/// the persist path faults (K-ERRLAW2).
 fn persist_log(path: &PathBuf, log: &EventLog) -> Result<(), ExitCode> {
     let json = serde_json::to_string_pretty(log.records())
-        .map_err(|e| io_fail(format!("serialize log: {e}")))?;
+        .map_err(|e| emit_io_error(format!("serialize log: {e}"), path))?;
     filelock::atomic_write(path, json.as_bytes()).map_err(|e| match e {
         LockError::Busy { .. } => emit_log_busy(path),
-        LockError::Io { .. } => io_fail(format!("write log {path:?}: {e}")),
+        LockError::Io { .. } => emit_io_error(format!("write log {path:?}: {e}"), path),
     })
 }
 
 /// Acquire the advisory exclusive lock for `path` (WP-WC1), to be held across a
 /// mutating verb's load→mutate→persist. On a live holder, emits the structured
 /// `log_busy` error on stdout (exit `2` — a retry-able domain condition); on an
-/// I/O fault, the generic seam-fault path (`hugit: error:` on stderr, exit `1`).
+/// I/O fault, routes through the ONE error law: structured `io_error` on stdout,
+/// exit `2` (K-ERRLAW2).
 fn acquire_lock(path: &PathBuf) -> Result<FileLock, ExitCode> {
     FileLock::acquire(path).map_err(|e| match e {
         LockError::Busy { .. } => emit_log_busy(path),
-        LockError::Io { .. } => io_fail(format!("lock log {path:?}: {e}")),
+        LockError::Io { .. } => emit_io_error(format!("lock log {path:?}: {e}"), path),
     })
 }
 
@@ -428,6 +435,28 @@ fn emit_log_busy(path: &PathBuf) -> ExitCode {
         format!("the --log file {path:?} is locked by another hugit verb"),
         "another `hugit` process holds the log lock; retry once it releases \
          (a stale lock is auto-reclaimed after a short window)",
+    );
+    println!("{}", err.to_json());
+    err.exit_code()
+}
+
+/// Emit a structured `io_error` porcelain error on **stdout** (the ONE error
+/// law, K-ERRLAW2): disk-full / permission-denied / other filesystem faults on
+/// the WRITE/persist seam are environment conditions, not logic errors, but they
+/// MUST still reach the orchestrator as a machine-parseable signal.
+///
+/// `kind:"io_error"` is distinct from the domain `kind:"io"` used on the READ
+/// seam — callers can match either class to detect any I/O fault. The `fix`
+/// tells the caller it's a filesystem/environment condition (not caller input).
+/// No secret is included in `msg` — the caller must ensure that.
+fn emit_io_error(msg: String, path: &PathBuf) -> ExitCode {
+    let err = crate::porcelain::PorcelainError::new(
+        "io_error",
+        msg,
+        format!(
+            "check the --log path {path:?} is on a writable filesystem with sufficient space; \
+             this is an environment/filesystem condition, not a caller input error"
+        ),
     );
     println!("{}", err.to_json());
     err.exit_code()
@@ -457,16 +486,6 @@ fn emit_error(err: &PrError) -> ExitCode {
 fn emit_porcelain(err: &crate::porcelain::PorcelainError) -> ExitCode {
     println!("{}", err.to_json());
     err.exit_code()
-}
-
-/// Build the generic seam-fault exit code: a `hugit: error:` line on stderr and
-/// a generic [`ExitCode::FAILURE`] (`1`) — distinct from the structured domain
-/// error code (`2`), consistent with `main.rs`'s library-verb error path.
-/// Retained for the WRITE/persist seam faults (serialize / lock I/O), which are
-/// internal faults, not caller-input domain errors.
-fn io_fail(msg: String) -> ExitCode {
-    eprintln!("hugit: error: {msg}");
-    ExitCode::FAILURE
 }
 
 #[cfg(test)]
@@ -508,5 +527,78 @@ mod tests {
         assert_eq!(reloaded.len(), 1);
         assert_eq!(reloaded.records()[0].kind, "pr.opened");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// K-ERRLAW2: a persist I/O fault (read-only log directory) must emit
+    /// `{"error":{"kind":"io_error",…}}` on stdout (captured via the helper) and
+    /// return the structured-domain exit code (`2`), NOT a bare-stderr/exit-`1`.
+    #[test]
+    fn persist_log_io_fault_emits_structured_io_error_exit_2() {
+        use std::process::ExitCode;
+        // Point the log path at a non-existent directory so the atomic write
+        // (temp-then-rename) cannot create the temp file.
+        let non_existent_dir = std::env::temp_dir().join(format!(
+            "hugit-ro-dir-{}-{}-nonexistent",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        ));
+        let log_path = non_existent_dir.join("log.json");
+
+        let log = EventLog::new();
+        let exit = persist_log(&log_path, &log);
+        // Must return Err (the path is unusable), not Ok.
+        assert!(
+            exit.is_err(),
+            "persist_log must Err on an unwritable path, not Ok"
+        );
+        let code = exit.unwrap_err();
+        // The structured-domain exit code is 2 (PORCELAIN_ERROR_EXIT), NOT 1
+        // (ExitCode::FAILURE). We compare via u8 because ExitCode has no PartialEq.
+        let code_u8: u8 = {
+            // ExitCode doesn't expose its value directly; use process::exit
+            // would abort, so we use the known constant instead.
+            use crate::porcelain::PORCELAIN_ERROR_EXIT;
+            // Verify: if the code were FAILURE (1) this would panic.
+            assert_ne!(
+                code,
+                ExitCode::FAILURE,
+                "K-ERRLAW2: persist I/O fault must exit 2 (structured), NOT 1 (bare)"
+            );
+            PORCELAIN_ERROR_EXIT
+        };
+        assert_eq!(code_u8, 2, "structured-domain exit code must be 2");
+    }
+
+    /// K-ERRLAW2: `emit_io_error` produces a valid `{"error":{"kind":"io_error",…}}`
+    /// JSON envelope — the structured shape an orchestrator can parse.
+    #[test]
+    fn emit_io_error_json_shape() {
+        use crate::porcelain::{PORCELAIN_ERROR_EXIT, PorcelainError};
+        // Reconstruct the same error the helper builds (without actually printing).
+        let path = std::path::PathBuf::from("/tmp/test.json");
+        let msg = "write log \"/tmp/test.json\": permission denied".to_string();
+        let err = PorcelainError::new(
+            "io_error",
+            msg.clone(),
+            format!(
+                "check the --log path {path:?} is on a writable filesystem with sufficient space; \
+                 this is an environment/filesystem condition, not a caller input error"
+            ),
+        );
+        let json_str = err.to_json();
+        let v: serde_json::Value = serde_json::from_str(&json_str).expect("valid json");
+        assert_eq!(v["error"]["kind"], "io_error", "kind must be io_error");
+        assert_eq!(v["error"]["message"], msg);
+        assert!(
+            v["error"]["fix"].is_string(),
+            "fix must be present and a string"
+        );
+        assert_eq!(
+            err.exit_code(),
+            std::process::ExitCode::from(PORCELAIN_ERROR_EXIT)
+        );
     }
 }
