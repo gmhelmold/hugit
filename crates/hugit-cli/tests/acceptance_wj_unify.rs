@@ -220,9 +220,11 @@ fn intent_ulid_id_survives_is_verdictable_and_advances_proven() {
 // (c) a prefixed secret in a pr/intent identifier REDACTS (0 verbatim on the log).
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A `xoxb-` Slack-bot token shape — caught by the engine's structural prefix
-/// detector but NOT by the `ident.rs` door validator, so it exercises the
-/// CENTRAL boundary (the security boundary, per WI-SCRUB).
+/// A `xoxb-` Slack-bot token shape. WI-SCRUB era: caught by the engine's
+/// structural prefix detector but NOT by the `ident.rs` door (which omitted
+/// `xoxb-`), so it exercised the CENTRAL boundary. WJ-INT closed that gap — the
+/// door now reuses the same structural detector, so `xoxb-` IS caught at the door
+/// for the door-validated identifier fields (`--pr`/`--campaign`/`--run-id`/`--id`).
 const XOXB: &str = "xoxb-1111111111-2222222222-aaaaaaaaaaaa";
 /// A `ghp_` GitHub PAT shape — caught at the door by `ident.rs` (exit-2) for the
 /// explicit `--pr`/`--id`, and by the boundary for free-flowing fields.
@@ -234,8 +236,14 @@ fn prefixed_secret_in_pr_identifier_redacts_on_the_log() {
     let log = dir.join("log.json");
     let log_s = log.to_str().unwrap();
 
-    // A `xoxb-` in --campaign + --run-id: the door validator misses these, so the
-    // central structural boundary MUST redact them.
+    // WJ-INT: `--campaign`/`--run-id` are door-validated identifier fields, so a
+    // `xoxb-` in either is now rejected at the DOOR (exit-2 `secret_in_identifier`)
+    // BEFORE any write — the door reuses the SAME structural detector as the
+    // central boundary, so the WI-SCRUB gap (door omitted `xoxb-`) is closed. The
+    // secret never reaches the log at all. (The central-boundary redact-at-rest
+    // path is still exercised for the NON-door-validated fields — pr `--intent`,
+    // verdict `--intent`/`--lens`, check `--pr`/`--principal`/`--toolchain` — in
+    // `acceptance_wj_matrix.rs`, the comprehensive per-verb grid.)
     let out = run(&[
         "pr",
         "open",
@@ -250,19 +258,20 @@ fn prefixed_secret_in_pr_identifier_redacts_on_the_log() {
         "--run-id",
         XOXB,
     ]);
-    assert!(
-        out.status.success(),
-        "pr open exits 0: {}",
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a xoxb- --campaign is DOOR-rejected (WJ-INT): {}",
         String::from_utf8_lossy(&out.stdout)
     );
-    let bytes = std::fs::read_to_string(&log).unwrap();
-    assert!(
-        !bytes.contains(XOXB),
-        "the xoxb- secret must NOT persist verbatim in campaign/run_id:\n{bytes}"
+    let v = stdout_json(&out);
+    assert_eq!(
+        v["error"]["kind"], "secret_in_identifier",
+        "the door rejects the xoxb- identifier: {v}"
     );
     assert!(
-        bytes.contains(REDACTED),
-        "the secret was REDACTED to the sentinel, not merely dropped:\n{bytes}"
+        !log.exists() || !std::fs::read_to_string(&log).unwrap().contains(XOXB),
+        "the door-rejected xoxb- never reaches the log"
     );
 
     // A `ghp_` in the explicit --pr is rejected at the door (exit-2) — never logged.
@@ -302,8 +311,11 @@ fn prefixed_secret_in_intent_id_redacts_on_the_log() {
     let log_s = log.to_str().unwrap();
     let store_s = store.to_str().unwrap();
 
-    // A `xoxb-` explicit --id: ident.rs misses this prefix, so the central
-    // boundary on the canonical --log MUST redact it (0 verbatim on the log).
+    // WJ-INT: `--id` is a door-validated identifier field, so a `xoxb-` explicit
+    // id is now rejected at the DOOR (exit-2 `secret_in_identifier`) BEFORE any
+    // write — the door reuses the same structural detector as the boundary, so
+    // the WI-SCRUB gap (door omitted `xoxb-`) is closed. The secret never reaches
+    // the store NOR the canonical log.
     let out = run(&[
         "intent",
         "new",
@@ -318,19 +330,24 @@ fn prefixed_secret_in_intent_id_redacts_on_the_log() {
         "--id",
         XOXB,
     ]);
-    assert!(
-        out.status.success(),
-        "intent new exits 0: {}",
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a xoxb- explicit --id is DOOR-rejected (WJ-INT): {}",
         String::from_utf8_lossy(&out.stdout)
     );
-    let bytes = std::fs::read_to_string(&log).unwrap();
-    assert!(
-        !bytes.contains(XOXB),
-        "the xoxb- intent --id must NOT persist verbatim on the canonical log:\n{bytes}"
+    let v = stdout_json(&out);
+    assert_eq!(
+        v["error"]["kind"], "secret_in_identifier",
+        "the door rejects the xoxb- intent id: {v}"
     );
     assert!(
-        bytes.contains(REDACTED),
-        "the xoxb- intent_id was REDACTED on the log:\n{bytes}"
+        !log.exists() || !std::fs::read_to_string(&log).unwrap().contains(XOXB),
+        "the door-rejected xoxb- never reaches the canonical log"
+    );
+    assert!(
+        !store.exists() || !std::fs::read_to_string(&store).unwrap().contains(XOXB),
+        "the door-rejected xoxb- never reaches the store"
     );
 
     // A `ghp_` explicit --id is rejected at the door (exit-2) — never logged.

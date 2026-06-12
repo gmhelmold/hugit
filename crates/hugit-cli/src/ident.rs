@@ -172,9 +172,11 @@ mod tests {
         // A real `sk-` key (≥20 token chars after the prefix) trips the engine's
         // length-gated `sk-` detector. A SHORT `sk-…` id (e.g. `sk-256`,
         // `sk-learn`) is NOT a secret and survives — see `sk_short_id_is_valid`.
-        let e =
-            validate_identifier("sk-abcdefghijklmnopqrstuvwxyz0123456789ABCDEF", "--campaign")
-                .unwrap_err();
+        let e = validate_identifier(
+            "sk-abcdefghijklmnopqrstuvwxyz0123456789ABCDEF",
+            "--campaign",
+        )
+        .unwrap_err();
         assert_eq!(e.kind, "secret_in_identifier");
     }
 
@@ -195,9 +197,8 @@ mod tests {
     #[test]
     fn corelink_pat_is_secret() {
         // `clp_` was OMITTED by the old hand-list — now rejected via the engine.
-        let e =
-            validate_identifier("clp_live_9f8e7d6c5b4a3210fedcba9876543210", "--campaign")
-                .unwrap_err();
+        let e = validate_identifier("clp_live_9f8e7d6c5b4a3210fedcba9876543210", "--campaign")
+            .unwrap_err();
         assert_eq!(e.kind, "secret_in_identifier");
     }
 
