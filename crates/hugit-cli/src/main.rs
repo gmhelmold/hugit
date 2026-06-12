@@ -145,14 +145,29 @@ const WHY_LOG_SHAPE: &str = "a JSON array of why-log entries \
      — note this is `why`'s own wrapper shape, NOT the bare [EventRecord, …] array \
      the flow porcelain (campaign/intent/pr) shares";
 
-/// The on-disk shape `hugit export` reads — an events-intent object, also not
-/// the canonical `[EventRecord, …]` array.
-const EXPORT_LOG_SHAPE: &str = "a JSON object {\"events\":[{\"kind\",\"principal_chain\"?,\
-     \"payload\",\"recorded_at\"?}, …]} of un-hashed events to append \
-     (export computes the hash chain), NOT the bare [EventRecord, …] array";
-
 fn run_why(args: WhyArgs) -> Result<String, PorcelainError> {
     let raw: Vec<WhyLogEntryInput> = read_log(&args.log, WHY_LOG_SHAPE)?;
+
+    // K-CHAIN: verify the hash chain of the embedded EventRecords BEFORE
+    // projecting provenance. Every other read verb (campaign show, checks show,
+    // queue show, pr, intent) already calls verify_chain on read; `why` was the
+    // lone gap. A tampered/reordered/dropped-record log must never be projected
+    // as authoritative provenance — fail closed exactly like the siblings.
+    {
+        let records: Vec<&EventRecord> = raw.iter().map(|e| &e.record).collect();
+        let owned: Vec<hugit_contracts::EventRecord> = records.into_iter().cloned().collect();
+        hugit_refstore::verify_chain(&owned).map_err(|e| {
+            PorcelainError::new(
+                "chain_broken",
+                format!(
+                    "log {} failed integrity verification: {e}",
+                    args.log.display()
+                ),
+                "the --log file's hash chain is tampered or corrupt",
+            )
+        })?;
+    }
+
     let entries: Vec<LogEntry> = raw
         .into_iter()
         .map(|r| LogEntry {
@@ -374,7 +389,9 @@ fn run_tournament(args: TournamentArgs) -> Result<String, PorcelainError> {
 
 #[derive(clap::Args, Debug)]
 struct ExportArgs {
-    /// Path to a JSON file holding the corpus's event log (`{"events": [...]}`).
+    /// Path to a canonical JSON event log (`[EventRecord, …]`) — the same format
+    /// every porcelain verb writes through (`intent new`, `pr open`, …). The
+    /// chain is verified before exporting; a tampered log is `chain_broken`/exit-2.
     #[arg(long)]
     log: PathBuf,
     /// Output directory for the artifact + envelope.
@@ -382,35 +399,20 @@ struct ExportArgs {
     out: PathBuf,
 }
 
-/// The on-disk JSON input shape for an export corpus's event log.
-///
-/// Events are given as un-hashed *intents to append* — the hash chain is
-/// computed by [`hugit_refstore::EventLog::append`], so a caller never
-/// hand-authors (and never has to forge) the `this_hash`/`prev_hash` chain.
-#[derive(Deserialize)]
-struct ExportLogInput {
-    events: Vec<ExportEventInput>,
-}
-
-#[derive(Deserialize)]
-struct ExportEventInput {
-    kind: String,
-    #[serde(default)]
-    principal_chain: Vec<String>,
-    /// Opaque JSON payload, carried as a string.
-    payload: String,
-    #[serde(default)]
-    recorded_at: u64,
-}
-
 fn run_export(args: ExportArgs) -> Result<String, PorcelainError> {
-    let input: ExportLogInput = read_log(&args.log, EXPORT_LOG_SHAPE)?;
-
-    let mut event_log = hugit_refstore::EventLog::new();
-    for e in input.events {
-        // append computes the hash chain — no forged hashes accepted.
-        event_log.append(e.kind, e.principal_chain, e.payload, e.recorded_at);
-    }
+    // K-CHAIN: verify the hash chain of the input log BEFORE exporting. The
+    // previous path rebuilt an EventLog via raw `.append()` over an
+    // `{events:[…]}` input that carried no hashes, so a forged/arbitrary input
+    // could enter the export corpus unchecked. The fix: read the CANONICAL
+    // `[EventRecord, …]` format through the same `load_event_log` every other
+    // read verb uses. `load_event_log` runs `verify_chain` and returns
+    // `chain_broken`/exit-2 on any tampered/reordered/corrupt input — the same
+    // boundary as `checks show`, `queue show`, `tournament --log`, etc.
+    //
+    // Callers building an export log use the same porcelain write path every
+    // other verb does (`intent new --log L`, `pr open --log L`, …), so the
+    // canonical `[EventRecord, …]` format is the natural input shape here too.
+    let event_log = checks::load_event_log(&args.log)?;
     let corpus = Corpus {
         event_log,
         ..Corpus::default()

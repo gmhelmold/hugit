@@ -15,7 +15,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use serde_json::Value;
+use hugit_refstore::EventLog;
+use serde_json::{Value, json};
 
 fn hugit_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_hugit"))
@@ -26,6 +27,32 @@ fn scratch(tag: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+/// Build a why-format log `[{record, attestation: null, sidecar: null}, …]`
+/// with a REAL hash chain (K-CHAIN: fake hashes are now rejected by
+/// verify_chain before why projects).
+fn write_why_log(path: &std::path::Path, events: &[(&str, Value)]) {
+    let mut log = EventLog::new();
+    for (kind, payload) in events {
+        log.append(*kind, vec![], payload.to_string(), 0);
+    }
+    let entries: Vec<Value> = log
+        .records()
+        .iter()
+        .map(|r| json!({"record": r, "attestation": null, "sidecar": null}))
+        .collect();
+    std::fs::write(path, serde_json::to_string(&entries).unwrap()).unwrap();
+}
+
+/// Build a canonical `[EventRecord, …]` log with a REAL hash chain for export
+/// tests (K-CHAIN: export now reads this format and runs verify_chain).
+fn write_canonical_log(path: &std::path::Path, events: &[(&str, Value)]) {
+    let mut log = EventLog::new();
+    for (kind, payload) in events {
+        log.append(*kind, vec![], payload.to_string(), 0);
+    }
+    std::fs::write(path, serde_json::to_string_pretty(log.records()).unwrap()).unwrap();
 }
 
 /// Parse stdout as the canonical error envelope, asserting the one-law shape:
@@ -79,20 +106,15 @@ fn tournament_success_is_stable_json() {
 fn export_success_is_stable_json_with_paths_and_digest() {
     let dir = scratch("export-ok");
     let log = dir.join("corpus.json");
-    std::fs::write(
+    // K-CHAIN: export now reads the canonical `[EventRecord, …]` format with
+    // real chain verification. Build via the engine's append path.
+    write_canonical_log(
         &log,
-        serde_json::json!({
-            "events": [{
-                "kind": "ref.update",
-                "principal_chain": ["ci"],
-                "payload": serde_json::json!({"ref":"refs/heads/main","target":"deadbeef"})
-                    .to_string(),
-                "recorded_at": 1u64
-            }]
-        })
-        .to_string(),
-    )
-    .unwrap();
+        &[(
+            "ref.update",
+            json!({"ref": "refs/heads/main", "target": "deadbeef"}),
+        )],
+    );
     let out_dir = dir.join("artifact");
     let out = Command::new(hugit_bin())
         .args([
@@ -134,19 +156,9 @@ fn tournament_over_cap_is_canonical_error_exit_two() {
 fn why_unresolved_is_canonical_error_exit_two() {
     let dir = scratch("why-unresolved");
     let log = dir.join("log.json");
-    std::fs::write(
-        &log,
-        serde_json::json!([{
-            "record": {
-                "seq": 0, "prev_hash": "0".repeat(64), "this_hash": "a".repeat(64),
-                "kind": "intent.landed", "principal_chain": ["a@b.c"],
-                "payload": serde_json::json!({"path":"src/known.rs"}).to_string(),
-                "recorded_at": 1u64
-            }
-        }])
-        .to_string(),
-    )
-    .unwrap();
+    // K-CHAIN: build with a REAL chain so the error kind is `unresolved` (not
+    // `chain_broken`) — the test proves the unresolved-query law.
+    write_why_log(&log, &[("intent.landed", json!({"path": "src/known.rs"}))]);
     let out = Command::new(hugit_bin())
         .args([
             "why",

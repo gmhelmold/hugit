@@ -12,6 +12,9 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+use hugit_refstore::EventLog;
+use serde_json::json;
+
 /// The built `hugit` binary path (Cargo sets this env for bin-target tests).
 fn hugit_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_hugit"))
@@ -25,37 +28,58 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
+/// Write a `why`-format log: `[{record: EventRecord, attestation: null, sidecar:
+/// null}, …]` where each EventRecord is produced by the engine's canonical
+/// [`EventLog::append`] so the hash chain is REAL (not hand-forged). K-CHAIN:
+/// `verify_chain` runs before `why` projects, so fake hashes are rejected.
+fn write_why_log(path: &std::path::Path, events: &[(&str, serde_json::Value)]) {
+    let mut log = EventLog::new();
+    for (kind, payload) in events {
+        log.append(*kind, vec![], payload.to_string(), 0);
+    }
+    let entries: Vec<serde_json::Value> = log
+        .records()
+        .iter()
+        .map(|r| {
+            json!({
+                "record": r,
+                "attestation": null,
+                "sidecar": null
+            })
+        })
+        .collect();
+    std::fs::write(path, serde_json::to_string(&entries).unwrap()).unwrap();
+}
+
+/// Write a canonical `[EventRecord, …]` log for `export` tests, using the
+/// engine's real append path so the chain is valid and `verify_chain` passes.
+fn write_canonical_log(path: &std::path::Path, events: &[(&str, serde_json::Value)]) {
+    let mut log = EventLog::new();
+    for (kind, payload) in events {
+        log.append(*kind, vec![], payload.to_string(), 0);
+    }
+    std::fs::write(path, serde_json::to_string_pretty(log.records()).unwrap()).unwrap();
+}
+
 // ── ① the binary exists and `hugit why` runs end-to-end, exit 0 ───────────────
 
 #[test]
 fn item_1_why_runs_end_to_end_exit_zero() {
     let dir = scratch("why-ok");
     let log = dir.join("log.json");
-    // A real event-log fixture the resolver can attribute.
-    std::fs::write(
+    // K-CHAIN: build a REAL hash chain via the engine's append path so
+    // `verify_chain` passes (fake/hand-forged hashes are now rejected).
+    write_why_log(
         &log,
-        serde_json::json!([
-            {
-                "record": {
-                    "seq": 0,
-                    "prev_hash": "0".repeat(64),
-                    "this_hash": "a".repeat(64),
-                    "kind": "intent.landed",
-                    "principal_chain": ["alice@example.com"],
-                    "payload": serde_json::json!({
-                        "intent_id": "intent-1",
-                        "charter": "Add the parser",
-                        "path": "src/parser.rs"
-                    }).to_string(),
-                    "recorded_at": 1_700_000_000_000u64
-                },
-                "attestation": null,
-                "sidecar": null
-            }
-        ])
-        .to_string(),
-    )
-    .unwrap();
+        &[(
+            "intent.landed",
+            json!({
+                "intent_id": "intent-1",
+                "charter": "Add the parser",
+                "path": "src/parser.rs"
+            }),
+        )],
+    );
 
     let out = Command::new(hugit_bin())
         .args([
@@ -86,24 +110,9 @@ fn item_1_why_runs_end_to_end_exit_zero() {
 fn item_2_why_error_exits_nonzero() {
     let dir = scratch("why-err");
     let log = dir.join("log.json");
-    std::fs::write(
-        &log,
-        serde_json::json!([
-            {
-                "record": {
-                    "seq": 0,
-                    "prev_hash": "0".repeat(64),
-                    "this_hash": "a".repeat(64),
-                    "kind": "intent.landed",
-                    "principal_chain": ["alice@example.com"],
-                    "payload": serde_json::json!({"path": "src/known.rs"}).to_string(),
-                    "recorded_at": 1u64
-                }
-            }
-        ])
-        .to_string(),
-    )
-    .unwrap();
+    // K-CHAIN: build with real hashes so the error is `unresolved`, not
+    // `chain_broken` (the test asserts non-zero exit for an unresolvable query).
+    write_why_log(&log, &[("intent.landed", json!({"path": "src/known.rs"}))]);
 
     // Query a path that is NOT in the log → NotFound → non-zero exit. Under the
     // WB0 one-law convergence the error is the canonical JSON envelope on
@@ -217,26 +226,15 @@ fn item_4_tournament_runs_and_caps() {
 fn item_5_export_runs_end_to_end() {
     let dir = scratch("export");
     let log = dir.join("corpus.json");
-    // A single ref.update event (un-hashed; the CLI appends + computes the
-    // chain) so the export has a ref to project.
-    std::fs::write(
+    // K-CHAIN: export now reads the canonical `[EventRecord, …]` format and
+    // verifies the chain. Build via the engine's real append path.
+    write_canonical_log(
         &log,
-        serde_json::json!({
-            "events": [
-                {
-                    "kind": "ref.update",
-                    "principal_chain": ["ci"],
-                    "payload": serde_json::json!({
-                        "ref": "refs/heads/main",
-                        "target": "deadbeef"
-                    }).to_string(),
-                    "recorded_at": 1u64
-                }
-            ]
-        })
-        .to_string(),
-    )
-    .unwrap();
+        &[(
+            "ref.update",
+            json!({"ref": "refs/heads/main", "target": "deadbeef"}),
+        )],
+    );
     let out_dir = dir.join("artifact");
 
     let out = Command::new(hugit_bin())
