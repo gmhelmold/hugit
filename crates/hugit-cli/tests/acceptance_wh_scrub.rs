@@ -15,6 +15,14 @@
 //! content-address prefix). A secret-shaped value in a digest-named field is NOT
 //! exempt → it scrubs like any other value. A REAL content address still survives.
 //!
+//! K-SCRUB (Round-7 residual): the `cas:` exemption was itself a hole — ANY
+//! `cas:`-prefixed value (e.g. `cas:ghp_…`) was blanket-treated as digest-shaped
+//! and stored VERBATIM. That `cas:` exemption is now VALUE-gated too (the payload
+//! must be a genuine content-address shape, not a credential), and `--toolchain`
+//! AND `--tree-hash` are routed through the structural-secret DOOR (exit-2
+//! `secret_in_identifier`) so a secret is refused at input, never persisted. A
+//! REAL `cas:<64hex>` tree-hash still passes the door and survives verbatim.
+//!
 //! These tests drive the real binary and assert: the smuggled secret no longer
 //! persists verbatim in the log; the binary's own real `memo_key`/`tree_hash`
 //! content addresses still survive (the false-positive guard holds). The Wave-G
@@ -70,21 +78,6 @@ fn bootstrap_log(log_s: &str) {
         out.status.success(),
         "bootstrap campaign open exits 0: {}",
         stdout_of(&out)
-    );
-}
-
-/// Assert the persisted log file carries the PAT NOWHERE verbatim — the
-/// forever-log is clean of the smuggled secret.
-fn assert_no_pat(path: &std::path::Path, ctx: &str) {
-    let bytes = std::fs::read_to_string(path).unwrap_or_default();
-    assert!(
-        !bytes.contains(PAT),
-        "{ctx}: the PAT smuggled into a digest-named field must NOT persist \
-         verbatim in the forever-log:\n{bytes}"
-    );
-    assert!(
-        bytes.contains(REDACTED),
-        "{ctx}: the smuggled secret is replaced by the sentinel, not dropped:\n{bytes}"
     );
 }
 
@@ -157,7 +150,12 @@ fn check_toolchain_secret_is_rejected_at_the_door() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn verdict_tree_hash_secret_redacts_in_the_tree_hash_field() {
+fn verdict_tree_hash_secret_is_rejected_at_the_door() {
+    // K-SCRUB: `--tree-hash` is now routed through the SAME structural-secret door
+    // as `--id`/`--campaign`/`--toolchain` (it is a content-address identifier
+    // reaching the forever-log). A PAT smuggled into it is rejected at the door
+    // (exit-2 `secret_in_identifier`) — nothing is persisted. (The central scrub
+    // boundary remains the backstop; the door is the clean early rejection.)
     let dir = scratch("verdict-th");
     let log = dir.join("log.json");
     let log_s = log.to_str().unwrap();
@@ -178,12 +176,56 @@ fn verdict_tree_hash_secret_redacts_in_the_tree_hash_field() {
         "--tree-hash",
         PAT,
     ]);
-    assert!(
-        out.status.success(),
-        "verdict --store exits 0: {}",
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a secret --tree-hash is rejected at the door (exit 2): {}",
         stdout_of(&out)
     );
-    assert_no_pat(&log, "verdict --tree-hash");
+    assert!(
+        stdout_of(&out).contains("secret_in_identifier"),
+        "the door surfaces the structured secret_in_identifier error: {}",
+        stdout_of(&out)
+    );
+    // Nothing was persisted: the PAT is NOWHERE at rest (no verdict.recorded row
+    // was appended behind the rejected door).
+    let log_bytes = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !log_bytes.contains(PAT),
+        "the rejected tree-hash secret never reached the --log:\n{log_bytes}"
+    );
+}
+
+#[test]
+fn verdict_legit_cas_tree_hash_survives_verbatim() {
+    // K-SCRUB addressability half: a real `cas:<64-hex>` tree-hash passes the door
+    // AND survives verbatim in the recorded payload (the content address is
+    // load-bearing — the value-gated `cas:` exemption preserves it).
+    let dir = scratch("verdict-th-legit");
+    let log = dir.join("log.json");
+    let log_s = log.to_str().unwrap();
+    bootstrap_log(log_s);
+
+    const CAS64: &str = "cas:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    let out = run(&[
+        "verdict",
+        "--intent",
+        "i1",
+        "--log",
+        log_s,
+        "--store",
+        "--lens",
+        "security",
+        "--result",
+        "approve",
+        "--tree-hash",
+        CAS64,
+    ]);
+    assert!(
+        out.status.success(),
+        "a legit cas: tree-hash records (exit 0): {}",
+        stdout_of(&out)
+    );
 
     let records: serde_json::Value = serde_json::from_slice(&std::fs::read(&log).unwrap()).unwrap();
     let row = records
@@ -195,8 +237,8 @@ fn verdict_tree_hash_secret_redacts_in_the_tree_hash_field() {
     let payload: serde_json::Value =
         serde_json::from_str(row["payload"].as_str().unwrap()).unwrap();
     assert_eq!(
-        payload["tree_hash"], REDACTED,
-        "a secret smuggled into tree_hash is scrubbed, not key-exempt: {payload}"
+        payload["tree_hash"], CAS64,
+        "a legit cas:<64hex> tree-hash survives verbatim (addressable): {payload}"
     );
 }
 

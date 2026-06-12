@@ -515,6 +515,103 @@ fn verdict_intent_and_lens_are_free_text_not_addresses() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// verdict — --tree-hash (K-SCRUB: the cas:/content-address exemption hole)
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn record_verdict_tree_hash(log: &str, intent: &str, tree_hash: &str) -> Output {
+    run(&[
+        "verdict",
+        "--intent",
+        intent,
+        "--log",
+        log,
+        "--store",
+        "--lens",
+        "security",
+        "--result",
+        "approve",
+        "--tree-hash",
+        tree_hash,
+    ])
+}
+
+#[test]
+fn verdict_tree_hash_field_matrix() {
+    // K-SCRUB: `--tree-hash` is an identifier-address that reaches the forever-log
+    // (and the `.ac`). EVERY structural secret in it — BARE and `cas:`-prefixed —
+    // must be door-rejected OR `[REDACTED]` at rest, with ZERO verbatim bytes.
+    for (label, secret) in secrets() {
+        for (variant, value) in [
+            ("bare", secret.to_string()),
+            ("cas-prefixed", format!("cas:{secret}")),
+        ] {
+            let dir = scratch(&format!(
+                "verdict-tree-hash-{variant}-{}",
+                label.replace(['/', ' ', '-'], "_")
+            ));
+            let log = dir.join("log.json");
+            std::fs::write(&log, "[]").unwrap();
+            let out = record_verdict_tree_hash(log.to_str().unwrap(), "i1", &value);
+            let ctx = format!("verdict --tree-hash={variant}={label}");
+            assert_door_or_rest(&dir, &out, secret, &ctx);
+            // The `.ac` sidecar (a separate engine write path) must also be clean.
+            assert_ac_clean(&dir, secret, &ctx);
+        }
+    }
+}
+
+#[test]
+fn verdict_tree_hash_cas_credential_does_not_survive() {
+    // THE confirmed P0: `verdict … --tree-hash "cas:ghp_…"` stored the PAT
+    // VERBATIM in the forever-log because ANY `cas:`-prefixed value was
+    // blanket-exempted from the scrub. Value-gated now: a credential behind `cas:`
+    // is NOT a content address — door-rejected OR redacted, never verbatim.
+    let dir = scratch("verdict-tree-hash-cas-ghp");
+    let log = dir.join("log.json");
+    std::fs::write(&log, "[]").unwrap();
+    let leak = format!("cas:{GHP}");
+    let out = record_verdict_tree_hash(log.to_str().unwrap(), "i1", &leak);
+    assert_door_or_rest(&dir, &out, GHP, "verdict --tree-hash=cas:ghp_");
+    assert_ac_clean(&dir, GHP, "verdict --tree-hash=cas:ghp_ (.ac)");
+}
+
+#[test]
+fn verdict_legit_cas_and_hex_tree_hash_survive_verbatim() {
+    // The addressability half: a real `cas:<64-hex>` and a bare 64-hex tree-hash
+    // MUST survive verbatim (the content address is load-bearing, never collapses).
+    const HEX64: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    let cas64 = format!("cas:{HEX64}");
+
+    let dir = scratch("verdict-tree-hash-legit-cas");
+    let log = dir.join("log.json");
+    std::fs::write(&log, "[]").unwrap();
+    let out = record_verdict_tree_hash(log.to_str().unwrap(), "auth-hardening", &cas64);
+    assert!(
+        out.status.success(),
+        "legit cas: tree-hash must record: {out:?}"
+    );
+    let bytes = at_rest_bytes_excluding_ac(&dir);
+    assert!(
+        bytes.contains(&cas64),
+        "a legit `cas:<64hex>` tree-hash must SURVIVE verbatim:\n{bytes}"
+    );
+
+    let dir2 = scratch("verdict-tree-hash-legit-hex");
+    let log2 = dir2.join("log.json");
+    std::fs::write(&log2, "[]").unwrap();
+    let out2 = record_verdict_tree_hash(log2.to_str().unwrap(), "auth-hardening", HEX64);
+    assert!(
+        out2.status.success(),
+        "legit hex tree-hash must record: {out2:?}"
+    );
+    let bytes2 = at_rest_bytes_excluding_ac(&dir2);
+    assert!(
+        bytes2.contains(HEX64),
+        "a legit bare 64-hex tree-hash must SURVIVE verbatim:\n{bytes2}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // check — --def, --cmd, --pr, --principal, --toolchain
 // ─────────────────────────────────────────────────────────────────────────────
 

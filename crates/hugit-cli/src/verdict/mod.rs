@@ -173,6 +173,19 @@ fn record(args: VerdictArgs) -> Result<Value, PorcelainError> {
         .with_context("result_count", json!(args.result.len())));
     }
 
+    // ── Door the --tree-hash identifier (K-SCRUB) ─────────────────────────────
+    // `--tree-hash` is a content-address identifier that is stamped into the
+    // recorded verdict and reaches the forever-log. Route it through the SAME
+    // structural-secret door as --id/--campaign/--run-id so a credential smuggled
+    // as a tree-hash (`cas:ghp_…`) is rejected at input with a clear exit-2
+    // (`secret_in_identifier`) BEFORE it is appended. The default empty
+    // placeholder and a legitimate hex / `cas:<hex>` content address pass through;
+    // the central scrub boundary remains the security backstop regardless.
+    if !args.tree_hash.trim().is_empty() {
+        crate::ident::validate_identifier(&args.tree_hash, "--tree-hash")
+            .map_err(|e| PorcelainError::new(e.kind, e.message, e.fix))?;
+    }
+
     // ── Parse per-lens verdicts ───────────────────────────────────────────────
     let mut lens_verdicts: Vec<(String, Verdict)> = Vec::with_capacity(args.lens.len());
     for (name, raw) in args.lens.iter().zip(args.result.iter()) {
