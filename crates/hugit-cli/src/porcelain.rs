@@ -610,11 +610,25 @@ fn is_bare_hex_digest(value: &str) -> bool {
 }
 
 /// A content-address ref carrying an explicit algorithm prefix: `cas:<payload>`
-/// (any payload) or `<algo>:<40|64-hex>` where `<algo>` names a recognised hash
-/// family. Mirrors `hugit_ledger::redact::is_content_address_ref`.
+/// or `<algo>:<40|64-hex>` where `<algo>` names a recognised hash family.
+///
+/// VALUE-GATED (K-SCRUB, the Round-7 hole — the 5th "an exemption is a hole"):
+/// the `cas:` prefix no longer blanket-exempts ANY payload. The payload after the
+/// `cas:` prefix must be a genuine content-address SHAPE
+/// ([`is_cas_payload_shaped`]) — a bare 40/64-hex run or a base32 CID — AND must
+/// not trip a structural-secret detector ([`is_structural_secret`]). A
+/// `cas:ghp_…` / `cas:<JWT>` / `cas:<conn-string>` is NOT a content address: it
+/// falls through here and scrubs to `[REDACTED]`, never stored verbatim. A real
+/// `cas:<64-hex>` (or base32 CID) still survives — addressability preserved.
+///
+/// Mirrors `hugit_ledger::redact::is_content_address_ref` (kept in lockstep).
 fn is_content_address_ref(value: &str) -> bool {
-    if value.starts_with("cas:") {
-        return true;
+    if let Some(payload) = value.strip_prefix("cas:") {
+        // VALUE-GATE: a `cas:` ref survives only when its payload is genuinely
+        // content-address shaped AND not structurally a secret. Both gates: the
+        // shape rejects credential charsets (`_`, uppercase prefixes); the
+        // structural detector is the authoritative belt-and-braces guard.
+        return is_cas_payload_shaped(payload) && !is_structural_secret(payload);
     }
     let Some((algo, hex)) = value.split_once(':') else {
         return false;
@@ -622,6 +636,26 @@ fn is_content_address_ref(value: &str) -> bool {
     is_digest_algo(algo)
         && matches!(hex.len(), 40 | 64)
         && hex.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// True iff `payload` (the part after a `cas:` prefix) is a genuine
+/// content-address SHAPE: either a bare 40/64-char hex run (sha-1 / sha-256) or a
+/// base32 content-id (lowercase `[a-z2-7]`, the CIDv1/multibase-b charset, of a
+/// content-address-plausible length). A credential smuggled behind `cas:` (`ghp_…`,
+/// a JWT, a connection string) does NOT match this charset/length, so it is not a
+/// content address. Mirrors `hugit_ledger::redact::is_cas_payload_shaped`.
+fn is_cas_payload_shaped(payload: &str) -> bool {
+    // Bare hex content address (sha-1 / sha-256).
+    if matches!(payload.len(), 40 | 64) && payload.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return true;
+    }
+    // base32 content-id: lowercase RFC-4648 base32 charset (`a-z2-7`), of a
+    // content-address-plausible length (a CIDv1 base32 of a sha-256 is ~59
+    // chars; allow the 32–64 band that real content ids fall in).
+    matches!(payload.len(), 32..=64)
+        && payload
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b))
 }
 
 /// Recognised content-address algorithm tags (case-insensitive). Mirrors the
@@ -1004,12 +1038,36 @@ mod tests {
         assert!(is_digest_shaped(DIGEST_40));
         assert!(is_digest_shaped(&format!("sha256:{DIGEST_64}")));
         assert!(is_digest_shaped(&format!("sha1:{DIGEST_40}")));
-        assert!(is_digest_shaped("cas:anything-here"));
+        // K-SCRUB: a `cas:` ref is digest-shaped ONLY with a content-address
+        // payload (64-hex / base32 CID), not any string.
+        assert!(is_digest_shaped(&format!("cas:{DIGEST_64}")));
+        assert!(is_digest_shaped(
+            "cas:bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+        ));
+        assert!(!is_digest_shaped("cas:anything-here")); // not a content-address shape
+        // K-SCRUB: a credential smuggled behind `cas:` is NOT digest-shaped.
+        assert!(!is_digest_shaped(&format!("cas:{GHP}")));
         // Secrets / short / unknown-prefix are NOT digest-shaped.
         assert!(!is_digest_shaped(GHP));
         assert!(!is_digest_shaped("deadbeef")); // 8 hex, too short
         assert!(!is_digest_shaped(&format!("token:{DIGEST_64}"))); // unknown algo
         assert!(!is_digest_shaped("postgres://u:p@h:5432/d"));
+    }
+
+    #[test]
+    fn is_content_address_ref_value_gates_the_cas_prefix() {
+        // K-SCRUB unit proof: `cas:<64hex>` / `cas:<base32 CID>` ARE refs; a
+        // `cas:<credential>` is NOT (the 5th "an exemption is a hole" closed).
+        assert!(is_content_address_ref(&format!("cas:{DIGEST_64}")));
+        assert!(is_content_address_ref(&format!("cas:{DIGEST_40}")));
+        assert!(is_content_address_ref(
+            "cas:bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+        ));
+        assert!(!is_content_address_ref(&format!("cas:{GHP}")));
+        assert!(!is_content_address_ref("cas:anything-here"));
+        // Non-cas prefixed forms unchanged.
+        assert!(is_content_address_ref(&format!("sha256:{DIGEST_64}")));
+        assert!(!is_content_address_ref(&format!("token:{DIGEST_64}")));
     }
 
     // ── WI-SCRUB (adversarial Round 5): structural-secret scrub for identifiers ─

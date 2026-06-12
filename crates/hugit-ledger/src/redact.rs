@@ -395,14 +395,21 @@ fn is_token_char(c: char) -> bool {
 
 /// True for content-address refs that must survive verbatim — but ONLY in a
 /// content-address CONTEXT (WF-1). A digest is a ref iff it carries an explicit
-/// algorithm prefix: `cas:` (any payload) or `<algo>:<40|64-hex>` where `<algo>`
+/// algorithm prefix: `cas:<payload>` or `<algo>:<40|64-hex>` where `<algo>`
 /// is a recognised content-address tag. A **bare** 40/64-hex run (no prefix) is
 /// NOT treated as a ref here — in free text it could be an HMAC / SECRET_KEY /
 /// hex API key of exactly that shape, so it falls through to the entropy scan
 /// and redacts. Typed hash fields never reach [`apply`], so they are unaffected.
+///
+/// VALUE-GATED (K-SCRUB, the Round-7 hole): the `cas:` prefix no longer
+/// blanket-exempts ANY payload. The payload must be a genuine content-address
+/// SHAPE ([`is_cas_payload_shaped`]) AND must not trip a structural-secret
+/// detector. A `cas:ghp_…` / `cas:<JWT>` / `cas:<conn-string>` is NOT a content
+/// address → it is not a ref here and redacts. A real `cas:<64-hex>` (or base32
+/// CID) survives. Kept in lockstep with `porcelain::is_content_address_ref`.
 fn is_content_address_ref(token: &str) -> bool {
-    if token.starts_with("cas:") {
-        return true;
+    if let Some(payload) = token.strip_prefix("cas:") {
+        return is_cas_payload_shaped(payload) && !is_structural_secret(payload);
     }
     // Require an explicit `<algo>:` prefix and a hex payload of digest shape.
     // A bare hex run (no `:`) is deliberately NOT exempt.
@@ -412,6 +419,37 @@ fn is_content_address_ref(token: &str) -> bool {
     is_digest_algo(algo)
         && matches!(hex.len(), 40 | 64)
         && hex.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// True iff `payload` (the part after a `cas:` prefix) is a genuine
+/// content-address SHAPE: a bare 40/64-char hex run (sha-1 / sha-256) or a base32
+/// content-id (lowercase RFC-4648 `[a-z2-7]`, of a content-address-plausible
+/// length). A credential smuggled behind `cas:` does NOT match this
+/// charset/length. Kept in lockstep with `porcelain::is_cas_payload_shaped`.
+fn is_cas_payload_shaped(payload: &str) -> bool {
+    if matches!(payload.len(), 40 | 64) && payload.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return true;
+    }
+    matches!(payload.len(), 32..=64)
+        && payload
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b))
+}
+
+/// True iff `s` trips a STRUCTURAL secret detector — the credential-prefix / PEM /
+/// connection-string / keyword-context classes that do NOT depend on entropy or
+/// bare-hex shape. This is the value-gate guard for the `cas:` exemption: even a
+/// content-address-charset payload that happens to carry a known credential prefix
+/// (`ghp_`/`xoxb-`/`Bearer `/…) is NOT a content address. The bare-hex/entropy
+/// scan is intentionally NOT consulted (a real CID is high-entropy and must
+/// survive). Reuses the same detectors [`is_secret`] runs (1)–(4).
+fn is_structural_secret(s: &str) -> bool {
+    s.contains(SECRET_MARKER)
+        || KNOWN_PREFIXES.iter().any(|p| s.contains(p))
+        || has_sk_key(s)
+        || (s.contains("-----BEGIN") && s.contains("PRIVATE KEY"))
+        || has_connection_string_password(s)
+        || has_keyword_context_secret(s)
 }
 
 /// Recognised content-address algorithm tags for the prefixed-digest exemption.
@@ -855,15 +893,28 @@ mod tests {
 
     #[test]
     fn content_address_ref_recognised() {
-        // WF-1: only PREFIXED forms are content-address refs now. A BARE hex
-        // digest is NOT (it falls to the digest-shape detector in free text).
+        // WF-1: only PREFIXED forms are content-address refs. K-SCRUB: the `cas:`
+        // payload is now VALUE-GATED — it must be content-address shaped, not any
+        // string.
         assert!(is_content_address_ref(
             "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         ));
         assert!(is_content_address_ref(
             "sha1:da39a3ee5e6b4b0d3255bfef95601890afd80709"
         ));
-        assert!(is_content_address_ref("cas:anything-here"));
+        // A real `cas:<64-hex>` / base32 CID survives.
+        assert!(is_content_address_ref(
+            "cas:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ));
+        assert!(is_content_address_ref(
+            "cas:bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"
+        ));
+        // K-SCRUB: a credential smuggled behind `cas:` is NOT a content address.
+        assert!(!is_content_address_ref(
+            "cas:ghp_16C7e42F292c6912E7710c838347Ae178B4a"
+        ));
+        // K-SCRUB: an arbitrary non-shaped `cas:` payload is no longer a ref.
+        assert!(!is_content_address_ref("cas:anything-here"));
         // Bare hex digests are NO LONGER refs by themselves.
         assert!(!is_content_address_ref(
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -876,6 +927,24 @@ mod tests {
             "deadbeef:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         ));
         assert!(!is_content_address_ref("8Kp2mZ9qLx4vTn7wRj3sYb6cFd1gHe0"));
+    }
+
+    #[test]
+    fn cas_with_a_credential_payload_redacts() {
+        // K-SCRUB (Round-7 hole): the `cas:` exemption is value-gated. A PAT
+        // smuggled behind `cas:` is NOT a content address and MUST redact.
+        assert_eq!(
+            apply("cas:ghp_16C7e42F292c6912E7710c838347Ae178B4a"),
+            REDACTED
+        );
+        // Belt-and-braces across structural classes behind `cas:`.
+        assert_eq!(
+            apply("cas:xoxb-2222222222-3333333333-abcdefghijklmnop"),
+            REDACTED
+        );
+        // A real `cas:<64-hex>` still survives verbatim (addressability).
+        let real = "cas:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        assert_eq!(apply(real), real);
     }
 
     #[test]
