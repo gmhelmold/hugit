@@ -45,6 +45,7 @@
 //! surfaces the structured `log_busy`, never a clobber.
 
 use std::collections::BTreeMap;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -71,6 +72,17 @@ const DEFAULT_TIMEOUT_SECS: u64 = 300;
 /// How often the timeout watcher polls the child for completion. Small enough to
 /// kill promptly on expiry, large enough not to busy-spin.
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// Per-stream capture ceiling for the drain threads (WJ-CHECK-DRAIN). A
+/// flooding command (`yes`, `cat /dev/urandom`) can emit output without bound;
+/// reading it all into memory would OOM the agent. We cap at 4 MiB per stream:
+/// enough for any real gate's diagnostic output, harmless for a `yes`-style
+/// flood (the drain discards bytes past the cap while still consuming from the
+/// pipe so the child is never blocked). The captured bytes are not stored — they
+/// are silently discarded per the verb's JSON-contract rule (a check's output
+/// never pollutes `hugit`'s own stdout). The cap is a safety budget, not a
+/// truncation of meaningful content: gate diagnostics rarely exceed 1 MiB.
+const PIPE_CAPTURE_CAP: usize = 4 * 1024 * 1024; // 4 MiB per stream
 
 /// Resolve a built-in check def by name into its frozen gate command. The
 /// built-ins are the gate set every hugit/CoreLink crate runs.
@@ -358,13 +370,22 @@ impl CheckRunner for ProcessRunner {
     ) -> Result<CheckResult, ExecError> {
         let start = Instant::now();
         // Spawn (not `.output()`) so we keep the child handle and can kill it on
-        // the deadline. stdout/stderr are piped so the wait-with-output drains
-        // them without polluting the verb's JSON contract. The child is spawned in
-        // its OWN process group (`process_group(0)` — std-only, Unix) so the whole
-        // tree (including a backgrounded grandchild) can be killed as a unit on a
-        // timeout (WH-CHECK lock-poison fix item b: `child.kill()` alone reaps only
-        // the direct child, letting an orphan grandchild survive past the deadline
-        // and a backgrounding command bypass the wall-time ceiling).
+        // the deadline. stdout/stderr are piped and CONCURRENTLY DRAINED by two
+        // background threads (WJ-CHECK-DRAIN): a command emitting more than the
+        // 64 KiB OS pipe-buffer would otherwise block on its next write(), causing
+        // `try_wait()` to return `Ok(None)` forever until the 300 s timeout. The
+        // drain threads read each pipe to completion (capped at PIPE_CAPTURE_CAP
+        // per stream to prevent OOM from a `yes`/`cat /dev/urandom` flood), so the
+        // child is never blocked on a full pipe and the timeout fires only for a
+        // genuinely hung (non-writing) command. The captured bytes are discarded —
+        // a check's output never pollutes the verb's JSON-contract stdout.
+        //
+        // The child is spawned in its OWN process group (`process_group(0)` —
+        // std-only, Unix) so the whole tree (including a backgrounded grandchild)
+        // can be killed as a unit on a timeout (WH-CHECK lock-poison fix item b:
+        // `child.kill()` alone reaps only the direct child, letting an orphan
+        // grandchild survive past the deadline and a backgrounding command bypass
+        // the wall-time ceiling).
         let mut command = shell_command(&def.command);
         command
             .stdout(std::process::Stdio::piped())
@@ -380,28 +401,94 @@ impl CheckRunner for ProcessRunner {
             .spawn()
             .map_err(|e| ExecError::Run(format!("spawn `{}`: {e}", def.command)))?;
 
+        // Take the pipe handles BEFORE the poll loop so the drain threads can
+        // consume them independently. Taking them here (before any try_wait) is
+        // required: once `child.wait()` is called the handles are consumed.
+        //
+        // Each drain thread reads up to PIPE_CAPTURE_CAP bytes then discards the
+        // rest (still consuming, so the child is never blocked). On a normal
+        // command the thread reads until EOF (pipe closed when the child exits).
+        // On a flooding command it reads until the cap, then discards the rest via
+        // a small fixed-size scratch buffer until EOF — the child is STILL
+        // unblocked. On timeout `kill_group` closes the child's write end of the
+        // pipe (the child's fd is gone after kill+wait), so the drain thread sees
+        // EOF and exits promptly.
+        let stdout_handle = child.stdout.take();
+        let stderr_handle = child.stderr.take();
+
+        let drain = |mut pipe: Box<dyn std::io::Read + Send + 'static>| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::with_capacity(PIPE_CAPTURE_CAP.min(64 * 1024));
+                let mut total = 0usize;
+                let mut scratch = [0u8; 4096];
+                loop {
+                    if total < PIPE_CAPTURE_CAP {
+                        let room = PIPE_CAPTURE_CAP - total;
+                        let chunk = room.min(scratch.len());
+                        match pipe.read(&mut scratch[..chunk]) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                buf.extend_from_slice(&scratch[..n]);
+                                total += n;
+                            }
+                            Err(_) => break,
+                        }
+                    } else {
+                        // Cap reached: drain and discard to keep the pipe unblocked.
+                        match pipe.read(&mut scratch) {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => {}
+                        }
+                    }
+                }
+                // The captured bytes are intentionally discarded (not returned).
+                // A check's output never surfaces in hugit's JSON-contract stdout.
+                drop(buf);
+            })
+        };
+
+        let stdout_thread = stdout_handle.map(|h| drain(Box::new(h)));
+        let stderr_thread = stderr_handle.map(|h| drain(Box::new(h)));
+
         // Poll for completion up to the deadline; kill the whole GROUP + reap on
         // expiry (WH-CHECK: a backgrounding child must not outlive the ceiling).
-        let exit = loop {
+        // The drain threads run concurrently throughout: the child can never block
+        // on a full pipe regardless of how much output it emits (WJ-CHECK-DRAIN).
+        let poll_result = loop {
             match child.try_wait() {
-                Ok(Some(status)) => break status.code().unwrap_or(-1),
+                Ok(Some(status)) => break Ok(status.code().unwrap_or(-1)),
                 Ok(None) => {
                     if start.elapsed() >= self.timeout {
                         // Bounded ceiling reached: kill the whole process GROUP (so
                         // orphan grandchildren die too), reap the direct child (no
                         // zombie), and surface a structured timeout. The result is
                         // NOT stored — a hang never poisons the cache.
+                        // The kill closes the child's write end of the pipes, so
+                        // the drain threads will see EOF and exit promptly.
                         kill_group(&mut child);
-                        return Err(ExecError::Timeout(self.timeout.as_secs()));
+                        break Err(ExecError::Timeout(self.timeout.as_secs()));
                     }
                     std::thread::sleep(POLL_INTERVAL);
                 }
                 Err(e) => {
                     kill_group(&mut child);
-                    return Err(ExecError::Run(format!("wait `{}`: {e}", def.command)));
+                    break Err(ExecError::Run(format!("wait `{}`: {e}", def.command)));
                 }
             }
         };
+
+        // Join the drain threads so all pipe data is consumed before we return.
+        // On a normal exit the threads have already drained to EOF. On a timeout
+        // they drain the residual bytes left in the OS pipe buffer after the kill
+        // (at most a few KB) and then see EOF — the join is prompt.
+        if let Some(t) = stdout_thread {
+            let _ = t.join();
+        }
+        if let Some(t) = stderr_thread {
+            let _ = t.join();
+        }
+
+        let exit = poll_result?;
         let duration_ms = start.elapsed().as_millis() as u64;
 
         Ok(CheckResult {
