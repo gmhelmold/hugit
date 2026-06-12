@@ -30,8 +30,8 @@ use std::path::{Path, PathBuf};
 
 use hugit_contracts::IntentSidecar;
 use hugit_contracts::event_record::EventRecord;
+use hugit_refstore::EventLog;
 use hugit_refstore::intent::{import_sidecar, intents_from_log};
-use hugit_refstore::{EventLog, verify_chain};
 use sha2::{Digest, Sha256};
 
 use super::canonical_log;
@@ -450,27 +450,26 @@ fn load_log_verified(path: &Path) -> Result<EventLog, PorcelainError> {
             "the --log file must be a canonical JSON [EventRecord, …] array",
         )
     })?;
-    let mut log = EventLog::new();
-    for record in records {
-        log.push_record(record).map_err(|e| {
-            PorcelainError::new(
-                "rehydrate",
-                format!("rehydrate --log {}: {e}", path.display()),
-                "the --log file's records must form a gap-free, monotonic chain",
-            )
-        })?;
-    }
-    verify_chain(log.records()).map_err(|e| {
-        PorcelainError::new(
+    // PS-13 chokepoint (Wave M integration): the reconcile's rehydrate+verify
+    // routes through the SINGLE verified loader `checks::rehydrate_and_verify`
+    // (the sole production site of `push_record` + `verify_chain`) rather than
+    // hand-rolling it — so this read path cannot drift from the chain-integrity
+    // law and a future edit here that forgot to verify would break the build.
+    crate::checks::rehydrate_and_verify(records).map_err(|e| match e {
+        crate::checks::ChainLoadFault::Rehydrate(m) => PorcelainError::new(
+            "rehydrate",
+            format!("rehydrate --log {}: {m}", path.display()),
+            "the --log file's records must form a gap-free, monotonic chain",
+        ),
+        crate::checks::ChainLoadFault::ChainBroken(m) => PorcelainError::new(
             "chain_broken",
             format!(
-                "--log {} failed integrity verification: {e}",
+                "--log {} failed integrity verification: {m}",
                 path.display()
             ),
             "the --log file's hash chain is tampered or corrupt",
-        )
-    })?;
-    Ok(log)
+        ),
+    })
 }
 
 /// Bootstrap the store's parent directory (mkdir -p) so a first-run
