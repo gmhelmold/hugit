@@ -132,9 +132,16 @@ impl Ledger {
         // Match by raw intent id (via the internal index) so that redaction
         // of the surfaced field does not break the verdict linkage.
         //
-        // WH-PROVEN: `proven` advances ONLY when the aggregate outcome is
-        // `Approve`.  A `Reject` or `FixFirst` verdict marks `rejected=true`
-        // and leaves `proven=false` — the intent is landed but NOT validated.
+        // WI-PROVEN2 / latest-verdict-wins: records are in log (seq) order;
+        // iterating forward means each subsequent `verdict.recorded` for the
+        // same intent overwrites the previous one.  The LAST verdict on the
+        // log is authoritative — `proven` and `rejected` are MUTUALLY
+        // EXCLUSIVE: only the latest verdict outcome governs.
+        //
+        // WH-PROVEN: `proven` is true ONLY when the LATEST outcome is
+        // `Approve`.  A `Reject` or `FixFirst` revision clears `proven` and
+        // sets `rejected=true`.  An `Approve` revision clears `rejected` and
+        // sets `proven=true`.  The two flags are never simultaneously true.
         for r in records {
             if r.kind == "verdict.recorded"
                 && let Ok(vo) = serde_json::from_str::<VerdictObject>(&r.payload)
@@ -142,10 +149,14 @@ impl Ledger {
             {
                 match vo.verdict {
                     Verdict::Approve => {
+                        // Latest verdict is approve: proven=true, rejected cleared.
                         entries[idx].proven = true;
+                        entries[idx].rejected = false;
                     }
                     Verdict::Reject | Verdict::FixFirst => {
+                        // Latest verdict is non-approve: rejected=true, proven cleared.
                         entries[idx].rejected = true;
+                        entries[idx].proven = false;
                     }
                 }
                 entries[idx].verdict = Some(VerdictView::from_verdict_object(&vo));
