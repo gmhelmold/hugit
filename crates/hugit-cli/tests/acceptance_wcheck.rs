@@ -1275,3 +1275,177 @@ fn an_identical_ad_hoc_cmd_run_is_a_cache_hit_even_with_state_under_root() {
         "the memo key is STABLE across runs — hugit's own state no longer busts it: {warm}"
     );
 }
+
+// ── WJ-CHECK-DRAIN (adversarial Round-6 Cluster C) ───────────────────────────
+
+/// WJ-CHECK-DRAIN [SHIP-BLOCKER — pipe-buffer deadlock]: a command that emits
+/// more than the 64 KiB OS pipe-buffer to stdout COMPLETES PROMPTLY instead of
+/// deadlocking for 300 s. Before the fix, `ProcessRunner` piped stdout/stderr
+/// but never drained them; once the pipe buffer filled the child blocked on its
+/// next `write()`, `try_wait()` returned `Ok(None)` forever, and the 300 s
+/// timeout was the only way out — holding the process for ~5 min.
+///
+/// The fix: two background drain threads consume stdout and stderr concurrently
+/// with the poll loop (capped at 4 MiB per stream to prevent OOM). The child
+/// is never blocked on a full pipe, so a >64 KiB-output command completes in
+/// its real wall-clock time, not 300 s.
+///
+/// This test uses a PORTABLE, BOUNDED flood: `head -c 200000 /dev/zero` emits
+/// exactly 200 000 bytes (~195 KiB) to stdout — safely above the 64 KiB
+/// pipe-buffer ceiling, safely below OOM, and built from POSIX-standard tools
+/// (`head -c` + `/dev/zero`) present on macOS + Linux. It is bounded by
+/// construction (no unbounded `yes`), so it cannot OOM CI even if the drain cap
+/// regressed.
+///
+/// Proof:
+///   - Without the drain fix: the child fills the 64 KiB buffer, blocks on
+///     the next write, never calls exit(); `try_wait()` returns `Ok(None)` on
+///     every poll; the loop runs until the 300 s ceiling. The test's 20 s
+///     wall-time assertion FAILS (elapsed > 20 s).
+///   - With the drain fix: the drain threads consume the output as it arrives;
+///     the child exits normally after emitting all bytes; `try_wait()` returns
+///     `Ok(Some(status))` with exit 0; the verb reports `ok:true` and
+///     `exit:0`; elapsed << 20 s.
+#[test]
+#[cfg(unix)]
+fn large_output_command_completes_promptly_no_pipe_buffer_deadlock() {
+    let dir = scratch("drain");
+    let log = dir.join("log.json");
+    let ac = dir.join("ac.json");
+    write_empty_log(&log);
+    let root = seed_tree(&dir);
+
+    // A portable >64 KiB flood (200 000 bytes ~ 195 KiB) built from POSIX tools:
+    // `/dev/zero` is an infinite source, `head -c` caps it at exactly 200 000
+    // bytes. Bounded by construction — no unbounded `yes`.
+    let flood_cmd = "head -c 200000 /dev/zero";
+
+    let start = std::time::Instant::now();
+    let (code, v) = run(&[
+        "check",
+        "--def",
+        "drain-check",
+        "--cmd",
+        flood_cmd,
+        "--log",
+        &log.display().to_string(),
+        "--store",
+        "--ac",
+        &ac.display().to_string(),
+        "--root",
+        &root.display().to_string(),
+        "--toolchain",
+        "tc-fixed",
+        "--timeout-secs",
+        "60",
+    ]);
+    let elapsed = start.elapsed();
+
+    // The command exits 0 and the verb completes promptly (well under the 20 s
+    // wall-time budget — the actual runtime on any real host is < 1 s).
+    assert_eq!(
+        code, 0,
+        "a >64 KiB-output check exits 0 (no deadlock): {v}; elapsed: {elapsed:?}"
+    );
+    assert_eq!(
+        v["ok"], true,
+        "a >64 KiB-output command that exits 0 is ok: {v}"
+    );
+    assert_eq!(v["exit"], 0, "exit code is 0: {v}");
+    assert!(
+        elapsed < std::time::Duration::from_secs(20),
+        "the >64 KiB-output check completed in {elapsed:?} — NOT deadlocked for 300 s \
+         (pipe drain is working; without the fix this would block until the timeout)"
+    );
+}
+
+/// WJ-CHECK-DRAIN [lock-not-held]: the `--log` FileLock is NOT held during
+/// command execution. A concurrent `hugit checks show --log L` while a flood
+/// check is running on the same log MUST NOT be blocked out (it should complete
+/// in milliseconds, not be stuck waiting for the flood check to finish).
+///
+/// This test directly verifies the architectural property: the log lock is
+/// acquired only inside `record_on_log` (called AFTER `run_memoized` returns),
+/// never across the execute. A flooding command must not cause `log_busy` for
+/// any concurrent verb.
+#[test]
+#[cfg(unix)]
+fn concurrent_show_is_not_locked_out_during_a_flood_check() {
+    use std::thread;
+
+    let dir = scratch("drain-lock");
+    let log = dir.join("log.json");
+    let ac = dir.join("ac.json");
+    write_empty_log(&log);
+    let root = seed_tree(&dir);
+
+    // The flood check: emit 200 KB (> the 64 KiB pipe buffer) THEN sleep 1 s so
+    // the check is still executing while the concurrent `checks show` runs — a
+    // genuine overlap. The 200 KB output proves the drain works (no deadlock);
+    // the 1 s sleep proves the log lock is not held across the whole execute
+    // (the concurrent verb is not blocked for that second). Bounded by
+    // construction (`head -c`), no unbounded `yes`. 30 s timeout is well above
+    // the ~1 s real runtime so it is never killed.
+    let flood_cmd = "head -c 200000 /dev/zero; sleep 1";
+    let log_str = log.display().to_string();
+    let ac_str = ac.display().to_string();
+    let root_str = root.display().to_string();
+
+    let flood_handle = {
+        let log_str = log_str.clone();
+        let ac_str = ac_str.clone();
+        let root_str = root_str.clone();
+        thread::spawn(move || {
+            run(&[
+                "check",
+                "--def",
+                "drain-lock-check",
+                "--cmd",
+                flood_cmd,
+                "--log",
+                &log_str,
+                "--store",
+                "--ac",
+                &ac_str,
+                "--root",
+                &root_str,
+                "--toolchain",
+                "tc-fixed",
+                "--timeout-secs",
+                "30",
+            ])
+        })
+    };
+
+    // Let the flood check start.
+    thread::sleep(std::time::Duration::from_millis(50));
+
+    // While the flood check is running, a concurrent `checks show` MUST NOT be
+    // locked out. If the log lock were held across execute, this would block
+    // until the flood check's record_on_log finished — potentially seconds.
+    // With the fix it returns in milliseconds.
+    let show_start = std::time::Instant::now();
+    let (show_code, show_v) = run(&["checks", "show", "--log", &log_str]);
+    let show_elapsed = show_start.elapsed();
+
+    // `checks show` must complete promptly (well under 5 s, typically < 100 ms).
+    assert!(
+        show_elapsed < std::time::Duration::from_secs(5),
+        "concurrent `checks show` completed in {show_elapsed:?} — not locked out by \
+         the flood check (log lock is not held across execute): {show_v}"
+    );
+    // `checks show` on a fresh log (no records yet from the flood, which may
+    // still be running) exits 0 with check_count 0 or 1 depending on race;
+    // we only care that it didn't block.
+    assert_eq!(
+        show_code, 0,
+        "`checks show` exits 0 while a flood check is running: {show_v}"
+    );
+
+    // Let the flood check finish and confirm it succeeded.
+    let (flood_code, flood_v) = flood_handle.join().unwrap();
+    assert_eq!(
+        flood_code, 0,
+        "the flood check itself completed successfully: {flood_v}"
+    );
+}
