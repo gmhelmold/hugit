@@ -203,12 +203,23 @@ fn lookup_404_is_a_miss() {
 
 #[test]
 fn lookup_401_403_5xx_are_explicit_errors_never_a_hit() {
-    for code in [401u16, 403, 500, 503] {
+    // 401/403/500 are TERMINAL faults → `Status` (never a silent hit). 429/503 are
+    // RETRYABLE server-busy conditions → the typed `Busy` variant (Round-8 C6), so
+    // a fleet-shared-cache loser retries instead of collapsing to a terminal kind.
+    for code in [401u16, 403, 500] {
         let t = Arc::new(MockTransport::get(code, Vec::new()));
         let client = shared_client(&t);
         match client.lookup(&"a".repeat(64)) {
             Err(AcError::Status(c)) => assert_eq!(c, code),
             other => panic!("HTTP {code} must surface as Status error, got {other:?}"),
+        }
+    }
+    for code in [429u16, 503] {
+        let t = Arc::new(MockTransport::get(code, Vec::new()));
+        let client = shared_client(&t);
+        match client.lookup(&"a".repeat(64)) {
+            Err(AcError::Busy { .. }) => {}
+            other => panic!("HTTP {code} must surface as retryable Busy, got {other:?}"),
         }
     }
 }

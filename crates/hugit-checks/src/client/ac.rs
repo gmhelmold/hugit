@@ -32,6 +32,18 @@ pub enum AcError {
     NotWired(String),
     /// A transport/protocol failure from the live client (network, TLS, I/O).
     Transport(String),
+    /// A RETRYABLE server-busy / contention condition: AC-file lock exhaustion,
+    /// or an HTTP 429 (rate-limited) / 503 (service unavailable) from the live
+    /// fleet-shared cache. Carried as a TYPED variant — never an ad-hoc string —
+    /// so the downstream `map_exec_error` matches it structurally and the
+    /// compiler's exhaustiveness check forces every new variant to be classified
+    /// retryable-or-terminal (mirrors `LockError::Busy`). The loser of a race
+    /// must surface a retryable `ac_busy`, never collapse to terminal `ac_error`.
+    Busy {
+        /// A short, secret-free description of what was busy (the lock path or
+        /// the HTTP status). Never carries a credential.
+        detail: String,
+    },
     /// The required runtime configuration (tenant PAT and/or base URL) was not
     /// supplied. Fail-closed: the client refuses to make a network call without
     /// a credential rather than silently degrading. This is what an unconfigured
@@ -69,6 +81,7 @@ impl std::fmt::Display for AcError {
         match self {
             AcError::NotWired(ep) => write!(f, "AC HTTP seam not wired (P2): {ep}"),
             AcError::Transport(e) => write!(f, "AC transport error: {e}"),
+            AcError::Busy { detail } => write!(f, "AC busy (retryable): {detail}"),
             AcError::NotConfigured(what) => {
                 write!(f, "AC client not configured (P2): {what}")
             }
@@ -479,6 +492,13 @@ impl<T: HttpTransport> ActionCache for HttpAcClient<T> {
         match status {
             200 => Ok(Some(parse_hit(memo_key, &body)?)),
             404 => Ok(None),
+            // 429 (rate-limited) / 503 (unavailable) are RETRYABLE server-busy
+            // conditions from the live fleet-shared cache — classify them as the
+            // typed `Busy` variant so the loser of a race retries instead of
+            // collapsing to a terminal `ac_error`.
+            429 | 503 => Err(AcError::Busy {
+                detail: format!("AC GET returned HTTP {status}"),
+            }),
             other => Err(AcError::Status(other)),
         }
     }
@@ -497,6 +517,10 @@ impl<T: HttpTransport> ActionCache for HttpAcClient<T> {
         match status {
             // 200 = idempotent re-write, 201 = fresh insert — both are success.
             200 | 201 => Ok(()),
+            // 429 / 503 = retryable server-busy (see `lookup`).
+            429 | 503 => Err(AcError::Busy {
+                detail: format!("AC PUT returned HTTP {status}"),
+            }),
             other => Err(AcError::Status(other)),
         }
     }
