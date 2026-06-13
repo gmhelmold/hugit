@@ -52,7 +52,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use hugit_checks::client::ac::ActionCache;
 use hugit_checks::client::executor::{self, CheckRunner, ExecError};
-use hugit_checks::client::memo_key::FileContent;
+use hugit_checks::client::memo_key::{FileContent, frame_file_with_mode};
 use hugit_contracts::{CheckDef, CheckResult};
 use hugit_refstore::{Endpoint, EventLog, PrincipalClass};
 use serde_json::{Value, json};
@@ -386,6 +386,37 @@ fn state_file_exclusions(state_files: &[&Path]) -> std::collections::HashSet<Pat
 /// symlink cycles — this is the belt-and-suspenders guard).
 const MAX_WALK_DEPTH: usize = 64;
 
+/// The POSIX permission/mode bits of `path` folded into the tree axis (N-1).
+///
+/// On unix we read `st_mode` and keep the low `0o7777` bits (the
+/// permission + setuid/setgid/sticky bits) — the FULL permission set, not just
+/// the executable bit, so ANY mode change (`chmod -x`, `chmod 600`, a setuid
+/// flip) busts the memo key. A stat failure folds a fixed sentinel (`MODE_UNREAD`)
+/// rather than guessing — deterministic, never a silent off-key input.
+///
+/// On non-unix the mode bits are not meaningful (Windows has no `st_mode`
+/// exec bit), so we fold a fixed sentinel: the framing stays stable and
+/// cross-platform, and the Windows build is unaffected.
+#[cfg(unix)]
+fn file_mode(path: &Path) -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    /// Sentinel when the mode cannot be stat'd — distinct from any real mode.
+    const MODE_UNREAD: u32 = u32::MAX;
+    match std::fs::metadata(path) {
+        Ok(meta) => meta.mode() & 0o7777,
+        Err(_) => MODE_UNREAD,
+    }
+}
+
+/// Non-unix fold: a fixed sentinel (mode bits are not meaningful on Windows), so
+/// the canonical framing is stable cross-platform without breaking the build.
+#[cfg(not(unix))]
+fn file_mode(_path: &Path) -> u32 {
+    /// Fixed cross-platform sentinel folded on non-unix (no POSIX mode there).
+    const MODE_NON_UNIX: u32 = 0;
+    MODE_NON_UNIX
+}
+
 /// Recursively walk `dir`, collecting glob-matched files relative to `base`.
 /// Skips `target/`, `.git/`, and the worktree scratch dir so the tree axis is the
 /// SOURCE subtree, not build output (which would make every run a miss).
@@ -442,7 +473,14 @@ fn collect_files(
             if hugit_checks::client::glob::matches_any(glob_set, &rel)
                 && let Ok(bytes) = std::fs::read(&path)
             {
-                out.insert(rel, bytes);
+                // Fold the POSIX mode into the snapshotted byte field so a mode
+                // change (e.g. `chmod -x gate.sh`, SAME content) busts the tree
+                // axis → a MISS that RE-EXECUTES (N-1 stale-green close). The
+                // mode is a result-affecting input (an unexecutable `./gate.sh`
+                // fails `exit 126`), so content alone is an incomplete key. The
+                // canonical framing lives ONCE in `frame_file_with_mode`.
+                let mode = file_mode(&path);
+                out.insert(rel, frame_file_with_mode(mode, &bytes));
             }
         }
     }
