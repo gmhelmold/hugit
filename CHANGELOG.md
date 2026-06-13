@@ -39,6 +39,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`IntentMetrics.json` round-trips byte-exactly through the frozen
   `hugit_contracts::IntentMetrics` type). Completes the contract v1.2.0 §13.4
   amendment on the hugit side; unblocks the sibling PR.
+- feat(checks): **PS-11 — `hugit check --env-axis <VAR>` declares a custom env
+  dependency** (owner-approved opt-in, repeatable). The hermetic spawn clears every
+  ambient var not on the built-in result-affecting allowlist, so an ad-hoc `--cmd`
+  check that reads a CUSTOM var (e.g. `MY_GATE_MODE`) would see it unset and a change
+  to it could not bust the memo key. Declaring it with `--env-axis MY_GATE_MODE` adds
+  it to the single captured-env source, so it is BOTH folded into the memo key (value
+  change → MISS) AND passed through to the spawn — "declared == keyed == present", a
+  sound dependency, never a stale green. An UNDECLARED custom var stays cleared
+  (hit-rate preserved); the value is hashed into `def_digest` before persistence (no
+  raw leak even for a secret-valued var). Verified end-to-end against the binary
+  (`acceptance_ps11_env_axis`) + pure unit tests. Closes PS-11.
 
 - fix(checks): **PS-17 — bound peak memory on the memo-key snapshot read.** The
   tree-axis + ancestor-config snapshot previously read each matched file whole into

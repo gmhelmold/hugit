@@ -165,6 +165,17 @@ pub struct CheckArgs {
     /// block forever holding the `--log` lock.
     #[arg(long)]
     pub timeout_secs: Option<u64>,
+    /// Declare a custom environment variable this check legitimately depends on
+    /// (PS-11, repeatable). The hermetic spawn CLEARS every ambient var not on the
+    /// built-in result-affecting allowlist (RUSTFLAGS, CARGO_*, …), so an ad-hoc
+    /// `--cmd` check that reads a CUSTOM var (e.g. `MY_GATE_MODE`) would otherwise
+    /// see it UNSET. Naming it with `--env-axis MY_GATE_MODE` (a) folds it into the
+    /// memo key (a change to its value is a MISS) AND (b) passes it through to the
+    /// spawn — so the dependency is sound (declared == keyed == present), never a
+    /// silent stale green. Unset declared vars contribute nothing (toggling the var
+    /// on later is itself a MISS).
+    #[arg(long = "env-axis")]
+    pub env_axis: Vec<String>,
 }
 
 /// `hugit check` — run a memoized CI check for real (W-CHECK EXECUTE path).
