@@ -2,39 +2,15 @@
 //! the fleet per master-plan §5 (REAL: branches/last_commit/commit_count via
 //! refstore `replay`/`project_machine`; STUB: file tree, readme, about-mirror).
 
+use std::collections::BTreeSet;
+
 use hugit_http_contracts::{AboutVm, LastCommitVm, RepoHomeVm, SynergyVm};
 use hugit_refstore::EventLog;
 use hugit_refstore::intent::intents_from_log;
 use hugit_refstore::intent::projection::{ProjectionRow, project_machine};
 use hugit_refstore::replay::replay;
 
-/// Humanize a Unix-epoch-millisecond timestamp into a pt-BR age string.
-///
-/// Returns a string like "há 3 min", "há 2h", "há 5d". The wall clock is read
-/// via `std::time::SystemTime`; this is presentation-only (not in any hash
-/// chain), so the non-hermetic clock read is acceptable here.
-fn humanize_age(unix_ms: u64) -> String {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-
-    let delta_ms = now_ms.saturating_sub(unix_ms);
-    let secs = delta_ms / 1_000;
-
-    if secs < 60 {
-        "há menos de 1 min".to_string()
-    } else if secs < 3_600 {
-        let mins = secs / 60;
-        format!("há {mins} min")
-    } else if secs < 86_400 {
-        let hours = secs / 3_600;
-        format!("há {hours}h")
-    } else {
-        let days = secs / 86_400;
-        format!("há {days}d")
-    }
-}
+use crate::fmt::{CONTRIBUTORS_CAP, humanize_age, scrub};
 
 /// Extract a display name from a principal-chain entry.
 ///
@@ -58,22 +34,15 @@ pub fn build_home(log: &EventLog, repo: &str) -> RepoHomeVm {
     // ── REAL: replay → branch / branch_count / tag_count / branches ────────
     let ref_state = replay(log).unwrap_or_default();
 
-    // HEAD branch: resolve refs/HEAD → a symbolic target, then strip prefix.
-    // hugit stores the head branch as refs/heads/<name>. We look for the
-    // symbolic HEAD pointer (stored as "refs/HEAD" → "refs/heads/<branch>")
-    // and fall back to any refs/heads entry.
+    // Primary branch: the first `refs/heads/*` in sorted ref order. replay never
+    // inserts a symbolic `refs/HEAD` pointer (a `refs/HEAD` lookup here was dead
+    // code — dropped), so this sorted-first heads entry IS the real path. Empty
+    // when the log has advanced no branch ref.
     let branch: String = ref_state
-        .get("refs/HEAD")
-        .and_then(|target| target.strip_prefix("refs/heads/"))
+        .iter()
+        .find_map(|(name, _)| name.strip_prefix("refs/heads/"))
         .map(str::to_string)
-        .unwrap_or_else(|| {
-            // Fallback: first refs/heads/* in sorted order.
-            ref_state
-                .iter()
-                .find_map(|(name, _)| name.strip_prefix("refs/heads/"))
-                .map(str::to_string)
-                .unwrap_or_default()
-        });
+        .unwrap_or_default();
 
     let mut branch_count: usize = 0;
     let mut tag_count: u32 = 0;
@@ -97,36 +66,36 @@ pub fn build_home(log: &EventLog, repo: &str) -> RepoHomeVm {
         .last()
         .map(|row| match row {
             ProjectionRow::Intent(gc) => {
-                // Author: first entry in the originating intent's principal_chain
-                // that carries agent:/orchestrator: prefix. We recover the intent
-                // to get the principal_chain via intents_from_log.
-                let author = log
-                    .records()
-                    .iter()
-                    .find(|r| r.seq == gc.seq)
+                // The originating `intent.landed` record. By construction the log
+                // is gap-free and 0-based, so `seq == index`: ONE indexed lookup
+                // (was two O(n) `.iter().find(|r| r.seq == gc.seq)` scans).
+                let record = log.records().get(gc.seq as usize);
+
+                // Author: first entry of the originating record's principal_chain,
+                // prefix-stripped to a display name. SCRUBBED — a principal entry
+                // is free text echoed from the log; a secret-shaped value never
+                // reaches the browser (P0 read-path redaction).
+                let author = record
                     .and_then(|r| r.principal_chain.first())
-                    .map(|p| principal_display_name(p).to_string())
+                    .map(|p| scrub(principal_display_name(p)))
                     .unwrap_or_default();
 
-                let recorded_at = log
-                    .records()
-                    .iter()
-                    .find(|r| r.seq == gc.seq)
-                    .map(|r| r.recorded_at)
-                    .unwrap_or(0);
+                let recorded_at = record.map(|r| r.recorded_at).unwrap_or(0);
 
-                // safe 6-char slice of the target SHA
+                // safe 6-char slice of the target SHA (structural — NOT scrubbed)
                 let short_sha = gc.target.get(..6).unwrap_or(gc.target.as_str()).to_string();
 
-                // Strip "Intent-Id: …" trailer from display message (show charter only).
-                let message = gc
-                    .message
-                    .lines()
-                    .take_while(|l| !l.starts_with("Intent-Id:"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-                    .trim()
-                    .to_string();
+                // Strip "Intent-Id: …" trailer (show charter only), then SCRUB —
+                // the charter is free text echoed from the log (P0 redaction). The
+                // intent_id / short_sha are content-addresses, left structural.
+                let message = scrub(
+                    gc.message
+                        .lines()
+                        .take_while(|l| !l.starts_with("Intent-Id:"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                        .trim(),
+                );
 
                 LastCommitVm {
                     author,
@@ -160,16 +129,17 @@ pub fn build_home(log: &EventLog, repo: &str) -> RepoHomeVm {
         .unwrap_or_default();
 
     // ── REAL: intents_from_log → contributors (dedup principal-chain names) ─
+    // Each principal entry is free text echoed from the log → SCRUBBED (P0). A
+    // `BTreeSet<String>` dedups in O(n log n) (was `Vec::contains`, O(n²)) and
+    // also gives a stable sorted order. Capped at `CONTRIBUTORS_CAP`.
     let intent_log = intents_from_log(log).unwrap_or_default();
-    let mut contributor_set: Vec<String> = Vec::new();
+    let mut contributor_set: BTreeSet<String> = BTreeSet::new();
     for intent in intent_log.intents() {
         for entry in &intent.principal_chain {
-            let name = principal_display_name(entry).to_string();
-            if !contributor_set.contains(&name) {
-                contributor_set.push(name);
-            }
+            contributor_set.insert(scrub(principal_display_name(entry)));
         }
     }
+    let contributors: Vec<String> = contributor_set.into_iter().take(CONTRIBUTORS_CAP).collect();
 
     // ── PRESENTATION: about.updated_ago from last record's recorded_at ──────
     let updated_ago = log
@@ -201,7 +171,7 @@ pub fn build_home(log: &EventLog, repo: &str) -> RepoHomeVm {
             description: String::new(),         // STUB — GitHub-mirror P2
             topics: vec![],                     // STUB — GitHub-mirror P2
             release: None,                      // STUB — P2 release tag
-            contributors: contributor_set,      // REAL — from principal chains
+            contributors,                       // REAL — from principal chains
             contributors_suffix: String::new(), // STUB
             stars: String::new(),               // STUB — GitHub-mirror P2
             forks: String::new(),               // STUB — GitHub-mirror P2

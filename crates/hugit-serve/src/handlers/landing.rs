@@ -6,7 +6,11 @@
 //! files (no diffstat seam), mirror (P2), union (best-effort empty), list_groups
 //! (no fleet grouping), draft_count (no draft state), stack/change_id/landed_ago.
 
-use hugit_cli::pr::{OpenedPr, all_pr_queued, find_pr_opened};
+use crate::fmt::{PR_CARDS_CAP, humanize_age, scrub};
+use hugit_cli::pr::{
+    CAMPAIGN_OPENED_KIND, INTENT_ENVELOPE_KIND, OpenedPr, PR_ABANDONED_KIND, PR_ENVELOPE_KIND,
+    PR_LANDED_KIND, PR_OPENED_KIND, all_pr_queued, find_pr_opened,
+};
 use hugit_contracts::context_envelope::{Altitude, CiCost, ContextEnvelope};
 use hugit_http_contracts::common::{
     CampaignChipVm, CostVm, IntentSummaryVm, MirrorVm, UnionVm, VerdictVm,
@@ -20,48 +24,13 @@ use hugit_ledger::{Ledger, LedgerEntry};
 use hugit_refstore::EventLog;
 use serde_json::Value;
 
-/// Event kinds (read-side mirrors of the porcelain's stable wire strings —
-/// projected directly off `log.records()` per the §5 source pattern).
-const PR_OPENED_KIND: &str = "pr.opened";
-const CAMPAIGN_OPENED_KIND: &str = "campaign.opened";
-const PR_ENVELOPE_KIND: &str = "pr.envelope";
-const INTENT_ENVELOPE_KIND: &str = "intent.envelope";
-
-/// Humanize a Unix-epoch-millisecond timestamp into a pt-BR age string.
-///
-/// Idiom copied from `home.rs` (NOT imported across handlers — each handler owns
-/// its own copy). Presentation-only (not in any hash chain), so the non-hermetic
-/// clock read is acceptable here.
-fn humanize_age(unix_ms: u64) -> String {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-
-    let delta_ms = now_ms.saturating_sub(unix_ms);
-    let secs = delta_ms / 1_000;
-
-    if secs < 60 {
-        "há menos de 1 min".to_string()
-    } else if secs < 3_600 {
-        let mins = secs / 60;
-        format!("há {mins} min")
-    } else if secs < 86_400 {
-        let hours = secs / 3_600;
-        format!("há {hours}h")
-    } else {
-        let days = secs / 86_400;
-        format!("há {days}d")
-    }
-}
-
 /// The lifecycle state of a PR projected off the log — mirrors the porcelain's
 /// `pr_state` precedence (landed ≻ abandoned ≻ queued ≻ proposed). Read straight
 /// off raw record kinds so the projection never re-hand-rolls authority.
 fn pr_state(log: &EventLog, opened: &OpenedPr) -> PrState {
-    if record_names_pr(log, "pr.landed", &opened.pr_id) {
+    if record_names_pr(log, PR_LANDED_KIND, &opened.pr_id) {
         PrState::Landed
-    } else if record_names_pr(log, "pr.abandoned", &opened.pr_id) {
+    } else if record_names_pr(log, PR_ABANDONED_KIND, &opened.pr_id) {
         // No distinct Blocked source; an abandoned PR is terminal-not-landed.
         // The card surfaces it as Blocked (the "not advancing" column) — honest
         // mapping of the only terminal-non-landed signal we have.
@@ -160,16 +129,14 @@ fn cost_for(log: &EventLog, opened: &OpenedPr) -> CostVm {
         PrQueueInput::default(),
     );
     match record {
-        Ok(rec) => {
-            let model_breakdown: Vec<(String, u64)> =
-                rec.models_used.iter().map(|m| (m.clone(), 0)).collect();
-            CostVm {
-                tokens_total: rec.cost.total.tokens,
-                usd: rec.cost.total.cost_usd_micros as f64 / 1_000_000.0,
-                model_breakdown,
-                cache_savings: String::new(), // STUB — no live-AC savings string seam
-            }
-        }
+        Ok(rec) => CostVm {
+            tokens_total: rec.cost.total.tokens,
+            usd: rec.cost.total.cost_usd_micros as f64 / 1_000_000.0,
+            // HONEST: the rollup carries no per-model token split, so emitting
+            // `(model, 0)` would be a misleading stub-zero. Empty is honest.
+            model_breakdown: vec![],
+            cache_savings: String::new(), // STUB — no live-AC savings string seam
+        },
         Err(_) => zero_cost(),
     }
 }
@@ -256,6 +223,8 @@ fn build_card(
     let pos = queue_position(log, &opened.pr_id);
 
     // PRESENTATION: list_badge from the queue position (the wedge's "na fila #N").
+    // Display is 1-based ("na fila #1") to match the mock; the engine's
+    // `order_index` is 0-based, hence the `p + 1`.
     let list_badge = match pos {
         Some(p) => format!("na fila #{}", p + 1),
         None => String::new(),
@@ -324,11 +293,15 @@ fn campaign_chips(log: &EventLog) -> Vec<CampaignChipVm> {
             && let Some(id) = v.get("campaign").and_then(Value::as_str)
             && seen.insert(id.to_string())
         {
+            // P1 LEAK FIX: the campaign id is raw free-text from the log
+            // envelope — scrub it before it reaches id/label/display_label so a
+            // secret-shaped campaign id never echoes verbatim to the browser.
+            let safe = scrub(id);
             chips.push(CampaignChipVm {
-                id: id.to_string(),
-                label: id.to_string(), // REAL id; no separate human label seam
+                id: safe.clone(),
+                label: safe.clone(), // REAL id (scrubbed); no separate human label seam
                 color_class: String::new(), // STUB — no kit color seam on the log
-                display_label: id.to_string(),
+                display_label: safe,
             });
         }
     }
@@ -370,7 +343,10 @@ pub fn build_landing(log: &EventLog, repo: &str) -> LandingVm {
     let mut open_count = 0usize;
     let mut merged_count = 0usize;
 
-    for opened in &prs {
+    // P1 list cap: bound the total cards projected across all columns (fail-honest
+    // — the VM IS the page). One PR yields exactly one card, so capping the
+    // iterated PRs caps the emitted cards.
+    for opened in prs.iter().take(PR_CARDS_CAP) {
         let state = pr_state(log, opened);
         match state {
             PrState::Landed => merged_count += 1,
@@ -379,7 +355,9 @@ pub fn build_landing(log: &EventLog, repo: &str) -> LandingVm {
             PrState::Blocked => {} // abandoned: terminal-not-landed, not "open"
         }
 
-        let chip = chips.iter().find(|c| c.id == opened.campaign).cloned();
+        // Chip ids are scrubbed (P1), so match against the scrubbed campaign id.
+        let want = scrub(&opened.campaign);
+        let chip = chips.iter().find(|c| c.id == want).cloned();
         let card = build_card(log, &ledger, opened, chip);
         let label = column_label(&state);
         cards_by_column

@@ -2,13 +2,13 @@
 //! the fleet per master-plan §5 (REAL: local hit-rate KPIs + check rows via the
 //! `hugit checks show` projection; STUB: bisect/culprit + FLEET KPIs = P2).
 
+use hugit_cli::checks::CHECK_RECORDED_KIND;
 use hugit_http_contracts::common::CheckRowVm;
 use hugit_http_contracts::{ChecksHeroVm, ChecksKpisVm, ChecksPillVm, ChecksVm};
 use hugit_refstore::EventLog;
 use serde_json::Value;
 
-/// Kind string for captured check results — matches `hugit_cli::checks::CHECK_RECORDED_KIND`.
-const CHECK_RECORDED_KIND: &str = "check.recorded";
+use crate::fmt::{CHECKS_CAP, str_field};
 
 // ---------------------------------------------------------------------------
 // Internal row — mirrors hugit-cli's CheckRow without depending on it.
@@ -92,13 +92,14 @@ fn aggregate_kpis(rows: &[CheckRow]) -> Kpis {
 /// STUB (P2): bisect, culprit, fleet KPIs (cache_hit_rate_pct / cache_saved_usd /
 ///            cache_saved_runner_h), hero_red.
 pub fn build_checks(log: &EventLog, repo: &str) -> ChecksVm {
-    // Collect check rows from the log.
+    // Collect check rows from the log, capped at CHECKS_CAP.
     let rows: Vec<CheckRow> = log
         .records()
         .iter()
         .filter(|r| r.kind == CHECK_RECORDED_KIND)
         .filter_map(|r| serde_json::from_str::<Value>(&r.payload).ok())
         .map(|v| CheckRow::from_payload(&v))
+        .take(CHECKS_CAP)
         .collect();
 
     let kpis = aggregate_kpis(&rows);
@@ -125,7 +126,7 @@ pub fn build_checks(log: &EventLog, repo: &str) -> ChecksVm {
 
     let kpis_vm = ChecksKpisVm {
         hit_rate_pct,
-        shape: shape.clone(),
+        shape,
         hits: kpis.hits,
         executed: kpis.executed,
         saved_ms: kpis.saved_ms,
@@ -134,6 +135,7 @@ pub fn build_checks(log: &EventLog, repo: &str) -> ChecksVm {
     // -- CheckRowVm list ---------------------------------------------------
     let checks: Vec<CheckRowVm> = rows
         .iter()
+        .take(CHECKS_CAP)
         .map(|row| CheckRowVm {
             name: row.name.clone().unwrap_or_default(),         // REAL
             ok: row.ok.unwrap_or(false),                        // REAL (exit==0)
@@ -146,10 +148,11 @@ pub fn build_checks(log: &EventLog, repo: &str) -> ChecksVm {
         })
         .collect();
 
-    // -- Cache-hit pills (cpills) — one per HIT row -----------------------
+    // -- Cache-hit pills (cpills) — one per HIT row, capped at CHECKS_CAP ---
     let cpills: Vec<ChecksPillVm> = rows
         .iter()
         .filter(|row| row.cache_hit == Some(true))
+        .take(CHECKS_CAP)
         .map(|row| {
             // hash: first 8 chars of memo_key (REAL); empty if no key.
             let hash = row
@@ -171,7 +174,8 @@ pub fn build_checks(log: &EventLog, repo: &str) -> ChecksVm {
         .collect();
 
     // -- Hero (PRESENTATION from KPIs) ------------------------------------
-    let all_ok = rows.iter().all(|r| r.ok.unwrap_or(true));
+    // P1 honesty fix: unknown exit (None) = NOT green (conservative, fail-safe).
+    let all_ok = rows.iter().all(|r| r.ok.unwrap_or(false));
     let green = !rows.is_empty() && all_ok;
 
     let headline = if green {
@@ -248,12 +252,4 @@ pub fn build_checks(log: &EventLog, repo: &str) -> ChecksVm {
         cache_saved_usd: String::new(),
         cache_saved_runner_h: String::new(),
     }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn str_field(v: &Value, key: &str) -> Option<String> {
-    v.get(key).and_then(Value::as_str).map(str::to_string)
 }

@@ -10,6 +10,8 @@
 //! (no diffstat seam), impact (blast-radius not wired), source/target_branch
 //! (no git-ref tracking), reviewers/labels/conversation, mirror (P2).
 
+use crate::fmt::{CHECKS_CAP, pct_u8, scrub, scrub_all, str_field};
+use hugit_cli::checks::CHECK_RECORDED_KIND;
 use hugit_cli::pr::{
     INTENT_ENVELOPE_KIND, OpenedPr, PR_ABANDONED_KIND, PR_ENVELOPE_KIND, PR_LANDED_KIND,
     PR_QUEUED_KIND, find_pr_opened,
@@ -23,9 +25,6 @@ use hugit_ledger::{Ledger, PrQueueInput, pr_record};
 use hugit_refstore::EventLog;
 use serde_json::Value;
 use std::collections::BTreeSet;
-
-/// Kind string for captured check results — matches `hugit_cli::checks::CHECK_RECORDED_KIND`.
-const CHECK_RECORDED_KIND: &str = "check.recorded";
 
 /// Build the PR-detail view-model for PR `pr_number`.
 ///
@@ -53,13 +52,13 @@ pub fn build_pr_detail(log: &EventLog, repo: &str, pr_number: u32) -> Option<PrD
         None
     } else {
         Some(CampaignChipVm {
-            id: opened.campaign.clone(),
-            label: opened.campaign.clone(),
+            id: scrub(&opened.campaign),
+            label: scrub(&opened.campaign),
             color_class: String::new(),   // STUB — no color seam
             display_label: String::new(), // serde(default)
         })
     };
-    let provenance_campaign = opened.campaign.clone();
+    let provenance_campaign = scrub(&opened.campaign);
 
     // ── REAL: PR-altitude ContextEnvelope (charter→why, acceptance→note,
     //          authorship→author/session, context_ref→envelope_cas) ──────────
@@ -67,12 +66,12 @@ pub fn build_pr_detail(log: &EventLog, repo: &str, pr_number: u32) -> Option<PrD
 
     let (author, session, why, acceptance_note, envelope, envelope_cas) = match &pr_env {
         Some(env) => {
-            let author = env.authorship.operator.clone(); // REAL
-            let session = env.intent_id.clone(); // REAL — session/run id at PR altitude
-            let why = env.charter.clone(); // REAL
-            let acceptance_note = env.acceptance.join("; "); // REAL
-            let envelope = envelope_vm(env); // REAL
-            let envelope_cas = env.snapshot.prompt_ref.clone().unwrap_or_default(); // REAL or ""
+            let author = scrub(&env.authorship.operator); // REAL (scrubbed free text)
+            let session = env.intent_id.clone(); // REAL — structural session/run id
+            let why = scrub(&env.charter); // REAL (scrubbed free text)
+            let acceptance_note = scrub_all(&env.acceptance).join("; "); // REAL (scrubbed)
+            let envelope = envelope_vm(env); // REAL (free text scrubbed inside)
+            let envelope_cas = env.snapshot.prompt_ref.clone().unwrap_or_default(); // structural ref
             (
                 author,
                 session,
@@ -83,20 +82,21 @@ pub fn build_pr_detail(log: &EventLog, repo: &str, pr_number: u32) -> Option<PrD
             )
         }
         None => (
-            String::new(),               // STUB — no envelope authorship on log
-            String::new(),               // STUB
-            String::new(),               // STUB — no charter
-            String::new(),               // STUB — no acceptance
-            EnvelopeVm::default_empty(), // STUB — honest empty envelope
-            String::new(),               // STUB
+            String::new(),         // STUB — no envelope authorship on log
+            String::new(),         // STUB
+            String::new(),         // STUB — no charter
+            String::new(),         // STUB — no acceptance
+            EnvelopeVm::default(), // STUB — honest empty envelope
+            String::new(),         // STUB
         ),
     };
 
     // ── REAL: intents in this PR's bundle (Ledger projection) ───────────────
     let intents = build_intents(log, &opened);
 
-    // ── REAL: check_rows from check.recorded events ─────────────────────────
-    let check_rows = build_check_rows(log);
+    // ── REAL: check_rows from check.recorded events (capped — the VM is the page) ─
+    let mut check_rows = build_check_rows(log);
+    check_rows.truncate(CHECKS_CAP);
     let checks_count = check_rows.len() as u32;
 
     // ── REAL or honest-ZERO: the F3 cost split (ledger pr_record) ───────────
@@ -231,14 +231,16 @@ fn intent_altitude_envelopes(log: &EventLog, opened: &OpenedPr) -> Vec<ContextEn
 
 /// Map a PR-altitude [`ContextEnvelope`] into the wire [`EnvelopeVm`] — REAL.
 fn envelope_vm(env: &ContextEnvelope) -> EnvelopeVm {
+    let summary = env.trajectory.summary.clone().unwrap_or_default();
+    let headline = scrub(&summary);
     EnvelopeVm {
-        session: env.intent_id.clone(),
-        model: env.authorship.model.clone(),
-        window: String::new(), // STUB — no window seam
-        headline: env.trajectory.summary.clone().unwrap_or_default(),
+        session: env.intent_id.clone(),      // structural
+        model: scrub(&env.authorship.model), // free text — scrubbed
+        window: String::new(),               // STUB — no window seam
+        headline: headline.clone(),          // free text — scrubbed
         transcript_complete: env.trajectory.raw_transcript_ref.is_some()
             && env.trajectory.task_transcript_ref.is_some(),
-        session_summary: env.trajectory.summary.clone().unwrap_or_default(),
+        session_summary: headline, // same scrubbed summary text
         compact_transcript_ref: env
             .trajectory
             .task_transcript_ref
@@ -253,7 +255,7 @@ fn envelope_vm(env: &ContextEnvelope) -> EnvelopeVm {
             .snapshot
             .files_read
             .iter()
-            .map(|f| f.path.clone())
+            .map(|f| scrub(&f.path)) // free text — scrubbed
             .collect(),
         context_json: String::new(), // STUB — no pretty-printed context.json here
         context_cas: env.snapshot.prompt_ref.clone().unwrap_or_default(),
@@ -274,12 +276,12 @@ fn build_intents(log: &EventLog, opened: &OpenedPr) -> Vec<IntentSummaryVm> {
         .map(|e| IntentSummaryVm {
             id: e.intent_id.clone(),
             title: e.charter.clone(),
-            status: if e.proven {
-                "proven".to_string()
-            } else if e.rejected {
-                "rejected".to_string()
+            status: if e.rejected {
+                "REJECTED".to_string()
+            } else if e.proven {
+                "PROVEN".to_string()
             } else {
-                "landed".to_string()
+                "LANDED".to_string()
             },
             charter: e.charter.clone(),
             context_json: String::new(), // STUB — no context.json snapshot here
@@ -378,17 +380,12 @@ fn cost_split_from_record(r: &PrRecord) -> CostSplitVm {
         total_usd: usd(c.total.cost_usd_micros), // REAL
         waste_usd: usd(c.waste.cost_usd_micros), // REAL
         waste_note: String::new(),
-        overhead_pct: pct_u8(r.efficiency.overhead_pct), // REAL (cast)
-        cache_savings_pct: pct_u8(r.efficiency.cache_savings_pct), // REAL (cast)
+        // The efficiency ratios are fractions in `[0,1]` per ADR-0001 — scale to
+        // percent at the call site; `pct_u8` clamps to 0..=100 (NOT 255).
+        overhead_pct: pct_u8(r.efficiency.overhead_pct * 100.0), // REAL
+        cache_savings_pct: pct_u8(r.efficiency.cache_savings_pct * 100.0), // REAL
         time_note: String::new(), // PRESENTATION — no time line composed here
     }
-}
-
-/// Clamp a fractional/percentage f64 into a display `u8` (0..=100). The
-/// efficiency ratios are fractions in `[0,1]` per ADR-0001, so scale to percent.
-fn pct_u8(ratio: f64) -> u8 {
-    let pct = (ratio * 100.0).round();
-    pct.clamp(0.0, 255.0) as u8
 }
 
 /// The honest-ZERO cost block (no PR-altitude envelope on the log).
@@ -422,38 +419,5 @@ fn pr_title(opened: &OpenedPr) -> String {
         format!("PR #{} — {} intents", opened.pr_id, n)
     } else {
         format!("PR #{} ({}) — {} intents", opened.pr_id, opened.campaign, n)
-    }
-}
-
-fn str_field(v: &Value, key: &str) -> Option<String> {
-    v.get(key).and_then(Value::as_str).map(str::to_string)
-}
-
-// ---------------------------------------------------------------------------
-// Honest-empty EnvelopeVm (no PR-altitude envelope on the log).
-// ---------------------------------------------------------------------------
-
-trait EmptyEnvelope {
-    fn default_empty() -> Self;
-}
-
-impl EmptyEnvelope for EnvelopeVm {
-    fn default_empty() -> Self {
-        EnvelopeVm {
-            session: String::new(),
-            model: String::new(),
-            window: String::new(),
-            headline: String::new(),
-            transcript_complete: false,
-            session_summary: String::new(),
-            compact_transcript_ref: String::new(),
-            raw_transcript_ref: String::new(),
-            snapshot_files: vec![],
-            context_json: String::new(),
-            context_cas: String::new(),
-            compact_context_ref: String::new(),
-            compact_json_note: String::new(),
-            bundle_note: String::new(),
-        }
     }
 }

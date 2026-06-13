@@ -130,7 +130,9 @@ pub struct IntentSummaryVm {
 }
 
 /// The session envelope (ADR-0001) — shared by the PR and the campaign.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// `Default` is an honest all-empty envelope (no faked refs) for the no-envelope
+/// read path. All fields are `String`/`bool`/`Vec<String>` so the derive is total.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct EnvelopeVm {
     pub session: String,
     pub model: String,

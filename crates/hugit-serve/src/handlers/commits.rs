@@ -11,7 +11,11 @@ use hugit_refstore::{
     replay,
 };
 
+use crate::fmt::{COMMITS_CAP, classify_avatar, humanize_age, scrub, sha_prefix};
 use hugit_cli::checks::CHECK_RECORDED_KIND;
+
+/// Sha prefix length echoed into a `CommitRowVm` (structural, not scrubbed).
+const SHA_PREFIX_LEN: usize = 6;
 
 /// Build the commits view-model from a verified event log.
 ///
@@ -85,14 +89,20 @@ pub fn build_commits(log: &EventLog, repo: &str) -> CommitsVm {
                 // Author: first element of the principal_chain of the originating record
                 // that matches "agent:" or "orchestrator:" prefix; else "".
                 let author = extract_author(log, seq);
+                // avatar_class is a structural classification of the author, not
+                // an echo of free text — derive it from the RAW author so the
+                // class is stable, then scrub the displayed author below.
                 let avatar_class = classify_avatar(&author);
-                let sha = safe_sha_prefix(&c.target);
+                let sha = sha_prefix(&c.target, SHA_PREFIX_LEN);
                 let age = humanize_age(recorded_at_ms);
                 let checks_ok = checks_ok_shas.contains(c.target.as_str())
                     || checks_ok_shas.contains(sha.as_str());
                 let cr = CommitRowVm {
-                    message: c.message.clone(),
-                    author,
+                    // P0: message + author are free text echoed from the log →
+                    // MUST pass through the redaction seam. sha/intent_id/age are
+                    // structural (content-addresses), so they are NOT scrubbed.
+                    message: scrub(&c.message),
+                    author: scrub(&author),
                     avatar_class,
                     age,
                     intent_id: Some(c.intent_id.clone()),
@@ -103,7 +113,10 @@ pub fn build_commits(log: &EventLog, repo: &str) -> CommitsVm {
             }
             ProjectionRow::ExternalChange { kind, target, .. } => {
                 // ExternalChange: no intent, no author from principal, kind as fallback.
-                let sha = target.as_deref().map(safe_sha_prefix).unwrap_or_default();
+                let sha = target
+                    .as_deref()
+                    .map(|t| sha_prefix(t, SHA_PREFIX_LEN))
+                    .unwrap_or_default();
                 let author = extract_author(log, seq);
                 let avatar_class = classify_avatar(&author);
                 let age = humanize_age(recorded_at_ms);
@@ -113,8 +126,10 @@ pub fn build_commits(log: &EventLog, repo: &str) -> CommitsVm {
                     checks_ok_shas.contains(sha.as_str())
                 };
                 let cr = CommitRowVm {
-                    message: kind.clone(),
-                    author,
+                    // P0: `kind` is the displayed free-text message for an external
+                    // change and `author` is free text — both pass through scrub.
+                    message: scrub(kind),
+                    author: scrub(&author),
                     avatar_class,
                     age,
                     intent_id: None,
@@ -129,14 +144,26 @@ pub fn build_commits(log: &EventLog, repo: &str) -> CommitsVm {
     }
 
     // Sort days most-recent-first (BTreeMap is ascending; we collect in reverse).
-    let days: Vec<CommitDayVm> = day_map
+    // P3: within each day, rows were pushed in ascending log order, so reverse to
+    // make the within-day order most-recent-first too — consistent with the
+    // most-recent-first day order (the VM reads newest-at-top, both axes).
+    let mut days: Vec<CommitDayVm> = day_map
         .into_iter()
         .rev()
-        .map(|((year, month, day), commits)| CommitDayVm {
-            label: format_day_label(year, month, day),
-            commits,
+        .map(|((year, month, day), mut commits)| {
+            commits.reverse();
+            CommitDayVm {
+                label: format_day_label(year, month, day),
+                commits,
+            }
         })
         .collect();
+
+    // P1: cap the projected commits at COMMITS_CAP, most-recent-first — the VM IS
+    // the page. The cap is applied to the TOTAL row count across days (after
+    // grouping + sorting), keeping the 100 most recent and dropping older days /
+    // the older tail of the boundary day; empty trailing days are pruned.
+    cap_commits(&mut days, COMMITS_CAP);
 
     CommitsVm {
         repo: repo.to_string(),
@@ -186,7 +213,7 @@ fn build_checks_ok_set(log: &EventLog) -> std::collections::HashSet<String> {
         if let Some(target) = v.get("target").and_then(serde_json::Value::as_str) {
             // Store both the full sha and the 6-char prefix so matching works
             // regardless of which form the commit row carries.
-            let prefix = safe_sha_prefix(target);
+            let prefix = crate::fmt::sha_prefix(target, 6);
             if !prefix.is_empty() {
                 set.insert(prefix);
             }
@@ -216,39 +243,24 @@ fn extract_author(log: &EventLog, seq: u64) -> String {
     chain.first().cloned().unwrap_or_default()
 }
 
-/// Classify an author string into an avatar_class.
-/// - contains "opus" → "opus"
-/// - contains "sonnet" → "sonnet"
-/// - else → first token (split on ':' then '-' then ' ') or the full string
-fn classify_avatar(author: &str) -> String {
-    let lower = author.to_lowercase();
-    if lower.contains("opus") {
-        return "opus".to_string();
+/// Cap the total commit rows across all days at `cap`, keeping the most-recent
+/// `cap` rows. `days` is already most-recent-first (both across days and within
+/// a day), so we walk from the front and stop once `cap` rows are kept; the
+/// boundary day is truncated and any fully-dropped trailing days are removed.
+fn cap_commits(days: &mut Vec<CommitDayVm>, cap: usize) {
+    let mut remaining = cap;
+    let mut keep_days = 0usize;
+    for day in days.iter_mut() {
+        if remaining == 0 {
+            break;
+        }
+        if day.commits.len() > remaining {
+            day.commits.truncate(remaining);
+        }
+        remaining -= day.commits.len();
+        keep_days += 1;
     }
-    if lower.contains("sonnet") {
-        return "sonnet".to_string();
-    }
-    // First "token": split on ':' first (agent:foo → "agent"), then on '-' and ' '.
-    // For "agent:opus-4.8" → lower = "agent:opus-4.8" → contains "opus" already.
-    // For a bare human handle like "ana" the first token is "ana".
-    let token = author
-        .split(':')
-        .next()
-        .unwrap_or(author)
-        .split(['-', ' ', '/'])
-        .next()
-        .unwrap_or(author);
-    if token.is_empty() {
-        author.to_string()
-    } else {
-        token.to_string()
-    }
-}
-
-/// Return a 6-char sha prefix from a full sha string.  If the string is shorter
-/// than 6 chars, return the whole string (safe — never panics on short input).
-fn safe_sha_prefix(sha: &str) -> String {
-    sha.chars().take(6).collect()
+    days.truncate(keep_days);
 }
 
 /// Convert a Unix epoch ms timestamp to a (year, month, day) UTC triple.
@@ -275,52 +287,6 @@ fn civil_date(z: i32) -> (i32, u32, u32) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
     let y = y + if m <= 2 { 1 } else { 0 };
     (y, m, d)
-}
-
-/// Humanize a Unix-ms age as a pt-BR relative string.
-/// Now is wall-clock UTC (system time).  Uses coarse buckets.
-///
-/// Note: the current time is read from `std::time::SystemTime` so tests that
-/// pass `0` as a timestamp will render as a very old age — that is honest.
-fn humanize_age(unix_ms: u64) -> String {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-
-    let diff_ms = now_ms.saturating_sub(unix_ms);
-    let diff_secs = diff_ms / 1000;
-
-    if diff_secs < 60 {
-        return "há poucos segundos".to_string();
-    }
-    let diff_min = diff_secs / 60;
-    if diff_min < 60 {
-        return format!("há {diff_min} min");
-    }
-    let diff_h = diff_min / 60;
-    if diff_h < 24 {
-        return format!("há {diff_h} h");
-    }
-    let diff_d = diff_h / 24;
-    if diff_d == 1 {
-        return "há 1 dia".to_string();
-    }
-    if diff_d < 30 {
-        return format!("há {diff_d} dias");
-    }
-    let diff_m = diff_d / 30;
-    if diff_m == 1 {
-        return "há 1 mês".to_string();
-    }
-    if diff_m < 12 {
-        return format!("há {diff_m} meses");
-    }
-    let diff_y = diff_m / 12;
-    if diff_y == 1 {
-        return "há 1 ano".to_string();
-    }
-    format!("há {diff_y} anos")
 }
 
 /// Format a day label in pt-BR style: "Commits em <d> de <mês> de <ano>".
@@ -364,27 +330,9 @@ mod tests {
         assert!(vm.days.is_empty());
     }
 
-    #[test]
-    fn classify_avatar_opus() {
-        assert_eq!(classify_avatar("agent:opus-4.8"), "opus");
-    }
-
-    #[test]
-    fn classify_avatar_sonnet() {
-        assert_eq!(classify_avatar("agent:sonnet-4.6"), "sonnet");
-    }
-
-    #[test]
-    fn classify_avatar_human() {
-        assert_eq!(classify_avatar("ana"), "ana");
-    }
-
-    #[test]
-    fn safe_sha_prefix_short() {
-        assert_eq!(safe_sha_prefix("abc"), "abc");
-        assert_eq!(safe_sha_prefix("a31f9cff00"), "a31f9c");
-        assert_eq!(safe_sha_prefix(""), "");
-    }
+    // NOTE: classify_avatar / sha_prefix / humanize_age now live in `crate::fmt`
+    // (the shared DRY seam) and are unit-tested there; the local forks were
+    // deleted, so their tests moved with them.
 
     #[test]
     fn civil_date_unix_epoch() {
@@ -406,14 +354,6 @@ mod tests {
     fn format_day_label_canonical() {
         // The canonical fixture uses "Commits em 9 de jun de 2026".
         assert_eq!(format_day_label(2026, 6, 9), "Commits em 9 de jun de 2026");
-    }
-
-    #[test]
-    fn humanize_age_zero_is_old() {
-        // ts=0 is 1970-01-01; should render as "há N anos" (very old).
-        let age = humanize_age(0);
-        assert!(age.starts_with("há"), "expected pt-BR age, got: {age}");
-        assert!(age.contains("ano"), "expected years, got: {age}");
     }
 
     #[test]

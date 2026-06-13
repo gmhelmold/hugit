@@ -18,4 +18,5 @@
 //! (the fail-honest contract). The per-field REAL/PRESENTATION/STUB source map is
 //! `docs/plan/2026-06-13-hugit-serve-wave1-master-plan.md` §0/§5.
 
+pub mod fmt;
 pub mod handlers;

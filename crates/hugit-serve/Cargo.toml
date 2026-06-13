@@ -35,4 +35,5 @@ serde      = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+hugit-refstore = { path = "../hugit-refstore", features = ["test-support"] }
 serde_json = { workspace = true }
