@@ -507,7 +507,26 @@ identically. Tracked; no code change required until P2.
 
 ---
 
-## PS-11 — Check `env_manifest` captures only an allowlist; ad-hoc `--cmd` custom env vars are not keyed
+## PS-11 — Check `env_manifest` captures only an allowlist; ad-hoc `--cmd` custom env vars are not keyed (RESOLVED 2026-06-13 — `--env-axis` shipped)
+
+**Status:** RESOLVED — the soundness hole was already closed by L-C (hermetic clear); the
+remaining FEATURE residual (a check that LEGITIMATELY needs a custom env var) is now shipped as
+the owner-approved opt-in `--env-axis <VAR>` flag.
+
+**SHIPPED (2026-06-13): `hugit check --env-axis <VAR>` (repeatable).** A caller-declared var is
+added to the SINGLE captured-env source (`captured_hermetic_env`) so it is BOTH (a) folded into
+the memo-key env manifest (a change to its value is a MISS) AND (b) passed through to the hermetic
+spawn (the spawn otherwise clears it). "declared == keyed == present" by construction — the same
+invariant the allowlist vars hold — so a declared dependency is sound (never a stale green), while
+an UNDECLARED custom var stays cleared (hit-rate preserved). The var's value is hashed into
+`def_digest` before any persistence (only `def_digest` reaches the log, never the raw manifest),
+so a declared var may even be a secret without leaking. Cold-verified end-to-end against the real
+binary (`acceptance_ps11_env_axis`: declared var value change → MISS; undeclared same change → HIT)
+plus pure unit tests on the capture/manifest logic (no process-global env mutation). The
+do-NOT-silently-widen-the-allowlist guard stands — `--env-axis` is explicit, per-invocation, and
+narrow.
+
+**Original framing (kept for the record):**
 
 K-RUN (`def8a18`, Round 7 finding #4) closed the wedge stale-green by folding a CANONICAL,
 SORTED snapshot of an ALLOWLIST of result-affecting env vars into the memo key (`RUSTFLAGS`,

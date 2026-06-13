@@ -405,14 +405,31 @@ fn is_result_affecting_env(name: &str) -> bool {
 }
 
 /// The captured, hermetic env for a spawn: every ambient var whose name is in the
-/// result-affecting allowlist, PLUS `PATH` (pinned), sorted by name for
-/// determinism. This is the EXACT set that is (a) folded into the memo-key axis via
-/// [`env_manifest_axis`] and (b) set on the spawned `Command` after `env_clear()`.
-/// Because (a) and (b) come from the same source, "captured == present": the memo
-/// key's env axis is the complete spawn env.
-fn captured_hermetic_env() -> Vec<(String, String)> {
-    let mut pairs: Vec<(String, String)> = std::env::vars()
-        .filter(|(k, _)| k == "PATH" || is_result_affecting_env(k))
+/// result-affecting allowlist, PLUS `PATH` (pinned), PLUS any caller-declared
+/// `--env-axis` var (`declared`, PS-11), sorted by name for determinism. This is
+/// the EXACT set that is (a) folded into the memo-key axis via [`env_manifest_axis`]
+/// and (b) set on the spawned `Command` after `env_clear()`. Because (a) and (b)
+/// come from the same source, "captured == present": the memo key's env axis is the
+/// complete spawn env, so a declared var is keyed AND passed (never a stale green).
+fn captured_hermetic_env(declared: &[String]) -> Vec<(String, String)> {
+    captured_hermetic_env_from(std::env::vars(), declared)
+}
+
+/// Pure core of [`captured_hermetic_env`] over an explicit `(name, value)` source,
+/// so the capture rule is unit-testable without mutating the process-global env (a
+/// cross-test data race — sweep T-3). A var is captured iff it is `PATH`, on the
+/// result-affecting allowlist, OR caller-declared via `--env-axis`. A declared var
+/// that is NOT present in `vars` simply does not appear (so toggling it on later is
+/// a MISS — adding a captured pair changes the manifest).
+fn captured_hermetic_env_from<I>(vars: I, declared: &[String]) -> Vec<(String, String)>
+where
+    I: IntoIterator<Item = (String, String)>,
+{
+    let mut pairs: Vec<(String, String)> = vars
+        .into_iter()
+        .filter(|(k, _)| {
+            k == "PATH" || is_result_affecting_env(k) || declared.iter().any(|d| d == k)
+        })
         .collect();
     pairs.sort_by(|a, b| a.0.cmp(&b.0));
     pairs
@@ -1394,7 +1411,7 @@ pub fn run(args: &CheckArgs) -> Result<Value, PorcelainError> {
     // vars + PATH the spawn will set. Fold it into `env_manifest` so a change to any
     // captured var (or PATH, whose value is hashed) busts the memo key — the same
     // set is set on the spawn below, so "captured == present".
-    let captured_env = captured_hermetic_env();
+    let captured_env = captured_hermetic_env(&args.env_axis);
     let env_manifest = env_manifest_axis(&captured_env);
 
     let root = args
@@ -1765,6 +1782,7 @@ mod tests {
             principal: None,
             ac: None,
             timeout_secs: None,
+            env_axis: Vec::new(),
         }
     }
 
@@ -2028,7 +2046,7 @@ mod tests {
     #[test]
     fn env_manifest_captures_only_allowlisted_result_affecting_vars() {
         // Wave-L C3 hermetic env axis (ported from K-RUN's manifest test onto
-        // `env_manifest_axis(&captured_hermetic_env())`). A change to an
+        // `env_manifest_axis(&captured_hermetic_env(&[]))`). A change to an
         // ALLOWLISTED var must change the manifest (→ a different def_digest →
         // memo-key bust → MISS, no stale green). A change to an UNLISTED var
         // (e.g. PWD/FOO) must NOT, so the
@@ -2048,7 +2066,7 @@ mod tests {
             std::env::set_var(listed, "-C target-cpu=native");
             std::env::remove_var(unlisted);
         }
-        let m_a = env_manifest_axis(&captured_hermetic_env());
+        let m_a = env_manifest_axis(&captured_hermetic_env(&[]));
         assert!(
             m_a.contains("RUSTFLAGS=-C target-cpu=native"),
             "an allowlisted var is captured into the env axis: {m_a:?}"
@@ -2062,7 +2080,7 @@ mod tests {
         unsafe {
             std::env::set_var(listed, "-C opt-level=3");
         }
-        let m_b = env_manifest_axis(&captured_hermetic_env());
+        let m_b = env_manifest_axis(&captured_hermetic_env(&[]));
         assert_ne!(
             m_a, m_b,
             "a change to an allowlisted var changes the manifest (busts the key)"
@@ -2072,7 +2090,7 @@ mod tests {
         unsafe {
             std::env::set_var(unlisted, "anything");
         }
-        let m_c = env_manifest_axis(&captured_hermetic_env());
+        let m_c = env_manifest_axis(&captured_hermetic_env(&[]));
         assert!(
             !m_c.contains(unlisted),
             "an unlisted var is DECLARED not-result-affecting — never in the axis: {m_c:?}"
@@ -2086,7 +2104,7 @@ mod tests {
         unsafe {
             std::env::set_var("CARGO_TERM_COLOR", "never");
         }
-        let m_d = env_manifest_axis(&captured_hermetic_env());
+        let m_d = env_manifest_axis(&captured_hermetic_env(&[]));
         let keys: Vec<&str> = m_d.lines().filter_map(|l| l.split('=').next()).collect();
         let mut sorted = keys.clone();
         sorted.sort_unstable();
@@ -2344,5 +2362,72 @@ mod tests {
         assert!(read_snapshot_content_capped(&path, 1024).is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn env_axis_declares_a_custom_var_into_the_captured_set() {
+        // PS-11: a caller-declared --env-axis var is captured (so it is both keyed
+        // into the memo manifest AND passed to the hermetic spawn), alongside the
+        // allowlist + PATH. Verified on a SYNTHETIC env via the pure inner form, so
+        // no process-global env mutation (the cross-test data race, sweep T-3).
+        let vars = vec![
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            ("RUSTFLAGS".to_string(), "-Cdebuginfo=0".to_string()), // allowlisted
+            ("MY_GATE_MODE".to_string(), "strict".to_string()),     // custom
+            ("PWD".to_string(), "/somewhere".to_string()),          // ambient, not keyed
+        ];
+
+        // Undeclared: the custom var is NOT captured (hermetic spawn would clear it).
+        let base = captured_hermetic_env_from(vars.clone(), &[]);
+        assert!(base.iter().any(|(k, _)| k == "PATH"));
+        assert!(base.iter().any(|(k, _)| k == "RUSTFLAGS"));
+        assert!(
+            !base.iter().any(|(k, _)| k == "MY_GATE_MODE"),
+            "an undeclared custom var is cleared (not captured)"
+        );
+        assert!(
+            !base.iter().any(|(k, _)| k == "PWD"),
+            "an ambient non-allowlisted var is cleared"
+        );
+
+        // Declared: the custom var is now captured WITH its value; PWD still is not.
+        let declared = captured_hermetic_env_from(vars, &["MY_GATE_MODE".to_string()]);
+        assert_eq!(
+            declared
+                .iter()
+                .find(|(k, _)| k == "MY_GATE_MODE")
+                .map(|(_, v)| v.as_str()),
+            Some("strict"),
+            "a declared --env-axis var is captured with its value"
+        );
+        assert!(
+            !declared.iter().any(|(k, _)| k == "PWD"),
+            "declaring one var does not capture unrelated ambient vars"
+        );
+    }
+
+    #[test]
+    fn env_axis_value_change_busts_the_memo_manifest() {
+        // A change to a DECLARED var's value changes the env manifest → a different
+        // def_digest → a MISS (the soundness PS-11 buys). An UNDECLARED var leaves
+        // the manifest invariant (the hit-rate the hermetic clear preserves).
+        let manifest = |mode: &str, declared: &[String]| {
+            let vars = vec![
+                ("PATH".to_string(), "/usr/bin".to_string()),
+                ("MY_GATE_MODE".to_string(), mode.to_string()),
+            ];
+            env_manifest_axis(&captured_hermetic_env_from(vars, declared))
+        };
+        let axis = vec!["MY_GATE_MODE".to_string()];
+        assert_ne!(
+            manifest("strict", &axis),
+            manifest("lax", &axis),
+            "a declared var's value change busts the manifest (MISS)"
+        );
+        assert_eq!(
+            manifest("strict", &[]),
+            manifest("lax", &[]),
+            "an undeclared var does not affect the manifest (hit-rate preserved)"
+        );
     }
 }
