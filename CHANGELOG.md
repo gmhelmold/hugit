@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(conformance): **IntentMetrics conformance vector (§13.4) landed on `main`** —
+  the hugit twin that corelink-runners PR #5 ("WAITS on hugit twin") explicitly
+  blocks on. `conformance/IntentMetrics.json` + its `manifest.sha256` line are
+  **byte-identical** to the sibling twin branch (`feat/intent-metrics-vector`),
+  SHA-256 `2d8d22…d402`, honoring the iron rule that conformance vectors are
+  committed byte-identical in both repos. Pinned by the x4-wire oracle — item ①
+  (manifest lists exactly the now-three frozen vectors) and a new item ②
+  (`IntentMetrics.json` round-trips byte-exactly through the frozen
+  `hugit_contracts::IntentMetrics` type). Completes the contract v1.2.0 §13.4
+  amendment on the hugit side; unblocks the sibling PR.
+
 - fix(checks): **PS-17 — bound peak memory on the memo-key snapshot read.** The
   tree-axis + ancestor-config snapshot previously read each matched file whole into
   memory (a pathological 200 MB config → ~400 MB peak). All four read sites now route
