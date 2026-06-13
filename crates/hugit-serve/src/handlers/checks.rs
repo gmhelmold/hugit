@@ -8,7 +8,7 @@ use hugit_http_contracts::{ChecksHeroVm, ChecksKpisVm, ChecksPillVm, ChecksVm};
 use hugit_refstore::EventLog;
 use serde_json::Value;
 
-use crate::fmt::{CHECKS_CAP, str_field};
+use crate::fmt::{CHECKS_CAP, scrub, str_field};
 
 // ---------------------------------------------------------------------------
 // Internal row — mirrors hugit-cli's CheckRow without depending on it.
@@ -137,7 +137,7 @@ pub fn build_checks(log: &EventLog, repo: &str) -> ChecksVm {
         .iter()
         .take(CHECKS_CAP)
         .map(|row| CheckRowVm {
-            name: row.name.clone().unwrap_or_default(),         // REAL
+            name: scrub(&row.name.clone().unwrap_or_default()), // REAL (scrubbed read-boundary)
             ok: row.ok.unwrap_or(false),                        // REAL (exit==0)
             duration_ms: row.duration_ms.unwrap_or(0),          // REAL
             cache_hit: row.cache_hit.unwrap_or(false),          // REAL
@@ -161,14 +161,14 @@ pub fn build_checks(log: &EventLog, repo: &str) -> ChecksVm {
                 .map(|k| k.chars().take(8).collect::<String>())
                 .unwrap_or_default();
             ChecksPillVm {
-                key: row.name.clone().unwrap_or_default(),      // REAL
-                cached: true,                                   // REAL
-                hash,                                           // REAL (prefix)
-                from_pr: row.pr_id.clone().unwrap_or_default(), // REAL or ""
-                command: String::new(),                         // STUB — not in log payload
-                saved: String::new(),                           // STUB — not in log payload
-                ago: String::new(),                             // STUB — not in log payload
-                runner: String::new(),                          // STUB — not in log payload
+                key: scrub(&row.name.clone().unwrap_or_default()), // REAL (scrubbed read-boundary)
+                cached: true,                                      // REAL
+                hash,                                              // REAL (prefix)
+                from_pr: row.pr_id.clone().unwrap_or_default(),    // REAL or ""
+                command: String::new(),                            // STUB — not in log payload
+                saved: String::new(),                              // STUB — not in log payload
+                ago: String::new(),                                // STUB — not in log payload
+                runner: String::new(),                             // STUB — not in log payload
             }
         })
         .collect();

@@ -176,3 +176,43 @@ fn failed_exit_row_makes_hero_not_green() {
     assert_eq!(vm.kpis.executed, 1);
     assert_eq!(vm.kpis.shape, "NONE");
 }
+
+/// SECRET-MATRIX (read-boundary): a `check.recorded` whose `name` is secret-shaped,
+/// pushed RAW via `append_for_test` (bypassing the write-path scrub), is scrubbed at
+/// the READ boundary into the check row + cpill — defence-in-depth per the doctrine.
+#[test]
+fn check_name_is_scrubbed_at_read_boundary() {
+    let mut log = EventLog::new();
+    let secret = "ghp_16C7e42F292c6912E7710c838347Ae178B4a";
+    log.append_for_test(
+        "check.recorded",
+        vec!["test".to_string()],
+        serde_json::json!({
+            "name": secret,
+            "exit": 0,
+            "duration_ms": 10_u64,
+            "cache_hit": true,
+            "memo_key": "abc123def4567890",
+        })
+        .to_string(),
+        1_000,
+    );
+
+    let vm = build_checks(&log, "hugit");
+    assert!(
+        vm.checks[0].name.contains("[REDACTED]"),
+        "check row name scrubbed at read boundary, got: {}",
+        vm.checks[0].name
+    );
+    assert!(
+        !vm.checks[0].name.contains("ghp_"),
+        "the raw PAT never reaches the check row name"
+    );
+    assert!(
+        vm.cpills[0].key.contains("[REDACTED]"),
+        "cpill key scrubbed, got: {}",
+        vm.cpills[0].key
+    );
+    // memo_key is a content-address — NOT scrubbed.
+    assert!(!vm.cpills[0].hash.contains("[REDACTED]"));
+}

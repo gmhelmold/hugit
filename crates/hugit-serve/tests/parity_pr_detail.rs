@@ -277,3 +277,48 @@ fn pr_altitude_secrets_are_scrubbed_not_echoed() {
     assert_eq!(vm.change_id, "128");
     assert_eq!(vm.session, "128", "PR-altitude session id is structural");
 }
+
+/// SECRET-MATRIX (read-boundary): a `pr.opened` whose `campaign` is secret-shaped,
+/// pushed RAW via `append_for_test` (bypassing `open()`'s write-scrub), is scrubbed
+/// at the READ boundary in the PR title, the campaign chip, AND provenance — the
+/// path the first fix missed (re-audit P1).
+#[test]
+fn pr_opened_campaign_is_scrubbed_at_read_boundary() {
+    let mut log = EventLog::new();
+    let secret = "ghp_16C7e42F292c6912E7710c838347Ae178B4a";
+    log.append_for_test(
+        "pr.opened",
+        vec!["test".to_string()],
+        serde_json::json!({
+            "pr_id": "128",
+            "campaign": secret,
+            "author_kind": "orchestrator",
+            "intent_ids": ["i1"],
+            "principal": serde_json::Value::Null,
+            "run_id": "r-1",
+        })
+        .to_string(),
+        1_000,
+    );
+
+    let vm = build_pr_detail(&log, "hugit", 128).expect("PR 128 is present");
+    assert!(
+        vm.title.contains("[REDACTED]"),
+        "PR title scrubs the campaign, got: {}",
+        vm.title
+    );
+    assert!(
+        !vm.title.contains("ghp_"),
+        "the raw PAT never reaches the PR title"
+    );
+    assert!(
+        vm.provenance_campaign.contains("[REDACTED]"),
+        "provenance_campaign scrubbed"
+    );
+    if let Some(chip) = &vm.campaign {
+        assert!(chip.id.contains("[REDACTED]"), "campaign chip id scrubbed");
+        assert!(!chip.id.contains("ghp_"), "raw PAT never in the chip id");
+    }
+    // Structural id is not scrubbed.
+    assert_eq!(vm.number, 128);
+}

@@ -312,14 +312,14 @@ fn build_check_rows(log: &EventLog) -> Vec<CheckRowVm> {
                 .map(|e| e == 0)
                 .unwrap_or(false);
             CheckRowVm {
-                name: str_field(&v, "name").unwrap_or_default(), // REAL
-                ok,                                              // REAL (exit==0)
+                name: scrub(&str_field(&v, "name").unwrap_or_default()), // REAL (scrubbed read-boundary)
+                ok,                                                      // REAL (exit==0)
                 duration_ms: v.get("duration_ms").and_then(Value::as_u64).unwrap_or(0), // REAL
                 cache_hit: v.get("cache_hit").and_then(Value::as_bool).unwrap_or(false), // REAL
-                log: String::new(),                              // STUB — not in payload
+                log: String::new(),                                      // STUB — not in payload
                 memo_key: str_field(&v, "memo_key").unwrap_or_default(), // REAL
-                reason: String::new(),                           // STUB
-                cost: String::new(),                             // STUB
+                reason: String::new(),                                   // STUB
+                cost: String::new(),                                     // STUB
             }
         })
         .collect()
@@ -418,6 +418,11 @@ fn pr_title(opened: &OpenedPr) -> String {
     if opened.campaign.is_empty() {
         format!("PR #{} — {} intents", opened.pr_id, n)
     } else {
-        format!("PR #{} ({}) — {} intents", opened.pr_id, opened.campaign, n)
+        format!(
+            "PR #{} ({}) — {} intents",
+            opened.pr_id,
+            scrub(&opened.campaign),
+            n
+        )
     }
 }
