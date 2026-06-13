@@ -8,6 +8,7 @@ license-file.workspace = true
 
 [dependencies]
 hugit-contracts = { path = "../hugit-contracts" }
+hugit-ledger = { path = "../hugit-ledger" }
 hugit-refstore = { path = "../hugit-refstore" }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -15,3 +16,7 @@ serde_json = { workspace = true }
 [[test]]
 name = "acceptance_d6"
 path = "tests/acceptance_d6.rs"
+
+[[test]]
+name = "acceptance_n4_secret_parity"
+path = "tests/acceptance_n4_secret_parity.rs"
