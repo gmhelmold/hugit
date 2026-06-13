@@ -22,3 +22,8 @@ serde_json = { workspace = true }
 # C4-F1: ledger test fixtures build synthetic event logs via the `test-support`
 # raw-append shim (the production raw door is `pub(crate)`).
 hugit-refstore = { path = "../hugit-refstore", features = ["test-support"] }
+# O-1 (T-8): property/fuzz coverage for the redaction scrubber over GENERATED
+# inputs (not just hand-picked fixtures). `default-features = false` drops
+# proptest's fork/timeout machinery (rusty-fork) — we run in-process, keeping
+# the new transitive surface minimal and `cargo deny`-clean.
+proptest = { version = "1", default-features = false, features = ["std"] }

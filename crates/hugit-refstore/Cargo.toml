@@ -28,3 +28,8 @@ test-support = []
 # This self dev-dependency enables the feature for the integration-test target
 # only; it does NOT enable it for the library's normal compilation.
 hugit-refstore = { path = ".", features = ["test-support"] }
+# O-1 (T-8): property/fuzz coverage for the hash chain + memo key over GENERATED
+# chains/mutations (not just hand-picked fixtures). `default-features = false`
+# drops proptest's fork/timeout machinery (rusty-fork) — in-process, minimal
+# transitive surface, `cargo deny`-clean.
+proptest = { version = "1", default-features = false, features = ["std"] }

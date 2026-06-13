@@ -45,6 +45,11 @@ base64 = { workspace = true }
 # path at a temp file so it never touches the real ~/.hugit. Already in the
 # workspace lock (transitive via gix-tempfile) — no new transitive surface.
 tempfile = "3"
+# O-1 (T-8): property/fuzz coverage for the three-axis memo key over GENERATED
+# (tree, def, toolchain) tuples (not just hand-picked fixtures).
+# `default-features = false` drops proptest's fork/timeout machinery
+# (rusty-fork) — in-process, minimal transitive surface, `cargo deny`-clean.
+proptest = { version = "1", default-features = false, features = ["std"] }
 
 [[test]]
 name = "acceptance_c8"
@@ -69,3 +74,7 @@ path = "tests/ac_loader.rs"
 [[test]]
 name = "corelink_ac_smoke"
 path = "tests/corelink_ac_smoke.rs"
+
+[[test]]
+name = "proptest_memo_key"
+path = "tests/proptest_memo_key.rs"
