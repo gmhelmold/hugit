@@ -50,20 +50,37 @@ jobs:
         with:
           tool: cargo-audit,cargo-deny
 
+      # Each gate step puts cargo on PATH itself rather than relying on the
+      # toolchain action's `$GITHUB_PATH` entry — that propagation is
+      # intermittently lost per-step on the shared self-hosted runner (observed
+      # `cargo: command not found` in `test` while `fmt`/`clippy` in the SAME run
+      # found it; ~37% flake, PS-12-class infra). `~/.cargo/bin` holds the rustup
+      # cargo shim + the taiki-e-installed `cargo-deny`/`cargo-audit`, so this is
+      # additive + bulletproof against the runner's flaky PATH propagation.
       - name: fmt
-        run: cargo fmt --all --check
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo fmt --all --check
 
       - name: clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: test
-        run: cargo test --workspace --locked
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo test --workspace --locked
 
       - name: deny
-        run: cargo deny check
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo deny check
 
       - name: audit
-        run: cargo audit --deny warnings
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo audit --deny warnings
 
       - name: changelog gate
         if: github.event_name == 'pull_request'
