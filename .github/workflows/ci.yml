@@ -8,10 +8,22 @@ on:
   # environment approval gate, or add a fork-origin guard:
   #   if: github.event.pull_request.head.repo.fork == false
   # to prevent untrusted fork code from running on the corelink-builder machine.
+  # Docs-only changes do NOT run CI (owner directive 2026-06-12): a change whose
+  # files ALL match these globs skips the runner entirely — no point burning a
+  # ~14-24 min self-hosted cycle to "verify" markdown. A change that touches ANY
+  # non-doc file (code, Cargo.toml, .github/, conformance vectors) still runs.
+  # (Safe: `main` has no required-status-check branch protection, so a path-filter
+  # skip cannot leave a PR "pending forever".)
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
   push:
     branches:
       - main
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
 
 permissions:
   contents: read
