@@ -651,24 +651,28 @@ findings are tracked here as accepted/deferred:
 After Wave N, a focused re-audit of the WEDGE stale-green class (`docs/review/sweep-2026-06-12/wedge-stale-green-reaudit.md`)
 + a property/fuzz pass (Wave O) ran. Outcomes:
 
-- **WO-GLOBMISS (3rd wedge stale-green) — CLOSED (Wave O follow-up).** The built-in gates' tree-axis
-  glob captured only `**/*.rs` + `Cargo.toml`/`Cargo.lock` but `fmt`/`clippy` READ toolchain config
-  files outside it (`rustfmt.toml`, `clippy.toml`, `.cargo/config.toml`, `rust-toolchain.toml`) — a
-  config change served a cached GREEN while the real gate failed (lead cold-reproduced, same shape as
-  the N-1 mode-bit P0). Fixed: `builtin_glob_set` is now PER-DEF and captures the toolchain config
-  files (fmt→rustfmt config; clippy/test→clippy/cargo/toolchain config). Hit-rate preserved (glob
-  stays narrow, NOT `**/*`; a doc edit does not bust the gate). Cold-verified: a `rustfmt.toml`/
-  `.cargo/config.toml` change now busts the key (MISS). Symlink / file-type / file-mode axes were
-  re-confirmed CAPTURED.
-- **RESIDUAL — unbounded check reads (the recurring root) = the disclosed P2 hermetic seam.** The
-  three wedge stale-greens (env→K-RUN, mode→N-1, config-glob→WO-GLOBMISS) are all one class: you
-  cannot soundly memoize a NON-hermetic command by ENUMERATING its inputs. A built-in `test` can read
-  an ARBITRARY fixture (`tests/data/*`, `include_str!`, a `build.rs`-emitted path) no bounded glob can
-  predict — same class as files-outside-`--root`. The class-killing fix is **hermetic execution**
-  (the runner's isolated rootfs so the action physically cannot read outside the seeded tree axis) —
-  the **P2 corelink-runners sandbox seam** (`docs/interop.md` §2 / Round-8 C3 disclosure). Locally we
-  capture the bounded/known axes (env, mode, toolchain config) and disclose the unbounded-read residual;
-  it is NOT closable locally by enumeration.
+- **The wedge stale-green class needed FOUR local fixes (honest correction).** This bullet
+  previously claimed the local class was closed after the 3rd fix — that was an OVERCLAIM (Round 11
+  R11-4 caught it). The four bounded local holes found + fixed: (1) env → K-RUN; (2) file mode →
+  N-1 (and Round 11 found N-1 OVER-captured the umask → Wave P folds exec-only `0o111`); (3) in-root
+  toolchain config (`rustfmt.toml`/`clippy.toml`/`.cargo/config.toml`/`rust-toolchain.toml`) →
+  WO-GLOBMISS, per-def globs; (4) **ANCESTOR** toolchain config (cargo/rustfmt search UPWARD; a parent
+  `.cargo/config.toml` flipped the gate off-key) → **Wave P** (`ancestor_config_digest` replicates the
+  upward search + `$CARGO_HOME`, folds the effective config into the key). Each cold-verified
+  (mutating the axis → MISS; no-change/doc-edit → HIT, hit-rate preserved). Symlink / file-type axes
+  re-confirmed captured. **Dryness is NOT asserted** — a fresh round (12) must confirm no 5th local
+  hole before this is called closed.
+- **RESIDUAL — the recurring ROOT = a non-hermetic command, genuinely closed only by the P2 seam.**
+  Four holes from one class: you cannot soundly memoize a NON-hermetic command by ENUMERATING its
+  inputs — each round found one more axis. The bounded, KNOWN axes are now captured locally (env,
+  exec-mode, in-root + ancestor toolchain config). The GENUINELY irreducible residual is the UNBOUNDED
+  read: a `test` reading an ARBITRARY fixture (`tests/data/*`, `include_str!`, a `build.rs`-emitted
+  path), network, or the clock — no enumeration predicts these. The class-killing fix is **hermetic
+  execution** (the runner's isolated rootfs so the action physically cannot read outside the seeded
+  tree axis) — the **P2 corelink-runners sandbox seam** (`docs/interop.md` §2 / Round-8 C3). That
+  residual is honestly P2; the local bounded axes are captured but only "closed" once a round confirms
+  dry. Narrow accepted edge: the toolchain digest hashes `rustc --version --verbose`, not the binary
+  bytes (two rustc with identical version strings would false-HIT — vanishingly unlikely, accepted).
 - **Hash-chain tail-truncation (PS-8 instance, property-confirmed).** Wave O's `verify_chain` proptest
   precisely bounded the LOCAL guarantee: any MID-STREAM corruption (byte-flip / drop / reorder /
   duplicate) is detected, but dropping the TAIL record leaves a still-valid prefix that `verify_chain`

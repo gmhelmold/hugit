@@ -59,12 +59,16 @@ const MODE_TAG: &[u8] = b"\0hugit-fmode\0";
 /// Fold a file's POSIX `mode` and `content` into the single canonical byte field
 /// the tree axis hashes (N-1). Layout: `MODE_TAG ‖ LP(u32_le(mode)) ‖ LP(content)`.
 ///
-/// The full `mode` (the `st_mode` low bits, in practice the `0o7777`
-/// permission/setuid/setgid/sticky bits the snapshot passes) is folded — not
-/// merely the executable bit — so ANY permission change busts the memo key. On
-/// non-unix the caller passes a fixed sentinel mode (the bits are not
-/// meaningful there), so the framing is stable cross-platform and the Windows
-/// build is unaffected.
+/// The `mode` the snapshot passes is the result-affecting subset (Wave P FIX B:
+/// the executable bits `0o111` — exec-vs-not is what changes a gate's outcome;
+/// the umask-dependent read/write bits do not, and folding them leaked the
+/// runner's umask into the memo key → a cross-runner MISS for identical work).
+/// A `chmod -x` (exec bit cleared) still busts the key; a `chmod 0664` on a
+/// non-exec file (a pure umask difference) no longer does. On non-unix the caller
+/// passes a fixed sentinel mode (the bits are not meaningful there), so the
+/// framing is stable cross-platform and the Windows build is unaffected. This
+/// function is mode-agnostic — it frames whatever `mode` value it is handed; the
+/// SELECTION of which bits are result-affecting lives in the caller's `file_mode`.
 ///
 /// This is the ONE place the mode↔content framing lives, so the snapshotter and
 /// any future producer fold identically (no drift between producers).

@@ -175,6 +175,148 @@ fn builtin_glob_set(name: &str) -> Vec<String> {
     set
 }
 
+/// The KNOWN, BOUNDED toolchain-config filenames a built-in gate reads from a
+/// directory, PER DEF (Wave P FIX A). Cargo and rustfmt search UPWARD from the
+/// invocation dir to the filesystem root for these, so an ANCESTOR copy of one
+/// (above `--root`) is just as result-affecting as an in-root copy — but the
+/// `--root`-relative tree glob ([`builtin_glob_set`]) never sees it. We mirror the
+/// per-def split of the glob set so an ancestor change busts ONLY the gates that
+/// actually read it (fmt does not read clippy/cargo config — capturing them would
+/// needlessly bust a fmt HIT). These are SPECIFIC, ENUMERATED filenames — NOT an
+/// arbitrary-file read — so this stays in the bounded toolchain-config class the
+/// glob fix already closed in-root, not the disclosed unbounded P2 fixture seam.
+///
+/// `.cargo/config{,.toml}` is special: it lives in a `.cargo/` subdir of each
+/// ancestor, so it is probed as the relative segment `.cargo/config.toml`. All
+/// other names are probed directly in the ancestor dir.
+fn ancestor_config_names(name: &str) -> &'static [&'static str] {
+    match name {
+        // `cargo fmt` reads the rustfmt config; the active toolchain pin selects
+        // WHICH rustfmt runs. Both search upward.
+        "fmt" => &[
+            "rustfmt.toml",
+            ".rustfmt.toml",
+            "rust-toolchain.toml",
+            "rust-toolchain",
+        ],
+        // `cargo clippy`/`cargo test` read the lint config, the cargo build config
+        // (rustflags / lints / [build]), and the toolchain pin — all upward-searched.
+        "clippy" | "test" => &[
+            ".cargo/config.toml",
+            ".cargo/config",
+            "clippy.toml",
+            ".clippy.toml",
+            "rust-toolchain.toml",
+            "rust-toolchain",
+        ],
+        // An unknown (ad-hoc) name never reaches here (the caller takes the `**/*`
+        // path and resolves no ancestor config).
+        _ => &[],
+    }
+}
+
+/// Compute the ANCESTOR toolchain-config digest folded into the memo key (Wave P
+/// FIX A — the 4th wedge stale-green close).
+///
+/// cargo & rustfmt discover their config by walking UP from the invocation dir to
+/// the filesystem root (plus `$CARGO_HOME/config.toml`). [`builtin_glob_set`]
+/// captured the in-`--root` copies; this captures the ones in ANCESTOR directories
+/// of `--root` (strictly above it — the in-root copies are the glob's job) plus
+/// `$CARGO_HOME/config.toml`, so an ancestor-config change BUSTS the key.
+///
+/// Discovery replicates the tools' DETERMINISTIC search: from the canonical
+/// `--root`, take each ancestor (parent, grandparent, … up to the filesystem
+/// root), and at each one probe the per-def [`ancestor_config_names`]. The result
+/// is a single SHA-256 over a canonical pre-image: for every (ancestor-depth,
+/// relative-name) that EXISTS, frame `LP(label) ‖ LP(content)`, sorted by label,
+/// count-prefixed. The label is `depth`-stable (the integer number of `..` hops
+/// above `--root`) + the relative name, NOT an absolute path, so the digest is
+/// invariant to where `--root` sits in the filesystem (two checkouts at different
+/// absolute prefixes with the same ancestor config compute the SAME digest — the
+/// hit-rate is preserved cross-machine). `$CARGO_HOME/config.toml` is labelled by
+/// a fixed `cargo-home/config.toml` tag (its absolute location is captured in the
+/// env axis via `CARGO_HOME`/`HOME`, so only its CONTENT needs folding here).
+///
+/// A def with no ancestor config names (ad-hoc, or none found) yields the empty
+/// digest sentinel — folded identically, so "no ancestor config" is itself a
+/// stable, distinct key input (adding the first ancestor config is a MISS).
+///
+/// This reads SPECIFIC BOUNDED KNOWN filenames outside `--root` — NOT arbitrary
+/// files; the unbounded outside-root read stays the disclosed P2 hermetic seam.
+fn ancestor_config_digest(name: &str, canonical_root: &Path) -> String {
+    let names = ancestor_config_names(name);
+    // (canonical label, content) for every existing probed file, deterministically
+    // ordered by label below.
+    let mut found: Vec<(String, Vec<u8>)> = Vec::new();
+
+    if !names.is_empty() {
+        // Walk strictly UPWARD: depth 1 = parent, depth 2 = grandparent, … The
+        // in-`--root` copies (depth 0) are captured by the tree-axis glob, so we
+        // start at the parent to avoid double-counting (harmless if we did, but
+        // this keeps the two axes cleanly disjoint).
+        let mut depth = 1usize;
+        let mut cursor = canonical_root.parent();
+        while let Some(dir) = cursor {
+            for rel in names {
+                let candidate = dir.join(rel);
+                if let Ok(bytes) = std::fs::read(&candidate) {
+                    // Label by the ancestor DEPTH + the relative name — stable
+                    // across absolute-prefix changes, so two checkouts in
+                    // different locations with the same ancestor config key alike.
+                    found.push((format!("anc{depth}/{rel}"), bytes));
+                }
+            }
+            depth += 1;
+            cursor = dir.parent();
+        }
+    }
+
+    // `$CARGO_HOME/config.toml` (default `~/.cargo/config.toml`) is a further
+    // ancestor-of-sorts cargo always consults for clippy/test. Its absolute path
+    // is env-captured (CARGO_HOME/HOME), so only its CONTENT is folded, under a
+    // fixed label. fmt does not consult it (no cargo config), so guard by def.
+    if matches!(name, "clippy" | "test")
+        && let Some(cargo_home) = cargo_home_dir()
+    {
+        let candidate = cargo_home.join("config.toml");
+        if let Ok(bytes) = std::fs::read(&candidate) {
+            found.push(("cargo-home/config.toml".to_string(), bytes));
+        }
+        // cargo also accepts the extensionless `config` in CARGO_HOME.
+        let candidate_noext = cargo_home.join("config");
+        if let Ok(bytes) = std::fs::read(&candidate_noext) {
+            found.push(("cargo-home/config".to_string(), bytes));
+        }
+    }
+
+    // Canonical pre-image: sorted by label, count-prefixed, each entry
+    // `LP(label) ‖ LP(content)` — the same framing discipline as the tree axis, so
+    // a changed/added/removed ancestor config all change the digest (a MISS).
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut buf: Vec<u8> = Vec::new();
+    buf.extend_from_slice(&(found.len() as u32).to_be_bytes());
+    for (label, content) in &found {
+        buf.extend_from_slice(&(label.len() as u32).to_be_bytes());
+        buf.extend_from_slice(label.as_bytes());
+        buf.extend_from_slice(&(content.len() as u32).to_be_bytes());
+        buf.extend_from_slice(content);
+    }
+    hex::encode(Sha256::digest(&buf))
+}
+
+/// Resolve `$CARGO_HOME` (the dir holding cargo's global `config.toml`): the
+/// `CARGO_HOME` env var if set, else `~/.cargo` derived from `HOME`. Both inputs
+/// are themselves captured in the env axis, so this only locates the file whose
+/// CONTENT [`ancestor_config_digest`] folds.
+fn cargo_home_dir() -> Option<PathBuf> {
+    if let Some(ch) = std::env::var_os("CARGO_HOME").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(ch));
+    }
+    std::env::var_os("HOME")
+        .filter(|v| !v.is_empty())
+        .map(|home| PathBuf::from(home).join(".cargo"))
+}
+
 /// The fallback toolchain marker used ONLY when `--toolchain` is omitted AND the
 /// active toolchain identity cannot be probed (e.g. `rustc` is not on PATH). It is
 /// deliberately distinct from any real digest so a probe failure is visible rather
@@ -330,7 +472,19 @@ fn default_toolchain_digest() -> String {
 /// result-affecting env vars + the hashed PATH that the hermetic spawn will set, so
 /// a change to any captured var/PATH busts the memo key. It MUST be set before
 /// validation (the digest folds it).
-fn resolve_def(args: &CheckArgs, env_manifest: String) -> Result<CheckDef, PorcelainError> {
+///
+/// `ancestor_config_digest` (Wave P FIX A) is a single SHA-256 over the ANCESTOR
+/// toolchain-config files the built-in gate reads from ABOVE `--root` (cargo &
+/// rustfmt search upward). It is folded into `inputs` (a `def_digest` axis), so an
+/// ancestor `.cargo/config.toml`/`rustfmt.toml`/`rust-toolchain*` change BUSTS the
+/// memo key — closing the 4th wedge stale-green. For a built-in def it is the
+/// `ancestor:<digest>` line; for an ad-hoc def it is empty (the `**/*` glob already
+/// makes any in-tree edit a MISS and the ancestor-config class is built-in-only).
+fn resolve_def(
+    args: &CheckArgs,
+    env_manifest: String,
+    ancestor_config_digest: String,
+) -> Result<CheckDef, PorcelainError> {
     let (command, glob_set) = match builtin_command(&args.def) {
         Some(cmd) => (cmd.to_string(), builtin_glob_set(&args.def)),
         None => {
@@ -358,10 +512,22 @@ fn resolve_def(args: &CheckArgs, env_manifest: String) -> Result<CheckDef, Porce
         }
     };
 
+    // FIX A: fold the ANCESTOR toolchain-config digest into `inputs` (a
+    // `def_digest` axis via `compute_def_digest`'s `push_vec`). A non-empty digest
+    // means a built-in gate's effective ancestor config (cargo/rustfmt/toolchain
+    // config ABOVE `--root`, plus `$CARGO_HOME/config.toml`) is captured, so a
+    // change to it busts the memo key. The `ancestor:` label keeps it a discrete,
+    // self-describing entry that can never collide with a future declared input.
+    let inputs = if ancestor_config_digest.is_empty() {
+        Vec::new()
+    } else {
+        vec![format!("ancestor:{ancestor_config_digest}")]
+    };
+
     let def = CheckDef {
         def_digest: String::new(),
         command,
-        inputs: Vec::new(),
+        inputs,
         // The toolchain axis is a REAL digest when `--toolchain` is omitted — the
         // hash of the active `rustc --version --verbose` — so a toolchain change
         // busts the memo key (WG-CACHE: the old `local-toolchain` constant made
@@ -451,13 +617,23 @@ fn state_file_exclusions(state_files: &[&Path]) -> std::collections::HashSet<Pat
 /// symlink cycles — this is the belt-and-suspenders guard).
 const MAX_WALK_DEPTH: usize = 64;
 
-/// The POSIX permission/mode bits of `path` folded into the tree axis (N-1).
+/// The result-affecting POSIX mode bits of `path` folded into the tree axis (N-1,
+/// narrowed by Wave P FIX B to the EXECUTABLE bits only).
 ///
-/// On unix we read `st_mode` and keep the low `0o7777` bits (the
-/// permission + setuid/setgid/sticky bits) — the FULL permission set, not just
-/// the executable bit, so ANY mode change (`chmod -x`, `chmod 600`, a setuid
-/// flip) busts the memo key. A stat failure folds a fixed sentinel (`MODE_UNREAD`)
-/// rather than guessing — deterministic, never a silent off-key input.
+/// On unix we read `st_mode` and keep ONLY the executable bits `mode & 0o111`
+/// (owner/group/other exec). Exec-vs-not is the result-affecting part — the
+/// failure the N-1 fold closed needed only the exec bit (`./gate.sh` flips from
+/// `exit 0` to `exit 126` on `chmod -x`, SAME content). The OTHER permission bits
+/// (the read/write bits, e.g. group-write `0664` vs `0644`) are a function of the
+/// runner's UMASK, which git does NOT track and which does not change a gate's
+/// outcome; folding the full `0o7777` leaked the umask into the memo key, so two
+/// runners with different umasks computed DIFFERENT keys for byte-identical,
+/// same-exec-bit sources → a cross-runner cache MISS on the fleet-shared AC for
+/// identical work (Round 11 N-1 over-capture: correctness-SAFE, a hit-rate loss).
+/// Folding only `0o111` keeps `chmod -x` a MISS (the N-1 P0 stays closed) while
+/// making the key umask-invariant. A stat failure folds a fixed sentinel
+/// (`MODE_UNREAD`) rather than guessing — deterministic, never a silent off-key
+/// input.
 ///
 /// On non-unix the mode bits are not meaningful (Windows has no `st_mode`
 /// exec bit), so we fold a fixed sentinel: the framing stays stable and
@@ -465,10 +641,13 @@ const MAX_WALK_DEPTH: usize = 64;
 #[cfg(unix)]
 fn file_mode(path: &Path) -> u32 {
     use std::os::unix::fs::MetadataExt;
-    /// Sentinel when the mode cannot be stat'd — distinct from any real mode.
+    /// Sentinel when the mode cannot be stat'd — distinct from any real
+    /// `mode & 0o111` value.
     const MODE_UNREAD: u32 = u32::MAX;
     match std::fs::metadata(path) {
-        Ok(meta) => meta.mode() & 0o7777,
+        // FIX B: fold ONLY the executable bits — exec-vs-not is the
+        // result-affecting axis; the umask-dependent read/write bits are not.
+        Ok(meta) => meta.mode() & 0o111,
         Err(_) => MODE_UNREAD,
     }
 }
@@ -1151,7 +1330,31 @@ pub fn run(args: &CheckArgs) -> Result<Value, PorcelainError> {
     let captured_env = captured_hermetic_env();
     let env_manifest = env_manifest_axis(&captured_env);
 
-    let def = resolve_def(args, env_manifest)?;
+    let root = args
+        .root
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    // The canonical `--root` the hermetic spawn pins its cwd to (Round-8 C3) AND
+    // the anchor the FIX A ancestor-config walk climbs from. Canonicalize ONCE; a
+    // canonicalize failure (a `--root` that does not exist) falls back to the raw
+    // path so the spawn still has a defined cwd and the ancestor walk a defined
+    // start rather than silently inheriting the ambient one.
+    let canonical_root = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+
+    // FIX A — the 4th wedge stale-green close: capture the effective ANCESTOR
+    // toolchain config (cargo/rustfmt/toolchain config ABOVE `--root`, plus
+    // `$CARGO_HOME/config.toml`) as an additional memo-key input. cargo & rustfmt
+    // search upward, so an ancestor `.cargo/config.toml`/`rustfmt.toml` flips the
+    // gate's result while the `--root`-relative tree glob never sees it; folding
+    // its digest into `def.inputs` (→ `def_digest` → memo key) makes such a change
+    // a MISS. Computed from `canonical_root` so the per-def names are probed from
+    // the SAME real path the tree axis snapshotted.
+    let ancestor_cfg = ancestor_config_digest(&args.def, &canonical_root);
+
+    // resolve_def runs BEFORE the log-not-found check so an unknown def with no
+    // `--cmd` surfaces its OWN `unknown_def` fault first (the W0 dispatch contract:
+    // dispatch reaches the resolver, not a premature log guard).
+    let def = resolve_def(args, env_manifest, ancestor_cfg)?;
     // Axis 3 is taken from the resolved def's `toolchain_ref` — the SAME value
     // `resolve_def` baked into axis 2 (`compute_def_digest` hashes `toolchain_ref`)
     // — so the two axes can never disagree. When `--toolchain` is omitted this is
@@ -1166,11 +1369,6 @@ pub fn run(args: &CheckArgs) -> Result<Value, PorcelainError> {
         return Err(PorcelainError::log_not_found(&args.log));
     }
 
-    let root = args
-        .root
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
     // Exclude hugit's OWN wedge-state files from the tree axis (WH-CHECK
     // cmd-memoize fix). An ad-hoc def globs `**/*`, which would otherwise match the
     // `--log`, the `--ac` cache, and their `.lock`/`.tmp` sidecars when they live
@@ -1184,11 +1382,6 @@ pub fn run(args: &CheckArgs) -> Result<Value, PorcelainError> {
     let excluded = state_file_exclusions(&[&args.log, &ac_path]);
     let files = snapshot_tree(&root, &def.glob_set, &excluded);
     let ac = select_ac(args)?;
-    // The canonical `--root` the hermetic spawn pins its cwd to (Round-8 C3). Pin
-    // to the SAME real path the tree axis snapshotted; a canonicalize failure (a
-    // `--root` that does not exist) falls back to the raw path so the spawn still
-    // has a defined cwd rather than silently inheriting the ambient one.
-    let canonical_root = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
     let runner = ProcessRunner {
         timeout: Duration::from_secs(args.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS)),
         root: Some(canonical_root),
@@ -1518,13 +1711,19 @@ mod tests {
 
     #[test]
     fn ad_hoc_def_requires_cmd() {
-        let err = resolve_def(&args_for("echo-check", None), String::new()).unwrap_err();
+        let err =
+            resolve_def(&args_for("echo-check", None), String::new(), String::new()).unwrap_err();
         assert_eq!(err.kind(), "unknown_def");
     }
 
     #[test]
     fn ad_hoc_def_with_cmd_builds_a_valid_def() {
-        let def = resolve_def(&args_for("echo-check", Some("true")), String::new()).unwrap();
+        let def = resolve_def(
+            &args_for("echo-check", Some("true")),
+            String::new(),
+            String::new(),
+        )
+        .unwrap();
         assert_eq!(def.command, "true");
         // The def_digest was canonicalized (non-empty) by the validator.
         assert!(!def.def_digest.is_empty());
@@ -1898,5 +2097,131 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Wave P FIX B: exec-only mode fold (umask no longer leaks) ────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn file_mode_folds_only_exec_bits_not_umask_rw_bits() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("hugit-p-mode-{}-{}", std::process::id(), "u"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("file.txt");
+        std::fs::write(&f, b"same bytes").unwrap();
+
+        // A non-exec file at 0644 and the SAME bytes at 0664 (only the group-write
+        // bit flipped — a pure umask difference git does NOT track) must fold to
+        // the SAME mode value, so the memo key is umask-invariant (FIX B).
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let m644 = file_mode(&f);
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o664)).unwrap();
+        let m664 = file_mode(&f);
+        assert_eq!(
+            m644, m664,
+            "a 0644 vs 0664 (umask) difference must NOT change the folded mode"
+        );
+
+        // But the EXEC bit IS result-affecting: chmod +x must change the fold so
+        // `chmod -x` still busts the key (the N-1 P0 stays closed).
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let m755 = file_mode(&f);
+        assert_ne!(
+            m644, m755,
+            "adding the exec bit must change the folded mode (N-1 stays closed)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Wave P FIX A: ancestor toolchain-config digest ──────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn ancestor_config_digest_busts_on_a_parent_cargo_config_change() {
+        // Layout: parent/.cargo/config.toml is an ANCESTOR of the proj root (above
+        // it), so the `--root`-relative tree glob never sees it — but cargo reads
+        // it. The ancestor digest must move when its content changes (FIX A).
+        let base = std::env::temp_dir().join(format!("hugit-p-anc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let parent = base.join("parent");
+        let proj = parent.join("proj");
+        std::fs::create_dir_all(parent.join(".cargo")).unwrap();
+        std::fs::create_dir_all(&proj).unwrap();
+        let cfg = parent.join(".cargo/config.toml");
+        let root = std::fs::canonicalize(&proj).unwrap();
+
+        // No ancestor config yet → a baseline digest.
+        let d_none = ancestor_config_digest("clippy", &root);
+
+        // Add the ancestor cargo config (caps lints) → digest MUST change (MISS).
+        std::fs::write(&cfg, b"[build]\nrustflags = [\"--cap-lints=allow\"]\n").unwrap();
+        let d_capped = ancestor_config_digest("clippy", &root);
+        assert_ne!(
+            d_none, d_capped,
+            "adding an ancestor .cargo/config.toml must change the digest (R11-1 close)"
+        );
+
+        // Mutate the ancestor config (remove the cap) → digest MUST change again.
+        std::fs::write(&cfg, b"[build]\nrustflags = []\n").unwrap();
+        let d_nocap = ancestor_config_digest("clippy", &root);
+        assert_ne!(
+            d_capped, d_nocap,
+            "mutating the ancestor config must change the digest (the R11-1 stale-green)"
+        );
+
+        // `fmt` does NOT read the cargo config, so its ancestor digest must be
+        // INVARIANT to a `.cargo/config.toml` change (per-def scoping; hit-rate).
+        let f_a = ancestor_config_digest("fmt", &root);
+        std::fs::write(&cfg, b"[build]\nrustflags = [\"-C\", \"opt-level=0\"]\n").unwrap();
+        let f_b = ancestor_config_digest("fmt", &root);
+        assert_eq!(
+            f_a, f_b,
+            "fmt does not read .cargo/config — its ancestor digest is invariant to it"
+        );
+
+        // An ancestor rustfmt.toml DOES affect fmt → its digest must move.
+        std::fs::write(parent.join("rustfmt.toml"), b"max_width = 1\n").unwrap();
+        let f_c = ancestor_config_digest("fmt", &root);
+        assert_ne!(
+            f_b, f_c,
+            "an ancestor rustfmt.toml must change the fmt ancestor digest"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ancestor_config_digest_is_absolute_prefix_invariant() {
+        // Two checkouts at DIFFERENT absolute prefixes with the SAME ancestor
+        // config must compute the SAME digest (depth+relname label, not abspath) —
+        // the cross-machine hit-rate is preserved.
+        let mk = |tag: &str| -> String {
+            let base = std::env::temp_dir().join(format!(
+                "hugit-p-anc-inv-{}-{}",
+                std::process::id(),
+                tag
+            ));
+            let _ = std::fs::remove_dir_all(&base);
+            let parent = base.join("parent");
+            let proj = parent.join("proj");
+            std::fs::create_dir_all(parent.join(".cargo")).unwrap();
+            std::fs::create_dir_all(&proj).unwrap();
+            std::fs::write(
+                parent.join(".cargo/config.toml"),
+                b"[build]\nrustflags = [\"--cap-lints=allow\"]\n",
+            )
+            .unwrap();
+            let root = std::fs::canonicalize(&proj).unwrap();
+            let d = ancestor_config_digest("clippy", &root);
+            let _ = std::fs::remove_dir_all(&base);
+            d
+        };
+        assert_eq!(
+            mk("a"),
+            mk("b"),
+            "the ancestor digest is invariant to the absolute prefix (hit-rate preserved)"
+        );
     }
 }
