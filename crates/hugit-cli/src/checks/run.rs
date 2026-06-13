@@ -270,7 +270,7 @@ fn ancestor_config_digest(name: &str, canonical_root: &Path) -> String {
         while let Some(dir) = cursor {
             for rel in names {
                 let candidate = dir.join(rel);
-                if let Ok(bytes) = std::fs::read(&candidate) {
+                if let Some(bytes) = read_snapshot_content(&candidate) {
                     // Label by the ancestor DEPTH + the relative name — stable
                     // across absolute-prefix changes, so two checkouts in
                     // different locations with the same ancestor config key alike.
@@ -290,12 +290,12 @@ fn ancestor_config_digest(name: &str, canonical_root: &Path) -> String {
         && let Some(cargo_home) = cargo_home_dir()
     {
         let candidate = cargo_home.join("config.toml");
-        if let Ok(bytes) = std::fs::read(&candidate) {
+        if let Some(bytes) = read_snapshot_content(&candidate) {
             found.push(("cargo-home/config.toml".to_string(), bytes));
         }
         // cargo also accepts the extensionless `config` in CARGO_HOME.
         let candidate_noext = cargo_home.join("config");
-        if let Ok(bytes) = std::fs::read(&candidate_noext) {
+        if let Some(bytes) = read_snapshot_content(&candidate_noext) {
             found.push(("cargo-home/config".to_string(), bytes));
         }
     }
@@ -672,6 +672,62 @@ fn file_mode(_path: &Path) -> u32 {
     MODE_NON_UNIX
 }
 
+/// Peak-memory ceiling (bytes) for reading a single snapshotted file WHOLE into
+/// the memo key (PS-17, defensive). A file at or under the cap is folded as its
+/// raw bytes — exactly as before, so every realistic source/config input
+/// (Cargo.toml/rustfmt.toml are KB; source files MB) keeps its folded
+/// representation byte-for-byte and the memo key + hit-rate are UNCHANGED. Only a
+/// pathological file ABOVE the cap (e.g. a 200 MB adversarial ancestor config →
+/// ~400 MB peak under the old whole-read) is folded differently — and even then
+/// soundly (below).
+///
+/// 64 MiB is far above any legitimate check input while bounding the peak.
+const MAX_SNAPSHOT_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Read a file's content for snapshotting into the memo key with a bounded peak
+/// memory (PS-17). Delegates to [`read_snapshot_content_capped`] with the
+/// production cap; the inner form takes the cap as a parameter so the soundness
+/// invariants can be exercised by a unit test without materializing a >64 MiB
+/// fixture.
+fn read_snapshot_content(path: &Path) -> Option<Vec<u8>> {
+    read_snapshot_content_capped(path, MAX_SNAPSHOT_FILE_BYTES)
+}
+
+/// The capped read. A file `<= cap` bytes is returned as its raw bytes (folded
+/// IDENTICALLY to the old bare `fs::read`, so the key is unchanged for every
+/// real-repo file). A file `> cap` is folded as a deterministic
+/// `OVERSIZE:<len>:<streamed-sha256>` sentinel computed WITHOUT holding the whole
+/// file in memory (a 1 MiB streaming buffer) — soundness is preserved (any change
+/// to the oversized file changes its length or hash → the sentinel changes → a
+/// MISS that re-executes), so the snapshot never serves a stale green off an
+/// oversized input, while peak memory stays bounded. Any I/O fault returns `None`,
+/// which the callers treat as "file absent" — the same fail-safe the bare
+/// `fs::read(..).ok()` had (a fault never crashes and never silently fabricates a
+/// key input).
+fn read_snapshot_content_capped(path: &Path, cap: u64) -> Option<Vec<u8>> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    if meta.len() <= cap {
+        return std::fs::read(path).ok();
+    }
+    // Oversized: stream-hash so the peak stays at one chunk, not the whole file.
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1024 * 1024];
+    let mut total: u64 = 0;
+    loop {
+        let n = file.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        total += n as u64;
+    }
+    Some(format!("OVERSIZE:{total}:{}", hex::encode(hasher.finalize())).into_bytes())
+}
+
 /// Recursively walk `dir`, collecting glob-matched files relative to `base`.
 /// Skips `target/`, `.git/`, and the worktree scratch dir so the tree axis is the
 /// SOURCE subtree, not build output (which would make every run a miss).
@@ -726,7 +782,7 @@ fn collect_files(
         {
             let rel = rel.to_string_lossy().replace('\\', "/");
             if hugit_checks::client::glob::matches_any(glob_set, &rel)
-                && let Ok(bytes) = std::fs::read(&path)
+                && let Some(bytes) = read_snapshot_content(&path)
             {
                 // Fold the POSIX mode into the snapshotted byte field so a mode
                 // change (e.g. `chmod -x gate.sh`, SAME content) busts the tree
@@ -2234,5 +2290,59 @@ mod tests {
             mk("b"),
             "the ancestor digest is invariant to the absolute prefix (hit-rate preserved)"
         );
+    }
+
+    #[test]
+    fn read_snapshot_content_caps_oversized_files_soundly() {
+        // PS-17: a file at/under the cap folds as its raw bytes (byte-identical to
+        // the old bare `fs::read`, so the memo key is UNCHANGED for real inputs); a
+        // file OVER the cap folds as a bounded streaming-hash sentinel that STILL
+        // changes when the file changes (no stale green) while bounding peak memory.
+        // Exercised with a TINY cap so no >64 MiB fixture is materialized.
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("hugit-ps17-{}-{}", std::process::id(), nanos));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("blob");
+        std::fs::write(&path, b"hello-world").unwrap(); // 11 bytes
+
+        // Under the cap → raw bytes, byte-identical to a plain read (key unchanged).
+        assert_eq!(
+            read_snapshot_content_capped(&path, 1024).as_deref(),
+            Some(&b"hello-world"[..]),
+            "a file at/under the cap folds as its raw bytes"
+        );
+
+        // Over the cap (4 < 11) → a deterministic OVERSIZE sentinel, NOT the raw bytes.
+        let over = read_snapshot_content_capped(&path, 4).expect("oversized read");
+        assert!(
+            over.starts_with(b"OVERSIZE:11:"),
+            "an oversized file folds as a streamed-hash sentinel carrying its length"
+        );
+        assert_ne!(
+            over, b"hello-world",
+            "the oversized fold is not the raw bytes"
+        );
+        assert_eq!(
+            over,
+            read_snapshot_content_capped(&path, 4).unwrap(),
+            "the oversized sentinel is deterministic for identical content"
+        );
+
+        // Soundness: a content change MUST change the sentinel (no stale green).
+        std::fs::write(&path, b"hello-worlds").unwrap(); // changed (12 bytes)
+        assert_ne!(
+            over,
+            read_snapshot_content_capped(&path, 4).unwrap(),
+            "changing an oversized file must change its sentinel (PS-17 soundness)"
+        );
+
+        // A missing file is None — fail-safe "absent", exactly as `fs::read(..).ok()`.
+        std::fs::remove_file(&path).unwrap();
+        assert!(read_snapshot_content_capped(&path, 1024).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

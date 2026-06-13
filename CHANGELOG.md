@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(checks): **PS-17 — bound peak memory on the memo-key snapshot read.** The
+  tree-axis + ancestor-config snapshot previously read each matched file whole into
+  memory (a pathological 200 MB config → ~400 MB peak). All four read sites now route
+  through `read_snapshot_content`: a file `≤ 64 MiB` folds as its raw bytes
+  (byte-identical to before — memo key + hit-rate unchanged for every realistic
+  input), and a file `> 64 MiB` folds as a bounded `OVERSIZE:<len>:<streamed-sha256>`
+  sentinel (1 MiB streaming buffer). Soundness holds — a change to an oversized file
+  still busts the key (no stale green) — while peak memory stays bounded. Defensive
+  P3, closed by construction.
+
 - fix(security,cli,ledger): **Round-8 SEVERE class sweep + Wave L — six root-cause
   classes closed by construction** (branch `integ/wave-l`; pending Round 9 re-audit
   + merge to `main`; push HELD). After the owner judged the prior fix waves to be

@@ -687,10 +687,18 @@ After Wave N, a focused re-audit of the WEDGE stale-green class (`docs/review/sw
   unbounded read is the only surviving stale-green vector, and it is the documented P2 hermetic seam.
   Narrow accepted edge: the toolchain digest hashes `rustc --version --verbose`, not the binary bytes
   (two rustc with identical version strings would false-HIT — vanishingly unlikely, accepted).
-  **PS-17 (minor P3, defensive):** the tree/ancestor-config snapshot reads each matched file WHOLE
-  into memory (a 200MB adversarial config → ~400MB peak). Not specific to the ancestor fix (the
-  in-root snapshot does the same) and harmless on real repos, but a defensive per-file size cap on the
-  snapshot read is worth a follow-up. Tracked, not blocking.
+  **PS-17 (minor P3, defensive) — RESOLVED 2026-06-13:** the tree/ancestor-config snapshot read
+  previously pulled each matched file WHOLE into memory (a 200MB adversarial config → ~400MB peak).
+  CLOSED in `checks/run.rs`: all four snapshot read sites (the tree-axis `collect_files` + the three
+  `ancestor_config_digest` reads, incl. `$CARGO_HOME/config[.toml]`) now route through
+  `read_snapshot_content`, which folds a file `≤ 64 MiB` as its raw bytes (BYTE-IDENTICAL to the old
+  read — the memo key and hit-rate are UNCHANGED for every realistic input) and a file `> 64 MiB` as a
+  bounded `OVERSIZE:<len>:<streamed-sha256>` sentinel computed with a 1 MiB streaming buffer. Soundness
+  is preserved (a change to an oversized file changes its length or hash → the sentinel changes → a
+  MISS that re-executes — no stale green), peak memory is bounded, and an I/O fault still returns
+  "absent" (fail-safe, exactly as the prior `fs::read(..).ok()`). Unit test
+  `read_snapshot_content_caps_oversized_files_soundly` exercises both branches + determinism +
+  soundness + the missing-file fail-safe with a tiny cap (no >64 MiB fixture materialized).
 - **Hash-chain tail-truncation (PS-8 instance, property-confirmed).** Wave O's `verify_chain` proptest
   precisely bounded the LOCAL guarantee: any MID-STREAM corruption (byte-flip / drop / reorder /
   duplicate) is detected, but dropping the TAIL record leaves a still-valid prefix that `verify_chain`
