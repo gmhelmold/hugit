@@ -119,6 +119,17 @@ impl IntentLog {
     pub fn by_id(&self, intent_id: &str) -> Option<&Intent> {
         self.intents.iter().find(|i| i.intent_id == intent_id)
     }
+
+    /// The set of all landed `intent_id`s on this altitude, materialised ONCE.
+    ///
+    /// O(n) to build, O(1) per membership query — the index a reconcile/sync
+    /// pass uses to test "is this log-intent already present here?" without the
+    /// O(n²) of a fresh [`by_id`](Self::by_id) linear scan (itself over a fresh
+    /// [`intents_from_log`] re-parse) per candidate. Borrows the ids; the
+    /// returned set lives no longer than `&self`.
+    pub fn id_set(&self) -> std::collections::HashSet<&str> {
+        self.intents.iter().map(|i| i.intent_id.as_str()).collect()
+    }
 }
 
 /// Error reading native intents out of the event log.
