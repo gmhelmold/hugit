@@ -99,15 +99,80 @@ fn builtin_command(name: &str) -> Option<&'static str> {
     }
 }
 
-/// The default input glob for the built-in defs — Rust sources + the manifests
-/// that change the gate's outcome. Scopes the `tree_hash` axis so an edit inside
-/// the source tree is a MISS and an edit outside it is a HIT.
-fn builtin_glob_set() -> Vec<String> {
-    vec![
+/// The input glob for a built-in def — Rust sources + the manifests + the
+/// per-gate TOOLCHAIN-CONFIG files that change the gate's outcome. Scopes the
+/// `tree_hash` axis so an edit to any result-affecting input is a MISS and an
+/// unrelated edit (docs, fixtures the gate does not read) is a HIT.
+///
+/// # WO-GLOBMISS — the bounded config files are first-class inputs (not optional)
+///
+/// The prior set was `["**/*.rs", "**/Cargo.toml", "Cargo.lock"]`. But the
+/// built-in gate COMMANDS read result-affecting config OUTSIDE that set, so a
+/// change to one left the memo key unchanged → a warm HIT served a STALE GREEN
+/// where a cold run now FAILS (lead repro: add `rustfmt.toml(max_width=1)` under
+/// `--def fmt`, the warm re-run still served `exit 0` while `cargo fmt --check`
+/// is `exit 1`). These config files are BOUNDED, KNOWN, result-affecting inputs
+/// of the frozen gate commands, so they MUST be in the tree axis — a change to
+/// one is now a MISS. This is the SAME failure class as the N-1 mode-bit P0 (a
+/// real per-input the tree axis omitted), on the glob-scope axis the mode fix did
+/// not touch.
+///
+/// The set is PER-DEF, not one widened shared set: `fmt` only reads the rustfmt
+/// config (adding the clippy/cargo files would needlessly bust a fmt hit when an
+/// unrelated `clippy.toml` changes); `clippy`/`test` additionally read the lint
+/// config, the cargo build config (rustflags etc.), and the toolchain pin. The
+/// glob stays otherwise NARROW (NOT `**/*`) so the wedge's hit-rate is preserved:
+/// a doc/`*.md`/fixture-the-gate-does-not-read edit is still a HIT.
+///
+/// ## Honest residual — the unbounded-fixture vector is NOT closed here (P2 seam)
+///
+/// This closes the BOUNDED toolchain-config vectors. It does NOT (and cannot by
+/// enumeration) close the UNBOUNDED case: a built-in `test` can read an ARBITRARY
+/// fixture file (e.g. `tests/data/foo.json`, an `include_str!`/`include_bytes!`
+/// target, a `build.rs`-emitted path) that no bounded glob can predict. A change
+/// to such a file changes the gate's outcome while leaving the memo key unchanged
+/// → a stale green. That unbounded-read case is the SAME class as the disclosed P2
+/// hermetic-execution / files-outside-the-captured-tree seam (the runner-side
+/// isolated rootfs of campaign #1 — where the action physically cannot read
+/// outside the seeded tree axis): it is NOT closable locally by enumerating more
+/// globs. We do NOT pretend the enumeration is complete for `test`'s fixtures;
+/// the bounded config vectors are closed, the unbounded-fixture vector stays the
+/// P2 seam (for the lead to track in pending-seams).
+fn builtin_glob_set(name: &str) -> Vec<String> {
+    // Shared base: every built-in gate's outcome depends on the Rust sources and
+    // the workspace manifests + lock.
+    let mut set = vec![
         "**/*.rs".to_string(),
         "**/Cargo.toml".to_string(),
         "Cargo.lock".to_string(),
-    ]
+    ];
+    match name {
+        // `cargo fmt --all --check` reads ONLY the rustfmt config (both the
+        // canonical and dotfile names, at any depth). It does NOT read the lint /
+        // cargo-build / toolchain config, so we deliberately do NOT capture those
+        // for fmt — adding them would bust a fmt HIT on an unrelated change.
+        "fmt" => {
+            set.push("**/rustfmt.toml".to_string());
+            set.push("**/.rustfmt.toml".to_string());
+        }
+        // `cargo clippy`/`cargo test` are influenced by the lint config
+        // (`clippy.toml`), the cargo build config (`.cargo/config.toml` /
+        // `.cargo/config` — `rustflags`, lints, `[build]` target dir, registry),
+        // and the toolchain pin (`rust-toolchain` / `rust-toolchain.toml` —
+        // changing the active compiler/components). All bounded + result-affecting.
+        "clippy" | "test" => {
+            set.push("**/clippy.toml".to_string());
+            set.push("**/.clippy.toml".to_string());
+            set.push("**/.cargo/config.toml".to_string());
+            set.push("**/.cargo/config".to_string());
+            set.push("**/rust-toolchain.toml".to_string());
+            set.push("**/rust-toolchain".to_string());
+        }
+        // A name with no built-in command never reaches here (the caller takes the
+        // ad-hoc `**/*` path); the base set is a safe, narrow default regardless.
+        _ => {}
+    }
+    set
 }
 
 /// The fallback toolchain marker used ONLY when `--toolchain` is omitted AND the
@@ -267,7 +332,7 @@ fn default_toolchain_digest() -> String {
 /// validation (the digest folds it).
 fn resolve_def(args: &CheckArgs, env_manifest: String) -> Result<CheckDef, PorcelainError> {
     let (command, glob_set) = match builtin_command(&args.def) {
-        Some(cmd) => (cmd.to_string(), builtin_glob_set()),
+        Some(cmd) => (cmd.to_string(), builtin_glob_set(&args.def)),
         None => {
             let cmd = args
                 .cmd
