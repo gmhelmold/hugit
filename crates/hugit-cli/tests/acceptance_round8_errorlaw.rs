@@ -1,13 +1,18 @@
-//! Acceptance — Round-8 C6 (Wave L, WP L-C): the clap argument-error path now
-//! obeys the ONE error law (the typed `ac_busy` taxonomy is unit-tested in
-//! `checks::run`'s module, where `map_exec_error` lives).
+//! Acceptance — Round-8 C6 (Wave L, WP L-C) + N-6 ergonomics unification: the
+//! clap argument-error path obeys the ONE error law (the typed `ac_busy`
+//! taxonomy is unit-tested in `checks::run`'s module, where `map_exec_error`
+//! lives).
 //!
 //! ROOT (audit class-6-errorlaw F-2): `Cli::parse()` let clap own the failure
 //! path — it printed a bare English `error:` to STDERR and exited BEFORE `main`'s
 //! envelope choke-point, so an orchestrating agent parsing STDOUT for
 //! `{"error":{"kind",…}}` got empty stdout + an unparseable string. The L-C fix
 //! routes `Cli::try_parse()` through the envelope: a bad invocation emits
-//! `{"error":{"kind":"invalid_arguments",…}}` on STDOUT with exit 2.
+//! `{"error":{"kind":"invalid_argument",…}}` on STDOUT with exit 2.
+//!
+//! N-6 F-1: the kind is unified to `"invalid_argument"` (singular, matching the
+//! domain-validation spelling used everywhere else — no split between clap-parse
+//! and domain kinds for the same error class).
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -40,7 +45,7 @@ fn unknown_flag_emits_invalid_arguments_envelope_on_stdout_exit_2() {
     );
     assert_eq!(
         v.pointer("/error/kind").and_then(Value::as_str),
-        Some("invalid_arguments"),
+        Some("invalid_argument"),
         "the bad-args path renders the canonical envelope on STDOUT: {v}"
     );
     assert!(
@@ -62,7 +67,7 @@ fn unknown_subcommand_emits_invalid_arguments_envelope() {
     assert_eq!(code, 2);
     assert_eq!(
         v.pointer("/error/kind").and_then(Value::as_str),
-        Some("invalid_arguments"),
+        Some("invalid_argument"),
         "an unknown subcommand obeys the error law on STDOUT: {v}"
     );
 }
@@ -75,7 +80,7 @@ fn missing_required_args_emits_envelope_on_stdout() {
     assert_eq!(code, 2);
     assert_eq!(
         v.pointer("/error/kind").and_then(Value::as_str),
-        Some("invalid_arguments"),
+        Some("invalid_argument"),
         "missing-required-args yields a machine-parseable envelope on STDOUT: {v}"
     );
 }

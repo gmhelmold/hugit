@@ -443,33 +443,36 @@ fn run_export(args: ExportArgs) -> Result<String, PorcelainError> {
 // ── dispatch ──────────────────────────────────────────────────────────────────
 
 fn main() -> ExitCode {
-    // Route clap's own parse failures through the ONE error law (Round-8 C6 F-2).
+    // Route clap's own parse failures through the ONE error law (Round-8 C6 F-2;
+    // N-6 ergo: no-args / missing subcommand is also a usage error → exit 2).
     // `Cli::parse()` would let clap print a bare English `error:` to STDERR and
     // exit before `main`'s match — bypassing the envelope choke-point, so an
     // orchestrating agent parsing STDOUT for `{"error":{"kind",…}}` gets nothing.
     // `try_parse()` returns the error here so a bad invocation emits the SAME
-    // structured `{"error":{"kind":"invalid_arguments",…}}` envelope on stdout +
+    // structured `{"error":{"kind":"invalid_argument",…}}` envelope on stdout +
     // exit 2 as every other user/domain error.
+    //
+    // NOTE (N-6): `DisplayHelpOnMissingArgumentOrSubcommand` is intentionally NOT
+    // in the exit-0 branch below. `hugit` with no subcommand is a botched dispatch
+    // from an orchestrating agent — the agent MUST receive the structured envelope
+    // + exit 2 so it can detect the error. Only `--help`/`-h` (explicitly requested
+    // help) and `--version` are real successes that stay exit 0.
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {
             use clap::error::ErrorKind;
-            // `--help` / `--version` are NOT errors: clap renders the help/version
-            // text into the error and these kinds are the success path. Print it
-            // verbatim to stdout and exit 0 (clap's normal contract).
-            if matches!(
-                e.kind(),
-                ErrorKind::DisplayHelp
-                    | ErrorKind::DisplayVersion
-                    | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
-            ) {
+            // `--help` / `--version` explicitly requested: clap renders the text
+            // into the error. These are the SUCCESS path — print verbatim to stdout
+            // and exit 0.  `DisplayHelpOnMissingArgumentOrSubcommand` (no-args /
+            // missing subcommand) is NOT here — that's a usage error → exit 2.
+            if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
                 print!("{e}");
                 return ExitCode::SUCCESS;
             }
-            // A genuine argument/subcommand/value-parse error: render the canonical
-            // envelope on STDOUT and exit 2 (the user/domain error law). clap's own
-            // message (the English `error: …`) becomes the envelope `message`; the
-            // `fix` points at `--help`.
+            // Every other clap error (missing subcommand, bad flag, bad value, …):
+            // render the canonical envelope on STDOUT + exit 2 (the one error law).
+            // `kind:"invalid_argument"` — the same stable spelling as domain
+            // validation errors (singular, unified — N-6 F-1).
             let message = e
                 .to_string()
                 .trim_end_matches('\n')
@@ -477,7 +480,7 @@ fn main() -> ExitCode {
                 .trim()
                 .to_string();
             let err = PorcelainError::new(
-                "invalid_arguments",
+                "invalid_argument",
                 message,
                 "run `hugit --help` (or `hugit <verb> --help`) for the correct usage",
             );
