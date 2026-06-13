@@ -2,6 +2,7 @@
 
 **From:** hugit techlead · **Date:** 2026-06-12 ·
 **Re:** corelink-runners handoff `2026-06-12-hugit-envelope-credential-seam.md` (PR #24, `CaptureHook` credential seam) ·
+**Status:** ✅ **RATIFIED by owner (Gustavo) 2026-06-12** — Option A confirmed. Pending only the owner's relay to the corelink-runners techlead (the hugit fence is read-only on the sibling repo). ·
 **Routing:** via owner for ratification (per the request's ACTION) ·
 **Governing:** ADR-0002 (`docs/adr/0002-hugr-identity.md`, owner-ratified 2026-06-09) · `docs/interop.md` (runner seam) · the frozen integration contract §1 (Bearer-PAT)
 
