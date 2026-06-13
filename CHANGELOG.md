@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(test): **de-flake the N-2 reconcile perf test** — drop its unsound ABSOLUTE
+  wall-clock ceiling (`t5k < 12 s`), which false-failed at ~16 s on the contended
+  shared runner (PS-12b infra contention, NOT an algorithmic regression). The
+  contended O(n) @5k time (~16 s) OVERLAPS the old O(n²) @5k (18.2 s), so no absolute
+  bound can separate "contended-but-linear" from "quadratic". The contention-INVARIANT
+  SCALING RATIO assertion (2k→5k grows < 4×, vs O(n²)'s 6.25×) is kept as the sole,
+  sound proof of the O(n²)→O(n) fix.
+
 - feat(intent): **PS-9 — truthful per-source-log `intent list`/`show` + `--log` scope
   filter** (owner-decided SOTA). `intent new --log L` now records `L` as the intent's
   OWNING log in the store (`source_logs`, a backward-compatible

@@ -180,27 +180,26 @@ fn timed_run_in_sync(tag: &str, n: usize) -> Duration {
 ///     3.64 s → 18.2 s is exactly 5×, quadratic). The N-2 O(n) reconcile must
 ///     grow roughly LINEARLY; we require the 5k run to cost < 4× the 2k run (a
 ///     band that comfortably admits linear + per-run fixed cost, but excludes the
-///     quadratic 6.25×). This assertion is build-speed-independent (a ratio).
+///     quadratic 6.25×). This assertion is build-speed-independent (a ratio) and
+///     is the SOLE proof — see why an absolute ceiling is intentionally absent.
 ///
-///  2. **Absolute ceiling** — a generous wall-clock bound the old 5k O(n²) (18.2
-///     s) blew through. Note these run in a DEBUG build and the duration is the
-///     WHOLE run (the O(n) `verify_chain` + atomic save over n records dominate
-///     once the reconcile is no longer O(n²)); the ceiling is set high enough to
-///     never false-fail a slow CI box yet stay well under the old 18.2 s.
+///  No absolute wall-clock ceiling. On the shared self-hosted runner under
+///  contention the O(n) @5k run was measured at ~16 s, which OVERLAPS the old
+///  O(n²) @5k of 18.2 s — so no absolute bound can separate "contended-but-linear"
+///  from "quadratic" without false-failing on a merely-slow box (a slow run is not
+///  a regression). The ratio carries the real signal; an absolute ceiling carried
+///  only flakiness (the prior `t5k < 12 s` flaked at 16 s under contention —
+///  PS-12b runner contention, not an algorithmic regression).
 #[test]
 fn reconcile_in_sync_scales_linearly_not_quadratically() {
     let t2k = timed_run_in_sync("perf2k", 2_000);
     let t5k = timed_run_in_sync("perf5k", 5_000);
     eprintln!("N-2 perf: in-sync run @ 2k = {t2k:?}, @ 5k = {t5k:?} (old O(n²): 3.64 s / 18.2 s)");
 
-    // (2) absolute ceiling — well under the old 18.2 s @ 5k.
-    assert!(
-        t5k < Duration::from_secs(12),
-        "N-2: in-sync run @ 5k must be well under the old O(n²) 18.2 s; took {t5k:?}"
-    );
-
-    // (1) sub-quadratic: 2.5× the events must NOT cost ~6.25× the time. Allow a
-    // generous 4× band for linear growth + fixed per-run overhead.
+    // Sub-quadratic SCALING (the contention-robust proof): 2.5× the events must NOT
+    // cost ~6.25× the time. Allow a generous 4× band for linear growth + fixed
+    // per-run overhead; the quadratic 6.25× is excluded. Because contention slows
+    // both probes proportionally, the ratio is invariant to machine load.
     let ratio = t5k.as_secs_f64() / t2k.as_secs_f64().max(1e-6);
     assert!(
         ratio < 4.0,
