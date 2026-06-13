@@ -110,13 +110,19 @@ and a 3rd scrub-engine drift in `hugit-policy` — all fixed in **Wave N**.
 toolchain config, WO-GLOBMISS, fixed). **Round 11** then found a 4th wedge
 stale-green (ANCESTOR toolchain config — cargo/rustfmt search upward) + a umask
 over-capture in the mode-fold, both fixed in **Wave P**; the other five classes
-HELD. **Honest status: the WEDGE stale-green class has needed FOUR local fixes**
-(env / mode / in-root-config / ancestor-config) — its recurring root is that you
-cannot soundly memoize a NON-hermetic command by enumerating its inputs; the
-genuinely-irreducible residual (arbitrary fixture reads / network / clock) is the
-**P2 hermetic-execution seam** (the runner sandbox). The adversarial loop
-CONTINUES until a fresh round finds zero new local P0/P1 — convergence is proven
-per-round, never asserted. `main` (latest wave) is green by the LOCAL gate
+HELD. **Round 12** found a 5th wedge stale-green (ANCESTOR `Cargo.toml`
+`[workspace.lints]`/`Cargo.lock`) → **Wave Q** (completes the finite known
+cargo/rustc ancestor-config set). **Round 13 (fresh decider) confirmed
+CONVERGED-local:** the WEDGE stale-green class needed FIVE local fixes
+(env / exec-mode / in-root-config / ancestor-config / ancestor-manifest), all
+hold, NO 6th bounded hole; the five OTHER classes hold; Waves P/Q
+regression-clean. Its recurring root is that you cannot soundly memoize a
+NON-hermetic command by enumerating its inputs; the genuinely-irreducible
+residual (arbitrary fixture reads / network / clock) is the **P2
+hermetic-execution seam** (the runner sandbox). **The adversarial loop is DRY**
+— Round 13 found zero new local P0/P1; convergence is proven per-round, never
+asserted. (Minor P3 tracked: a defensive per-file size cap on the snapshot read,
+PS-17.) `main` (latest wave) is green by the LOCAL gate
 (fmt + clippy `--workspace --all-targets --locked -D warnings` + test
 `--workspace --locked` + `cargo deny check`, read by real bare exit — the exact
 test count moves per wave, so it is deliberately NOT pinned here) AND
