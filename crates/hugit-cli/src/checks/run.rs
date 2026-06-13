@@ -201,6 +201,14 @@ fn ancestor_config_names(name: &str) -> &'static [&'static str] {
         ],
         // `cargo clippy`/`cargo test` read the lint config, the cargo build config
         // (rustflags / lints / [build]), and the toolchain pin — all upward-searched.
+        // Wave Q (5th/final bounded wedge stale-green): also add `Cargo.toml` and
+        // `Cargo.lock` — cargo reads the WORKSPACE-root `Cargo.toml` (which can live
+        // in an ANCESTOR dir above `--root`) for `[workspace.lints]`, `[profile]`,
+        // `[patch]`, and the `Cargo.lock` for resolved deps — all result-affecting for
+        // `clippy`/`test`. This completes the BOUNDED ancestor config set for these
+        // two gates: {Cargo.toml, Cargo.lock, .cargo/config{,.toml}, rust-toolchain{,.toml},
+        // clippy.toml/.clippy.toml}. The unbounded-fixture / outside-root-read residual
+        // stays the disclosed P2 hermetic-execution seam — NOT closable by enumeration.
         "clippy" | "test" => &[
             ".cargo/config.toml",
             ".cargo/config",
@@ -208,6 +216,8 @@ fn ancestor_config_names(name: &str) -> &'static [&'static str] {
             ".clippy.toml",
             "rust-toolchain.toml",
             "rust-toolchain",
+            "Cargo.toml",
+            "Cargo.lock",
         ],
         // An unknown (ad-hoc) name never reaches here (the caller takes the `**/*`
         // path and resolves no ancestor config).
@@ -216,7 +226,8 @@ fn ancestor_config_names(name: &str) -> &'static [&'static str] {
 }
 
 /// Compute the ANCESTOR toolchain-config digest folded into the memo key (Wave P
-/// FIX A — the 4th wedge stale-green close).
+/// FIX A — the 4th wedge stale-green close; Wave Q extends clippy/test to also
+/// capture ancestor `Cargo.toml`/`Cargo.lock` — the 5th and final bounded close).
 ///
 /// cargo & rustfmt discover their config by walking UP from the invocation dir to
 /// the filesystem root (plus `$CARGO_HOME/config.toml`). [`builtin_glob_set`]
