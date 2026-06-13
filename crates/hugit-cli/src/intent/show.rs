@@ -61,6 +61,20 @@ pub fn run(input: ShowIntent, store_path: &Path) -> Result<Value, PorcelainError
     // Verdicts: present only when a panel actually recorded one.
     let verdict = store.verdicts.get(&input.intent_id);
 
+    // PS-9: the intent's OWN owning log (recorded at `intent new --log`) and its
+    // `landed` state resolved against THAT log — truthful per-intent, not against
+    // some unrelated `--log`. No recorded log, or a log that no longer exists →
+    // `null` (genuinely unknown). A tampered source log fails closed
+    // (`chain_broken`/exit-2) via the shared verified loader — never silent `null`.
+    let source_log = store.source_logs.get(&input.intent_id).cloned();
+    let landed: Option<bool> = match source_log.as_deref() {
+        Some(log_key) if Path::new(log_key).exists() => {
+            let ids = super::list::resolve_landed(Path::new(log_key))?;
+            Some(ids.contains(&input.intent_id))
+        }
+        _ => None,
+    };
+
     // Campaign: extracted from the principal chain (`campaign:<key>` entry).
     // Explicit null when not recorded — never invented.
     let campaign: Option<String> = intent
@@ -117,5 +131,8 @@ pub fn run(input: ShowIntent, store_path: &Path) -> Result<Value, PorcelainError
             Some(v) => vec![v.clone()],
             None => vec![],
         },
+        // PS-9: the owning log + per-log landed state (both null when not recorded).
+        "log": source_log,
+        "landed": landed,
     }))
 }

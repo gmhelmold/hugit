@@ -163,15 +163,21 @@ fn item_2_list_campaign_filter_restricts_correctly() {
     let _ = std::fs::remove_file(&store);
 }
 
-// ── ③ --log resolves landed state ────────────────────────────────────────────
+// ── ③ PS-9: landed is per-intent (own owning log); --log is a SCOPE FILTER ────
 
 #[test]
-fn item_3_list_with_log_resolves_landed_state() {
+fn item_3_landed_is_per_source_log_and_log_is_a_scope_filter() {
     let dir = scratch("list-log");
     let store = dir.join("store.json");
     let log = dir.join("log.json");
+    let canonical_log = std::fs::canonicalize(&dir)
+        .unwrap()
+        .join("log.json")
+        .to_string_lossy()
+        .into_owned();
 
-    // Land i1 and i2; i1 also goes on the shared log, i2 does not.
+    // i1 authored against the shared log (its OWNING log); i2 authored with no
+    // --log (no owning log recorded).
     new::run(
         sample_intent(Some("i1"), "camp", None, Some(log.clone())),
         &store,
@@ -179,22 +185,45 @@ fn item_3_list_with_log_resolves_landed_state() {
     .unwrap();
     new::run(sample_intent(Some("i2"), "camp", None, None), &store).unwrap();
 
-    let result = list::run(
+    // GLOBAL view (no --log): BOTH shown. landed is resolved per-intent against
+    // each intent's OWN owning log — i1 against its log (landed:true), i2 has no
+    // owning log (landed:null, NOT a misleading false). The `log` field exposes
+    // which log owns each intent — the truthful one-call fleet view (PS-9).
+    let global = list::run(
+        ListIntents {
+            log: None,
+            campaign: None,
+        },
+        &store,
+    )
+    .expect("global list");
+    assert_eq!(global.intents.len(), 2, "global view shows all intents");
+    let g1 = global.intents.iter().find(|i| i.id == "i1").unwrap();
+    let g2 = global.intents.iter().find(|i| i.id == "i2").unwrap();
+    assert_eq!(g1.landed, Some(true), "i1 landed on its OWN owning log");
+    assert_eq!(
+        g1.log.as_deref(),
+        Some(canonical_log.as_str()),
+        "i1 owning log"
+    );
+    assert_eq!(
+        g2.landed, None,
+        "i2 has no owning log → landed unknown, not false"
+    );
+    assert_eq!(g2.log, None, "i2 has no owning log recorded");
+
+    // SCOPE FILTER (--log Y): restrict to intents authored against Y — only i1.
+    let scoped = list::run(
         ListIntents {
             log: Some(log.clone()),
             campaign: None,
         },
         &store,
     )
-    .expect("list with log");
-
-    assert_eq!(result.intents.len(), 2);
-    // Stable sort: i1 before i2.
-    let i1 = result.intents.iter().find(|i| i.id == "i1").unwrap();
-    let i2 = result.intents.iter().find(|i| i.id == "i2").unwrap();
-
-    assert_eq!(i1.landed, Some(true), "i1 is landed on the log");
-    assert_eq!(i2.landed, Some(false), "i2 is not on the log");
+    .expect("scoped list");
+    assert_eq!(scoped.intents.len(), 1, "--log scopes to its own intents");
+    assert_eq!(scoped.intents[0].id, "i1");
+    assert_eq!(scoped.intents[0].landed, Some(true), "i1 landed on its log");
 }
 
 // ── ④ error convergence: "fix" not "suggested_fix", WB0 canonical shape ──────

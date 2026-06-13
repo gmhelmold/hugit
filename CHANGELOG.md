@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(test): **de-flake the N-2 reconcile perf test** — drop its unsound ABSOLUTE
+  wall-clock ceiling (`t5k < 12 s`), which false-failed at ~16 s on the contended
+  shared runner (PS-12b infra contention, NOT an algorithmic regression). The
+  contended O(n) @5k time (~16 s) OVERLAPS the old O(n²) @5k (18.2 s), so no absolute
+  bound can separate "contended-but-linear" from "quadratic". The contention-INVARIANT
+  SCALING RATIO assertion (2k→5k grows < 4×, vs O(n²)'s 6.25×) is kept as the sole,
+  sound proof of the O(n²)→O(n) fix.
+
+- feat(intent): **PS-9 — truthful per-source-log `intent list`/`show` + `--log` scope
+  filter** (owner-decided SOTA). `intent new --log L` now records `L` as the intent's
+  OWNING log in the store (`source_logs`, a backward-compatible
+  `skip_serializing_if`-empty field — zero on-disk shape change for stores that never
+  used `--log`). `intent list`/`show` resolve each intent's `landed` state against ITS
+  OWN owning log, so a fleet orchestrator's default global one-call `intent list`
+  reports the TRUE landed state per intent (and a new `log` field showing which log
+  owns each) — no more misleading `landed:null` for every cross-log intent. A
+  recorded-but-missing owning log → `landed:null` (honest unknown, never a false); a
+  **tampered** owning log fails the call closed (`chain_broken`/exit-2 — the shared
+  read-path invariant). `--log` on `intent list` is now a **scope filter** (restrict to
+  intents authored against that log) rather than a resolve-against override; the
+  reconcile path records source-logs for healed intents too. Closes PS-9.
+
 - feat(conformance): **IntentMetrics conformance vector (§13.4) landed on `main`** —
   the hugit twin that corelink-runners PR #5 ("WAITS on hugit twin") explicitly
   blocks on. `conformance/IntentMetrics.json` + its `manifest.sha256` line are

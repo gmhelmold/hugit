@@ -71,6 +71,16 @@ pub struct IntentStoreFile {
     /// Captured verdicts: intent_id → verdict, when an adversarial panel ran.
     #[serde(default)]
     pub verdicts: BTreeMap<String, Verdict>,
+    /// PS-9: intent_id → the canonical event log it was authored against (the
+    /// `--log` passed to `intent new`, stored as a canonical absolute path). This
+    /// is what lets `intent list`/`show` resolve each intent's `landed` state
+    /// against ITS OWN owning log — so a fleet's global (one-call) view is
+    /// truthful instead of showing `landed:null` for every cross-log intent.
+    /// `skip_serializing_if = is_empty` keeps the on-disk shape byte-identical for
+    /// stores that never recorded a source log (full backward compatibility);
+    /// intents authored without `--log` simply have no entry here.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub source_logs: BTreeMap<String, String>,
 }
 
 /// An error operating the on-disk intent store.
@@ -167,6 +177,10 @@ pub struct IntentStore {
     pub envelopes: BTreeMap<String, String>,
     /// Captured verdicts by `intent_id`.
     pub verdicts: BTreeMap<String, Verdict>,
+    /// PS-9: `intent_id` → the canonical log it was authored against (the owning
+    /// log used to resolve `landed` per-intent). Empty for intents authored
+    /// without `--log`.
+    pub source_logs: BTreeMap<String, String>,
 }
 
 impl IntentStore {
@@ -215,6 +229,7 @@ impl IntentStore {
             sidecars,
             envelopes: file.envelopes,
             verdicts: file.verdicts,
+            source_logs: file.source_logs,
         })
     }
 
@@ -314,6 +329,7 @@ impl IntentStore {
             sidecars,
             envelopes: self.envelopes.clone(),
             verdicts: self.verdicts.clone(),
+            source_logs: self.source_logs.clone(),
         };
         let json = serde_json::to_string_pretty(&file)
             .map_err(|e| StoreError::Serialize(e.to_string()))?;

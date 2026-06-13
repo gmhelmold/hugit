@@ -1,13 +1,14 @@
 //! `hugit intent list` — the agent discovery verb (WP-WB-INT).
 //!
 //! An agent that has lost an intent id can recover it here.  `list` reads the
-//! local store, resolves `landed` state against the shared canonical log when
-//! `--log` is given, and returns a stable JSON object:
+//! local store and resolves each intent's `landed` state against ITS OWN owning
+//! log (PS-9 — the log it was authored against, recorded at `intent new --log`),
+//! returning a stable JSON object:
 //!
 //! ```json
 //! {"intents":[
 //!   {"id":"intent-abc","charter":"Add the JSON …","campaign":"cli-porcelain",
-//!    "agent":"main","landed":true},
+//!    "agent":"main","landed":true,"log":"/abs/path/to/agent-a.log.json"},
 //!   …
 //! ]}
 //! ```
@@ -19,16 +20,25 @@
 //! - `campaign` — the campaign key from the principal chain (`campaign:<key>` entry)
 //! - `agent` — the agent token from the principal chain (`agent:<id>` entry),
 //!   or `null` when not recorded
-//! - `landed` — `true` when the `--log` is given AND the id appears on it;
-//!   `null` when `--log` is omitted (i.e. the log was not consulted)
+//! - `landed` — resolved against the intent's OWN owning `log` (below):
+//!   `true`/`false` when that log is recorded and present, `null` when no source
+//!   log was recorded (authored without `--log`) or it no longer exists. A
+//!   *tampered* source log fails the whole call closed (`chain_broken`/exit-2).
+//! - `log` — the canonical owning log the intent was authored against, or `null`.
+//!   A fleet orchestrator sees each intent's TRUE landed state AND which log owns
+//!   it in ONE global `intent list` call — no more `landed:null` for every
+//!   cross-log intent.
 //!
 //! Items are sorted by `id` (lexicographic) — stable order, so an agent can
 //! diff two consecutive list calls without noise.
 //!
-//! ## Campaign filter
+//! ## Filters
 //!
-//! `--campaign <key>` restricts the output to intents bound to that campaign
-//! (matched against the principal chain `campaign:` entry).
+//! - `--campaign <key>` restricts the output to intents bound to that campaign
+//!   (matched against the principal chain `campaign:` entry).
+//! - `--log <path>` is a SCOPE FILTER (PS-9): restrict the listing to intents
+//!   authored against that exact log (canonical-path match). Omit it for the
+//!   global, all-logs fleet view. `landed` is resolved per-intent regardless.
 
 use std::path::{Path, PathBuf};
 
@@ -39,7 +49,11 @@ use super::store::IntentStore;
 
 /// Inputs for `intent list`.
 pub struct ListIntents {
-    /// Optional canonical event log (to resolve `landed` state for each intent).
+    /// Optional **source-log scope filter** (PS-9): when given, restrict the
+    /// listing to intents that were authored against this exact log (matched by
+    /// canonical path). Omit it for the global, all-logs fleet view. (Note: this
+    /// is a FILTER — `landed` is always resolved per-intent against each intent's
+    /// OWN owning log, regardless of this flag.)
     pub log: Option<PathBuf>,
     /// Optional campaign key filter (none = all campaigns).
     pub campaign: Option<String>,
@@ -56,8 +70,16 @@ pub struct IntentListItem {
     pub campaign: String,
     /// The agent token from the principal chain, or null when not recorded.
     pub agent: Option<String>,
-    /// `true`/`false` when a `--log` was consulted; `null` when `--log` omitted.
+    /// `landed` resolved against this intent's OWN owning log (PS-9): `true`/`false`
+    /// when the intent has a recorded source log that exists and verifies; `null`
+    /// when no source log was recorded (authored without `--log`) or that log no
+    /// longer exists. (A *tampered* source log fails the whole call closed —
+    /// `chain_broken`/exit-2 — never silently `null`.)
     pub landed: Option<bool>,
+    /// The canonical log this intent was authored against (PS-9), or `null` when
+    /// authored without `--log`. Lets a fleet orchestrator see WHICH log owns each
+    /// intent in a single global `intent list` call.
+    pub log: Option<String>,
 }
 
 /// The stable result of `intent list`.
@@ -76,52 +98,92 @@ pub struct ListResult {
 pub fn run(input: ListIntents, store_path: &Path) -> Result<ListResult, PorcelainError> {
     let store = IntentStore::load_existing(store_path).map_err(PorcelainError::from_store)?;
 
-    // Projection of the real event log for landed-state resolution.
-    let landed_ids: Option<std::collections::HashSet<String>> =
-        input.log.as_deref().map(resolve_landed).transpose()?;
-
-    // Gather all intents from the log, sorted by id for stable output.
+    // Gather all intents from the store, sorted by id below for stable output.
     let all_intents = store.intent_for_all().map_err(PorcelainError::from_store)?;
 
-    let mut items: Vec<IntentListItem> = all_intents
-        .into_iter()
-        .filter_map(|intent| {
-            // Extract campaign + agent from the principal chain.
-            let campaign = extract_principal(&intent.principal_chain, "campaign");
-            let agent = extract_principal(&intent.principal_chain, "agent");
+    // Canonical key for the optional `--log` SCOPE FILTER — the same canonical
+    // form `intent new` recorded as the source log. Canonicalize fails on a
+    // non-existent path → fall back to the lexical path so a filter still compares
+    // sensibly against a not-yet-created log.
+    let filter_key: Option<String> = input.log.as_deref().map(canonical_key);
 
-            // Campaign filter: skip when --campaign given and this one doesn't match.
-            if input
-                .campaign
-                .as_deref()
-                .is_some_and(|filter| campaign.as_deref() != Some(filter))
-            {
-                return None;
+    // Landed-id sets memoized per DISTINCT source log actually consulted, so N
+    // intents over M logs do M reads, not N. A tampered/corrupt source log fails
+    // CLOSED here (`chain_broken`/exit-2) — never projected as authoritative
+    // landed state (the read-path invariant the whole CLI shares).
+    let mut landed_cache: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
+
+    let mut items: Vec<IntentListItem> = Vec::new();
+    for intent in all_intents {
+        // Extract campaign + agent from the principal chain.
+        let campaign = extract_principal(&intent.principal_chain, "campaign");
+        let agent = extract_principal(&intent.principal_chain, "agent");
+
+        // Campaign filter: skip when --campaign given and this one doesn't match.
+        if input
+            .campaign
+            .as_deref()
+            .is_some_and(|filter| campaign.as_deref() != Some(filter))
+        {
+            continue;
+        }
+
+        // The intent's OWN owning log (recorded at `intent new --log`), if any.
+        let source_log = store.source_logs.get(&intent.intent_id).cloned();
+
+        // --log SCOPE FILTER: keep only intents authored against the named log.
+        if let Some(ref want) = filter_key
+            && source_log.as_deref() != Some(want.as_str())
+        {
+            continue;
+        }
+
+        // Resolve `landed` against the intent's OWN source log (PS-9 — truthful
+        // per-intent, log-aware). No recorded source log, or a source log that no
+        // longer exists → `null` (genuinely unknown, never a misleading `false`).
+        let landed = match source_log.as_deref() {
+            Some(log_key) if Path::new(log_key).exists() => {
+                if !landed_cache.contains_key(log_key) {
+                    let ids = resolve_landed(Path::new(log_key))?;
+                    landed_cache.insert(log_key.to_string(), ids);
+                }
+                Some(landed_cache[log_key].contains(&intent.intent_id))
             }
+            _ => None,
+        };
 
-            let landed = landed_ids
-                .as_ref()
-                .map(|ids| ids.contains(&intent.intent_id));
-
-            // Redaction parity (Wave E, P-REDACT-SURFACE): scrub the echoed
-            // free-text fields through the hardened engine on the way OUT
-            // (defence-in-depth over the write-path redaction; also covers a
-            // pre-Wave-E log). Scrub the full charter THEN excerpt, so a redacted
-            // charter shows the sentinel, never an 80-char secret prefix.
-            Some(IntentListItem {
-                id: intent.intent_id.clone(),
-                charter: charter_excerpt(&crate::redaction::scrub(&intent.charter)),
-                campaign: crate::redaction::scrub(&campaign.unwrap_or_default()),
-                agent: agent.map(|a| crate::redaction::scrub(&a)),
-                landed,
-            })
-        })
-        .collect();
+        // Redaction parity (Wave E, P-REDACT-SURFACE): scrub the echoed free-text
+        // fields through the hardened engine on the way OUT (defence-in-depth over
+        // the write-path redaction; also covers a pre-Wave-E log). Scrub the full
+        // charter THEN excerpt, so a redacted charter shows the sentinel, never an
+        // 80-char secret prefix. The `log` is a local filesystem path (structural
+        // metadata, like `id`), not free text — surfaced as recorded.
+        items.push(IntentListItem {
+            id: intent.intent_id.clone(),
+            charter: charter_excerpt(&crate::redaction::scrub(&intent.charter)),
+            campaign: crate::redaction::scrub(&campaign.unwrap_or_default()),
+            agent: agent.map(|a| crate::redaction::scrub(&a)),
+            landed,
+            log: source_log,
+        });
+    }
 
     // Stable sort by id — deterministic across runs.
     items.sort_by(|a, b| a.id.cmp(&b.id));
 
     Ok(ListResult { intents: items })
+}
+
+/// Canonical (absolute, cwd-stable) string key for a log path — the same form
+/// `intent new` records as an intent's source log. A non-existent path cannot be
+/// canonicalized, so it falls back to its lexical form (still a stable key for a
+/// filter comparison against a not-yet-created log).
+fn canonical_key(p: &Path) -> String {
+    std::fs::canonicalize(p)
+        .unwrap_or_else(|_| p.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Extract the value of the FIRST `<prefix>:<value>` entry in the chain,
@@ -151,7 +213,9 @@ fn charter_excerpt(charter: &str) -> String {
 /// A *missing* file is treated as zero landed intents (the log has not been
 /// created yet; `--log` is optional for `intent list`).  Every other fault
 /// (tampered chain, malformed JSON, I/O error) is re-raised as exit-2.
-fn resolve_landed(log_path: &Path) -> Result<std::collections::HashSet<String>, PorcelainError> {
+pub(crate) fn resolve_landed(
+    log_path: &Path,
+) -> Result<std::collections::HashSet<String>, PorcelainError> {
     let bytes = match std::fs::read(log_path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {

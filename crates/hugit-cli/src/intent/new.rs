@@ -311,6 +311,18 @@ pub fn run(input: NewIntent, store_path: &Path) -> Result<NewResult, PorcelainEr
     if !context_ref.is_empty() {
         store.envelopes.insert(intent_id.clone(), context_ref);
     }
+    // PS-9: record the canonical log this intent was authored against. This is the
+    // OWNING log `intent list`/`show` resolve its `landed` state against — so a
+    // fleet's global (one-call) view reports each intent's TRUE landed state
+    // instead of a misleading `landed:null` for every cross-log intent. Canonical
+    // (absolute) so the key is cwd-stable; fall back to the given path if
+    // canonicalize fails (the log was just appended above, so it normally exists).
+    if let Some(log_path) = input.log.as_deref() {
+        let canonical = std::fs::canonicalize(log_path).unwrap_or_else(|_| log_path.to_path_buf());
+        store
+            .source_logs
+            .insert(intent_id.clone(), canonical.to_string_lossy().into_owned());
+    }
     store
         .save_locked(&store_lock, store_path)
         .map_err(PorcelainError::from_store)?;
@@ -402,6 +414,14 @@ fn reconcile_store_from_log(
         return Ok(());
     }
 
+    // PS-9: a healed intent was authored against THIS `--log`, so record it as the
+    // owning log too (canonical, cwd-stable) — keeping the reconcile path's
+    // source-log bookkeeping consistent with the normal `new --log` write above.
+    let canonical_log_key = std::fs::canonicalize(log_path)
+        .unwrap_or_else(|_| log_path.to_path_buf())
+        .to_string_lossy()
+        .into_owned();
+
     let mut healed = false;
     for intent in log_intents.intents() {
         // Already present in the store's own log (or already healed earlier this
@@ -444,6 +464,9 @@ fn reconcile_store_from_log(
             )
         })?;
         store.sidecars.insert(intent.intent_id.clone(), sidecar);
+        store
+            .source_logs
+            .insert(intent.intent_id.clone(), canonical_log_key.clone());
         // Fold the just-healed id in so a later DUPLICATE occurrence of the same
         // intent_id on the `--log` is skipped (not re-imported into a
         // `DuplicateIntentId` error) — the idempotency the old per-id
