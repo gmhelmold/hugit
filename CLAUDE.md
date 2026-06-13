@@ -100,17 +100,27 @@ hybrid), C3 FS/network/clock (P2 runner sandbox), C5-F3 (now LOW, P2/P3 seam),
 the caller-asserted principal (P2 identity seam).
 The integrity spine has held under every adversarial round (1–7) plus the
 SOTA audit.
-`main` (HEAD `def8a18`, Wave K) is green by the LOCAL gate (fmt + clippy
-`--workspace --all-targets --locked -D warnings` = 0/0 + test
-`--workspace --locked` = 1200 tests / 135 suites, 0 failed + `cargo deny
-check` = 0), read by real bare exit code. The Wave L integration branch
-`integ/wave-l` (3 docs/audit commits + L-A·L-B·L-C·L-D) is green by the same
-LOCAL gate (fmt + clippy `--workspace --all-targets --locked -D warnings` =
-0/0 + test `--workspace --locked` = **1234 tests / 140 suites, 0 failed**),
-read by real bare exit code; it merges to `main` only after owner sign-off +
-the PS-14 redaction-tuning decision (the lesson banked below — a fresh
-adversarial round runs BEFORE any push; Round 9 has run and converged 5/6,
-the 6th being a tuning decision, not a code hole). **Honest Round-7 correction:** the
+**Post-Round-10 (2026-06-12/13): a 7-agent SOTA review sweep + Waves N/O/P.**
+The sweep (`docs/review/sweep-2026-06-12/`) found defects the 10 adversarial
+rounds had MISSED — a memo stale-green SHIP-BLOCKER (the tree axis dropped the
+POSIX mode bit; a `chmod -x` served a cached green), an O(n²) intent reconcile,
+and a 3rd scrub-engine drift in `hugit-policy` — all fixed in **Wave N**.
+**Wave O** added proptest/fuzz on the security spine (scrubber/chain/memo-key)
++ test-quality fixes; a focused re-audit found a 3rd wedge stale-green (in-root
+toolchain config, WO-GLOBMISS, fixed). **Round 11** then found a 4th wedge
+stale-green (ANCESTOR toolchain config — cargo/rustfmt search upward) + a umask
+over-capture in the mode-fold, both fixed in **Wave P**; the other five classes
+HELD. **Honest status: the WEDGE stale-green class has needed FOUR local fixes**
+(env / mode / in-root-config / ancestor-config) — its recurring root is that you
+cannot soundly memoize a NON-hermetic command by enumerating its inputs; the
+genuinely-irreducible residual (arbitrary fixture reads / network / clock) is the
+**P2 hermetic-execution seam** (the runner sandbox). The adversarial loop
+CONTINUES until a fresh round finds zero new local P0/P1 — convergence is proven
+per-round, never asserted. `main` (latest wave) is green by the LOCAL gate
+(fmt + clippy `--workspace --all-targets --locked -D warnings` + test
+`--workspace --locked` + `cargo deny check`, read by real bare exit — the exact
+test count moves per wave, so it is deliberately NOT pinned here) AND
+runner-verified on each code push (docs-only pushes skip CI via `paths-ignore`). **Honest Round-7 correction:** the
 earlier "green, verified by real exit code" claim on the Wave J + WK-AC push
 (`bd95162`) was over-stated — the workspace gate was load-FLAKY
 (`concurrent_checks…` could surface a terminal `ac_error` under parallel
