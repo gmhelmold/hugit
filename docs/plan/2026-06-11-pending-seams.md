@@ -388,9 +388,32 @@ the unprefixed-entropy class is documented here as out-of-scope-by-physics.
 
 ---
 
-## PS-9 — Intent store vs. log: `intent show`/`intent list` read a cwd-global index (owner decision pending)
+## PS-9 — Intent store vs. log: `intent show`/`intent list` read a cwd-global index (RESOLVED 2026-06-13)
 
-**Status:** TRACKED — design decision pending owner input; DO NOT fix the code until the owner decides  
+**Status:** RESOLVED — owner DECIDED the SOTA hybrid (2026-06-13) and it is implemented + cold-verified.  
+
+**DECISION (owner, 2026-06-13): the SOTA hybrid — global view, truthful per-source-log
+`landed`, `--log` as a scope filter.** Implemented:
+- `intent new --log L` records `L` as the intent's OWNING log in the store
+  (`IntentStoreFile.source_logs`, a `serde(skip_serializing_if = is_empty)` map → zero
+  on-disk shape change for stores that never used `--log`; the reconcile path records it
+  for healed intents too).
+- `intent list`/`show` resolve each intent's `landed` against ITS OWN owning log, so the
+  default global (one-call) `intent list` is a TRUTHFUL fleet view — each item carries a
+  new `log` field (which log owns it) and a per-intent `landed`. A recorded-but-missing
+  owning log → `landed:null` (honest unknown, never a misleading `false`); a TAMPERED
+  owning log fails the whole call closed (`chain_broken`/exit-2 — the shared read-path
+  invariant, memoized per distinct log).
+- `--log` on `intent list` is now a SCOPE FILTER (restrict to intents authored against
+  that exact canonical log), replacing the old resolve-against-this override.
+
+Cold-verified: `acceptance_wbint` ③ rewritten to assert BOTH the global truthful view
+(i1 landed:true vs its own log + `log` set; i2 landed:null + `log` null) AND the `--log`
+scope filter (only i1 shown); full `hugit-cli` suite green; the read-path tamper tests
+(`acceptance_round8_readpath`, `acceptance_wave_m_readpath`) still fail closed.
+
+**Original framing (kept for the record):**
+**Status (historical):** TRACKED — design decision pending owner input; DO NOT fix the code until the owner decides  
 **Adversarial finding:** Round-6 Cluster D (`docs/review/2026-06-11-adversarial-round-6.md`);
 product-correctness seam for multi-log agent fleets.  
 **Governing docs:** `docs/review/2026-06-11-adversarial-round-6.md` §Cluster D;

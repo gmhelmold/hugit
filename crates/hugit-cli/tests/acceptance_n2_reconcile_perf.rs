@@ -120,6 +120,7 @@ fn write_store_in_sync(path: &Path, log: &EventLog) {
         sidecars,
         envelopes: Default::default(),
         verdicts: Default::default(),
+        source_logs: Default::default(),
     };
     let bytes = serde_json::to_vec_pretty(&file).expect("serialize store");
     std::fs::write(path, bytes).expect("write store");

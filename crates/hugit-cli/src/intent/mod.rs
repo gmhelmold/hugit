@@ -56,14 +56,17 @@ pub enum IntentCommand {
     /// List all intents in the store (the agent discovery verb — recovers a lost id).
     ///
     /// Prints a stable JSON object `{"intents":[…]}` where every item carries
-    /// `id`, `charter` (first-80-char excerpt), `campaign`, `agent`, and
-    /// `landed` (when a `--log` is provided the landed state is resolved
-    /// against the shared canonical log; omit `--log` for store-only listing).
+    /// `id`, `charter` (first-80-char excerpt), `campaign`, `agent`, `landed`,
+    /// and `log`. `landed` is resolved per-intent against its OWN owning log
+    /// (recorded at `intent new --log`), so the default (no `--log`) global call
+    /// is a truthful one-call fleet view — not `landed:null` for every intent.
     List {
         /// The local intent store file.
         #[arg(long, default_value = DEFAULT_STORE)]
         store: PathBuf,
-        /// Optional canonical event log (to resolve `landed` state).
+        /// Optional SCOPE FILTER: restrict the listing to intents authored
+        /// against this exact log (canonical-path match). Omit for the global,
+        /// all-logs view. (`landed` is resolved per-intent regardless of this.)
         #[arg(long)]
         log: Option<PathBuf>,
         /// Filter to one campaign key (omit for all campaigns).
