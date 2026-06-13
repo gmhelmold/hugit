@@ -1,0 +1,38 @@
+[package]
+name = "hugit-serve"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+license-file.workspace = true
+
+# The `/v1` HTTP engine port (githugr window ⇄ hugit engine), Wave 1.
+#
+# This crate is the INTEGRATOR/adapter: it maps the domain-pure engine crates'
+# state into the frozen UI-shaped wire view-models (`hugit-http-contracts`) and
+# serves them over a minimal SYNCHRONOUS HTTP server (added in the scaffold step;
+# NOT axum/tokio — the workspace is supply-chain-strict + async-free). The
+# VM-coupling (humanized strings, pt-BR, presentation) lives ONLY here; the engine
+# core stays headless + clean.
+#
+# ALL engine deps are pre-declared here so per-endpoint handler agents only ever
+# write their own disjoint `src/handlers/<x>.rs` file — never this manifest (no
+# shared-file collisions). Unused deps are harmless (the workspace does not deny
+# `unused_crate_dependencies`).
+
+[dependencies]
+hugit-http-contracts = { path = "../hugit-http-contracts" }
+hugit-refstore       = { path = "../hugit-refstore" }
+hugit-contracts      = { path = "../hugit-contracts" }
+hugit-checks         = { path = "../hugit-checks" }
+hugit-queue          = { path = "../hugit-queue" }
+hugit-ledger         = { path = "../hugit-ledger" }
+hugit-policy         = { path = "../hugit-policy" }
+hugit-proto          = { path = "../hugit-proto" }
+hugit-cli            = { path = "../hugit-cli" }
+hugit-diag           = { path = "../hugit-diag" }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

@@ -1024,6 +1024,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "hugit-serve"
+version = "0.1.0"
+dependencies = [
+ "hugit-checks",
+ "hugit-cli",
+ "hugit-contracts",
+ "hugit-diag",
+ "hugit-http-contracts",
+ "hugit-ledger",
+ "hugit-policy",
+ "hugit-proto",
+ "hugit-queue",
+ "hugit-refstore",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "icu_collections"
 version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
