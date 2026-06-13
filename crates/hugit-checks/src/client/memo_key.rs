@@ -27,9 +27,54 @@ use sha2::{Digest, Sha256};
 use super::glob;
 
 /// A single file in the workspace tree: a `/`-separated relative path mapped to
-/// its raw content bytes. The materializer / B3 affected-set produces this; B2a
-/// consumes it to derive the scoped `tree_root`.
+/// the bytes the tree axis hashes for that file. The materializer / B3
+/// affected-set produces this; B2a consumes it to derive the scoped `tree_root`.
+///
+/// # Mode-bit folding (N-1 stale-green close)
+///
+/// The tree axis MUST hash every result-affecting input of a file, and on POSIX
+/// the executable / permission bits are result-affecting: a check `--cmd
+/// './gate.sh'` over a `gate.sh` that is `chmod -x`'d (SAME content) flips from
+/// `exit 0` to `exit 126` (permission denied). Content alone is therefore an
+/// INCOMPLETE input set — dropping the mode is a STALE-GREEN hole (a warm HIT
+/// served `exit 0` where the real run now fails).
+///
+/// To close it WITHOUT changing this type's shape (it is consumed by callers
+/// across crates as a `Vec<u8>`), the snapshotter folds the POSIX mode INTO this
+/// byte field via [`frame_file_with_mode`] before inserting it: the value the
+/// tree hash sees is `MODE_TAG ‖ LP(mode_le) ‖ LP(content)`. Because EVERY
+/// snapshot entry is framed identically, a mode change (same content) and a
+/// content change both change the framed bytes → a different `tree_root` → a
+/// MISS; an unchanged (same mode + content) file frames identically → a HIT
+/// (hit-rate preserved). The framing is canonical (fixed tag, fixed-width
+/// little-endian mode, length-prefixed), so it can never collide with a raw
+/// file's bytes the way a naïve `mode ‖ bytes` concatenation could.
 pub type FileContent = Vec<u8>;
+
+/// Magic tag prefixed to every mode-framed snapshot entry so the framing is
+/// self-describing and can never be confused with raw file content. Fixed bytes
+/// `\0hugit-fmode\0` — a NUL-bracketed marker no shell script begins with.
+const MODE_TAG: &[u8] = b"\0hugit-fmode\0";
+
+/// Fold a file's POSIX `mode` and `content` into the single canonical byte field
+/// the tree axis hashes (N-1). Layout: `MODE_TAG ‖ LP(u32_le(mode)) ‖ LP(content)`.
+///
+/// The full `mode` (the `st_mode` low bits, in practice the `0o7777`
+/// permission/setuid/setgid/sticky bits the snapshot passes) is folded — not
+/// merely the executable bit — so ANY permission change busts the memo key. On
+/// non-unix the caller passes a fixed sentinel mode (the bits are not
+/// meaningful there), so the framing is stable cross-platform and the Windows
+/// build is unaffected.
+///
+/// This is the ONE place the mode↔content framing lives, so the snapshotter and
+/// any future producer fold identically (no drift between producers).
+pub fn frame_file_with_mode(mode: u32, content: &[u8]) -> FileContent {
+    let mut framed = Vec::with_capacity(MODE_TAG.len() + 8 + content.len());
+    framed.extend_from_slice(MODE_TAG);
+    push_lp(&mut framed, &mode.to_le_bytes());
+    push_lp(&mut framed, content);
+    framed
+}
 
 /// Length-prefix a byte field exactly as the canonical format does:
 /// `u32_be(len) ‖ bytes`. Mirrors `hugit_refstore`'s framing so tree hashing is

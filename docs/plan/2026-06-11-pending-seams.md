@@ -617,6 +617,35 @@ a higher-over-scrub trade, not in scope).
 
 ---
 
+## PS-15 — Review-sweep (2026-06-12) deferred items (non-blocking; tracked so nothing is silently dropped)
+
+A 7-agent code/audit/perf/SOTA review sweep (`docs/review/sweep-2026-06-12/`) ran on `main 5457730`.
+The SHIP-BLOCKER (memo stale-green via the dropped POSIX mode bit) and the two other real defects
+(O(n²) intent reconcile; `hugit-policy` scrub-engine drift) were fixed in **Wave N**. The remaining
+findings are tracked here as accepted/deferred:
+
+- **PERF (verify_chain is O(n) per read)** — every `--log` read re-verifies the whole hash chain
+  (measured ~103 ms @ 10k events). This is largely INHERENT for correctness (you must verify what
+  you project, and a cross-process prefix-memo is unsound — the on-disk log can change between
+  invocations). Acceptable at current log sizes; the bounded win is "verify-once per verb
+  invocation" + the per-record alloc shave (perf F5). Deferred, not a correctness issue.
+- **ERGONOMICS F-2 (error JSON key order)** — `kind` is not the first key (`serde_json` sorts
+  alphabetically → `fix`/`kind`/`message`). Making `kind` first needs `preserve_order`/`indexmap`,
+  not a one-liner. Cosmetic for agent stream-matching; deferred (N-6 closed F-5 + the kind-spelling
+  unification; F-2 left).
+- **TEST-QUALITY debt** (sweep `tests.md`): T-1 tautological shadow-scheduler test
+  (`hugit-checks/src/shadow/tests.rs`); T-3 `unsafe set_var` in parallel test binaries (cross-file
+  env race); T-5 scratch-dir PID-only collision (`acceptance_wj_matrix.rs`); T-6 presence-not-field
+  redaction assert; T-8 zero property/fuzz tests on the scrubber/chain/memo-key. Hardening backlog.
+- **CODE-REVIEW F2 (PS-13 invariant scans a hard-coded file list)** — a new read verb in a NEW file
+  escapes the source-invariant. Defence-in-depth (every current loader IS policed); harden by
+  walking `src/**.rs` minus tagged exemptions.
+- **N-1/N-6 false-positive corrected:** the sweep's "package count is 16 not 17" finding was WRONG —
+  `cargo metadata --no-deps` shows 17 workspace members (4 `hugit-app*` + 13 feature crates); the
+  CLAUDE.md "17-package" claim is correct and was NOT changed.
+
+---
+
 ## Closed seams (reference — do not re-open without owner approval)
 
 | Seam | Shipped | Governing commit |

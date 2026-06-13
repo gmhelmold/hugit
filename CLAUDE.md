@@ -9,9 +9,14 @@ VCS + merge + CI designed for orchestrated agent fleets, built on CoreLink's
 production CAS (Cloudflare Workers/R2/D1/DO). Founded 2026-06-05.
 
 **Status (as of 2026-06-12, post Waves A/B/C/D/E+F + the wedge wave + G + H + I +
-J + WK-AC + Wave K, adversarial rounds 1–7 closed; Round 8 = the SEVERE class
-sweep RAN and Wave L remediated all 6 classes on branch `integ/wave-l` —
-Round 9 re-audit + merge PENDING, push HELD): the buildable
+J + WK-AC + Wave K, adversarial rounds 1–7 closed; then Round 8 (SEVERE
+class sweep) → **Wave L** (6 root-cause classes closed by construction) →
+Round 9 (converged) → **Wave M** (PS-13/R9-3/C5-F3 hardening) → Round 10
+(4/4 converged), all MERGED to `main` + runner-green CI; then a 7-agent
+code/audit/perf/SOTA review sweep (`docs/review/sweep-2026-06-12/`) found and
+**Wave N** fixed a memo stale-green SHIP-BLOCKER (the tree axis dropped the
+POSIX mode bit — a `chmod -x` served a cached green), an O(n²) intent
+reconcile, and a third scrub-engine drift in `hugit-policy`): the buildable
 product is complete; adversarial hardening is ongoing, not closed.** A
 **17-package** Rust workspace (hugit-app + {ui,exit,sidecar} sub-crates = 4
 crates + 13 feature crates — verified by `cargo metadata --no-deps`
