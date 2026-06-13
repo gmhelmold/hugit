@@ -121,8 +121,24 @@ NON-hermetic command by enumerating its inputs; the genuinely-irreducible
 residual (arbitrary fixture reads / network / clock) is the **P2
 hermetic-execution seam** (the runner sandbox). **The adversarial loop is DRY**
 — Round 13 found zero new local P0/P1; convergence is proven per-round, never
-asserted. (Minor P3 tracked: a defensive per-file size cap on the snapshot read,
-PS-17.) `main` (latest wave) is green by the LOCAL gate
+asserted.
+**Post-Round-13 pendências sweep (2026-06-13): the in-my-control tracked seams were
+closed.** Four PRs merged to `main` (each runner-green): **PS-17** (the last P3 — the
+memo-key snapshot read now caps peak memory: ≤64 MiB files fold raw/byte-identical, a
+larger file folds a bounded `OVERSIZE:<len>:<streamed-sha256>` sentinel, soundness
+preserved), **PS-9** (owner-decided SOTA — `intent new --log` records each intent's
+owning log so `intent list`/`show` resolve `landed` per-source-log; the default global
+call is now a truthful one-call fleet view with a `log` field, `--log` is a scope
+filter, tampered owning log fails closed), **PS-11** (`hugit check --env-axis <VAR>` —
+an opt-in to declare a custom env dependency the hermetic spawn would otherwise clear;
+declared == keyed == present), and the **IntentMetrics §13.4 conformance vector** landed
+byte-identical to the corelink-runners twin (unblocking their PR #5). A 7-agent-style
+catch also de-flaked the N-2 reconcile perf test (dropped an unsound absolute wall-clock
+ceiling — it false-failed under runner contention; the scaling-RATIO assertion is the
+sound, contention-invariant proof). Remaining pendências are all owner/infra-gated (P2
+tenant: PS-2/3/8/10/PS-1-live-AC + dedicated runner for the PS-12b contention) or
+sibling-fenced (PS-4). (PS-17 — formerly the last tracked P3 — is now closed.) `main`
+(latest wave) is green by the LOCAL gate
 (fmt + clippy `--workspace --all-targets --locked -D warnings` + test
 `--workspace --locked` + `cargo deny check`, read by real bare exit — the exact
 test count moves per wave, so it is deliberately NOT pinned here) AND
