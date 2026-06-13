@@ -531,9 +531,19 @@ self-hosted runner could not run it — a green LOCAL gate was not reproduced on
 advisory tooling on the runner via `taiki-e/install-action`; the `gates` job ran
 `fmt`/`clippy`/`test`/`deny`/`audit` ALL green on `corelink-builder` and concluded `success`.
 The advisory gate is now runner-verified, not LOCAL-only — the "concluded remote green is the
-source of truth" caveat in CLAUDE.md is closed. (Residual: the runner remains contention-flaky —
-one post-run cache-save step flaked then succeeded on retry; tracked as ambient infra, distinct
-from PS-12's tooling gap which is closed.)
+source of truth" caveat in CLAUDE.md is closed.
+
+**PS-12b — runner contention disrupts gate-step env (ambient infra, owner/P2; mitigated 2026-06-13):**
+the shared `corelink-builder` runner intermittently loses the toolchain action's `$GITHUB_PATH`
+PER-STEP — observed `cargo: command not found` in a single step (e.g. `test`, or `deny`) while
+OTHER steps in the SAME run found cargo (~37% flake; a concurrent family-repo job mutating the env
+during the ~10-min test step is the likely cause). **Mitigated** (`3b6924e`): each gate step now
+prepends `~/.cargo/bin` to PATH itself, independent of `$GITHUB_PATH` — this got the test step green
+where it had flaked twice. **NOT fully resolved**: a long step + cross-repo contention can still
+disrupt the env; the real fix is **dedicated runner capacity / job isolation** (part of the P2
+runner provisioning — owner/infra). The CODE is runner-green-capable (run `27457719247` concluded
+`success`, all 5 gates green on the runner); a contention flake on a future push is re-enqueueable
+(`gh run rerun --failed`), NOT a code failure.
 
 ---
 
