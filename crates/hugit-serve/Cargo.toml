@@ -15,25 +15,23 @@ license-file.workspace = true
 # VM-coupling (humanized strings, pt-BR, presentation) lives ONLY here; the engine
 # core stays headless + clean.
 #
-# ALL engine deps are pre-declared here so per-endpoint handler agents only ever
-# write their own disjoint `src/handlers/<x>.rs` file — never this manifest (no
-# shared-file collisions). Unused deps are harmless (the workspace does not deny
-# `unused_crate_dependencies`).
+# Deps are exactly what the handlers + scaffold use (dead engine deps trimmed per
+# the SOTA audit). The HTTP server is `tiny_http` — a minimal SYNCHRONOUS server
+# with NO async runtime and NO TLS (`default-features = false`: TLS terminates at
+# the edge/Cloudflare), keeping the supply-chain surface small in this
+# exact-pinned, `multiple-versions = "deny"` workspace.
 
 [dependencies]
 hugit-http-contracts = { path = "../hugit-http-contracts" }
 hugit-refstore       = { path = "../hugit-refstore" }
 hugit-contracts      = { path = "../hugit-contracts" }
-hugit-checks         = { path = "../hugit-checks" }
-hugit-queue          = { path = "../hugit-queue" }
 hugit-ledger         = { path = "../hugit-ledger" }
-hugit-policy         = { path = "../hugit-policy" }
-hugit-proto          = { path = "../hugit-proto" }
 hugit-cli            = { path = "../hugit-cli" }
-hugit-diag           = { path = "../hugit-diag" }
+tiny_http  = { version = "0.12.0", default-features = false }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
 hugit-refstore = { path = "../hugit-refstore", features = ["test-support"] }
+tiny_http   = { version = "0.12.0", default-features = false }
 serde_json = { workspace = true }
