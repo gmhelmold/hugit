@@ -7,6 +7,8 @@
 //! 404 (no existence leak); a tampered/unreadable log is 503 (fail-honest); the
 //! error body is the `{code, reason}` envelope.
 
+use std::sync::OnceLock;
+
 use tiny_http::{Header, Method, Response, Server};
 
 use crate::auth::check_bearer;
@@ -14,28 +16,51 @@ use crate::error::EngineErr;
 use crate::handlers;
 use crate::state::AppState;
 
-/// Run the server forever on `addr` (e.g. `127.0.0.1:8787`).
+/// Bind `addr` (e.g. `127.0.0.1:8787`) and run the server forever.
 pub fn serve(state: AppState, addr: &str) -> std::io::Result<()> {
     let server = Server::http(addr).map_err(|e| std::io::Error::other(e.to_string()))?;
     eprintln!(
         "hugit-serve listening on {addr} (log_dir={})",
         state.log_dir.display()
     );
+    serve_on(state, server)
+}
+
+/// Run the request loop over a PRE-BOUND server (the loop the real binary runs;
+/// split out so a test can bind `:0`, learn the port, and exercise it end-to-end).
+pub fn serve_on(state: AppState, server: Server) -> std::io::Result<()> {
     for request in server.incoming_requests() {
-        let (status, body) = route(&state, request.method(), request.url(), request.headers());
+        // PANIC ISOLATION: a panic inside a handler must degrade to a 503 for THAT
+        // request, never take down the whole single-threaded server.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            route(&state, request.method(), request.url(), request.headers())
+        }));
+        let (status, body) = outcome.unwrap_or_else(|_| {
+            eprintln!("hugit-serve: handler panicked — degraded to 503");
+            (503, EngineErr::unavailable("internal error").to_body())
+        });
         let response = Response::from_string(body)
             .with_status_code(status)
             .with_header(json_content_type());
-        let _ = request.respond(response);
+        // A broken pipe (client hung up) is expected + silent; log other faults.
+        if let Err(e) = request.respond(response)
+            && e.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            eprintln!("hugit-serve: respond error: {e}");
+        }
     }
     Ok(())
 }
 
-/// `Content-Type: application/json` header.
+/// The `Content-Type: application/json` header — built once, cloned per response
+/// (a static valid header; the `expect` is provably infallible).
 fn json_content_type() -> Header {
-    // Safe: a static, valid header — the unwrap cannot fire.
-    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-        .expect("static content-type header is valid")
+    static CT: OnceLock<Header> = OnceLock::new();
+    CT.get_or_init(|| {
+        Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+            .expect("static content-type header is valid")
+    })
+    .clone()
 }
 
 /// Route + dispatch one request to a `(status, body)` pair. Socket-free.

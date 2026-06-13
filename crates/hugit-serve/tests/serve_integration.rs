@@ -7,12 +7,14 @@
 //! (`{code:"NOT_FOUND"}`, no existence leak); path-traversal → 404; non-GET → 404;
 //! a TAMPERED log → 503 (`ENGINE_UNAVAILABLE`, fail-honest).
 
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::path::PathBuf;
 
 use hugit_http_contracts::RepoHomeVm;
-use hugit_serve::server::route;
+use hugit_serve::server::{route, serve_on};
 use hugit_serve::state::AppState;
-use tiny_http::{Header, Method};
+use tiny_http::{Header, Method, Server};
 
 const TOKEN: &str = "dev-token-abc";
 
@@ -161,4 +163,56 @@ fn all_five_reads_route_with_bearer() {
         // Each body must be valid JSON.
         let _: serde_json::Value = serde_json::from_str(&body).expect("valid JSON body");
     }
+}
+
+/// One raw HTTP/1.1 GET over a TcpStream → the full response string (headers+body).
+/// `Connection: close` so the server closes and read-to-EOF terminates.
+fn http_get(addr: &str, path: &str, bearer: Option<&str>) -> String {
+    let mut stream = TcpStream::connect(addr).expect("connect to serve_on");
+    let auth = bearer
+        .map(|t| format!("Authorization: Bearer {t}\r\n"))
+        .unwrap_or_default();
+    let req = format!("GET {path} HTTP/1.1\r\nHost: test\r\n{auth}Connection: close\r\n\r\n");
+    stream.write_all(req.as_bytes()).unwrap();
+    let mut resp = String::new();
+    stream.read_to_string(&mut resp).unwrap();
+    resp
+}
+
+/// REAL-SOCKET smoke: bind `:0`, run the actual `serve_on` loop in a thread, and
+/// drive real HTTP over a TcpStream — proving the loop wiring (`Server::http`,
+/// `incoming_requests`, `respond`, the Content-Type header) the socket-free
+/// `route` tests cannot reach.
+#[test]
+fn live_socket_serves_readyz_and_authed_read() {
+    let (state, _d) = state_with_repo("hugit", "[]");
+    let server = Server::http("127.0.0.1:0").expect("bind ephemeral port");
+    let addr = server
+        .server_addr()
+        .to_ip()
+        .expect("ip listen addr")
+        .to_string();
+    std::thread::spawn(move || {
+        let _ = serve_on(state, server);
+    });
+
+    // /readyz — unauthenticated, real socket → 200 + JSON content-type + body.
+    let r = http_get(&addr, "/readyz", None);
+    assert!(r.starts_with("HTTP/1.1 200"), "readyz response: {r}");
+    assert!(r.contains("application/json"), "content-type set: {r}");
+    assert!(r.contains("\"ready\":true"), "readyz body: {r}");
+
+    // Authed read over the real socket → 200 + a contract-valid RepoHomeVm body.
+    let r2 = http_get(&addr, "/v1/repos/hugit/home", Some(TOKEN));
+    assert!(r2.starts_with("HTTP/1.1 200"), "home response: {r2}");
+    let body = r2.split("\r\n\r\n").nth(1).unwrap_or("");
+    let vm: RepoHomeVm = serde_json::from_str(body).expect("home body parses as RepoHomeVm");
+    assert_eq!(vm.repo, "hugit");
+
+    // No token over the real socket → 401.
+    let r3 = http_get(&addr, "/v1/repos/hugit/home", None);
+    assert!(
+        r3.starts_with("HTTP/1.1 401"),
+        "missing-bearer response: {r3}"
+    );
 }
