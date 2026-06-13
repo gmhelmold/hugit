@@ -37,14 +37,30 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 fn hugit_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_hugit"))
 }
 
-/// A fresh scratch dir per test (process-id + tag namespaced).
+// T-5 fix: a monotonic per-call counter ensures every scratch() invocation
+// gets a unique directory even when multiple test functions share the same tag
+// string AND cargo runs them in parallel within this binary.  PID alone is
+// insufficient because the static tags ("camp-addr", "intent-ulid", …) are
+// each used by exactly one test fn but the remove_dir_all + create_dir_all
+// sequence is not atomic — two fns colliding on the same name corrupt each
+// other's working directory.  The counter produces a strictly distinct suffix
+// per call, making collisions structurally impossible regardless of tag value.
+static SCRATCH_CTR: AtomicU64 = AtomicU64::new(0);
+
+/// A fresh scratch dir per call (process-id + monotonic counter + tag).
+///
+/// Each call gets a unique directory: the AtomicU64 counter is incremented
+/// before the path is built, so even parallel test functions that share a tag
+/// string can never land on the same directory.
 fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("hugit-wjmatrix-{tag}-{}", std::process::id()));
+    let n = SCRATCH_CTR.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("hugit-wjmatrix-{tag}-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir

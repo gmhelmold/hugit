@@ -87,13 +87,30 @@ fn cap_halts_shadow() {
 }
 
 // ② ─ a halted shadow does not stop an explicit job from proceeding.
+//
+// T-1 load-bearing upgrade: we now assert the INTERACTION — that admit_shadow
+// returning CapHalted has NOT drawn any budget (so the halt is real, not a
+// silent admit), AND that run_explicit_job still reaches Passed.  Deleting
+// admit_shadow or breaking its halt-path would either change the budget assertion
+// or change the ShadowDecision assertion, turning this test RED.
 #[test]
 fn explicit_proceeds_when_shadow_halted() {
     let mut mgr = BudgetManager::default();
     mgr.register_tenant("t1", 0);
-    assert_eq!(admit_shadow(&mut mgr, "t1"), ShadowDecision::CapHalted);
-    // explicit path is independent of shadow admission
+    // Confirm the cap is already exhausted (remaining == 0 BEFORE the call).
+    assert_eq!(mgr.budget("t1").unwrap().remaining, 0);
+    let decision = admit_shadow(&mut mgr, "t1");
+    assert_eq!(decision, ShadowDecision::CapHalted);
+    // The halt must NOT have drawn any budget — remaining is still 0.
+    assert_eq!(
+        mgr.budget("t1").unwrap().remaining,
+        0,
+        "a halted shadow must leave the budget untouched"
+    );
+    // Explicit job proceeds and passes on its own merits despite the halted shadow.
     assert_eq!(run_explicit_job(true), ExplicitJobStatus::Passed);
+    // Explicit job can still fail on its own merits when the shadow is halted.
+    assert_eq!(run_explicit_job(false), ExplicitJobStatus::Failed);
 }
 
 // ③ ─ default-off: empty opt-in opts in nothing.
@@ -132,13 +149,59 @@ fn outcome_pass_vs_signal() {
 }
 
 // ④ ─ explicit job verdict is independent of any shadow outcome.
+//
+// T-1 load-bearing upgrade: we drive the full scheduler → admit → outcome →
+// explicit-job sequence and assert that a PASSING shadow cannot make the
+// explicit job pass, and a FAILING shadow cannot make it fail.  If
+// run_explicit_job were ever wired to consult the shadow outcome (breaking the
+// non-gating invariant), a mismatched fixture here would turn this test RED.
 #[test]
 fn explicit_independent_of_shadow() {
-    // failing shadow present, explicit job still passes on its own merits
-    let _shadow = ShadowOutcome::from_check_result(0, check_result(1));
-    assert_eq!(run_explicit_job(true), ExplicitJobStatus::Passed);
-    // explicit job fails ONLY on its own merits
-    assert_eq!(run_explicit_job(false), ExplicitJobStatus::Failed);
+    let mut mgr = BudgetManager::default();
+    mgr.register_tenant("t1", 2);
+
+    // ── Failing shadow + explicit Passed ────────────────────────────────────
+    // Scheduler: one write → one pass at the boundary.
+    let mut s = ShadowScheduler::new("acme/repo", "t1");
+    s.record_write("src/lib.rs");
+    let pass = s.close_window().expect("one shadow pass");
+
+    // Budget gate: admit the shadow.
+    let admitted = admit_shadow(&mut mgr, "t1");
+    assert_eq!(
+        admitted,
+        ShadowDecision::Admitted,
+        "pass should be admitted"
+    );
+
+    // Shadow outcome: fail (exit 1).
+    let shadow_fail = ShadowOutcome::from_check_result(pass.window_seq, check_result(1));
+    assert!(shadow_fail.is_signal(), "failing shadow is a signal");
+
+    // The explicit job passes on its OWN merits — the failing shadow is irrelevant.
+    assert_eq!(
+        run_explicit_job(true),
+        ExplicitJobStatus::Passed,
+        "a failing shadow must not gate a passing explicit job"
+    );
+
+    // ── Passing shadow + explicit Failed ────────────────────────────────────
+    let mut s2 = ShadowScheduler::new("acme/repo", "t1");
+    s2.record_write("src/other.rs");
+    let pass2 = s2.close_window().expect("second shadow pass");
+
+    let admitted2 = admit_shadow(&mut mgr, "t1");
+    assert_eq!(admitted2, ShadowDecision::Admitted, "second pass admitted");
+
+    let shadow_pass = ShadowOutcome::from_check_result(pass2.window_seq, check_result(0));
+    assert!(shadow_pass.is_pass(), "passing shadow is a result");
+
+    // The explicit job fails on its OWN merits — the passing shadow is irrelevant.
+    assert_eq!(
+        run_explicit_job(false),
+        ExplicitJobStatus::Failed,
+        "a passing shadow must not rescue a failing explicit job"
+    );
 }
 
 // ⑤ ─ per-tenant cap isolation: A exhausting leaves B unaffected.

@@ -242,46 +242,106 @@ fn export_valid_projects_then_tamper_is_chain_broken() {
 /// a SOURCE-ENFORCED invariant: a new read verb that hand-rolls the loop, or an
 /// existing loader that regresses to inline verify, FAILS this test.
 ///
-/// Scope: the canonical-log loader files. The chokepoint file (`checks/mod.rs`)
-/// is the ONE legitimate home of the loop. `export/cut.rs`'s prefix re-verify is
-/// a DIFFERENT operation (re-verify a sub-range of an already-chokepoint-loaded
-/// in-memory log, not a disk read) and is tagged `readpath-verify-exempt`.
-/// `intent/store.rs` reads a DIFFERENT on-disk shape (`IntentStoreFile`, its own
-/// embedded spine with its own verify) and is out of the canonical-loader set.
+/// F2 fix: the previous version scanned a HARD-CODED array of 5 files, so a
+/// brand-new read verb in a NEW file was invisible to the guard — the exact
+/// failure mode that recurred in R7/R8 (why/export/intent-list each "forgot
+/// verify_chain").  This version WALKS the entire `src/**/*.rs` tree and flags
+/// any non-exempt file that hand-rolls `verify_chain(`/`.push_record(`.
+///
+/// ## Exemption rationale (documented per-file)
+///
+/// - `checks/mod.rs`  — the ONE legitimate home of the loop (the chokepoint
+///   itself); write-path append primitives live here too.
+/// - `intent/store.rs` — reads `IntentStoreFile` (a DIFFERENT on-disk shape
+///   with its OWN embedded spine); not a canonical-log loader.
+/// - `export/cut.rs`  — `verify_chain` here is tagged `readpath-verify-exempt`
+///   (re-verifies a SUB-RANGE of an already-chokepoint-loaded in-memory log,
+///   NOT a disk read); `.push_record` reconstructs the in-memory EventLog from
+///   an already-verified cut (write-path, not disk-read).
+/// - `export/mod.rs`  — `.push_record` usages are write-path/restore operations
+///   (`export` format serialisation, `restore_from_bytes`); no canonical-log
+///   disk read.
+/// - `why/` (`why/mod.rs`, `why/resolver.rs`) — reads `why`'s OWN wrapper shape
+///   (`[{record,attestation?,sidecar?},…]`), not the bare `[EventRecord,…]`
+///   canonical log; has its own K-CHAIN verify (correctly documented).
+/// - `main.rs` — hosts `run_why`; same special-shape exemption as `why/`.
+///
+/// Any file NOT in this exemption set that contains `verify_chain(` or
+/// `.push_record(` (outside comments or `readpath-verify-exempt` lines) is
+/// a NEW canonical-log inline bypass — the test FAILS.
 #[test]
 fn canonical_log_loaders_route_through_the_chokepoint() {
+    use std::collections::HashSet;
+
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let src = manifest.join("src");
 
-    // The canonical-log disk loaders converged in Wave M. NONE of these may
-    // contain an inline `verify_chain(` or `push_record(` (they route through
-    // `checks::rehydrate_and_verify`).
-    let converged = [
-        src.join("intent").join("list.rs"),
-        src.join("intent").join("canonical_log.rs"),
-        src.join("pr").join("cli.rs"),
-        src.join("campaign").join("world.rs"),
-        // The M-3 reconcile read path (`reconcile_store_from_log`) also reads the
-        // canonical `[EventRecord,…]` `--log`; it was routed through the chokepoint
-        // at Wave-M integration, so it too may not hand-roll the loader (R10-2 F-1).
-        // (`why`/`export` read DIFFERENT on-disk shapes and verify them with their
-        // own `verify_chain` — documented special-shape siblings, not canonical
-        // loaders, so intentionally NOT in this set.)
-        src.join("intent").join("new.rs"),
-    ];
+    // ── Exempted files (paths relative to `src/`, normalised for comparison) ─
+    //
+    // All exemptions are by SUFFIX of the canonical path so they are
+    // OS-independent (no hard-coded separators).
+    //
+    // Exempt: the chokepoint itself + write-path + special-shape siblings.
+    let exempt_suffixes: HashSet<&str> = [
+        // The chokepoint: the ONE legitimate home of verify_chain + push_record.
+        "checks/mod.rs",
+        // IntentStoreFile — different on-disk shape, own embedded spine.
+        "intent/store.rs",
+        // export: write-path push_record (in-memory log construction/restore)
+        // and readpath-verify-exempt sub-range re-verify.
+        "export/cut.rs",
+        "export/mod.rs",
+        // `why` verb: reads its OWN wrapper shape (not bare [EventRecord,…]).
+        "why/mod.rs",
+        "why/resolver.rs",
+        // main.rs hosts run_why; same special-shape exemption.
+        "main.rs",
+    ]
+    .iter()
+    .copied()
+    .collect();
+
+    /// Collect all `.rs` files under `dir` recursively via `std::fs::read_dir`.
+    fn collect_rs(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rs(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    let mut all_rs: Vec<PathBuf> = Vec::new();
+    collect_rs(&src, &mut all_rs);
+    all_rs.sort(); // deterministic order for readable failure messages
 
     let mut offenders: Vec<String> = Vec::new();
-    for path in &converged {
+
+    for path in &all_rs {
+        // Check whether this path ends with any exempted suffix.
+        // We normalise to forward slashes so the suffix match is cross-platform.
+        let path_str = path.to_string_lossy().replace('\\', "/");
+        let is_exempt = exempt_suffixes.iter().any(|suf| path_str.ends_with(suf));
+        if is_exempt {
+            continue;
+        }
+
         let text = std::fs::read_to_string(path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+
         for (i, line) in text.lines().enumerate() {
             let trimmed = line.trim_start();
-            // Skip comments and doc-comments (they legitimately NAME the pattern).
+            // Skip comment lines — they legitimately NAME the patterns in docs.
             if trimmed.starts_with("//") {
                 continue;
             }
-            // An explicit, documented exemption marker keeps a deliberate
-            // non-disk-read verify legal (none in these files today).
+            // An inline `readpath-verify-exempt` marker on the same line
+            // documents a deliberate non-canonical-log use of the primitives.
             if line.contains("readpath-verify-exempt") {
                 continue;
             }
@@ -293,9 +353,12 @@ fn canonical_log_loaders_route_through_the_chokepoint() {
 
     assert!(
         offenders.is_empty(),
-        "a canonical-log loader re-implements verify_chain/push_record instead of \
-         routing through the single chokepoint `checks::rehydrate_and_verify` — \
-         the PS-13 read-path chokepoint is bypassable. Offenders:\n{}",
+        "F2 / PS-13: a source file outside the exempt set hand-rolls \
+         verify_chain/push_record instead of routing through the single chokepoint \
+         `checks::rehydrate_and_verify`.  Adding verify_chain inline in a new file \
+         is the recurring R7/R8 regression class.  Either route through the chokepoint \
+         or add the file to the exempt list with a documented rationale.\n\
+         Offenders:\n{}",
         offenders.join("\n")
     );
 }

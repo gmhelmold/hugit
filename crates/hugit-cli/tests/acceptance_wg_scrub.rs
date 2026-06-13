@@ -23,6 +23,8 @@
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
+use serde_json::Value;
+
 fn hugit_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_hugit"))
 }
@@ -148,12 +150,36 @@ fn check_redacts_free_text_secrets_in_principal_and_cmd_on_the_log() {
     );
     assert_log_clean(&log, "check");
 
-    // The log positively carries the redaction sentinel (the secret was replaced,
-    // not merely dropped).
+    // T-6 fix: assert the SPECIFIC field that carried the secret is redacted,
+    // not just that the sentinel appears somewhere in the log bytes.
+    // A presence-only check would pass if a DIFFERENT field was accidentally
+    // redacted while the targeted field leaked — this field-level check catches
+    // that scenario.
+    //
+    // The `--principal` flag maps to `principal_chain[0]` in the EventRecord.
+    // After scrubbing, `orchestrator:{PAT}` (which contains a `ghp_` prefix)
+    // must collapse to exactly the `[REDACTED]` sentinel.
     let bytes = std::fs::read_to_string(&log).unwrap();
-    assert!(
-        bytes.contains(REDACTED),
-        "the check.recorded payload carries the sentinel instead of the secret:\n{bytes}"
+    let records: Vec<Value> =
+        serde_json::from_str(&bytes).expect("log is valid JSON array of EventRecords");
+    // Find the `check.recorded` event (the last record appended by `hugit check`).
+    let check_record = records
+        .iter()
+        .find(|r| r.get("kind").and_then(Value::as_str) == Some("check.recorded"))
+        .unwrap_or_else(|| panic!("no check.recorded event in log:\n{bytes}"));
+    let principal_chain = check_record
+        .get("principal_chain")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("check.recorded has no principal_chain:\n{check_record}"));
+    let first_principal = principal_chain
+        .first()
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("principal_chain is empty:\n{check_record}"));
+    assert_eq!(
+        first_principal, REDACTED,
+        "principal_chain[0] must be exactly the REDACTED sentinel \
+         (the ghp_ secret must not appear verbatim in the specific field that carried it):\n\
+         got: {first_principal:?}\nfull record: {check_record}"
     );
 }
 

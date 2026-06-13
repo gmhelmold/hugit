@@ -491,7 +491,37 @@ fn config_rejects_a_traversal_or_uppercase_tenant_slug_fail_closed() {
 //    serialized by a guard (its own binary, but belt-and-suspenders).
 // ─────────────────────────────────────────────────────────────────────────────
 
-static PAT_PERM_LOCK: Mutex<()> = Mutex::new(());
+// T-3 serialization guard: ALL env-mutating tests in this binary must hold this
+// lock for their entire duration (set-through-cleanup), including across any
+// panic path.  The lock is process-wide (static), so concurrent tests in the
+// same binary cannot observe a partially-set env window.
+static ENV_MUTATION_LOCK: Mutex<()> = Mutex::new(());
+
+/// A panic-safe RAII cleaner for the env vars set by the permission-gate test.
+///
+/// T-3 fix: the previous pattern set env vars before the `corelink_ac_from_env`
+/// call and cleaned them up in a manual `unsafe` block after it.  If the call
+/// panicked, cleanup was skipped, leaving `ENV_AC_URL`/`ENV_TENANT`/`ENV_PAT_FILE`
+/// set for the lifetime of the process, which could silently affect any
+/// subsequently scheduled test in the same binary.  This drop guard ensures
+/// cleanup runs even on panic — the `ENV_MUTATION_LOCK` ensures the set+cleanup
+/// window is never concurrent with another env read.
+#[cfg(unix)]
+struct EnvGuard {
+    vars: Vec<&'static str>,
+}
+
+#[cfg(unix)]
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: we hold ENV_MUTATION_LOCK for the entire set+cleanup window.
+        unsafe {
+            for var in &self.vars {
+                std::env::remove_var(var);
+            }
+        }
+    }
+}
 
 #[cfg(unix)]
 #[test]
@@ -499,7 +529,9 @@ fn loader_refuses_a_world_readable_pat_file_naming_the_path() {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
 
-    let _g = PAT_PERM_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    // Hold the process-wide env mutation lock for the entire test body,
+    // including any panic path.  The EnvGuard below ensures cleanup on Drop.
+    let _lock = ENV_MUTATION_LOCK.lock().unwrap_or_else(|p| p.into_inner());
 
     let dir = tempfile::tempdir().expect("tempdir");
     let pat_path = dir.path().join("pat");
@@ -509,21 +541,21 @@ fn loader_refuses_a_world_readable_pat_file_naming_the_path() {
     // 0644 → group/other readable → mode & 0o077 != 0.
     std::fs::set_permissions(&pat_path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-    // SAFETY: guarded by PAT_PERM_LOCK; env vars are restored at the end.
+    // SAFETY: serialized by ENV_MUTATION_LOCK (held above for the full scope).
+    // EnvGuard ensures these are removed even if corelink_ac_from_env panics.
     unsafe {
         std::env::set_var(ENV_AC_URL, BASE);
         std::env::set_var(ENV_TENANT, TENANT);
         std::env::remove_var(ENV_PAT);
         std::env::set_var(ENV_PAT_FILE, pat_path.to_str().unwrap());
     }
+    // Drop guard: removes ENV_AC_URL, ENV_TENANT, ENV_PAT_FILE on scope exit
+    // (success OR panic), keeping the process env clean for concurrent tests.
+    let _env_guard = EnvGuard {
+        vars: vec![ENV_AC_URL, ENV_TENANT, ENV_PAT_FILE],
+    };
 
     let outcome = corelink_ac_from_env();
-    // SAFETY: guarded by PAT_PERM_LOCK.
-    unsafe {
-        std::env::remove_var(ENV_AC_URL);
-        std::env::remove_var(ENV_TENANT);
-        std::env::remove_var(ENV_PAT_FILE);
-    }
 
     match outcome {
         Err(AcError::NotConfigured(msg)) => {
