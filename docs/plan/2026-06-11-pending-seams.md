@@ -646,6 +646,42 @@ findings are tracked here as accepted/deferred:
 
 ---
 
+## PS-16 — Post-sweep round 2 (2026-06-12/13): Wave O hardening + a 3rd wedge stale-green (closed) + residuals
+
+After Wave N, a focused re-audit of the WEDGE stale-green class (`docs/review/sweep-2026-06-12/wedge-stale-green-reaudit.md`)
++ a property/fuzz pass (Wave O) ran. Outcomes:
+
+- **WO-GLOBMISS (3rd wedge stale-green) — CLOSED (Wave O follow-up).** The built-in gates' tree-axis
+  glob captured only `**/*.rs` + `Cargo.toml`/`Cargo.lock` but `fmt`/`clippy` READ toolchain config
+  files outside it (`rustfmt.toml`, `clippy.toml`, `.cargo/config.toml`, `rust-toolchain.toml`) — a
+  config change served a cached GREEN while the real gate failed (lead cold-reproduced, same shape as
+  the N-1 mode-bit P0). Fixed: `builtin_glob_set` is now PER-DEF and captures the toolchain config
+  files (fmt→rustfmt config; clippy/test→clippy/cargo/toolchain config). Hit-rate preserved (glob
+  stays narrow, NOT `**/*`; a doc edit does not bust the gate). Cold-verified: a `rustfmt.toml`/
+  `.cargo/config.toml` change now busts the key (MISS). Symlink / file-type / file-mode axes were
+  re-confirmed CAPTURED.
+- **RESIDUAL — unbounded check reads (the recurring root) = the disclosed P2 hermetic seam.** The
+  three wedge stale-greens (env→K-RUN, mode→N-1, config-glob→WO-GLOBMISS) are all one class: you
+  cannot soundly memoize a NON-hermetic command by ENUMERATING its inputs. A built-in `test` can read
+  an ARBITRARY fixture (`tests/data/*`, `include_str!`, a `build.rs`-emitted path) no bounded glob can
+  predict — same class as files-outside-`--root`. The class-killing fix is **hermetic execution**
+  (the runner's isolated rootfs so the action physically cannot read outside the seeded tree axis) —
+  the **P2 corelink-runners sandbox seam** (`docs/interop.md` §2 / Round-8 C3 disclosure). Locally we
+  capture the bounded/known axes (env, mode, toolchain config) and disclose the unbounded-read residual;
+  it is NOT closable locally by enumeration.
+- **Hash-chain tail-truncation (PS-8 instance, property-confirmed).** Wave O's `verify_chain` proptest
+  precisely bounded the LOCAL guarantee: any MID-STREAM corruption (byte-flip / drop / reorder /
+  duplicate) is detected, but dropping the TAIL record leaves a still-valid prefix that `verify_chain`
+  accepts — tail-truncation needs a published length/head-hash anchor, which is the **PS-8 P2
+  server-side keyed seam**. Not a code defect; the property was constrained to mid-stream (the chain's
+  actual promise) and documented. This is now a regression-guarding property test, not just prose.
+- **Property/fuzz coverage added (T-8 closed):** `proptest` suites now guard the scrubber
+  (`hugit-ledger`), the hash chain (`hugit-refstore`), and the memo key (`hugit-checks`) over
+  generated inputs — continuous fuzzing of the security spine, not hand-picked fixtures.
+- **Test-quality (T-1/T-3/T-5/T-6) + the PS-13 invariant (now walks `src/**`)** hardened in Wave O / O-2.
+
+---
+
 ## Closed seams (reference — do not re-open without owner approval)
 
 | Seam | Shipped | Governing commit |
