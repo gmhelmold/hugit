@@ -20,6 +20,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exactly; one inline round-trip parity test per module. Additive-only (no existing
   type/field/signature changed). Phase A of the hugit-serve Phase-2 master plan.
 
+- feat(serve): **hugit-serve Phase 2 reads — 6 real-backbone handlers**
+  (`repo_chrome` · `branches` · `commit_detail` · `intent_detail` · `insights` ·
+  `campaign`), wired into the `/v1` router. Each maps the verified event-log → its
+  frozen VM with read-boundary redaction + honest defaults (never faked); by-id
+  handlers return `None`→404 with no existence leak. Lead scope: only endpoints the
+  engine can back with REAL data are served; ≥80%-honest-default surfaces
+  (`viewer_can`/`attention`/`dashboard`/`security` + git-layer/identity reads) stay on
+  the window fixture, disclosed as P2 seams (serving hollow shells would downgrade the
+  live site). A 4-agent adversarial audit (redaction · honesty · robustness ·
+  completeness) found + fixed: a P0 `env_manifest` redaction leak, a P0 `recorded_at`
+  overflow, a FAKE `tokens_by_campaign`, unbounded per-request scans (now `PR_CARDS_CAP`),
+  plus sound make-it-real reads (`campaign` chip, `when`, cost-xray `waste`/`first_pass`,
+  `cost_xray_totals`). Each handler carries a parity test + a secret-MATRIX guard
+  (a `ghp_…` PAT in a charter must serialize as `[REDACTED]`); whole hugit-serve suite
+  green + clippy `-D warnings` clean.
+
 - fix(test): **de-flake the N-2 reconcile perf test** — drop its unsound ABSOLUTE
   wall-clock ceiling (`t5k < 12 s`), which false-failed at ~16 s on the contended
   shared runner (PS-12b infra contention, NOT an algorithmic regression). The

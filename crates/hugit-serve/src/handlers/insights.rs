@@ -176,7 +176,11 @@ struct XrayOut {
 fn build_cost_xray(log: &EventLog, chips: &[CampaignChipVm]) -> XrayOut {
     let mut prs = ordered_open_prs(log);
     if prs.is_empty() || chips.is_empty() {
-        return XrayOut { rows: vec![], tokens_by_campaign: vec![], totals: None };
+        return XrayOut {
+            rows: vec![],
+            tokens_by_campaign: vec![],
+            totals: None,
+        };
     }
     // Cap per-request work (DoS bound): each PR triggers two full log scans.
     prs.truncate(PR_CARDS_CAP);
@@ -279,7 +283,11 @@ fn build_cost_xray(log: &EventLog, chips: &[CampaignChipVm]) -> XrayOut {
             first_pass: String::new(),  // honest
         })
     };
-    XrayOut { rows, tokens_by_campaign, totals }
+    XrayOut {
+        rows,
+        tokens_by_campaign,
+        totals,
+    }
 }
 
 // ── ledger view ───────────────────────────────────────────────────────────────
@@ -422,12 +430,12 @@ pub fn build_insights(log: &EventLog, repo: &str) -> InsightsVm {
         tokens_by_campaign: xray.tokens_by_campaign, // REAL — per-campaign raw tokens
         cost_xray: xray.rows,
         cost_xray_totals: xray.totals, // REAL — grand totals (sound sums)
-        tokens_by_model: vec![], // HONEST-DEFAULT — no per-model seam
+        tokens_by_model: vec![],       // HONEST-DEFAULT — no per-model seam
         tokens_by_model_legend: String::new(), // HONEST-DEFAULT
-        global_decomp: None,     // HONEST-DEFAULT — no decomp seam
-        contrib: vec![],         // HONEST-DEFAULT — no contributor seam
-        landing_times: None,     // HONEST-DEFAULT — no timing seam
-        ci_checks: None,         // HONEST-DEFAULT — no CI-card seam
+        global_decomp: None,           // HONEST-DEFAULT — no decomp seam
+        contrib: vec![],               // HONEST-DEFAULT — no contributor seam
+        landing_times: None,           // HONEST-DEFAULT — no timing seam
+        ci_checks: None,               // HONEST-DEFAULT — no CI-card seam
         ledger: build_ledger_view(&ledger, &chips),
     }
 }
