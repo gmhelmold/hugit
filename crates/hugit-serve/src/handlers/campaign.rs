@@ -6,18 +6,18 @@
 //! envelope/seal/bundle_status/who/attestation/mirror. Every free-text field
 //! passes `crate::fmt::scrub`. `None` → 404 (no existence leak).
 
-use crate::fmt::scrub;
+use crate::fmt::{PR_CARDS_CAP, scrub};
 use hugit_cli::pr::{
     CAMPAIGN_OPENED_KIND, INTENT_ENVELOPE_KIND, OpenedPr, PR_ABANDONED_KIND, PR_ENVELOPE_KIND,
     PR_LANDED_KIND, PR_OPENED_KIND, PR_QUEUED_KIND, find_pr_opened,
 };
 use hugit_contracts::context_envelope::{Altitude, CiCost, ContextEnvelope};
+use hugit_http_contracts::CampaignVm;
 use hugit_http_contracts::common::{CampaignChipVm, EnvelopeVm, MirrorVm};
 use hugit_http_contracts::landing::{CampaignIntentChipVm, CampaignPrVm};
 use hugit_http_contracts::pr_detail::{CostSplitVm, StatVm};
-use hugit_http_contracts::CampaignVm;
-use hugit_ledger::rollup::{PrQueueInput, pr_record};
 use hugit_ledger::Ledger;
+use hugit_ledger::rollup::{PrQueueInput, pr_record};
 use hugit_refstore::EventLog;
 use serde_json::Value;
 
@@ -69,28 +69,31 @@ pub fn build_campaign(log: &EventLog, repo: &str, name: &str) -> Option<Campaign
         chip,
         state_label,
         operator: scrub(&owner),
-        operator_signed: false,           // STUB — no signing seam off the log
-        operator_sig: String::new(),      // STUB
-        session: String::new(),           // STUB
-        model: String::new(),             // STUB
-        window: String::new(),            // STUB
+        operator_signed: false,      // STUB — no signing seam off the log
+        operator_sig: String::new(), // STUB
+        session: String::new(),      // STUB
+        model: String::new(),        // STUB
+        window: String::new(),       // STUB
         pr_count,
         intent_count,
         why: scrub(&charter),
-        acceptance_note: String::new(),   // STUB
-        born_from: vec![],                // STUB — no origin-ref seam
-        docs: vec![],                     // STUB
+        acceptance_note: String::new(), // STUB
+        born_from: vec![],              // STUB — no origin-ref seam
+        docs: vec![],                   // STUB
         stats,
         prs: campaign_prs,
-        envelope: EnvelopeVm::default(),  // STUB — no campaign-level envelope seam
-        seal_note: None,                  // STUB
+        envelope: EnvelopeVm::default(), // STUB — no campaign-level envelope seam
+        seal_note: None,                 // STUB
         cost,
         bundle_status: vec![],            // STUB
         who: vec![],                      // STUB
         attested_label: String::new(),    // STUB
         envelope_cas: String::new(),      // STUB
         transcripts_label: String::new(), // STUB
-        mirror: MirrorVm { synced: false, detail: String::new() }, // STUB — P2 mirror
+        mirror: MirrorVm {
+            synced: false,
+            detail: String::new(),
+        }, // STUB — P2 mirror
     })
 }
 
@@ -102,8 +105,14 @@ fn find_campaign_opened(log: &EventLog, name: &str) -> Option<(String, String)> 
         .find(|v| v.get("campaign").and_then(Value::as_str) == Some(name))
         .map(|v| {
             (
-                v.get("owner").and_then(Value::as_str).unwrap_or("").to_string(),
-                v.get("charter").and_then(Value::as_str).unwrap_or("").to_string(),
+                v.get("owner")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                v.get("charter")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
             )
         })
 }
@@ -120,6 +129,7 @@ fn prs_for_campaign(log: &EventLog, ledger: &Ledger, name: &str) -> Vec<Campaign
             pr_ids.push(id.to_string());
         }
     }
+    pr_ids.truncate(PR_CARDS_CAP); // cap per-request work (each PR → multiple log scans)
     pr_ids
         .into_iter()
         .filter_map(|pr_id| find_pr_opened(log, &pr_id).map(|o| build_campaign_pr(log, ledger, &o)))
@@ -132,7 +142,12 @@ fn build_campaign_pr(log: &EventLog, ledger: &Ledger, opened: &OpenedPr) -> Camp
     let title = if opened.campaign.is_empty() {
         format!("PR #{} — {} intents", opened.pr_id, n)
     } else {
-        format!("PR #{} ({}) — {} intents", opened.pr_id, scrub(&opened.campaign), n)
+        format!(
+            "PR #{} ({}) — {} intents",
+            opened.pr_id,
+            scrub(&opened.campaign),
+            n
+        )
     };
     let landed = pr_has_event(log, PR_LANDED_KIND, &opened.pr_id);
     let state_label = if landed {
@@ -146,12 +161,16 @@ fn build_campaign_pr(log: &EventLog, ledger: &Ledger, opened: &OpenedPr) -> Camp
     };
     let cost_usd_micros = pr_cost_micros(log, opened);
     let why = pr_why(log, &opened.pr_id);
-    let bundle: std::collections::BTreeSet<&str> = opened.intent_ids.iter().map(String::as_str).collect();
+    let bundle: std::collections::BTreeSet<&str> =
+        opened.intent_ids.iter().map(String::as_str).collect();
     let intents: Vec<CampaignIntentChipVm> = ledger
         .entries()
         .iter()
         .filter(|e| bundle.contains(e.intent_id.as_str()))
-        .map(|e| CampaignIntentChipVm { id: e.intent_id.clone(), note: scrub(&e.charter) })
+        .map(|e| CampaignIntentChipVm {
+            id: e.intent_id.clone(),
+            note: scrub(&e.charter),
+        })
         .collect();
     CampaignPrVm {
         number,
@@ -185,11 +204,17 @@ fn pr_why(log: &EventLog, pr_id: &str) -> String {
 }
 
 fn zero_ci() -> CiCost {
-    CiCost { cache_hit: 0, exec: 0, cost_usd_micros: 0, saved_usd_micros: 0 }
+    CiCost {
+        cache_hit: 0,
+        exec: 0,
+        cost_usd_micros: 0,
+        saved_usd_micros: 0,
+    }
 }
 
 fn intent_envs_for(log: &EventLog, opened: &OpenedPr) -> Vec<ContextEnvelope> {
-    let bundle: std::collections::BTreeSet<&str> = opened.intent_ids.iter().map(String::as_str).collect();
+    let bundle: std::collections::BTreeSet<&str> =
+        opened.intent_ids.iter().map(String::as_str).collect();
     log.records()
         .iter()
         .filter(|r| r.kind == INTENT_ENVELOPE_KIND)
@@ -207,11 +232,21 @@ fn pr_env_for(log: &EventLog, pr_id: &str) -> Option<ContextEnvelope> {
 }
 
 fn pr_cost_micros(log: &EventLog, opened: &OpenedPr) -> u64 {
-    let Some(env) = pr_env_for(log, &opened.pr_id) else { return 0 };
+    let Some(env) = pr_env_for(log, &opened.pr_id) else {
+        return 0;
+    };
     let intent_envs = intent_envs_for(log, opened);
-    pr_record(&env, "", &intent_envs, &opened.intent_ids, &[], zero_ci(), PrQueueInput::default())
-        .map(|r| r.cost.total.cost_usd_micros)
-        .unwrap_or(0)
+    pr_record(
+        &env,
+        "",
+        &intent_envs,
+        &opened.intent_ids,
+        &[],
+        zero_ci(),
+        PrQueueInput::default(),
+    )
+    .map(|r| r.cost.total.cost_usd_micros)
+    .unwrap_or(0)
 }
 
 fn rollup_campaign_cost(log: &EventLog, name: &str) -> CostSplitVm {
@@ -227,13 +262,25 @@ fn rollup_campaign_cost(log: &EventLog, name: &str) -> CostSplitVm {
             prs.push(o);
         }
     }
+    prs.truncate(PR_CARDS_CAP); // cap per-request work (each PR → multiple log scans)
 
-    let (mut work, mut orchestration, mut verification, mut ci, mut total, mut waste) = (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
+    let (mut work, mut orchestration, mut verification, mut ci, mut total, mut waste) =
+        (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
     let mut intent_count_total = 0u64;
     for opened in &prs {
-        let Some(env) = pr_env_for(log, &opened.pr_id) else { continue };
+        let Some(env) = pr_env_for(log, &opened.pr_id) else {
+            continue;
+        };
         let intent_envs = intent_envs_for(log, opened);
-        if let Ok(rec) = pr_record(&env, "", &intent_envs, &opened.intent_ids, &[], zero_ci(), PrQueueInput::default()) {
+        if let Ok(rec) = pr_record(
+            &env,
+            "",
+            &intent_envs,
+            &opened.intent_ids,
+            &[],
+            zero_ci(),
+            PrQueueInput::default(),
+        ) {
             work += rec.cost.work.cost_usd_micros;
             orchestration += rec.cost.orchestration.cost_usd_micros;
             verification += rec.cost.verification.cost_usd_micros;

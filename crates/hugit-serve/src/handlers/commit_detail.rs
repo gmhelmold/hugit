@@ -26,12 +26,19 @@ pub fn build_commit_detail(log: &EventLog, repo: &str, sha: &str) -> Option<Comm
     })?;
 
     let seq = row_seq(row);
-    let recorded_at_ms = log.records().get(seq as usize).map(|r| r.recorded_at).unwrap_or(0);
+    let recorded_at_ms = log
+        .records()
+        .get(seq as usize)
+        .map(|r| r.recorded_at)
+        .unwrap_or(0);
     let author_raw = extract_author(log, seq);
     let author = scrub(&author_raw);
     let age = humanize_age(recorded_at_ms);
 
-    let empty_diff = DiffVm { files: vec![], hunks: vec![] };
+    let empty_diff = DiffVm {
+        files: vec![],
+        hunks: vec![],
+    };
 
     match row {
         ProjectionRow::Intent(c) => {

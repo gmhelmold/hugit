@@ -7,7 +7,7 @@
 //! with no local seam. Presentation strings are DERIVED from real numbers,
 //! never invented. Every free-text field passes `crate::fmt::scrub`.
 
-use crate::fmt::scrub;
+use crate::fmt::{PR_CARDS_CAP, humanize_age, pct_u8, scrub};
 use hugit_cli::pr::{
     CAMPAIGN_OPENED_KIND, INTENT_ENVELOPE_KIND, OpenedPr, PR_ENVELOPE_KIND, PR_OPENED_KIND,
     find_pr_opened,
@@ -15,7 +15,7 @@ use hugit_cli::pr::{
 use hugit_contracts::context_envelope::{Altitude, CiCost, ContextEnvelope};
 use hugit_http_contracts::common::{KpiSubKind, KpiVm};
 use hugit_http_contracts::insights::{
-    CostXrayRowVm, LedgerCampaignVm, LedgerRowVm, LedgerViewVm, XrayDrillRowVm,
+    CostXrayRowVm, LedgerCampaignVm, LedgerRowVm, LedgerViewVm, XrayDrillRowVm, XrayTotalsVm,
 };
 use hugit_http_contracts::{CampaignChipVm, InsightsVm};
 use hugit_ledger::rollup::{PrQueueInput, pr_record};
@@ -25,8 +25,12 @@ use serde_json::Value;
 // ── civil-day helpers (mirror commits.rs) ────────────────────────────────────
 
 fn day_key_from_ms(unix_ms: u64) -> (i32, u32, u32) {
-    let secs = (unix_ms / 1000) as i64;
-    civil_date(secs.div_euclid(86400) as i32)
+    let secs = (unix_ms / 1000) as i64; // safe: u64::MAX/1000 < i64::MAX
+    // CLAMP, never wrap: `recorded_at` is excluded from the chain pre-image, so a
+    // corrupt/forged far-future value can ride a chain-valid log. `as i32` would
+    // wrap (release) / panic (debug); try_from clamps to a sentinel instead.
+    let days = i32::try_from(secs.div_euclid(86400)).unwrap_or(i32::MAX);
+    civil_date(days)
 }
 
 fn civil_date(z: i32) -> (i32, u32, u32) {
@@ -44,8 +48,18 @@ fn civil_date(z: i32) -> (i32, u32, u32) {
 
 fn pt_br_month(month: u32) -> &'static str {
     match month {
-        1 => "jan", 2 => "fev", 3 => "mar", 4 => "abr", 5 => "mai", 6 => "jun",
-        7 => "jul", 8 => "ago", 9 => "set", 10 => "out", 11 => "nov", 12 => "dez",
+        1 => "jan",
+        2 => "fev",
+        3 => "mar",
+        4 => "abr",
+        5 => "mai",
+        6 => "jun",
+        7 => "jul",
+        8 => "ago",
+        9 => "set",
+        10 => "out",
+        11 => "nov",
+        12 => "dez",
         _ => "???",
     }
 }
@@ -69,7 +83,11 @@ fn format_tokens(n: u64) -> String {
 fn campaign_chips(log: &EventLog) -> Vec<CampaignChipVm> {
     let mut seen = std::collections::BTreeSet::new();
     let mut chips = Vec::new();
-    for r in log.records().iter().filter(|r| r.kind == CAMPAIGN_OPENED_KIND) {
+    for r in log
+        .records()
+        .iter()
+        .filter(|r| r.kind == CAMPAIGN_OPENED_KIND)
+    {
         if let Ok(v) = serde_json::from_str::<Value>(&r.payload)
             && let Some(id) = v.get("campaign").and_then(Value::as_str)
             && seen.insert(id.to_string())
@@ -114,7 +132,10 @@ fn ordered_open_prs(log: &EventLog) -> Vec<OpenedPr> {
     ordered
 }
 
-fn envelopes_for_pr(log: &EventLog, opened: &OpenedPr) -> Option<(ContextEnvelope, Vec<ContextEnvelope>)> {
+fn envelopes_for_pr(
+    log: &EventLog,
+    opened: &OpenedPr,
+) -> Option<(ContextEnvelope, Vec<ContextEnvelope>)> {
     let bundle: std::collections::BTreeSet<&str> =
         opened.intent_ids.iter().map(String::as_str).collect();
     let pr = log
@@ -134,46 +155,90 @@ fn envelopes_for_pr(log: &EventLog, opened: &OpenedPr) -> Option<(ContextEnvelop
 }
 
 fn zero_ci() -> CiCost {
-    CiCost { cache_hit: 0, exec: 0, cost_usd_micros: 0, saved_usd_micros: 0 }
+    CiCost {
+        cache_hit: 0,
+        exec: 0,
+        cost_usd_micros: 0,
+        saved_usd_micros: 0,
+    }
 }
 
 // ── cost X-ray (per campaign) ─────────────────────────────────────────────────
 
-fn build_cost_xray(log: &EventLog, chips: &[CampaignChipVm]) -> Vec<CostXrayRowVm> {
-    let prs = ordered_open_prs(log);
+/// The cost X-ray outputs derived from one pass over the PR rollups: the table
+/// rows, the per-campaign (chip, raw-tokens, cost) triples, and the grand totals.
+struct XrayOut {
+    rows: Vec<CostXrayRowVm>,
+    tokens_by_campaign: Vec<(CampaignChipVm, u64, String)>,
+    totals: Option<XrayTotalsVm>,
+}
+
+fn build_cost_xray(log: &EventLog, chips: &[CampaignChipVm]) -> XrayOut {
+    let mut prs = ordered_open_prs(log);
     if prs.is_empty() || chips.is_empty() {
-        return vec![];
+        return XrayOut { rows: vec![], tokens_by_campaign: vec![], totals: None };
     }
+    // Cap per-request work (DoS bound): each PR triggers two full log scans.
+    prs.truncate(PR_CARDS_CAP);
+
     let mut by_campaign: std::collections::BTreeMap<String, Vec<&OpenedPr>> =
         std::collections::BTreeMap::new();
     for opened in &prs {
-        by_campaign.entry(scrub(&opened.campaign)).or_default().push(opened);
+        by_campaign
+            .entry(scrub(&opened.campaign))
+            .or_default()
+            .push(opened);
     }
 
     let mut rows = Vec::new();
+    let mut tokens_by_campaign = Vec::new();
+    let (mut g_tokens, mut g_micros, mut g_waste, mut g_prs, mut g_intents) =
+        (0u64, 0u64, 0u64, 0usize, 0usize);
+
     for chip in chips {
-        let Some(prs_for) = by_campaign.get(&chip.id) else { continue };
+        let Some(prs_for) = by_campaign.get(&chip.id) else {
+            continue;
+        };
         let mut total_tokens = 0u64;
         let mut total_micros = 0u64;
+        let mut waste_micros = 0u64;
         let mut drill_rows = Vec::new();
         let mut pr_count = 0usize;
         let mut intent_count = 0usize;
         for opened in prs_for {
             pr_count += 1;
             intent_count += opened.intent_ids.len();
-            let Some((pr_env, intent_envs)) = envelopes_for_pr(log, opened) else { continue };
-            if let Ok(rec) = pr_record(&pr_env, "", &intent_envs, &opened.intent_ids, &[], zero_ci(), PrQueueInput::default()) {
-                let tokens = rec.cost.total.tokens;
+            let Some((pr_env, intent_envs)) = envelopes_for_pr(log, opened) else {
+                continue;
+            };
+            if let Ok(rec) = pr_record(
+                &pr_env,
+                "",
+                &intent_envs,
+                &opened.intent_ids,
+                &[],
+                zero_ci(),
+                PrQueueInput::default(),
+            ) {
                 let micros = rec.cost.total.cost_usd_micros;
-                total_tokens += tokens;
+                total_tokens += rec.cost.total.tokens;
                 total_micros += micros;
+                waste_micros += rec.cost.waste.cost_usd_micros;
+                // Per-PR first-pass yield is sound (no cross-PR aggregation).
+                let fp = rec.efficiency.first_pass_yield;
+                let first_pass = if fp >= 0.999 {
+                    "✓ first-pass".to_string()
+                } else {
+                    format!("{}% first-pass", pct_u8(fp * 100.0))
+                };
                 drill_rows.push(XrayDrillRowVm {
                     pr_ref: format!("#{}", opened.pr_id),
                     pr_url: String::new(),
                     intent_label: format!("{} intents", opened.intent_ids.len()),
                     cost: format!("${:.2}", micros as f64 / 1_000_000.0),
+                    // cache-$ saved needs CI cost data (not on the log) — honest "".
                     saving: String::new(),
-                    first_pass: String::new(),
+                    first_pass, // REAL — per-PR yield
                     in_flight: false,
                 });
             }
@@ -181,25 +246,51 @@ fn build_cost_xray(log: &EventLog, chips: &[CampaignChipVm]) -> Vec<CostXrayRowV
         if drill_rows.is_empty() {
             continue;
         }
+        let cost_total = format!("${:.2}", total_micros as f64 / 1_000_000.0);
         rows.push(CostXrayRowVm {
             campaign: chip.clone(),
             tokens: format_tokens(total_tokens),
             prs_int: format!("{pr_count}·{intent_count}"),
             decomp_pcts: (0, 0, 0, 0), // STUB — no decomp split seam
-            cost_total: format!("${:.2}", total_micros as f64 / 1_000_000.0),
-            waste: String::new(),
-            cache_saved: String::new(),
-            first_pass: String::new(),
+            cost_total: cost_total.clone(),
+            // REAL — sum of per-PR waste (a sum is sound for dollars).
+            waste: format!("${:.2}", waste_micros as f64 / 1_000_000.0),
+            cache_saved: String::new(), // honest — no cache-$ seam (only %); never conflated
+            first_pass: String::new(), // honest — cross-PR yield not soundly aggregable at row level
             drill_rows,
         });
+        tokens_by_campaign.push((chip.clone(), total_tokens, cost_total));
+        g_tokens += total_tokens;
+        g_micros += total_micros;
+        g_waste += waste_micros;
+        g_prs += pr_count;
+        g_intents += intent_count;
     }
-    rows
+
+    let totals = if rows.is_empty() {
+        None
+    } else {
+        Some(XrayTotalsVm {
+            tokens: format_tokens(g_tokens),
+            prs_int: format!("{g_prs}·{g_intents}"),
+            cost: format!("${:.2}", g_micros as f64 / 1_000_000.0),
+            waste: format!("${:.2}", g_waste as f64 / 1_000_000.0),
+            cache_saved: String::new(), // honest
+            first_pass: String::new(),  // honest
+        })
+    };
+    XrayOut { rows, tokens_by_campaign, totals }
 }
 
 // ── ledger view ───────────────────────────────────────────────────────────────
 
 fn ledger_row_from_entry(entry: &LedgerEntry) -> LedgerRowVm {
-    let done_status = if entry.rejected { "rejected" } else { "mergeado" }.to_string();
+    let done_status = if entry.rejected {
+        "rejected"
+    } else {
+        "mergeado"
+    }
+    .to_string();
     let proven_status = if entry.proven {
         "verde"
     } else if entry.rejected {
@@ -220,7 +311,7 @@ fn ledger_row_from_entry(entry: &LedgerEntry) -> LedgerRowVm {
         done_status,
         proven_status,
         verdict,
-        when: String::new(),
+        when: humanize_age(entry.recorded_at), // REAL — from the ledger entry timestamp
         model: String::new(),
         done_body: String::new(),
         pr_number: None,
@@ -238,13 +329,20 @@ fn build_ledger_view(ledger: &Ledger, chips: &[CampaignChipVm]) -> LedgerViewVm 
     let mut campaigns = Vec::new();
     for campaign_id in ledger_campaign_ids(ledger) {
         let safe_id = scrub(&campaign_id);
-        let chip = chip_lookup.get(safe_id.as_str()).copied().cloned().unwrap_or_else(|| CampaignChipVm {
-            id: safe_id.clone(),
-            label: safe_id.clone(),
-            color_class: String::new(),
-            display_label: safe_id.clone(),
-        });
-        let rows: Vec<LedgerRowVm> = ledger.by_campaign(&campaign_id).map(ledger_row_from_entry).collect();
+        let chip = chip_lookup
+            .get(safe_id.as_str())
+            .copied()
+            .cloned()
+            .unwrap_or_else(|| CampaignChipVm {
+                id: safe_id.clone(),
+                label: safe_id.clone(),
+                color_class: String::new(),
+                display_label: safe_id.clone(),
+            });
+        let rows: Vec<LedgerRowVm> = ledger
+            .by_campaign(&campaign_id)
+            .map(ledger_row_from_entry)
+            .collect();
         campaigns.push(LedgerCampaignVm {
             campaign: chip,
             asked: ledger.asked(&campaign_id),
@@ -268,11 +366,17 @@ fn build_ledger_view(ledger: &Ledger, chips: &[CampaignChipVm]) -> LedgerViewVm 
 }
 
 fn build_landed_by_day(ledger: &Ledger) -> Vec<(String, u32)> {
-    let mut day_counts: std::collections::BTreeMap<(i32, u32, u32), u32> = std::collections::BTreeMap::new();
+    let mut day_counts: std::collections::BTreeMap<(i32, u32, u32), u32> =
+        std::collections::BTreeMap::new();
     for entry in ledger.entries() {
-        *day_counts.entry(day_key_from_ms(entry.recorded_at)).or_default() += 1;
+        *day_counts
+            .entry(day_key_from_ms(entry.recorded_at))
+            .or_default() += 1;
     }
-    day_counts.into_iter().map(|((y, m, d), c)| (format_short_day_label(y, m, d), c)).collect()
+    day_counts
+        .into_iter()
+        .map(|((y, m, d), c)| (format_short_day_label(y, m, d), c))
+        .collect()
 }
 
 fn kpi(label: &str, value: String, sub_text: &str) -> KpiVm {
@@ -309,25 +413,21 @@ fn build_kpis(ledger: &Ledger) -> Vec<KpiVm> {
 pub fn build_insights(log: &EventLog, repo: &str) -> InsightsVm {
     let ledger = Ledger::from_records(log.records());
     let chips = campaign_chips(log);
-    let cost_xray = build_cost_xray(log, &chips);
-    let tokens_by_campaign: Vec<(CampaignChipVm, u64, String)> = cost_xray
-        .iter()
-        .map(|row| (row.campaign.clone(), 0u64, row.cost_total.clone()))
-        .collect();
+    let xray = build_cost_xray(log, &chips);
 
     InsightsVm {
         repo: repo.to_string(),
         kpis: build_kpis(&ledger),
         landed_by_day: build_landed_by_day(&ledger),
-        tokens_by_campaign,
-        cost_xray,
-        cost_xray_totals: None,                 // HONEST-DEFAULT — no totals seam
-        tokens_by_model: vec![],                // HONEST-DEFAULT — no per-model seam
-        tokens_by_model_legend: String::new(),  // HONEST-DEFAULT
-        global_decomp: None,                    // HONEST-DEFAULT — no decomp seam
-        contrib: vec![],                        // HONEST-DEFAULT — no contributor seam
-        landing_times: None,                    // HONEST-DEFAULT — no timing seam
-        ci_checks: None,                        // HONEST-DEFAULT — no CI-card seam
+        tokens_by_campaign: xray.tokens_by_campaign, // REAL — per-campaign raw tokens
+        cost_xray: xray.rows,
+        cost_xray_totals: xray.totals, // REAL — grand totals (sound sums)
+        tokens_by_model: vec![], // HONEST-DEFAULT — no per-model seam
+        tokens_by_model_legend: String::new(), // HONEST-DEFAULT
+        global_decomp: None,     // HONEST-DEFAULT — no decomp seam
+        contrib: vec![],         // HONEST-DEFAULT — no contributor seam
+        landing_times: None,     // HONEST-DEFAULT — no timing seam
+        ci_checks: None,         // HONEST-DEFAULT — no CI-card seam
         ledger: build_ledger_view(&ledger, &chips),
     }
 }

@@ -5,12 +5,12 @@
 //! REAL (envelope-gated): authorship / metrics / snapshot / trajectory / CAS
 //! refs / acceptance when an `intent.envelope` for `id` exists, else honest
 //! defaults. STUB (no seam): diff, *_mono_terms, transcripts, journal,
-//! context_json, campaign. Every free-text field passes `crate::fmt::scrub`.
+//! context_json. Every free-text field passes `crate::fmt::scrub`.
 
 use crate::fmt::{scrub, scrub_all, sha_prefix};
 use hugit_cli::pr::{INTENT_ENVELOPE_KIND, PR_OPENED_KIND};
 use hugit_contracts::context_envelope::{Altitude, ContextEnvelope};
-use hugit_http_contracts::common::{DiffVm, VerdictVm};
+use hugit_http_contracts::common::{CampaignChipVm, DiffVm, VerdictVm};
 use hugit_http_contracts::intent_detail::{
     AuthorshipVm, EnvelopeAltitudeVm, IntentDetailVm, MetricsVm, SnapshotVm,
 };
@@ -55,7 +55,9 @@ pub fn build_intent_detail(log: &EventLog, repo: &str, id: &str) -> Option<Inten
         .unwrap_or_default();
 
     // REAL: pr_number — first pr.opened whose intent_ids contains id.
-    let pr_number: Option<u64> = log
+    // REAL: the pr.opened whose intent_ids contains id — yields BOTH pr_number
+    // and the campaign chip (one parse, two real fields).
+    let opened_pr: Option<Value> = log
         .records()
         .iter()
         .filter(|r| r.kind == PR_OPENED_KIND)
@@ -65,11 +67,24 @@ pub fn build_intent_detail(log: &EventLog, repo: &str, id: &str) -> Option<Inten
                 .and_then(Value::as_array)
                 .map(|arr| arr.iter().any(|x| x.as_str() == Some(id)))
                 .unwrap_or(false)
-        })
-        .and_then(|v| {
-            v.get("pr_id")
-                .and_then(Value::as_str)
-                .and_then(|s| s.parse::<u64>().ok())
+        });
+    let pr_number: Option<u64> = opened_pr
+        .as_ref()
+        .and_then(|v| v.get("pr_id").and_then(Value::as_str))
+        .and_then(|s| s.parse::<u64>().ok());
+    // REAL: the campaign chip from the owning PR (scrubbed id; None when uncampaigned).
+    let campaign: Option<CampaignChipVm> = opened_pr
+        .as_ref()
+        .and_then(|v| v.get("campaign").and_then(Value::as_str))
+        .filter(|c| !c.is_empty())
+        .map(|c| {
+            let s = scrub(c);
+            CampaignChipVm {
+                id: s.clone(),
+                label: s.clone(),
+                color_class: String::new(),
+                display_label: s,
+            }
         });
 
     // REAL (envelope-gated): the intent-altitude envelope for `id`.
@@ -85,7 +100,10 @@ pub fn build_intent_detail(log: &EventLog, repo: &str, id: &str) -> Option<Inten
         .and_then(|e| e.trajectory.summary.as_deref())
         .map(scrub)
         .unwrap_or_default();
-    let acceptance = env.as_ref().map(|e| scrub_all(&e.acceptance)).unwrap_or_default();
+    let acceptance = env
+        .as_ref()
+        .map(|e| scrub_all(&e.acceptance))
+        .unwrap_or_default();
 
     let authorship = {
         let principal_chain = scrub_all(&intent.principal_chain); // ALWAYS from intent
@@ -98,7 +116,10 @@ pub fn build_intent_detail(log: &EventLog, repo: &str, id: &str) -> Option<Inten
                 run_id: e.authorship.spawn.run_id.clone(),
                 parent_run_id: e.authorship.spawn.parent_run_id.clone().unwrap_or_default(),
                 wall_time_human: humanize_wall_ms(
-                    e.authorship.spawn.died_at.saturating_sub(e.authorship.spawn.born_at),
+                    e.authorship
+                        .spawn
+                        .died_at
+                        .saturating_sub(e.authorship.spawn.born_at),
                 ),
             },
             None => AuthorshipVm {
@@ -135,11 +156,22 @@ pub fn build_intent_detail(log: &EventLog, repo: &str, id: &str) -> Option<Inten
     let snapshot = match &env {
         Some(e) => SnapshotVm {
             tree: e.tree_hash.clone(), // structural — not scrubbed
-            toolchain: e.snapshot.env_manifest.clone(),
+            // env_manifest is free-form prose → scrub at the read boundary (P0).
+            toolchain: scrub(&e.snapshot.env_manifest),
             workspace: repo.to_string(),
-            files_read: e.snapshot.files_read.iter().map(|f| scrub(&f.path)).collect(),
-            prompt_policy: e.snapshot.prompt_ref.as_ref().map(|_| "redactado".to_string()).unwrap_or_default(),
-            ambiente: e.snapshot.env_manifest.clone(),
+            files_read: e
+                .snapshot
+                .files_read
+                .iter()
+                .map(|f| scrub(&f.path))
+                .collect(),
+            prompt_policy: e
+                .snapshot
+                .prompt_ref
+                .as_ref()
+                .map(|_| "redactado".to_string())
+                .unwrap_or_default(),
+            ambiente: scrub(&e.snapshot.env_manifest),
         },
         None => SnapshotVm {
             tree: String::new(),
@@ -199,20 +231,23 @@ pub fn build_intent_detail(log: &EventLog, repo: &str, id: &str) -> Option<Inten
         pr_number,
         summary,
         charter,
-        summary_mono_terms: vec![],  // STUB — no term-extraction seam
-        charter_mono_terms: vec![],  // STUB
+        summary_mono_terms: vec![], // STUB — no term-extraction seam
+        charter_mono_terms: vec![], // STUB
         acceptance,
-        task_transcript: None,       // STUB — CAS blob not fetched (renders "não capturado")
-        full_transcript: None,       // STUB
-        journal: None,               // STUB
+        task_transcript: None, // STUB — CAS blob not fetched (renders "não capturado")
+        full_transcript: None, // STUB
+        journal: None,         // STUB
         context_json: String::new(), // STUB — pretty context.json not piped
         trajectory,
         context_cas,
         compact_context_ref,
         bundle_ref,
         compact_transcript_ref,
-        campaign: None,              // STUB — PR campaign chip not resolved at intent altitude
-        diff: DiffVm { files: vec![], hunks: vec![] }, // STUB — no diffstat seam
+        campaign, // REAL — owning PR's campaign chip (scrubbed); None when uncampaigned
+        diff: DiffVm {
+            files: vec![],
+            hunks: vec![],
+        }, // STUB — no diffstat seam
         authorship,
         metrics,
         snapshot,

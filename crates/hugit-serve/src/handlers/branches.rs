@@ -91,23 +91,23 @@ pub fn build_branches(log: &EventLog, repo: &str) -> BranchesVm {
         }
     }
 
-    let default_branch: BranchRowVm = rows
-        .iter()
-        .find(|r| r.is_default)
-        .cloned()
-        .unwrap_or_else(|| BranchRowVm {
-            name: default_name.clone(),
-            is_default: true,
-            protected: false,
-            head_sha: String::new(),
-            attr: String::new(),
-            intent_id: None,
-            model: None,
-            ahead: None,
-            behind: None,
-            checks_ok: None,
-            pr: None,
-        });
+    let default_branch: BranchRowVm =
+        rows.iter()
+            .find(|r| r.is_default)
+            .cloned()
+            .unwrap_or_else(|| BranchRowVm {
+                name: default_name.clone(),
+                is_default: true,
+                protected: false,
+                head_sha: String::new(),
+                attr: String::new(),
+                intent_id: None,
+                model: None,
+                ahead: None,
+                behind: None,
+                checks_ok: None,
+                pr: None,
+            });
 
     let more_count = branch_count.saturating_sub(rows.len());
 
@@ -115,8 +115,8 @@ pub fn build_branches(log: &EventLog, repo: &str) -> BranchesVm {
         repo: repo.to_string(),
         branch_count,
         tag_count,
-        active_count: 0,  // HONEST-DEFAULT — no activity seam
-        yours_count: 0,   // HONEST-DEFAULT — no caller-principal seam (P2)
+        active_count: 0, // HONEST-DEFAULT — no activity seam
+        yours_count: 0,  // HONEST-DEFAULT — no caller-principal seam (P2)
         default_branch,
         branches: rows,
         inactive_count: 0,            // HONEST-DEFAULT — no staleness seam

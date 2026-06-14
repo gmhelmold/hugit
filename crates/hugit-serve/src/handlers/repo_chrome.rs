@@ -17,13 +17,13 @@ pub fn build_repo_chrome(log: &EventLog, repo: &str) -> RepoChromeVm {
         .unwrap_or(0);
 
     RepoChromeVm {
-        intents_count,                       // REAL
+        intents_count,                            // REAL
         clone_cmd: format!("hugit clone {repo}"), // DERIVED (structural)
-        issues_count: 0,                     // HONEST-DEFAULT — no issues seam (P2)
-        attention_count: 0,                  // HONEST-DEFAULT — no attention seam
-        stars: String::new(),                // HONEST-DEFAULT — GitHub-mirror (P2)
-        forks: String::new(),                // HONEST-DEFAULT — GitHub-mirror (P2)
-        visibility: String::new(),           // HONEST-DEFAULT — tenant provisioning (P2)
-        description_html_free: String::new(), // HONEST-DEFAULT — GitHub-mirror (P2)
+        issues_count: 0,                          // HONEST-DEFAULT — no issues seam (P2)
+        attention_count: 0,                       // HONEST-DEFAULT — no attention seam
+        stars: String::new(),                     // HONEST-DEFAULT — GitHub-mirror (P2)
+        forks: String::new(),                     // HONEST-DEFAULT — GitHub-mirror (P2)
+        visibility: String::new(),                // HONEST-DEFAULT — tenant provisioning (P2)
+        description_html_free: String::new(),     // HONEST-DEFAULT — GitHub-mirror (P2)
     }
 }
