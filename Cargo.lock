@@ -1045,6 +1045,8 @@ dependencies = [
 name = "hugit-serve"
 version = "0.1.0"
 dependencies = [
+ "hex",
+ "hmac",
  "hugit-cli",
  "hugit-contracts",
  "hugit-http-contracts",
@@ -1054,6 +1056,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tiny_http",
+ "ureq",
 ]
 
 [[package]]

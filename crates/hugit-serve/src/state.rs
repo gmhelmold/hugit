@@ -1,33 +1,73 @@
 //! Server state + repo→log resolution + the verified-load chokepoint.
 //!
 //! The `{repo}` slug arrives from the URL, so it is validated as a single safe
-//! path segment (no traversal) BEFORE touching the filesystem — a hostile
-//! `..%2F..%2Fetc%2Fpasswd` can never escape the log dir. Loading routes through
-//! the engine's single verified loader (`hugit_cli::checks::load_event_log` →
-//! `rehydrate_and_verify` → `verify_chain`, PS-13) — a tampered chain fails
-//! CLOSED as 503, never projected.
+//! path segment (no traversal) BEFORE it is used — a hostile
+//! `..%2F..%2Fetc%2Fpasswd` can never escape the source. Loading ALWAYS routes
+//! through the engine's single verified loader
+//! (`hugit_cli::checks::load_event_log[_from_bytes]` → `rehydrate_and_verify` →
+//! `verify_chain`, PS-13) — a tampered chain fails CLOSED as 503, never
+//! projected, REGARDLESS of source (local file or R2 object).
+//!
+//! ## Source (engine-storage)
+//! - **Local** (`HUGIT_SERVE_LOG_DIR`): `<dir>/<repo>.json` — the dev/test default.
+//! - **R2** (`HUGIT_SERVE_R2_*`): `<tenant_id>/<repo>.json` from the dedicated
+//!   `corelink-githugr-engine` bucket over the S3 API, SigV4-signed
+//!   ([`crate::sigv4`]). The bucket key contract is CoreLink's
+//!   (`<tenant_id>/<repo>.json`; tenant = Clerk `publicMetadata.tenant_id`). Until
+//!   real Clerk auth (the P2 identity seam) the tenant is the configured
+//!   `HUGIT_SERVE_R2_TENANT_ID` (the single dev tenant) — disclosed, not faked.
 
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hugit_refstore::EventLog;
 
 use crate::error::EngineErr;
+use crate::sigv4;
+
+/// Where the engine reads canonical event logs from.
+#[derive(Clone)]
+pub enum LogSource {
+    /// Local directory: `<dir>/<repo>.json`.
+    Local { dir: PathBuf },
+    /// R2 (S3-compatible) bucket: `<tenant_id>/<repo>.json`.
+    R2(Box<R2Config>),
+}
+
+/// R2 read-source config (engine-storage Option A — the engine reads R2 directly).
+#[derive(Clone)]
+pub struct R2Config {
+    /// `https://<account_id>.r2.cloudflarestorage.com` (no trailing slash).
+    pub endpoint: String,
+    /// `<account_id>.r2.cloudflarestorage.com` (the signed `host` header).
+    pub host: String,
+    /// `corelink-githugr-engine`.
+    pub bucket: String,
+    /// SigV4 region — R2 uses `auto`.
+    pub region: String,
+    pub key_id: String,
+    pub secret: String,
+    /// The tenant prefix; the configured dev tenant until the P2 Clerk seam.
+    pub tenant_id: String,
+    /// Sync HTTP client with a bounded timeout (no hanging reads).
+    pub agent: ureq::Agent,
+}
 
 /// Immutable server configuration.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AppState {
-    /// Directory holding one canonical event log per repo: `<log_dir>/<repo>.json`.
-    pub log_dir: PathBuf,
+    /// Where event logs are read from (local dir | R2).
+    pub source: LogSource,
     /// The Wave-1 dev Bearer token (the P2-Clerk stub). Fail-closed: required.
     pub dev_token: String,
 }
 
 impl AppState {
-    /// Build from env: `HUGIT_SERVE_LOG_DIR` + `HUGIT_ENGINE_DEV_TOKEN` (both
-    /// required — fail-closed: no token ⇒ refuse to start).
+    /// Build from env. `HUGIT_ENGINE_DEV_TOKEN` is always required (fail-closed).
+    /// If `HUGIT_SERVE_R2_ACCOUNT_ID` is set → the R2 source (all `R2_*` required);
+    /// else the Local source (`HUGIT_SERVE_LOG_DIR` required).
     pub fn from_env() -> Result<Self, String> {
-        let log_dir = std::env::var("HUGIT_SERVE_LOG_DIR")
-            .map_err(|_| "HUGIT_SERVE_LOG_DIR is not set".to_string())?;
         let dev_token = std::env::var("HUGIT_ENGINE_DEV_TOKEN").map_err(|_| {
             "HUGIT_ENGINE_DEV_TOKEN is not set (fail-closed: refusing to start without an auth token)"
                 .to_string()
@@ -35,45 +75,143 @@ impl AppState {
         if dev_token.trim().is_empty() {
             return Err("HUGIT_ENGINE_DEV_TOKEN is empty (fail-closed)".to_string());
         }
-        Ok(Self {
-            log_dir: PathBuf::from(log_dir),
-            dev_token,
-        })
+
+        let source = if std::env::var("HUGIT_SERVE_R2_ACCOUNT_ID").is_ok() {
+            Self::r2_from_env()?
+        } else {
+            let dir = std::env::var("HUGIT_SERVE_LOG_DIR")
+                .map_err(|_| "HUGIT_SERVE_LOG_DIR is not set".to_string())?;
+            LogSource::Local {
+                dir: PathBuf::from(dir),
+            }
+        };
+        Ok(Self { source, dev_token })
     }
 
-    /// Explicit constructor (tests).
+    fn r2_from_env() -> Result<LogSource, String> {
+        let req =
+            |k: &str| std::env::var(k).map_err(|_| format!("{k} is not set (R2 source selected)"));
+        let account_id = req("HUGIT_SERVE_R2_ACCOUNT_ID")?;
+        let host = format!("{account_id}.r2.cloudflarestorage.com");
+        let agent = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(10))
+            .build();
+        Ok(LogSource::R2(Box::new(R2Config {
+            endpoint: format!("https://{host}"),
+            host,
+            bucket: req("HUGIT_SERVE_R2_BUCKET")?,
+            region: std::env::var("HUGIT_SERVE_R2_REGION").unwrap_or_else(|_| "auto".to_string()),
+            key_id: req("HUGIT_SERVE_R2_KEY_ID")?,
+            secret: req("HUGIT_SERVE_R2_SECRET")?,
+            tenant_id: req("HUGIT_SERVE_R2_TENANT_ID")?,
+            agent,
+        })))
+    }
+
+    /// Explicit Local constructor (tests).
     #[must_use]
     pub fn new(log_dir: PathBuf, dev_token: String) -> Self {
-        Self { log_dir, dev_token }
+        Self {
+            source: LogSource::Local { dir: log_dir },
+            dev_token,
+        }
     }
 
-    /// The canonical event-log path for `repo` (caller MUST have validated the
-    /// slug via [`is_safe_repo_slug`]).
-    fn log_path(&self, repo: &str) -> PathBuf {
-        self.log_dir.join(format!("{repo}.json"))
+    /// A short label of the active source (for the boot log; no secrets).
+    #[must_use]
+    pub fn source_label(&self) -> String {
+        match &self.source {
+            LogSource::Local { dir } => format!("local:{}", dir.display()),
+            LogSource::R2(c) => format!("r2:{}/{}/<tenant>", c.host, c.bucket),
+        }
     }
 
     /// Load + chain-verify a repo's event log. A non-existent log (or an unsafe
-    /// slug) → 404 (no existence leak). Any parse / tamper / I/O fault → 503
-    /// ENGINE_UNAVAILABLE (fail-honest — never a fake-empty VM).
+    /// slug) → 404 (no existence leak). Any parse / tamper / transport fault →
+    /// 503 ENGINE_UNAVAILABLE (fail-honest — never a fake-empty VM). The verify
+    /// is identical for both sources (the PS-13 chokepoint).
     pub fn load_verified(&self, repo: &str) -> Result<EventLog, EngineErr> {
         if !is_safe_repo_slug(repo) {
             return Err(EngineErr::not_found());
         }
-        match hugit_cli::checks::load_event_log(&self.log_path(repo)) {
-            Ok(log) => Ok(log),
-            Err(e) if e.kind() == "log_not_found" => Err(EngineErr::not_found()),
-            Err(e) => Err(EngineErr::unavailable(format!(
-                "engine log read/verify failed ({})",
-                e.kind()
-            ))),
+        let (bytes, label) = match self.source.fetch(repo)? {
+            Some(b) => b,
+            None => return Err(EngineErr::not_found()),
+        };
+        hugit_cli::checks::load_event_log_from_bytes(&bytes, Path::new(&label)).map_err(|e| {
+            EngineErr::unavailable(format!("engine log read/verify failed ({})", e.kind()))
+        })
+    }
+}
+
+impl LogSource {
+    /// Fetch a repo's raw event-log bytes. `Ok(None)` = the object does not exist
+    /// (→ 404, no existence leak); `Ok(Some((bytes, label)))` = present; `Err` =
+    /// a transport/IO fault (→ 503). `label` is the source string for error context.
+    fn fetch(&self, repo: &str) -> Result<Option<(Vec<u8>, String)>, EngineErr> {
+        match self {
+            LogSource::Local { dir } => {
+                let path = dir.join(format!("{repo}.json"));
+                match std::fs::read(&path) {
+                    Ok(b) => Ok(Some((b, path.display().to_string()))),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(e) => Err(EngineErr::unavailable(format!(
+                        "local log read failed: {e}"
+                    ))),
+                }
+            }
+            LogSource::R2(c) => c.fetch(repo),
+        }
+    }
+}
+
+impl R2Config {
+    fn fetch(&self, repo: &str) -> Result<Option<(Vec<u8>, String)>, EngineErr> {
+        let key = format!("{}/{repo}.json", self.tenant_id);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let signed = sigv4::sign_s3_get(
+            &self.host,
+            &self.bucket,
+            &key,
+            &self.key_id,
+            &self.secret,
+            &self.region,
+            now,
+        );
+        // Path-style URL; tenant (UUID) + repo (validated slug) + ".json" are all
+        // RFC-3986-unreserved, so the wire path equals the signed canonical URI.
+        let url = format!("{}/{}/{key}", self.endpoint, self.bucket);
+        let label = format!("r2://{}/{key}", self.bucket);
+        let resp = self
+            .agent
+            .get(&url)
+            .set("Authorization", &signed.authorization)
+            .set("x-amz-date", &signed.amz_date)
+            .set("x-amz-content-sha256", &signed.content_sha256)
+            .call();
+        match resp {
+            Ok(r) => {
+                let mut buf = Vec::new();
+                r.into_reader()
+                    .read_to_end(&mut buf)
+                    .map_err(|e| EngineErr::unavailable(format!("R2 body read failed: {e}")))?;
+                Ok(Some((buf, label)))
+            }
+            Err(ureq::Error::Status(404, _)) => Ok(None),
+            Err(ureq::Error::Status(s, _)) => {
+                Err(EngineErr::unavailable(format!("R2 GET status {s}")))
+            }
+            Err(e) => Err(EngineErr::unavailable(format!("R2 GET transport: {e}"))),
         }
     }
 }
 
 /// A repo slug is a single safe path segment: non-empty, ≤100 chars, ASCII
 /// alnum + `-_.`, never `.`/`..`/containing `..` or a path separator. Blocks URL
-/// path-traversal into arbitrary files.
+/// path-traversal into arbitrary files / R2 keys.
 #[must_use]
 pub fn is_safe_repo_slug(repo: &str) -> bool {
     !repo.is_empty()
@@ -113,5 +251,23 @@ mod tests {
         ] {
             assert!(!is_safe_repo_slug(bad), "{bad} must be rejected");
         }
+    }
+
+    #[test]
+    fn unsafe_slug_is_404_before_any_fetch() {
+        let st = AppState::new(PathBuf::from("/nonexistent"), "tok".to_string());
+        assert_eq!(st.load_verified("../etc/passwd").unwrap_err().status, 404);
+    }
+
+    #[test]
+    fn absent_local_log_is_404() {
+        let st = AppState::new(PathBuf::from("/nonexistent-dir-xyz"), "tok".to_string());
+        assert_eq!(st.load_verified("hugit").unwrap_err().status, 404);
+    }
+
+    #[test]
+    fn source_label_reflects_local() {
+        let st = AppState::new(PathBuf::from("/tmp/logs"), "tok".to_string());
+        assert!(st.source_label().starts_with("local:"));
     }
 }

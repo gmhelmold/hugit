@@ -20,8 +20,8 @@ use crate::state::AppState;
 pub fn serve(state: AppState, addr: &str) -> std::io::Result<()> {
     let server = Server::http(addr).map_err(|e| std::io::Error::other(e.to_string()))?;
     eprintln!(
-        "hugit-serve listening on {addr} (log_dir={})",
-        state.log_dir.display()
+        "hugit-serve listening on {addr} (source={})",
+        state.source_label()
     );
     serve_on(state, server)
 }

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(serve): **R2 read source — the engine reads its event logs from the
+  dedicated `corelink-githugr-engine` bucket directly** (engine-storage Option A,
+  per the CoreLink handoff). `state.rs` gains a `LogSource { Local | R2 }`: R2 fetches
+  `<tenant_id>/<repo>.json` over the S3 API, **SigV4-signed by a hand-rolled signer**
+  (`sigv4.rs`) over the existing `hmac`+`sha2`+`hex` pins — **zero new crypto dep** —
+  proven against the canonical AWS test vectors (get-vanilla signature · published
+  signing-key derivation · empty-payload hash · RFC-4231 HMAC). Both sources route
+  through the SAME PS-13 verified loader (new `hugit_cli::checks::load_event_log_from_bytes`
+  next to the path loader): a tampered chain fails CLOSED (503) regardless of source;
+  absent object → 404 (no existence leak); transport fault → 503 (fail-honest, never a
+  fake-empty VM). Source is env-selected (`HUGIT_SERVE_R2_*` → R2; else
+  `HUGIT_SERVE_LOG_DIR` → Local). The tenant prefix is the configured dev tenant until
+  the P2 Clerk identity seam (disclosed, not faked). `cargo deny` clean (no new
+  duplicate/advisory from `ureq`+TLS). This is the seam that takes
+  `engine.githugr.com` from `fixture` to REAL on the read path — live on the scoped
+  R2 credential.
+
 - feat(contracts): **hugit-serve Phase 2 wire freeze — 26 remaining read VMs +
   the `Accepted` write shape**. Transcribes the remaining `githugr-vm` view-models
   byte-for-field into `hugit-http-contracts` (intent_detail · insights · security ·
