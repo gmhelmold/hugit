@@ -102,6 +102,10 @@ fn dispatch_repo(state: &AppState, repo: &str, tail: &[&str]) -> (u16, String) {
         ["landing"] => with_log(load, |log| ok(&handlers::build_landing(log, repo))),
         ["checks"] => with_log(load, |log| ok(&handlers::build_checks(log, repo))),
         ["commits"] => with_log(load, |log| ok(&handlers::build_commits(log, repo))),
+        // Phase-2 collection reads (real engine backbone).
+        ["chrome"] => with_log(load, |log| ok(&handlers::build_repo_chrome(log, repo))),
+        ["branches"] => with_log(load, |log| ok(&handlers::build_branches(log, repo))),
+        ["insights"] => with_log(load, |log| ok(&handlers::build_insights(log, repo))),
         ["prs", n] => match n.parse::<u32>() {
             Ok(num) => with_log(load, |log| {
                 match handlers::build_pr_detail(log, repo, num) {
@@ -112,6 +116,25 @@ fn dispatch_repo(state: &AppState, repo: &str, tail: &[&str]) -> (u16, String) {
             // A non-numeric PR id is not a resource that exists → 404 (no leak).
             Err(_) => err(EngineErr::not_found()),
         },
+        // Phase-2 by-id reads — absent resource → 404, no existence leak.
+        ["intents", id] => with_log(load, |log| {
+            match handlers::build_intent_detail(log, repo, id) {
+                Some(vm) => ok(&vm),
+                None => err(EngineErr::not_found()),
+            }
+        }),
+        ["commit", sha] => with_log(load, |log| {
+            match handlers::build_commit_detail(log, repo, sha) {
+                Some(vm) => ok(&vm),
+                None => err(EngineErr::not_found()),
+            }
+        }),
+        ["campaigns", name] => with_log(load, |log| {
+            match handlers::build_campaign(log, repo, name) {
+                Some(vm) => ok(&vm),
+                None => err(EngineErr::not_found()),
+            }
+        }),
         _ => err(EngineErr::not_found()),
     }
 }
