@@ -77,10 +77,21 @@ jobs:
           export PATH="$HOME/.cargo/bin:$PATH"
           cargo deny check
 
+      # `cargo-audit` is installed by taiki-e to `~/.cargo/bin`, but the rustup
+      # `cargo` proxy's external-subcommand search does NOT reliably consult
+      # `~/.cargo/bin` on this runner (the documented rustup-proxy quirk) — so
+      # `cargo audit` intermittently fails `no such command: audit` even though the
+      # binary is present and install-action verified it (`cargo-deny`, which lands
+      # in `/usr/local/bin`, is found fine; PS-12b-class infra). Fix: invoke the
+      # binary DIRECTLY (`cargo-audit audit`, exactly how install-action verifies
+      # it) — bypassing the proxy dispatch — with a self-healing reinstall guard in
+      # case the prebuilt binary is absent. Advisory coverage is also held by the
+      # `deny` step (cargo-deny's `advisories` check reads the same RUSTSEC DB).
       - name: audit
         run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          cargo audit --deny warnings
+          export PATH="$HOME/.cargo/bin:/usr/local/bin:$PATH"
+          command -v cargo-audit >/dev/null 2>&1 || cargo install cargo-audit --locked
+          cargo-audit audit --deny warnings
 
       - name: changelog gate
         if: github.event_name == 'pull_request'

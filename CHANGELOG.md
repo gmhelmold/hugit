@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(ci): **kill the `cargo audit` provisioning flake at the root (PS-12b)** — the
+  `audit` gate intermittently failed `no such command: audit` even though
+  install-action installed `cargo-audit` to `~/.cargo/bin` and verified it: the
+  rustup `cargo` proxy's external-subcommand search does not reliably consult
+  `~/.cargo/bin` on the self-hosted runner (the documented rustup-proxy quirk;
+  `cargo-deny`, which lands in `/usr/local/bin`, was found fine in the SAME run).
+  Root-cause fix: invoke the binary DIRECTLY (`cargo-audit audit`, exactly how
+  install-action verifies it) instead of via the proxy, with a self-healing
+  reinstall guard. All code gates (fmt/clippy/test/deny) were already green;
+  advisory coverage is independently held by the `deny` step.
+
 - fix(test): **honest-up the scrubber proptest `safe_address` generator (PS-14
   boundary)** — the randomized `safe_addresses_survive_the_identifier_gate`
   property found a real counterexample (`bcjdf_3gh_i1k6l-e4m5.027`): a 24-char
