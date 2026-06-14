@@ -203,6 +203,25 @@ stub + dev-tenant prefix until the **P2 Clerk seam**; git-layer commit shas (com
 the engine's `authored:<id>` intent-landing identifier) are the disclosed **P2 git seam**.
 Cross-repo handoffs routed via owner (no `path`/`git` coupling): the githugr deploy GO, the
 CoreLink cred ACK, the §13 transport reply — all in `docs/handoff/`.
+**Wave-2 WRITES (2026-06-14, #115 merged): the engine can now WRITE, not just read.**
+The 9 spec-§3 POST verbs (`land`·`verdict`·`comments`·`dispatch`·`issues/{n}/transition`·
+`policy`·`erasure/{id}/decide`·`edit/{path}/propose`·`undo`) ride ONE shared **write-door**
+(`hugit-serve/src/writes/`): an idempotency ledger (`Idempotency-Key` mandatory; byte-identical
+replay keyed on `(principal, verb, RESOURCE, key)`; `409` on body mismatch; the land
+one-position invariant), read-boundary redaction on every free-text field, the D14
+authorized-append, a STEP-UP gate (`policy`/`erasure`), a body-size cap, and the `LogSink`
+persistence trait (atomic Local / signed-PUT R2; the R2 write-cred + compare-and-swap are the
+disclosed P2 seams — the read-only standing cred 503s honestly). Built by a 9-agent fleet
+against a frozen interface, then **audited TWICE** (verbs, then the wired path) → FIX-FIRST →
+every P0/P1 closed at root, incl. the cross-resource idempotency replay the second (wired-path)
+audit caught. Lead-owned T3 design (the `docs/plan/2026-06-14-…-wave2-writes-master-plan.md`
+§6 checkpoints, decided under the owner's "tech lead owns decisions" mandate): `dispatch` never
+auto-spawns (P2 runner seam), `erasure` records the decision but NEVER executes (X12 = P2),
+`undo` is append-only (`op.undone`, never a chain rewrite). The **close-the-product engine
+scope is complete** — reads (11 real on R2) + writes (9) on `main`. What remains is
+owner/infra-gated: the R2 write credential (live writes in R2 mode), the githugr deploy/flip,
+and the ~15 git-layer/identity reads that stay honest-default fixture (a product decision, not
+hollow shells).
 
 Read first: `docs/whitepaper/hugit-v1.md` (product design) ·
 `docs/product/product.md` (the product brief: ICPs, killers, positioning, pricing posture) ·
