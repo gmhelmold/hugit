@@ -151,6 +151,10 @@ fn verdict_pair(vo: &VerdictObject) -> (VerdictVm, String) {
         verdict: outcome_str.to_string(),
         reviewer: String::new(),
         summary: format!("{lens}: {outcome_str}"),
+        // Invariant (not a fabricated per-verdict signal): every `verdict.recorded`
+        // VerdictObject in hugit is produced by the adversarial review panel — that
+        // is the forge's review model, and the VerdictObject carries no contrary
+        // flag. Matches the contract's canonical examples (common.rs `adversarial`).
         adversarial: true,
         lens,
         evidence_mono_terms,

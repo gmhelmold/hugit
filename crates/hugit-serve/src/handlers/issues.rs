@@ -38,7 +38,15 @@ fn fold_transitions(log: &EventLog) -> BTreeMap<u32, IssueState> {
         let Ok(v) = serde_json::from_str::<Value>(&record.payload) else {
             continue;
         };
-        let Some(issue_id) = v.get("issue_id").and_then(Value::as_u64).map(|n| n as u32) else {
+        // Bound the cast: an issue_id > u32::MAX would silently wrap and collide
+        // with a legitimate low-32-bit id, letting a malicious writer misclassify
+        // a real issue. Reject out-of-range ids rather than truncate.
+        let Some(issue_id) = v
+            .get("issue_id")
+            .and_then(Value::as_u64)
+            .filter(|n| *n <= u32::MAX as u64)
+            .map(|n| n as u32)
+        else {
             continue;
         };
         let Some(to) = v.get("to").and_then(Value::as_str) else {
@@ -54,6 +62,14 @@ fn fold_transitions(log: &EventLog) -> BTreeMap<u32, IssueState> {
                 }
             }
             None => {
+                // Bound the fold itself, not just the downstream projection: a
+                // log with N >> ISSUES_CAP distinct issue_ids would otherwise
+                // allocate N map entries before the projection cap bites. Keep
+                // the first ISSUES_CAP distinct issues (chain order); later-seen
+                // new ids are dropped (existing issues still fold their updates).
+                if map.len() >= ISSUES_CAP {
+                    continue;
+                }
                 map.insert(
                     issue_id,
                     IssueState {
@@ -203,6 +219,39 @@ mod tests {
         let vm = build_issues(&log, "r");
         let p = vm.open[0].priority.as_deref().unwrap_or("");
         assert!(p != pat && p.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn oversized_issue_id_rejected_no_collision() {
+        // A real issue #1, plus a malicious transition whose issue_id is
+        // (u32::MAX + 2) — which would truncate to 1 and overwrite #1's state.
+        let mut log = EventLog::new();
+        append(&mut log, 1, "open", None, 100);
+        let pv = serde_json::json!({"issue_id": (u32::MAX as u64) + 2, "to": "closed"});
+        log.append_authorized(
+            PrincipalClass::Orchestrator,
+            Endpoint::Land,
+            ISSUE_TRANSITION_KIND,
+            vec!["orchestrator:test".to_string()],
+            pv.to_string(),
+            200,
+        )
+        .expect("append");
+        let vm = build_issues(&log, "r");
+        // #1 stays open (not hijacked to closed by the wrapped id); the
+        // out-of-range record is dropped entirely.
+        assert_eq!(vm.open[0].number, 1);
+        assert!(vm.closed.is_empty());
+    }
+
+    #[test]
+    fn fold_is_bounded_by_cap() {
+        let mut log = EventLog::new();
+        for id in 0..(ISSUES_CAP as u32 + 50) {
+            append(&mut log, id, "open", None, 100 + id as u64);
+        }
+        let vm = build_issues(&log, "r");
+        assert_eq!(vm.open.len(), ISSUES_CAP);
     }
 
     #[test]
