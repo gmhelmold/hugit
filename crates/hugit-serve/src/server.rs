@@ -218,70 +218,150 @@ fn dispatch_repo_write(
         ["prs", n, "land"] => match n.parse::<u32>() {
             Ok(pr) => {
                 let req = parse!(wr::LandReq);
-                with_write(sink, repo, "land", &idem, body, step_up, p, at, |log, p, at| {
-                    verbs::write_land::write_land(log, repo, pr, &req, p, at)
-                })
+                with_write(
+                    sink,
+                    repo,
+                    "land",
+                    &idem,
+                    body,
+                    step_up,
+                    p,
+                    at,
+                    |log, p, at| verbs::write_land::write_land(log, repo, pr, &req, p, at),
+                )
             }
             Err(_) => Err(EngineErr::not_found()),
         },
         ["prs", n, "verdict"] => match n.parse::<u32>() {
             Ok(pr) => {
                 let req = parse!(wr::VerdictReq);
-                with_write(sink, repo, "verdict", &idem, body, step_up, p, at, |log, p, at| {
-                    verbs::write_verdict::write_verdict(log, repo, pr, &req, p, at)
-                })
+                with_write(
+                    sink,
+                    repo,
+                    "verdict",
+                    &idem,
+                    body,
+                    step_up,
+                    p,
+                    at,
+                    |log, p, at| verbs::write_verdict::write_verdict(log, repo, pr, &req, p, at),
+                )
             }
             Err(_) => Err(EngineErr::not_found()),
         },
         ["prs", n, "comments"] => match n.parse::<u32>() {
             Ok(pr) => {
                 let req = parse!(wr::CommentReq);
-                with_write(sink, repo, "comment", &idem, body, step_up, p, at, |log, p, at| {
-                    verbs::write_comment::write_comment(log, repo, pr, &req, p, at)
-                })
+                with_write(
+                    sink,
+                    repo,
+                    "comment",
+                    &idem,
+                    body,
+                    step_up,
+                    p,
+                    at,
+                    |log, p, at| verbs::write_comment::write_comment(log, repo, pr, &req, p, at),
+                )
             }
             Err(_) => Err(EngineErr::not_found()),
         },
         ["dispatch"] => {
             let req = parse!(wr::DispatchReq);
-            with_write(sink, repo, "dispatch", &idem, body, step_up, p, at, |log, p, at| {
-                verbs::write_dispatch::write_dispatch(log, repo, &req, p, at)
-            })
+            with_write(
+                sink,
+                repo,
+                "dispatch",
+                &idem,
+                body,
+                step_up,
+                p,
+                at,
+                |log, p, at| verbs::write_dispatch::write_dispatch(log, repo, &req, p, at),
+            )
         }
         ["issues", n, "transition"] => match n.parse::<u32>() {
             Ok(num) => {
                 let req = parse!(wr::IssueTransitionReq);
-                with_write(sink, repo, "issue_transition", &idem, body, step_up, p, at, |log, p, at| {
-                    verbs::write_issue_transition::write_issue_transition(log, repo, num, &req, p, at)
-                })
+                with_write(
+                    sink,
+                    repo,
+                    "issue_transition",
+                    &idem,
+                    body,
+                    step_up,
+                    p,
+                    at,
+                    |log, p, at| {
+                        verbs::write_issue_transition::write_issue_transition(
+                            log, repo, num, &req, p, at,
+                        )
+                    },
+                )
             }
             Err(_) => Err(EngineErr::not_found()),
         },
         ["policy"] => {
             let req = parse!(wr::PolicyReq);
-            with_write(sink, repo, "policy", &idem, body, step_up, p, at, |log, p, at| {
-                verbs::write_policy::write_policy(log, repo, &req, p, at)
-            })
+            with_write(
+                sink,
+                repo,
+                "policy",
+                &idem,
+                body,
+                step_up,
+                p,
+                at,
+                |log, p, at| verbs::write_policy::write_policy(log, repo, &req, p, at),
+            )
         }
         ["erasure", id, "decide"] => {
             let id = (*id).to_string();
             let req = parse!(wr::ErasureDecideReq);
-            with_write(sink, repo, "erasure", &idem, body, step_up, p, at, |log, p, at| {
-                verbs::write_erasure_decide::write_erasure_decide(log, repo, &id, &req, p, at)
-            })
+            with_write(
+                sink,
+                repo,
+                "erasure",
+                &idem,
+                body,
+                step_up,
+                p,
+                at,
+                |log, p, at| {
+                    verbs::write_erasure_decide::write_erasure_decide(log, repo, &id, &req, p, at)
+                },
+            )
         }
         ["edit", mid @ .., "propose"] if !mid.is_empty() => {
             let path = mid.join("/");
             let req = parse!(wr::EditProposeReq);
-            with_write(sink, repo, "edit_propose", &idem, body, step_up, p, at, |log, p, at| {
-                verbs::write_edit_propose::write_edit_propose(log, repo, &path, &req, p, at)
-            })
+            with_write(
+                sink,
+                repo,
+                "edit_propose",
+                &idem,
+                body,
+                step_up,
+                p,
+                at,
+                |log, p, at| {
+                    verbs::write_edit_propose::write_edit_propose(log, repo, &path, &req, p, at)
+                },
+            )
         }
         ["undo"] => {
             let req = parse!(wr::UndoReq);
-            with_write(sink, repo, "undo", &idem, body, step_up, p, at, |log, p, at| {
-                verbs::write_undo::write_undo(log, repo, &req, p, at)
-            })
+            with_write(
+                sink,
+                repo,
+                "undo",
+                &idem,
+                body,
+                step_up,
+                p,
+                at,
+                |log, p, at| verbs::write_undo::write_undo(log, repo, &req, p, at),
+            )
         }
         _ => Err(EngineErr::not_found()),
     };

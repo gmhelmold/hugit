@@ -193,11 +193,18 @@ mod tests {
         // The raw PAT (and the body) must be ABSENT from every log payload.
         let all: String = log.records().iter().map(|r| r.payload.as_str()).collect();
         assert!(!all.contains(pat), "raw PAT must not be in the log");
-        assert!(!all.contains("fn f"), "file body must not be in the log (CAS at P2)");
+        assert!(
+            !all.contains("fn f"),
+            "file body must not be in the log (CAS at P2)"
+        );
         // The content_sha is the hash of the RAW body (the real content-address
         // the CAS verifies), present on the pr.opened + ref.update.
         let expected = content_sha256(&content);
-        let pr = log.records().iter().find(|r| r.kind == PR_OPENED_KIND).unwrap();
+        let pr = log
+            .records()
+            .iter()
+            .find(|r| r.kind == PR_OPENED_KIND)
+            .unwrap();
         let v: serde_json::Value = serde_json::from_str(&pr.payload).unwrap();
         assert_eq!(v["content_sha"].as_str(), Some(expected.as_str()));
         assert!(a.branch.is_some());

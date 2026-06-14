@@ -26,7 +26,10 @@ fn scratch_dir() -> PathBuf {
         .unwrap()
         .as_nanos();
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("hugit-serve-wr-{}-{nanos}-{seq}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "hugit-serve-wr-{}-{nanos}-{seq}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -54,20 +57,23 @@ fn hdr(name: &str, val: &str) -> Header {
     Header::from_bytes(name.as_bytes(), val.as_bytes()).unwrap()
 }
 
-fn post(
-    state: &AppState,
-    url: &str,
-    headers: &[Header],
-    body: &[u8],
-) -> (u16, String) {
+fn post(state: &AppState, url: &str, headers: &[Header], body: &[u8]) -> (u16, String) {
     route_with_body(state, &Method::Post, url, headers, body)
 }
 
 #[test]
 fn land_with_key_is_200_accepted_and_persists() {
     let (state, _d) = state_with_open_pr();
-    let headers = vec![hdr("Authorization", &format!("Bearer {TOKEN}")), hdr("Idempotency-Key", "K1")];
-    let (status, body) = post(&state, "/v1/repos/hugit/prs/1/land", &headers, br#"{"mode":"union"}"#);
+    let headers = vec![
+        hdr("Authorization", &format!("Bearer {TOKEN}")),
+        hdr("Idempotency-Key", "K1"),
+    ];
+    let (status, body) = post(
+        &state,
+        "/v1/repos/hugit/prs/1/land",
+        &headers,
+        br#"{"mode":"union"}"#,
+    );
     assert_eq!(status, 200, "body={body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["accepted"], serde_json::Value::Bool(true));
@@ -78,7 +84,10 @@ fn land_with_key_is_200_accepted_and_persists() {
 #[test]
 fn replay_same_key_appends_nothing_new_one_position() {
     let (state, dir) = state_with_open_pr();
-    let headers = vec![hdr("Authorization", &format!("Bearer {TOKEN}")), hdr("Idempotency-Key", "K1")];
+    let headers = vec![
+        hdr("Authorization", &format!("Bearer {TOKEN}")),
+        hdr("Idempotency-Key", "K1"),
+    ];
     let body = br#"{"mode":"union"}"#;
     let (s1, b1) = post(&state, "/v1/repos/hugit/prs/1/land", &headers, body);
     assert_eq!(s1, 200);
@@ -96,9 +105,22 @@ fn replay_same_key_appends_nothing_new_one_position() {
 #[test]
 fn same_key_different_body_is_409() {
     let (state, _d) = state_with_open_pr();
-    let headers = vec![hdr("Authorization", &format!("Bearer {TOKEN}")), hdr("Idempotency-Key", "K1")];
-    post(&state, "/v1/repos/hugit/prs/1/land", &headers, br#"{"mode":"union"}"#);
-    let (status, _b) = post(&state, "/v1/repos/hugit/prs/1/land", &headers, br#"{"mode":"serial"}"#);
+    let headers = vec![
+        hdr("Authorization", &format!("Bearer {TOKEN}")),
+        hdr("Idempotency-Key", "K1"),
+    ];
+    post(
+        &state,
+        "/v1/repos/hugit/prs/1/land",
+        &headers,
+        br#"{"mode":"union"}"#,
+    );
+    let (status, _b) = post(
+        &state,
+        "/v1/repos/hugit/prs/1/land",
+        &headers,
+        br#"{"mode":"serial"}"#,
+    );
     assert_eq!(status, 409);
 }
 
@@ -106,7 +128,12 @@ fn same_key_different_body_is_409() {
 fn missing_idempotency_key_is_400() {
     let (state, _d) = state_with_open_pr();
     let headers = vec![hdr("Authorization", &format!("Bearer {TOKEN}"))];
-    let (status, body) = post(&state, "/v1/repos/hugit/prs/1/land", &headers, br#"{"mode":"union"}"#);
+    let (status, body) = post(
+        &state,
+        "/v1/repos/hugit/prs/1/land",
+        &headers,
+        br#"{"mode":"union"}"#,
+    );
     assert_eq!(status, 400);
     assert!(body.contains("IDEMPOTENCY_REQUIRED"));
 }
@@ -114,9 +141,17 @@ fn missing_idempotency_key_is_400() {
 #[test]
 fn step_up_verb_without_fresh_auth_is_403() {
     let (state, _d) = state_with_open_pr();
-    let headers = vec![hdr("Authorization", &format!("Bearer {TOKEN}")), hdr("Idempotency-Key", "K1")];
+    let headers = vec![
+        hdr("Authorization", &format!("Bearer {TOKEN}")),
+        hdr("Idempotency-Key", "K1"),
+    ];
     // `policy` is step-up-gated; no X-Step-Up header → 403 before any effect.
-    let (status, body) = post(&state, "/v1/repos/hugit/policy", &headers, br#"{"rule_id":"dco","enabled":false}"#);
+    let (status, body) = post(
+        &state,
+        "/v1/repos/hugit/policy",
+        &headers,
+        br#"{"rule_id":"dco","enabled":false}"#,
+    );
     assert_eq!(status, 403);
     assert!(body.contains("STEP_UP_REQUIRED"));
     // WITH the step-up header, it lands.
@@ -125,22 +160,38 @@ fn step_up_verb_without_fresh_auth_is_403() {
         hdr("Idempotency-Key", "K2"),
         hdr("X-Step-Up", "true"),
     ];
-    let (s2, _b2) = post(&state, "/v1/repos/hugit/policy", &headers2, br#"{"rule_id":"dco","enabled":false}"#);
+    let (s2, _b2) = post(
+        &state,
+        "/v1/repos/hugit/policy",
+        &headers2,
+        br#"{"rule_id":"dco","enabled":false}"#,
+    );
     assert_eq!(s2, 200);
 }
 
 #[test]
 fn wrong_bearer_is_401() {
     let (state, _d) = state_with_open_pr();
-    let headers = vec![hdr("Authorization", "Bearer WRONG"), hdr("Idempotency-Key", "K1")];
-    let (status, _b) = post(&state, "/v1/repos/hugit/prs/1/land", &headers, br#"{"mode":"union"}"#);
+    let headers = vec![
+        hdr("Authorization", "Bearer WRONG"),
+        hdr("Idempotency-Key", "K1"),
+    ];
+    let (status, _b) = post(
+        &state,
+        "/v1/repos/hugit/prs/1/land",
+        &headers,
+        br#"{"mode":"union"}"#,
+    );
     assert_eq!(status, 401);
 }
 
 #[test]
 fn invalid_body_is_400() {
     let (state, _d) = state_with_open_pr();
-    let headers = vec![hdr("Authorization", &format!("Bearer {TOKEN}")), hdr("Idempotency-Key", "K1")];
+    let headers = vec![
+        hdr("Authorization", &format!("Bearer {TOKEN}")),
+        hdr("Idempotency-Key", "K1"),
+    ];
     let (status, _b) = post(&state, "/v1/repos/hugit/prs/1/land", &headers, b"not json");
     assert_eq!(status, 400);
 }

@@ -373,15 +373,33 @@ mod tests {
         let sink = sink_with_pr("1");
         // `policy` is a STEP_UP verb; step_up_presented=false ⇒ 403 before any effect.
         let err = with_write(
-            &sink, "r", "policy", "K1", b"{}", false, vec!["o".into()], 2, dummy_verb,
+            &sink,
+            "r",
+            "policy",
+            "K1",
+            b"{}",
+            false,
+            vec!["o".into()],
+            2,
+            dummy_verb,
         )
         .expect_err("step-up verb without fresh auth must 403");
         assert_eq!(err.status, 403);
         assert_eq!(err.code, "STEP_UP_REQUIRED");
         // A non-step-up verb is unaffected by step_up_presented=false.
         assert!(
-            with_write(&sink, "r", "land", "K2", b"{}", false, vec!["o".into()], 3, dummy_verb)
-                .is_ok()
+            with_write(
+                &sink,
+                "r",
+                "land",
+                "K2",
+                b"{}",
+                false,
+                vec!["o".into()],
+                3,
+                dummy_verb
+            )
+            .is_ok()
         );
     }
 
@@ -390,7 +408,15 @@ mod tests {
         let sink = sink_with_pr("1");
         let big = vec![b'x'; MAX_BODY_BYTES + 1];
         let err = with_write(
-            &sink, "r", "land", "K1", &big, true, vec!["o".into()], 2, dummy_verb,
+            &sink,
+            "r",
+            "land",
+            "K1",
+            &big,
+            true,
+            vec!["o".into()],
+            2,
+            dummy_verb,
         )
         .expect_err("oversize body must 400");
         assert_eq!(err.status, 400);
