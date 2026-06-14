@@ -89,23 +89,7 @@ impl AppState {
     }
 
     fn r2_from_env() -> Result<LogSource, String> {
-        let req =
-            |k: &str| std::env::var(k).map_err(|_| format!("{k} is not set (R2 source selected)"));
-        let account_id = req("HUGIT_SERVE_R2_ACCOUNT_ID")?;
-        let host = format!("{account_id}.r2.cloudflarestorage.com");
-        let agent = ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(10))
-            .build();
-        Ok(LogSource::R2(Box::new(R2Config {
-            endpoint: format!("https://{host}"),
-            host,
-            bucket: req("HUGIT_SERVE_R2_BUCKET")?,
-            region: std::env::var("HUGIT_SERVE_R2_REGION").unwrap_or_else(|_| "auto".to_string()),
-            key_id: req("HUGIT_SERVE_R2_KEY_ID")?,
-            secret: req("HUGIT_SERVE_R2_SECRET")?,
-            tenant_id: req("HUGIT_SERVE_R2_TENANT_ID")?,
-            agent,
-        })))
+        Ok(LogSource::R2(Box::new(R2Config::from_env()?)))
     }
 
     /// Explicit Local constructor (tests).
@@ -166,6 +150,30 @@ impl LogSource {
 }
 
 impl R2Config {
+    /// Build from the `HUGIT_SERVE_R2_*` env (same vars the read server uses).
+    /// `REGION` defaults to `auto` (R2). For the snapshot uploader the `KEY_ID`/
+    /// `SECRET` are the one-shot READ+WRITE grant; for the server they are the
+    /// standing read-only cred — same shape, different scope.
+    pub fn from_env() -> Result<Self, String> {
+        let req =
+            |k: &str| std::env::var(k).map_err(|_| format!("{k} is not set (R2 source selected)"));
+        let account_id = req("HUGIT_SERVE_R2_ACCOUNT_ID")?;
+        let host = format!("{account_id}.r2.cloudflarestorage.com");
+        let agent = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(30))
+            .build();
+        Ok(R2Config {
+            endpoint: format!("https://{host}"),
+            host,
+            bucket: req("HUGIT_SERVE_R2_BUCKET")?,
+            region: std::env::var("HUGIT_SERVE_R2_REGION").unwrap_or_else(|_| "auto".to_string()),
+            key_id: req("HUGIT_SERVE_R2_KEY_ID")?,
+            secret: req("HUGIT_SERVE_R2_SECRET")?,
+            tenant_id: req("HUGIT_SERVE_R2_TENANT_ID")?,
+            agent,
+        })
+    }
+
     fn fetch(&self, repo: &str) -> Result<Option<(Vec<u8>, String)>, EngineErr> {
         let key = format!("{}/{repo}.json", self.tenant_id);
         let now = SystemTime::now()
@@ -205,6 +213,53 @@ impl R2Config {
                 Err(EngineErr::unavailable(format!("R2 GET status {s}")))
             }
             Err(e) => Err(EngineErr::unavailable(format!("R2 GET transport: {e}"))),
+        }
+    }
+
+    /// PUT `body` to `<tenant_id>/<repo>.json` (the one-shot snapshot upload — used
+    /// by the `hugit-snapshot` bin, NOT by the read server). The standing engine
+    /// credential is read-only by design (a PUT 403s); this path is reached only
+    /// when the config is built from a read+WRITE credential. Returns the wire key
+    /// on success. A 2xx is success; anything else is an explicit error (never a
+    /// silent partial write).
+    pub fn put(&self, repo: &str, body: &[u8]) -> Result<String, EngineErr> {
+        let key = format!("{}/{repo}.json", self.tenant_id);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let signed = sigv4::sign_s3_put(
+            &self.host,
+            &self.bucket,
+            &key,
+            body,
+            &self.key_id,
+            &self.secret,
+            &self.region,
+            now,
+        );
+        let url = format!("{}/{}/{key}", self.endpoint, self.bucket);
+        let resp = self
+            .agent
+            .put(&url)
+            .set("Authorization", &signed.authorization)
+            .set("x-amz-date", &signed.amz_date)
+            .set("x-amz-content-sha256", &signed.content_sha256)
+            .send_bytes(body);
+        match resp {
+            Ok(r) if (200..300).contains(&r.status()) => Ok(format!("r2://{}/{key}", self.bucket)),
+            Ok(r) => Err(EngineErr::unavailable(format!(
+                "R2 PUT unexpected status {}",
+                r.status()
+            ))),
+            Err(ureq::Error::Status(403, _)) => Err(EngineErr::unavailable(
+                "R2 PUT 403 — the credential is not write-scoped (need the one-shot RW grant)"
+                    .to_string(),
+            )),
+            Err(ureq::Error::Status(s, _)) => {
+                Err(EngineErr::unavailable(format!("R2 PUT status {s}")))
+            }
+            Err(e) => Err(EngineErr::unavailable(format!("R2 PUT transport: {e}"))),
         }
     }
 }

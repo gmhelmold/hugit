@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(serve): **`hugit-snapshot` — the one-shot engine-storage snapshot uploader
+  (Passo 4)**. A dedicated bin that reads a local canonical event-log file,
+  **chain-verifies it through the SAME PS-13 verified loader the read path uses**
+  (`load_event_log_from_bytes` → `rehydrate_and_verify` → `verify_chain`), and only
+  THEN PUTs the raw bytes to `<tenant_id>/<repo>.json` in the `corelink-githugr-engine`
+  bucket — a corrupt/tampered log is REFUSED before any upload, so the snapshot the
+  read path later serves is proven trustworthy at WRITE time, not just read time.
+  Adds `sigv4::sign_s3_put` (same proven `authorization` core as the GET signer;
+  the one PUT-specific bit — `x-amz-content-sha256` = SHA-256 of the ACTUAL body —
+  is unit-pinned to a `shasum`/Python-verified digest, never recalled) and
+  `R2Config::{from_env,put}`. The standing engine credential is read-only by design
+  (a PUT 403s with a clear message); this tool runs with the one-shot READ+WRITE
+  grant. Live-verified: the read path returns an honest 404 against the real bucket
+  (auth OK, object absent) until the first snapshot lands.
+
 - feat(serve): **R2 read source — the engine reads its event logs from the
   dedicated `corelink-githugr-engine` bucket directly** (engine-storage Option A,
   per the CoreLink handoff). `state.rs` gains a `LogSource { Local | R2 }`: R2 fetches

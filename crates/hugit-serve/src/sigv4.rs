@@ -157,6 +157,52 @@ pub fn sign_s3_get(
     }
 }
 
+/// Sign a path-style R2 PUT of `body` to `bucket`/`key`. Identical SigV4 algorithm
+/// to [`sign_s3_get`] (same proven [`authorization`] core), differing only in the
+/// method (`PUT`) and — the one PUT-specific bit — the `x-amz-content-sha256` /
+/// payload hash, which is the SHA-256 of the ACTUAL body (a bodyless-GET's empty
+/// hash would make R2 reject a non-empty PUT). Used by the one-shot snapshot
+/// uploader (the `hugit-snapshot` bin), which requires a read+WRITE credential —
+/// the standing engine cred is read-only by design.
+#[allow(clippy::too_many_arguments)]
+pub fn sign_s3_put(
+    host: &str,
+    bucket: &str,
+    key: &str,
+    body: &[u8],
+    key_id: &str,
+    secret: &str,
+    region: &str,
+    epoch_secs: u64,
+) -> SignedHeaders {
+    let (amz_date, date_stamp) = format_amz_date(epoch_secs);
+    let payload_hash = sha256_hex(body);
+    let canonical_uri = format!("/{}/{}", uri_encode(bucket, false), uri_encode(key, true));
+    let headers = vec![
+        ("host".to_string(), host.to_string()),
+        ("x-amz-content-sha256".to_string(), payload_hash.clone()),
+        ("x-amz-date".to_string(), amz_date.clone()),
+    ];
+    let authorization = authorization(
+        "PUT",
+        &canonical_uri,
+        "",
+        &headers,
+        &payload_hash,
+        &amz_date,
+        &date_stamp,
+        region,
+        "s3",
+        key_id,
+        secret,
+    );
+    SignedHeaders {
+        authorization,
+        amz_date,
+        content_sha256: payload_hash,
+    }
+}
+
 /// Format a Unix epoch-seconds instant as (`YYYYMMDDTHHMMSSZ`, `YYYYMMDD`) UTC.
 fn format_amz_date(epoch_secs: u64) -> (String, String) {
     let days = (epoch_secs / 86_400) as i64;
@@ -296,5 +342,43 @@ mod tests {
         );
         assert_eq!(s.content_sha256, EMPTY_PAYLOAD_SHA256);
         assert!(s.amz_date.ends_with('Z'));
+    }
+
+    /// The PUT signer must hash the REAL body into `x-amz-content-sha256` (a
+    /// bodyless-GET's empty-hash would make R2 reject the PUT) and otherwise share
+    /// the proven authorization core. Pins the body-hash to the known SHA-256 of
+    /// `[]` and asserts the PUT scope + that the content hash is NOT the empty one.
+    #[test]
+    fn sign_s3_put_hashes_the_real_body() {
+        let body = b"[]"; // a minimal (empty) event log
+        let s = sign_s3_put(
+            "acct.r2.cloudflarestorage.com",
+            "corelink-githugr-engine",
+            "tenant-uuid/hugit.json",
+            body,
+            "AKIDEXAMPLE",
+            "secret",
+            "auto",
+            1_700_000_000,
+        );
+        // SHA-256("[]") — verified via `shasum -a 256` + Python hashlib (NOT recalled).
+        assert_eq!(
+            s.content_sha256,
+            "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945".to_string(),
+            "PUT must carry the SHA-256 of the actual body"
+        );
+        assert_ne!(
+            s.content_sha256, EMPTY_PAYLOAD_SHA256,
+            "PUT must NOT carry the bodyless-GET empty-payload hash"
+        );
+        assert!(
+            s.authorization
+                .starts_with("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/")
+        );
+        assert!(s.authorization.contains("/auto/s3/aws4_request"));
+        assert!(
+            s.authorization
+                .contains("SignedHeaders=host;x-amz-content-sha256;x-amz-date")
+        );
     }
 }
