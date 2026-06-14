@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(test): **honest-up the scrubber proptest `safe_address` generator (PS-14
+  boundary)** — the randomized `safe_addresses_survive_the_identifier_gate`
+  property found a real counterexample (`bcjdf_3gh_i1k6l-e4m5.027`): a 24-char
+  near-all-distinct mixed-alnum slug whose Shannon entropy (4.5016) clears the
+  identifier gate's `IDENT_ENTROPY_THRESHOLD` (4.5), so the gate correctly redacts
+  it. This is the owner-decided PS-14 policy ("prefer redaction" — a dense long run
+  is indistinguishable from a credential blob), NOT a scrubber bug. The generator
+  was overclaiming: its slug regex can emit high-entropy runs while its own comment
+  promised "low entropy". Fix the GENERATOR, never the scrubber: a `prop_filter`
+  excludes long-AND-high-entropy slugs (the disclosed over-scrub residual), so the
+  property asserts only what the policy guarantees — short slugs always survive,
+  long slugs survive iff low-entropy. Security spine untouched; 15×512 cases clean.
+
 - feat(contracts): **hugit-serve Phase 2 wire freeze — 26 remaining read VMs +
   the `Accepted` write shape**. Transcribes the remaining `githugr-vm` view-models
   byte-for-field into `hugit-http-contracts` (intent_detail · insights · security ·

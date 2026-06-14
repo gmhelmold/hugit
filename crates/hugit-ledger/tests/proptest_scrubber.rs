@@ -18,7 +18,10 @@
 //! make it pass; a counterexample is reported, not papered over.
 
 use hugit_ledger::redact::{REDACTED, apply};
-use hugit_ledger::secret_shape::{is_safe_identifier_shape, is_structural_secret};
+use hugit_ledger::secret_shape::{
+    ENTROPY_MIN_LEN, IDENT_ENTROPY_THRESHOLD, is_safe_identifier_shape, is_structural_secret,
+    shannon_entropy,
+};
 use proptest::prelude::*;
 
 // ── Generators ───────────────────────────────────────────────────────────────
@@ -111,8 +114,22 @@ fn safe_address() -> impl Strategy<Value = String> {
             26..=26,
         )
         .prop_map(|v| v.into_iter().collect()),
-        // kebab / snake / dotted slug (bounded charset, low entropy).
-        proptest::string::string_regex("[a-z][a-z0-9]{0,6}([-_./][a-z0-9]{1,6}){0,4}").unwrap(),
+        // kebab / snake / dotted slug (bounded charset). A slug MUST survive only
+        // when it is genuinely low-entropy: the PS-14 (owner-decided HYBRID)
+        // identifier gate redacts a value that is BOTH long (>= ENTROPY_MIN_LEN)
+        // AND high Shannon entropy (>= IDENT_ENTROPY_THRESHOLD), because such a run
+        // is indistinguishable from a dense credential blob (e.g. a 24-char
+        // near-all-distinct mixed alnum string clears 4.5 bits/char). Asserting
+        // such a value "must survive" would contradict the decided policy ("prefer
+        // redaction"), so we filter it out HERE — the over-scrub of a dense slug is
+        // the owner-disclosed residual, not a scrubber bug. Short slugs (the common
+        // case) always survive; long slugs survive iff low-entropy.
+        proptest::string::string_regex("[a-z][a-z0-9]{0,6}([-_./][a-z0-9]{1,6}){0,4}")
+            .unwrap()
+            .prop_filter(
+                "a dense >=4.5-entropy long slug is correctly redacted per PS-14 — not must-survive",
+                |s| s.len() < ENTROPY_MIN_LEN || shannon_entropy(s) < IDENT_ENTROPY_THRESHOLD,
+            ),
         // Small integer (a `--pr 7`, `--run-id 12345`).
         proptest::string::string_regex("[1-9][0-9]{0,7}").unwrap(),
     ]
