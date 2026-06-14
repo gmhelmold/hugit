@@ -122,7 +122,8 @@ mod tests {
 
     #[test]
     fn comment_requires_body_allows_optional_anchor() {
-        let with = serde_json::from_str::<CommentReq>(r#"{"body":"lgtm","anchor":"x.rs:1"}"#).unwrap();
+        let with =
+            serde_json::from_str::<CommentReq>(r#"{"body":"lgtm","anchor":"x.rs:1"}"#).unwrap();
         assert_eq!(with.anchor.as_deref(), Some("x.rs:1"));
         let without = serde_json::from_str::<CommentReq>(r#"{"body":"lgtm"}"#).unwrap();
         assert_eq!(without.anchor, None);

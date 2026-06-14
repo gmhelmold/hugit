@@ -1045,6 +1045,7 @@ dependencies = [
 name = "hugit-serve"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "hugit-cli",
  "hugit-contracts",
  "hugit-http-contracts",
