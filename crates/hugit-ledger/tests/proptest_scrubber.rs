@@ -115,20 +115,26 @@ fn safe_address() -> impl Strategy<Value = String> {
         )
         .prop_map(|v| v.into_iter().collect()),
         // kebab / snake / dotted slug (bounded charset). A slug MUST survive only
-        // when it is genuinely low-entropy: the PS-14 (owner-decided HYBRID)
-        // identifier gate redacts a value that is BOTH long (>= ENTROPY_MIN_LEN)
-        // AND high Shannon entropy (>= IDENT_ENTROPY_THRESHOLD), because such a run
-        // is indistinguishable from a dense credential blob (e.g. a 24-char
-        // near-all-distinct mixed alnum string clears 4.5 bits/char). Asserting
-        // such a value "must survive" would contradict the decided policy ("prefer
-        // redaction"), so we filter it out HERE — the over-scrub of a dense slug is
-        // the owner-disclosed residual, not a scrubber bug. Short slugs (the common
-        // case) always survive; long slugs survive iff low-entropy.
+        // when it is genuinely a safe identifier. The free `[a-z0-9._/-]` regex can
+        // emit strings that are NOT safe addresses and which the scrubber correctly
+        // redacts — asserting those "must survive" would contradict the decided
+        // policy. Two such classes are filtered out HERE (NOT in the scrubber):
+        //   (1) credential-PREFIX collisions — a slug like `gho_a`/`ghp_x` starts
+        //       with a KNOWN_PREFIXES token shape, so `is_structural_secret` flags it
+        //       (a GitHub OAuth/PAT prefix) and the gate redacts it — correct.
+        //   (2) dense high-entropy long runs (>= ENTROPY_MIN_LEN AND >= the 4.5
+        //       bits/char identifier threshold) — indistinguishable from a credential
+        //       blob (PS-14 "prefer redaction"; the over-scrub is the disclosed residual).
+        // The remaining slugs (short, low-entropy, non-credential-shaped — the common
+        // real case: `my-repo`, `feature/x`, `a.b.c`) are the genuine must-survive set.
         proptest::string::string_regex("[a-z][a-z0-9]{0,6}([-_./][a-z0-9]{1,6}){0,4}")
             .unwrap()
             .prop_filter(
-                "a dense >=4.5-entropy long slug is correctly redacted per PS-14 — not must-survive",
-                |s| s.len() < ENTROPY_MIN_LEN || shannon_entropy(s) < IDENT_ENTROPY_THRESHOLD,
+                "exclude credential-prefix collisions + dense high-entropy slugs (both correctly redacted, not must-survive)",
+                |s| {
+                    !is_structural_secret(s)
+                        && (s.len() < ENTROPY_MIN_LEN || shannon_entropy(s) < IDENT_ENTROPY_THRESHOLD)
+                },
             ),
         // Small integer (a `--pr 7`, `--run-id 12345`).
         proptest::string::string_regex("[1-9][0-9]{0,7}").unwrap(),
