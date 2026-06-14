@@ -88,9 +88,21 @@ struct PriorOutcome {
     accepted: Accepted,
 }
 
-/// Scan the log for a prior `idem.recorded` matching `(principal, verb, key)`.
-/// Returns the stored body-hash + the replayable `Accepted`.
-fn idem_lookup(log: &EventLog, principal: &str, verb: &str, key: &str) -> Option<PriorOutcome> {
+/// Scan the log for a prior `idem.recorded` matching `(principal, verb, resource,
+/// key)`. Returns the stored body-hash + the replayable `Accepted`.
+///
+/// `resource` (the URL path tail, e.g. `prs/1/land`) is part of the key so an
+/// `Idempotency-Key` reused across DIFFERENT resources (PR 1 vs PR 2) does NOT
+/// replay the first resource's outcome (audit P0: URL-resourced verbs carry the id
+/// only in the URL, not the body — without `resource` keyed, the 2nd mutation is
+/// silently dropped).
+fn idem_lookup(
+    log: &EventLog,
+    principal: &str,
+    verb: &str,
+    resource: &str,
+    key: &str,
+) -> Option<PriorOutcome> {
     log.records()
         .iter()
         .filter(|r| r.kind == IDEM_RECORDED_KIND)
@@ -98,6 +110,7 @@ fn idem_lookup(log: &EventLog, principal: &str, verb: &str, key: &str) -> Option
         .find(|v| {
             v.get("principal").and_then(|x| x.as_str()) == Some(principal)
                 && v.get("verb").and_then(|x| x.as_str()) == Some(verb)
+                && v.get("resource").and_then(|x| x.as_str()) == Some(resource)
                 && v.get("key").and_then(|x| x.as_str()) == Some(key)
         })
         .and_then(|v| {
@@ -112,10 +125,12 @@ fn idem_lookup(log: &EventLog, principal: &str, verb: &str, key: &str) -> Option
 
 /// Append the `idem.recorded` ledger entry for a successful write. Canonical JSON
 /// (sorted keys) so the chain pre-image is deterministic.
+#[allow(clippy::too_many_arguments)]
 fn idem_record(
     log: &mut EventLog,
     principal: &str,
     verb: &str,
+    resource: &str,
     key: &str,
     body_sha256: &str,
     accepted: &Accepted,
@@ -128,6 +143,7 @@ fn idem_record(
         "key": key,
         "outcome": outcome,
         "principal": principal,
+        "resource": resource,
         "verb": verb,
     });
     let payload =
@@ -150,7 +166,9 @@ fn idem_record(
 
 /// The write-door: the one chokepoint every POST verb rides.
 ///
-/// - `verb` — the stable verb name keyed in the idempotency ledger (e.g. `"land"`).
+/// - `verb` — the stable verb name (the STEP-UP discriminator, e.g. `"land"`).
+/// - `resource` — the URL path tail (e.g. `prs/1/land`); part of the idempotency
+///   key so a key reused across different resources does NOT replay (audit P0).
 /// - `idem_key` — the `Idempotency-Key` header (empty ⇒ `400`).
 /// - `body` — the raw request body bytes (the replay fingerprint; size-capped).
 /// - `step_up_presented` — did the route present fresh re-auth? Required for the
@@ -163,6 +181,7 @@ pub fn with_write<F>(
     sink: &dyn LogSink,
     repo: &str,
     verb: &str,
+    resource: &str,
     idem_key: &str,
     body: &[u8],
     step_up_presented: bool,
@@ -194,7 +213,7 @@ where
 
     // Replay guard: a seen key returns the stored outcome (or 409 on a body change)
     // BEFORE the verb runs — so a lost-response retry never re-executes the effect.
-    if let Some(prior) = idem_lookup(&log, &principal, verb, idem_key) {
+    if let Some(prior) = idem_lookup(&log, &principal, verb, resource, idem_key) {
         if prior.body_sha256 != body_hash {
             return Err(EngineErr::idem_mismatch());
         }
@@ -205,7 +224,7 @@ where
     // the idempotent outcome, then persist ONCE (atomic: both records or neither).
     let accepted = run(&mut log, principal_chain, at)?;
     idem_record(
-        &mut log, &principal, verb, idem_key, &body_hash, &accepted, at,
+        &mut log, &principal, verb, resource, idem_key, &body_hash, &accepted, at,
     )?;
     sink.persist(repo, &log)?;
     Ok(accepted)
@@ -284,6 +303,7 @@ mod tests {
             &sink,
             "r",
             "land",
+            "res",
             "",
             b"{}",
             true,
@@ -304,6 +324,7 @@ mod tests {
             &sink,
             "r",
             "land",
+            "res",
             "K1",
             body,
             true,
@@ -318,6 +339,7 @@ mod tests {
             &sink,
             "r",
             "land",
+            "res",
             "K1",
             body,
             true,
@@ -344,6 +366,7 @@ mod tests {
             &sink,
             "r",
             "land",
+            "res",
             "K1",
             b"{\"mode\":\"union\"}",
             true,
@@ -356,6 +379,7 @@ mod tests {
             &sink,
             "r",
             "land",
+            "res",
             "K1",
             b"{\"mode\":\"serial\"}",
             true,
@@ -376,6 +400,7 @@ mod tests {
             &sink,
             "r",
             "policy",
+            "res",
             "K1",
             b"{}",
             false,
@@ -392,6 +417,7 @@ mod tests {
                 &sink,
                 "r",
                 "land",
+                "res",
                 "K2",
                 b"{}",
                 false,
@@ -411,6 +437,7 @@ mod tests {
             &sink,
             "r",
             "land",
+            "res",
             "K1",
             &big,
             true,
@@ -421,5 +448,51 @@ mod tests {
         .expect_err("oversize body must 400");
         assert_eq!(err.status, 400);
         assert_eq!(err.code, "INVALID_REQUEST");
+    }
+
+    #[test]
+    fn same_key_different_resource_does_not_replay() {
+        // Audit P0: an Idempotency-Key reused across DIFFERENT resources (PR 1 vs
+        // PR 2) must NOT replay the first resource's outcome — the verb runs again.
+        let sink = sink_with_pr("1");
+        let body = b"{\"mode\":\"union\"}";
+        with_write(
+            &sink,
+            "r",
+            "land",
+            "prs/1/land",
+            "K",
+            body,
+            true,
+            vec!["o".into()],
+            2,
+            dummy_verb,
+        )
+        .expect("first resource ok");
+        // Same verb + key + body, DIFFERENT resource → must execute (not replay).
+        with_write(
+            &sink,
+            "r",
+            "land",
+            "prs/2/land",
+            "K",
+            body,
+            true,
+            vec!["o".into()],
+            3,
+            dummy_verb,
+        )
+        .expect("second resource ok");
+        let queued = sink
+            .log
+            .borrow()
+            .records()
+            .iter()
+            .filter(|r| r.kind == "pr.queued")
+            .count();
+        assert_eq!(
+            queued, 2,
+            "a key reused across resources must NOT collapse to one effect"
+        );
     }
 }

@@ -203,6 +203,9 @@ fn dispatch_repo_write(
     let p = dev_principal();
     let at = now_ms();
     let sink: &dyn LogSink = state;
+    // The URL tail (e.g. `prs/1/land`) is the idempotency RESOURCE — keyed in the
+    // ledger so a key reused across resources never replays the wrong outcome (audit P0).
+    let resource = tail.join("/");
 
     // Parse the body as `$T` or short-circuit to 400 INVALID_REQUEST.
     macro_rules! parse {
@@ -222,6 +225,7 @@ fn dispatch_repo_write(
                     sink,
                     repo,
                     "land",
+                    &resource,
                     &idem,
                     body,
                     step_up,
@@ -239,6 +243,7 @@ fn dispatch_repo_write(
                     sink,
                     repo,
                     "verdict",
+                    &resource,
                     &idem,
                     body,
                     step_up,
@@ -256,6 +261,7 @@ fn dispatch_repo_write(
                     sink,
                     repo,
                     "comment",
+                    &resource,
                     &idem,
                     body,
                     step_up,
@@ -272,6 +278,7 @@ fn dispatch_repo_write(
                 sink,
                 repo,
                 "dispatch",
+                &resource,
                 &idem,
                 body,
                 step_up,
@@ -287,6 +294,7 @@ fn dispatch_repo_write(
                     sink,
                     repo,
                     "issue_transition",
+                    &resource,
                     &idem,
                     body,
                     step_up,
@@ -307,6 +315,7 @@ fn dispatch_repo_write(
                 sink,
                 repo,
                 "policy",
+                &resource,
                 &idem,
                 body,
                 step_up,
@@ -322,6 +331,7 @@ fn dispatch_repo_write(
                 sink,
                 repo,
                 "erasure",
+                &resource,
                 &idem,
                 body,
                 step_up,
@@ -339,6 +349,7 @@ fn dispatch_repo_write(
                 sink,
                 repo,
                 "edit_propose",
+                &resource,
                 &idem,
                 body,
                 step_up,
@@ -355,6 +366,7 @@ fn dispatch_repo_write(
                 sink,
                 repo,
                 "undo",
+                &resource,
                 &idem,
                 body,
                 step_up,
