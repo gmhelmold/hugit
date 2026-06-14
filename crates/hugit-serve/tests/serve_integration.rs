@@ -10,6 +10,7 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use hugit_http_contracts::RepoHomeVm;
 use hugit_serve::server::{route, serve_on};
@@ -18,13 +19,26 @@ use tiny_http::{Header, Method, Server};
 
 const TOKEN: &str = "dev-token-abc";
 
-/// A temp log dir unique to this test process; `<dir>/<repo>.json` is a repo log.
+/// A temp log dir unique to this test process AND to each call; `<dir>/<repo>.json`
+/// is a repo log. The per-call `AtomicU64` is load-bearing: tests run in parallel
+/// threads and several use the same repo name (`hugit`), so a clock-only suffix
+/// collided when two `scratch_dir()` calls landed in the same nanosecond bucket —
+/// two tests then shared one `hugit.json` and clobbered each other's fixture
+/// (a valid `[]` log vs. a tampered one), a real flake seen locally and on CI. The
+/// monotonic counter guarantees a distinct dir regardless of clock resolution.
 fn scratch_dir() -> PathBuf {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!("hugit-serve-it-{}-{}", std::process::id(), nanos));
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "hugit-serve-it-{}-{}-{}",
+        std::process::id(),
+        nanos,
+        seq
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }

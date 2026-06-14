@@ -36,6 +36,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (a `ghp_…` PAT in a charter must serialize as `[REDACTED]`); whole hugit-serve suite
   green + clippy `-D warnings` clean.
 
+- fix(test): **de-flake the serve_integration fixture race** — `scratch_dir()`
+  named its temp dir from a `nanos + pid` suffix only, so two parallel test threads
+  that landed in the same nanosecond bucket shared one `<dir>/hugit.json` and
+  clobbered each other's fixture (a valid `[]` log vs. a tampered one). The flake
+  surfaced non-deterministically (`present_repo_home…` saw the tampered log → 503;
+  `tampered_log…` saw the valid `[]` → 200) — once on CI, reproduced locally at
+  ~1-in-3 runs. Fix: a process-global `AtomicU64` per-call suffix guarantees a
+  distinct dir regardless of clock resolution; 11/11 stress runs clean (was flaky
+  at 3 runs). Test-only; no production code touched.
+
 - fix(test): **de-flake the N-2 reconcile perf test** — drop its unsound ABSOLUTE
   wall-clock ceiling (`t5k < 12 s`), which false-failed at ~16 s on the contended
   shared runner (PS-12b infra contention, NOT an algorithmic regression). The
