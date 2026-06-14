@@ -7,14 +7,19 @@
 //! 404 (no existence leak); a tampered/unreadable log is 503 (fail-honest); the
 //! error body is the `{code, reason}` envelope.
 
+use std::io::Read;
 use std::sync::OnceLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use tiny_http::{Header, Method, Response, Server};
+use tiny_http::{Header, Method, Request, Response, Server};
 
 use crate::auth::check_bearer;
 use crate::error::EngineErr;
 use crate::handlers;
 use crate::state::AppState;
+use crate::writes::{self, LogSink, verbs, with_write};
+use hugit_http_contracts::actions::Accepted;
+use hugit_http_contracts::write_requests as wr;
 
 /// Bind `addr` (e.g. `127.0.0.1:8787`) and run the server forever.
 pub fn serve(state: AppState, addr: &str) -> std::io::Result<()> {
@@ -29,11 +34,22 @@ pub fn serve(state: AppState, addr: &str) -> std::io::Result<()> {
 /// Run the request loop over a PRE-BOUND server (the loop the real binary runs;
 /// split out so a test can bind `:0`, learn the port, and exercise it end-to-end).
 pub fn serve_on(state: AppState, server: Server) -> std::io::Result<()> {
-    for request in server.incoming_requests() {
+    for mut request in server.incoming_requests() {
+        let method = request.method().clone();
+        let url = request.url().to_string();
+        let headers = request.headers().to_vec();
+        // Read the body ONLY for mutating methods (reads ignore it). Bounded read:
+        // at most MAX_BODY_BYTES+1 so the door's size cap rejects an oversize body
+        // without us buffering it all.
+        let body = if method == Method::Post {
+            read_body_capped(&mut request)
+        } else {
+            Vec::new()
+        };
         // PANIC ISOLATION: a panic inside a handler must degrade to a 503 for THAT
         // request, never take down the whole single-threaded server.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            route(&state, request.method(), request.url(), request.headers())
+            route_with_body(&state, &method, &url, &headers, &body)
         }));
         let (status, body) = outcome.unwrap_or_else(|_| {
             eprintln!("hugit-serve: handler panicked — degraded to 503");
@@ -90,6 +106,188 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
             dispatch_repo(state, repo, tail)
         }
         _ => err(EngineErr::not_found()),
+    }
+}
+
+/// The full entry (reads + writes). GET delegates to [`route`]; POST is a mutating
+/// verb routed through the write-door. Socket-free (body passed in).
+#[must_use]
+pub fn route_with_body(
+    state: &AppState,
+    method: &Method,
+    url: &str,
+    headers: &[Header],
+    body: &[u8],
+) -> (u16, String) {
+    if method == &Method::Post {
+        return route_write(state, url, headers, body);
+    }
+    route(state, method, url, headers)
+}
+
+/// Read a request body, capped at the door's `MAX_BODY_BYTES` (+1 byte so the
+/// door detects + rejects an over-cap body without buffering the whole thing).
+fn read_body_capped(request: &mut Request) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let _ = request
+        .as_reader()
+        .take(writes::MAX_BODY_BYTES as u64 + 1)
+        .read_to_end(&mut buf);
+    buf
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Case-insensitive header lookup.
+fn header_val(headers: &[Header], name: &str) -> Option<String> {
+    headers
+        .iter()
+        .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name))
+        .map(|h| h.value.as_str().to_string())
+}
+
+/// The v1 acting principal. Real authenticated identity (Clerk/RFC-8693) is the
+/// disclosed P2 seam; the dev-token path acts as the configured orchestrator.
+fn dev_principal() -> Vec<String> {
+    vec!["orchestrator:hugit".to_string()]
+}
+
+/// `Accepted` → a 200 JSON body with the spec §3 top-level `"accepted": true`
+/// alongside the typed fields (the client treats the 2xx as truth; the key is
+/// additive). A serialize fault is an internal 503.
+fn ok_accepted(a: &Accepted) -> (u16, String) {
+    match serde_json::to_value(a) {
+        Ok(mut v) => {
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("accepted".to_string(), serde_json::Value::Bool(true));
+            }
+            (200, v.to_string())
+        }
+        Err(e) => err(EngineErr::unavailable(format!("serialize: {e}"))),
+    }
+}
+
+/// POST routing: Bearer auth (BEFORE any work), then the mutating-verb dispatch.
+fn route_write(state: &AppState, url: &str, headers: &[Header], body: &[u8]) -> (u16, String) {
+    let path = url.split('?').next().unwrap_or("");
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    match segs.as_slice() {
+        ["v1", "repos", repo, tail @ ..] => {
+            if let Err(e) = check_bearer(headers, &state.dev_token) {
+                return err(e);
+            }
+            dispatch_repo_write(state, repo, tail, headers, body)
+        }
+        _ => err(EngineErr::not_found()),
+    }
+}
+
+/// Dispatch an authenticated `/v1/repos/{repo}/<tail...>` POST through the
+/// write-door (`with_write`): idempotency + step-up + persist + atomic ledger.
+fn dispatch_repo_write(
+    state: &AppState,
+    repo: &str,
+    tail: &[&str],
+    headers: &[Header],
+    body: &[u8],
+) -> (u16, String) {
+    let idem = header_val(headers, "Idempotency-Key").unwrap_or_default();
+    let step_up = header_val(headers, "X-Step-Up")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    let p = dev_principal();
+    let at = now_ms();
+    let sink: &dyn LogSink = state;
+
+    // Parse the body as `$T` or short-circuit to 400 INVALID_REQUEST.
+    macro_rules! parse {
+        ($T:ty) => {
+            match serde_json::from_slice::<$T>(body) {
+                Ok(v) => v,
+                Err(e) => return err(EngineErr::invalid_request(format!("corpo inválido: {e}"))),
+            }
+        };
+    }
+
+    let result: Result<Accepted, EngineErr> = match tail {
+        ["prs", n, "land"] => match n.parse::<u32>() {
+            Ok(pr) => {
+                let req = parse!(wr::LandReq);
+                with_write(sink, repo, "land", &idem, body, step_up, p, at, |log, p, at| {
+                    verbs::write_land::write_land(log, repo, pr, &req, p, at)
+                })
+            }
+            Err(_) => Err(EngineErr::not_found()),
+        },
+        ["prs", n, "verdict"] => match n.parse::<u32>() {
+            Ok(pr) => {
+                let req = parse!(wr::VerdictReq);
+                with_write(sink, repo, "verdict", &idem, body, step_up, p, at, |log, p, at| {
+                    verbs::write_verdict::write_verdict(log, repo, pr, &req, p, at)
+                })
+            }
+            Err(_) => Err(EngineErr::not_found()),
+        },
+        ["prs", n, "comments"] => match n.parse::<u32>() {
+            Ok(pr) => {
+                let req = parse!(wr::CommentReq);
+                with_write(sink, repo, "comment", &idem, body, step_up, p, at, |log, p, at| {
+                    verbs::write_comment::write_comment(log, repo, pr, &req, p, at)
+                })
+            }
+            Err(_) => Err(EngineErr::not_found()),
+        },
+        ["dispatch"] => {
+            let req = parse!(wr::DispatchReq);
+            with_write(sink, repo, "dispatch", &idem, body, step_up, p, at, |log, p, at| {
+                verbs::write_dispatch::write_dispatch(log, repo, &req, p, at)
+            })
+        }
+        ["issues", n, "transition"] => match n.parse::<u32>() {
+            Ok(num) => {
+                let req = parse!(wr::IssueTransitionReq);
+                with_write(sink, repo, "issue_transition", &idem, body, step_up, p, at, |log, p, at| {
+                    verbs::write_issue_transition::write_issue_transition(log, repo, num, &req, p, at)
+                })
+            }
+            Err(_) => Err(EngineErr::not_found()),
+        },
+        ["policy"] => {
+            let req = parse!(wr::PolicyReq);
+            with_write(sink, repo, "policy", &idem, body, step_up, p, at, |log, p, at| {
+                verbs::write_policy::write_policy(log, repo, &req, p, at)
+            })
+        }
+        ["erasure", id, "decide"] => {
+            let id = (*id).to_string();
+            let req = parse!(wr::ErasureDecideReq);
+            with_write(sink, repo, "erasure", &idem, body, step_up, p, at, |log, p, at| {
+                verbs::write_erasure_decide::write_erasure_decide(log, repo, &id, &req, p, at)
+            })
+        }
+        ["edit", mid @ .., "propose"] if !mid.is_empty() => {
+            let path = mid.join("/");
+            let req = parse!(wr::EditProposeReq);
+            with_write(sink, repo, "edit_propose", &idem, body, step_up, p, at, |log, p, at| {
+                verbs::write_edit_propose::write_edit_propose(log, repo, &path, &req, p, at)
+            })
+        }
+        ["undo"] => {
+            let req = parse!(wr::UndoReq);
+            with_write(sink, repo, "undo", &idem, body, step_up, p, at, |log, p, at| {
+                verbs::write_undo::write_undo(log, repo, &req, p, at)
+            })
+        }
+        _ => Err(EngineErr::not_found()),
+    };
+    match result {
+        Ok(a) => ok_accepted(&a),
+        Err(e) => err(e),
     }
 }
 

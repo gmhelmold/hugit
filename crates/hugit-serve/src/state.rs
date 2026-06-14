@@ -147,6 +147,56 @@ impl LogSource {
             LogSource::R2(c) => c.fetch(repo),
         }
     }
+
+    /// Durably write a repo's raw event-log bytes back to the source.
+    /// - **Local**: atomic temp-write + rename under `<dir>/<repo>.json`.
+    /// - **R2**: a signed PUT ([`R2Config::put`]) — REQUIRES a write-scoped
+    ///   credential; the standing engine cred is read-only by design, so an R2
+    ///   write fail-honestly returns 503 until the one-shot/scoped RW grant is
+    ///   wired (the disclosed P2 write-credential seam).
+    fn persist(&self, repo: &str, bytes: &[u8]) -> Result<(), EngineErr> {
+        match self {
+            LogSource::Local { dir } => {
+                std::fs::create_dir_all(dir).map_err(|e| {
+                    EngineErr::unavailable(format!("local log dir create failed: {e}"))
+                })?;
+                let path = dir.join(format!("{repo}.json"));
+                // Atomic: write a unique temp then rename over the target, so a
+                // crash mid-write never leaves a torn `<repo>.json`.
+                let tmp = dir.join(format!("{repo}.json.tmp.{}", std::process::id()));
+                std::fs::write(&tmp, bytes)
+                    .map_err(|e| EngineErr::unavailable(format!("local log write failed: {e}")))?;
+                std::fs::rename(&tmp, &path).map_err(|e| {
+                    let _ = std::fs::remove_file(&tmp);
+                    EngineErr::unavailable(format!("local log rename failed: {e}"))
+                })
+            }
+            LogSource::R2(c) => c.put(repo, bytes).map(|_| ()),
+        }
+    }
+}
+
+impl crate::writes::LogSink for AppState {
+    /// Load + chain-verify (same gate as the read path; absent → 404).
+    fn load(&self, repo: &str) -> Result<EventLog, EngineErr> {
+        self.load_verified(repo)
+    }
+
+    /// Serialize the mutated log + durably persist it back to the source.
+    ///
+    /// NOTE (audit CAS obligation): the `tiny_http` serve loop is single-threaded
+    /// (one request at a time), so within a deployed engine there is no concurrent
+    /// writer and the load→persist gap cannot interleave. A multi-writer / R2
+    /// deployment MUST upgrade `LogSource::persist` to a conditional/compare-and-
+    /// swap write (R2 `If-Match`) per the `LogSink::persist` contract.
+    fn persist(&self, repo: &str, log: &EventLog) -> Result<(), EngineErr> {
+        if !is_safe_repo_slug(repo) {
+            return Err(EngineErr::not_found());
+        }
+        let bytes = serde_json::to_vec(log.records())
+            .map_err(|e| EngineErr::unavailable(format!("log serialize failed: {e}")))?;
+        self.source.persist(repo, &bytes)
+    }
 }
 
 impl R2Config {
