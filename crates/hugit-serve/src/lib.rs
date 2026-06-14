@@ -24,3 +24,4 @@ pub mod fmt;
 pub mod handlers;
 pub mod server;
 pub mod state;
+pub mod writes;
