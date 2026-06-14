@@ -160,3 +160,53 @@ pub struct CostVm {
     #[serde(default)]
     pub cache_savings: String,
 }
+
+// ── Phase-2 shared atoms (used by ≥2 of the 26 read VMs) ─────────────────────
+
+/// Which sub-line variant a [`KpiVm`] card renders. Shared by insights + security.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum KpiSubKind {
+    #[default]
+    None,
+    DeltaUp,
+    DeltaDn,
+    Plain,
+    Streak,
+}
+
+/// A KPI card. Used by `InsightsVm.kpis` and `SecurityVm.posture`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct KpiVm {
+    pub label: String,
+    pub value: String,
+    pub delta: Option<String>,
+    #[serde(default)]
+    pub unit: String,
+    #[serde(default)]
+    pub sub_kind: KpiSubKind,
+    #[serde(default)]
+    pub sub_text: String,
+    #[serde(default)]
+    pub label_has_period: bool,
+}
+
+/// GitHub-App savings strip. Used by `DashboardVm` and `GithubAppVm`.
+/// Contains an f64 (`saved_usd`) → derives `PartialEq` only, never `Eq`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GithubAppStripVm {
+    pub saved_usd: f64,
+    pub saved_ci_minutes: u32,
+}
+
+/// A repo row. Used by `DashboardVm.repos` and `OrgVm.repos`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DashboardRepoVm {
+    pub org: String,
+    pub name: String,
+    pub main_green: bool,
+    pub status: String,
+    pub stack: String,
+    pub visibility: String,
+    pub open_prs: u32,
+    pub last_activity: String,
+}

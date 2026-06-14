@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(contracts): **hugit-serve Phase 2 wire freeze — 26 remaining read VMs +
+  the `Accepted` write shape**. Transcribes the remaining `githugr-vm` view-models
+  byte-for-field into `hugit-http-contracts` (intent_detail · insights · security ·
+  review · issues · blob · campaign · github_app · repo_settings · branches ·
+  releases · knowledge · search · new_pr · edit · compare · commit_detail ·
+  dashboard · attention · account · import · login · org · profile · repo_chrome ·
+  viewer_can), plus 4 shared atoms (`KpiVm`/`KpiSubKind`/`GithubAppStripVm`/
+  `DashboardRepoVm`) and the §3 write success body `Accepted`. Derives copied
+  verbatim from the canonical source — f64-bearing types `PartialEq`-only;
+  internally-tagged enums and `#[serde(rename="cost_usd_micros")]` preserved
+  exactly; one inline round-trip parity test per module. Additive-only (no existing
+  type/field/signature changed). Phase A of the hugit-serve Phase-2 master plan.
+
 - fix(test): **de-flake the N-2 reconcile perf test** — drop its unsound ABSOLUTE
   wall-clock ceiling (`t5k < 12 s`), which false-failed at ~16 s on the contended
   shared runner (PS-12b infra contention, NOT an algorithmic regression). The
