@@ -176,6 +176,33 @@ infra** (P2 CoreLink tenant provisioning — see
 request `docs/handoff/2026-06-11-corelink-p2-ceiling-request.md`). The
 disclosed live-infra seams (AC HTTP fleet-shared cache, runner box,
 transparency log, live GitHub detect) remain hermetic-proof until P2.
+**Close-the-product campaign (2026-06-14): the githugr read-path went from
+fixture to REAL.** Driven by `../githugr/docs/handoff/2026-06-13-hugit-phase2-close-the-product.md`,
+the engine grew the `/v1` reads the live `engine.githugr.com` window consumes:
+**#111** (hugit-serve Wave-1, 5 reads) → **#112** (Phase-2 wire freeze — 26 read VMs +
+the `Accepted` write shape, byte-transcribed from the frozen `githugr-vm`) → **#113**
+(6 real-backbone Phase-2 reads: `chrome·branches·commit_detail·intent_detail·insights·campaign`,
+4-agent adversarial-audited) → **#114** (the **R2 read source**, engine-storage Option A:
+`hugit-serve` reads `<tenant>/<repo>.json` from the dedicated `corelink-githugr-engine`
+bucket over S3 with a **hand-rolled SigV4 signer** — zero new crypto dep, AWS-vector-proven —
+through the SAME PS-13 verified loader; plus `hugit-snapshot`, the one-shot snapshot uploader).
+**11 reads now serve REAL data**, validated 200 end-to-end against live R2.
+**Passo 4 DONE:** a real, chain-verified snapshot of hugit's OWN recent forge history
+(built by driving the real recording verbs via `scripts/build-engine-snapshot.sh`, never
+hand-assembled; `engine-snapshots/hugit.json`) was uploaded to
+`corelink-githugr-engine/<dev-tenant>/hugit.json` with the one-shot RW grant and read back
+live (200). **Launch repo is `hugit`** ("the forge that built itself"); **`corelink-server`
+is owner-vetoed** as a launch dataset (ultra-sensitive/private — never exported). Two
+self-hosted-runner infra fixes landed in this wave: the **PS-12b rustup-proxy PATH flake**
+(`cargo`/`cargo-deny`/`cargo-audit` non-deterministically not-found per-step) is closed by
+pinning every gate step to the DIRECT toolchain bin + invoking the advisory tools as their
+own binaries; and a **pre-launch security sweep** caught + fixed an R2 503 that echoed the
+storage topology (host/bucket/tenant/key) to public clients — now a generic client reason,
+detail server-side only (the snapshot itself scanned clean). Identity is still the dev-token
+stub + dev-tenant prefix until the **P2 Clerk seam**; git-layer commit shas (commits expose
+the engine's `authored:<id>` intent-landing identifier) are the disclosed **P2 git seam**.
+Cross-repo handoffs routed via owner (no `path`/`git` coupling): the githugr deploy GO, the
+CoreLink cred ACK, the §13 transport reply — all in `docs/handoff/`.
 
 Read first: `docs/whitepaper/hugit-v1.md` (product design) ·
 `docs/product/product.md` (the product brief: ICPs, killers, positioning, pricing posture) ·
