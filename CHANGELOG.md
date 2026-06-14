@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(serve): **Wave-2 write path — the 9 `/v1` POST verbs + the write-door**
+  (`land`·`verdict`·`comments`·`dispatch`·`issues/{n}/transition`·`policy`·
+  `erasure/{id}/decide`·`edit/{path}/propose`·`undo`). Each verb is a PURE function
+  the shared write-door (`writes::with_write`) wraps: an idempotency ledger
+  (`Idempotency-Key` mandatory → `400`; byte-identical 24h replay; `409` on
+  key+body mismatch; the **land one-position invariant** — a lost-response retry
+  never enqueues twice); read-boundary redaction on every free-text field; the D14
+  authorized-append door; a STEP-UP gate (`policy`/`erasure` → `403` without fresh
+  auth); a request-body size cap; and the `Denied`→`EngineErr` §3 error map. The
+  `LogSink` persistence trait abstracts the write target (atomic temp+rename Local /
+  signed-PUT R2; the write-credential + R2 compare-and-swap are the disclosed P2
+  seams — the read-only standing cred 503s honestly). Built by a 9-agent fleet
+  against a frozen interface, then adversarially audited (FIX-FIRST → all P0/P1
+  fixed at root: `dispatch.campaign` scrub, `policy.rule_id` structural validation,
+  comment fail-closed routing, the step-up gate, the body cap, the LogSink CAS
+  contract, edit-content stored as a CAS hash never field-scrubbed). Lead-owned T3
+  design: `dispatch` never auto-spawns (spawn is the P2 runner seam), `erasure`
+  records the decision but NEVER executes (X12 execution is P2), `undo` is
+  append-only (a compensating `op.undone`, never a chain rewrite). 7 end-to-end
+  POST integration tests + per-verb secret-MATRIX guards; clippy `-D warnings` clean.
+
 - fix(serve): **don't leak R2 storage topology in a public 503 (pre-launch hardening)**
   — the R2 GET error arms echoed `ureq`'s error (which embeds the request URL: R2 host
   + bucket + tenant + key) into the `{code, reason}` body sent to the client, so a
