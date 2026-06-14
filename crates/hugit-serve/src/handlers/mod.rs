@@ -6,14 +6,26 @@
 //! (§0/§5): REAL engine data where it exists, the documented honest default
 //! elsewhere — never faked. Signatures are FROZEN (the scaffold ⇄ handler seam).
 
+pub mod branches;
+pub mod campaign;
 pub mod checks;
+pub mod commit_detail;
 pub mod commits;
 pub mod home;
+pub mod insights;
+pub mod intent_detail;
 pub mod landing;
 pub mod pr_detail;
+pub mod repo_chrome;
 
+pub use branches::build_branches;
+pub use campaign::build_campaign;
 pub use checks::build_checks;
+pub use commit_detail::build_commit_detail;
 pub use commits::build_commits;
 pub use home::build_home;
+pub use insights::build_insights;
+pub use intent_detail::build_intent_detail;
 pub use landing::build_landing;
 pub use pr_detail::build_pr_detail;
+pub use repo_chrome::build_repo_chrome;
