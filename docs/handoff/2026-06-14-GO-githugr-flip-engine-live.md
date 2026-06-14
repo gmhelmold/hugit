@@ -7,9 +7,9 @@
 ## TL;DR — you do NOT upload anything. The real data is already in the bucket.
 
 I uploaded + **live-verified** the real snapshot. The engine, reading from the real
-R2 bucket, returns **HTTP 200 with real data** on all 5 Wave-1 reads. Your only job is
-to point the deployed engine at R2 and flip the site. No write credential, no snapshot
-export on your side.
+R2 bucket, returns **HTTP 200 with real data on ALL 11 wired reads** (I curled every
+one against R2). Your only job is to point the deployed engine at R2 and flip the
+site. No write credential, no snapshot export on your side.
 
 ## State (what's done)
 
@@ -39,8 +39,21 @@ export on your side.
 3. **Drop the `HUGIT_SERVE_LOG_DIR` workaround** — setting `HUGIT_SERVE_R2_ACCOUNT_ID`
    makes the engine select R2 mode automatically (if both are set, R2 wins).
 4. **Deploy** + flip the site to `GITHUGR_MODE=hybrid` pointing at `engine.githugr.com`.
-   The 5 Wave-1 reads (`home`·`landing`·`prs/{n}`·`checks`·`commits`) go REAL; every
-   other surface stays fixture (honest hybrid) until the remaining reads land.
+   **All 11 wired reads go REAL** (verified 200 against R2): the 5 Wave-1
+   (`home`·`landing`·`prs/{n}`·`checks`·`commits`) **plus** the 6 Phase-B
+   (`chrome`·`branches`·`insights`·`intents/{id}`·`commit/{sha}`·`campaigns/{name}`).
+   Every other surface stays fixture (honest hybrid) until the remaining reads land.
+
+## Navigation notes (verified)
+
+- **Commits navigate by the engine's intent-landing identifier**, not a git sha:
+  `commit/{key}` where `{key}` is the `target` from the `commits` read (e.g.
+  `authored:pr-112`), NOT the GitHub merge sha. Real git shas are the disclosed P2
+  git-layer seam — honest, not faked. `commit/<github-sha>` correctly 404s.
+- **Pass the commit key RAW** (e.g. `…/commit/authored:pr-112`). A percent-encoded
+  colon (`authored%3Apr-112`) currently 404s — the route matches raw segments. If
+  your client must encode it, tell me and I'll add percent-decode to the route
+  (small fast-follow); for now navigate with the unencoded `target` string.
 
 ## Rules
 
