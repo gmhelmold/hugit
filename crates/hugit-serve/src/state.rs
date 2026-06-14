@@ -203,16 +203,26 @@ impl R2Config {
         match resp {
             Ok(r) => {
                 let mut buf = Vec::new();
-                r.into_reader()
-                    .read_to_end(&mut buf)
-                    .map_err(|e| EngineErr::unavailable(format!("R2 body read failed: {e}")))?;
+                r.into_reader().read_to_end(&mut buf).map_err(|e| {
+                    // Detail (which carries the bucket/key `label`) to the SERVER log
+                    // only — never echo storage internals to the public client.
+                    eprintln!("hugit-serve: R2 body read failed for {label}: {e}");
+                    EngineErr::unavailable("engine storage read failed".to_string())
+                })?;
                 Ok(Some((buf, label)))
             }
             Err(ureq::Error::Status(404, _)) => Ok(None),
-            Err(ureq::Error::Status(s, _)) => {
-                Err(EngineErr::unavailable(format!("R2 GET status {s}")))
+            // A non-404 status OR a transport fault. `ureq`'s error Display embeds the
+            // request URL (R2 host + bucket + tenant + key); on the PUBLIC read path
+            // that would leak the storage topology in a 503 body. Log the specifics
+            // server-side; return a GENERIC reason to the client (no existence/topology
+            // oracle). Still fail-honest (503), never a fake-empty VM.
+            Err(e) => {
+                eprintln!("hugit-serve: R2 GET failed for {label}: {e}");
+                Err(EngineErr::unavailable(
+                    "engine storage temporarily unavailable".to_string(),
+                ))
             }
-            Err(e) => Err(EngineErr::unavailable(format!("R2 GET transport: {e}"))),
         }
     }
 

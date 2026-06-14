@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(serve): **don't leak R2 storage topology in a public 503 (pre-launch hardening)**
+  — the R2 GET error arms echoed `ureq`'s error (which embeds the request URL: R2 host
+  + bucket + tenant + key) into the `{code, reason}` body sent to the client, so a
+  transport/5xx fault on the PUBLIC read path would disclose the storage layout. The
+  specifics now go to the SERVER log only; the client gets a generic
+  `engine storage temporarily unavailable` (still fail-honest 503, no
+  existence/topology oracle). Found by a pre-launch security sweep of the about-to-be-
+  public read path (the snapshot itself scanned clean — no secret, only structural
+  hashes). The operator-only PUT (snapshot uploader) keeps its detailed errors.
+
 - feat(serve): **`hugit-snapshot` — the one-shot engine-storage snapshot uploader
   (Passo 4)**. A dedicated bin that reads a local canonical event-log file,
   **chain-verifies it through the SAME PS-13 verified loader the read path uses**
