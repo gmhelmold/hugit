@@ -1,0 +1,38 @@
+[package]
+name = "hugit-serve"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+license-file.workspace = true
+
+# The `/v1` HTTP engine port (githugr window ⇄ hugit engine), Wave 1.
+#
+# This crate is the INTEGRATOR/adapter: it maps the domain-pure engine crates'
+# state into the frozen UI-shaped wire view-models (`hugit-http-contracts`) and
+# serves them over a minimal SYNCHRONOUS HTTP server (added in the scaffold step;
+# NOT axum/tokio — the workspace is supply-chain-strict + async-free). The
+# VM-coupling (humanized strings, pt-BR, presentation) lives ONLY here; the engine
+# core stays headless + clean.
+#
+# Deps are exactly what the handlers + scaffold use (dead engine deps trimmed per
+# the SOTA audit). The HTTP server is `tiny_http` — a minimal SYNCHRONOUS server
+# with NO async runtime and NO TLS (`default-features = false`: TLS terminates at
+# the edge/Cloudflare), keeping the supply-chain surface small in this
+# exact-pinned, `multiple-versions = "deny"` workspace.
+
+[dependencies]
+hugit-http-contracts = { path = "../hugit-http-contracts" }
+hugit-refstore       = { path = "../hugit-refstore" }
+hugit-contracts      = { path = "../hugit-contracts" }
+hugit-ledger         = { path = "../hugit-ledger" }
+hugit-cli            = { path = "../hugit-cli" }
+tiny_http  = { version = "0.12.0", default-features = false }
+sha2       = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+hugit-refstore = { path = "../hugit-refstore", features = ["test-support"] }
+tiny_http   = { version = "0.12.0", default-features = false }
+serde_json = { workspace = true }
