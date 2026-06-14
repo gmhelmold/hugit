@@ -24,6 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   green. The git-layer/identity reads (blob/compare/dashboard/account/…) stay
   honest-default fixture — a product decision, not hollow shells.
 
+- fix(serve): **Wave-3 read-audit hardening.** A fresh-context adversarial audit of
+  the 3 new read handlers (cold-verified by the lead) closed two defensive defects in
+  `issues`: an `issue_id as u32` overflow that silently wrapped ids > `u32::MAX` into a
+  low-32-bit collision (now rejected, not truncated) and an unbounded transition fold
+  that allocated one map entry per distinct id before the cap (now bounded at the
+  source). `VerdictVm.adversarial = true` was documented as a forge invariant rather
+  than left as a silent hardcode. `review`/`security` audited CLEAN.
+
 - feat(serve): **Wave-2 write path — the 9 `/v1` POST verbs + the write-door**
   (`land`·`verdict`·`comments`·`dispatch`·`issues/{n}/transition`·`policy`·
   `erasure/{id}/decide`·`edit/{path}/propose`·`undo`). Each verb is a PURE function
