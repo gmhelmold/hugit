@@ -455,15 +455,27 @@ pub fn load_event_log(path: &Path) -> Result<EventLog, PorcelainError> {
         }
         Err(e) => return Err(PorcelainError::io("read log", path, &e)),
     };
+    load_event_log_from_bytes(&bytes, path)
+}
+
+/// Verify + rehydrate an event log from RAW BYTES — the SAME chokepoint as
+/// [`load_event_log`] minus the filesystem read, so a non-file source (e.g. an
+/// R2 object the `/v1` server fetches) is held to the identical integrity bar:
+/// it routes through [`rehydrate_and_verify`], and a tampered chain fails CLOSED
+/// (`chain_broken`). `source` is used only for error context (e.g. the R2 key).
+pub fn load_event_log_from_bytes(bytes: &[u8], source: &Path) -> Result<EventLog, PorcelainError> {
     let records: Vec<hugit_contracts::event_record::EventRecord> =
-        serde_json::from_slice(&bytes).map_err(|e| PorcelainError::parse_log(path, &e))?;
+        serde_json::from_slice(bytes).map_err(|e| PorcelainError::parse_log(source, &e))?;
     rehydrate_and_verify(records).map_err(|fault| match fault {
         ChainLoadFault::Rehydrate(e) => {
-            PorcelainError::internal(format!("rehydrate log {}: {e}", path.display()))
+            PorcelainError::internal(format!("rehydrate log {}: {e}", source.display()))
         }
         ChainLoadFault::ChainBroken(e) => PorcelainError::new(
             "chain_broken",
-            format!("log {} failed integrity verification: {e}", path.display()),
+            format!(
+                "log {} failed integrity verification: {e}",
+                source.display()
+            ),
             "the --log file's hash chain is tampered or corrupt",
         ),
     })

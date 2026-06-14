@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(serve): **don't leak R2 storage topology in a public 503 (pre-launch hardening)**
+  — the R2 GET error arms echoed `ureq`'s error (which embeds the request URL: R2 host
+  + bucket + tenant + key) into the `{code, reason}` body sent to the client, so a
+  transport/5xx fault on the PUBLIC read path would disclose the storage layout. The
+  specifics now go to the SERVER log only; the client gets a generic
+  `engine storage temporarily unavailable` (still fail-honest 503, no
+  existence/topology oracle). Found by a pre-launch security sweep of the about-to-be-
+  public read path (the snapshot itself scanned clean — no secret, only structural
+  hashes). The operator-only PUT (snapshot uploader) keeps its detailed errors.
+
+- feat(serve): **`hugit-snapshot` — the one-shot engine-storage snapshot uploader
+  (Passo 4)**. A dedicated bin that reads a local canonical event-log file,
+  **chain-verifies it through the SAME PS-13 verified loader the read path uses**
+  (`load_event_log_from_bytes` → `rehydrate_and_verify` → `verify_chain`), and only
+  THEN PUTs the raw bytes to `<tenant_id>/<repo>.json` in the `corelink-githugr-engine`
+  bucket — a corrupt/tampered log is REFUSED before any upload, so the snapshot the
+  read path later serves is proven trustworthy at WRITE time, not just read time.
+  Adds `sigv4::sign_s3_put` (same proven `authorization` core as the GET signer;
+  the one PUT-specific bit — `x-amz-content-sha256` = SHA-256 of the ACTUAL body —
+  is unit-pinned to a `shasum`/Python-verified digest, never recalled) and
+  `R2Config::{from_env,put}`. The standing engine credential is read-only by design
+  (a PUT 403s with a clear message); this tool runs with the one-shot READ+WRITE
+  grant. Live-verified: the read path returns an honest 404 against the real bucket
+  (auth OK, object absent) until the first snapshot lands.
+
+- feat(serve): **R2 read source — the engine reads its event logs from the
+  dedicated `corelink-githugr-engine` bucket directly** (engine-storage Option A,
+  per the CoreLink handoff). `state.rs` gains a `LogSource { Local | R2 }`: R2 fetches
+  `<tenant_id>/<repo>.json` over the S3 API, **SigV4-signed by a hand-rolled signer**
+  (`sigv4.rs`) over the existing `hmac`+`sha2`+`hex` pins — **zero new crypto dep** —
+  proven against the canonical AWS test vectors (get-vanilla signature · published
+  signing-key derivation · empty-payload hash · RFC-4231 HMAC). Both sources route
+  through the SAME PS-13 verified loader (new `hugit_cli::checks::load_event_log_from_bytes`
+  next to the path loader): a tampered chain fails CLOSED (503) regardless of source;
+  absent object → 404 (no existence leak); transport fault → 503 (fail-honest, never a
+  fake-empty VM). Source is env-selected (`HUGIT_SERVE_R2_*` → R2; else
+  `HUGIT_SERVE_LOG_DIR` → Local). The tenant prefix is the configured dev tenant until
+  the P2 Clerk identity seam (disclosed, not faked). `cargo deny` clean (no new
+  duplicate/advisory from `ureq`+TLS). This is the seam that takes
+  `engine.githugr.com` from `fixture` to REAL on the read path — live on the scoped
+  R2 credential.
+
 - fix(ci): **make the gate steps deterministic against the self-hosted runner's
   PATH/proxy flake (PS-12b)** — the gate failed non-deterministically in DIFFERENT
   steps across runs, ALWAYS a command-not-found, NEVER a real lint/test/advisory

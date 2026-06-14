@@ -29,9 +29,15 @@ hugit-ledger         = { path = "../hugit-ledger" }
 hugit-cli            = { path = "../hugit-cli" }
 tiny_http  = { version = "0.12.0", default-features = false }
 sha2       = { workspace = true }
-hex        = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
+# R2 read source (engine-storage Option A): hand-rolled AWS SigV4 over the
+# existing crypto pins (zero new crypto dep) + the sync `ureq` client for the
+# S3 GET. TLS is required OUTBOUND here (R2 is https) — distinct from the
+# tiny_http server, which stays TLS-free (edge terminates inbound).
+hmac       = { workspace = true }
+hex        = { workspace = true }
+ureq       = { workspace = true }
 
 [dev-dependencies]
 hugit-refstore = { path = "../hugit-refstore", features = ["test-support"] }

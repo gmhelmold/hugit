@@ -23,5 +23,6 @@ pub mod error;
 pub mod fmt;
 pub mod handlers;
 pub mod server;
+pub mod sigv4;
 pub mod state;
 pub mod writes;
