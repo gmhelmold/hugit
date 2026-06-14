@@ -71,7 +71,10 @@ mod tests {
             ahead: Some(3),
             behind: Some(1),
             checks_ok: Some(false),
-            pr: Some(BranchPrVm { number: 129, state: "aberto".to_string() }),
+            pr: Some(BranchPrVm {
+                number: 129,
+                state: "aberto".to_string(),
+            }),
         };
         let vm = BranchesVm {
             repo: "hugit".to_string(),

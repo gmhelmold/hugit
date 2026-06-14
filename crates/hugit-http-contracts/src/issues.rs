@@ -95,8 +95,14 @@ mod tests {
                 ("bug".to_string(), None),
             ],
             triage: vec![
-                IssueTriageChipVm { class: "ok".to_string(), text: "✓ repro".to_string() },
-                IssueTriageChipVm { class: "warn".to_string(), text: "≈ PR #129".to_string() },
+                IssueTriageChipVm {
+                    class: "ok".to_string(),
+                    text: "✓ repro".to_string(),
+                },
+                IssueTriageChipVm {
+                    class: "warn".to_string(),
+                    text: "≈ PR #129".to_string(),
+                },
             ],
             priority: Some("P1".to_string()),
             author: "@ana".to_string(),

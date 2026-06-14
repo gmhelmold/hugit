@@ -116,7 +116,12 @@ mod tests {
                     hl: true,
                     intent_id: Some("a31".into()),
                 },
-                BlobLineVm { number: 3, text: "}".into(), hl: false, intent_id: None },
+                BlobLineVm {
+                    number: 3,
+                    text: "}".into(),
+                    hl: false,
+                    intent_id: None,
+                },
             ],
             blame: vec![BlobBlameVm {
                 line_start: 1,
@@ -140,20 +145,51 @@ mod tests {
                 ],
                 attestation_ok: true,
                 reason_segments: vec![
-                    BlobReasonSegVm::Text { text: "esta função existe porque o ".into() },
-                    BlobReasonSegVm::Bold { text: "refresh".into() },
-                    BlobReasonSegVm::Text { text: " precisa de ".into() },
+                    BlobReasonSegVm::Text {
+                        text: "esta função existe porque o ".into(),
+                    },
+                    BlobReasonSegVm::Bold {
+                        text: "refresh".into(),
+                    },
+                    BlobReasonSegVm::Text {
+                        text: " precisa de ".into(),
+                    },
                     BlobReasonSegVm::Mono { text: "exp".into() },
                 ],
             }],
             outline: vec![
-                OutlineItemVm { kind: "fn".into(), name: "refresh".into(), line: 1, active: true },
-                OutlineItemVm { kind: "c".into(), name: "TTL".into(), line: 42, active: false },
+                OutlineItemVm {
+                    kind: "fn".into(),
+                    name: "refresh".into(),
+                    line: 1,
+                    active: true,
+                },
+                OutlineItemVm {
+                    kind: "c".into(),
+                    name: "TTL".into(),
+                    line: 42,
+                    active: false,
+                },
             ],
-            actions: vec!["Raw".into(), "Copiar".into(), "✎ Editar".into(), "Blame".into()],
+            actions: vec![
+                "Raw".into(),
+                "Copiar".into(),
+                "✎ Editar".into(),
+                "Blame".into(),
+            ],
             tree: vec![
-                BlobTreeRowVm { name: "auth/".into(), depth: 0, is_dir: true, current: false },
-                BlobTreeRowVm { name: "token.rs".into(), depth: 1, is_dir: false, current: true },
+                BlobTreeRowVm {
+                    name: "auth/".into(),
+                    depth: 0,
+                    is_dir: true,
+                    current: false,
+                },
+                BlobTreeRowVm {
+                    name: "token.rs".into(),
+                    depth: 1,
+                    is_dir: false,
+                    current: true,
+                },
             ],
         };
 

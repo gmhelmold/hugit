@@ -46,8 +46,16 @@ mod tests {
             path: "crates/auth/src/token.rs".to_string(),
             workspace_note: "Workspace efêmero, só seu.".to_string(),
             lines: vec![
-                EditLineVm { number: 41, text: "    let exp = now();".to_string(), edited: false },
-                EditLineVm { number: 42, text: "    let exp = now() + TTL;".to_string(), edited: true },
+                EditLineVm {
+                    number: 41,
+                    text: "    let exp = now();".to_string(),
+                    edited: false,
+                },
+                EditLineVm {
+                    number: 42,
+                    text: "    let exp = now() + TTL;".to_string(),
+                    edited: true,
+                },
             ],
             changed_note: "2 linhas alteradas".to_string(),
             changed_count: "2 linhas".to_string(),
@@ -74,7 +82,8 @@ mod tests {
             direct_main_reason: "main é single-writer.".to_string(),
             branch_label: "criar branch gustavo/edit-token-rs e abrir PR".to_string(),
             branch_note: "branch criada a partir de main · PR rascunho.".to_string(),
-            authorship_note: "A autoria da mudança é sua — assinada com sua identidade HuGR.".to_string(),
+            authorship_note: "A autoria da mudança é sua — assinada com sua identidade HuGR."
+                .to_string(),
         };
         let json = serde_json::to_string(&vm).expect("EditVm serializes");
         let reparsed: EditVm = serde_json::from_str(&json).expect("EditVm deserializes");

@@ -96,12 +96,16 @@ mod tests {
             answer: KnowledgeAnswerVm {
                 question: "por que o refresh tolera ±2s de skew?".to_string(),
                 paragraphs: vec![vec![
-                    AnswerSegmentVm::Text { text: "O TTL conta do recebimento — veja ".to_string() },
+                    AnswerSegmentVm::Text {
+                        text: "O TTL conta do recebimento — veja ".to_string(),
+                    },
                     AnswerSegmentVm::Cite {
                         label: "a31".to_string(),
                         href: "/r/humangr/corelink-server/intent/a31".to_string(),
                     },
-                    AnswerSegmentVm::Mono { text: "iat".to_string() },
+                    AnswerSegmentVm::Mono {
+                        text: "iat".to_string(),
+                    },
                 ]],
                 trail: vec![TrailStepVm {
                     icon: "○".to_string(),
@@ -115,7 +119,10 @@ mod tests {
                 name: "auth".to_string(),
                 color_class: "c-auth".to_string(),
                 owner: "auth-hardening · gustavo".to_string(),
-                lines: vec![("TTL conta do recebimento".to_string(), "desde a31".to_string())],
+                lines: vec![(
+                    "TTL conta do recebimento".to_string(),
+                    "desde a31".to_string(),
+                )],
             }],
             faq: vec![KnowledgeFaqVm {
                 question: "qual é o modelo de custo?".to_string(),

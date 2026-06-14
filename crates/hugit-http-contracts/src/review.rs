@@ -183,7 +183,10 @@ mod tests {
                     summary: "iat/exp corretos.".to_string(),
                     adversarial: true,
                     lens: "correctness".to_string(),
-                    evidence_mono_terms: vec!["iat".to_string(), "test_refresh_full_ttl".to_string()],
+                    evidence_mono_terms: vec![
+                        "iat".to_string(),
+                        "test_refresh_full_ttl".to_string(),
+                    ],
                 },
                 "O campo `exp` é derivado do instante atual — prova byte-idêntica ×3.".to_string(),
             )],

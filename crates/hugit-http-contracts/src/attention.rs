@@ -76,7 +76,10 @@ mod tests {
                     lines: vec!["checks 11 verdes · byte-idêntico ×3".into()],
                 }],
                 actions: vec![
-                    AttentionActionVm { label: "Aprovar e land →".into(), href: None },
+                    AttentionActionVm {
+                        label: "Aprovar e land →".into(),
+                        href: None,
+                    },
                     AttentionActionVm {
                         label: "Ver PR".into(),
                         href: Some("/r/corelink-server/pr/128".into()),

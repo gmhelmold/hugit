@@ -114,8 +114,14 @@ mod tests {
             }],
             save_hint: "Entra em vigor no próximo intent aberto.".into(),
             collaborators: vec![
-                CollaboratorVm { name: "gustavo".into(), role: "Maintainer".into() },
-                CollaboratorVm { name: "ana".into(), role: "Arquiteto".into() },
+                CollaboratorVm {
+                    name: "gustavo".into(),
+                    role: "Maintainer".into(),
+                },
+                CollaboratorVm {
+                    name: "ana".into(),
+                    role: "Arquiteto".into(),
+                },
             ],
             sync: SyncGithubVm {
                 mirror_repo: "humangr/corelink-server".into(),
@@ -124,7 +130,11 @@ mod tests {
                 direction_note: "githugr → GitHub · GitHub → githugr".into(),
                 rows: vec![
                     ("último push".into(), "há 2 min".into(), "".into()),
-                    ("último pull".into(), "há 5 min".into(), "sem conflito".into()),
+                    (
+                        "último pull".into(),
+                        "há 5 min".into(),
+                        "sem conflito".into(),
+                    ),
                 ],
                 how_note: "O espelho corre em background; conflitos param na fila.".into(),
             },

@@ -43,7 +43,10 @@ mod tests {
                 open_prs: 3,
                 last_activity: "há 12 min".into(),
             }],
-            github_app: GithubAppStripVm { saved_usd: 1412.0, saved_ci_minutes: 240 },
+            github_app: GithubAppStripVm {
+                saved_usd: 1412.0,
+                saved_ci_minutes: 240,
+            },
             inbox_pending_total: 5,
             inbox: vec![InboxRowVm {
                 signal_class: "green".into(),
