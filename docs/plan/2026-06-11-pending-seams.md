@@ -754,6 +754,41 @@ After Wave N, a focused re-audit of the WEDGE stale-green class (`docs/review/sw
 
 ---
 
+## PS-18 — `hugit-serve` /v1 backend: P2-gated + Wave-2 seams (disclosed, not faked)
+
+**Source:** the githugr `/v1` HTTP backend (PR #111, 2026-06-13). The read-path serves REAL
+engine data + documented honest defaults; these are the disclosed gaps so nothing is silently
+shipped as complete.
+
+- **Real auth (P2/identity):** `hugit-serve` uses a Bearer **dev-token stub**
+  (`HUGIT_ENGINE_DEV_TOKEN`, length-invariant constant-time compare, fail-closed). The real
+  ADR-0002 Clerk-JWKS / RFC-8693 validation is the **P2 identity seam** (needs the CoreLink
+  tenant) — same family as PS-2. No code path fakes auth; the stub is honest + isolated in
+  `auth.rs`.
+- **Data source (deploy decision):** `state.rs` reads logs from a local dir
+  (`HUGIT_SERVE_LOG_DIR/<repo>.json`). For a real Cloudflare deploy the source is **R2**
+  (a bounded `state.rs` change — an R2/S3 read source, not yet built; build on request) or the
+  **CoreLink CAS** (P2). Tracked in `docs/handoff/2026-06-13-hugit-serve-deploy-handoff.md`.
+- **Structurally-sparse fields (no local seam):** `main_green`/`main_status`, diffstat
+  (file_count/added/removed/diff), file tree (no git-tree API), mirror, the union-oracle,
+  list_groups, GitHub-mirror About fields, fleet KPIs — all served as honest defaults; several
+  need P2 (live AC, CoreLink) or new engine seams (a git-tree reader, a diffstat projector, a
+  local main-CI status). Field-by-field map: `docs/plan/2026-06-13-hugit-serve-wave1-master-plan.md` §0/§5.
+- **Wave-2 (deferred):** the SSE event stream (§2) + all write verbs (§3). Wave-1 is the 5 reads.
+- **`tiny_http` hardening (deployment):** no built-in body-size/slowloris/connection limits;
+  **localhost-until-fronted** by the edge proxy (Cloudflare terminates TLS + should enforce
+  limits) before any public bind.
+- **503-vs-404 existence signal (accepted trade-off):** a corrupt/tampered EXISTING repo → 503
+  (fail-honest, never a fake-empty VM) while an absent repo → 404 — this distinguishes
+  exists-corrupt from absent (a narrow, documented info signal). Accepted: fail-honest beats
+  hiding a corrupt-data fault; owner may revisit if the no-existence-leak rule is read strictly.
+
+**Owner/seam:** P2 CoreLink tenant unblocks real auth + the CoreLink data source + live KPIs;
+the R2 source + the new sparse-field engine seams are buildable on request; deploy is the
+githugr-TL + owner lane.
+
+---
+
 ## Closed seams (reference — do not re-open without owner approval)
 
 | Seam | Shipped | Governing commit |

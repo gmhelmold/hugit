@@ -18,9 +18,12 @@ code/audit/perf/SOTA review sweep (`docs/review/sweep-2026-06-12/`) found and
 POSIX mode bit — a `chmod -x` served a cached green), an O(n²) intent
 reconcile, and a third scrub-engine drift in `hugit-policy`): the buildable
 product is complete; adversarial hardening is ongoing, not closed.** A
-**17-package** Rust workspace (hugit-app + {ui,exit,sidecar} sub-crates = 4
-crates + 13 feature crates — verified by `cargo metadata --no-deps`
-2026-06-11; `hugit-web` MIGRATED OUT 2026-06-10 to ../githugr per the
+**19-package** Rust workspace (hugit-app + {ui,exit,sidecar} sub-crates = 4
+crates + 15 feature crates — verified by `cargo metadata --no-deps`
+2026-06-13; +`hugit-http-contracts` +`hugit-serve` added 2026-06-13 = the
+`/v1` HTTP backend the githugr window reads — headless-consistent: an API the
+vitrine consumes, NOT a UI in the engine, see PR #111 + the deploy handoff;
+`hugit-web` MIGRATED OUT 2026-06-10 to ../githugr per the
 headless-engine doctrine, and `hugit-runner` TRANSFERRED 2026-06-10 to
 ../corelink-runners per the runner-transfer campaign: hugit is git+forge,
 compute is campaign #1's product; the seam is the wire contract — shared
