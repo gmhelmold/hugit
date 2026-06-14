@@ -7,16 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- fix(ci): **kill the `cargo audit` provisioning flake at the root (PS-12b)** — the
-  `audit` gate intermittently failed `no such command: audit` even though
-  install-action installed `cargo-audit` to `~/.cargo/bin` and verified it: the
-  rustup `cargo` proxy's external-subcommand search does not reliably consult
-  `~/.cargo/bin` on the self-hosted runner (the documented rustup-proxy quirk;
-  `cargo-deny`, which lands in `/usr/local/bin`, was found fine in the SAME run).
-  Root-cause fix: invoke the binary DIRECTLY (`cargo-audit audit`, exactly how
-  install-action verifies it) instead of via the proxy, with a self-healing
-  reinstall guard. All code gates (fmt/clippy/test/deny) were already green;
-  advisory coverage is independently held by the `deny` step.
+- fix(ci): **make the gate steps deterministic against the self-hosted runner's
+  PATH/proxy flake (PS-12b)** — the gate failed non-deterministically in DIFFERENT
+  steps across runs, ALWAYS a command-not-found, NEVER a real lint/test/advisory
+  failure: `cargo: command not found` in `deny`/`test` (the rustup `cargo` *proxy*
+  at `~/.cargo/bin` vanishes on this box, while `fmt`/`clippy` found it in the SAME
+  run) and `no such command: audit` (the proxy's external-subcommand search does not
+  reliably consult `~/.cargo/bin`). Root-cause fix: every step prepends the DIRECT
+  toolchain bin (`~/.rustup/toolchains/1.96.0-*/bin` — real `cargo`/`rustc`/`rustfmt`/
+  `cargo-clippy` binaries that do not vanish) ahead of `~/.cargo/bin` + `/usr/local/bin`,
+  and the advisory tools are invoked as their OWN binaries (`cargo-deny`/`cargo-audit`,
+  not via the flaky proxy dispatch) with a self-healing reinstall guard. Code gates
+  (fmt/clippy/test) have been green every run; this stops the infra flake from masking
+  that.
 
 - fix(test): **honest-up the scrubber proptest `safe_address` generator (PS-14
   boundary)** — the randomized `safe_addresses_survive_the_identifier_gate`

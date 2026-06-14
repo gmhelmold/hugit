@@ -50,46 +50,42 @@ jobs:
         with:
           tool: cargo-audit,cargo-deny
 
-      # Each gate step puts cargo on PATH itself rather than relying on the
-      # toolchain action's `$GITHUB_PATH` entry — that propagation is
-      # intermittently lost per-step on the shared self-hosted runner (observed
-      # `cargo: command not found` in `test` while `fmt`/`clippy` in the SAME run
-      # found it; ~37% flake, PS-12-class infra). `~/.cargo/bin` holds the rustup
-      # cargo shim + the taiki-e-installed `cargo-deny`/`cargo-audit`, so this is
-      # additive + bulletproof against the runner's flaky PATH propagation.
+      # Every gate step resolves its OWN toolchain PATH rather than trusting the
+      # toolchain action's `$GITHUB_PATH` entry — that propagation is intermittently
+      # lost per-step on the shared self-hosted runner: BOTH `cargo: command not
+      # found` (the rustup `cargo` *proxy* at `~/.cargo/bin` vanishes on this box —
+      # observed in `deny`/`test` while `fmt`/`clippy` in the SAME run found it) AND
+      # `no such command: audit` (the proxy's external-subcommand search does not
+      # reliably consult `~/.cargo/bin`). ~37% PS-12b-class infra flake, NEVER a real
+      # lint/test/advisory failure. The deterministic close: prepend the DIRECT
+      # toolchain bin (real `cargo`/`rustc`/`rustfmt`/`cargo-clippy` binaries that do
+      # not vanish), then `~/.cargo/bin` + `/usr/local/bin` for the taiki-e-installed
+      # `cargo-deny`/`cargo-audit`; invoke the advisory tools as their OWN binaries
+      # (not via the flaky proxy dispatch) with a self-healing reinstall guard.
       - name: fmt
         run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
+          export PATH="$(echo "$HOME"/.rustup/toolchains/1.96.0-*/bin):$HOME/.cargo/bin:/usr/local/bin:$PATH"
           cargo fmt --all --check
 
       - name: clippy
         run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
+          export PATH="$(echo "$HOME"/.rustup/toolchains/1.96.0-*/bin):$HOME/.cargo/bin:/usr/local/bin:$PATH"
           cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: test
         run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
+          export PATH="$(echo "$HOME"/.rustup/toolchains/1.96.0-*/bin):$HOME/.cargo/bin:/usr/local/bin:$PATH"
           cargo test --workspace --locked
 
       - name: deny
         run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          cargo deny check
+          export PATH="$(echo "$HOME"/.rustup/toolchains/1.96.0-*/bin):$HOME/.cargo/bin:/usr/local/bin:$PATH"
+          command -v cargo-deny >/dev/null 2>&1 || cargo install cargo-deny --locked
+          cargo-deny check
 
-      # `cargo-audit` is installed by taiki-e to `~/.cargo/bin`, but the rustup
-      # `cargo` proxy's external-subcommand search does NOT reliably consult
-      # `~/.cargo/bin` on this runner (the documented rustup-proxy quirk) — so
-      # `cargo audit` intermittently fails `no such command: audit` even though the
-      # binary is present and install-action verified it (`cargo-deny`, which lands
-      # in `/usr/local/bin`, is found fine; PS-12b-class infra). Fix: invoke the
-      # binary DIRECTLY (`cargo-audit audit`, exactly how install-action verifies
-      # it) — bypassing the proxy dispatch — with a self-healing reinstall guard in
-      # case the prebuilt binary is absent. Advisory coverage is also held by the
-      # `deny` step (cargo-deny's `advisories` check reads the same RUSTSEC DB).
       - name: audit
         run: |
-          export PATH="$HOME/.cargo/bin:/usr/local/bin:$PATH"
+          export PATH="$(echo "$HOME"/.rustup/toolchains/1.96.0-*/bin):$HOME/.cargo/bin:/usr/local/bin:$PATH"
           command -v cargo-audit >/dev/null 2>&1 || cargo install cargo-audit --locked
           cargo-audit audit --deny warnings
 
