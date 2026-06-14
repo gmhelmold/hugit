@@ -53,6 +53,61 @@ impl EngineErr {
         }
     }
 
+    /// 400 — a mutating verb arrived with no `Idempotency-Key` (spec §3). The
+    /// write-door rejects BEFORE any side effect.
+    #[must_use]
+    pub fn idempotency_required() -> Self {
+        Self {
+            status: 400,
+            code: "IDEMPOTENCY_REQUIRED",
+            reason: "toda escrita exige um Idempotency-Key".to_string(),
+        }
+    }
+
+    /// 409 — the same `Idempotency-Key` was replayed with a DIFFERENT body. The
+    /// verb is NEVER re-executed; the conflict is reported (spec §3).
+    #[must_use]
+    pub fn idem_mismatch() -> Self {
+        Self {
+            status: 409,
+            code: "IDEM_MISMATCH",
+            reason: "Idempotency-Key reutilizada com um corpo diferente".to_string(),
+        }
+    }
+
+    /// 403 — a step-up-gated verb (policy, erasure) without fresh reauth (spec §3).
+    /// 403 is authZ/step-up; 401 is always authN — they never overlap.
+    #[must_use]
+    pub fn step_up_required() -> Self {
+        Self {
+            status: 403,
+            code: "STEP_UP_REQUIRED",
+            reason: "esta ação exige reautenticação recente".to_string(),
+        }
+    }
+
+    /// 403 — a policy rule refused the verb SYNCHRONOUSLY (spec §3: a recusa nunca
+    /// chega depois). `reason` is the pt-BR "a regra exige <x>" line.
+    #[must_use]
+    pub fn policy_denied(reason: impl Into<String>) -> Self {
+        Self {
+            status: 403,
+            code: "POLICY_DENIED",
+            reason: reason.into(),
+        }
+    }
+
+    /// 400 — a malformed/invalid request body (e.g. an unknown `mode`/`verdict`
+    /// enum value). Distinct from the auth/idempotency/policy refusals.
+    #[must_use]
+    pub fn invalid_request(reason: impl Into<String>) -> Self {
+        Self {
+            status: 400,
+            code: "INVALID_REQUEST",
+            reason: reason.into(),
+        }
+    }
+
     /// The `{code, reason}` JSON body (UTF-8). Exactly the two fields the frozen
     /// client deserializes; extra fields are never added.
     #[must_use]

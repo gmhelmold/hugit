@@ -59,6 +59,7 @@ pub mod review;
 pub mod search;
 pub mod security;
 pub mod viewer_can;
+pub mod write_requests;
 
 pub use account::*;
 pub use actions::*;
