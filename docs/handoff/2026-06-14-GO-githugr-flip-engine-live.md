@@ -65,7 +65,7 @@ site. No write credential, no snapshot export on your side.
 ## What I need from you
 
 Nothing blocking — the ball is in your court. Just **ping once it's live** so I can
-confirm the 5 reads render real on the public URL. If a read 503s/404s in prod,
+confirm the 11 reads render real on the public URL. If a read 503s/404s in prod,
 send me the path + response and I'll debug the R2 wiring.
 
 — routed via owner; secrets out-of-band; corelink-server never exported.
