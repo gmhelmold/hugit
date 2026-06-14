@@ -29,6 +29,7 @@
 pub mod account;
 pub mod actions;
 pub mod attention;
+pub mod write_requests;
 pub mod blob;
 pub mod branches;
 pub mod campaign;
