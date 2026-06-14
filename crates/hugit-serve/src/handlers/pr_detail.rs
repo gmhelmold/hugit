@@ -415,14 +415,13 @@ fn zero_cost() -> CostSplitVm {
 /// from the campaign + bundle size).
 fn pr_title(opened: &OpenedPr) -> String {
     let n = opened.intent_ids.len();
-    if opened.campaign.is_empty() {
+    // `pr_id` is payload-derived free text (not a router-validated u32), so the
+    // WHOLE composed title is scrubbed at the read boundary — a secret-shaped
+    // pr_id embedded here would otherwise echo verbatim.
+    let raw = if opened.campaign.is_empty() {
         format!("PR #{} — {} intents", opened.pr_id, n)
     } else {
-        format!(
-            "PR #{} ({}) — {} intents",
-            opened.pr_id,
-            scrub(&opened.campaign),
-            n
-        )
-    }
+        format!("PR #{} ({}) — {} intents", opened.pr_id, opened.campaign, n)
+    };
+    scrub(&raw)
 }

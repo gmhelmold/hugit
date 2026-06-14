@@ -139,16 +139,14 @@ fn prs_for_campaign(log: &EventLog, ledger: &Ledger, name: &str) -> Vec<Campaign
 fn build_campaign_pr(log: &EventLog, ledger: &Ledger, opened: &OpenedPr) -> CampaignPrVm {
     let number = opened.pr_id.parse::<u32>().unwrap_or(0);
     let n = opened.intent_ids.len();
-    let title = if opened.campaign.is_empty() {
+    // `pr_id` is payload-derived free text (not a router-validated u32) → the
+    // WHOLE composed title is scrubbed at the read boundary.
+    let raw_title = if opened.campaign.is_empty() {
         format!("PR #{} — {} intents", opened.pr_id, n)
     } else {
-        format!(
-            "PR #{} ({}) — {} intents",
-            opened.pr_id,
-            scrub(&opened.campaign),
-            n
-        )
+        format!("PR #{} ({}) — {} intents", opened.pr_id, opened.campaign, n)
     };
+    let title = scrub(&raw_title);
     let landed = pr_has_event(log, PR_LANDED_KIND, &opened.pr_id);
     let state_label = if landed {
         "pousou ✓".to_string()

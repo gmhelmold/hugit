@@ -164,7 +164,7 @@ pub fn build_checks(log: &EventLog, repo: &str) -> ChecksVm {
                 key: scrub(&row.name.clone().unwrap_or_default()), // REAL (scrubbed read-boundary)
                 cached: true,                                      // REAL
                 hash,                                              // REAL (prefix)
-                from_pr: row.pr_id.clone().unwrap_or_default(),    // REAL or ""
+                from_pr: scrub(&row.pr_id.clone().unwrap_or_default()), // REAL or "" (payload id: scrubbed read-boundary)
                 command: String::new(),                            // STUB — not in log payload
                 saved: String::new(),                              // STUB — not in log payload
                 ago: String::new(),                                // STUB — not in log payload
