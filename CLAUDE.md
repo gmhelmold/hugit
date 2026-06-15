@@ -217,11 +217,44 @@ every P0/P1 closed at root, incl. the cross-resource idempotency replay the seco
 audit caught. Lead-owned T3 design (the `docs/plan/2026-06-14-…-wave2-writes-master-plan.md`
 §6 checkpoints, decided under the owner's "tech lead owns decisions" mandate): `dispatch` never
 auto-spawns (P2 runner seam), `erasure` records the decision but NEVER executes (X12 = P2),
-`undo` is append-only (`op.undone`, never a chain rewrite). The **close-the-product engine
-scope is complete** — reads (11 real on R2) + writes (9) on `main`. What remains is
-owner/infra-gated: the R2 write credential (live writes in R2 mode), the githugr deploy/flip,
-and the ~15 git-layer/identity reads that stay honest-default fixture (a product decision, not
-hollow shells).
+`undo` is append-only (`op.undone`, never a chain rewrite).
+
+**Waves 3 → 5b (2026-06-14, #116·#117/#118·#119·#120 all merged to `main`): the
+close-the-product engine scope is COMPLETE — 20 reads + SSE + 9 writes + real
+request auth.** Built by Spec→Build→Audit agent pipelines, lead-integrated centrally
+(agents return code-as-text; parallel tree-mutation is the banked corruption
+incident). **Wave-3** (#116): `review`·`issues`·`security` go real on the write-backed
+records. **Wave-4** (#117→#118): 6 more deferred reads go real
+(`settings`·`releases`·`search`·`viewer-can`·`dashboard`·`attention`); the Spec phase
+GATED OUT a hollow one (`actions` dropped — it was the write-path `Accepted` shape, not
+a feed), and the per-handler adversarial audit caught + closed a **systemic class**
+(the "exemption-is-a-hole" leak: `pr_id`/`rule_id` are user-supplied payload STRINGS,
+not numbers — a secret-shaped id echoed into a composite text field leaked; now
+read-boundary-scrubbed across **all 18 read handlers**, sound against any writer).
+**Wave-5a** (#119): the **SSE event stream** `GET …/events?since=` (spec §2,
+replay-then-close; wire seq is 1-based — a lead cold-verify against the frozen client
+mock caught a `seq>since` off-by-one that would have dropped the first event; true
+live-tail is the P2 seam — the sync `tiny_http` loop can't hold a stream open).
+**Wave-5b** (#120): **`POST /v1/token`** (RFC-8693 Clerk JWT → short-lived opaque
+engine token) + a two-tier request-auth gate (Clerk-minted engine token, else the
+dev-token fallback); security-critical, lead crypto-audited + an adversarial auth audit
+(6/7 CLEAN, one LOW step-up finding hardened: the `X-Step-Up` header is now dev-principal-
+only, future-proofing the P2 Clerk seam). `alg` pinned to RS256 on the untrusted header
+before any key; tokens are SHA-256-keyed + TTL-swept + never logged; `jsonwebtoken 9.3.1`
+added with ZERO new lock versions. The **`result_binding_v2` conformance vector** (§7.1,
+contract **v1.4.0**, ratified hugit-side) is mirrored byte-identical under the X4 drift
+tripwire — it pins the full-outcome attestation binding (`…‖i32_be(exit)‖
+u32_be(artifacts.len)‖Σ(LP(path)‖LP(digest))`) the fabric shipped to close a
+verdict-forgery surface; hugit's ed25519 v2-verifier wires at the P2 attestation-verify
+path. **What remains is owner/infra-gated** (a product decision, not hollow shells): the
+R2 write credential (live writes), the githugr deploy/flip + the engine-container rebuild
+from `main` (the deployed image is stale — the new reads 404 until it rebuilds), the live
+Clerk JWKS URL + mandatory `azp`, the FC3 fabric-observed attestation axes, and the
+~12 git-layer/identity reads (`blob`·`compare`·`edit`·`org`·`profile`·`account`·…) that
+stay honest-default fixture (the window's hybrid provider serves those client-side).
+Cross-repo loop closed 2026-06-14: replies to githugr (the 404 = stale image, rebuild
+from `main`) and to the corelink-runners TL (4 handoffs — §7.1 v2 ratified, §7 M1 scope
+accepted, §13.2 ingest confirmed, P2 transport decided) in `docs/handoff/`.
 
 Read first: `docs/whitepaper/hugit-v1.md` (product design) ·
 `docs/product/product.md` (the product brief: ICPs, killers, positioning, pricing posture) ·
