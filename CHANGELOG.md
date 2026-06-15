@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- docs(seams): **close the remaining in-control pending-seam halves + reconcile the
+  register to reality** (the infra-gated ones are owner/P2, untouched).
+  - **PS-4** (hugit-side DONE): `docs/interop.md` §8 now frames `HUGIT_RUNNER_HOST`
+    as the INTENTIONAL cross-product seam name (contract-frozen, not a naming error,
+    do-not-fix). Only the sibling-repo doc-title rename (in `../corelink-runners`)
+    remains — owner-coordinated.
+  - **PS-7** (docs-acceptance DONE): interop.md §8 documents that fleet-dispatch /
+    multi-env orchestration MUST pass `--toolchain <digest>` explicitly (so the
+    toolchain axis is never the shared `toolchain-unprobed` constant → no cross-env
+    false cache hit).
+  - **PS-12b** (registry-corruption half CLOSED): recorded that the `ci.yml`
+    CARGO_HOME isolation (`$HOME/.cargo-hugit-ci`) kills the cross-repo registry
+    corruption race by construction; only benign CPU/IO contention remains (the
+    dedicated-runner P2 seam).
+  - **PS-18** (reconciled): noted that Waves 1–5b shipped most originally-listed
+    gaps (20 reads + SSE + 9 writes + token + R2 source); narrowed the residual to
+    the genuinely owner/infra-gated set (live Clerk config, CoreLink CAS, GitHub-App
+    mirror fields, fleet KPIs, live-tail SSE) + the ~12 git-layer reads kept
+    honest-default by owner product decision.
+  - **token.rs hygiene**: removed a stale comment block that called the embedded
+    test RSA keypair a "PLACEHOLDER" and warned tests would `todo!()`-panic "until
+    filled" — the keypair is a real (owner-waived, test-only) 2048-bit key and the
+    21 token tests sign against it and pass. No code/behavior change.
+
 - fix(seams): **close three in-control pending seams — PS-6, PS-10, PS-15 F-2 —
   at root (no infra gate).**
   - **PS-6 (queue verdict projection):** `hugit queue show` now carries a REAL

@@ -652,40 +652,21 @@ mod tests {
     // ──────────────────────────────────────────────────────────────────────────
     // TESTS-LEAD-MUST-FILL: Static RSA keypair
     //
-    // The tests below require a static 2048-bit RSA keypair.  You CANNOT use
-    // the `rsa` crate (it pulls rand 0.8, which collides with rand 0.9.4 under
-    // `multiple-versions = "deny"`).
-    //
-    // LEAD MUST:
-    //   1. Run once (outside this repo):
-    //          openssl genrsa -out /tmp/test.pem 2048
-    //          openssl rsa -in /tmp/test.pem -pubout -out /tmp/test.pub.pem
-    //          # get n and e in base64url:
-    //          openssl rsa -in /tmp/test.pem -noout -text 2>&1 | \
-    //            grep -E "^(modulus|publicExponent)"
-    //          # OR use a small Rust script with the `rsa` crate outside the
-    //          # workspace to extract n/e as base64url.
-    //
-    //   2. Paste the PRIVATE key PEM into TEST_PRIVATE_KEY_PEM below.
-    //   3. Paste the RSA modulus as base64url (no padding) into TEST_N_B64.
-    //   4. Paste the public exponent as base64url (no padding) into TEST_E_B64.
-    //      For e=65537 (0x010001), the base64url value is always: "AQAB"
-    //
-    // ALTERNATIVELY, use the injection approach (no PEM needed at all):
-    //   - In each test, call `jwks.insert_key(kid, DecodingKey::from_rsa_pem(...))`
-    //     instead of the HTTP-fetch path.  The `#[cfg(test)] fn insert_key` method
-    //     on `JwksCache` enables this.
-    //
-    // UNTIL this is filled, every test that calls `make_validator(...)` will
-    // compile but fail at runtime with a `todo!()` panic — which is intentional
-    // (key constants are a real ephemeral test keypair — owner-waived secret-read, test-only).
+    // The tests below use a static, REAL 2048-bit RSA keypair, generated once
+    // out-of-band (`openssl genrsa 2048`) under an owner-authorized secret-read
+    // waiver and pasted below — it is a throwaway TEST keypair (never a real
+    // credential, never used outside `#[cfg(test)]`). We embed it rather than
+    // generate at test time because the `rsa` crate cannot be a dependency: it
+    // pulls `rand 0.8`, which collides with `rand 0.9.4` under the workspace's
+    // `multiple-versions = "deny"` supply-chain policy. The constants ARE
+    // populated (this is NOT a stub — the alg-confusion / tampered-sig / expired
+    // / cross-tenant test matrix signs against this exact key and passes).
     // ──────────────────────────────────────────────────────────────────────────
 
-    /// PLACEHOLDER — replace with an actual 2048-bit RSA private key PEM.
-    /// Generate with: `openssl genrsa 2048`
+    /// A real throwaway 2048-bit RSA private key PEM (test-only, owner-waived).
     const TEST_PRIVATE_KEY_PEM: &[u8] = b"-----BEGIN PRIVATE KEY-----\nMIIEuwIBADANBgkqhkiG9w0BAQEFAASCBKUwggShAgEAAoIBAQCexERzkVvF9PxE\nYt9YKx9rXDIBrnUt2bJSSvQVoODaEHrAmUJK8mxdmK4DaZ9v9iDShKvecvxGVrv4\nfKq+V1W2o0ePbE7hPkVvc/urpp6CJFvWJJzZOl4uyOBGgBPyou4M4DrQUPzdoSVK\n9DLYlVbTbkEFLvbC5baZRNfSfeWVbyckG2tuJfqKGqrofEOi5GNPmPOlOIjalvoY\nXTQaS0E7Jcg1s1ydAhcj3slkqztxbLwlzGwGnt6cPieD6J3tGs/8YEtTKmtYPdvW\nVJjSGw2Vhr77M6MUXp0/lh6rSSrxgoTXnez1zfa99r/c/j3NiutFM60u8sQ6kjIe\nj1HPFYchAgMBAAECgf9CmeZJthSzTzNitFoeSVzkzgr0k1wPF4ZovFaG0nCL0gTk\nKrRs6L+uKrdaXhX+iKWrfaM3axtHniYEnONchlGbFHRq7aA/pUPqyxXTRQcM3vwW\nwr+O/Kpve2WOsyCf9lUd2f2acOSBTDm83p2tdSTKrmqB7qwEpvRh3O6WPQJVERzZ\nhtrwxLMmcgk+BjgJSAzSB9rD60J4v6RexIxyo93t82vNnYdjAsJvWGcRvtZHCYUv\n4aKhGAejL/xFLKZVwmZElcr2qh0zq9nAF6kUK/oMCEcAvse2qwprT4yeI75aKUA3\nXZgjne+d1JposvXuNhgXHuDhs3PFmT9r0IMVxuECgYEA1FcYPEP5p4A7mX8xJPsP\nrfgevlnU8NPncDbsBa7g181pjhbRMbTnz+M/bgvLaI7luq0mtlfCL/MRDAZMbQ3O\nx/mc3JJIe6qGJRRd1H7WZeDmdBkwNEe9FPMWhpKIKWxWZ8gthQUmaJh6I/TxqAmD\n/Nq2oWcBQxeI1iUXX2uVrk0CgYEAv2k72u22nQbvGnJ6Nvie0KsHa5JoGDwla9oK\nCsU9TVSsXOjMVh79vRG7n8zPQbqdC7c5NCehfDR5QG/b6lH89lOJ3oVWWba6YyYD\nKFkOu0p5K88zNicUb/ETdxno+vVVsCn0Eg9ZBYF1CZzPEoDEVVc3k1d0wCpGJsIT\n/HlnriUCgYADROgBnYZNduL0BQpLqHXgVs6aXaWyo4CPsLjHiZ66k9YJMv67hi5/\ne98xIYtbK8ALtLjA2+8Ib/SWO86XazwAxi4NE098X+66yWp8aAuC/AhwRyb/1w7p\nMKjrH3xrLtjRtjpFLwQdXiObRB0oWiUnEnL3Xy+cydL4gQ+wD2b5jQKBgAu2Oq1Y\nojXVeMfbfVLjv4PxExEn8iqZc4i33KlwDCIxLiK5M9eJKelprltGwt+4tWdEHMHu\nMtlQtKKWtZQO1DWWQvdUnUX8AkeSydqsKFSZZ/SgRvfnSD7ZN2GwOisw279dsctx\nGPdXRnwCFkGBk4HNRl9DmKcxbv1sHqDyJL/pAoGBAMMshE3yJN/lkNIuRO2ko2T2\nXA2U9wumZcL8Msg6NzVpcvxmzuQEcOnRxERJecDS+gnRNjC/HaY/1XS9q67U2FRf\nbyyaZ/PBiT4t1e72BEyI8LXLlJvoTE/shuiDfeOzKGb+Ali/JJ2vTnX1znOfPpPH\n5jYWMXnUKTzi9klPffcL\n-----END PRIVATE KEY-----\n";
 
-    /// PLACEHOLDER — base64url (no padding) of the RSA modulus.
+    /// base64url (no padding) of the RSA modulus `n` for the key above.
     const TEST_N_B64: &str = "nsREc5FbxfT8RGLfWCsfa1wyAa51LdmyUkr0FaDg2hB6wJlCSvJsXZiuA2mfb_Yg0oSr3nL8Rla7-HyqvldVtqNHj2xO4T5Fb3P7q6aegiRb1iSc2TpeLsjgRoAT8qLuDOA60FD83aElSvQy2JVW025BBS72wuW2mUTX0n3llW8nJBtrbiX6ihqq6HxDouRjT5jzpTiI2pb6GF00GktBOyXINbNcnQIXI97JZKs7cWy8JcxsBp7enD4ng-id7RrP_GBLUyprWD3b1lSY0hsNlYa--zOjFF6dP5Yeq0kq8YKE153s9c32vfa_3P49zYrrRTOtLvLEOpIyHo9RzxWHIQ";
 
     /// base64url of the public exponent.  For e=65537 this is always "AQAB".
