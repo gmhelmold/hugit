@@ -29,7 +29,7 @@ pub mod search;
 pub mod security;
 pub mod viewer_can;
 
-pub use admin::{build_admin_overview, build_audit, build_erasure};
+pub use admin::{build_admin_overview, build_admin_tokens, build_audit, build_erasure};
 pub use attention::build_attention;
 pub use branches::build_branches;
 pub use campaign::build_campaign;

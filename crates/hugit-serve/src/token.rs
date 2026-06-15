@@ -469,6 +469,25 @@ impl TokenStore {
             }
         }
     }
+
+    /// List the ACTIVE (unexpired) sessions for the admin area — sanitized: each
+    /// entry is `(handle, record)` where `handle` is the hex of the stored
+    /// `SHA-256(token)` (a non-secret, non-reversible identifier — the raw token
+    /// is never stored, so this leaks nothing). Sweeps expired entries first, so
+    /// the list is exactly the live sessions. Single-host (the in-process store);
+    /// a fleet-wide session list is the P2 shared-store seam.
+    pub fn list(&self) -> Vec<(String, TokenRecord)> {
+        let now = now_secs();
+        let mut guard = match self.tokens.lock() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(), // poisoned → empty (fail-safe, never panic)
+        };
+        guard.retain(|_, v| v.expires_at > now);
+        guard
+            .iter()
+            .map(|(h, r)| (hex::encode(h), r.clone()))
+            .collect()
+    }
 }
 
 /// The three-way outcome of a token lookup.

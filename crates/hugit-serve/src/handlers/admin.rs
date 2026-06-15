@@ -9,12 +9,14 @@
 use std::collections::{BTreeMap, HashSet};
 
 use hugit_http_contracts::admin::{
-    AdminOverviewVm, AuditEntryVm, AuditVm, ErasureHistoryVm, ErasureRowVm,
+    AdminOverviewVm, AdminTokensVm, AuditEntryVm, AuditVm, ErasureHistoryVm, ErasureRowVm,
+    TokenSessionVm,
 };
 use hugit_refstore::EventLog;
 use serde_json::Value;
 
 use crate::fmt::{humanize_age, scrub, sha_prefix, str_field};
+use crate::token::TokenRecord;
 
 /// Default page size for the audit read; capped at [`AUDIT_LIMIT_MAX`].
 const AUDIT_LIMIT_DEFAULT: usize = 100;
@@ -259,6 +261,34 @@ pub fn build_admin_overview(log: &EventLog, repo: &str) -> AdminOverviewVm {
     }
 }
 
+/// `GET /v1/admin/tokens` → [`AdminTokensVm`].
+///
+/// Project the ACTIVE engine-token sessions from the in-process store
+/// (`(handle, record)` pairs the store already sanitized — the raw token is
+/// never stored). `expires_in_secs` is the TTL remaining vs `now`. User/org are
+/// scrubbed at the read boundary (defense-in-depth — they are identity strings).
+pub fn build_admin_tokens(sessions: &[(String, TokenRecord)], now: u64) -> AdminTokensVm {
+    let mut out: Vec<TokenSessionVm> = sessions
+        .iter()
+        .map(|(handle, rec)| TokenSessionVm {
+            handle: handle.clone(),
+            user: scrub(&rec.user),
+            org: scrub(&rec.org),
+            fresh_auth: rec.fresh_auth,
+            expires_in_secs: rec.expires_at.saturating_sub(now),
+        })
+        .collect();
+    // Stable display: soonest-to-expire first.
+    out.sort_by_key(|s| s.expires_in_secs);
+    AdminTokensVm {
+        count: out.len(),
+        sessions: out,
+        note: "sessões do store in-process (single-host); a lista fleet-wide + revoke \
+               são o seam P2 (store compartilhado). TTL curto (300s) auto-expira."
+            .to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,5 +480,35 @@ mod tests {
         assert_eq!(vm.total_prs, 0);
         assert_eq!(vm.log_depth, 0);
         assert_eq!(vm.last_activity_age, "—");
+    }
+
+    #[test]
+    fn admin_tokens_projects_active_sessions_sorted_by_ttl() {
+        let rec = |user: &str, org: &str, exp: u64| TokenRecord {
+            user: user.to_string(),
+            org: org.to_string(),
+            fresh_auth: false,
+            expires_at: exp,
+        };
+        let now = 1000u64;
+        let sessions = vec![
+            ("h_far".to_string(), rec("clerk-sub-1", "org-a", 1290)), // +290s
+            ("h_soon".to_string(), rec("clerk-sub-2", "org-b", 1060)), // +60s
+        ];
+        let vm = build_admin_tokens(&sessions, now);
+        assert_eq!(vm.count, 2);
+        // Soonest-to-expire first.
+        assert_eq!(vm.sessions[0].handle, "h_soon");
+        assert_eq!(vm.sessions[0].expires_in_secs, 60);
+        assert_eq!(vm.sessions[1].expires_in_secs, 290);
+        assert_eq!(vm.sessions[0].user, "clerk-sub-2");
+        assert!(vm.note.contains("single-host"));
+    }
+
+    #[test]
+    fn admin_tokens_empty_is_honest() {
+        let vm = build_admin_tokens(&[], 1000);
+        assert_eq!(vm.count, 0);
+        assert!(vm.sessions.is_empty());
     }
 }

@@ -211,6 +211,21 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
                 |log| ok(&handlers::build_attention(log, repo)),
             )
         }
+        // Admin control-plane: active engine-token sessions. Reads the in-process
+        // token store (not the log), so it does not route through `dispatch_repo`.
+        ["v1", "admin", "tokens"] => {
+            if let Err(e) = two_tier_auth(state, headers).map(|_| ()) {
+                return err(e);
+            }
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            ok(&handlers::build_admin_tokens(
+                &state.token_store.list(),
+                now,
+            ))
+        }
         _ => err(EngineErr::not_found()),
     }
 }
