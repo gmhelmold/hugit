@@ -74,6 +74,51 @@ fn present_repo_home_with_bearer_is_200_contract_valid() {
 }
 
 #[test]
+fn admin_control_plane_reads_are_wired_and_contract_valid() {
+    use hugit_http_contracts::admin::{AdminOverviewVm, AuditVm, ErasureHistoryVm};
+    let (state, _d) = state_with_repo("hugit", "[]");
+
+    // audit — paginated timeline (empty log → honest empty page).
+    let (s, b) = route(
+        &state,
+        &Method::Get,
+        "/v1/repos/hugit/audit?since=0&limit=50",
+        &bearer(TOKEN),
+    );
+    assert_eq!(s, 200, "audit body={b}");
+    let audit: AuditVm = serde_json::from_str(&b).expect("AuditVm");
+    assert_eq!(audit.returned, 0);
+    assert_eq!(audit.next_since, None);
+
+    // erasure — governance history.
+    let (s, b) = route(
+        &state,
+        &Method::Get,
+        "/v1/repos/hugit/erasure",
+        &bearer(TOKEN),
+    );
+    assert_eq!(s, 200, "erasure body={b}");
+    let er: ErasureHistoryVm = serde_json::from_str(&b).expect("ErasureHistoryVm");
+    assert_eq!(er.approved_count, 0);
+
+    // admin overview — one-call snapshot.
+    let (s, b) = route(
+        &state,
+        &Method::Get,
+        "/v1/repos/hugit/admin/overview",
+        &bearer(TOKEN),
+    );
+    assert_eq!(s, 200, "overview body={b}");
+    let ov: AdminOverviewVm = serde_json::from_str(&b).expect("AdminOverviewVm");
+    assert_eq!(ov.log_depth, 0);
+    assert_eq!(ov.last_activity_age, "—");
+
+    // admin reads require Bearer like every other /v1 read.
+    let (s, _b) = route(&state, &Method::Get, "/v1/repos/hugit/audit", &[]);
+    assert_eq!(s, 401);
+}
+
+#[test]
 fn missing_bearer_is_401() {
     let (state, _d) = state_with_repo("hugit", "[]");
     let (status, body) = route(&state, &Method::Get, "/v1/repos/hugit/home", &[]);

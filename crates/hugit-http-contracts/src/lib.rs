@@ -28,6 +28,7 @@
 
 pub mod account;
 pub mod actions;
+pub mod admin;
 pub mod attention;
 pub mod blob;
 pub mod branches;

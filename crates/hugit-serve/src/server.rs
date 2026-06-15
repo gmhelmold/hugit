@@ -656,6 +656,31 @@ fn dispatch_repo(state: &AppState, repo: &str, tail: &[&str], query: &str) -> (u
                 None => err(EngineErr::not_found()),
             }
         }),
+        // Admin control-plane reads (operator area) — pure projections over the
+        // verified log, no P2 infra. Audit timeline, erasure governance history,
+        // the one-call overview.
+        ["audit"] => {
+            let since = query_param(query, "since").parse::<u64>().unwrap_or(0);
+            let limit = query_param(query, "limit").parse::<usize>().unwrap_or(0);
+            let kind = query_param(query, "kind");
+            let principal = query_param(query, "principal");
+            let kind_filter = (!kind.is_empty()).then_some(kind);
+            let principal_filter = (!principal.is_empty()).then_some(principal);
+            with_log(load, |log| {
+                ok(&handlers::build_audit(
+                    log,
+                    repo,
+                    since,
+                    limit,
+                    kind_filter.as_deref(),
+                    principal_filter.as_deref(),
+                ))
+            })
+        }
+        ["erasure"] => with_log(load, |log| ok(&handlers::build_erasure(log, repo))),
+        ["admin", "overview"] => {
+            with_log(load, |log| ok(&handlers::build_admin_overview(log, repo)))
+        }
         _ => err(EngineErr::not_found()),
     }
 }

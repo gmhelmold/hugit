@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(serve): **admin control-plane reads (operator area), engine half.** Three
+  new `/v1` reads back the hugit-authored / githugr-hosted operator admin area —
+  all pure projections over the already-chain-verified log (no P2 infra):
+  - `GET /v1/repos/{repo}/audit?since=&limit=&kind=&principal=` → `AuditVm`: the
+    paginated, all-kinds event timeline (who/what/when + integrity `hash_short`),
+    forward cursor (`next_since`), exact-`kind` + `principal`-substring filters.
+    The raw payload is NEVER echoed — `summary` is a kind-aware, scrubbed
+    one-liner over the safe id field only (proven: a planted `ghp_…` in a payload
+    does not appear in the projection).
+  - `GET /v1/repos/{repo}/erasure` → `ErasureHistoryVm`: every erasure decision
+    (approved + denied, latest-per-id, newest first), execution always `pending`
+    (X12 execution is the P2 CAS-scrub seam).
+  - `GET /v1/repos/{repo}/admin/overview` → `AdminOverviewVm`: the one-call
+    operational snapshot (queue depth, active campaigns, attention — reusing
+    `build_dashboard` so it agrees by construction — total PRs, enabled policy
+    rules, erasure decisions, log depth, last-activity age).
+  Auth: the admin reads ride the same Bearer two-tier gate as every `/v1` read.
+  6 tests (5 projection unit + 1 HTTP route/wiring). The githugr UI (the admin
+  AREA screens consuming these) is the next slice, authored in `../githugr`.
+
 - docs(seams): **close the remaining in-control pending-seam halves + reconcile the
   register to reality** (the infra-gated ones are owner/P2, untouched).
   - **PS-4** (hugit-side DONE): `docs/interop.md` §8 now frames `HUGIT_RUNNER_HOST`

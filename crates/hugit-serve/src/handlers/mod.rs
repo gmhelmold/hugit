@@ -6,6 +6,7 @@
 //! (§0/§5): REAL engine data where it exists, the documented honest default
 //! elsewhere — never faked. Signatures are FROZEN (the scaffold ⇄ handler seam).
 
+pub mod admin;
 pub mod attention;
 pub mod branches;
 pub mod campaign;
@@ -28,6 +29,7 @@ pub mod search;
 pub mod security;
 pub mod viewer_can;
 
+pub use admin::{build_admin_overview, build_audit, build_erasure};
 pub use attention::build_attention;
 pub use branches::build_branches;
 pub use campaign::build_campaign;
