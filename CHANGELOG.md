@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(serve): **harden the admin control-plane from a 3-lens adversarial audit.**
+  A fresh-context adversarial sweep (redaction · auth/access · DoS/correctness) of
+  the new `/v1` admin reads found — and this closes — the real holes; the base held
+  (auth gate, slug-guard, non-reversible token handle, pagination, panic-safety all
+  confirmed clean).
+  - **Cross-tenant session leak (P1):** `GET /v1/admin/tokens` discarded the
+    principal and listed EVERY org's sessions. Now scoped by the caller's tenant —
+    a Clerk principal (`clerk:{org}:{user}`) sees ONLY its own org; the platform
+    operator (`orchestrator:`) sees all; an unrecognized principal fails closed to
+    empty. New `TokenStore::list_for_org(scope)` + test
+    `list_for_org_scopes_to_tenant_no_cross_tenant_leak`.
+  - **Read-boundary scrub completeness:** `ErasureRowVm.state` (P1) and
+    `AuditEntryVm.kind` were the two VM fields surfaced RAW — a tampered-log value
+    could ride them past the module's "every surfaced field scrubbed" invariant.
+    Both now `scrub`-ed (no-op on the legit fixed vocab; closes the leak vector).
+  - **Honesty fixes:** corrected the `TokenStore::lookup` comment that overstated
+    its constant-time guarantee (it `break`s on match — per-key compare is
+    constant-time, loop position is not, but it's not an exploitable oracle);
+    documented the `principal_of` length-1-chain assumption and the
+    `build_admin_overview` O(open_prs × log) bound (accepted at current scale,
+    tracked optimization — not silently shipped as "fine").
+
 - feat(serve): **admin control-plane — active token sessions** (`GET /v1/admin/tokens`
   → `AdminTokensVm`). Lists the ACTIVE engine-token sessions from the in-process
   store (handle = hex of the stored `SHA-256(token)` — non-secret, non-reversible;

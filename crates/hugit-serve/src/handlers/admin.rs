@@ -51,6 +51,11 @@ fn audit_summary(kind: &str, payload: &str) -> String {
 }
 
 /// The acting principal — the tail of the record's principal chain, scrubbed.
+///
+/// Today the HTTP write path always produces a LENGTH-1 chain (`clerk:{org}:{user}`
+/// or `orchestrator:hugit`), so the tail IS the whole chain. If a future identity
+/// seam appends multi-hop chains, earlier hops are NOT surfaced here — revisit
+/// (scrub + surface the full chain) before that lands.
 fn principal_of(chain: &[String]) -> String {
     match chain.last() {
         Some(p) if !p.is_empty() => scrub(p),
@@ -104,7 +109,11 @@ pub fn build_audit(
         }
         entries.push(AuditEntryVm {
             seq: record.seq,
-            kind: record.kind.clone(),
+            // Scrubbed for consistency with the module's read-boundary invariant.
+            // `kind` is fixed engine vocabulary on every write path (so scrub is a
+            // no-op in practice), but a tampered/crafted log record could carry an
+            // arbitrary `kind` — defense-in-depth, no field escapes the scrub.
+            kind: scrub(&record.kind),
             principal,
             summary: audit_summary(&record.kind, &record.payload),
             age: humanize_age(record.recorded_at),
@@ -148,7 +157,12 @@ pub fn build_erasure(log: &EventLog, _repo: &str) -> ErasureHistoryVm {
         .into_iter()
         .map(|(id, (state, by, at, seq))| ErasureRowVm {
             erasure_id: scrub(&id),
-            state,
+            // Scrubbed: the write verb only ever sets "approved"/"denied" (a bool),
+            // but `state`/`decision` are read from the log payload — a tampered
+            // record could plant a secret here. The only VM field that was raw
+            // (audit finding); now no field escapes the read-boundary scrub.
+            // (scrub is a no-op on "approved"/"denied", so the counts below hold.)
+            state: scrub(&state),
             execution: "pending".to_string(),
             decided_by: by,
             age: humanize_age(at),
@@ -252,6 +266,12 @@ pub fn build_admin_overview(log: &EventLog, repo: &str) -> AdminOverviewVm {
     AdminOverviewVm {
         queue_depth,
         active_campaigns: campaigns_open.len(),
+        // Reuses build_dashboard's attention rule so the two views AGREE by
+        // construction (correctness > a perf inline that would risk drift from the
+        // source of truth). Cost: build_dashboard does per-open-PR sub-scans, so
+        // this is O(open_prs × log) — fine at current scale (small logs); the
+        // tracked optimization is to fold attention into the single pass above
+        // once logs grow. (Audit 2026-06-15, accepted-at-scale.)
         attention_count: super::build_dashboard(log, repo).attention_count,
         total_prs: opened_prs.len(),
         policy_rules_active: policy_enabled.values().filter(|&&e| e).count(),

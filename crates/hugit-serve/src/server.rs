@@ -214,15 +214,29 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
         // Admin control-plane: active engine-token sessions. Reads the in-process
         // token store (not the log), so it does not route through `dispatch_repo`.
         ["v1", "admin", "tokens"] => {
-            if let Err(e) = two_tier_auth(state, headers).map(|_| ()) {
-                return err(e);
-            }
+            let (principal, _) = match two_tier_auth(state, headers) {
+                Ok(p) => p,
+                Err(e) => return err(e),
+            };
+            // Scope to the caller's tenant (audit 2026-06-15 — no cross-tenant
+            // session enumeration): the platform operator (dev/`orchestrator:`
+            // principal) sees ALL sessions; a Clerk principal (`clerk:{org}:{user}`)
+            // sees ONLY its own org; any unrecognized principal is fail-closed to
+            // no org (empty list).
+            let caller = principal.first().map(String::as_str).unwrap_or("");
+            let scope: Option<&str> = if caller.starts_with("orchestrator:") {
+                None
+            } else if let Some(rest) = caller.strip_prefix("clerk:") {
+                Some(rest.split(':').next().unwrap_or(""))
+            } else {
+                Some("")
+            };
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
             ok(&handlers::build_admin_tokens(
-                &state.token_store.list(),
+                &state.token_store.list_for_org(scope),
                 now,
             ))
         }
