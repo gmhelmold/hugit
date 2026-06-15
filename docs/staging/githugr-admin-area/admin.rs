@@ -129,6 +129,31 @@ pub fn render(vm: &AdminVm) -> Markup {
                     }
                     p .note { (vm.erasure.note) }
                 }
+
+                // ── Active sessions (engine tokens) ────────────────────────
+                div .sec {
+                    "Sessões ativas"
+                    span .sp {}
+                    span .badge { (vm.tokens.count) " sessões" }
+                }
+                @if vm.tokens.sessions.is_empty() {
+                    div .zerobox { "nenhuma sessão de engine-token ativa" }
+                } @else {
+                    div .list {
+                        @for s in &vm.tokens.sessions {
+                            div .row .erow {
+                                span .body {
+                                    (s.user) span .who { " · " (s.org) }
+                                }
+                                span {
+                                    @if s.fresh_auth { span .pill.green { "fresh" } } @else { span .pill { "—" } }
+                                }
+                                span .right { span .age { "expira em " (s.expires_in_secs) "s" } }
+                            }
+                        }
+                    }
+                    p .note { (vm.tokens.note) }
+                }
             }
         }
     }

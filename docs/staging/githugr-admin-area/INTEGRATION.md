@@ -88,11 +88,26 @@ pub struct ErasureHistoryVm {
     pub note: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TokenSessionVm {
+    pub handle: String,
+    pub user: String,
+    pub org: String,
+    pub fresh_auth: bool,
+    pub expires_in_secs: u64,
+}
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AdminTokensVm {
+    pub sessions: Vec<TokenSessionVm>,
+    pub count: usize,
+    pub note: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AdminVm {
     pub overview: AdminOverviewVm,
     /// Recent audit rows, NEWEST FIRST (screen reverses the engine's ascending tail).
     pub recent_audit: Vec<AuditEntryVm>,
     pub erasure: ErasureHistoryVm,
+    pub tokens: AdminTokensVm,
 }
 ```
 
@@ -156,6 +171,14 @@ fn w2_admin_vm() -> AdminVm {
             approved_count: 1, denied_count: 1,
             note: "execução de uma erasure aprovada é o seam P2 (CAS-scrub); aqui só a decisão é registrada".to_string(),
         },
+        tokens: AdminTokensVm {
+            sessions: vec![
+                TokenSessionVm { handle: "a1b2c3".to_string(), user: "clerk:gustavo".to_string(),
+                    org: "humangr".to_string(), fresh_auth: true, expires_in_secs: 240 },
+            ],
+            count: 1,
+            note: "sessões do store in-process (single-host); lista fleet-wide + revoke são o seam P2".to_string(),
+        },
     }
 }
 ```
@@ -176,9 +199,13 @@ In `impl Provider for LiveProvider`, after `attention()`:
         let erasure: ErasureHistoryVm = self
             .get_opt_q(&format!("repos/{repo}/erasure"), &[]).await?
             .ok_or_else(|| unavail("erasure"))?;
+        // Tokens are account-level (NOT repo-scoped): `/v1/admin/tokens`.
+        let tokens: AdminTokensVm = self
+            .get_opt_q("admin/tokens", &[]).await?
+            .ok_or_else(|| unavail("tokens"))?;
         let mut recent_audit = audit.entries;
         recent_audit.reverse(); // engine ascending → screen newest-first
-        Ok(AdminVm { overview, recent_audit, erasure })
+        Ok(AdminVm { overview, recent_audit, erasure, tokens })
     }
 ```
 (`get_opt_q` already exists; it attaches the query via reqwest `.query()`.)
