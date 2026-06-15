@@ -17,6 +17,13 @@ hugit-queue = { path = "../hugit-queue" }
 # its attestations sign over the byte-exact frozen pre-image — never a bespoke
 # re-transcription (brutal-review R1).
 hugit-refstore = { path = "../hugit-refstore" }
+# PS-10: the structural-secret / safe-address-shape predicate
+# (`secret_shape::is_safe_identifier_shape`, the R9-3 single source of truth)
+# lives in hugit-ledger. hugit-checks depends on it so the AC write-boundary axis
+# guard is enforced on the SHARED `ActionCache::store` (every backend — file,
+# in-memory, HTTP), not only on the CLI's `FileAc`. No cycle: hugit-ledger
+# depends only on hugit-contracts + hugit-refstore.
+hugit-ledger = { path = "../hugit-ledger" }
 # Real ASYMMETRIC signature for the D12 attestation (item ④ provenance closure):
 # the private key signs, the public key alone verifies — a keyed-MAC would let
 # any verifier forge. Pinned exact; already a workspace dep via hugit-invariants/x2.

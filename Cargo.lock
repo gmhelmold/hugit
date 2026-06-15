@@ -864,6 +864,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "hugit-contracts",
+ "hugit-ledger",
  "hugit-queue",
  "hugit-refstore",
  "proptest",

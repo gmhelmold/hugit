@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(seams): **close three in-control pending seams — PS-6, PS-10, PS-15 F-2 —
+  at root (no infra gate).**
+  - **PS-6 (queue verdict projection):** `hugit queue show` now carries a REAL
+    per-entry + per-batch `verdict` + `implicated_pr`, projected from the SAME
+    `verdict.recorded` events `campaign show` reads (the shared
+    `hugit_ledger::Ledger` reject-sticky fold) — so the two views AGREE by
+    construction. A union batch `"reject"`s if any member intent has an
+    outstanding reject (`implicated_pr` names the first such PR in queue order),
+    `"approve"`s once every member intent is proven, and stays `null` (disclosed
+    `verdict_note`) until a verdict covers the batch — honest unknown, never a
+    faked pass/fail. No P2 dependency (pure projection on the existing log).
+    Tests: `acceptance_wb2::queue_show_projects_real_union_verdict_and_blame` +
+    `…_verdict_is_null_until_a_verdict_covers_the_batch`.
+  - **PS-10 (AC axis guard hoisted to the shared trait):** the structural-secret
+    write-boundary guard now lives on `hugit_checks::client::ac::guard_axes_not_secret`
+    and is enforced by EVERY `ActionCache` backend (`FileAc`/`InMemoryAc`/
+    `HttpAcClient`), not only the CLI `FileAc` — close-by-construction completion
+    of WK-AC. The predicate (`!is_safe_identifier_shape`) is byte-equivalent to
+    the CLI's prior scrub, so behavior is unchanged; `FileAc` delegates and dropped
+    its local copy. `hugit-checks` gained a `hugit-ledger` path-dep (no cycle; **0**
+    new lock versions, single-line lock diff).
+  - **PS-15 F-2 (error JSON `kind`-first):** every agent-facing CLI error envelope
+    now emits `kind`→`message`→`fix`→context (was alphabetical `fix`/`kind`/`message`
+    from `serde_json`'s BTreeMap object) — agents stream-match on `kind`, so it must
+    lead. Both porcelain-error twins render through one shared
+    `porcelain::ordered_error_object` builder; **zero new dep** (no workspace-wide
+    `preserve_order`). PS-15 PERF F5 was found ALREADY verify-once-per-invocation
+    (honest register correction); the residual alloc micro-shave is lead-deferred
+    (marginal, integrity-critical surface). All affected-crate gates green.
+
 - chore(conformance): **mirror the `result_binding_v2` vector (§7.1, contract
   v1.4.0)** byte-identical from corelink-runners (sha `600c99b5…`), under the X4
   drift tripwire (`manifest.sha256` + `acceptance_x4_wire`). Pins the full-outcome

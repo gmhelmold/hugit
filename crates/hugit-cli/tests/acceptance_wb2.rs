@@ -12,8 +12,10 @@
 //!     the same three axes (engine parity — the agent can predict cache behavior).
 //!   - `checks show` aggregates the hit-rate KPIs correctly over a crafted log,
 //!     and is honest-null (never a fabricated 0%) on a log with no check records.
-//!   - `queue show` orders by the queue's `order_index` and groups entries by
-//!     campaign (union-batch composition), with the verdict honestly `null`.
+//!   - `queue show` orders by the queue's `order_index`, groups entries by
+//!     campaign (union-batch composition), and projects a REAL union verdict +
+//!     implicated_pr from the recorded `verdict.recorded` events (PS-6) — honest
+//!     `null` only until a verdict covers the batch.
 //!   - every output is stable JSON under the WB0 one-error/one-exit law
 //!     (`log_not_found` / `parse_log` are the canonical envelopes, exit 2).
 
@@ -265,6 +267,156 @@ fn queue_show_orders_and_groups_by_campaign() {
     assert!(auth["implicated_pr"].is_null());
     // The null verdict is disclosed, not silent.
     assert!(v["verdict_note"].is_string());
+}
+
+#[test]
+fn queue_show_projects_real_union_verdict_and_blame() {
+    // PS-6: `queue show` carries a REAL per-batch + per-entry verdict +
+    // implicated_pr, projected from the SAME `verdict.recorded` events
+    // `campaign show` reads (the shared `hugit_ledger::Ledger` reject-sticky
+    // fold) — so the two views agree by construction. A union with any reject
+    // fails (and names the blamed PR); an all-approve union passes.
+    let dir = scratch("queue-verdict");
+    let log = dir.join("log.json");
+
+    // A canonical `verdict.recorded` payload (a `VerdictObject`). Empty
+    // `claims_checked` exercises the ledger's panel-lens fallback, folding the
+    // aggregate `verdict` field — exactly what `hugit verdict --store` writes
+    // for a single-lens panel.
+    let vo = |intent: &str, verdict: &str| {
+        json!({
+            "intent": intent,
+            "tree_hash": "",
+            "lens": "panel",
+            "model": "porcelain",
+            "prompt_digest": "",
+            "verdict": verdict,
+            "claims_checked": [],
+            "evidence_refs": [],
+        })
+    };
+
+    write_log(
+        &log,
+        &[
+            // Intents landed (the ledger's asked+done axis; verdicts link to these).
+            (
+                "intent.landed",
+                json!({"intent_id":"i1","campaign":"auth","charter":"a"}),
+            ),
+            (
+                "intent.landed",
+                json!({"intent_id":"i2","campaign":"billing","charter":"b"}),
+            ),
+            (
+                "intent.landed",
+                json!({"intent_id":"i3","campaign":"auth","charter":"c"}),
+            ),
+            // PRs opened, each owning one intent.
+            (
+                "pr.opened",
+                json!({"pr_id":"1","campaign":"auth","author_kind":"orchestrator","intent_ids":["i1"]}),
+            ),
+            (
+                "pr.opened",
+                json!({"pr_id":"2","campaign":"billing","author_kind":"orchestrator","intent_ids":["i2"]}),
+            ),
+            (
+                "pr.opened",
+                json!({"pr_id":"3","campaign":"auth","author_kind":"orchestrator","intent_ids":["i3"]}),
+            ),
+            // Queued in order — none landed, so all stay in the queue projection.
+            (
+                "pr.queued",
+                json!({"pr_id":"1","item_id":"it1","order_index":0}),
+            ),
+            (
+                "pr.queued",
+                json!({"pr_id":"2","item_id":"it2","order_index":1}),
+            ),
+            (
+                "pr.queued",
+                json!({"pr_id":"3","item_id":"it3","order_index":2}),
+            ),
+            // Verdicts: the auth union has a reject (i3) → batch rejects, blame
+            // PR 3; the billing union is all-approve → batch approves.
+            ("verdict.recorded", vo("i1", "approve")),
+            ("verdict.recorded", vo("i3", "reject")),
+            ("verdict.recorded", vo("i2", "approve")),
+        ],
+    );
+
+    let (code, v) = run(&["queue", "show", "--log", log.to_str().unwrap()]);
+    assert_eq!(code, 0, "queue show exits 0: {v}");
+
+    let batches = v["batches"].as_array().unwrap();
+    let auth = batches.iter().find(|b| b["campaign"] == "auth").unwrap();
+    assert_eq!(
+        auth["verdict"], "reject",
+        "the auth union carries a reject (i3) → the batch rejects (decisive)"
+    );
+    assert_eq!(
+        auth["implicated_pr"], "3",
+        "PR 3 owns the rejected intent i3 — it is the implicated PR"
+    );
+
+    let billing = batches.iter().find(|b| b["campaign"] == "billing").unwrap();
+    assert_eq!(
+        billing["verdict"], "approve",
+        "the billing union is all-approve → the batch approves"
+    );
+    assert!(
+        billing["implicated_pr"].is_null(),
+        "an approving batch implicates no PR"
+    );
+
+    // Per-entry verdicts mirror each PR's own intents — read from the SAME
+    // ledger flags `campaign show`'s proven/rejected use (PS-6 agreement).
+    let entries = v["entries"].as_array().unwrap();
+    let entry = |pr: &str| entries.iter().find(|x| x["pr_id"] == pr).unwrap().clone();
+    assert_eq!(entry("1")["verdict"], "approve");
+    assert_eq!(entry("3")["verdict"], "reject");
+    assert_eq!(entry("2")["verdict"], "approve");
+}
+
+#[test]
+fn queue_show_verdict_is_null_until_a_verdict_covers_the_batch() {
+    // The honest-null floor (PS-6): with intents landed but NO verdict.recorded
+    // covering them, the verdict stays `null` — never a faked pass.
+    let dir = scratch("queue-verdict-null");
+    let log = dir.join("log.json");
+    write_log(
+        &log,
+        &[
+            (
+                "intent.landed",
+                json!({"intent_id":"i1","campaign":"auth","charter":"a"}),
+            ),
+            (
+                "pr.opened",
+                json!({"pr_id":"1","campaign":"auth","author_kind":"orchestrator","intent_ids":["i1"]}),
+            ),
+            (
+                "pr.queued",
+                json!({"pr_id":"1","item_id":"it1","order_index":0}),
+            ),
+        ],
+    );
+    let (code, v) = run(&["queue", "show", "--log", log.to_str().unwrap()]);
+    assert_eq!(code, 0, "{v}");
+    let auth = v["batches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["campaign"] == "auth")
+        .unwrap();
+    assert!(
+        auth["verdict"].is_null(),
+        "no covering verdict → honest null"
+    );
+    assert!(auth["implicated_pr"].is_null());
+    assert!(v["entries"][0]["verdict"].is_null());
+    assert!(v["verdict_note"].is_string(), "the null is disclosed");
 }
 
 #[test]

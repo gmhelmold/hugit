@@ -1215,37 +1215,6 @@ struct FileAc {
     path: PathBuf,
 }
 
-/// Fail-closed write-boundary guard (WK-AC, defense-in-depth): refuse to persist
-/// a [`CheckResult`] whose memo axes carry a structural-secret shape.
-///
-/// The three memo axes (`tree_hash`, `def_digest`, `toolchain_digest`) are the
-/// content-address the cache keys on — `verify_hit` recomputes the memo key from
-/// them, so they are stored UNREDACTED. A secret in an axis therefore can NOT be
-/// scrubbed (that would destroy every cache hit); the only safe action is to
-/// REFUSE the persist. We reuse the ONE shared structural detector
-/// ([`crate::porcelain::structural_secret_scrub`] — secret iff scrubbing changes
-/// the value) so this never drifts weaker than the door or the engine. In
-/// practice only `toolchain_digest` can trip (the other two are computed hashes),
-/// but all three are guarded uniformly — an exemption is a hole.
-fn guard_axes_not_secret(result: &CheckResult) -> Result<(), hugit_checks::client::ac::AcError> {
-    use hugit_checks::client::ac::AcError;
-    for (field, value) in [
-        ("tree_hash", result.tree_hash.as_str()),
-        ("def_digest", result.def_digest.as_str()),
-        ("toolchain_digest", result.toolchain_digest.as_str()),
-    ] {
-        if crate::porcelain::structural_secret_scrub(value) != value {
-            return Err(AcError::Transport(format!(
-                "AC store refused: memo axis `{field}` carries a structural-secret \
-                 shape — an axis is a content-address stored unredacted, so a \
-                 credential in it cannot be persisted (it would also be unscrubbable \
-                 without busting the cache key)"
-            )));
-        }
-    }
-    Ok(())
-}
-
 impl FileAc {
     /// Construct a file-backed AC over `path`. No lock is held by the backend
     /// itself — each `lookup`/`store` op takes the lock only for its own short
@@ -1299,16 +1268,18 @@ impl ActionCache for FileAc {
 
     fn store(&self, result: &CheckResult) -> Result<(), hugit_checks::client::ac::AcError> {
         use hugit_checks::client::ac::AcError;
-        // WRITE-BOUNDARY GUARD (WK-AC, defense-in-depth, fail-closed): before any
-        // bytes touch the `.ac` file, REFUSE to persist a CheckResult whose memo
-        // axes carry a structural-secret shape. An axis is a content-address the
-        // cache keys on — it CANNOT be scrubbed (that would bust `verify_hit`), so
-        // the only safe action is to refuse the write entirely. The DOOR
-        // (`validate_axis` in `run`) is the primary line; this is the belt-and-
-        // suspenders so NO future code path can leak an axis to the `.ac` even if
-        // the door is bypassed. tree_hash/def_digest are computed hashes (never
-        // secret), but we guard all three uniformly — an exemption is a hole.
-        guard_axes_not_secret(result)?;
+        // WRITE-BOUNDARY GUARD (WK-AC + PS-10): before any bytes touch the `.ac`
+        // file, REFUSE to persist a CheckResult whose memo axes carry a
+        // structural-secret shape. An axis is a content-address the cache keys on
+        // — it CANNOT be scrubbed (that would bust `verify_hit`), so the only safe
+        // action is to refuse the write entirely. The DOOR (`validate_axis` in
+        // `run`) is the primary line; this is the belt-and-suspenders. PS-10
+        // moved the guard onto the SHARED `hugit_checks` layer so EVERY backend
+        // (file/in-memory/HTTP) enforces it identically — the deny-by-default
+        // `is_safe_identifier_shape` predicate is byte-equivalent to the prior
+        // `structural_secret_scrub(v) != v` (a value is a secret iff it is not a
+        // provable safe-address shape), so no behavior changed here.
+        hugit_checks::client::ac::guard_axes_not_secret(result)?;
         // Lock the whole read-modify-write of the cache file so two concurrent
         // stores merge instead of clobbering, then release. The lock is taken HERE
         // (per-op), never held across the execute that produced `result`.
