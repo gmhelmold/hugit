@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use hugit_http_contracts::RepoHomeVm;
+use hugit_refstore::EventLog;
 use hugit_serve::server::{route, serve_on};
 use hugit_serve::state::AppState;
 use tiny_http::{Header, Method, Server};
@@ -125,6 +126,110 @@ fn admin_control_plane_reads_are_wired_and_contract_valid() {
     assert_eq!(toks.count, 0, "no minted sessions yet");
     let (s, _b) = route(&state, &Method::Get, "/v1/admin/tokens", &[]);
     assert_eq!(s, 401, "tokens read requires Bearer");
+}
+
+#[test]
+fn per_tenant_read_gate_enforces_visibility_and_owner() {
+    use hugit_serve::token::ClerkPrincipal;
+    // A PRIVATE repo owned by org-a (a real repo.meta record on a valid chain).
+    let mut log = EventLog::new();
+    log.append_for_test(
+        "repo.meta",
+        vec![],
+        serde_json::json!({"visibility":"private","owner_tenant":"org-a"}).to_string(),
+        0,
+    );
+    let log_json = serde_json::to_string_pretty(log.records()).unwrap();
+    let (state, _d) = state_with_repo("acme", &log_json);
+
+    let tok_a = state
+        .token_store
+        .mint(&ClerkPrincipal {
+            user: "u-a".into(),
+            org: "org-a".into(),
+            fresh_auth: false,
+        })
+        .expect("mint a");
+    let tok_b = state
+        .token_store
+        .mint(&ClerkPrincipal {
+            user: "u-b".into(),
+            org: "org-b".into(),
+            fresh_auth: false,
+        })
+        .expect("mint b");
+
+    // Owning tenant → 200.
+    let (s, _b) = route(&state, &Method::Get, "/v1/repos/acme/home", &bearer(&tok_a));
+    assert_eq!(s, 200, "owning tenant reads its private repo");
+    // Cross-tenant → 404 (no existence leak, NEVER 403).
+    let (s, b) = route(&state, &Method::Get, "/v1/repos/acme/home", &bearer(&tok_b));
+    assert_eq!(s, 404, "cross-tenant denied as 404: {b}");
+    assert!(b.contains("NOT_FOUND"));
+    // Operator (dev-token) → 200 (bypass keeps single-tenant/dev working).
+    let (s, _b) = route(&state, &Method::Get, "/v1/repos/acme/home", &bearer(TOKEN));
+    assert_eq!(s, 200, "operator bypass");
+    // The gate covers EVERY repo read — including the admin reads.
+    let (s, _b) = route(
+        &state,
+        &Method::Get,
+        "/v1/repos/acme/audit",
+        &bearer(&tok_b),
+    );
+    assert_eq!(s, 404, "gate covers admin reads too (cross-tenant)");
+    let (s, _b) = route(
+        &state,
+        &Method::Get,
+        "/v1/repos/acme/audit",
+        &bearer(&tok_a),
+    );
+    assert_eq!(s, 200, "owning tenant reads admin too");
+}
+
+#[test]
+fn private_repo_with_no_owner_denies_tenant_allows_operator() {
+    use hugit_serve::token::ClerkPrincipal;
+    // No repo.meta → fail-safe default PRIVATE, no owner.
+    let (state, _d) = state_with_repo("acme", "[]");
+    let tok = state
+        .token_store
+        .mint(&ClerkPrincipal {
+            user: "u".into(),
+            org: "org-x".into(),
+            fresh_auth: false,
+        })
+        .expect("mint");
+    // A tenant cannot read a private repo with no owner_tenant (fail-safe).
+    let (s, _b) = route(&state, &Method::Get, "/v1/repos/acme/home", &bearer(&tok));
+    assert_eq!(s, 404, "private-no-owner denies a tenant");
+    // The operator still can (bypass — the dev/launch bootstrap).
+    let (s, _b) = route(&state, &Method::Get, "/v1/repos/acme/home", &bearer(TOKEN));
+    assert_eq!(s, 200, "operator bypass on private-no-owner");
+}
+
+#[test]
+fn public_repo_is_readable_cross_tenant() {
+    use hugit_serve::token::ClerkPrincipal;
+    let mut log = EventLog::new();
+    log.append_for_test(
+        "repo.meta",
+        vec![],
+        serde_json::json!({"visibility":"public","owner_tenant":"org-a"}).to_string(),
+        0,
+    );
+    let log_json = serde_json::to_string_pretty(log.records()).unwrap();
+    let (state, _d) = state_with_repo("acme", &log_json);
+    let tok_b = state
+        .token_store
+        .mint(&ClerkPrincipal {
+            user: "u-b".into(),
+            org: "org-b".into(),
+            fresh_auth: false,
+        })
+        .expect("mint b");
+    // A public repo is readable by ANY authenticated tenant.
+    let (s, _b) = route(&state, &Method::Get, "/v1/repos/acme/home", &bearer(&tok_b));
+    assert_eq!(s, 200, "public repo readable cross-tenant");
 }
 
 #[test]

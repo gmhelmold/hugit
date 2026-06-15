@@ -125,10 +125,13 @@ fn respond_sse(state: &AppState, url: &str, headers: &[Header], request: Request
 
     // Auth BEFORE any resource work (the SAME two-tier gate as every other read:
     // a Clerk-minted engine token, else the dev-token fallback).
-    if let Err(e) = two_tier_auth(state, headers).map(|_| ()) {
-        let (status, body) = err(e);
-        return send_json(request, status, body);
-    }
+    let principal = match two_tier_auth(state, headers) {
+        Ok((p, _)) => p,
+        Err(e) => {
+            let (status, body) = err(e);
+            return send_json(request, status, body);
+        }
+    };
     let path = url.split('?').next().unwrap_or("");
     let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     let repo = match segs.as_slice() {
@@ -149,6 +152,13 @@ fn respond_sse(state: &AppState, url: &str, headers: &[Header], request: Request
             return send_json(request, status, body);
         }
     };
+    // Per-tenant read gate — the SAME fail-closed decision as the standard read
+    // path (a denied private repo's event stream is 404, no existence leak).
+    let meta = crate::authz::project_repo_meta(&log);
+    if !crate::authz::authorize_read(&principal, &meta) {
+        let (status, body) = err(EngineErr::not_found());
+        return send_json(request, status, body);
+    }
     let since = parse_since(url.split('?').nth(1).unwrap_or(""));
     let bytes = handlers::build_events(&log, repo, since);
     let resp = Response::from_data(bytes)
@@ -182,11 +192,28 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
     // repo/resource work, so 401 never depends on whether the repo exists).
     match segs.as_slice() {
         ["v1", "repos", repo, tail @ ..] => {
-            if let Err(e) = two_tier_auth(state, headers).map(|_| ()) {
-                return err(e);
+            let (principal, _) = match two_tier_auth(state, headers) {
+                Ok(p) => p,
+                Err(e) => return err(e),
+            };
+            // Load + verify the repo log ONCE (404 absent/unsafe-slug, 503
+            // tampered) BEFORE gating — and reuse it for the handler (no
+            // double-verify).
+            let log = match state.load_verified(repo) {
+                Ok(l) => l,
+                Err(e) => return err(e),
+            };
+            // PER-TENANT READ GATE (fail-closed, re-decided server-side on every
+            // repo read — githugr TL request 2026-06-15 / ADR-0007 §3): a denied
+            // PRIVATE repo is a 404, identical to a non-existent one (no existence
+            // oracle). Operator (dev/orchestrator) bypass keeps single-tenant dev +
+            // the launch repo working until owner_tenant is assigned.
+            let meta = crate::authz::project_repo_meta(&log);
+            if !crate::authz::authorize_read(&principal, &meta) {
+                return err(EngineErr::not_found());
             }
             // The query (stripped above) is re-passed for the param-driven reads.
-            dispatch_repo(state, repo, tail, url.split('?').nth(1).unwrap_or(""))
+            dispatch_repo(repo, tail, url.split('?').nth(1).unwrap_or(""), &log)
         }
         // Identity-scoped reads (/v1/me/*): no {repo} path param. Auth BEFORE any
         // work, then bind the dev-principal's default context = the launch repo
@@ -619,72 +646,68 @@ fn dispatch_repo_write(
 
 /// Dispatch an authenticated `/v1/repos/{repo}/<tail...>` read. `query` is the
 /// raw query string (after `?`), threaded for the param-driven reads (search).
-fn dispatch_repo(state: &AppState, repo: &str, tail: &[&str], query: &str) -> (u16, String) {
-    // Resolve + verify the repo's log once (404 if absent/unsafe, 503 if tampered).
-    let load = || state.load_verified(repo);
+/// Dispatch a repo read over an ALREADY loaded + verified + tenant-gated `log`
+/// (the caller owns load → 404/503 → authz gate). Every arm projects over `log`;
+/// by-id reads return 404 on an absent resource (no existence leak).
+fn dispatch_repo(
+    repo: &str,
+    tail: &[&str],
+    query: &str,
+    log: &hugit_refstore::EventLog,
+) -> (u16, String) {
     match tail {
-        ["home"] => with_log(load, |log| ok(&handlers::build_home(log, repo))),
-        ["landing"] => with_log(load, |log| ok(&handlers::build_landing(log, repo))),
-        ["checks"] => with_log(load, |log| ok(&handlers::build_checks(log, repo))),
-        ["commits"] => with_log(load, |log| ok(&handlers::build_commits(log, repo))),
+        ["home"] => ok(&handlers::build_home(log, repo)),
+        ["landing"] => ok(&handlers::build_landing(log, repo)),
+        ["checks"] => ok(&handlers::build_checks(log, repo)),
+        ["commits"] => ok(&handlers::build_commits(log, repo)),
         // Phase-2 collection reads (real engine backbone).
-        ["chrome"] => with_log(load, |log| ok(&handlers::build_repo_chrome(log, repo))),
-        ["branches"] => with_log(load, |log| ok(&handlers::build_branches(log, repo))),
-        ["insights"] => with_log(load, |log| ok(&handlers::build_insights(log, repo))),
+        ["chrome"] => ok(&handlers::build_repo_chrome(log, repo)),
+        ["branches"] => ok(&handlers::build_branches(log, repo)),
+        ["insights"] => ok(&handlers::build_insights(log, repo)),
         // Wave-3 collection reads (write-backed: issues←issue.transition,
         // security←policy.set/erasure.decided).
-        ["issues"] => with_log(load, |log| ok(&handlers::build_issues(log, repo))),
-        ["security"] => with_log(load, |log| ok(&handlers::build_security(log, repo))),
+        ["issues"] => ok(&handlers::build_issues(log, repo)),
+        ["security"] => ok(&handlers::build_security(log, repo)),
         // Wave-4 collection reads (real log-backed): settings←policy.set,
         // releases←pr.landed, search←q over records, viewer-can←D14 authz matrix.
-        ["settings"] => with_log(load, |log| ok(&handlers::build_repo_settings(log, repo))),
-        ["releases"] => with_log(load, |log| ok(&handlers::build_releases(log, repo))),
+        ["settings"] => ok(&handlers::build_repo_settings(log, repo)),
+        ["releases"] => ok(&handlers::build_releases(log, repo)),
         ["search"] => {
             let q = query_param(query, "q");
-            with_log(load, |log| ok(&handlers::build_search(log, repo, &q)))
+            ok(&handlers::build_search(log, repo, &q))
         }
-        // The capability matrix is per-principal-class (repo-agnostic); the log is
-        // still load-verified for consistent 404/503 semantics with the other reads.
-        ["viewer-can"] => with_log(load, |_log| {
-            ok(&handlers::build_viewer_can(&dev_principal()))
-        }),
+        // The capability matrix is per-principal-class (repo-agnostic); the log
+        // was already load-verified + gated by the caller.
+        ["viewer-can"] => ok(&handlers::build_viewer_can(&dev_principal())),
         ["prs", n] => match n.parse::<u32>() {
-            Ok(num) => with_log(load, |log| {
-                match handlers::build_pr_detail(log, repo, num) {
-                    Some(vm) => ok(&vm),
-                    None => err(EngineErr::not_found()), // get_opt: absent PR → 404, no leak
-                }
-            }),
+            Ok(num) => match handlers::build_pr_detail(log, repo, num) {
+                Some(vm) => ok(&vm),
+                None => err(EngineErr::not_found()), // get_opt: absent PR → 404, no leak
+            },
             // A non-numeric PR id is not a resource that exists → 404 (no leak).
             Err(_) => err(EngineErr::not_found()),
         },
         // Wave-3 by-PR read: the review panel (write-backed: verdict.recorded + pr.comment).
         ["prs", n, "review"] => match n.parse::<u32>() {
-            Ok(num) => with_log(load, |log| match handlers::build_review(log, repo, num) {
+            Ok(num) => match handlers::build_review(log, repo, num) {
                 Some(vm) => ok(&vm),
                 None => err(EngineErr::not_found()),
-            }),
+            },
             Err(_) => err(EngineErr::not_found()),
         },
         // Phase-2 by-id reads — absent resource → 404, no existence leak.
-        ["intents", id] => with_log(load, |log| {
-            match handlers::build_intent_detail(log, repo, id) {
-                Some(vm) => ok(&vm),
-                None => err(EngineErr::not_found()),
-            }
-        }),
-        ["commit", sha] => with_log(load, |log| {
-            match handlers::build_commit_detail(log, repo, sha) {
-                Some(vm) => ok(&vm),
-                None => err(EngineErr::not_found()),
-            }
-        }),
-        ["campaigns", name] => with_log(load, |log| {
-            match handlers::build_campaign(log, repo, name) {
-                Some(vm) => ok(&vm),
-                None => err(EngineErr::not_found()),
-            }
-        }),
+        ["intents", id] => match handlers::build_intent_detail(log, repo, id) {
+            Some(vm) => ok(&vm),
+            None => err(EngineErr::not_found()),
+        },
+        ["commit", sha] => match handlers::build_commit_detail(log, repo, sha) {
+            Some(vm) => ok(&vm),
+            None => err(EngineErr::not_found()),
+        },
+        ["campaigns", name] => match handlers::build_campaign(log, repo, name) {
+            Some(vm) => ok(&vm),
+            None => err(EngineErr::not_found()),
+        },
         // Admin control-plane reads (operator area) — pure projections over the
         // verified log, no P2 infra. Audit timeline, erasure governance history,
         // the one-call overview.
@@ -695,26 +718,25 @@ fn dispatch_repo(state: &AppState, repo: &str, tail: &[&str], query: &str) -> (u
             let principal = query_param(query, "principal");
             let kind_filter = (!kind.is_empty()).then_some(kind);
             let principal_filter = (!principal.is_empty()).then_some(principal);
-            with_log(load, |log| {
-                ok(&handlers::build_audit(
-                    log,
-                    repo,
-                    since,
-                    limit,
-                    kind_filter.as_deref(),
-                    principal_filter.as_deref(),
-                ))
-            })
+            ok(&handlers::build_audit(
+                log,
+                repo,
+                since,
+                limit,
+                kind_filter.as_deref(),
+                principal_filter.as_deref(),
+            ))
         }
-        ["erasure"] => with_log(load, |log| ok(&handlers::build_erasure(log, repo))),
-        ["admin", "overview"] => {
-            with_log(load, |log| ok(&handlers::build_admin_overview(log, repo)))
-        }
+        ["erasure"] => ok(&handlers::build_erasure(log, repo)),
+        ["admin", "overview"] => ok(&handlers::build_admin_overview(log, repo)),
         _ => err(EngineErr::not_found()),
     }
 }
 
 /// Run `f` over a freshly verified log, mapping the load error to its envelope.
+/// Still used by the identity-scoped `/v1/me/*` reads (fixed launch repo, the
+/// caller's own context — NOT an arbitrary-slug repo read, so the per-tenant
+/// repo-gate does not apply there).
 fn with_log(
     load: impl FnOnce() -> Result<hugit_refstore::EventLog, EngineErr>,
     f: impl FnOnce(&hugit_refstore::EventLog) -> (u16, String),

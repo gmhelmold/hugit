@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(serve): **engine-side per-tenant READ authorization** (closes the
+  cross-tenant read critical from the githugr 360° audit; the engine half of the
+  githugr TL's 2026-06-15 request). In live/hybrid the engine served any repo's
+  substance to any authenticated session — now the **engine re-decides fail-closed
+  on every `/v1/repos/{repo}/*` read** (the window's `viewer_can` is a cosmetic
+  hint only; ADR-0007 §3).
+  - **`crate::authz`** (new): `project_repo_meta(log)` projects `visibility` +
+    `owner_tenant` from the latest `repo.meta` record (**fail-safe defaults:
+    PRIVATE, no owner** — never default-public); `authorize_read(principal, meta)`
+    is the gate — `orchestrator:*` operator → bypass (keeps single-tenant dev +
+    the launch repo working); `public` → open; `private` → ONLY a `clerk:{org}:…`
+    principal whose org equals a SET `owner_tenant`; else deny.
+  - **The gate is wired at the read chokepoint** (`route()` repo arm + the SSE
+    `events` path): load+verify ONCE → gate → dispatch, so EVERY repo read +
+    admin read + event stream inherits it with no double-verify. A denied private
+    repo is a **404**, identical to a non-existent one (no existence oracle, never
+    403). The tenant is the ENGINE-resolved principal org (from `two_tier_auth`) —
+    never a window claim; the current engine-token flow needs NO per-read CoreLink
+    introspect.
+  - 13 tests (10 `authz` unit incl. the cross-tenant matrix + 3 HTTP integration:
+    owner→200, cross-tenant→404, operator-bypass, public-cross-tenant, private-no-
+    owner→404, gate-covers-admin-reads). `dispatch_repo` refactored to take the
+    pre-loaded `&EventLog` (single verify per request). fmt + clippy clean; 197
+    serve tests green. Build order per the handoff reply: gate now; the
+    `visibility` VM field + `owner_tenant` assignment-at-creation land with the
+    githugr-vm mirror (awaiting their confirm).
+
 - fix(serve): **harden the admin control-plane from a 3-lens adversarial audit.**
   A fresh-context adversarial sweep (redaction · auth/access · DoS/correctness) of
   the new `/v1` admin reads found — and this closes — the real holes; the base held
