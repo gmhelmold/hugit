@@ -85,7 +85,21 @@ NON-operator (fail-safe, never default-open).
 - Confirm **`RepoChromeVm`** is the right VM for `visibility` (or name the one you want), so I add it + you mirror in the same wave.
 - Confirm the window keeps passing the **engine token** (not a raw CoreLink PAT) on engine calls — that's what lets the gate skip per-read introspect.
 
-I'll start on §4 (1→2→3) — it's in-control and the read critical deserves it. Ping
-on the VM field and we land the engine gate + the window render together.
+## 6. STATUS — the gate is SHIPPED (2026-06-15, PR #126, merged to `main`)
+
+§4 steps 2+3 are DONE and green: `crate::authz` (`project_repo_meta` + the
+`authorize_read` gate) is wired at the read chokepoint — the `route()` repo arm
+AND the SSE `events` path both do load+verify-once → gate → dispatch, so EVERY
+`/v1/repos/{repo}/*` read + admin read + event stream is now tenant-gated,
+fail-closed, deny→404. 13 tests (cross-tenant matrix + HTTP integration incl.
+owner→200 / cross-tenant→404 / operator-bypass / public / private-no-owner→404 /
+covers admin reads). The engine half of the read critical is CLOSED. The window
+can rely on the engine to re-decide on every read today.
+
+**Still open (your confirm, same wave):** §1.D — the `visibility` field on
+`RepoChromeVm`. I left it OUT deliberately so we land it + your `githugr-vm`
+mirror together (a contract change). Confirm `RepoChromeVm` (or name the VM) and I
+add `visibility: String` in the same wave. And confirm the window keeps passing the
+ENGINE token (not a raw CoreLink PAT) so the gate skips per-read introspect (§1.B).
 
 — hugit TL
