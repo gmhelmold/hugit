@@ -45,6 +45,13 @@ pub fn serve_on(state: AppState, server: Server) -> std::io::Result<()> {
         } else {
             Vec::new()
         };
+        // SSE replay: GET /v1/repos/{repo}/events?since=<seq>. Handled BEFORE the
+        // standard (status, String) path because it needs a different Content-Type
+        // and a Vec<u8> body. `respond_sse` consumes `request` in every branch.
+        if method == Method::Get && is_events_path(&url) {
+            respond_sse(&state, &url, &headers, request);
+            continue;
+        }
         // PANIC ISOLATION: a panic inside a handler must degrade to a 503 for THAT
         // request, never take down the whole single-threaded server.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -76,6 +83,82 @@ fn json_content_type() -> Header {
             .expect("static content-type header is valid")
     })
     .clone()
+}
+
+/// The `Content-Type: text/event-stream` header (SSE) — built once, cloned per use.
+fn sse_content_type() -> Header {
+    static CT: OnceLock<Header> = OnceLock::new();
+    CT.get_or_init(|| {
+        Header::from_bytes(&b"Content-Type"[..], &b"text/event-stream"[..])
+            .expect("static sse content-type header is valid")
+    })
+    .clone()
+}
+
+/// Whether `url`'s path is `/v1/repos/{repo}/events` (query ignored).
+fn is_events_path(url: &str) -> bool {
+    let path = url.split('?').next().unwrap_or("");
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    matches!(segs.as_slice(), ["v1", "repos", _, "events"])
+}
+
+/// Parse `?since=<u64>`; absent/unparseable → 0 (replay from the start).
+fn parse_since(query: &str) -> u64 {
+    query_param(query, "since").parse::<u64>().unwrap_or(0)
+}
+
+/// Serve a replay-then-close SSE response. Consumes `request` in EVERY branch.
+/// Auth + slug + load are validated first, identical to the standard read path;
+/// error cases respond with the JSON `{code, reason}` envelope.
+fn respond_sse(state: &AppState, url: &str, headers: &[Header], request: Request) {
+    // A small helper to send a JSON error envelope and return.
+    fn send_json(request: Request, status: u16, body: String) {
+        let resp = Response::from_string(body)
+            .with_status_code(status)
+            .with_header(json_content_type());
+        if let Err(e) = request.respond(resp)
+            && e.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            eprintln!("hugit-serve: sse error-respond: {e}");
+        }
+    }
+
+    // Auth BEFORE any resource work (the SAME two-tier gate as every other read:
+    // a Clerk-minted engine token, else the dev-token fallback).
+    if let Err(e) = two_tier_auth(state, headers).map(|_| ()) {
+        let (status, body) = err(e);
+        return send_json(request, status, body);
+    }
+    let path = url.split('?').next().unwrap_or("");
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let repo = match segs.as_slice() {
+        ["v1", "repos", repo, "events"] => *repo,
+        _ => {
+            let (status, body) = err(EngineErr::not_found());
+            return send_json(request, status, body);
+        }
+    };
+    if !crate::state::is_safe_repo_slug(repo) {
+        let (status, body) = err(EngineErr::not_found());
+        return send_json(request, status, body);
+    }
+    let log = match state.load_verified(repo) {
+        Ok(log) => log,
+        Err(e) => {
+            let (status, body) = err(e);
+            return send_json(request, status, body);
+        }
+    };
+    let since = parse_since(url.split('?').nth(1).unwrap_or(""));
+    let bytes = handlers::build_events(&log, repo, since);
+    let resp = Response::from_data(bytes)
+        .with_status_code(200)
+        .with_header(sse_content_type());
+    if let Err(e) = request.respond(resp)
+        && e.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        eprintln!("hugit-serve: sse respond: {e}");
+    }
 }
 
 /// Route + dispatch one request to a `(status, body)` pair. Socket-free.
