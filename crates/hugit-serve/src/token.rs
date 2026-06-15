@@ -429,22 +429,17 @@ impl TokenStore {
             Ok(g) => g,
             Err(_) => return LookupResult::Invalid, // lock poisoned → fail-closed
         };
-        // Linear scan for constant-time key comparison (mirrors auth.rs).
-        // The store is bounded by active sessions (swept on mint), so this is
-        // safe in practice; for large fleets upgrade to a direct map lookup
-        // (which HashMap already provides — the XOR is redundant there but we
-        // keep it for the timing-invariant guarantee).
-        //
-        // UNVERIFIED: whether Rust's HashMap lookup leaks key-presence timing.
-        // The XOR-fold approach below is conservative: we always scan all entries.
-        // This is correct but O(n) — acceptable for a single-host store where n
-        // is bounded by the sweep; flag for the lead to decide if a direct lookup
-        // is acceptable (it IS constant-time in the sense that HashMap does not
-        // early-exit on byte comparison, only on hash bucket — but that's a
-        // different kind of timing oracle).
-        //
-        // LEAD NOTE: for the single-host, short-TTL store the direct `get` is
-        // fine.  The XOR pattern here matches auth.rs for consistency.
+        // Linear scan with a constant-time XOR PER-KEY comparison (mirrors
+        // auth.rs): each candidate key is compared byte-for-byte without an
+        // early-exit on the bytes, so the per-key compare leaks no byte-position
+        // timing. The loop itself DOES `break` on the first match (audit
+        // correction 2026-06-15: an earlier comment claimed "always scan all
+        // entries" — that is false, the break exits early). So the only timing
+        // signal is the match's POSITION in HashMap iteration order, which is
+        // randomized and not attacker-controllable — not an exploitable oracle.
+        // The store is bounded by active sessions (swept on mint + short TTL), so
+        // the scan is cheap; a direct `get` would also be fine for this single-
+        // host store. The XOR-per-key pattern matches auth.rs for consistency.
         let mut found_key: Option<[u8; 32]> = None;
         let mut found: Option<TokenRecord> = None;
         for (stored_hash, record) in guard.iter() {
@@ -470,13 +465,20 @@ impl TokenStore {
         }
     }
 
-    /// List the ACTIVE (unexpired) sessions for the admin area — sanitized: each
-    /// entry is `(handle, record)` where `handle` is the hex of the stored
-    /// `SHA-256(token)` (a non-secret, non-reversible identifier — the raw token
-    /// is never stored, so this leaks nothing). Sweeps expired entries first, so
-    /// the list is exactly the live sessions. Single-host (the in-process store);
-    /// a fleet-wide session list is the P2 shared-store seam.
-    pub fn list(&self) -> Vec<(String, TokenRecord)> {
+    /// List the ACTIVE (unexpired) sessions for the admin area, SCOPED to a tenant.
+    ///
+    /// `scope`: `Some(org)` returns ONLY that org's sessions (a tenant admin sees
+    /// only their own); `None` returns ALL sessions (the platform operator view).
+    /// **Cross-tenant guard (audit 2026-06-15):** the caller MUST pass their own
+    /// org as the scope unless they are the platform operator — never `None` for a
+    /// tenant principal — so org A cannot enumerate org B's live sessions.
+    ///
+    /// Each entry is `(handle, record)` where `handle` is the hex of the stored
+    /// `SHA-256(token)` (a non-secret, non-reversible identifier — the raw token is
+    /// never stored, so this leaks nothing). Sweeps expired entries first, so the
+    /// list is exactly the live sessions. Single-host (the in-process store); a
+    /// fleet-wide session list is the P2 shared-store seam.
+    pub fn list_for_org(&self, scope: Option<&str>) -> Vec<(String, TokenRecord)> {
         let now = now_secs();
         let mut guard = match self.tokens.lock() {
             Ok(g) => g,
@@ -485,8 +487,15 @@ impl TokenStore {
         guard.retain(|_, v| v.expires_at > now);
         guard
             .iter()
+            .filter(|(_, r)| scope.is_none_or(|org| r.org == org))
             .map(|(h, r)| (hex::encode(h), r.clone()))
             .collect()
+    }
+
+    /// All active sessions (the platform-operator view). Prefer
+    /// [`list_for_org`](Self::list_for_org) with the caller's org for tenant scoping.
+    pub fn list(&self) -> Vec<(String, TokenRecord)> {
+        self.list_for_org(None)
     }
 }
 
@@ -996,6 +1005,34 @@ mod tests {
             org: TEST_ORG.to_string(),
             fresh_auth: fresh,
         }
+    }
+
+    #[test]
+    fn list_for_org_scopes_to_tenant_no_cross_tenant_leak() {
+        let store = TokenStore::new();
+        let pa = ClerkPrincipal {
+            user: "u-a".to_string(),
+            org: "org-a".to_string(),
+            fresh_auth: false,
+        };
+        let pb = ClerkPrincipal {
+            user: "u-b".to_string(),
+            org: "org-b".to_string(),
+            fresh_auth: false,
+        };
+        store.mint(&pa).expect("mint a");
+        store.mint(&pb).expect("mint b");
+        // Platform operator (None) sees BOTH.
+        assert_eq!(store.list_for_org(None).len(), 2, "operator sees all");
+        // Tenant A sees ONLY its own session — NEVER org-b (the cross-tenant guard).
+        let a = store.list_for_org(Some("org-a"));
+        assert_eq!(a.len(), 1, "tenant A sees only its own");
+        assert_eq!(a[0].1.org, "org-a");
+        // Unknown/empty scope → nothing (fail-closed).
+        assert!(
+            store.list_for_org(Some("")).is_empty(),
+            "unknown scope → empty"
+        );
     }
 
     #[test]
