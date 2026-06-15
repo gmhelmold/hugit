@@ -310,12 +310,17 @@ fn dispatch_repo_write(
     fresh_auth: bool,
 ) -> (u16, String) {
     let idem = header_val(headers, "Idempotency-Key").unwrap_or_default();
-    // Step-up is satisfied by a fresh Clerk session (Tier-1 `fresh_auth`) OR the
-    // explicit `X-Step-Up` header (the dev-token Tier-2 path). A Clerk-minted token
-    // from a recently re-authenticated session needs no header.
-    let step_up_header = header_val(headers, "X-Step-Up")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false);
+    // Step-up is satisfied by a fresh Clerk session (Tier-1 `fresh_auth`, derived
+    // from the signed `auth_time`) OR — for the DEV path ONLY — the explicit
+    // `X-Step-Up` header. The header is honored solely for the single trusted dev
+    // orchestrator credential; a Clerk principal can NEVER self-assert step-up via
+    // a header (its step-up MUST come from a freshly re-authenticated session), so
+    // the header gate is future-proofed against the P2 Clerk seam (audit hardening).
+    let is_dev_principal = principal.first().map(String::as_str) == Some("orchestrator:hugit");
+    let step_up_header = is_dev_principal
+        && header_val(headers, "X-Step-Up")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
     let step_up = fresh_auth || step_up_header;
     let p = principal;
     let at = now_ms();
