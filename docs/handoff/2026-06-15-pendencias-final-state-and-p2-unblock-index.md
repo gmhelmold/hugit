@@ -41,13 +41,14 @@ that and most close in one motion.
 | **PS-18 — R2 write cred** | The standing R2 cred is read-only; provide a **write cred** for live writes (reads already work) | `2026-06-14-request-r2-credential-from-corelink.md` |
 | **PS-18 — CoreLink CAS / GitHub-mirror / fleet KPIs** | These need the **live AC (Seam A)** + a **GitHub App** — same P2 tenant family | `2026-06-11-corelink-p2-ceiling-request.md` |
 
-## C. OPEN — owner PRODUCT DECISIONS (not blocked on infra; awaiting a call)
+## C. owner PRODUCT DECISIONS — DECIDED 2026-06-15 (no in-control work pending)
 
-| Item | The decision | Default if undecided |
+| Item | DECISION (owner, 2026-06-15) | Consequence |
 |---|---|---|
-| **PS-18 — ~12 git-layer/identity reads** (blob/compare/edit/org/profile/account/…) | real-when-backed vs honest-default fixture | **honest-default** (the window's hybrid provider serves them client-side; decided posture, not a hollow shell) |
-| **PS-5** — CI fork-guard | only escalates if the repo goes **public** (then switch to `pull_request_target` + env gate) | accepted LOW (private repo); comment + fix-path already in `ci.yml`/`dco.yml` |
-| **PS-4 — sibling rename** | rename the doc-title "hugit-runner" → "CoreLink runner" inside `../corelink-runners` product docs | routed to the corelink-runners owner (session fence forbids hugit mutating a sibling) |
+| **PS-18 — ~12 git-layer/identity reads** (blob/compare/edit/org/profile/account/…) | **KEEP honest-default fixture** | the window's hybrid provider serves them client-side; a conscious decided posture, NOT a hollow shell. No engine work; revisit only if a real git-tree reader is pulled. |
+| **PS-5** — CI fork-guard | **stay PRIVATE for now** | accepted-LOW holds; the threat-model comment + fix-path are already in `ci.yml`/`dco.yml`. The `pull_request_target` hardening is built ONLY if/when the repo goes public. |
+| **Owner/business dashboard** (users · countries · usage volume · growth) | **PARKED — revisit post-launch** | it's a separate surface for a different audience (the founder, across all forges), and needs a user-analytics/telemetry pipeline (signup/usage events + geo-IP) that does not exist, plus actual users (pre-launch). When pulled, it's its own design + data-pipeline project — see the operator-admin handoff §6. |
+| **PS-4 — sibling rename** | doc-title "hugit-runner" → "CoreLink runner" inside `../corelink-runners` | routed to the corelink-runners owner (session fence forbids hugit mutating a sibling). Not a hugit decision. |
 
 ## D. Accepted-by-physics (no action, tracked for audit completeness)
 
