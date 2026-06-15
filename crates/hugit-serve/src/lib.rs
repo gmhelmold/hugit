@@ -19,6 +19,7 @@
 //! `docs/plan/2026-06-13-hugit-serve-wave1-master-plan.md` §0/§5.
 
 pub mod auth;
+pub mod authz;
 pub mod error;
 pub mod fmt;
 pub mod handlers;
