@@ -396,6 +396,10 @@ fn dispatch_repo(state: &AppState, repo: &str, tail: &[&str]) -> (u16, String) {
         ["chrome"] => with_log(load, |log| ok(&handlers::build_repo_chrome(log, repo))),
         ["branches"] => with_log(load, |log| ok(&handlers::build_branches(log, repo))),
         ["insights"] => with_log(load, |log| ok(&handlers::build_insights(log, repo))),
+        // Wave-3 collection reads (write-backed: issues←issue.transition,
+        // security←policy.set/erasure.decided).
+        ["issues"] => with_log(load, |log| ok(&handlers::build_issues(log, repo))),
+        ["security"] => with_log(load, |log| ok(&handlers::build_security(log, repo))),
         ["prs", n] => match n.parse::<u32>() {
             Ok(num) => with_log(load, |log| {
                 match handlers::build_pr_detail(log, repo, num) {
@@ -404,6 +408,14 @@ fn dispatch_repo(state: &AppState, repo: &str, tail: &[&str]) -> (u16, String) {
                 }
             }),
             // A non-numeric PR id is not a resource that exists → 404 (no leak).
+            Err(_) => err(EngineErr::not_found()),
+        },
+        // Wave-3 by-PR read: the review panel (write-backed: verdict.recorded + pr.comment).
+        ["prs", n, "review"] => match n.parse::<u32>() {
+            Ok(num) => with_log(load, |log| match handlers::build_review(log, repo, num) {
+                Some(vm) => ok(&vm),
+                None => err(EngineErr::not_found()),
+            }),
             Err(_) => err(EngineErr::not_found()),
         },
         // Phase-2 by-id reads — absent resource → 404, no existence leak.

@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(serve): **Wave-3 reads — the 3 write-backed surfaces go REAL** (`review` ·
+  `issues` · `security`). Now that the Wave-2 writes emit `verdict.recorded`,
+  `pr.comment`, `issue.transition`, `policy.set`, and `erasure.decided`, three more
+  `/v1` reads serve REAL projected data (never hollow): `GET …/prs/{n}/review`
+  (verdicts + comment timeline from a PR's records; `None`→404), `GET …/issues`
+  (latest-`issue.transition`-per-id folded into the open/backlog/in-flight/closed
+  tabs, latest-wins state + sticky priority), `GET …/security` (the 3 house policy
+  rules' current state from latest-`policy.set`-per-rule + the latest approved
+  `erasure.decided`; the erasure CAS-scrub step is always `pending`, never
+  `executed` — execution is the P2 seam). Read-boundary redaction on every echoed
+  free-text field; honest defaults for the still-P2 fields (diff/attestation/
+  supply-chain/git-layer). Built by a 3-agent fleet against the frozen contract VMs;
+  a lead fix corrected a latest-wins bug in the security policy-rule fold. Per-handler
+  parity + secret-MATRIX tests; clippy `-D warnings` clean; full hugit-serve suite
+  green. The git-layer/identity reads (blob/compare/dashboard/account/…) stay
+  honest-default fixture — a product decision, not hollow shells.
+
+- fix(serve): **Wave-3 read-audit hardening.** A fresh-context adversarial audit of
+  the 3 new read handlers (cold-verified by the lead) closed two defensive defects in
+  `issues`: an `issue_id as u32` overflow that silently wrapped ids > `u32::MAX` into a
+  low-32-bit collision (now rejected, not truncated) and an unbounded transition fold
+  that allocated one map entry per distinct id before the cap (now bounded at the
+  source). `VerdictVm.adversarial = true` was documented as a forge invariant rather
+  than left as a silent hardcode. `review`/`security` audited CLEAN.
+
 - feat(serve): **Wave-2 write path — the 9 `/v1` POST verbs + the write-door**
   (`land`·`verdict`·`comments`·`dispatch`·`issues/{n}/transition`·`policy`·
   `erasure/{id}/decide`·`edit/{path}/propose`·`undo`). Each verb is a PURE function
