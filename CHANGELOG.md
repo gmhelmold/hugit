@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(serve): **Wave-5a — the SSE event stream** (`GET /v1/repos/{repo}/events?since=<seq>`,
+  spec §2). The live-update channel the githugr window subscribes to, as
+  **replay-then-close**: every record with `seq > since` is emitted as an SSE frame
+  (`id: <seq>` ≡ `data.seq`, `data` = `{seq, kind, summary}`), a `gap` sentinel is
+  prepended when `since` is below the last-10k retention floor, and a trailing
+  `: hb` heartbeat closes the body. The `summary` is read-boundary-scrubbed (payload
+  free text); `kind`/`seq` are structural. Auth + safe-slug + the PS-13 verified
+  load gate the stream identically to every other read. **True live-tail is the
+  documented P2 seam** — the sync `tiny_http` loop processes responses serially and
+  cannot hold a stream open; the client reconnects from its advanced `since` cursor
+  (the githugr `EventsClient` already handles clean closure). Designed by a research
+  agent against the frozen client frame format, built + lead-integrated.
+
 - feat(serve): **Wave-4 reads — 6 more deferred surfaces go REAL** (`settings` ·
   `releases` · `search` · `viewer-can` · `dashboard` · `attention`). Built by a
   Spec→Build→Audit agent pipeline whose **Spec phase gated out the hollow ones**:
