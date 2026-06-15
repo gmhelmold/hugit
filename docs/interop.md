@@ -133,6 +133,24 @@ SKUs on the Runners fabric (M4), and githugr's "open in workspace" uses
 | `HUGIT_GH_TEST_REPO` | live GitHub detect (bidir-sync, E1 to real repo) |
 | transparency log endpoint | X8 live publication + boot verify |
 
+> **`HUGIT_RUNNER_HOST` is an INTENTIONAL cross-product seam name, not a naming
+> error (PS-4).** After `hugit-runner` transferred to `../corelink-runners` (the
+> runner-transfer campaign), the env-var name stayed `HUGIT_RUNNER_HOST` ON
+> PURPOSE: it anchors the hugit↔runner wire seam (the variable hugit reads to
+> reach the leased runner box) and is frozen by the integration contract — it
+> does NOT track the runner product's own crate name (`corelink-runner`). Do not
+> "fix" it. (The matching cleanup — the doc-title "hugit-runner" inside the
+> corelink-runners product docs — is the sibling-repo half of PS-4, owner-coordinated.)
+
+> **Fleet-dispatch toolchain requirement (PS-7).** The `hugit check` toolchain
+> memo axis falls back to the constant `toolchain-unprobed` when `--toolchain` is
+> omitted AND `rustc` is unavailable (a sandboxed / rustc-less environment). Two
+> distinct rustc-less environments would then share that constant → the same memo
+> key → a potential cross-env false cache HIT. **Any fleet-dispatch / multi-env
+> orchestration MUST pass `--toolchain <digest>` explicitly** so the toolchain
+> axis is a real fingerprint, never the shared `toolchain-unprobed` constant.
+> Single-env local runs (where `rustc` is probed) are unaffected.
+
 ## 9. Change protocol
 
 `hugit-contracts` is golden-pinned: any shape change is a deliberate,

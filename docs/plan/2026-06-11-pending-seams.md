@@ -88,7 +88,17 @@ implicitly referenced in CHANGELOG WA3 entry
 
 ## PS-4 — Transplant naming: `HUGIT_RUNNER_HOST` env-var + `hugit-runner` doc title inside corelink-runners
 
-**Status:** DEFERRED — naming drift introduced by runner-transfer campaign (WP-R4, 2026-06-10)  
+**Status:** HUGIT-SIDE DONE (2026-06-15); sibling-repo rename owner-coordinated.
+Acceptance criteria 2 + 3 are CLOSED: `docs/interop.md` §8 now carries an explicit
+note framing `HUGIT_RUNNER_HOST` as the INTENTIONAL cross-product seam name (frozen
+by the integration contract, NOT a naming error, do-not-fix) and confirms the
+env-var itself is never renamed. Acceptance criterion 1 — the doc-title
+"hugit-runner" → "CoreLink runner" cleanup INSIDE `../corelink-runners` product
+docs — is the sibling-repo half: read-only from here (the session fence forbids
+mutating a sibling), so it is routed to the corelink-runners owner. Only that
+cross-repo doc-title rename remains.
+
+**Status (historical):** DEFERRED — naming drift introduced by runner-transfer campaign (WP-R4, 2026-06-10)  
 **Adversarial finding:** Docs/process — Round-2 verdict (`docs/review/2026-06-11-adversarial-round-2.md`);
 claimed "tracked" in the Round-1 CHANGELOG but was never entered in this register.  
 **Governing docs:** `docs/review/2026-06-11-adversarial-round-2.md` §Docs/process;
@@ -213,7 +223,16 @@ event log. Can be implemented in a future Wave once the other Round 4 code fixes
 
 ## PS-7 — `toolchain-unprobed` fallback: cross-env false-hit risk (accepted, tracked)
 
-**Status:** TRACKED ACCEPTED RISK — no code change required; use `--toolchain`
+**Status:** TRACKED ACCEPTED RISK — no code change required; DOCS-acceptance CLOSED
+(2026-06-15). Acceptance criterion 1 is satisfied: `docs/interop.md` §8 now
+documents that any fleet-dispatch / multi-env orchestration MUST pass
+`--toolchain <digest>` explicitly (so the toolchain axis is a real fingerprint,
+never the shared `toolchain-unprobed` constant). Criterion 2 (no code change) held
+from the start. The fleet-dispatch mechanism itself is not yet wired
+(`LiveBoxRunnerExecutor` returns `BoxNotWired` — the P2 runner-box seam); the note
+is in place ahead of that wiring.  
+
+**Status (historical):** TRACKED ACCEPTED RISK — no code change required; use `--toolchain`
 explicitly in multi-env fleets  
 **Adversarial finding:** Round-4 Cluster D (`docs/review/2026-06-11-adversarial-round-4.md`);
 noted as untracked cross-env false-hit vector.  
@@ -625,6 +644,23 @@ runner provisioning — owner/infra). The CODE is runner-green-capable (run `274
 `success`, all 5 gates green on the runner); a contention flake on a future push is re-enqueueable
 (`gh run rerun --failed`), NOT a code failure.
 
+**REGISTRY-CORRUPTION HALF CLOSED BY CONSTRUCTION (2026-06-15, `ci.yml` CARGO_HOME isolation).**
+A worse failure mode than the PATH flake was diagnosed under a sustained sibling-repo CI storm
+(one `corelink-server` PR fanned out to 7–13 concurrent runs, re-igniting on every push): all the
+self-hosted runners on the box share `CARGO_HOME=$HOME/.cargo`, so a sibling's registry extraction
+RACES with hugit's on the same files and truncates a `.crate` mid-write → a crate loses source
+files → DETERMINISTIC `clang: no such file` (ring `*.S`, libgit2-sys `common_crypto.c`) /
+`no <X> in the root` (typenum) build failures that look like code breakage but hit untouched
+transitive deps. (Banked anti-pattern: rust-cache `cache-on-failure: true` made it WORSE — it
+persisted a storm-truncated snapshot, turning a flaky red into a sticky deterministic one; reverted
++ `prefix-key` bust to recover.) **The fix that kills the race by construction:** `ci.yml` now sets
+`CARGO_HOME=$HOME/.cargo-hugit-ci` (an "isolate cargo home" step before rust-cache + taiki-e), so
+hugit's registry extraction is untouchable by sibling jobs and completes cleanly even mid-storm
+(cold-verified: run `27561393561` concluded `success` while the box was loaded; main `27564241894`
+green). **What REMAINS of PS-12b is only benign CPU/IO contention** — a concurrent sibling job
+slows the build but can no longer CORRUPT it. The remaining-flake real fix (dedicated runner
+capacity so CI isn't merely slow under load) is still the P2 runner-provisioning seam (owner/infra).
+
 ---
 
 ## PS-13 — Read-path `verify_chain` per-loader, not one chokepoint (RESOLVED 2026-06-12 — Wave M / M-1)
@@ -808,7 +844,24 @@ After Wave N, a focused re-audit of the WEDGE stale-green class (`docs/review/sw
 
 ## PS-18 — `hugit-serve` /v1 backend: P2-gated + Wave-2 seams (disclosed, not faked)
 
-**Source:** the githugr `/v1` HTTP backend (PR #111, 2026-06-13). The read-path serves REAL
+**Status reconciliation (2026-06-15): most of the originally-listed gaps SHIPPED in Waves 1–5b
+(#111–#120, all merged).** The bullets below were written at PR #111 (Wave-1, 5 reads); since then
+the engine grew to **20 reads + the SSE event stream + 9 write verbs + `POST /v1/token`** plus the
+**R2 read source** (#114, SigV4) and the `result_binding_v2` conformance vector. So, of the gaps
+first listed here: the **R2 data source is BUILT** (#114); the **SSE event stream + all 9 write
+verbs are BUILT** (Wave-2/3/5a, no longer "deferred"); the **Clerk JWT validation CODE is BUILT**
+(`token.rs`, RS256-pinned, JWKS, RFC-8693 exchange) — only its LIVE config (Clerk JWKS URL +
+mandatory `azp` + `auth_time`→`fresh_auth`) is owner/CoreLink-gated. **What genuinely REMAINS
+owner/infra-gated** (NOT buildable here): the live Clerk JWKS config, the CoreLink CAS data source,
+the GitHub-mirror About fields / union-oracle / list_groups (need a GitHub App or live AC), the
+fleet KPIs (live AC, Seam A), true live-tail SSE (sync `tiny_http` can't hold a stream — P2), the
+`tiny_http` edge-hardening (Cloudflare-fronted at deploy), and the **~12 git-layer/identity reads
+that stay honest-default fixture by OWNER PRODUCT DECISION** (blob/compare/edit/org/profile/account
+— the window's hybrid provider serves those client-side; not hollow shells, a decided posture). The
+original per-field bullets are kept below for the record; read them as "as-of-Wave-1", superseded
+by the wave history in CLAUDE.md.
+
+**Source (historical, as-of-Wave-1):** the githugr `/v1` HTTP backend (PR #111, 2026-06-13). The read-path serves REAL
 engine data + documented honest defaults; these are the disclosed gaps so nothing is silently
 shipped as complete.
 
