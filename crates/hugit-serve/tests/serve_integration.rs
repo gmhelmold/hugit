@@ -116,6 +116,15 @@ fn admin_control_plane_reads_are_wired_and_contract_valid() {
     // admin reads require Bearer like every other /v1 read.
     let (s, _b) = route(&state, &Method::Get, "/v1/repos/hugit/audit", &[]);
     assert_eq!(s, 401);
+
+    // admin tokens — active engine-token sessions (account-level, store-backed).
+    use hugit_http_contracts::admin::AdminTokensVm;
+    let (s, b) = route(&state, &Method::Get, "/v1/admin/tokens", &bearer(TOKEN));
+    assert_eq!(s, 200, "tokens body={b}");
+    let toks: AdminTokensVm = serde_json::from_str(&b).expect("AdminTokensVm");
+    assert_eq!(toks.count, 0, "no minted sessions yet");
+    let (s, _b) = route(&state, &Method::Get, "/v1/admin/tokens", &[]);
+    assert_eq!(s, 401, "tokens read requires Bearer");
 }
 
 #[test]

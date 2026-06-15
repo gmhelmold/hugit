@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(serve): **admin control-plane — active token sessions** (`GET /v1/admin/tokens`
+  → `AdminTokensVm`). Lists the ACTIVE engine-token sessions from the in-process
+  store (handle = hex of the stored `SHA-256(token)` — non-secret, non-reversible;
+  the raw token is never stored), with user/org (scrubbed), `fresh_auth`, and TTL
+  remaining; soonest-to-expire first. `TokenStore::list()` sweeps expired entries
+  first, so the list is exactly the live sessions. Account-level, Bearer-gated.
+  **Honest scope:** single-host (the in-process store) — a fleet-wide session list
+  + explicit revoke are the P2 shared-store seam (and revoke earns little on a
+  300s-TTL single-host store that auto-sweeps). 3 tests (2 projection unit + the
+  HTTP route/wiring). Completes the buildable-now admin reads (audit · erasure ·
+  overview · tokens); runner status / fleet KPIs / multi-repo identity stay P2.
+
 - feat(serve): **admin control-plane reads (operator area), engine half.** Three
   new `/v1` reads back the hugit-authored / githugr-hosted operator admin area —
   all pure projections over the already-chain-verified log (no P2 infra):

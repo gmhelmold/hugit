@@ -106,3 +106,33 @@ pub struct AdminOverviewVm {
     /// Humanized age of the most recent record, `"—"` on an empty log.
     pub last_activity_age: String,
 }
+
+/// One active engine-token session (sanitized — never the raw token).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenSessionVm {
+    /// A non-secret, non-reversible handle: hex of the stored `SHA-256(token)`.
+    pub handle: String,
+    /// The session's principal user (Clerk `sub`).
+    pub user: String,
+    /// The session's tenant/org.
+    pub org: String,
+    /// Whether the session is step-up-fresh (Clerk `auth_time` within the window).
+    pub fresh_auth: bool,
+    /// Seconds until this token expires (TTL remaining).
+    pub expires_in_secs: u64,
+}
+
+/// Active engine-token sessions (`GET /v1/admin/tokens`).
+///
+/// SINGLE-HOST: the in-process token store; a fleet-wide session list is the P2
+/// shared-store seam. Revocation is intentionally NOT offered here — the TTL is
+/// short (300s) and the store sweeps on every mint, so a session auto-expires
+/// within the window; explicit revoke only earns its keep on the P2 multi-host,
+/// longer-lived store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminTokensVm {
+    pub sessions: Vec<TokenSessionVm>,
+    pub count: usize,
+    /// Honest disclosure of the single-host scope.
+    pub note: String,
+}
