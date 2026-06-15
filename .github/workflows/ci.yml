@@ -46,14 +46,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
-          # The runner is a single shared box (one PR's CI fan-out from a sibling
-          # repo can saturate it). Under that contention a `rustc` spawn can fail
-          # ("never executed"), aborting the cold dep-compile before any gate runs.
-          # Saving the cache even on failure persists the compile progress that DID
-          # complete (valid, just incomplete artifacts), so each rerun compiles
-          # LESS and converges to green instead of re-doing the full cold build
-          # every attempt — the contention-flake window shrinks per rerun.
-          cache-on-failure: "true"
+          # `prefix-key` busts the prior cache: a `cache-on-failure` experiment
+          # saved a registry/target snapshot DURING a sibling-repo CI storm that
+          # truncated a `.crate` extraction (ring-0.17.14 lost its pregenerated
+          # `*.S`), poisoning every restore into a DETERMINISTIC build failure.
+          # Bumping the key forces one clean fetch+build (default save-on-success
+          # only), which then re-seeds a healthy cache. Do NOT re-enable
+          # cache-on-failure: under contention it persists truncated artifacts.
+          prefix-key: "v2-cibust-20260615"
 
       - uses: taiki-e/install-action@0631aa6515c7d545823c67cfae7ef4fc7f490154  # v2
         with:
