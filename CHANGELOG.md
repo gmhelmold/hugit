@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- chore(conformance): **mirror the `result_binding_v2` vector (§7.1, contract
+  v1.4.0)** byte-identical from corelink-runners (sha `600c99b5…`), under the X4
+  drift tripwire (`manifest.sha256` + `acceptance_x4_wire`). Pins the full-outcome
+  attestation binding formula (`…‖i32_be(exit)‖u32_be(artifacts.len)‖Σ(LP(path)‖
+  LP(digest))`) so it cannot drift between the repos ahead of hugit's P2
+  attestation-verify path. Ratifies the §7.1 v2 amendment hugit-side.
+
 - feat(serve): **Wave-5b — `POST /v1/token` (RFC-8693 Clerk exchange) + real
   request identity.** The engine now exchanges a Clerk session JWT for a
   short-lived opaque engine token and authenticates every request through a
