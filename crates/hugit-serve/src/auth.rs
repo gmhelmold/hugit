@@ -31,7 +31,7 @@ pub fn check_bearer(headers: &[tiny_http::Header], expected: &str) -> Result<(),
 /// Length-invariant constant-time token equality: compare `SHA-256(a)` vs
 /// `SHA-256(b)` (fixed 32-byte digests) with a branch-free XOR fold. No early
 /// return reveals the length or the first differing byte.
-fn tokens_match(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn tokens_match(a: &[u8], b: &[u8]) -> bool {
     let da = Sha256::digest(a);
     let db = Sha256::digest(b);
     let mut diff: u8 = 0;

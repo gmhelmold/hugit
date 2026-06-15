@@ -38,6 +38,12 @@ serde_json = { workspace = true }
 hmac       = { workspace = true }
 hex        = { workspace = true }
 ureq       = { workspace = true }
+# Clerk JWKS / RS256 verification for POST /v1/token (Wave-5b). Already the single
+# version in the lock (a hugit-queue dep) → zero lock delta, no multiple-versions
+# hit. base64 (url-safe-no-pad) is used to decode the JWT azp claim; 0.22.1 is
+# already the single locked version.
+jsonwebtoken = "=9.3.1"
+base64       = { workspace = true }
 
 [dev-dependencies]
 hugit-refstore = { path = "../hugit-refstore", features = ["test-support"] }
