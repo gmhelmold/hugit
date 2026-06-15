@@ -13,7 +13,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tiny_http::{Header, Method, Request, Response, Server};
 
-use crate::auth::check_bearer;
 use crate::error::EngineErr;
 use crate::handlers;
 use crate::state::AppState;
@@ -100,7 +99,7 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
     // repo/resource work, so 401 never depends on whether the repo exists).
     match segs.as_slice() {
         ["v1", "repos", repo, tail @ ..] => {
-            if let Err(e) = check_bearer(headers, &state.dev_token) {
+            if let Err(e) = two_tier_auth(state, headers).map(|_| ()) {
                 return err(e);
             }
             // The query (stripped above) is re-passed for the param-driven reads.
@@ -110,7 +109,7 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
         // work, then bind the dev-principal's default context = the launch repo
         // (the per-principal multi-repo `me` aggregation is the P2 identity seam).
         ["v1", "me", "dashboard"] => {
-            if let Err(e) = check_bearer(headers, &state.dev_token) {
+            if let Err(e) = two_tier_auth(state, headers).map(|_| ()) {
                 return err(e);
             }
             let repo = ME_DEFAULT_REPO;
@@ -120,7 +119,7 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
             )
         }
         ["v1", "me", "attention"] => {
-            if let Err(e) = check_bearer(headers, &state.dev_token) {
+            if let Err(e) = two_tier_auth(state, headers).map(|_| ()) {
                 return err(e);
             }
             let repo = ME_DEFAULT_REPO;
@@ -245,14 +244,58 @@ fn route_write(state: &AppState, url: &str, headers: &[Header], body: &[u8]) -> 
     let path = url.split('?').next().unwrap_or("");
     let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     match segs.as_slice() {
+        // POST /v1/token — the ONLY no-Bearer route (it IS the auth-issuance
+        // endpoint; the handler validates the Clerk JWT internally). Without a
+        // configured Clerk validator the endpoint does not exist → 404 (we do not
+        // disclose its presence in dev-only mode).
+        ["v1", "token"] => match &state.validator {
+            Some(v) => crate::token::handle_token_exchange(v, &state.token_store, body),
+            None => err(EngineErr::not_found()),
+        },
         ["v1", "repos", repo, tail @ ..] => {
-            if let Err(e) = check_bearer(headers, &state.dev_token) {
-                return err(e);
-            }
-            dispatch_repo_write(state, repo, tail, headers, body)
+            // Two-tier Bearer auth: a Clerk-minted engine token, else the dev token.
+            let (principal, fresh_auth) = match two_tier_auth(state, headers) {
+                Ok(pair) => pair,
+                Err(e) => return err(e),
+            };
+            dispatch_repo_write(state, repo, tail, headers, body, principal, fresh_auth)
         }
         _ => err(EngineErr::not_found()),
     }
+}
+
+/// Two-tier Bearer auth (Wave-5b token seam):
+///   Tier 1 — `token_store.lookup(raw)`: a real Clerk-minted engine token →
+///            `(clerk principal, fresh_auth from the minted record)`.
+///   Tier 2 — the dev-token fallback (constant-time, mirrors `check_bearer`) →
+///            `(dev principal, fresh_auth=false)`.
+/// An in-store-but-EXPIRED engine token is `TOKEN_EXPIRED` (client renews + retries);
+/// anything else is `TOKEN_INVALID`. Returns `(principal_chain, fresh_auth)`.
+fn two_tier_auth(state: &AppState, headers: &[Header]) -> Result<(Vec<String>, bool), EngineErr> {
+    let raw = header_val(headers, "Authorization")
+        .and_then(|v| v.strip_prefix("Bearer ").map(str::to_string));
+    let raw = match raw {
+        Some(r) => r,
+        None => return Err(EngineErr::token_invalid()),
+    };
+
+    // Tier 1: the engine-token store (a Clerk exchange minted this).
+    match state.token_store.lookup(&raw) {
+        crate::token::LookupResult::Ok(rec) => {
+            return Ok((
+                vec![format!("clerk:{}:{}", rec.org, rec.user)],
+                rec.fresh_auth,
+            ));
+        }
+        crate::token::LookupResult::Expired => return Err(EngineErr::token_expired()),
+        crate::token::LookupResult::Invalid => {} // fall through to the dev token
+    }
+
+    // Tier 2: dev-token fallback (same constant-time SHA-256+XOR as check_bearer).
+    if crate::auth::tokens_match(raw.as_bytes(), state.dev_token.as_bytes()) {
+        return Ok((dev_principal(), false));
+    }
+    Err(EngineErr::token_invalid())
 }
 
 /// Dispatch an authenticated `/v1/repos/{repo}/<tail...>` POST through the
@@ -263,12 +306,18 @@ fn dispatch_repo_write(
     tail: &[&str],
     headers: &[Header],
     body: &[u8],
+    principal: Vec<String>,
+    fresh_auth: bool,
 ) -> (u16, String) {
     let idem = header_val(headers, "Idempotency-Key").unwrap_or_default();
-    let step_up = header_val(headers, "X-Step-Up")
+    // Step-up is satisfied by a fresh Clerk session (Tier-1 `fresh_auth`) OR the
+    // explicit `X-Step-Up` header (the dev-token Tier-2 path). A Clerk-minted token
+    // from a recently re-authenticated session needs no header.
+    let step_up_header = header_val(headers, "X-Step-Up")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
-    let p = dev_principal();
+    let step_up = fresh_auth || step_up_header;
+    let p = principal;
     let at = now_ms();
     let sink: &dyn LogSink = state;
     // The URL tail (e.g. `prs/1/land`) is the idempotency RESOURCE — keyed in the

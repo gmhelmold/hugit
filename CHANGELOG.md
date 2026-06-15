@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(serve): **Wave-5b — `POST /v1/token` (RFC-8693 Clerk exchange) + real
+  request identity.** The engine now exchanges a Clerk session JWT for a
+  short-lived opaque engine token and authenticates every request through a
+  two-tier gate (a Clerk-minted engine token, else the dev-token fallback).
+  Security-critical, so built conservatively + lead crypto-audited: the `alg` is
+  pinned to RS256 on the UNTRUSTED header BEFORE any key material (kills `alg=none`
+  + HS256-confusion), `kid`→JWKS (refetch-once, fail-closed), `exp`/`nbf`/`iss`
+  mandatory, `azp` checked from the verified payload, tenant from
+  `publicMetadata.tenant_id`→`org_id`→reject, `auth_time`→`fresh_auth` (300 s,
+  absent/future ⇒ false). Engine tokens are 32 `/dev/urandom` bytes stored as
+  `SHA-256(token)` with a 300 s TTL + sweep, looked up constant-time; the raw token
+  and the `subject_token` are NEVER logged. Cross-tenant mint is blocked
+  (`audience == claims.org`). Uses `jsonwebtoken 9.3.1` — already the single locked
+  version (zero new package versions; the lock gains only dependency edges). Step-up
+  verbs require a fresh Clerk session (`fresh_auth`) or the dev `X-Step-Up` header.
+  **P2 seams (honest, disclosed):** the live Clerk JWKS URL + mandatory `azp` are
+  owner/CoreLink-gated; `auth_time` isn't a Clerk claim yet so `fresh_auth` is
+  `false` in prod until frontend re-verification; the in-process token store is
+  single-host (same seam as the idem ledger). Drafted by a research agent, then
+  lead-integrated + crypto-audited; **167** hugit-serve tests green (21 new token
+  tests incl. the alg-confusion/tampered-sig/expired/cross-tenant attack matrix,
+  signed against a real ephemeral RSA keypair under an owner-authorized test waiver).
+
 - feat(serve): **Wave-4 reads — 6 more deferred surfaces go REAL** (`settings` ·
   `releases` · `search` · `viewer-can` · `dashboard` · `attention`). Built by a
   Spec→Build→Audit agent pipeline whose **Spec phase gated out the hollow ones**:

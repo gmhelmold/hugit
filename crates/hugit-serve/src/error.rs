@@ -42,6 +42,18 @@ impl EngineErr {
         }
     }
 
+    /// 401 — a valid engine token that has EXPIRED. The client calls
+    /// `POST /v1/token` for a fresh engine token, then retries once. Distinct
+    /// from `TOKEN_INVALID` (which requires re-login).
+    #[must_use]
+    pub fn token_expired() -> Self {
+        Self {
+            status: 401,
+            code: "TOKEN_EXPIRED",
+            reason: "token de engine expirado — renove via /v1/token".to_string(),
+        }
+    }
+
     /// 503 — the engine cannot serve trustworthy data (log unreadable, parse
     /// failure, or a TAMPERED hash chain). Fail-honest: never a fake-empty VM.
     #[must_use]

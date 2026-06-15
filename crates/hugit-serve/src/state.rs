@@ -19,12 +19,14 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hugit_refstore::EventLog;
 
 use crate::error::EngineErr;
 use crate::sigv4;
+use crate::token::{ClerkValidator, TokenConfig, TokenStore};
 
 /// Where the engine reads canonical event logs from.
 #[derive(Clone)]
@@ -61,6 +63,13 @@ pub struct AppState {
     pub source: LogSource,
     /// The Wave-1 dev Bearer token (the P2-Clerk stub). Fail-closed: required.
     pub dev_token: String,
+    /// Clerk JWKS validator for `POST /v1/token` (None → dev-token-only; the
+    /// endpoint 404s without it). The P2 Clerk identity seam.
+    pub validator: Option<Arc<ClerkValidator>>,
+    /// In-process engine-token store. Always present so the lookup gate compiles
+    /// uniformly; stays empty until a Clerk exchange mints a token. Single-host
+    /// (the multi-instance shared store is the same P2 seam as the idem ledger).
+    pub token_store: Arc<TokenStore>,
 }
 
 impl AppState {
@@ -85,7 +94,14 @@ impl AppState {
                 dir: PathBuf::from(dir),
             }
         };
-        Ok(Self { source, dev_token })
+        let validator = TokenConfig::from_env()?.map(|cfg| Arc::new(cfg.into_validator()));
+        let token_store = Arc::new(TokenStore::new());
+        Ok(Self {
+            source,
+            dev_token,
+            validator,
+            token_store,
+        })
     }
 
     fn r2_from_env() -> Result<LogSource, String> {
@@ -98,6 +114,8 @@ impl AppState {
         Self {
             source: LogSource::Local { dir: log_dir },
             dev_token,
+            validator: None,
+            token_store: Arc::new(TokenStore::new()),
         }
     }
 
