@@ -236,7 +236,7 @@ fn build_cost_xray(log: &EventLog, chips: &[CampaignChipVm]) -> XrayOut {
                     format!("{}% first-pass", pct_u8(fp * 100.0))
                 };
                 drill_rows.push(XrayDrillRowVm {
-                    pr_ref: format!("#{}", opened.pr_id),
+                    pr_ref: scrub(&format!("#{}", opened.pr_id)),
                     pr_url: String::new(),
                     intent_label: format!("{} intents", opened.intent_ids.len()),
                     cost: format!("${:.2}", micros as f64 / 1_000_000.0),

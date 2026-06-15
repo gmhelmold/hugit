@@ -103,10 +103,78 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
             if let Err(e) = check_bearer(headers, &state.dev_token) {
                 return err(e);
             }
-            dispatch_repo(state, repo, tail)
+            // The query (stripped above) is re-passed for the param-driven reads.
+            dispatch_repo(state, repo, tail, url.split('?').nth(1).unwrap_or(""))
+        }
+        // Identity-scoped reads (/v1/me/*): no {repo} path param. Auth BEFORE any
+        // work, then bind the dev-principal's default context = the launch repo
+        // (the per-principal multi-repo `me` aggregation is the P2 identity seam).
+        ["v1", "me", "dashboard"] => {
+            if let Err(e) = check_bearer(headers, &state.dev_token) {
+                return err(e);
+            }
+            let repo = ME_DEFAULT_REPO;
+            with_log(
+                || state.load_verified(repo),
+                |log| ok(&handlers::build_dashboard(log, repo)),
+            )
+        }
+        ["v1", "me", "attention"] => {
+            if let Err(e) = check_bearer(headers, &state.dev_token) {
+                return err(e);
+            }
+            let repo = ME_DEFAULT_REPO;
+            with_log(
+                || state.load_verified(repo),
+                |log| ok(&handlers::build_attention(log, repo)),
+            )
         }
         _ => err(EngineErr::not_found()),
     }
+}
+
+/// The default repo context for identity-scoped (`/v1/me/*`) reads until the P2
+/// Clerk identity seam resolves a per-principal repo set: the launch repo.
+const ME_DEFAULT_REPO: &str = "hugit";
+
+/// Extract a percent-decoded query-param value (`+` → space) from a raw query
+/// string (the part after `?`). Returns `""` when absent — the read handlers
+/// treat an empty query as an honest no-op.
+fn query_param(query: &str, key: &str) -> String {
+    let prefix = format!("{key}=");
+    let Some(raw) = query.split('&').find_map(|kv| kv.strip_prefix(&prefix)) else {
+        return String::new();
+    };
+    let bytes = raw.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hi = (bytes[i + 1] as char).to_digit(16);
+                let lo = (bytes[i + 2] as char).to_digit(16);
+                match (hi, lo) {
+                    (Some(h), Some(l)) => {
+                        out.push((h * 16 + l) as u8);
+                        i += 3;
+                    }
+                    _ => {
+                        out.push(b'%');
+                        i += 1;
+                    }
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// The full entry (reads + writes). GET delegates to [`route`]; POST is a mutating
@@ -383,8 +451,9 @@ fn dispatch_repo_write(
     }
 }
 
-/// Dispatch an authenticated `/v1/repos/{repo}/<tail...>` read.
-fn dispatch_repo(state: &AppState, repo: &str, tail: &[&str]) -> (u16, String) {
+/// Dispatch an authenticated `/v1/repos/{repo}/<tail...>` read. `query` is the
+/// raw query string (after `?`), threaded for the param-driven reads (search).
+fn dispatch_repo(state: &AppState, repo: &str, tail: &[&str], query: &str) -> (u16, String) {
     // Resolve + verify the repo's log once (404 if absent/unsafe, 503 if tampered).
     let load = || state.load_verified(repo);
     match tail {
@@ -400,6 +469,19 @@ fn dispatch_repo(state: &AppState, repo: &str, tail: &[&str]) -> (u16, String) {
         // security←policy.set/erasure.decided).
         ["issues"] => with_log(load, |log| ok(&handlers::build_issues(log, repo))),
         ["security"] => with_log(load, |log| ok(&handlers::build_security(log, repo))),
+        // Wave-4 collection reads (real log-backed): settings←policy.set,
+        // releases←pr.landed, search←q over records, viewer-can←D14 authz matrix.
+        ["settings"] => with_log(load, |log| ok(&handlers::build_repo_settings(log, repo))),
+        ["releases"] => with_log(load, |log| ok(&handlers::build_releases(log, repo))),
+        ["search"] => {
+            let q = query_param(query, "q");
+            with_log(load, |log| ok(&handlers::build_search(log, repo, &q)))
+        }
+        // The capability matrix is per-principal-class (repo-agnostic); the log is
+        // still load-verified for consistent 404/503 semantics with the other reads.
+        ["viewer-can"] => with_log(load, |_log| {
+            ok(&handlers::build_viewer_can(&dev_principal()))
+        }),
         ["prs", n] => match n.parse::<u32>() {
             Ok(num) => with_log(load, |log| {
                 match handlers::build_pr_detail(log, repo, num) {

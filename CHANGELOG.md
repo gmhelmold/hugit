@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(serve): **Wave-4 reads — 6 more deferred surfaces go REAL** (`settings` ·
+  `releases` · `search` · `viewer-can` · `dashboard` · `attention`). Built by a
+  Spec→Build→Audit agent pipeline whose **Spec phase gated out the hollow ones**:
+  `actions` was correctly DROPPED (its contract type is the write-path `Accepted`
+  shape, not an activity-feed VM — no fake handler shipped). The six real ones
+  project live log data: `GET …/settings` (house rules + operator overrides from
+  `policy.set`), `GET …/releases` (the `pr.landed` history, newest-first, with the
+  `latest` pill), `GET …/search?q=` (over prs/intents/issues/campaigns records),
+  `GET …/viewer-can` (the REAL D14 authz capability matrix per principal class),
+  `GET /v1/me/dashboard` + `GET /v1/me/attention` (the dev-principal's real forge
+  work — open/queued PRs, pending verdicts, blocked PRs — scoped to the launch repo;
+  the per-principal multi-repo aggregation is the documented P2 identity seam).
+  The per-handler **adversarial audit phase caught a real systemic class** — the
+  "exemption-is-a-hole" pattern (Round 7/Wave K): `pr_id`/`rule_id` are
+  user-supplied payload STRINGS (not validated numbers), so a secret-shaped id
+  echoed into a composite text field leaked verbatim; fixed at the read boundary in
+  `settings`/`releases`/`dashboard` (whole-field scrub + regression tests), plus a
+  real projection bug in `releases` (the cap took the OLDEST page and dropped the
+  `latest` release — now newest-first, cap at source). Every echoed free-text field
+  is read-boundary-scrubbed; honest defaults for the still-P2 fields. clippy
+  `-D warnings` clean; full hugit-serve suite green.
+
 - feat(serve): **Wave-3 reads — the 3 write-backed surfaces go REAL** (`review` ·
   `issues` · `security`). Now that the Wave-2 writes emit `verdict.recorded`,
   `pr.comment`, `issue.transition`, `policy.set`, and `erasure.decided`, three more
