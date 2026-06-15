@@ -154,9 +154,26 @@ on `[self-hosted, mac, corelink-builder]`).
 
 ---
 
-## PS-6 — Queue batch-verdict → queue-show projection
+## PS-6 — Queue batch-verdict → queue-show projection (RESOLVED 2026-06-15)
 
-**Status:** DEFERRED — union-batch verdict seam not yet wired  
+**Status:** RESOLVED — `queue show` now projects a REAL per-entry + per-batch
+`verdict` + `implicated_pr` from the SAME `verdict.recorded` events `campaign
+show` reads (the shared `hugit_ledger::Ledger` reject-sticky fold), so the two
+views AGREE by construction. No P2 dependency was needed (a pure projection seam
+on the existing log, as predicted below). A union batch's verdict is `"reject"`
+if any member intent carries an outstanding (sticky) reject — `implicated_pr`
+names the first such PR in queue order — `"approve"` once every member intent is
+proven, and `null` (with the disclosing `verdict_note`) while no `verdict.recorded`
+event covers the batch yet (honest unknown, never a faked pass/fail). The join is
+by `intent_id`; a recorded intent_id is always a safe-address shape (the door
+rejects a secret-shaped `--id`/`--intent` at input), so the ledger's view-boundary
+redaction is a no-op on it and the lookup is exact. Cold-verified end-to-end:
+`acceptance_wb2::queue_show_projects_real_union_verdict_and_blame` (auth union has
+a reject → batch rejects + blame PR 3; billing union all-approve → approves) and
+`queue_show_verdict_is_null_until_a_verdict_covers_the_batch` (the honest-null
+floor). See the Closed seams table.
+
+**Status (historical):** DEFERRED — union-batch verdict seam not yet wired  
 **Adversarial finding:** Round-4 Cluster D (`docs/review/2026-06-11-adversarial-round-4.md`);
 WG-COHERENCE (Wave G) flagged the cross-module half but left `verdict: null` with a
 disclosure note; Round 4 confirmed no register entry existed.  
@@ -476,7 +493,28 @@ the global view even if the intent IS landed in its own log.
 
 ---
 
-## PS-10 — AC write-boundary axis guard lives only on the CLI `FileAc` (defense-in-depth completeness)
+## PS-10 — AC write-boundary axis guard lives only on the CLI `FileAc` (RESOLVED 2026-06-15)
+
+**Status:** RESOLVED — the structural-secret axis guard is now enforced on the
+SHARED `hugit_checks::client::ac::ActionCache` layer, so EVERY backend (`FileAc`,
+`InMemoryAc`, `HttpAcClient`) refuses to persist a `CheckResult` whose any memo
+axis carries a secret shape — not only the CLI `FileAc`. The hoist is a
+`pub fn guard_axes_not_secret(result)` in `hugit-checks/src/client/ac.rs` (placed
+exactly like the already-shared `verify_hit`), called at the top of all three
+`store` impls. The predicate is `!hugit_ledger::secret_shape::is_safe_identifier_shape(axis)`
+— **byte-equivalent** to the CLI's prior `structural_secret_scrub(v) != v` (a value
+is a secret iff it is not a provable safe-address shape), so the CLI `FileAc`
+behavior is UNCHANGED (it now delegates to the shared fn and dropped its local
+copy). `hugit-checks` gained a `hugit-ledger` path-dep (no cycle — hugit-ledger
+depends only on contracts + refstore; `cargo update` locked **0** new external
+packages, a single-line lock diff). All `hugit-checks` + `hugit-cli` AC tests
+green (the fixtures use 64-hex / short-slug / empty axes, all safe shapes — no
+regression). This is the close-by-construction completion of the WK-AC
+defense-in-depth — the shared trait's contract is no longer weaker than one of
+its implementations. See the Closed seams table.
+
+**Status (historical):** TRACKED — defense-in-depth completeness, no code change
+required until P2.
 
 WK-AC (2026-06-12) closed the live `.ac` toolchain-digest leak with **two**
 layers: (1) the DOOR — `hugit check --toolchain`/`--def` now reject a
@@ -679,12 +717,26 @@ findings are tracked here as accepted/deferred:
 - **PERF (verify_chain is O(n) per read)** — every `--log` read re-verifies the whole hash chain
   (measured ~103 ms @ 10k events). This is largely INHERENT for correctness (you must verify what
   you project, and a cross-process prefix-memo is unsound — the on-disk log can change between
-  invocations). Acceptable at current log sizes; the bounded win is "verify-once per verb
-  invocation" + the per-record alloc shave (perf F5). Deferred, not a correctness issue.
-- **ERGONOMICS F-2 (error JSON key order)** — `kind` is not the first key (`serde_json` sorts
-  alphabetically → `fix`/`kind`/`message`). Making `kind` first needs `preserve_order`/`indexmap`,
-  not a one-liner. Cosmetic for agent stream-matching; deferred (N-6 closed F-5 + the kind-spelling
-  unification; F-2 left).
+  invocations). **Honest correction (2026-06-15):** the "verify-once per verb invocation" half of
+  this win is **already achieved** — `checks::rehydrate_and_verify` is the single load chokepoint
+  (PS-13/M-1), and `intent list` memoizes per distinct log (`landed_cache`), so a recon traced
+  `intent list` / `campaign show` calling `verify_chain` EXACTLY ONCE per invocation — there is no
+  double-verification to remove. What genuinely remains is only a per-record alloc micro-shave
+  (reuse the `compute_this_hash` buffer / drop the per-record hex `String`), a small-constant win
+  on the most-audited integrity-critical code; **DEFERRED by the lead** — marginal at current log
+  sizes and the regression surface on the hash spine is not worth it without a measured need. The
+  O(n) re-verify itself is inherent and stays. (No code change; the "verify-once" framing is now
+  recorded as solved, not pending.)
+- **ERGONOMICS F-2 (error JSON key order) — RESOLVED 2026-06-15.** `kind` is now emitted FIRST
+  (`kind`→`message`→`fix`→context) in every agent-facing CLI error envelope. Both porcelain-error
+  twins (`porcelain::PorcelainError` and `intent::error::PorcelainError`) render through one shared
+  `porcelain::ordered_error_object` builder that assembles the object in explicit order (each value
+  via `serde_json::Value`'s always-valid-JSON `Display`; only `{`/`}`/`:`/`,` hand-written) —
+  **zero new dep**, no workspace-wide `preserve_order`/`indexmap`. All four stdout error paths
+  (`main`, `checks`, `verdict`, `queue`, `intent`, `pr`) route through the string renderer; the
+  `PrError::to_json()->Value` library API is never printed (Display uses the string). Cold-verified
+  live: `hugit queue show --log /no/such` emits `{"error":{"kind":"log_not_found",…}}`. Existing
+  field-access error tests stay green (order-independent).
 - **TEST-QUALITY debt** (sweep `tests.md`): T-1 tautological shadow-scheduler test
   (`hugit-checks/src/shadow/tests.rs`); T-3 `unsafe set_var` in parallel test binaries (cross-file
   env race); T-5 scratch-dir PID-only collision (`acceptance_wj_matrix.rs`); T-6 presence-not-field
@@ -793,6 +845,9 @@ githugr-TL + owner lane.
 
 | Seam | Shipped | Governing commit |
 |---|---|---|
+| **PS-6 — Queue batch-verdict → queue-show projection** — `queue show` carried `verdict:null`/`implicated_pr:null` always; the recorded verdicts flowed to `campaign show` but not to the queue projection. | 2026-06-15 | branch `fix/pending-seams-ps6-ps10-ps15`; `queue::show` now folds the shared `hugit_ledger::Ledger` per-intent (proven, rejected) into a union verdict + blame; tests `acceptance_wb2::queue_show_projects_real_union_verdict_and_blame` + `…_verdict_is_null_until_a_verdict_covers_the_batch`. |
+| **PS-10 — AC write-boundary axis guard only on the CLI `FileAc`** — the shared `ActionCache::store` contract was weaker than its CLI impl; `InMemoryAc`/`HttpAcClient` had no axis guard. | 2026-06-15 | branch `fix/pending-seams-ps6-ps10-ps15`; `pub fn guard_axes_not_secret` hoisted to `hugit_checks::client::ac` (called by all 3 `store` impls), predicate byte-equivalent to the prior CLI scrub (`!is_safe_identifier_shape`); `hugit-checks`→`hugit-ledger` path-dep, 0 new lock versions. |
+| **PS-15 F-2 — error JSON `kind` not first** — `serde_json`'s BTreeMap-backed object sorted keys alphabetically (`fix`/`kind`/`message`), so agents stream-matching on `kind` found it second. | 2026-06-15 | branch `fix/pending-seams-ps6-ps10-ps15`; shared `porcelain::ordered_error_object` emits `kind`→`message`→`fix`→context in explicit order (zero new dep); both porcelain-error twins route through it. |
 | **`cas:` exemption secret leak** — any `cas:`-prefixed value in a digest field was blanket-exempted from the detector, so `verdict --tree-hash "cas:ghp_…"` stored a PAT verbatim in the forever-log (pre-existing since WH-SCRUB). Round-7 finding #1. | 2026-06-12 (K-SCRUB) | merge `def8a18`; value-gate the `cas:` exemption (run the ONE detector on the payload) + `--tree-hash` door + matrix (`verdict_tree_hash_cas_credential_does_not_survive`). |
 | **`hugit why` / `hugit export` skipped `verify_chain`** — two read paths projected a tampered log as authoritative provenance; PS-8 AC4 was momentarily false. Round-7 findings #2/#5. | 2026-06-12 (K-CHAIN) | merge `def8a18`; both now verify the chain → `chain_broken` exit 2 (`tampered_chain_is_chain_broken_exit_two_on_{why,export}`). |
 | **Verdict rejection-laundering by lens substitution** — `latest-record-wins` let an approve under a novel `--lens` name erase a prior reject from the projection. Round-7 finding #3. | 2026-06-12 (K-VERDICT) | merge `def8a18`; **reject-sticky** resolution (a reject clears only on a SAME-lens re-approval) + post-seal append guard (`campaign_sealed` exit 2). Owner-decided rule. |

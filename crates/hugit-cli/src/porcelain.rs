@@ -83,6 +83,33 @@ pub struct PorcelainError {
     internal: bool,
 }
 
+/// Build the inner error object JSON string with `kind` FIRST (PS-15 F-2):
+/// `kind`, then `message`, then `fix`, then each context key in insertion order.
+///
+/// Shared by both porcelain-error twins (`porcelain::PorcelainError` and
+/// `intent::error::PorcelainError`) so the wire key order is identical across
+/// the CLI. Each value is rendered via `serde_json::Value`'s `Display`, which
+/// always emits valid, escaped JSON; only the `{`/`}`/`:`/`,` punctuation and
+/// the three fixed key literals are hand-written.
+pub(crate) fn ordered_error_object(
+    kind: &str,
+    message: &str,
+    fix: &str,
+    context: &[(&'static str, Value)],
+) -> String {
+    let mut parts: Vec<String> = Vec::with_capacity(3 + context.len());
+    parts.push(format!(r#""kind":{}"#, Value::String(kind.to_string())));
+    parts.push(format!(
+        r#""message":{}"#,
+        Value::String(message.to_string())
+    ));
+    parts.push(format!(r#""fix":{}"#, Value::String(fix.to_string())));
+    for (k, v) in context {
+        parts.push(format!("{}:{}", Value::String((*k).to_string()), v));
+    }
+    format!("{{{}}}", parts.join(","))
+}
+
 impl PorcelainError {
     /// A `kind` + `message` + `fix` error (the common case), exit
     /// [`PORCELAIN_ERROR_EXIT`].
@@ -118,18 +145,18 @@ impl PorcelainError {
 
     /// Render THE canonical `{"error":{"kind","message","fix", …context}}`
     /// envelope (the stable wire shape).
+    ///
+    /// `kind` is emitted FIRST (then `message`, `fix`, then context keys in
+    /// insertion order). Agents stream-match the error envelope on `kind`, so it
+    /// must lead (PS-15 F-2). `serde_json`'s object map is a `BTreeMap`
+    /// (alphabetical → `fix`/`kind`/`message`) unless the workspace-wide
+    /// `preserve_order` feature is enabled, so the object is assembled in
+    /// explicit order rather than via `json!({…})`. Each value is rendered by
+    /// `serde_json::Value`'s `Display`, which always emits valid, escaped JSON —
+    /// only the structural punctuation is hand-written.
     pub fn to_json(&self) -> String {
-        let mut error = json!({
-            "kind": self.kind,
-            "message": self.message,
-            "fix": self.fix,
-        });
-        if let Some(map) = error.as_object_mut() {
-            for (k, v) in &self.context {
-                map.insert((*k).to_string(), v.clone());
-            }
-        }
-        json!({ "error": error }).to_string()
+        let inner = ordered_error_object(self.kind, &self.message, &self.fix, &self.context);
+        format!(r#"{{"error":{inner}}}"#)
     }
 
     /// The process exit code under the one exit-code law: `1` for an internal

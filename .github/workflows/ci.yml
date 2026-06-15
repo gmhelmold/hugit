@@ -44,7 +44,32 @@ jobs:
           toolchain: "1.96.0"
           components: rustfmt,clippy
 
+      # Isolate hugit's CARGO_HOME from the shared `~/.cargo`. This box runs MANY
+      # self-hosted runners (sibling repos: corelink-server, githugr, wallet, …);
+      # they all default to `$HOME/.cargo`, so a sibling's CI fan-out extracting
+      # the registry CONCURRENTLY with ours races on the same files and truncates
+      # `.crate` extractions mid-write (observed: typenum/ring/libgit2-sys lost
+      # source files → deterministic `clang: no such file` / `no X in the root`
+      # build failures that are NOT our code). A dedicated CARGO_HOME is
+      # untouchable by sibling jobs, so our extraction completes cleanly even while
+      # another repo's CI storms — it kills the cross-repo corruption race by
+      # construction (the durable fix for the PS-12b-class registry flake).
+      # Set BEFORE rust-cache + taiki-e so both target the isolated home.
+      - name: isolate cargo home
+        run: |
+          mkdir -p "$HOME/.cargo-hugit-ci"
+          echo "CARGO_HOME=$HOME/.cargo-hugit-ci" >> "$GITHUB_ENV"
+
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          # `prefix-key` busts the prior cache: a `cache-on-failure` experiment
+          # saved a registry/target snapshot DURING a sibling-repo CI storm that
+          # truncated a `.crate` extraction (ring-0.17.14 lost its pregenerated
+          # `*.S`), poisoning every restore into a DETERMINISTIC build failure.
+          # Bumping the key forces one clean fetch+build (default save-on-success
+          # only), which then re-seeds a healthy cache. Do NOT re-enable
+          # cache-on-failure: under contention it persists truncated artifacts.
+          prefix-key: "v2-cibust-20260615"
 
       - uses: taiki-e/install-action@0631aa6515c7d545823c67cfae7ef4fc7f490154  # v2
         with:
@@ -59,33 +84,34 @@ jobs:
       # reliably consult `~/.cargo/bin`). ~37% PS-12b-class infra flake, NEVER a real
       # lint/test/advisory failure. The deterministic close: prepend the DIRECT
       # toolchain bin (real `cargo`/`rustc`/`rustfmt`/`cargo-clippy` binaries that do
-      # not vanish), then `~/.cargo/bin` + `/usr/local/bin` for the taiki-e-installed
-      # `cargo-deny`/`cargo-audit`; invoke the advisory tools as their OWN binaries
-      # (not via the flaky proxy dispatch) with a self-healing reinstall guard.
+      # not vanish), then `$CARGO_HOME/bin` (the isolated home above, where taiki-e
+      # and the fallback `cargo install` place `cargo-deny`/`cargo-audit`) +
+      # `/usr/local/bin`; invoke the advisory tools as their OWN binaries (not via
+      # the flaky proxy dispatch) with a self-healing reinstall guard.
       - name: fmt
         run: |
-          export PATH="$(echo "$HOME"/.rustup/toolchains/1.96.0-*/bin):$HOME/.cargo/bin:/usr/local/bin:$PATH"
+          export PATH="$(echo "$HOME"/.rustup/toolchains/1.96.0-*/bin):$CARGO_HOME/bin:/usr/local/bin:$PATH"
           cargo fmt --all --check
 
       - name: clippy
         run: |
-          export PATH="$(echo "$HOME"/.rustup/toolchains/1.96.0-*/bin):$HOME/.cargo/bin:/usr/local/bin:$PATH"
+          export PATH="$(echo "$HOME"/.rustup/toolchains/1.96.0-*/bin):$CARGO_HOME/bin:/usr/local/bin:$PATH"
           cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: test
         run: |
-          export PATH="$(echo "$HOME"/.rustup/toolchains/1.96.0-*/bin):$HOME/.cargo/bin:/usr/local/bin:$PATH"
+          export PATH="$(echo "$HOME"/.rustup/toolchains/1.96.0-*/bin):$CARGO_HOME/bin:/usr/local/bin:$PATH"
           cargo test --workspace --locked
 
       - name: deny
         run: |
-          export PATH="$(echo "$HOME"/.rustup/toolchains/1.96.0-*/bin):$HOME/.cargo/bin:/usr/local/bin:$PATH"
+          export PATH="$(echo "$HOME"/.rustup/toolchains/1.96.0-*/bin):$CARGO_HOME/bin:/usr/local/bin:$PATH"
           command -v cargo-deny >/dev/null 2>&1 || cargo install cargo-deny --locked
           cargo-deny check
 
       - name: audit
         run: |
-          export PATH="$(echo "$HOME"/.rustup/toolchains/1.96.0-*/bin):$HOME/.cargo/bin:/usr/local/bin:$PATH"
+          export PATH="$(echo "$HOME"/.rustup/toolchains/1.96.0-*/bin):$CARGO_HOME/bin:/usr/local/bin:$PATH"
           command -v cargo-audit >/dev/null 2>&1 || cargo install cargo-audit --locked
           cargo-audit audit --deny warnings
 

@@ -216,6 +216,8 @@ impl ActionCache for InMemoryAc {
     }
 
     fn store(&self, result: &CheckResult) -> Result<(), AcError> {
+        // PS-10 write-boundary guard — shared across every backend.
+        guard_axes_not_secret(result)?;
         self.store
             .lock()
             .expect("store lock poisoned")
@@ -392,6 +394,44 @@ pub fn verify_hit(requested: &str, result: &CheckResult) -> Result<(), AcError> 
     Ok(())
 }
 
+/// Refuse to STORE a [`CheckResult`] whose any memo axis (`tree_hash` /
+/// `def_digest` / `toolchain_digest`) carries a structural-secret shape (PS-10).
+///
+/// The axes are content-addresses, persisted UNREDACTED — redacting one would
+/// change the recomputed memo key and break every cache HIT ([`verify_hit`]).
+/// So a credential smuggled into an axis (the WK-AC vector: a secret-shaped
+/// `--toolchain`) cannot be persisted at all — it is refused at the write
+/// boundary rather than scrubbed. DENY-BY-DEFAULT: an axis survives only if it
+/// PROVES a bounded safe-address shape
+/// ([`hugit_ledger::secret_shape::is_safe_identifier_shape`] — the SAME
+/// predicate the CLI identifier door uses, so a prefix-less high-entropy
+/// credential is caught too). "An exemption is a hole" — all three axes are
+/// guarded uniformly (in practice only `toolchain_digest` can carry a
+/// user-supplied value; the other two are computed hashes).
+///
+/// `pub` and called by EVERY [`ActionCache`] backend — the in-memory fake, the
+/// HTTP client, AND the CLI's file-backed cache — exactly mirroring how
+/// [`verify_hit`] is shared. PS-10 closes the prior gap where this guard lived
+/// only on the CLI `FileAc`, leaving the shared trait's contract weaker than one
+/// of its implementations.
+pub fn guard_axes_not_secret(result: &CheckResult) -> Result<(), AcError> {
+    for (field, value) in [
+        ("tree_hash", result.tree_hash.as_str()),
+        ("def_digest", result.def_digest.as_str()),
+        ("toolchain_digest", result.toolchain_digest.as_str()),
+    ] {
+        if !hugit_ledger::secret_shape::is_safe_identifier_shape(value) {
+            return Err(AcError::Transport(format!(
+                "AC store refused: memo axis `{field}` carries a structural-secret \
+                 shape — an axis is a content-address stored unredacted, so a \
+                 credential in it cannot be persisted (it would also be unscrubbable \
+                 without busting the cache key)"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Decode + content-verify a 200 lookup body into a [`CheckResult`] HIT.
 /// Pure (no I/O): the hit-path logic is fully testable from recorded bytes.
 fn parse_hit(requested: &str, body: &[u8]) -> Result<CheckResult, AcError> {
@@ -504,6 +544,9 @@ impl<T: HttpTransport> ActionCache for HttpAcClient<T> {
     }
 
     fn store(&self, result: &CheckResult) -> Result<(), AcError> {
+        // PS-10 write-boundary guard — shared across every backend, enforced
+        // before the network PUT so a secret-shaped axis never leaves the box.
+        guard_axes_not_secret(result)?;
         let Some(cfg) = self.config.as_ref() else {
             return Err(AcError::NotWired(format!(
                 "PUT {}/v1/ac/{}",

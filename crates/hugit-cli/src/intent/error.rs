@@ -103,19 +103,17 @@ impl PorcelainError {
     }
 
     /// Serialise to the canonical single-object JSON wire shape:
-    /// `{"error":{"kind":…,"message":…,"fix":…, …context}}` — context folded
-    /// FLAT, identical placement to every sibling porcelain verb.
+    /// `{"error":{"kind":…,"message":…,"fix":…, …context}}` — `kind` FIRST
+    /// (agents stream-match on it, PS-15 F-2), context folded FLAT, identical
+    /// key order to every sibling porcelain verb (the shared
+    /// [`crate::porcelain::ordered_error_object`] builder).
     pub fn to_json(&self) -> String {
-        let mut error = serde_json::json!({
-            "kind":    self.kind,
-            "message": self.message,
-            "fix":     self.fix,
-        });
-        if let Some(map) = error.as_object_mut() {
-            for (k, v) in &self.context {
-                map.insert((*k).to_string(), v.clone());
-            }
-        }
-        serde_json::json!({ "error": error }).to_string()
+        let inner = crate::porcelain::ordered_error_object(
+            &self.kind,
+            &self.message,
+            &self.fix,
+            &self.context,
+        );
+        format!(r#"{{"error":{inner}}}"#)
     }
 }

@@ -42,8 +42,14 @@ fn check_result(tree_hash: &str, def_digest: &str, toolchain: &str, exit: i32) -
     }
 }
 
-const DEF: &str = "0000000000000000000000000000000000000000000000000000000000000def0";
-const TC: &str = "0000000000000000000000000000000000000000000000000000000000000abc1";
+// Valid 64-hex content-address digests (a real def/toolchain digest IS a
+// SHA-256 → exactly 64 hex). The fixtures were previously 65 hex, which the
+// shared AC write-boundary axis guard (PS-10) correctly refuses — a long bare
+// hex run that is NOT a {40,64}-hex digest is deny-by-default (PS-14), since a
+// 32/50-hex value could be a credential. Pinned to 64 so the memoized fixture
+// stores like a real check result.
+const DEF: &str = "0000000000000000000000000000000000000000000000000000000000000def";
+const TC: &str = "0000000000000000000000000000000000000000000000000000000000000abc";
 
 /// An ordered tree history `t0..t_{n-1}` where every tree at or after
 /// `first_red` is RED and everything before is green. All results are memoized
