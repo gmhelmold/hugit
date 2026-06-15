@@ -60,6 +60,30 @@ The two corrections that define a SOTA operator panel:
 **Honesty bar (owner law):** real data or a documented honest default — NEVER a
 fabricated number. The engine reads already follow this.
 
+## 3.5 Recommended v1 layout (act-first — a concrete target, not just principles)
+
+Top-to-bottom, by what the operator needs in that order:
+
+1. **"Precisa de você"** (the headline — an ACTION queue, not a number). One list
+   of items awaiting an operator call, each with the inline action:
+   | Item | Source | Inline action → verb |
+   |---|---|---|
+   | PR aprovado, não-landado | `overview` / `attention` | **Landar** → `POST …/prs/{n}/land` |
+   | PR rejeitado | verdict on `review`/`audit` | **Ver** → review screen |
+   | Erasure aguardando decisão | `erasure` (state) | **Aprovar / Negar** → `POST …/erasure/{id}/decide` *(step-up)* |
+   Empty = "tudo em dia" (a calm honest empty state, not a fake zero).
+2. **Health strip** (a THIN row of only-what-matters — replaces the vanity cards):
+   `fila: N · mais antigo há Xh` · `cache hit-rate: Y%` · `precisam atenção: Z`.
+   That's it. (main-green + $-saved go here when their P2 seams land.)
+3. **Trilha de auditoria** (read) — the trust/forensics timeline (`audit`).
+4. **Governança** — policy posture with a **toggle** (`POST …/policy`, step-up) +
+   erasure history (`erasure`).
+5. **Sessões ativas** (`/v1/admin/tokens`) — read (revoke is P2, see §2/§6).
+
+**Auth for actions:** every action posts with a mandatory `Idempotency-Key`;
+`policy` + `erasure` require step-up (a fresh Clerk session / `X-Step-Up`). The
+window renders the POST + handles the `STEP_UP_REQUIRED` / `409` envelopes (spec §3).
+
 ## 4. A starting UI draft (use as a skeleton, then rework per §3)
 
 `hugit/docs/staging/githugr-admin-area/` has a maud screen draft + `INTEGRATION.md`
@@ -92,5 +116,8 @@ not a tweak to `/admin`. Do not conflate the two.
 
 - Engine reads + write verbs are READY on hugit `main` (§2) — build the screen on them.
 - Make it a **control plane** (act-first), not a report; **no vanity KPIs** (§3).
-- Starting scaffold in `docs/staging/githugr-admin-area/` (rework the KPIs + add actions).
+- **Build to the concrete v1 layout in §3.5** — "Precisa de você" action queue first,
+  thin health strip, then audit/governance/sessions. Each action maps to a verb there.
+- Starting scaffold in `docs/staging/githugr-admin-area/` (keep the wiring; rework the
+  KPIs + add the actions).
 - Business/founder dashboard is a separate parked project (§6) — not this.
