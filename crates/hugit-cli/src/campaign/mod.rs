@@ -40,7 +40,7 @@ mod open;
 mod output;
 pub(crate) mod seal_guard;
 mod show;
-mod world;
+pub(crate) mod world;
 
 pub use output::CampaignError;
 

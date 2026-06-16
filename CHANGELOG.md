@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(cli): **`hugit repo meta set`** — the `repo.meta` PRODUCER (closes the
+  `owner_tenant` assignment seam's write half). The engine
+  (`hugit-serve::authz::project_repo_meta`) already CONSUMED the latest `repo.meta`
+  record to decide reads (visibility) and writes (ownership), but nothing WROTE it
+  — so every repo defaulted fail-safe PRIVATE / no-owner (operator-only), and an
+  owner's per-session token could never read/write its own repo. `repo meta set
+  --visibility <public|private> [--owner-tenant <org>] [--by <human>]` records a
+  chain-valid `repo.meta` through the SAME D14-guarded / scrub-on-append / atomic
+  -persist chokepoint the campaign verbs use — never hand-assembled JSON.
+  Visibility is a STRICT closed enum (a typo errors, never silently → private);
+  `owner_tenant` is identifier-validated; empty ⇒ unassigned (operator-only).
+  Registered in `HUGIT_VERBS` (no-drift oracle); `repo` shadows no `git` verb (X5).
+  - **Snapshot wired:** `build-engine-snapshot.sh` now seeds hugit's `repo.meta`
+    as **PRIVATE** (owner-decided 2026-06-16: the product is free, but the forge
+    view is not a public showcase), with `owner_tenant` from `$HUGIT_OWNER_TENANT`
+    — unset ⇒ empty ⇒ the snapshot NEVER fabricates a tenant id. `engine-snapshots/
+    hugit.json` regenerated (35 records, 1 `repo.meta`, chain-valid by construction).
+
 - fix(serve): **`public` repos were WRITABLE by any authenticated tenant** — the
   write gate reused `authorize_read`, which opens `public` to everyone. A latent
   hole (today every repo is fail-safe private, so it's not yet reachable) that the

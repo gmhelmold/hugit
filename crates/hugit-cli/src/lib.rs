@@ -28,6 +28,7 @@ pub mod porcelain;
 pub mod pr;
 pub mod queue;
 pub mod redaction;
+pub mod repo;
 pub mod tournament;
 pub mod verdict;
 pub mod why;
@@ -69,6 +70,7 @@ pub const HUGIT_VERBS: &[&str] = &[
     "campaign", // hugit campaign open/close/show — campaign lifecycle (PC1)
     "intent",   // hugit intent new/show         — intent ceremony (PC2)
     "pr",       // hugit pr open/land/show        — pull-request lifecycle (PC3)
+    "repo",     // hugit repo meta set            — repo.meta producer (owner_tenant seam)
     // Wedge-visibility verbs (SOTA-fix Wave B) — dispatched as honest
     // NOT-IMPLEMENTED stubs at WB0 (clap skeletons); WB2 fills the projection.
     // LIVE the moment main.rs routes them (the no-drift oracle asserts
