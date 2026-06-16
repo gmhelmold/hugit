@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(serve): **pre-go-live audit remediation — 3 findings** (the audit's non-P1
+  remainder; the P1 JWKS DoS shipped separately):
+  - **Existence/integrity oracle (info-leak).** The read path verified the log
+    (→ 503 on tamper/transport fault) BEFORE the per-tenant gate, so a non-owner
+    could distinguish a tampered/existing PRIVATE repo (503) from a non-existent
+    one (404) — violating the "deny→404, no existence leak" law. New
+    `authz::is_operator`; a load failure now maps to the honest 503 ONLY for the
+    operator, and to a uniform 404 for every other caller (applied at all four load
+    sites: repo read, SSE, `/v1/me/dashboard`, `/v1/me/attention`).
+  - **`viewer-can` reported operator capabilities to EVERY viewer.** The handler was
+    called with a hardcoded `dev_principal()` stub AND projected the per-class D14
+    matrix — which is not the per-caller write gate (verbs append as a fixed class;
+    the real gate is `authorize_write`/ownership). Now built from the REAL caller +
+    the repo's meta as `authorize_write(principal, meta)` across all six affordances
+    — faithful to the write-door: owner/operator → all-true; a non-owner (even on a
+    PUBLIC repo — public opens READS only) → all-false. (Render hint only; the engine
+    re-decides regardless.)
+  - **`write_policy` echoed an unscrubbed secret-shaped `rule_id` (P3 self-leak).**
+    The `[A-Za-z0-9-_.:]` shape check allows `_`, so a `ghp_…`-shaped rule_id passed
+    and was persisted/echoed verbatim. `rule_id` is now scrubbed at the boundary
+    (a legit rule key is not secret-shaped → no-op).
+  - Tests: oracle (`is_operator` matrix + the non-operator 404 mapping), viewer-can
+    (operator/owner full, non-owner all-false on public+private, unclassifiable
+    all-false), policy rule_id scrub. fmt + clippy `-D warnings` clean; full serve
+    suite green.
+
 - fix(serve): **close a P1 unauthenticated JWKS-refetch DoS** (pre-go-live audit, the
   one confirmed-critical finding). `/v1/token` is the only no-Bearer route; it read
   the attacker-supplied `kid` from the JWT header BEFORE signature work, and a cache

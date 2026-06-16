@@ -352,6 +352,38 @@ fn tampered_log_is_503_fail_honest() {
 }
 
 #[test]
+fn tampered_log_is_404_not_503_for_a_non_operator() {
+    use hugit_serve::token::ClerkPrincipal;
+    // The existence/integrity-oracle fix (audit 2026-06-16): a load/verify failure
+    // (503 with integrity detail) must NOT reveal to a non-operator that a repo
+    // exists / is tampered — it gets a uniform 404, identical to a non-existent
+    // repo. The OPERATOR still gets the honest 503 (the integrity signal).
+    let bogus = r#"[{"seq":7,"kind":"pr.opened","payload":"{}","prev_hash":"deadbeef","this_hash":"00","recorded_at":1,"principal_chain":["x"]}]"#;
+    let (state, _d) = state_with_repo("acme", bogus);
+    let tok_b = state
+        .token_store
+        .mint(&ClerkPrincipal {
+            user: "u-b".into(),
+            org: "org-b".into(),
+            fresh_auth: false,
+        })
+        .expect("mint b");
+
+    // Non-operator tenant → 404 (no existence/integrity oracle), NOT 503.
+    let (s, b) = route(&state, &Method::Get, "/v1/repos/acme/home", &bearer(&tok_b));
+    assert_eq!(s, 404, "non-operator must get 404 on a tampered repo: {b}");
+    assert!(b.contains("NOT_FOUND"));
+    assert!(
+        !b.contains("ENGINE_UNAVAILABLE"),
+        "no integrity detail leaks: {b}"
+    );
+    // Operator (dev-token) STILL gets the honest 503 integrity signal.
+    let (s, b) = route(&state, &Method::Get, "/v1/repos/acme/home", &bearer(TOKEN));
+    assert_eq!(s, 503, "operator keeps the honest 503: {b}");
+    assert!(b.contains("ENGINE_UNAVAILABLE"));
+}
+
+#[test]
 fn all_five_reads_route_with_bearer() {
     let (state, _d) = state_with_repo("hugit", "[]");
     for path in [

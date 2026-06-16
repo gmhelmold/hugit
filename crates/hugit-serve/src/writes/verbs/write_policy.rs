@@ -31,11 +31,13 @@ pub fn write_policy(
     at: u64,
 ) -> Result<Accepted, EngineErr> {
     let _ = repo;
-    // P1 (audit): `rule_id` is written UNSCRUBBED (it is a structural identifier,
-    // not free text). So its structural shape must be ENFORCED, not asserted —
-    // non-empty, ≤64 bytes, charset `[A-Za-z0-9-_.:]` (a rule key like `dco`,
-    // `changelog`, `org.custom-gate`). A secret-shaped rule_id is rejected here,
-    // so an unredacted secret can never reach the chain via this field.
+    // `rule_id` is a structural identifier (a rule key like `dco`, `changelog`,
+    // `org.custom-gate`): non-empty, ≤64 bytes, charset `[A-Za-z0-9-_.:]`. NOTE the
+    // charset allows `_`, so a credential-shaped value (`ghp_…`, `sk-…`) PASSES the
+    // shape check — therefore it is ALSO scrubbed at the boundary before it is
+    // echoed/persisted (audit 2026-06-16 P3: a secret-shaped rule_id was leaking
+    // verbatim into the payload + note; a legit rule key is not secret-shaped, so
+    // scrub is a no-op for it).
     let rid = req.rule_id.trim();
     if rid.is_empty() {
         return Err(EngineErr::invalid_request("rule_id não pode ser vazio"));
@@ -49,11 +51,12 @@ pub fn write_policy(
             "rule_id inválido (≤64 chars, apenas ASCII alfanumérico e - _ . :)",
         ));
     }
+    let rule_id_safe = scrub(rid);
     let enabled = req.enabled.unwrap_or(true);
     let param_scrubbed: Option<String> = req.param.as_deref().map(scrub);
     let payload_value = match &param_scrubbed {
-        Some(p) => json!({"enabled": enabled, "param": p, "rule_id": req.rule_id}),
-        None => json!({"enabled": enabled, "rule_id": req.rule_id}),
+        Some(p) => json!({"enabled": enabled, "param": p, "rule_id": rule_id_safe}),
+        None => json!({"enabled": enabled, "rule_id": rule_id_safe}),
     };
     let payload = hugit_refstore::canonical_json(&payload_value.to_string())
         .unwrap_or_else(|| payload_value.to_string());
@@ -71,7 +74,7 @@ pub fn write_policy(
         })?;
     Ok(Accepted {
         seq: record.seq,
-        note: format!("regra {} atualizada", req.rule_id),
+        note: format!("regra {rule_id_safe} atualizada"),
         extra: None,
         queue_pos: None,
         pr_number: None,
@@ -110,6 +113,33 @@ mod tests {
         let p: serde_json::Value = serde_json::from_str(&r.payload).unwrap();
         assert_eq!(p["rule_id"].as_str(), Some("dco"));
         assert_eq!(p["enabled"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn secret_shaped_rule_id_is_scrubbed_in_payload_and_note() {
+        // The shape check allows `_`, so a `ghp_…` rule_id PASSES it — it must then
+        // be scrubbed at the boundary (audit 2026-06-16 P3), never persisted/echoed
+        // verbatim. (A 40-hex/`ghp_` token is the canonical secret shape.)
+        let mut log = EventLog::new();
+        let pat = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let a = write_policy(&mut log, "r", &req(pat, Some(true), None), chain(), 1).expect("ok");
+        // Persisted payload: the raw PAT must NOT appear.
+        let r = log
+            .records()
+            .iter()
+            .find(|r| r.kind == POLICY_SET_KIND)
+            .expect("present");
+        assert!(
+            !r.payload.contains(pat),
+            "raw PAT must not be persisted: {}",
+            r.payload
+        );
+        // The success note must NOT echo the raw PAT either.
+        assert!(
+            !a.note.contains(pat),
+            "raw PAT must not be echoed: {}",
+            a.note
+        );
     }
 
     #[test]

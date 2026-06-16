@@ -148,7 +148,8 @@ fn respond_sse(state: &AppState, url: &str, headers: &[Header], request: Request
     let log = match state.load_verified(repo) {
         Ok(log) => log,
         Err(e) => {
-            let (status, body) = err(e);
+            // Non-operator → 404 (no existence/integrity oracle on the SSE path).
+            let (status, body) = err(hide_load_err(&principal, e));
             return send_json(request, status, body);
         }
     };
@@ -168,6 +169,19 @@ fn respond_sse(state: &AppState, url: &str, headers: &[Header], request: Request
         && e.kind() != std::io::ErrorKind::BrokenPipe
     {
         eprintln!("hugit-serve: sse respond: {e}");
+    }
+}
+
+/// Map a load/verify failure to the status the CALLER may see. The operator gets
+/// the honest error (a 503 carrying integrity/transport detail); every other caller
+/// gets a uniform 404 — so a 503 on a private repo they don't own can never be an
+/// existence/integrity oracle (audit 2026-06-16; upholds "deny→404, no existence
+/// leak" on the load-failure path, matching the gate-deny path which is already 404).
+fn hide_load_err(principal: &[String], e: EngineErr) -> EngineErr {
+    if crate::authz::is_operator(principal) {
+        e
+    } else {
+        EngineErr::not_found()
     }
 }
 
@@ -201,7 +215,10 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
             // double-verify).
             let log = match state.load_verified(repo) {
                 Ok(l) => l,
-                Err(e) => return err(e),
+                // Non-operator → 404 (a load failure on a private repo a tenant does
+                // not own must not reveal it exists / is tampered — same no-leak law
+                // as the gate-deny path below, which is already 404).
+                Err(e) => return err(hide_load_err(&principal, e)),
             };
             // PER-TENANT READ GATE (fail-closed, re-decided server-side on every
             // repo read — githugr TL request 2026-06-15 / ADR-0007 §3): a denied
@@ -213,7 +230,13 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
                 return err(EngineErr::not_found());
             }
             // The query (stripped above) is re-passed for the param-driven reads.
-            dispatch_repo(repo, tail, url.split('?').nth(1).unwrap_or(""), &log)
+            dispatch_repo(
+                repo,
+                tail,
+                url.split('?').nth(1).unwrap_or(""),
+                &log,
+                &principal,
+            )
         }
         // Identity-scoped reads (/v1/me/*): no {repo} path param — they bind the
         // launch repo (`ME_DEFAULT_REPO`) until the P2 per-principal multi-repo
@@ -228,7 +251,11 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
             };
             let repo = ME_DEFAULT_REPO;
             with_log(
-                || state.load_verified(repo),
+                || {
+                    state
+                        .load_verified(repo)
+                        .map_err(|e| hide_load_err(&principal, e))
+                },
                 |log| {
                     if !crate::authz::authorize_read(
                         &principal,
@@ -247,7 +274,11 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
             };
             let repo = ME_DEFAULT_REPO;
             with_log(
-                || state.load_verified(repo),
+                || {
+                    state
+                        .load_verified(repo)
+                        .map_err(|e| hide_load_err(&principal, e))
+                },
                 |log| {
                     if !crate::authz::authorize_read(
                         &principal,
@@ -675,6 +706,7 @@ fn dispatch_repo(
     tail: &[&str],
     query: &str,
     log: &hugit_refstore::EventLog,
+    principal: &[String],
 ) -> (u16, String) {
     match tail {
         ["home"] => ok(&handlers::build_home(log, repo)),
@@ -697,9 +729,14 @@ fn dispatch_repo(
             let q = query_param(query, "q");
             ok(&handlers::build_search(log, repo, &q))
         }
-        // The capability matrix is per-principal-class (repo-agnostic); the log
-        // was already load-verified + gated by the caller.
-        ["viewer-can"] => ok(&handlers::build_viewer_can(&dev_principal())),
+        // viewer-can mirrors the REAL per-caller write gate (`authorize_write`,
+        // ownership) for THIS repo (audit 2026-06-16) — using the real caller +
+        // the repo's meta, not a hardcoded operator stub + the (non-enforcing)
+        // class matrix. The log was already load-verified + read-gated above.
+        ["viewer-can"] => {
+            let meta = crate::authz::project_repo_meta(log);
+            ok(&handlers::build_viewer_can(principal, &meta))
+        }
         ["prs", n] => match n.parse::<u32>() {
             Ok(num) => match handlers::build_pr_detail(log, repo, num) {
                 Some(vm) => ok(&vm),
