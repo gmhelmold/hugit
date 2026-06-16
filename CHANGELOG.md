@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(serve): **close a P1 unauthenticated JWKS-refetch DoS** (pre-go-live audit, the
+  one confirmed-critical finding). `/v1/token` is the only no-Bearer route; it read
+  the attacker-supplied `kid` from the JWT header BEFORE signature work, and a cache
+  miss unconditionally triggered a **blocking 10s upstream JWKS GET**. A flood of
+  random `kid`s thus forced one synchronous fetch per request — and the engine is
+  single-threaded, so each fetch stalled ALL traffic (reads/writes/SSE). ROOT FIX: a
+  refetch throttle (`JwksCache::refetch_allowed`) — a miss refetches at most once per
+  `JWKS_MIN_REFETCH_SECS` (60s) and otherwise fails closed WITHOUT a fetch; the
+  ATTEMPT time is recorded (so a slow/unreachable Clerk JWKS also stalls ≤1 request
+  per window, not every request). Key rotation still works (bounded ≤60s staleness).
+  Test: cold → allowed, immediate repeats → throttled, post-interval → allowed.
+
 - fix(serve): **reject a `:` in the resolved Clerk org (tenant) at the mint boundary**
   — pre-go-live adversarial audit of the live-write path. The engine principal is
   `clerk:{org}:{user}` and `authz::caller` splits it on `:` to recover the org for

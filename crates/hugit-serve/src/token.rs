@@ -14,7 +14,8 @@
 //! ## Security invariants (match auth.rs + clerk.rs)
 //!
 //! - `alg=RS256` pinned on the UNTRUSTED header BEFORE any key material is touched.
-//! - Unknown kid → refetch ONCE → fail-closed (not a second refetch).
+//! - Unknown kid → refetch at most ONCE per `JWKS_MIN_REFETCH_SECS` → fail-closed
+//!   (the throttle stops an attacker-chosen kid forcing a blocking GET per request).
 //! - `exp`/`nbf`/`iss` mandatory via `Validation`.
 //! - `azp` optional now; checked when `TokenConfig.azp` is Some.
 //! - tenant from `publicMetadata.tenant_id` then `org_id`, else reject.
@@ -35,7 +36,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::{Deserialize, Serialize};
@@ -58,6 +59,12 @@ const FRESH_AUTH_SECS: i64 = 300;
 
 /// JWKS HTTP fetch timeout — a hung JWKS never hangs the request.
 const JWKS_TIMEOUT_SECS: u64 = 10;
+
+/// Minimum interval between JWKS refetches. A cache miss within this window of the
+/// last attempt fails closed WITHOUT an upstream fetch — caps an attacker-chosen
+/// `kid` to at most one fetch per window (DoS guard) while still picking up key
+/// rotation with bounded staleness.
+const JWKS_MIN_REFETCH_SECS: u64 = 60;
 
 // ── Wire types (server-to-server; NOT in hugit-http-contracts) ────────────────
 
@@ -175,6 +182,9 @@ pub struct ClerkPrincipal {
 pub struct JwksCache {
     url: String,
     keys: Mutex<HashMap<String, DecodingKey>>,
+    /// When the JWKS was last (attempted to be) fetched. Gates the refetch so an
+    /// attacker-chosen `kid` cannot force one synchronous upstream GET per request.
+    last_refetch: Mutex<Option<Instant>>,
 }
 
 impl JwksCache {
@@ -182,19 +192,48 @@ impl JwksCache {
         Self {
             url,
             keys: Mutex::new(HashMap::new()),
+            last_refetch: Mutex::new(None),
         }
     }
 
-    /// Resolve a `DecodingKey` for `kid`, refetching the JWKS once on a cache
-    /// miss (handles key rotation).  Returns `None` on any failure (fail-closed).
+    /// Resolve a `DecodingKey` for `kid`.
+    ///
+    /// On a cache MISS, refetch the JWKS **at most once per
+    /// [`JWKS_MIN_REFETCH_SECS`]** (key rotation is still picked up, with bounded
+    /// staleness). Within that window a miss fails CLOSED *without* an upstream
+    /// fetch — so a flood of requests carrying random `kid`s (the one no-Bearer
+    /// route, `/v1/token`) cannot trigger a blocking 10s GET per request and wedge
+    /// the single-threaded server (the pre-go-live audit's P1 DoS). The throttle
+    /// also records the ATTEMPT time, so a slow/unreachable Clerk JWKS can stall at
+    /// most one request per window, not every request.
     fn key_for(&self, kid: &str) -> Option<DecodingKey> {
         // Fast path: cache hit.
         if let Some(k) = self.get(kid) {
             return Some(k);
         }
-        // Cache miss → refetch once, then look again.
-        self.refetch();
-        self.get(kid)
+        // Cache miss → refetch ONLY if the throttle window has elapsed.
+        if self.refetch_allowed() {
+            self.refetch();
+            return self.get(kid);
+        }
+        None
+    }
+
+    /// `true` iff a refetch is permitted now (cold cache, or ≥ the min interval
+    /// since the last attempt). Records the attempt time when it returns `true`.
+    fn refetch_allowed(&self) -> bool {
+        let Ok(mut last) = self.last_refetch.lock() else {
+            return false; // poisoned → fail closed (no fetch)
+        };
+        let now = Instant::now();
+        let allowed = match *last {
+            None => true,
+            Some(t) => now.duration_since(t) >= Duration::from_secs(JWKS_MIN_REFETCH_SECS),
+        };
+        if allowed {
+            *last = Some(now);
+        }
+        allowed
     }
 
     fn get(&self, kid: &str) -> Option<DecodingKey> {
@@ -1004,6 +1043,29 @@ mod tests {
             v.validate(&sign(&c2, TEST_KID)).is_none(),
             "colon org_id must be rejected"
         );
+    }
+
+    #[test]
+    fn jwks_refetch_is_throttled_against_kid_flood() {
+        // The P1 DoS guard: a cache miss may refetch at most once per window, so a
+        // flood of random kids on /v1/token cannot force a blocking GET per request.
+        let c = JwksCache::new("http://127.0.0.1:0/jwks.json".to_string());
+        assert!(c.refetch_allowed(), "cold cache → first refetch allowed");
+        assert!(
+            !c.refetch_allowed(),
+            "within the window → throttled, no fetch"
+        );
+        assert!(!c.refetch_allowed(), "still throttled");
+        // After the interval, refetch is allowed again (key rotation still works).
+        if let Some(old) =
+            Instant::now().checked_sub(Duration::from_secs(JWKS_MIN_REFETCH_SECS + 5))
+        {
+            *c.last_refetch.lock().unwrap() = Some(old);
+            assert!(
+                c.refetch_allowed(),
+                "after the interval → refetch allowed again"
+            );
+        }
     }
 
     #[test]
