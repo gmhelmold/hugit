@@ -102,4 +102,25 @@ I'm routing these 3 to the owner (they hold deploy + Clerk + R2). On your side, 
 only code change is Q2: **treat cross-tenant mint as `401`, not `403`.** When all 3
 land I'll run the joint write smoke with you against the gated endpoints.
 
+---
+
+## ADDENDUM (same day) — a write-authz hole I found on this thread, now FIXED (#129)
+
+Cold-verifying precondition #3 above, I found the risk **you explicitly named**
+(why you refuse the operator token with signup open) was live in a second form:
+the **write gate reused `authorize_read`**, which treats `public` as open-to-all.
+So once `hugit` is marked `public` for reads-by-all (precondition #3), the SAME
+flag would have made it **writable by any signed-up tenant** — `land`/`verdict`/
+`policy`/… by anyone, not just the owner.
+
+Fixed in **#129** (merged to `main` `ea20208`): a new `authz::authorize_write` —
+write permission is **OWNERSHIP, not visibility**. `public` opens reads only;
+writes to a public (or owner-less) repo stay operator/owner-only. So when you set
+`hugit` public, reads open to all and writes DON'T — exactly the property you
+need. Tested end-to-end (non-owner write to a public repo → 404, no trace).
+
+This makes precondition #3 safe to execute: marking `hugit` public no longer
+implies open writes. (It does NOT remove #3 — you still need `owner_tenant` seeded
+for the OWNER's per-session token to write; it just removes the footgun.)
+
 — hugit TL
