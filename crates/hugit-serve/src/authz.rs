@@ -155,6 +155,18 @@ pub fn authorize_write(principal: &[String], meta: &RepoMeta) -> bool {
     }
 }
 
+/// `true` iff the principal is the platform/dev OPERATOR (`orchestrator:*`).
+///
+/// Used to decide who may see a load/verify failure's honest error (a 503 with
+/// integrity/transport detail) on a repo they may not own: ONLY the operator does;
+/// every other caller gets a uniform 404, so a load failure on a private repo a
+/// caller doesn't own is never an existence/integrity oracle (audit 2026-06-16 —
+/// upholds the "deny→404, no existence leak" law for the load-failure path too).
+#[must_use]
+pub fn is_operator(principal: &[String]) -> bool {
+    matches!(caller(principal), Caller::Operator)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,6 +244,15 @@ mod tests {
         assert!(!authorize_write(&tenant("org-a"), &public_no_owner));
         assert!(!authorize_write(&tenant("org-a"), &private(None)));
         assert!(authorize_write(&op(), &public_no_owner));
+    }
+
+    #[test]
+    fn is_operator_only_for_orchestrator() {
+        assert!(is_operator(&op()));
+        assert!(!is_operator(&tenant("org-a")));
+        assert!(!is_operator(&["clerk:org-a:u".to_string()]));
+        assert!(!is_operator(&["weird:x".to_string()]));
+        assert!(!is_operator(&[]));
     }
 
     #[test]
