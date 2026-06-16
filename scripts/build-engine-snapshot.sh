@@ -37,6 +37,16 @@ ms() { echo "$(($(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$1" +%s) * 1000))"; }
   --charter "Post-Round-13 in-control tracked-seam closure (PS-9 / PS-11 / PS-17 + the IntentMetrics conformance twin)." \
   --owner humangr >/dev/null
 
+# Repo authz metadata (the owner_tenant producer seam). hugit is PRIVATE
+# (owner-decided 2026-06-16: the product is free, but the forge view is NOT a
+# public showcase). `owner_tenant` comes from the env — unset ⇒ empty ⇒
+# unassigned (operator-only) so the snapshot NEVER fabricates a tenant id. Set
+# HUGIT_OWNER_TENANT=<owner's Clerk org> to let the owner's per-session token
+# read+write its own repo. Reads (visibility) and writes (ownership) are decided
+# off THIS record by hugit-serve::authz::project_repo_meta.
+"$BIN" repo meta set --log "$OUT" --visibility private \
+  --owner-tenant "${HUGIT_OWNER_TENANT:-}" --by humangr >/dev/null
+
 # Real PRs:  number | campaign | merged-iso | merge-sha | state | title
 PRS=(
   "112|githugr-spine|2026-06-14T03:07:02Z|a6735c03e15bb9aa22bdeebffd57371fb95e9c8c|landed|feat(contracts): Phase 2 wire freeze — 26 read VMs + Accepted write shape"

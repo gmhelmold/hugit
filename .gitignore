@@ -2,3 +2,6 @@
 /.techlead/
 /.claude/worktrees/
 /.claude/scheduled_tasks.lock
+
+# Local Action Cache produced by `hugit check --store` during snapshot builds (not a source artifact)
+engine-snapshots/*.ac

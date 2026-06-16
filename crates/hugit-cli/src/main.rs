@@ -30,6 +30,7 @@ use hugit_cli::intent::{self, IntentArgs};
 use hugit_cli::porcelain::PorcelainError;
 use hugit_cli::pr::{self, PrArgs};
 use hugit_cli::queue::{self, QueueArgs};
+use hugit_cli::repo::{self, RepoArgs};
 use hugit_cli::tournament::{MAX_N_POLICY, produce_candidates};
 use hugit_cli::verdict::{self, VerdictArgs};
 use hugit_cli::why::resolver::LogEntry;
@@ -67,6 +68,8 @@ enum Command {
     Intent(IntentArgs),
     /// Pull-request lifecycle: open / land / show (WP-PC3).
     Pr(PrArgs),
+    /// Repo authz metadata: `meta set` records `repo.meta` (visibility + owner_tenant).
+    Repo(RepoArgs),
     /// Memoized-CI checks: show / key — make the CI wedge visible (WP-WB2 stub).
     Checks(ChecksArgs),
     /// Landing-queue state: show — make the union-batch wedge visible (WP-WB2 stub).
@@ -503,6 +506,7 @@ fn main() -> ExitCode {
         Command::Campaign(a) => return campaign::run(a),
         Command::Intent(a) => return intent::run(a),
         Command::Pr(a) => return pr::run(a),
+        Command::Repo(a) => return repo::run(a),
         Command::Checks(a) => return checks::run(a),
         Command::Queue(a) => return queue::run(a),
         // Wedge EXECUTE verbs (W0 scaffold): thin → the owning module's runner,
