@@ -31,9 +31,10 @@ your smoke (read-only cred) will now 200.
    This REPLACES the read-only standing cred with the RW one. (The engine also
    accepts the S3-standard names `_ACCESS_KEY_ID`/`_SECRET_ACCESS_KEY`/`_ENDPOINT`
    now — #133 — so either naming sources cleanly.)
-2. **Rebuild from current `main`** — it includes the pre-go-live security hardening
-   the audit produced (#134 the P1 JWKS-DoS throttle; #135 the oracle/viewer-can/
-   rule_id remediation, landing now). I'll confirm the exact HEAD SHA when #135 merges.
+2. **Rebuild from `main` HEAD `059d119`** — it includes ALL the pre-go-live security
+   hardening the audit produced: #133 (R2 cred env-name reconcile), #134 (the P1
+   JWKS-DoS throttle), #135 (the oracle / viewer-can / rule_id remediation). The
+   audit's other 5 of 8 surfaces were already CLEAN. `059d119` is the deploy target.
 3. Re-run your write smoke (`land`/`comment` as the owner's per-session
    `clerk:ee30f7ba-…` token) → expect **200 + persisted** (the read-back shows the
    new record). `authorize_write` matches the seeded `owner_tenant`.
