@@ -211,6 +211,15 @@ where
 
     let mut log = sink.load(repo)?;
 
+    // WRITE-SIDE PER-TENANT GATE (parity with the read gate; ADR-0007 §3 — the
+    // engine re-decides on EVERY verb, not just reads): the caller must OWN the
+    // repo (or be the operator) to mutate it. A non-owner is denied as 404 (no
+    // existence leak), BEFORE the idempotency lookup or any effect — closes the
+    // cross-tenant WRITE hole (org-b must never land/verdict/policy/… into org-a).
+    if !crate::authz::authorize_read(&principal_chain, &crate::authz::project_repo_meta(&log)) {
+        return Err(EngineErr::not_found());
+    }
+
     // Replay guard: a seen key returns the stored outcome (or 409 on a body change)
     // BEFORE the verb runs — so a lost-response retry never re-executes the effect.
     if let Some(prior) = idem_lookup(&log, &principal, verb, resource, idem_key) {
@@ -307,7 +316,7 @@ mod tests {
             "",
             b"{}",
             true,
-            vec!["o".into()],
+            vec!["orchestrator:o".into()],
             2,
             dummy_verb,
         )
@@ -328,7 +337,7 @@ mod tests {
             "K1",
             body,
             true,
-            vec!["o".into()],
+            vec!["orchestrator:o".into()],
             2,
             dummy_verb,
         )
@@ -343,7 +352,7 @@ mod tests {
             "K1",
             body,
             true,
-            vec!["o".into()],
+            vec!["orchestrator:o".into()],
             3,
             dummy_verb,
         )
@@ -370,7 +379,7 @@ mod tests {
             "K1",
             b"{\"mode\":\"union\"}",
             true,
-            vec!["o".into()],
+            vec!["orchestrator:o".into()],
             2,
             dummy_verb,
         )
@@ -383,7 +392,7 @@ mod tests {
             "K1",
             b"{\"mode\":\"serial\"}",
             true,
-            vec!["o".into()],
+            vec!["orchestrator:o".into()],
             3,
             dummy_verb,
         )
@@ -404,7 +413,7 @@ mod tests {
             "K1",
             b"{}",
             false,
-            vec!["o".into()],
+            vec!["orchestrator:o".into()],
             2,
             dummy_verb,
         )
@@ -421,7 +430,7 @@ mod tests {
                 "K2",
                 b"{}",
                 false,
-                vec!["o".into()],
+                vec!["orchestrator:o".into()],
                 3,
                 dummy_verb
             )
@@ -441,7 +450,7 @@ mod tests {
             "K1",
             &big,
             true,
-            vec!["o".into()],
+            vec!["orchestrator:o".into()],
             2,
             dummy_verb,
         )
@@ -464,7 +473,7 @@ mod tests {
             "K",
             body,
             true,
-            vec!["o".into()],
+            vec!["orchestrator:o".into()],
             2,
             dummy_verb,
         )
@@ -478,7 +487,7 @@ mod tests {
             "K",
             body,
             true,
-            vec!["o".into()],
+            vec!["orchestrator:o".into()],
             3,
             dummy_verb,
         )

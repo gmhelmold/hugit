@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(serve): **close two cross-tenant holes the post-#126 adversarial audit found**
+  — the read gate alone wasn't enough.
+  - **P0 — writes were UNgated.** `POST /v1/repos/{repo}/*` (land/verdict/comment/
+    policy/erasure/dispatch/undo/edit) had NO per-tenant check — any authenticated
+    tenant could WRITE into another tenant's repo. Now the same fail-closed gate
+    runs at the `with_write` chokepoint (after load, before idempotency/effect):
+    `authorize_read(principal, project_repo_meta(log))` → deny is 404, no effect.
+    The engine re-decides on EVERY verb (ADR-0007 §3), not just reads.
+  - **P1 — `/v1/me/*` leaked the launch repo.** `me/dashboard` + `me/attention`
+    discarded the principal and served `hugit`'s operational data to any
+    authenticated tenant. Now gated against the bound repo (operator bypass;
+    non-owner tenant → 404).
+  - Audit also confirmed CLEAN: `caller()` parsing (no operator-forge via a
+    `clerk:` org), `repo.meta` not HTTP-writable, `/v1/admin/tokens` org-scoping,
+    pagination/panic-safety. The load-then-gate 503-on-tampered-private edge is a
+    documented LOW residual (same family as PS-18's 503-vs-404).
+  - Tests: a cross-tenant WRITE → 404 + leaves no trace (owner → 200); me/* tenant
+    → 404, operator → 200. fmt + clippy clean; full serve suite green.
+
 - feat(serve): **engine-side per-tenant READ authorization** (closes the
   cross-tenant read critical from the githugr 360° audit; the engine half of the
   githugr TL's 2026-06-15 request). In live/hybrid the engine served any repo's

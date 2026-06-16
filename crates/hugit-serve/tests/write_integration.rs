@@ -62,6 +62,76 @@ fn post(state: &AppState, url: &str, headers: &[Header], body: &[u8]) -> (u16, S
 }
 
 #[test]
+fn cross_tenant_write_is_denied_owner_allowed() {
+    use hugit_serve::token::ClerkPrincipal;
+    // A private repo "acme" owned by org-a, with an open PR 1 to land.
+    let dir = scratch_dir();
+    let mut log = EventLog::new();
+    log.append_for_test(
+        "repo.meta",
+        vec![],
+        serde_json::json!({"visibility":"private","owner_tenant":"org-a"}).to_string(),
+        0,
+    );
+    let pr = hugit_refstore::canonical_json(
+        &serde_json::json!({"author_kind":"orchestrator","campaign":"c","intent_ids":["i"],"pr_id":"1","principal":null,"run_id":"r"}).to_string(),
+    )
+    .unwrap();
+    log.append_for_test("pr.opened", vec!["orchestrator:t".into()], pr, 1);
+    std::fs::write(
+        dir.join("acme.json"),
+        serde_json::to_vec(log.records()).unwrap(),
+    )
+    .unwrap();
+    let state = AppState::new(dir.clone(), TOKEN.to_string());
+
+    let tok_a = state
+        .token_store
+        .mint(&ClerkPrincipal {
+            user: "u-a".into(),
+            org: "org-a".into(),
+            fresh_auth: false,
+        })
+        .unwrap();
+    let tok_b = state
+        .token_store
+        .mint(&ClerkPrincipal {
+            user: "u-b".into(),
+            org: "org-b".into(),
+            fresh_auth: false,
+        })
+        .unwrap();
+    let land = |tok: &str, key: &str| {
+        post(
+            &state,
+            "/v1/repos/acme/prs/1/land",
+            &[
+                hdr("Authorization", &format!("Bearer {tok}")),
+                hdr("Idempotency-Key", key),
+            ],
+            br#"{"mode":"union"}"#,
+        )
+    };
+
+    // Cross-tenant (org-b) WRITE → 404, denied BEFORE any effect (the P0 fix).
+    let (s, b) = land(&tok_b, "kb");
+    assert_eq!(s, 404, "cross-tenant write must be denied: {b}");
+    assert!(b.contains("NOT_FOUND"));
+    // The owning tenant (org-a) → 200 (not a blanket deny).
+    let (s, b) = land(&tok_a, "ka");
+    assert_eq!(s, 200, "owning tenant can write: {b}");
+    // The cross-tenant write left NO trace on the log.
+    let recs: Vec<serde_json::Value> =
+        serde_json::from_slice(&std::fs::read(dir.join("acme.json")).unwrap()).unwrap();
+    let from_b = recs.iter().any(|r| {
+        r["principal_chain"]
+            .as_array()
+            .is_some_and(|c| c.iter().any(|p| p == "clerk:org-b:u-b"))
+    });
+    assert!(!from_b, "no org-b record may exist on org-a's repo");
+}
+
+#[test]
 fn land_with_key_is_200_accepted_and_persists() {
     let (state, _d) = state_with_open_pr();
     let headers = vec![
