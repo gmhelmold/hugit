@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(serve): **`repo_chrome` serves the REAL machine visibility** + **lock the
+  2 corrected write routes** (closes the githugr TL's 2026-06-15 authz-confirms +
+  write-route-correction loop; the engine half of the cross-tenant authz wave).
+  - **`visibility` field now REAL.** `build_repo_chrome` projects `visibility`
+    from the SAME `crate::authz::project_repo_meta` source the read gate decides
+    on (one law) — was honest-default empty. The wire carries the **machine
+    value** `"public" | "private"` via a new `Visibility::as_machine_str()`
+    (single source of truth); the **window** maps it to a localized display label
+    (TL decision: i18n in the presentation layer). `RepoChromeVm.visibility`
+    doc-locked to the machine value; a pre-`repo.meta` repo fail-safe defaults to
+    `"private"` (matches the gate).
+  - **Write routes confirmed-by-test.** The githugr TL cold-checked `LiveActions`
+    and corrected 2 routes (comment → plural `/prs/{pr}/comments`; edit_propose →
+    path-scoped `/edit/{*path}/propose`). The engine ALREADY served exactly these
+    — no code change; locked with routing tests so the Fixture→Live flip is
+    proven: plural `/comments` → 200 / singular `/comment` → 404; multi-segment
+    `/edit/src/foo/bar.rs/propose` → 200 / bare `/edit` + no-`/propose` → 404. All
+    9 spec-§3 write routes match the verified client list.
+  - Tests: 4 new (chrome machine-value public/private + pre-meta default; the 2
+    route-shape proofs). fmt + clippy clean; full serve + contracts suites green.
+
 - fix(serve): **close two cross-tenant holes the post-#126 adversarial audit found**
   — the read gate alone wasn't enough.
   - **P0 — writes were UNgated.** `POST /v1/repos/{repo}/*` (land/verdict/comment/

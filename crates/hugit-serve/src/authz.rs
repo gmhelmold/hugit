@@ -33,6 +33,20 @@ pub enum Visibility {
     Private,
 }
 
+impl Visibility {
+    /// The MACHINE value the wire carries (`"public" | "private"`) — never a
+    /// localized display string. Locale lives in the window (githugr TL decision
+    /// 2026-06-15: clean contract = machine value + window-side i18n). This is the
+    /// single source of truth for the `RepoChromeVm.visibility` field.
+    #[must_use]
+    pub fn as_machine_str(self) -> &'static str {
+        match self {
+            Visibility::Public => "public",
+            Visibility::Private => "private",
+        }
+    }
+}
+
 /// A repo's projected authz metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoMeta {

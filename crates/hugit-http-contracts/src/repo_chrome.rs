@@ -11,6 +11,9 @@ pub struct RepoChromeVm {
     pub attention_count: u32,
     pub stars: String,
     pub forks: String,
+    /// MACHINE value: `"public" | "private"` (NOT a localized display string).
+    /// The window maps it to a display label at render (githugr TL decision
+    /// 2026-06-15 — locale lives in the window). Empty only on a pre-meta repo.
     pub visibility: String,
     /// Repo description as plain text (HTML-free).
     pub description_html_free: String,
@@ -29,7 +32,7 @@ mod tests {
             attention_count: 3,
             stars: "1.2k".into(),
             forks: "84".into(),
-            visibility: "Privado".into(),
+            visibility: "private".into(), // MACHINE value on the wire (display is window-side)
             description_html_free: "Content-addressed cache + compute da CoreLink.".into(),
             clone_cmd: "hugit clone humangr/corelink-server".into(),
         };

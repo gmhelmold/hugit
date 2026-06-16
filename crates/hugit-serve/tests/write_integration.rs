@@ -132,6 +132,69 @@ fn cross_tenant_write_is_denied_owner_allowed() {
 }
 
 #[test]
+fn comment_route_is_plural_comments() {
+    // githugr CORRECTION 2026-06-15: the comment route is `/prs/{pr}/comments`
+    // (PLURAL), NOT `/comment`. Prove the engine serves the plural form (200) and
+    // the old singular `/comment` is NOT a route (404).
+    let (state, _d) = state_with_open_pr();
+    let headers = vec![
+        hdr("Authorization", &format!("Bearer {TOKEN}")),
+        hdr("Idempotency-Key", "C1"),
+    ];
+    let (status, body) = post(
+        &state,
+        "/v1/repos/hugit/prs/1/comments",
+        &headers,
+        br#"{"body":"looks good"}"#,
+    );
+    assert_eq!(status, 200, "plural /comments must route: {body}");
+
+    let headers2 = vec![
+        hdr("Authorization", &format!("Bearer {TOKEN}")),
+        hdr("Idempotency-Key", "C2"),
+    ];
+    let (singular, _b) = post(
+        &state,
+        "/v1/repos/hugit/prs/1/comment",
+        &headers2,
+        br#"{"body":"x"}"#,
+    );
+    assert_eq!(singular, 404, "singular /comment must NOT be a route");
+}
+
+#[test]
+fn edit_propose_route_is_path_scoped_multi_segment() {
+    // githugr CORRECTION 2026-06-15: edit_propose is `/edit/{*path}/propose` (the
+    // file path is IN the route, suffix `/propose`), NOT a bare `/edit`. Prove a
+    // MULTI-SEGMENT path routes (200) and the bare/suffix-less forms are NOT routes.
+    let (state, _d) = state_with_open_pr();
+    let headers = vec![
+        hdr("Authorization", &format!("Bearer {TOKEN}")),
+        hdr("Idempotency-Key", "E1"),
+    ];
+    let (status, body) = post(
+        &state,
+        "/v1/repos/hugit/edit/src/foo/bar.rs/propose",
+        &headers,
+        br#"{"content":"fn main() {}","title":"edit bar"}"#,
+    );
+    assert_eq!(
+        status, 200,
+        "multi-segment /edit/.../propose must route: {body}"
+    );
+
+    // Bare `/edit` and a path WITHOUT the `/propose` suffix are NOT routes.
+    for bad in ["/v1/repos/hugit/edit", "/v1/repos/hugit/edit/src/foo.rs"] {
+        let h = vec![
+            hdr("Authorization", &format!("Bearer {TOKEN}")),
+            hdr("Idempotency-Key", "E2"),
+        ];
+        let (s, _b) = post(&state, bad, &h, br#"{"content":"x","title":"t"}"#);
+        assert_eq!(s, 404, "non-propose edit shape must NOT route: {bad}");
+    }
+}
+
+#[test]
 fn land_with_key_is_200_accepted_and_persists() {
     let (state, _d) = state_with_open_pr();
     let headers = vec![
