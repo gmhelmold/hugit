@@ -85,7 +85,11 @@ impl AppState {
             return Err("HUGIT_ENGINE_DEV_TOKEN is empty (fail-closed)".to_string());
         }
 
-        let source = if std::env::var("HUGIT_SERVE_R2_ACCOUNT_ID").is_ok() {
+        // R2 is selected by EITHER the native ACCOUNT_ID or the S3-standard ENDPOINT
+        // (so a standard cred file, which carries _ENDPOINT not _ACCOUNT_ID, selects R2).
+        let r2_selected = std::env::var("HUGIT_SERVE_R2_ACCOUNT_ID").is_ok()
+            || std::env::var("HUGIT_SERVE_R2_ENDPOINT").is_ok();
+        let source = if r2_selected {
             Self::r2_from_env()?
         } else {
             let dir = std::env::var("HUGIT_SERVE_LOG_DIR")
@@ -223,20 +227,68 @@ impl R2Config {
     /// `SECRET` are the one-shot READ+WRITE grant; for the server they are the
     /// standing read-only cred — same shape, different scope.
     pub fn from_env() -> Result<Self, String> {
-        let req =
-            |k: &str| std::env::var(k).map_err(|_| format!("{k} is not set (R2 source selected)"));
-        let account_id = req("HUGIT_SERVE_R2_ACCOUNT_ID")?;
-        let host = format!("{account_id}.r2.cloudflarestorage.com");
+        Self::from_vars(|k| std::env::var(k).ok())
+    }
+
+    /// Pure core of [`from_env`] — resolves the config from a `get(name)` lookup so
+    /// it is testable without mutating global process env.
+    ///
+    /// Accepts BOTH the engine-native names AND the S3-standard names a CoreLink/AWS
+    /// credential file ships with, so such a file can be `source`d verbatim (only
+    /// `HUGIT_SERVE_R2_TENANT_ID` must be supplied separately — it is not part of a
+    /// generic cred):
+    /// - host: `HUGIT_SERVE_R2_ACCOUNT_ID` (native) **or** `…_ENDPOINT` (S3-standard).
+    /// - key:  `HUGIT_SERVE_R2_KEY_ID` (native) **or** `…_ACCESS_KEY_ID`.
+    /// - secret: `HUGIT_SERVE_R2_SECRET` (native) **or** `…_SECRET_ACCESS_KEY`.
+    fn from_vars(get: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
+        let req = |k: &str| get(k).ok_or_else(|| format!("{k} is not set (R2 source selected)"));
+        let either = |primary: &str, alias: &str| get(primary).or_else(|| get(alias));
+
+        // Host from the native ACCOUNT_ID, else parsed from the S3-standard ENDPOINT.
+        let (endpoint, host) = match get("HUGIT_SERVE_R2_ACCOUNT_ID") {
+            Some(account_id) => {
+                let host = format!("{account_id}.r2.cloudflarestorage.com");
+                (format!("https://{host}"), host)
+            }
+            None => {
+                let endpoint = get("HUGIT_SERVE_R2_ENDPOINT").ok_or_else(|| {
+                    "neither HUGIT_SERVE_R2_ACCOUNT_ID nor HUGIT_SERVE_R2_ENDPOINT is set \
+                     (R2 source selected)"
+                        .to_string()
+                })?;
+                let host = endpoint
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .split('/')
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                if host.is_empty() {
+                    return Err(format!("HUGIT_SERVE_R2_ENDPOINT is malformed: {endpoint}"));
+                }
+                (endpoint, host)
+            }
+        };
+        let key_id =
+            either("HUGIT_SERVE_R2_KEY_ID", "HUGIT_SERVE_R2_ACCESS_KEY_ID").ok_or_else(|| {
+                "HUGIT_SERVE_R2_KEY_ID (or _ACCESS_KEY_ID) is not set (R2 source selected)"
+                    .to_string()
+            })?;
+        let secret = either("HUGIT_SERVE_R2_SECRET", "HUGIT_SERVE_R2_SECRET_ACCESS_KEY")
+            .ok_or_else(|| {
+                "HUGIT_SERVE_R2_SECRET (or _SECRET_ACCESS_KEY) is not set (R2 source selected)"
+                    .to_string()
+            })?;
         let agent = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(30))
             .build();
         Ok(R2Config {
-            endpoint: format!("https://{host}"),
+            endpoint,
             host,
             bucket: req("HUGIT_SERVE_R2_BUCKET")?,
-            region: std::env::var("HUGIT_SERVE_R2_REGION").unwrap_or_else(|_| "auto".to_string()),
-            key_id: req("HUGIT_SERVE_R2_KEY_ID")?,
-            secret: req("HUGIT_SERVE_R2_SECRET")?,
+            region: get("HUGIT_SERVE_R2_REGION").unwrap_or_else(|| "auto".to_string()),
+            key_id,
+            secret,
             tenant_id: req("HUGIT_SERVE_R2_TENANT_ID")?,
             agent,
         })
@@ -362,6 +414,70 @@ pub fn is_safe_repo_slug(repo: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    /// Build a `get`-style lookup over a fixed map (no global env mutation).
+    fn vars(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let m: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |k: &str| m.get(k).cloned()
+    }
+
+    #[test]
+    fn r2_config_accepts_engine_native_names() {
+        let c = R2Config::from_vars(vars(&[
+            ("HUGIT_SERVE_R2_ACCOUNT_ID", "acct123"),
+            ("HUGIT_SERVE_R2_BUCKET", "corelink-githugr-engine"),
+            ("HUGIT_SERVE_R2_KEY_ID", "k"),
+            ("HUGIT_SERVE_R2_SECRET", "s"),
+            ("HUGIT_SERVE_R2_TENANT_ID", "ee30f7ba"),
+        ]))
+        .expect("native names");
+        assert_eq!(c.host, "acct123.r2.cloudflarestorage.com");
+        assert_eq!(c.endpoint, "https://acct123.r2.cloudflarestorage.com");
+        assert_eq!(c.tenant_id, "ee30f7ba");
+        assert_eq!(c.region, "auto"); // default
+    }
+
+    #[test]
+    fn r2_config_accepts_s3_standard_cred_names() {
+        // A CoreLink/AWS cred file (sourced verbatim) + the separately-set tenant.
+        let c = R2Config::from_vars(vars(&[
+            (
+                "HUGIT_SERVE_R2_ENDPOINT",
+                "https://acct123.r2.cloudflarestorage.com",
+            ),
+            ("HUGIT_SERVE_R2_ACCESS_KEY_ID", "k"),
+            ("HUGIT_SERVE_R2_SECRET_ACCESS_KEY", "s"),
+            ("HUGIT_SERVE_R2_BUCKET", "corelink-githugr-engine"),
+            ("HUGIT_SERVE_R2_REGION", "auto"),
+            ("HUGIT_SERVE_R2_TENANT_ID", "ee30f7ba"),
+        ]))
+        .expect("S3-standard names");
+        assert_eq!(c.host, "acct123.r2.cloudflarestorage.com");
+        assert_eq!(c.endpoint, "https://acct123.r2.cloudflarestorage.com");
+        assert_eq!(c.key_id, "k");
+        assert_eq!(c.secret, "s");
+    }
+
+    #[test]
+    fn r2_config_missing_host_source_is_an_error() {
+        let err = match R2Config::from_vars(vars(&[
+            ("HUGIT_SERVE_R2_KEY_ID", "k"),
+            ("HUGIT_SERVE_R2_SECRET", "s"),
+            ("HUGIT_SERVE_R2_BUCKET", "b"),
+            ("HUGIT_SERVE_R2_TENANT_ID", "t"),
+        ])) {
+            Ok(_) => panic!("expected an error when neither ACCOUNT_ID nor ENDPOINT is set"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("ACCOUNT_ID") && err.contains("ENDPOINT"),
+            "{err}"
+        );
+    }
 
     #[test]
     fn safe_slugs_accept_normal_repos() {

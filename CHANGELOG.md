@@ -19,6 +19,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per window, not every request). Key rotation still works (bounded ≤60s staleness).
   Test: cold → allowed, immediate repeats → throttled, post-interval → allowed.
 
+- fix(serve): **`R2Config` accepts the S3-standard cred var names** alongside the
+  engine-native ones, so a CoreLink/AWS credential file (`HUGIT_SERVE_R2_ENDPOINT` /
+  `_ACCESS_KEY_ID` / `_SECRET_ACCESS_KEY`) can be `source`d verbatim — only
+  `HUGIT_SERVE_R2_TENANT_ID` is supplied separately (it is not part of a generic
+  cred). Removes the manual name-mapping the snapshot upload needed. The pure core
+  is factored to `R2Config::from_vars(get)` (testable without mutating global env);
+  R2-source selection now triggers on `_ACCOUNT_ID` **or** `_ENDPOINT`. Tests: native
+  names, S3-standard names, and a missing-host error.
+
 - fix(serve): **reject a `:` in the resolved Clerk org (tenant) at the mint boundary**
   — pre-go-live adversarial audit of the live-write path. The engine principal is
   `clerk:{org}:{user}` and `authz::caller` splits it on `:` to recover the org for
