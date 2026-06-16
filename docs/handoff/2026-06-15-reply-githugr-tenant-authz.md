@@ -85,16 +85,30 @@ NON-operator (fail-safe, never default-open).
 - Confirm **`RepoChromeVm`** is the right VM for `visibility` (or name the one you want), so I add it + you mirror in the same wave.
 - Confirm the window keeps passing the **engine token** (not a raw CoreLink PAT) on engine calls — that's what lets the gate skip per-read introspect.
 
-## 6. STATUS — the gate is SHIPPED (2026-06-15, PR #126, merged to `main`)
+## 6. STATUS — the gate is SHIPPED on READ **and** WRITE (2026-06-15, PR #126 + #127, merged to `main`)
 
 §4 steps 2+3 are DONE and green: `crate::authz` (`project_repo_meta` + the
 `authorize_read` gate) is wired at the read chokepoint — the `route()` repo arm
 AND the SSE `events` path both do load+verify-once → gate → dispatch, so EVERY
 `/v1/repos/{repo}/*` read + admin read + event stream is now tenant-gated,
-fail-closed, deny→404. 13 tests (cross-tenant matrix + HTTP integration incl.
-owner→200 / cross-tenant→404 / operator-bypass / public / private-no-owner→404 /
-covers admin reads). The engine half of the read critical is CLOSED. The window
+fail-closed, deny→404. The engine half of the read critical is CLOSED. The window
 can rely on the engine to re-decide on every read today.
+
+**Post-#126 adversarial audit → #127 (closes the WRITE path + `/v1/me/*`):** a
+fresh audit of #126 found the read gate alone was NOT enough — two holes the same
+`repo.meta`/`authorize_read` projection had to plug:
+- **P0 — writes were ungated.** Any tenant could POST `land`/`verdict`/`comment`/…
+  to ANY repo. Now gated at the `with_write` chokepoint (load → `project_repo_meta`
+  → `authorize_read` → deny→404 BEFORE any effect or log append). Cross-tenant
+  write leaves **no trace** on the target log (tested).
+- **P1 — `/v1/me/*` leaked the launch repo** to any tenant. Now gated
+  (cross-tenant me/* → 404).
+
+Combined coverage is now **read + write + SSE + me/\*** — one projection, one
+`authorize_read` law, fail-closed everywhere. 20 tests across the cross-tenant
+matrix + HTTP read/write integration (owner→200 / cross-tenant→404 +
+no-trace / operator-bypass / public→200 / private-no-owner→404 / me/* tenant→404).
+The engine half of the cross-tenant critical is **fully CLOSED on both paths**.
 
 **Still open (your confirm, same wave):** §1.D — the `visibility` field on
 `RepoChromeVm`. I left it OUT deliberately so we land it + your `githugr-vm`
