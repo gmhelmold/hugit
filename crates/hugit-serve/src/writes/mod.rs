@@ -211,12 +211,14 @@ where
 
     let mut log = sink.load(repo)?;
 
-    // WRITE-SIDE PER-TENANT GATE (parity with the read gate; ADR-0007 §3 — the
-    // engine re-decides on EVERY verb, not just reads): the caller must OWN the
-    // repo (or be the operator) to mutate it. A non-owner is denied as 404 (no
-    // existence leak), BEFORE the idempotency lookup or any effect — closes the
-    // cross-tenant WRITE hole (org-b must never land/verdict/policy/… into org-a).
-    if !crate::authz::authorize_read(&principal_chain, &crate::authz::project_repo_meta(&log)) {
+    // WRITE-SIDE PER-TENANT GATE (ADR-0007 §3 — the engine re-decides on EVERY
+    // verb, not just reads): the caller must OWN the repo (or be the operator) to
+    // mutate it. Uses `authorize_WRITE`, NOT the read gate — write permission is
+    // OWNERSHIP, never read-visibility: a `public` repo is readable by all but
+    // writable ONLY by its owner/operator (else any signed-up tenant could
+    // land/verdict/policy/… into the public launch repo). A non-owner is denied as
+    // 404 (no existence leak), BEFORE the idempotency lookup or any effect.
+    if !crate::authz::authorize_write(&principal_chain, &crate::authz::project_repo_meta(&log)) {
         return Err(EngineErr::not_found());
     }
 

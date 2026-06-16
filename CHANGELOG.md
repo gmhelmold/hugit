@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(serve): **`public` repos were WRITABLE by any authenticated tenant** — the
+  write gate reused `authorize_read`, which opens `public` to everyone. A latent
+  hole (today every repo is fail-safe private, so it's not yet reachable) that the
+  close-the-product step would ACTIVATE: the moment the launch repo `hugit` is
+  marked `public` for reads-by-all, ANY signed-up tenant could `land`/`verdict`/
+  `policy`/`erasure`/`dispatch`/`undo`/`edit` into it — the exact risk the githugr
+  TL flagged (why they refuse the operator token with signup open). Found by
+  cold-verifying the `/v1/token` deploy thread.
+  - **New `authz::authorize_write`** — write permission is OWNERSHIP, not
+    read-visibility: operator (`orchestrator:*`) OR the owning tenant
+    (`clerk:{org}:…` whose org == a SET `owner_tenant`). Visibility is NOT
+    consulted — `public` opens reads only; writes to a public (or owner-less) repo
+    stay operator-only. The write door (`writes::with_write`) now gates on
+    `authorize_write`, not `authorize_read`.
+  - Tests: a non-owner tenant WRITE to a PUBLIC repo → 404 + no log trace (owner →
+    200, read still open); unit matrix (public/private/no-owner/unknown × owner/
+    operator/tenant). fmt + clippy clean; full serve suite green.
+
 - feat(serve): **`repo_chrome` serves the REAL machine visibility** + **lock the
   2 corrected write routes** (closes the githugr TL's 2026-06-15 authz-confirms +
   write-route-correction loop; the engine half of the cross-tenant authz wave).

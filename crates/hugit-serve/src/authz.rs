@@ -133,6 +133,28 @@ pub fn authorize_read(principal: &[String], meta: &RepoMeta) -> bool {
     }
 }
 
+/// THE write gate — fail-closed, and STRICTER than [`authorize_read`]. `true` =
+/// ALLOW the mutation; `false` = deny (the caller maps deny to a 404).
+///
+/// Write permission is OWNERSHIP, not read-visibility — `public` opens READS to
+/// everyone, but NEVER writes (else any signed-up tenant could `land`/`verdict`/
+/// `policy`/… into a public repo). So visibility is NOT consulted here:
+/// - Operator (`orchestrator:*`) → always allow (platform/dev; the bootstrap).
+/// - The owning tenant (`clerk:{org}:…` whose org equals a SET `owner_tenant`) →
+///   allow.
+/// - Everyone else → deny, INCLUDING on a public repo and on a private repo with
+///   no `owner_tenant` (writes stay operator-only until ownership is assigned).
+#[must_use]
+pub fn authorize_write(principal: &[String], meta: &RepoMeta) -> bool {
+    match caller(principal) {
+        Caller::Operator => true,
+        c => matches!(
+            (c, &meta.owner_tenant),
+            (Caller::Tenant(org), Some(owner)) if &org == owner
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,6 +199,47 @@ mod tests {
     #[test]
     fn private_denies_a_different_tenant() {
         assert!(!authorize_read(&tenant("org-b"), &private(Some("org-a"))));
+    }
+
+    // ── write gate: ownership, NOT visibility ────────────────────────────────
+
+    #[test]
+    fn write_on_public_is_denied_to_a_non_owner_tenant() {
+        // THE hole this closes: `public` opens reads to all, but a non-owner tenant
+        // must NOT be able to write to a public repo (the read gate would allow it).
+        assert!(authorize_read(&tenant("org-b"), &public()), "read is open");
+        assert!(
+            !authorize_write(&tenant("org-b"), &public()),
+            "write is NOT — ownership, not visibility"
+        );
+    }
+
+    #[test]
+    fn write_is_allowed_to_the_owner_and_operator() {
+        assert!(authorize_write(&tenant("org-a"), &public())); // owner of the public repo
+        assert!(authorize_write(&tenant("org-a"), &private(Some("org-a"))));
+        assert!(authorize_write(&op(), &public()));
+        assert!(authorize_write(&op(), &private(None)));
+    }
+
+    #[test]
+    fn write_on_a_no_owner_repo_is_operator_only() {
+        // Public OR private with no owner_tenant → writes stay operator-only.
+        let public_no_owner = RepoMeta {
+            visibility: Visibility::Public,
+            owner_tenant: None,
+        };
+        assert!(!authorize_write(&tenant("org-a"), &public_no_owner));
+        assert!(!authorize_write(&tenant("org-a"), &private(None)));
+        assert!(authorize_write(&op(), &public_no_owner));
+    }
+
+    #[test]
+    fn write_denies_unknown_principal_everywhere() {
+        let weird = ["weird:thing".to_string()];
+        assert!(!authorize_write(&weird, &public()));
+        assert!(!authorize_write(&weird, &private(Some("org-a"))));
+        assert!(!authorize_write(&[], &public()));
     }
 
     #[test]
