@@ -215,27 +215,48 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
             // The query (stripped above) is re-passed for the param-driven reads.
             dispatch_repo(repo, tail, url.split('?').nth(1).unwrap_or(""), &log)
         }
-        // Identity-scoped reads (/v1/me/*): no {repo} path param. Auth BEFORE any
-        // work, then bind the dev-principal's default context = the launch repo
-        // (the per-principal multi-repo `me` aggregation is the P2 identity seam).
+        // Identity-scoped reads (/v1/me/*): no {repo} path param — they bind the
+        // launch repo (`ME_DEFAULT_REPO`) until the P2 per-principal multi-repo
+        // `me` aggregation lands. They STILL run the per-tenant gate against that
+        // repo (audit 2026-06-15): without it, any authenticated tenant could read
+        // the launch repo's operational data here — a cross-tenant leak. Operator
+        // bypass keeps the dev/launch view working; a non-owner tenant → 404.
         ["v1", "me", "dashboard"] => {
-            if let Err(e) = two_tier_auth(state, headers).map(|_| ()) {
-                return err(e);
-            }
+            let (principal, _) = match two_tier_auth(state, headers) {
+                Ok(p) => p,
+                Err(e) => return err(e),
+            };
             let repo = ME_DEFAULT_REPO;
             with_log(
                 || state.load_verified(repo),
-                |log| ok(&handlers::build_dashboard(log, repo)),
+                |log| {
+                    if !crate::authz::authorize_read(
+                        &principal,
+                        &crate::authz::project_repo_meta(log),
+                    ) {
+                        return err(EngineErr::not_found());
+                    }
+                    ok(&handlers::build_dashboard(log, repo))
+                },
             )
         }
         ["v1", "me", "attention"] => {
-            if let Err(e) = two_tier_auth(state, headers).map(|_| ()) {
-                return err(e);
-            }
+            let (principal, _) = match two_tier_auth(state, headers) {
+                Ok(p) => p,
+                Err(e) => return err(e),
+            };
             let repo = ME_DEFAULT_REPO;
             with_log(
                 || state.load_verified(repo),
-                |log| ok(&handlers::build_attention(log, repo)),
+                |log| {
+                    if !crate::authz::authorize_read(
+                        &principal,
+                        &crate::authz::project_repo_meta(log),
+                    ) {
+                        return err(EngineErr::not_found());
+                    }
+                    ok(&handlers::build_attention(log, repo))
+                },
             )
         }
         // Admin control-plane: active engine-token sessions. Reads the in-process

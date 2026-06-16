@@ -208,6 +208,35 @@ fn private_repo_with_no_owner_denies_tenant_allows_operator() {
 }
 
 #[test]
+fn me_reads_are_tenant_gated_not_a_launch_repo_leak() {
+    use hugit_serve::token::ClerkPrincipal;
+    // hugit (the launch repo) has no repo.meta → private, no owner.
+    let (state, _d) = state_with_repo("hugit", "[]");
+    let tok = state
+        .token_store
+        .mint(&ClerkPrincipal {
+            user: "u".into(),
+            org: "org-x".into(),
+            fresh_auth: false,
+        })
+        .expect("mint");
+    // A non-owner tenant must NOT read the launch repo via /v1/me/* → 404.
+    let (s, _b) = route(&state, &Method::Get, "/v1/me/dashboard", &bearer(&tok));
+    assert_eq!(
+        s, 404,
+        "me/dashboard must not leak the launch repo to a tenant"
+    );
+    let (s, _b) = route(&state, &Method::Get, "/v1/me/attention", &bearer(&tok));
+    assert_eq!(
+        s, 404,
+        "me/attention must not leak the launch repo to a tenant"
+    );
+    // The operator still sees their own me/* view (bypass).
+    let (s, _b) = route(&state, &Method::Get, "/v1/me/dashboard", &bearer(TOKEN));
+    assert_eq!(s, 200, "operator me/dashboard works");
+}
+
+#[test]
 fn public_repo_is_readable_cross_tenant() {
     use hugit_serve::token::ClerkPrincipal;
     let mut log = EventLog::new();
