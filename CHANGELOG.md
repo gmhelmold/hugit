@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(serve): **reject a `:` in the resolved Clerk org (tenant) at the mint boundary**
+  — pre-go-live adversarial audit of the live-write path. The engine principal is
+  `clerk:{org}:{user}` and `authz::caller` splits it on `:` to recover the org for
+  ownership comparison; an org containing a `:` would MIS-PARSE (a structural
+  "exemption-is-a-hole"-class confusion). Real Clerk tenant_ids/org_ids (UUIDs,
+  `org_…`) never contain `:`, so this was LATENT not exploitable — but it's closed
+  fail-closed at `Claims::org()` (a colon-bearing `tenant_id`/`org_id` → `None` →
+  `/v1/token` 401, no token minted) so a colon can never reach the authz delimiter.
+  Audit also CONFIRMED CLEAN: no HTTP path writes `repo.meta` (ownership is
+  unforgeable via the API — only the local `repo meta set` verb); the principal org
+  comes from the RS256-validated JWT (not user-injectable); engine tokens are 32
+  CSPRNG bytes, SHA-256-keyed, constant-time looked up; a `clerk:` token whose org
+  is literally `orchestrator` does NOT escalate to operator (the `clerk:` prefix
+  guards). Test: colon `tenant_id`/`org_id` → rejected.
+
 - feat(cli): **`hugit repo meta set`** — the `repo.meta` PRODUCER (closes the
   `owner_tenant` assignment seam's write half). The engine
   (`hugit-serve::authz::project_repo_meta`) already CONSUMED the latest `repo.meta`
