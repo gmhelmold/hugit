@@ -24,30 +24,30 @@
   {
     "seq": 2,
     "prev_hash": "ed7284350e963cedf0ebcf432b09f1bfb5715b378a3d3993bb61c9dcc959509b",
-    "this_hash": "62f87089c2a442a175f13750882c4660da4f6bc8a1f13fa9ecc7037cd6f21a84",
+    "this_hash": "28b3f412de1135c4574391ef5a5e83fcd670bda5058b66c95c9fe64a853dd086",
     "kind": "repo.meta",
     "principal_chain": [
       "user:humangr"
     ],
-    "payload": "{\"owner_tenant\":\"\",\"visibility\":\"private\"}",
+    "payload": "{\"owner_tenant\":\"ee30f7ba-fc25-4d71-939e-ebe130b4c6a3\",\"visibility\":\"private\"}",
     "recorded_at": 0
   },
   {
     "seq": 3,
-    "prev_hash": "62f87089c2a442a175f13750882c4660da4f6bc8a1f13fa9ecc7037cd6f21a84",
-    "this_hash": "602779ed341595b3bf01bbdb91ec41dca988ef935ebe029d109cee00ee8470fc",
+    "prev_hash": "28b3f412de1135c4574391ef5a5e83fcd670bda5058b66c95c9fe64a853dd086",
+    "this_hash": "b767977d1f9d018a37db54af39abe74ed09b64ce2bcbbebb9c005f6aef93773e",
     "kind": "intent.landed",
     "principal_chain": [
       "campaign:githugr-spine",
       "agent:main"
     ],
     "payload": "{\"campaign\":\"githugr-spine\",\"charter\":\"feat(contracts): Phase 2 wire freeze — 26 read VMs + Accepted write shape\",\"intent_id\":\"pr-112\",\"ref\":\"refs/hugit/intents\",\"target\":\"authored:pr-112\"}",
-    "recorded_at": 1781613436493
+    "recorded_at": 1781621935017
   },
   {
     "seq": 4,
-    "prev_hash": "602779ed341595b3bf01bbdb91ec41dca988ef935ebe029d109cee00ee8470fc",
-    "this_hash": "0c730f5d79f4d2d19d78ded600e17019ffea355836e4f8d4b98f5c49cf3aef5f",
+    "prev_hash": "b767977d1f9d018a37db54af39abe74ed09b64ce2bcbbebb9c005f6aef93773e",
+    "this_hash": "b2d2b2983cef982314c2b588f8a676b27753374f47fe6b2351f5303e73f9baf3",
     "kind": "pr.opened",
     "principal_chain": [
       "wave-githugr-spine"
@@ -57,8 +57,8 @@
   },
   {
     "seq": 5,
-    "prev_hash": "0c730f5d79f4d2d19d78ded600e17019ffea355836e4f8d4b98f5c49cf3aef5f",
-    "this_hash": "bdd3092319b1e29aa06409d930fb0148085a31c432f322b66098af3f4566564e",
+    "prev_hash": "b2d2b2983cef982314c2b588f8a676b27753374f47fe6b2351f5303e73f9baf3",
+    "this_hash": "40ad483c690263880682882193968216140bd1badb28e81865eda6c3cbc3c8c0",
     "kind": "pr.queued",
     "principal_chain": [],
     "payload": "{\"item_id\":\"112#0\",\"mode\":\"union\",\"order_index\":0,\"pr_id\":\"112\"}",
@@ -66,8 +66,8 @@
   },
   {
     "seq": 6,
-    "prev_hash": "bdd3092319b1e29aa06409d930fb0148085a31c432f322b66098af3f4566564e",
-    "this_hash": "b45e7e23408b7ab9a3906e6fb942a5ccd017dc0072d8b2d7c59677a0f984caf8",
+    "prev_hash": "40ad483c690263880682882193968216140bd1badb28e81865eda6c3cbc3c8c0",
+    "this_hash": "9cf76f9500b06be3d6e904514545661ee5c91a0ff2b14c4ed42f4e9d3e695a45",
     "kind": "pr.landed",
     "principal_chain": [],
     "payload": "{\"campaign\":\"githugr-spine\",\"pr_id\":\"112\"}",
@@ -75,20 +75,20 @@
   },
   {
     "seq": 7,
-    "prev_hash": "b45e7e23408b7ab9a3906e6fb942a5ccd017dc0072d8b2d7c59677a0f984caf8",
-    "this_hash": "06058d53a8696033efca7039af7b72260be95bbfed0f7381858bc12514b785ef",
+    "prev_hash": "9cf76f9500b06be3d6e904514545661ee5c91a0ff2b14c4ed42f4e9d3e695a45",
+    "this_hash": "e55b5d443af8e88630f29ae88b12df5fc6b94f284bcce65e6feb1f62d8c993b4",
     "kind": "intent.landed",
     "principal_chain": [
       "campaign:githugr-spine",
       "agent:main"
     ],
     "payload": "{\"campaign\":\"githugr-spine\",\"charter\":\"feat: hugit-serve — the /v1 HTTP engine port (Wave 1, githugr read-path)\",\"intent_id\":\"pr-111\",\"ref\":\"refs/hugit/intents\",\"target\":\"authored:pr-111\"}",
-    "recorded_at": 1781613436862
+    "recorded_at": 1781621935384
   },
   {
     "seq": 8,
-    "prev_hash": "06058d53a8696033efca7039af7b72260be95bbfed0f7381858bc12514b785ef",
-    "this_hash": "c5594c8343ee745977226782965415dfd59564df17d13293557711e05b607885",
+    "prev_hash": "e55b5d443af8e88630f29ae88b12df5fc6b94f284bcce65e6feb1f62d8c993b4",
+    "this_hash": "c4282972a9f6af5bb81283ed30baba98942be8327583157ab91f6f32dc023f25",
     "kind": "pr.opened",
     "principal_chain": [
       "wave-githugr-spine"
@@ -98,8 +98,8 @@
   },
   {
     "seq": 9,
-    "prev_hash": "c5594c8343ee745977226782965415dfd59564df17d13293557711e05b607885",
-    "this_hash": "1af95e083b383b6d1e2bcb118ca07c353667c7694bd8606769cb1f5837885499",
+    "prev_hash": "c4282972a9f6af5bb81283ed30baba98942be8327583157ab91f6f32dc023f25",
+    "this_hash": "108b87a371bd56108e756c7d14ec27baaa2454457d1923be8d9b7a2dde8649a3",
     "kind": "pr.queued",
     "principal_chain": [],
     "payload": "{\"item_id\":\"111#0\",\"mode\":\"union\",\"order_index\":0,\"pr_id\":\"111\"}",
@@ -107,8 +107,8 @@
   },
   {
     "seq": 10,
-    "prev_hash": "1af95e083b383b6d1e2bcb118ca07c353667c7694bd8606769cb1f5837885499",
-    "this_hash": "8249d4348b4f030b8e57d31f02ee2065440567f87a6e1f7553094c7750314d1e",
+    "prev_hash": "108b87a371bd56108e756c7d14ec27baaa2454457d1923be8d9b7a2dde8649a3",
+    "this_hash": "35f0abd9d91ea891604a5ee010c3d926a2d207cbfd39ab337a6090f7f21a71a1",
     "kind": "pr.landed",
     "principal_chain": [],
     "payload": "{\"campaign\":\"githugr-spine\",\"pr_id\":\"111\"}",
@@ -116,20 +116,20 @@
   },
   {
     "seq": 11,
-    "prev_hash": "8249d4348b4f030b8e57d31f02ee2065440567f87a6e1f7553094c7750314d1e",
-    "this_hash": "3e93275149a8d86f4ff43b8f45e26be374baf425211504a231367e40275d37d5",
+    "prev_hash": "35f0abd9d91ea891604a5ee010c3d926a2d207cbfd39ab337a6090f7f21a71a1",
+    "this_hash": "72c0846ec946c0866514e33e22cdfaf7a6672cc240da3a3dc95bd575570272cd",
     "kind": "intent.landed",
     "principal_chain": [
       "campaign:pendencias-sweep",
       "agent:main"
     ],
     "payload": "{\"campaign\":\"pendencias-sweep\",\"charter\":\"feat(checks): PS-11 — hugit check --env-axis declares a custom env dependency\",\"intent_id\":\"pr-110\",\"ref\":\"refs/hugit/intents\",\"target\":\"authored:pr-110\"}",
-    "recorded_at": 1781613437206
+    "recorded_at": 1781621935725
   },
   {
     "seq": 12,
-    "prev_hash": "3e93275149a8d86f4ff43b8f45e26be374baf425211504a231367e40275d37d5",
-    "this_hash": "f2b8c68cee4ff7ea953a9422967d0570a83057c7d4b9ab8f20475cd542258014",
+    "prev_hash": "72c0846ec946c0866514e33e22cdfaf7a6672cc240da3a3dc95bd575570272cd",
+    "this_hash": "bb5fbca9dfd18bdc9d178e4f53a1aeeda8624da30e30714cc7f2c8c604fc7734",
     "kind": "pr.opened",
     "principal_chain": [
       "wave-pendencias-sweep"
@@ -139,8 +139,8 @@
   },
   {
     "seq": 13,
-    "prev_hash": "f2b8c68cee4ff7ea953a9422967d0570a83057c7d4b9ab8f20475cd542258014",
-    "this_hash": "0ca0a2d2d30c600fc61b472b9b486516162e8fab5d4cb69daba7db7d33f65859",
+    "prev_hash": "bb5fbca9dfd18bdc9d178e4f53a1aeeda8624da30e30714cc7f2c8c604fc7734",
+    "this_hash": "bf6a68cc85cbf2d819dfcf9506424230719953016d7bcbdc14ff7f8255c6728d",
     "kind": "pr.queued",
     "principal_chain": [],
     "payload": "{\"item_id\":\"110#0\",\"mode\":\"union\",\"order_index\":0,\"pr_id\":\"110\"}",
@@ -148,8 +148,8 @@
   },
   {
     "seq": 14,
-    "prev_hash": "0ca0a2d2d30c600fc61b472b9b486516162e8fab5d4cb69daba7db7d33f65859",
-    "this_hash": "1069eea74678c773ac153e4ca84696379cc1c8743b89ae8c0e3f7e98c4f9c253",
+    "prev_hash": "bf6a68cc85cbf2d819dfcf9506424230719953016d7bcbdc14ff7f8255c6728d",
+    "this_hash": "48eb7df947d9d334502c8d3477d39504d689d011076ffa056c08aa9f1005c93d",
     "kind": "pr.landed",
     "principal_chain": [],
     "payload": "{\"campaign\":\"pendencias-sweep\",\"pr_id\":\"110\"}",
@@ -157,20 +157,20 @@
   },
   {
     "seq": 15,
-    "prev_hash": "1069eea74678c773ac153e4ca84696379cc1c8743b89ae8c0e3f7e98c4f9c253",
-    "this_hash": "6c173e17daded58fd353c09a8d21b59ddf7d011a7e55a82bf8dae11f6c476dcc",
+    "prev_hash": "48eb7df947d9d334502c8d3477d39504d689d011076ffa056c08aa9f1005c93d",
+    "this_hash": "bac3f1a1a43003006e27523f8f518e6f438aa451bd54c224e4181323d5047dab",
     "kind": "intent.landed",
     "principal_chain": [
       "campaign:pendencias-sweep",
       "agent:main"
     ],
     "payload": "{\"campaign\":\"pendencias-sweep\",\"charter\":\"feat(intent): PS-9 — truthful per-source-log list/show + --log scope filter\",\"intent_id\":\"pr-109\",\"ref\":\"refs/hugit/intents\",\"target\":\"authored:pr-109\"}",
-    "recorded_at": 1781613437533
+    "recorded_at": 1781621936053
   },
   {
     "seq": 16,
-    "prev_hash": "6c173e17daded58fd353c09a8d21b59ddf7d011a7e55a82bf8dae11f6c476dcc",
-    "this_hash": "728d059af5e83edd8e49980c0703a737bd265b3cf3892af2413203709fdbe5c6",
+    "prev_hash": "bac3f1a1a43003006e27523f8f518e6f438aa451bd54c224e4181323d5047dab",
+    "this_hash": "c487f16ad2d494b6c43afa41feb448e074ef628f1a32d4932a17844c544a42de",
     "kind": "pr.opened",
     "principal_chain": [
       "wave-pendencias-sweep"
@@ -180,8 +180,8 @@
   },
   {
     "seq": 17,
-    "prev_hash": "728d059af5e83edd8e49980c0703a737bd265b3cf3892af2413203709fdbe5c6",
-    "this_hash": "ad5696159c5fa887ad44d045f7019916eb1b2ae3cd0b9686978fe0b2570e35d7",
+    "prev_hash": "c487f16ad2d494b6c43afa41feb448e074ef628f1a32d4932a17844c544a42de",
+    "this_hash": "7079a589ef25e589dac162a1f33e6a77b5163de9469389dd82c2a6b6e0234225",
     "kind": "pr.queued",
     "principal_chain": [],
     "payload": "{\"item_id\":\"109#0\",\"mode\":\"union\",\"order_index\":0,\"pr_id\":\"109\"}",
@@ -189,8 +189,8 @@
   },
   {
     "seq": 18,
-    "prev_hash": "ad5696159c5fa887ad44d045f7019916eb1b2ae3cd0b9686978fe0b2570e35d7",
-    "this_hash": "3d494400b15bc796bf185b2922a6967e36082f931b70f146f02c50b2eb77b338",
+    "prev_hash": "7079a589ef25e589dac162a1f33e6a77b5163de9469389dd82c2a6b6e0234225",
+    "this_hash": "83d4bc92854a1193f67b4552e157ca72f02a57a2abe8d79fb771801a4617c52a",
     "kind": "pr.landed",
     "principal_chain": [],
     "payload": "{\"campaign\":\"pendencias-sweep\",\"pr_id\":\"109\"}",
@@ -198,20 +198,20 @@
   },
   {
     "seq": 19,
-    "prev_hash": "3d494400b15bc796bf185b2922a6967e36082f931b70f146f02c50b2eb77b338",
-    "this_hash": "1a8f6cf6e9097d3c6769be56f43815d173cce4d022e2c5010be7fd91ea118aca",
+    "prev_hash": "83d4bc92854a1193f67b4552e157ca72f02a57a2abe8d79fb771801a4617c52a",
+    "this_hash": "b24806a8ba647f25ade5147c44c877c34431b7c6f689ef44614f6032311c157d",
     "kind": "intent.landed",
     "principal_chain": [
       "campaign:pendencias-sweep",
       "agent:main"
     ],
     "payload": "{\"campaign\":\"pendencias-sweep\",\"charter\":\"fix(checks): PS-17 — bound peak memory on the memo-key snapshot read\",\"intent_id\":\"pr-108\",\"ref\":\"refs/hugit/intents\",\"target\":\"authored:pr-108\"}",
-    "recorded_at": 1781613437859
+    "recorded_at": 1781621936397
   },
   {
     "seq": 20,
-    "prev_hash": "1a8f6cf6e9097d3c6769be56f43815d173cce4d022e2c5010be7fd91ea118aca",
-    "this_hash": "9b54c74286f849c33ec7fee7ac9d776ec04b86c6281c442efaf5a100d29e34f2",
+    "prev_hash": "b24806a8ba647f25ade5147c44c877c34431b7c6f689ef44614f6032311c157d",
+    "this_hash": "6895869de3ff0e1b84a7014daea5e32a92eeb3dbe04616fef6ef027e4a9b6304",
     "kind": "pr.opened",
     "principal_chain": [
       "wave-pendencias-sweep"
@@ -221,8 +221,8 @@
   },
   {
     "seq": 21,
-    "prev_hash": "9b54c74286f849c33ec7fee7ac9d776ec04b86c6281c442efaf5a100d29e34f2",
-    "this_hash": "ef13631cdb6007545169d27693bd41629117039cff3d6dfc9289550894a35fde",
+    "prev_hash": "6895869de3ff0e1b84a7014daea5e32a92eeb3dbe04616fef6ef027e4a9b6304",
+    "this_hash": "e819389642842111809a2918cbc85a789ea3c85fab496b574539bea57033f6c2",
     "kind": "pr.queued",
     "principal_chain": [],
     "payload": "{\"item_id\":\"108#0\",\"mode\":\"union\",\"order_index\":0,\"pr_id\":\"108\"}",
@@ -230,8 +230,8 @@
   },
   {
     "seq": 22,
-    "prev_hash": "ef13631cdb6007545169d27693bd41629117039cff3d6dfc9289550894a35fde",
-    "this_hash": "d18ee43d9d2272c50349f0a656fe0fc5bd9d257e217eb4aa9c0f70395e1fef6f",
+    "prev_hash": "e819389642842111809a2918cbc85a789ea3c85fab496b574539bea57033f6c2",
+    "this_hash": "cfd608b0982f56c42961d89a4fdcaae5b7fb41dc640ff4995ad1cc24ac0d6170",
     "kind": "pr.landed",
     "principal_chain": [],
     "payload": "{\"campaign\":\"pendencias-sweep\",\"pr_id\":\"108\"}",
@@ -239,20 +239,20 @@
   },
   {
     "seq": 23,
-    "prev_hash": "d18ee43d9d2272c50349f0a656fe0fc5bd9d257e217eb4aa9c0f70395e1fef6f",
-    "this_hash": "64b1133941380205501f3e3113ae592476398ac4ed8b4978ac54c01df345acec",
+    "prev_hash": "cfd608b0982f56c42961d89a4fdcaae5b7fb41dc640ff4995ad1cc24ac0d6170",
+    "this_hash": "778de1bbb206d1777c2c0579ccf8829526eb45759b1455c9383dcbcb446fa019",
     "kind": "intent.landed",
     "principal_chain": [
       "campaign:pendencias-sweep",
       "agent:main"
     ],
     "payload": "{\"campaign\":\"pendencias-sweep\",\"charter\":\"feat(conformance): land IntentMetrics vector (§13.4) — hugit twin\",\"intent_id\":\"pr-107\",\"ref\":\"refs/hugit/intents\",\"target\":\"authored:pr-107\"}",
-    "recorded_at": 1781613438350
+    "recorded_at": 1781621936970
   },
   {
     "seq": 24,
-    "prev_hash": "64b1133941380205501f3e3113ae592476398ac4ed8b4978ac54c01df345acec",
-    "this_hash": "97fab488f547e4bc3a588e790dc4c7f17cd8b6ab9072de36a5281a11f5376b98",
+    "prev_hash": "778de1bbb206d1777c2c0579ccf8829526eb45759b1455c9383dcbcb446fa019",
+    "this_hash": "8ce2ab5542645c8f5bc817181c05921d89a264274fc31009900968c6ad149a05",
     "kind": "pr.opened",
     "principal_chain": [
       "wave-pendencias-sweep"
@@ -262,8 +262,8 @@
   },
   {
     "seq": 25,
-    "prev_hash": "97fab488f547e4bc3a588e790dc4c7f17cd8b6ab9072de36a5281a11f5376b98",
-    "this_hash": "1bb6cec85af189360963a1d5076c194e07cd2027dfde9a7a0fe5398537e56d53",
+    "prev_hash": "8ce2ab5542645c8f5bc817181c05921d89a264274fc31009900968c6ad149a05",
+    "this_hash": "3901e949aef464894be055ada8d04f3d8946cc16a0512e96bc7646b5325a0c54",
     "kind": "pr.queued",
     "principal_chain": [],
     "payload": "{\"item_id\":\"107#0\",\"mode\":\"union\",\"order_index\":0,\"pr_id\":\"107\"}",
@@ -271,8 +271,8 @@
   },
   {
     "seq": 26,
-    "prev_hash": "1bb6cec85af189360963a1d5076c194e07cd2027dfde9a7a0fe5398537e56d53",
-    "this_hash": "ab5bc3293634fb4fd63d8b4f8547d60a01be843eae052239014aa128e097f088",
+    "prev_hash": "3901e949aef464894be055ada8d04f3d8946cc16a0512e96bc7646b5325a0c54",
+    "this_hash": "de96344f7e1dcb338eee66f86b289d222638675e0a00623ddfe81f45a53abbdc",
     "kind": "pr.landed",
     "principal_chain": [],
     "payload": "{\"campaign\":\"pendencias-sweep\",\"pr_id\":\"107\"}",
@@ -280,20 +280,20 @@
   },
   {
     "seq": 27,
-    "prev_hash": "ab5bc3293634fb4fd63d8b4f8547d60a01be843eae052239014aa128e097f088",
-    "this_hash": "04d0e143ecff852d3f5d168fcd33a942c5517076db64d0879809131893e9e0f0",
+    "prev_hash": "de96344f7e1dcb338eee66f86b289d222638675e0a00623ddfe81f45a53abbdc",
+    "this_hash": "842fee90835e3fedf741c8781593c9a579a28e7579858dc35f4b4f073235fd25",
     "kind": "intent.landed",
     "principal_chain": [
       "campaign:githugr-spine",
       "agent:main"
     ],
     "payload": "{\"campaign\":\"githugr-spine\",\"charter\":\"feat(serve): Phase 2 reads — 6 real-backbone handlers + parity/secret-matrix tests\",\"intent_id\":\"pr-113\",\"ref\":\"refs/hugit/intents\",\"target\":\"authored:pr-113\"}",
-    "recorded_at": 1781613438732
+    "recorded_at": 1781621937823
   },
   {
     "seq": 28,
-    "prev_hash": "04d0e143ecff852d3f5d168fcd33a942c5517076db64d0879809131893e9e0f0",
-    "this_hash": "a81e44fc39989e45de4ad58ccb4ebbe66e4af6c51655dabf208977172e808c7b",
+    "prev_hash": "842fee90835e3fedf741c8781593c9a579a28e7579858dc35f4b4f073235fd25",
+    "this_hash": "3e2c88461113d9b566de7d86382b052c306851b5443a3c5eaecd3aa86ae96efd",
     "kind": "pr.opened",
     "principal_chain": [
       "wave-githugr-spine"
@@ -303,8 +303,8 @@
   },
   {
     "seq": 29,
-    "prev_hash": "a81e44fc39989e45de4ad58ccb4ebbe66e4af6c51655dabf208977172e808c7b",
-    "this_hash": "a993d262dbf7d3902e213b8ab3791093aade26969faef06fffae65a35a2100dd",
+    "prev_hash": "3e2c88461113d9b566de7d86382b052c306851b5443a3c5eaecd3aa86ae96efd",
+    "this_hash": "ed57a6d9fc1dbba01c0ce11c7ebc89a1646b9ddd4d2572bda4d607e044ec850a",
     "kind": "pr.queued",
     "principal_chain": [],
     "payload": "{\"item_id\":\"113#0\",\"mode\":\"union\",\"order_index\":0,\"pr_id\":\"113\"}",
@@ -312,20 +312,20 @@
   },
   {
     "seq": 30,
-    "prev_hash": "a993d262dbf7d3902e213b8ab3791093aade26969faef06fffae65a35a2100dd",
-    "this_hash": "f62dec70069956dd0e9367cb239c0a14a419516fc59a32ff6f42569bcb91cee1",
+    "prev_hash": "ed57a6d9fc1dbba01c0ce11c7ebc89a1646b9ddd4d2572bda4d607e044ec850a",
+    "this_hash": "69c7b678457d40a2f254b50dbe09f14b42895576c20368ba2a9a0f100a71c2d1",
     "kind": "intent.landed",
     "principal_chain": [
       "campaign:githugr-spine",
       "agent:main"
     ],
     "payload": "{\"campaign\":\"githugr-spine\",\"charter\":\"feat(serve): R2 read source — SigV4-signed, AWS-vector-proven + Passo-4 snapshot uploader\",\"intent_id\":\"pr-114\",\"ref\":\"refs/hugit/intents\",\"target\":\"authored:pr-114\"}",
-    "recorded_at": 1781613439075
+    "recorded_at": 1781621938515
   },
   {
     "seq": 31,
-    "prev_hash": "f62dec70069956dd0e9367cb239c0a14a419516fc59a32ff6f42569bcb91cee1",
-    "this_hash": "170b303cd0f751c38632cf046af2450b275f17bb31bc799f3621034480e7c8c3",
+    "prev_hash": "69c7b678457d40a2f254b50dbe09f14b42895576c20368ba2a9a0f100a71c2d1",
+    "this_hash": "b108efb8bed0271d1270e231e6499fa38d41c2b4be439e3af6e8189a74a792cf",
     "kind": "pr.opened",
     "principal_chain": [
       "wave-githugr-spine"
@@ -335,8 +335,8 @@
   },
   {
     "seq": 32,
-    "prev_hash": "170b303cd0f751c38632cf046af2450b275f17bb31bc799f3621034480e7c8c3",
-    "this_hash": "1830cfe8bc2bfe36b8ba05c84c1b36e56c0177f729cd7d90659d13c6301a36e1",
+    "prev_hash": "b108efb8bed0271d1270e231e6499fa38d41c2b4be439e3af6e8189a74a792cf",
+    "this_hash": "93dba85f646084e059a738df5fb2e02411eb089f1bea4f74efae36718411ae40",
     "kind": "pr.queued",
     "principal_chain": [],
     "payload": "{\"item_id\":\"114#1\",\"mode\":\"union\",\"order_index\":1,\"pr_id\":\"114\"}",
@@ -344,24 +344,24 @@
   },
   {
     "seq": 33,
-    "prev_hash": "1830cfe8bc2bfe36b8ba05c84c1b36e56c0177f729cd7d90659d13c6301a36e1",
-    "this_hash": "684346bb2a59a4d70a69a027c47f82d2f3ca18099faf27015b46e75fbc28d638",
+    "prev_hash": "93dba85f646084e059a738df5fb2e02411eb089f1bea4f74efae36718411ae40",
+    "this_hash": "b51e5c46b36ec87f344966ae360a236331ccfd950870be6fe9c4e457ec1259ad",
     "kind": "check.recorded",
     "principal_chain": [
       "orchestrator:hugit"
     ],
-    "payload": "{\"cache_hit\":false,\"def_digest\":\"f17b0108de3204ed21235c58ce25e1fd2b667fc992e0289be0fe9a99122bb405\",\"duration_ms\":10695,\"exit\":0,\"memo_key\":\"91284f3617008976aa47766eb80180ee330e0c3aafcf946e4c29522b9092e21e\",\"name\":\"fmt\",\"pr_id\":\"111\",\"toolchain_digest\":\"4d8ef7a4d2fe91e2e73066fdff851a6b49773a97b60cf751f81045606a502281\",\"tree_hash\":\"f4d7e9f6c73b31f49bed9543d10ade13d083c8fec8a44b4713f86871ec8af95b\"}",
-    "recorded_at": 1781613453864
+    "payload": "{\"cache_hit\":false,\"def_digest\":\"f17b0108de3204ed21235c58ce25e1fd2b667fc992e0289be0fe9a99122bb405\",\"duration_ms\":9443,\"exit\":0,\"memo_key\":\"91284f3617008976aa47766eb80180ee330e0c3aafcf946e4c29522b9092e21e\",\"name\":\"fmt\",\"pr_id\":\"111\",\"toolchain_digest\":\"4d8ef7a4d2fe91e2e73066fdff851a6b49773a97b60cf751f81045606a502281\",\"tree_hash\":\"f4d7e9f6c73b31f49bed9543d10ade13d083c8fec8a44b4713f86871ec8af95b\"}",
+    "recorded_at": 1781621953349
   },
   {
     "seq": 34,
-    "prev_hash": "684346bb2a59a4d70a69a027c47f82d2f3ca18099faf27015b46e75fbc28d638",
-    "this_hash": "5bd4b49bb05436ac0e5a86025787a8a133d6fbff483f823a9031d01e56cc3fc6",
+    "prev_hash": "b51e5c46b36ec87f344966ae360a236331ccfd950870be6fe9c4e457ec1259ad",
+    "this_hash": "4f48f9c524733906a37e23f07554f0a414c9cdeebeb818f72d5b6e616add9057",
     "kind": "check.recorded",
     "principal_chain": [
       "orchestrator:hugit"
     ],
-    "payload": "{\"cache_hit\":true,\"def_digest\":\"f17b0108de3204ed21235c58ce25e1fd2b667fc992e0289be0fe9a99122bb405\",\"duration_ms\":10695,\"exit\":0,\"memo_key\":\"91284f3617008976aa47766eb80180ee330e0c3aafcf946e4c29522b9092e21e\",\"name\":\"fmt\",\"pr_id\":\"112\",\"toolchain_digest\":\"4d8ef7a4d2fe91e2e73066fdff851a6b49773a97b60cf751f81045606a502281\",\"tree_hash\":\"f4d7e9f6c73b31f49bed9543d10ade13d083c8fec8a44b4713f86871ec8af95b\"}",
-    "recorded_at": 1781613457481
+    "payload": "{\"cache_hit\":true,\"def_digest\":\"f17b0108de3204ed21235c58ce25e1fd2b667fc992e0289be0fe9a99122bb405\",\"duration_ms\":9443,\"exit\":0,\"memo_key\":\"91284f3617008976aa47766eb80180ee330e0c3aafcf946e4c29522b9092e21e\",\"name\":\"fmt\",\"pr_id\":\"112\",\"toolchain_digest\":\"4d8ef7a4d2fe91e2e73066fdff851a6b49773a97b60cf751f81045606a502281\",\"tree_hash\":\"f4d7e9f6c73b31f49bed9543d10ade13d083c8fec8a44b4713f86871ec8af95b\"}",
+    "recorded_at": 1781621955130
   }
 ]
