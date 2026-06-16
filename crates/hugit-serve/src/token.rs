@@ -134,16 +134,25 @@ impl Claims {
     /// Tenant resolution order (first non-empty hit wins): `publicMetadata.tenant_id`
     /// (CoreLink authoritative — ADR-0007), then `org_id` (compatibility fallback).
     /// Returns `None` when neither is present → token is rejected (fail-closed).
+    ///
+    /// The org becomes the MIDDLE segment of the `clerk:{org}:{user}` principal,
+    /// which `authz::caller` splits on `:` to recover the org for ownership
+    /// comparison. An org containing a `:` would MIS-PARSE (the `:` is the authz
+    /// delimiter — a structural confusion of the same "exemption-is-a-hole" class
+    /// the project has been bitten by). So a colon-bearing org is rejected
+    /// fail-closed HERE, at the trust boundary, before it can reach the principal.
+    /// Real Clerk tenant_ids / org_ids (UUIDs, `org_…`) never contain `:`.
     fn org(&self) -> Option<&str> {
+        let usable = |s: &&str| !s.is_empty() && !s.contains(':');
         if let Some(t) = self
             .public_metadata
             .as_ref()
             .and_then(|m| m.tenant_id.as_deref())
-            .filter(|s| !s.is_empty())
+            .filter(usable)
         {
             return Some(t);
         }
-        self.org_id.as_deref().filter(|s| !s.is_empty())
+        self.org_id.as_deref().filter(usable)
     }
 }
 
@@ -969,6 +978,32 @@ mod tests {
         claims.public_metadata = None;
         let p = v.validate(&sign(&claims, TEST_KID)).unwrap();
         assert_eq!(p.org, "fallback-org");
+    }
+
+    #[test]
+    fn colon_in_org_is_rejected_fail_closed() {
+        // A ':' in the resolved org would break the `clerk:{org}:{user}` principal
+        // parse (`:` is the authz delimiter). Reject fail-closed at the mint
+        // boundary so a colon can never confuse ownership comparison downstream.
+        let v = make_validator(None);
+
+        // Colon in publicMetadata.tenant_id (and no org_id fallback) → rejected.
+        let mut c = good_claims();
+        c.public_metadata = Some(json!({"tenant_id": "ee30f7ba:evil"}));
+        c.org_id = None;
+        assert!(
+            v.validate(&sign(&c, TEST_KID)).is_none(),
+            "colon tenant_id must be rejected"
+        );
+
+        // Colon in the org_id fallback → rejected.
+        let mut c2 = good_claims();
+        c2.public_metadata = None;
+        c2.org_id = Some("a:b".to_string());
+        assert!(
+            v.validate(&sign(&c2, TEST_KID)).is_none(),
+            "colon org_id must be rejected"
+        );
     }
 
     #[test]
