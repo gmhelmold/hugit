@@ -452,6 +452,14 @@ impl R2Config {
     /// spec it need not be in `SignedHeaders`; it is sent UNSIGNED (keeping the
     /// proven signer untouched) and the live round-trip proves R2 honors it.
     /// A 2xx is success; anything else is an explicit error (never a silent partial).
+    ///
+    /// THREAT-MODEL NOTE (audit): because `If-Match` is unsigned, an on-path attacker
+    /// who can rewrite the request (a MITM or a malicious/buggy intermediary) could
+    /// STRIP it, downgrading the CAS to an unconditional overwrite. This is bounded by
+    /// the fact that the engine talks to R2 over TLS DIRECTLY (no intermediary), so it
+    /// is not exploitable in the deployed topology — it is NOT a general "tamper-proof"
+    /// guarantee. Signing the header (adding it to `SignedHeaders`) would close even
+    /// the intermediary case; deferred as the threat is out of the direct-TLS model.
     pub fn put_conditional(
         &self,
         repo: &str,

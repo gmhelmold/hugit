@@ -38,7 +38,7 @@ pub fn write_issue_transition(
     if !VALID_STATES.contains(&req.to.as_str()) {
         return Err(EngineErr::invalid_request(format!(
             "estado inválido '{}': aceito backlog|open|closed|dispatch",
-            req.to
+            scrub(&req.to)
         )));
     }
     let priority: Option<String> = req.priority.as_deref().map(scrub);

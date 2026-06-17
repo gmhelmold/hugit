@@ -13,6 +13,7 @@ use hugit_refstore::{Endpoint, EventLog, PrincipalClass};
 use serde_json::json;
 
 use crate::error::EngineErr;
+use crate::fmt::scrub;
 
 /// The valid landing modes (spec §3 / `LandReq.mode`).
 const VALID_MODES: &[&str] = &["union", "serial", "window"];
@@ -38,7 +39,7 @@ pub fn write_land(
     if !VALID_MODES.contains(&req.mode.as_str()) {
         return Err(EngineErr::invalid_request(format!(
             "mode inválido '{}': aceito union|serial|window",
-            req.mode
+            scrub(&req.mode)
         )));
     }
 

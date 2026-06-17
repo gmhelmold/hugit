@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(serve): **write-path audit hardening** (post-CAS adversarial sweep — a 4-agent
+  read-only fan-out over the write door + verbs + authz/redaction). Real findings closed
+  at root:
+  - **Idempotency fail-OPEN → fail-CLOSED (H12).** `idem_lookup` used `.ok()?` on the
+    stored outcome, so a ledger entry that MATCHED the key tuple but whose `outcome`
+    would not deserialize folded to "no prior found" — silently RE-EXECUTING the verb
+    (a double effect). A matched-but-corrupt entry now returns 503, never re-executes
+    (test `corrupt_idem_entry_with_matching_key_fails_closed_not_re_executes`). A true
+    no-match still runs the verb.
+  - **Unscrubbed enum echo in 400 errors (F-9).** `land`/`verdict`/`issue_transition`
+    echoed the raw invalid `mode`/`verdict`/`to` value into the error reason; a
+    secret-shaped value round-tripped to the caller verbatim. Now `scrub`bed at the
+    boundary like every other free-text field.
+  - **Unsigned `If-Match` threat-model note (H6).** Documented that the unsigned
+    conditional header is strip-able by an on-path intermediary (bounded: the engine
+    talks to R2 over direct TLS, so not exploitable in the deployed topology); narrowed
+    the safety claim and noted signing as the future close.
+  - Verified-and-sound (no change): the serve loop is single-threaded (the Local CAS
+    comment is accurate; no in-process race), `undo`'s ownership gate holds (cross-tenant
+    undo is 404), and the core CAS race/exhaustion logic. Tracked (by-design / latent):
+    `undo`'s caller-asserted `Human` class (P2 identity seam), `repo` not in the
+    idempotency tuple (latent until logs ever consolidate).
+  fmt + clippy `--workspace -D warnings` clean; serve suite green.
+
 - fix(serve): **CAS hardening — fail-closed on a missing R2 version token** (adversarial
   audit of the PR #137 CAS guard). If an R2 GET returned no ETag for an existing object,
   the captured `CasToken` was `Unsupported`, which on the write path would have made
