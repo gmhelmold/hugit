@@ -35,7 +35,7 @@ pub use authz::{
 };
 pub use log::{
     AppendError, AuthzDenied, EventLog, GENESIS_PREV_HASH, attestation_sig_preimage,
-    canonical_json, compute_memo_key, compute_this_hash,
+    canonical_json, compute_memo_key, compute_this_hash, result_binding_preimage_v2,
 };
 pub use replay::{RefState, replay};
 pub use tamper::{TamperError, verify_chain};

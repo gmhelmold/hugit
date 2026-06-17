@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(checks): **`result_binding_sig_v2` verifier — closes the verdict-forgery window**
+  (contract §7.1 amendment v1.4.0; the corelink-runners P0 security item, Path 1 =
+  transcribe-in-hugit). The v1 binding covered `memo_key‖stdout_ref‖stderr_ref` but NOT
+  `CheckResult.exit` (the pass/fail verdict) or `artifacts` — a malicious runner/MITM could
+  flip `exit: 1 → 0` (and rewrite artifacts) with the v1-covered fields intact and a v1-only
+  verifier still accepted it. Now:
+  - `hugit_refstore::result_binding_preimage_v2` builds the v2 pre-image
+    (`LP(memo_key)‖LP(stdout_ref)‖LP(stderr_ref)‖i32_be(exit)‖u32_be(artifacts.len)‖
+    Σ(LP(path)‖LP(digest))`), beside the other single-sourced LP pre-image builders (never
+    re-transcribed).
+  - `hugit_checks::attest_v2::verify_result_binding_v2` decodes the fabric key/sig and runs
+    `verify_strict` over that pre-image; fail-closed on any malformed input.
+  - Proven byte-exact against the shared `conformance/result_binding_v2.json`: pre-image hex
+    matches, the genuine fabric signature verifies, a flipped `exit` is REJECTED (the forgery
+    v2 closes), a tampered artifact digest is REJECTED, malformed inputs fail closed.
+  Live wiring into the attestation-verify path stays the P2 AC seam; the verifier is complete
+  + conformance-green now, so P2 is plumbing. No new crypto dep (reuses `ed25519-dalek`).
+
 - fix(serve): **write-path audit hardening** (post-CAS adversarial sweep — a 4-agent
   read-only fan-out over the write door + verbs + authz/redaction). Real findings closed
   at root:
