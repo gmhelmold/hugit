@@ -198,6 +198,45 @@ pub fn attestation_sig_preimage(
     buf
 }
 
+/// Build the ed25519 signing/verification pre-image for the **v2** result binding
+/// (contract §7.1 amendment v1.4.0). v2 extends the v1 binding to cover the
+/// pass/fail verdict (`exit`) and the output `artifacts` — the surface a malicious
+/// runner/MITM could flip with the v1-covered fields intact.
+///
+/// Pre-image (BYTE-EXACT, the single canonical realisation — call it, never
+/// re-transcribe; proven against `conformance/result_binding_v2.json`):
+///
+/// ```text
+/// LP(memo_key) ‖ LP(stdout_ref) ‖ LP(stderr_ref)   // 3 v1 fields, unchanged
+///   ‖ i32_be(exit)                                  // 4 bytes, two's-complement
+///   ‖ u32_be(artifacts.len)                         // 4-byte count
+///   ‖ for each (path, digest) in artifacts order:   // ORDER IS PART OF THE BINDING
+///         LP(path) ‖ LP(digest)
+/// ```
+///
+/// where `LP(s)` = `u32_be(byte_len(s)) ‖ utf8_bytes(s)`. The returned bytes are
+/// the ed25519 message (no extra hashing layer).
+pub fn result_binding_preimage_v2(
+    memo_key: &str,
+    stdout_ref: &str,
+    stderr_ref: &str,
+    exit: i32,
+    artifacts: &[(String, String)],
+) -> Vec<u8> {
+    let mut buf: Vec<u8> = Vec::new();
+    push_lp_field(&mut buf, memo_key);
+    push_lp_field(&mut buf, stdout_ref);
+    push_lp_field(&mut buf, stderr_ref);
+    buf.extend_from_slice(&exit.to_be_bytes());
+    // `artifacts.len` framed as a u32 (matches the fabric's `u32_be(artifacts.len)`).
+    buf.extend_from_slice(&(artifacts.len() as u32).to_be_bytes());
+    for (path, digest) in artifacts {
+        push_lp_field(&mut buf, path);
+        push_lp_field(&mut buf, digest);
+    }
+    buf
+}
+
 /// Canonicalise a JSON string: parse then re-serialise with **sorted object
 /// keys** and **no insignificant whitespace**, so equal JSON values map to
 /// identical bytes regardless of authoring key-order/spacing.
