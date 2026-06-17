@@ -25,4 +25,6 @@ thiserror = { workspace = true }
 # in the product binary. Used by acceptance_d2b item ③ to prove the served pack
 # is cloneable by a real libgit2 client (not just construction-equivalence).
 # libgit2 is built vendored from source (no linkable system lib on this host).
-git2 = "0.20"
+# Pinned >=0.21 to clear RUSTSEC-2026-0183/0184 (git2 0.20 Remote::list/BlameHunk
+# unsoundness); test-only, but the advisory gate (`cargo deny`) flags any version.
+git2 = "0.21"

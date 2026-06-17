@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(deps): bump `git2` `0.20 → 0.21` (hugit-proto test-only dev-dep) to clear
+  **RUSTSEC-2026-0183 / RUSTSEC-2026-0184** (git2 0.20 `Remote::list()` /
+  `BlameHunk` unsoundness). Test-only and never shipped in the product binary, but
+  the advisory gate (`cargo deny`) flags any version; drop-in (hugit-proto suite green).
+
+- feat(serve): **compare-and-swap write durability (closes the P2→P1 CAS obligation).**
+  The write-door's `load → mutate → persist` cycle held no lock across the gap, so a
+  concurrent writer (the snapshot uploader today; horizontal scale tomorrow) could
+  silently clobber another request's records AND its idempotency-ledger entry
+  (last-writer-wins). Now persist is a **compare-and-swap** against the head the
+  matching load returned:
+  - `LogSink::load` returns `(EventLog, CasToken)`; `persist` takes the expected
+    `CasToken` (`Absent` | `Version(etag/hash)` | `Unsupported`). The chain verify
+    stays the single PS-13 chokepoint (`load_verified_with_token` IS the body;
+    `load_verified` drops the token — readers untouched).
+  - **R2**: a conditional signed PUT — `If-Match: <etag>` (overwrite-if-unchanged) /
+    `If-None-Match: *` (create-if-absent); the ETag is captured from the GET. R2's
+    **412 Precondition Failed** maps to a typed `EngineErr::cas_conflict`. The
+    conditional header is a standard (non-`x-amz`) header → sent UNSIGNED per the
+    SigV4 spec (the proven signer is untouched), and proven against LIVE R2.
+  - **Local**: a content-hash compare before the atomic temp+rename (dev/test source;
+    residual TOCTOU documented — the production multi-writer source is R2).
+  - `with_write` wraps the cycle in a bounded retry loop (`MAX_CAS_ATTEMPTS=5`): on a
+    `cas_conflict` it reloads + re-runs, so two concurrent requests with the SAME key
+    collapse to one execution + one replay (no double effect), and with DIFFERENT keys
+    both survive (no silent drop). Exhaustion → honest transient 503 (nothing
+    persisted on a losing attempt).
+  - Tests: three CAS unit tests (different-writer reload-and-both-survive, same-key
+    winner-collapses-to-replay, exhaustion-503-with-no-partial-write) + a live R2
+    `If-Match` round-trip proof (`tests/r2_cas_live.rs`, `#[ignore]`: stale→412/
+    cas_conflict, correct→200, ETag stable/non-destructive). fmt + clippy
+    `--workspace -D warnings` clean; full serve suite green.
+
 - fix(serve): **pre-go-live audit remediation — 3 findings** (the audit's non-P1
   remainder; the P1 JWKS DoS shipped separately):
   - **Existence/integrity oracle (info-leak).** The read path verified the log

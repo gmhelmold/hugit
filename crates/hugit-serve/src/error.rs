@@ -120,6 +120,28 @@ impl EngineErr {
         }
     }
 
+    /// 409 — a compare-and-swap head mismatch: the durable log moved between the
+    /// write-door's `load` and its `persist` (a concurrent writer won the race).
+    /// This is an INTERNAL retry signal — `with_write` catches it (via
+    /// [`Self::is_cas_conflict`]), reloads, and re-runs; it only surfaces to a
+    /// client after the bounded retry budget is exhausted, and then as a 503
+    /// (transient contention), never as this code.
+    #[must_use]
+    pub fn cas_conflict() -> Self {
+        Self {
+            status: 409,
+            code: "CAS_CONFLICT",
+            reason: "escrita concorrente — o log mudou durante a operação".to_string(),
+        }
+    }
+
+    /// Whether this is the [`Self::cas_conflict`] head-mismatch signal — the
+    /// write-door's cue to reload + retry rather than fail.
+    #[must_use]
+    pub fn is_cas_conflict(&self) -> bool {
+        self.code == "CAS_CONFLICT"
+    }
+
     /// The `{code, reason}` JSON body (UTF-8). Exactly the two fields the frozen
     /// client deserializes; extra fields are never added.
     #[must_use]

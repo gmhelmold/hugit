@@ -27,6 +27,7 @@ use hugit_refstore::EventLog;
 use crate::error::EngineErr;
 use crate::sigv4;
 use crate::token::{ClerkValidator, TokenConfig, TokenStore};
+use crate::writes::CasToken;
 
 /// Where the engine reads canonical event logs from.
 #[derive(Clone)]
@@ -137,29 +138,43 @@ impl AppState {
     /// 503 ENGINE_UNAVAILABLE (fail-honest — never a fake-empty VM). The verify
     /// is identical for both sources (the PS-13 chokepoint).
     pub fn load_verified(&self, repo: &str) -> Result<EventLog, EngineErr> {
+        self.load_verified_with_token(repo).map(|(log, _)| log)
+    }
+
+    /// As [`load_verified`], but ALSO returns the [`CasToken`] for the head (the R2
+    /// object ETag, or a local content hash) — the version the write-door's
+    /// compare-and-swap persists against. The chain verify is the SAME single
+    /// PS-13 chokepoint (this method IS the body; `load_verified` drops the token),
+    /// so a write can never skip the verification a read performs.
+    pub fn load_verified_with_token(&self, repo: &str) -> Result<(EventLog, CasToken), EngineErr> {
         if !is_safe_repo_slug(repo) {
             return Err(EngineErr::not_found());
         }
-        let (bytes, label) = match self.source.fetch(repo)? {
+        let (bytes, label, token) = match self.source.fetch(repo)? {
             Some(b) => b,
             None => return Err(EngineErr::not_found()),
         };
-        hugit_cli::checks::load_event_log_from_bytes(&bytes, Path::new(&label)).map_err(|e| {
-            EngineErr::unavailable(format!("engine log read/verify failed ({})", e.kind()))
-        })
+        let log = hugit_cli::checks::load_event_log_from_bytes(&bytes, Path::new(&label)).map_err(
+            |e| EngineErr::unavailable(format!("engine log read/verify failed ({})", e.kind())),
+        )?;
+        Ok((log, token))
     }
 }
 
 impl LogSource {
-    /// Fetch a repo's raw event-log bytes. `Ok(None)` = the object does not exist
-    /// (→ 404, no existence leak); `Ok(Some((bytes, label)))` = present; `Err` =
-    /// a transport/IO fault (→ 503). `label` is the source string for error context.
-    fn fetch(&self, repo: &str) -> Result<Option<(Vec<u8>, String)>, EngineErr> {
+    /// Fetch a repo's raw event-log bytes + the head [`CasToken`] (R2 ETag, or a
+    /// local content hash). `Ok(None)` = the object does not exist (→ 404, no
+    /// existence leak); `Ok(Some((bytes, label, token)))` = present; `Err` = a
+    /// transport/IO fault (→ 503). `label` is the source string for error context.
+    fn fetch(&self, repo: &str) -> Result<Option<(Vec<u8>, String, CasToken)>, EngineErr> {
         match self {
             LogSource::Local { dir } => {
                 let path = dir.join(format!("{repo}.json"));
                 match std::fs::read(&path) {
-                    Ok(b) => Ok(Some((b, path.display().to_string()))),
+                    Ok(b) => {
+                        let token = CasToken::Version(content_hash(&b));
+                        Ok(Some((b, path.display().to_string(), token)))
+                    }
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
                     Err(e) => Err(EngineErr::unavailable(format!(
                         "local log read failed: {e}"
@@ -170,19 +185,38 @@ impl LogSource {
         }
     }
 
-    /// Durably write a repo's raw event-log bytes back to the source.
-    /// - **Local**: atomic temp-write + rename under `<dir>/<repo>.json`.
-    /// - **R2**: a signed PUT ([`R2Config::put`]) — REQUIRES a write-scoped
-    ///   credential; the standing engine cred is read-only by design, so an R2
-    ///   write fail-honestly returns 503 until the one-shot/scoped RW grant is
-    ///   wired (the disclosed P2 write-credential seam).
-    fn persist(&self, repo: &str, bytes: &[u8]) -> Result<(), EngineErr> {
+    /// Durably write a repo's raw event-log bytes back to the source, as a
+    /// COMPARE-AND-SWAP against `expected` (the token the matching [`fetch`]
+    /// returned). A concurrent head move → [`EngineErr::cas_conflict`] (the
+    /// write-door reloads + retries), NEVER last-writer-wins.
+    /// - **Local**: re-read + content-hash compare, then atomic temp-write + rename.
+    /// - **R2**: a conditional signed PUT (`If-Match`/`If-None-Match`) — REQUIRES a
+    ///   write-scoped credential; the standing engine cred is read-only by design,
+    ///   so an R2 write fail-honestly returns 503 until the scoped RW grant is wired.
+    fn persist(&self, repo: &str, bytes: &[u8], expected: &CasToken) -> Result<(), EngineErr> {
         match self {
             LogSource::Local { dir } => {
                 std::fs::create_dir_all(dir).map_err(|e| {
                     EngineErr::unavailable(format!("local log dir create failed: {e}"))
                 })?;
                 let path = dir.join(format!("{repo}.json"));
+                // CAS check: the on-disk head must still equal `expected` (a local
+                // analogue of R2 `If-Match`). A residual TOCTOU remains between this
+                // compare and the rename below — acceptable because Local is the
+                // single-box dev/test source; the production multi-writer source is
+                // R2, whose conditional PUT is atomic at the store.
+                let current = match std::fs::read(&path) {
+                    Ok(b) => CasToken::Version(content_hash(&b)),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => CasToken::Absent,
+                    Err(e) => {
+                        return Err(EngineErr::unavailable(format!(
+                            "local log re-read failed: {e}"
+                        )));
+                    }
+                };
+                if !cas_matches(expected, &current) {
+                    return Err(EngineErr::cas_conflict());
+                }
                 // Atomic: write a unique temp then rename over the target, so a
                 // crash mid-write never leaves a torn `<repo>.json`.
                 let tmp = dir.join(format!("{repo}.json.tmp.{}", std::process::id()));
@@ -193,31 +227,51 @@ impl LogSource {
                     EngineErr::unavailable(format!("local log rename failed: {e}"))
                 })
             }
-            LogSource::R2(c) => c.put(repo, bytes).map(|_| ()),
+            LogSource::R2(c) => c.put_conditional(repo, bytes, expected).map(|_| ()),
         }
     }
 }
 
+/// The content-hash version of a raw log object — the local CAS token (a stand-in
+/// for the R2 ETag). Hex SHA-256 of the exact bytes.
+fn content_hash(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(bytes);
+    hex::encode(h.finalize())
+}
+
+/// Whether the head a write swaps against (`expected`) still equals what is durably
+/// present now (`current`). `Unsupported` always matches (the sink opts out of CAS).
+fn cas_matches(expected: &CasToken, current: &CasToken) -> bool {
+    match (expected, current) {
+        (CasToken::Unsupported, _) => true,
+        (CasToken::Absent, CasToken::Absent) => true,
+        (CasToken::Version(a), CasToken::Version(b)) => a == b,
+        _ => false,
+    }
+}
+
 impl crate::writes::LogSink for AppState {
-    /// Load + chain-verify (same gate as the read path; absent → 404).
-    fn load(&self, repo: &str) -> Result<EventLog, EngineErr> {
-        self.load_verified(repo)
+    /// Load + chain-verify (same gate as the read path; absent → 404) AND capture
+    /// the head [`CasToken`] for the write-door's compare-and-swap.
+    fn load(&self, repo: &str) -> Result<(EventLog, CasToken), EngineErr> {
+        self.load_verified_with_token(repo)
     }
 
-    /// Serialize the mutated log + durably persist it back to the source.
-    ///
-    /// NOTE (audit CAS obligation): the `tiny_http` serve loop is single-threaded
-    /// (one request at a time), so within a deployed engine there is no concurrent
-    /// writer and the load→persist gap cannot interleave. A multi-writer / R2
-    /// deployment MUST upgrade `LogSource::persist` to a conditional/compare-and-
-    /// swap write (R2 `If-Match`) per the `LogSink::persist` contract.
-    fn persist(&self, repo: &str, log: &EventLog) -> Result<(), EngineErr> {
+    /// Serialize the mutated log + durably persist it back to the source as a
+    /// COMPARE-AND-SWAP against `expected` (the head this request loaded). A
+    /// concurrent head move → [`EngineErr::cas_conflict`], which `with_write`
+    /// catches to reload + retry — so a multi-writer / R2 deployment never drops a
+    /// concurrent request's records (the load→persist gap holds no lock; the CAS,
+    /// not a lock, is what makes the cycle safe).
+    fn persist(&self, repo: &str, log: &EventLog, expected: &CasToken) -> Result<(), EngineErr> {
         if !is_safe_repo_slug(repo) {
             return Err(EngineErr::not_found());
         }
         let bytes = serde_json::to_vec(log.records())
             .map_err(|e| EngineErr::unavailable(format!("log serialize failed: {e}")))?;
-        self.source.persist(repo, &bytes)
+        self.source.persist(repo, &bytes, expected)
     }
 }
 
@@ -294,7 +348,10 @@ impl R2Config {
         })
     }
 
-    fn fetch(&self, repo: &str) -> Result<Option<(Vec<u8>, String)>, EngineErr> {
+    /// Fetch the raw object + head [`CasToken`] (the GET ETag). `pub` so the live
+    /// R2 CAS round-trip proof (`tests/r2_cas_live.rs`, `#[ignore]`) can exercise
+    /// the real fetch→put_conditional path.
+    pub fn fetch(&self, repo: &str) -> Result<Option<(Vec<u8>, String, CasToken)>, EngineErr> {
         let key = format!("{}/{repo}.json", self.tenant_id);
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -322,6 +379,15 @@ impl R2Config {
             .call();
         match resp {
             Ok(r) => {
+                // Capture the ETag (the CAS version) BEFORE consuming the body. R2
+                // returns it quoted (e.g. `"abc…"`); preserve it verbatim so the
+                // `If-Match` we send back round-trips byte-identically. A response
+                // without an ETag (should not happen for a real object) opts out of
+                // CAS for this head rather than failing the read.
+                let token = match r.header("etag") {
+                    Some(e) if !e.is_empty() => CasToken::Version(e.to_string()),
+                    _ => CasToken::Unsupported,
+                };
                 let mut buf = Vec::new();
                 r.into_reader().read_to_end(&mut buf).map_err(|e| {
                     // Detail (which carries the bucket/key `label`) to the SERVER log
@@ -329,7 +395,7 @@ impl R2Config {
                     eprintln!("hugit-serve: R2 body read failed for {label}: {e}");
                     EngineErr::unavailable("engine storage read failed".to_string())
                 })?;
-                Ok(Some((buf, label)))
+                Ok(Some((buf, label, token)))
             }
             Err(ureq::Error::Status(404, _)) => Ok(None),
             // A non-404 status OR a transport fault. `ureq`'s error Display embeds the
@@ -346,13 +412,33 @@ impl R2Config {
         }
     }
 
-    /// PUT `body` to `<tenant_id>/<repo>.json` (the one-shot snapshot upload — used
-    /// by the `hugit-snapshot` bin, NOT by the read server). The standing engine
-    /// credential is read-only by design (a PUT 403s); this path is reached only
-    /// when the config is built from a read+WRITE credential. Returns the wire key
-    /// on success. A 2xx is success; anything else is an explicit error (never a
-    /// silent partial write).
+    /// PUT `body` to `<tenant_id>/<repo>.json` UNCONDITIONALLY (the one-shot
+    /// snapshot upload — used by the `hugit-snapshot` bin, NOT the engine write
+    /// path). The standing engine credential is read-only by design (a PUT 403s);
+    /// this path is reached only with a read+WRITE credential. Returns the wire key.
     pub fn put(&self, repo: &str, body: &[u8]) -> Result<String, EngineErr> {
+        self.put_conditional(repo, body, &CasToken::Unsupported)
+    }
+
+    /// PUT `body` as a COMPARE-AND-SWAP against `expected` (the head the matching
+    /// [`fetch`] returned), via the S3/R2 conditional headers:
+    /// - [`CasToken::Version(etag)`] → `If-Match: <etag>` (overwrite only if unchanged),
+    /// - [`CasToken::Absent`] → `If-None-Match: *` (create only if still absent),
+    /// - [`CasToken::Unsupported`] → no conditional header (unconditional PUT).
+    ///
+    /// R2 returns **412 Precondition Failed** when the precondition is not met
+    /// (verified against the Cloudflare S3-compat docs); that maps to
+    /// [`EngineErr::cas_conflict`] — the write-door's reload-and-retry signal. The
+    /// conditional header is a standard (non-`x-amz`) HTTP header, so per the SigV4
+    /// spec it need not be in `SignedHeaders`; it is sent UNSIGNED (keeping the
+    /// proven signer untouched) and the live round-trip proves R2 honors it.
+    /// A 2xx is success; anything else is an explicit error (never a silent partial).
+    pub fn put_conditional(
+        &self,
+        repo: &str,
+        body: &[u8],
+        expected: &CasToken,
+    ) -> Result<String, EngineErr> {
         let key = format!("{}/{repo}.json", self.tenant_id);
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -369,19 +455,28 @@ impl R2Config {
             now,
         );
         let url = format!("{}/{}/{key}", self.endpoint, self.bucket);
-        let resp = self
+        let mut req = self
             .agent
             .put(&url)
             .set("Authorization", &signed.authorization)
             .set("x-amz-date", &signed.amz_date)
-            .set("x-amz-content-sha256", &signed.content_sha256)
-            .send_bytes(body);
+            .set("x-amz-content-sha256", &signed.content_sha256);
+        // The conditional header that turns this PUT into a compare-and-swap.
+        match expected {
+            CasToken::Version(etag) => req = req.set("If-Match", etag),
+            CasToken::Absent => req = req.set("If-None-Match", "*"),
+            CasToken::Unsupported => {}
+        }
+        let resp = req.send_bytes(body);
         match resp {
             Ok(r) if (200..300).contains(&r.status()) => Ok(format!("r2://{}/{key}", self.bucket)),
             Ok(r) => Err(EngineErr::unavailable(format!(
                 "R2 PUT unexpected status {}",
                 r.status()
             ))),
+            // The precondition failed: a concurrent writer moved the head. This is
+            // the CAS-conflict retry signal, NOT a hard failure.
+            Err(ureq::Error::Status(412, _)) => Err(EngineErr::cas_conflict()),
             Err(ureq::Error::Status(403, _)) => Err(EngineErr::unavailable(
                 "R2 PUT 403 — the credential is not write-scoped (need the one-shot RW grant)"
                     .to_string(),

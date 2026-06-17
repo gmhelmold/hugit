@@ -48,31 +48,55 @@ pub const IDEM_RECORDED_KIND: &str = "idem.recorded";
 /// pathological multi-MB comment/ask. Over-limit ⇒ `400 INVALID_REQUEST`.
 pub const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
+/// Max compare-and-swap attempts in [`with_write`] before failing with a transient
+/// 503. Each lost race reloads the (now-advanced) head and re-runs; a single engine
+/// instance + the occasional out-of-band writer (the snapshot uploader) never
+/// approaches this, so exhaustion means sustained, pathological contention.
+pub const MAX_CAS_ATTEMPTS: u32 = 5;
+
 /// Verbs that require fresh re-auth (STEP-UP, spec §3). The door refuses them
 /// with `403 STEP_UP_REQUIRED` unless the route presents a fresh-auth proof.
 /// (The real fresh-auth is the P2 Clerk seam; the door enforces the GATE today.)
 pub const STEP_UP_VERBS: &[&str] = &["policy", "erasure"];
 
+/// An opaque concurrency token captured by [`LogSink::load`] and presented back to
+/// [`LogSink::persist`] for the compare-and-swap. It pins the exact head the verb
+/// ran against, so persist can reject a write whose head moved underneath it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CasToken {
+    /// The log did not exist at load — persist must CREATE-only (R2 `If-None-Match: *`):
+    /// it fails the CAS if another writer created it in the gap.
+    Absent,
+    /// The log existed at this version (the R2 object ETag, or a local content hash).
+    /// Persist swaps only if the head still equals this version (R2 `If-Match: <v>`).
+    Version(String),
+    /// The sink does not implement CAS (the in-memory test sink). Persist is
+    /// unconditional — used ONLY where there is provably no concurrent writer.
+    Unsupported,
+}
+
 /// Durable persistence for a repo's event log. The read path stays read-only; the
 /// WRITE credential / R2-write architecture lives ENTIRELY behind this trait.
 pub trait LogSink: Send + Sync {
     /// Load + chain-verify `<repo>`'s event log (same verification as the read
-    /// path). A missing log is an empty world ONLY if the verb can create it; for
-    /// writes against an existing repo, absence is the verb's own `404`.
-    fn load(&self, repo: &str) -> Result<EventLog, EngineErr>;
+    /// path) AND capture its [`CasToken`] (the head version, for the swap). A
+    /// missing log is an empty world ONLY if the verb can create it; for writes
+    /// against an existing repo, absence is the verb's own `404`.
+    fn load(&self, repo: &str) -> Result<(EventLog, CasToken), EngineErr>;
 
-    /// Durably persist `log` as the new source of truth for `<repo>`. Fail-honest:
-    /// a non-durable write is an `Err` (never a silent partial / fake success).
+    /// Durably persist `log` as the new source of truth for `<repo>`, as a
+    /// COMPARE-AND-SWAP against `expected` (the token the matching [`load`]
+    /// returned). Fail-honest: a non-durable write is an `Err` (never a silent
+    /// partial / fake success).
     ///
     /// **CAS OBLIGATION (hard contract — audit P2→P1).** `with_write` does
-    /// load → mutate → persist with NO lock held across the gap. A correct impl
-    /// MUST persist as a COMPARE-AND-SWAP against the head the matching [`load`]
-    /// returned (R2 `If-Match`/conditional PUT, or a per-repo write lock): on a
-    /// concurrent-write head mismatch it MUST reject (so the caller reloads +
-    /// retries), NEVER last-writer-wins (which would silently drop the other
-    /// request's records AND its idempotency-ledger entry). A non-CAS impl breaks
-    /// cross-request atomicity — it is a contract violation, not an optimization.
-    fn persist(&self, repo: &str, log: &EventLog) -> Result<(), EngineErr>;
+    /// load → mutate → persist with NO lock held across the gap. On a concurrent
+    /// head mismatch the impl MUST return [`EngineErr::cas_conflict`] (so the
+    /// caller reloads + retries), NEVER last-writer-wins (which would silently drop
+    /// the other request's records AND its idempotency-ledger entry). A non-CAS
+    /// impl breaks cross-request atomicity — a contract violation, not an
+    /// optimization.
+    fn persist(&self, repo: &str, log: &EventLog, expected: &CasToken) -> Result<(), EngineErr>;
 }
 
 /// Hex SHA-256 of the raw request body — the idempotency body fingerprint.
@@ -176,6 +200,16 @@ fn idem_record(
 /// - `run` — the pure verb body; it mutates the loaded log and returns `Accepted`.
 ///
 /// On success the verb's record(s) + the `idem.recorded` entry persist atomically.
+///
+/// **Concurrency (CAS):** the load→mutate→persist cycle holds no lock across the
+/// gap, so a concurrent writer can move the head between this request's `load` and
+/// `persist`. The cycle is therefore wrapped in a bounded retry loop: `persist` is
+/// a compare-and-swap against the loaded head; on a [`EngineErr::is_cas_conflict`]
+/// the loop reloads and re-runs from scratch. The reload re-checks idempotency, so
+/// two concurrent requests with the SAME key resolve to one execution + one replay
+/// (never a double append), and with DIFFERENT keys both survive (never a silent
+/// drop). After [`MAX_CAS_ATTEMPTS`] lost races the door fails honestly with a
+/// transient-contention 503 — the write did NOT happen; the client may retry.
 #[allow(clippy::too_many_arguments)]
 pub fn with_write<F>(
     sink: &dyn LogSink,
@@ -190,7 +224,7 @@ pub fn with_write<F>(
     run: F,
 ) -> Result<Accepted, EngineErr>
 where
-    F: FnOnce(&mut EventLog, Vec<String>, u64) -> Result<Accepted, EngineErr>,
+    F: Fn(&mut EventLog, Vec<String>, u64) -> Result<Accepted, EngineErr>,
 {
     // STEP-UP gate (audit P1): a step-up verb without fresh re-auth is refused at
     // the door, BEFORE any load/effect — the verb itself is step-up-agnostic.
@@ -209,36 +243,55 @@ where
     let principal = principal_chain.last().cloned().unwrap_or_default();
     let body_hash = body_sha256(body);
 
-    let mut log = sink.load(repo)?;
+    for _attempt in 0..MAX_CAS_ATTEMPTS {
+        // Re-load the head on every attempt: the CAS token pins THIS read so the
+        // matching persist can detect a concurrent move (and a reload after a lost
+        // race sees the winner's records — including its idempotency ledger entry).
+        let (mut log, token) = sink.load(repo)?;
 
-    // WRITE-SIDE PER-TENANT GATE (ADR-0007 §3 — the engine re-decides on EVERY
-    // verb, not just reads): the caller must OWN the repo (or be the operator) to
-    // mutate it. Uses `authorize_WRITE`, NOT the read gate — write permission is
-    // OWNERSHIP, never read-visibility: a `public` repo is readable by all but
-    // writable ONLY by its owner/operator (else any signed-up tenant could
-    // land/verdict/policy/… into the public launch repo). A non-owner is denied as
-    // 404 (no existence leak), BEFORE the idempotency lookup or any effect.
-    if !crate::authz::authorize_write(&principal_chain, &crate::authz::project_repo_meta(&log)) {
-        return Err(EngineErr::not_found());
-    }
-
-    // Replay guard: a seen key returns the stored outcome (or 409 on a body change)
-    // BEFORE the verb runs — so a lost-response retry never re-executes the effect.
-    if let Some(prior) = idem_lookup(&log, &principal, verb, resource, idem_key) {
-        if prior.body_sha256 != body_hash {
-            return Err(EngineErr::idem_mismatch());
+        // WRITE-SIDE PER-TENANT GATE (ADR-0007 §3 — the engine re-decides on EVERY
+        // verb, not just reads): the caller must OWN the repo (or be the operator)
+        // to mutate it. Uses `authorize_WRITE`, NOT the read gate — write permission
+        // is OWNERSHIP, never read-visibility: a `public` repo is readable by all
+        // but writable ONLY by its owner/operator (else any signed-up tenant could
+        // land/verdict/policy/… into the public launch repo). A non-owner is denied
+        // as 404 (no existence leak), BEFORE the idempotency lookup or any effect.
+        if !crate::authz::authorize_write(&principal_chain, &crate::authz::project_repo_meta(&log))
+        {
+            return Err(EngineErr::not_found());
         }
-        return Ok(prior.accepted);
+
+        // Replay guard: a seen key returns the stored outcome (or 409 on a body
+        // change) BEFORE the verb runs — so a lost-response retry (or a same-key
+        // race lost above) never re-executes the effect.
+        if let Some(prior) = idem_lookup(&log, &principal, verb, resource, idem_key) {
+            if prior.body_sha256 != body_hash {
+                return Err(EngineErr::idem_mismatch());
+            }
+            return Ok(prior.accepted);
+        }
+
+        // First time for this key on this head: run the verb (mutates the in-memory
+        // log), record the idempotent outcome, then compare-and-swap-persist ONCE
+        // (atomic: both records or neither).
+        let accepted = run(&mut log, principal_chain.clone(), at)?;
+        idem_record(
+            &mut log, &principal, verb, resource, idem_key, &body_hash, &accepted, at,
+        )?;
+        match sink.persist(repo, &log, &token) {
+            Ok(()) => return Ok(accepted),
+            // The head moved under us — discard this attempt's in-memory work and
+            // retry from a fresh load (which re-checks idempotency).
+            Err(e) if e.is_cas_conflict() => continue,
+            Err(e) => return Err(e),
+        }
     }
 
-    // First time for this key: run the verb (mutates the in-memory log), then record
-    // the idempotent outcome, then persist ONCE (atomic: both records or neither).
-    let accepted = run(&mut log, principal_chain, at)?;
-    idem_record(
-        &mut log, &principal, verb, resource, idem_key, &body_hash, &accepted, at,
-    )?;
-    sink.persist(repo, &log)?;
-    Ok(accepted)
+    // Exhausted the retry budget: sustained contention. Fail honest + transient —
+    // nothing was persisted on the losing attempts (each was a rejected CAS).
+    Err(EngineErr::unavailable(
+        "escrita sob contenção concorrente — tente novamente",
+    ))
 }
 
 #[cfg(test)]
@@ -251,10 +304,18 @@ mod tests {
         log: RefCell<EventLog>,
     }
     impl LogSink for MemSink {
-        fn load(&self, _repo: &str) -> Result<EventLog, EngineErr> {
-            Ok(self.log.borrow().clone())
+        fn load(&self, _repo: &str) -> Result<(EventLog, CasToken), EngineErr> {
+            // `Unsupported`: this sink opts out of CAS (no concurrent writer in the
+            // single-threaded happy-path tests). The CAS retry loop is exercised by
+            // `CasSink` below, which DOES enforce + simulates a concurrent bump.
+            Ok((self.log.borrow().clone(), CasToken::Unsupported))
         }
-        fn persist(&self, _repo: &str, log: &EventLog) -> Result<(), EngineErr> {
+        fn persist(
+            &self,
+            _repo: &str,
+            log: &EventLog,
+            _expected: &CasToken,
+        ) -> Result<(), EngineErr> {
             *self.log.borrow_mut() = log.clone();
             Ok(())
         }
@@ -262,6 +323,100 @@ mod tests {
     // RefCell isn't Sync; for single-threaded tests we only need the trait shape.
     // SAFETY: tests are single-threaded; this unblocks `&dyn LogSink` use.
     unsafe impl Sync for MemSink {}
+
+    /// A CAS-enforcing in-memory sink: it versions the head and rejects a persist
+    /// whose `expected` version no longer matches — the in-memory analogue of R2
+    /// `If-Match`. A "concurrent writer" is simulated by injecting records (and
+    /// bumping the version) just before a persist, so a test can force a lost CAS
+    /// race and assert `with_write` reloads + recovers:
+    /// - `pending_bump` — records injected ONCE, on the next persist (then drained).
+    /// - `always_bump` — inject an unrelated record on EVERY persist, so no attempt
+    ///   ever wins (drives the retry budget to exhaustion).
+    struct CasSink {
+        log: RefCell<EventLog>,
+        version: RefCell<u64>,
+        pending_bump: RefCell<Vec<(String, String)>>,
+        always_bump: bool,
+    }
+    impl CasSink {
+        fn inject(&self, recs: &[(String, String)]) {
+            let mut cur = self.log.borrow_mut();
+            for (kind, payload) in recs {
+                let at = cur.records().len() as u64 + 1;
+                cur.append_for_test(kind, vec!["orchestrator:other".into()], payload.clone(), at);
+            }
+            *self.version.borrow_mut() += 1;
+        }
+    }
+    impl LogSink for CasSink {
+        fn load(&self, _repo: &str) -> Result<(EventLog, CasToken), EngineErr> {
+            Ok((
+                self.log.borrow().clone(),
+                CasToken::Version(self.version.borrow().to_string()),
+            ))
+        }
+        fn persist(
+            &self,
+            _repo: &str,
+            log: &EventLog,
+            expected: &CasToken,
+        ) -> Result<(), EngineErr> {
+            // A concurrent writer lands first, moving the head — once (pending_bump)
+            // or on every attempt (always_bump).
+            if self.always_bump {
+                self.inject(&[("other.churn".into(), "{}".into())]);
+            } else {
+                let pending: Vec<_> = self.pending_bump.borrow_mut().drain(..).collect();
+                if !pending.is_empty() {
+                    self.inject(&pending);
+                }
+            }
+            let head = CasToken::Version(self.version.borrow().to_string());
+            if *expected != head {
+                return Err(EngineErr::cas_conflict());
+            }
+            *self.log.borrow_mut() = log.clone();
+            *self.version.borrow_mut() += 1;
+            Ok(())
+        }
+    }
+    // SAFETY: single-threaded tests only (same as MemSink).
+    unsafe impl Sync for CasSink {}
+
+    fn cas_sink_with_pr(pr_id: &str) -> CasSink {
+        let seeded = sink_with_pr(pr_id).log.into_inner();
+        CasSink {
+            log: RefCell::new(seeded),
+            version: RefCell::new(0),
+            pending_bump: RefCell::new(Vec::new()),
+            always_bump: false,
+        }
+    }
+
+    /// The (kind, payload) records a completed `with_write(key)` adds beyond the
+    /// `sink_with_pr` seed — the faithful "winner's records" (its effect + its
+    /// `idem.recorded`) to inject as a same-key concurrent winner.
+    fn winner_records(pr_id: &str, key: &str, body: &[u8]) -> Vec<(String, String)> {
+        let w = sink_with_pr(pr_id);
+        with_write(
+            &w,
+            "r",
+            "land",
+            "res",
+            key,
+            body,
+            true,
+            vec!["orchestrator:o".into()],
+            2,
+            dummy_verb,
+        )
+        .expect("winner write ok");
+        let log = w.log.borrow();
+        log.records()[1..]
+            .iter()
+            .map(|r| (r.kind.clone(), r.payload.clone()))
+            .collect()
+    }
 
     fn sink_with_pr(pr_id: &str) -> MemSink {
         let mut log = EventLog::new();
@@ -505,5 +660,131 @@ mod tests {
             queued, 2,
             "a key reused across resources must NOT collapse to one effect"
         );
+    }
+
+    #[test]
+    fn cas_conflict_with_different_writer_reloads_and_both_survive() {
+        // A concurrent DIFFERENT-key writer lands an unrelated record between our
+        // load and persist. The first persist loses the CAS (head moved); the door
+        // reloads and re-runs against the advanced head. Neither write is dropped.
+        let sink = cas_sink_with_pr("1");
+        *sink.pending_bump.borrow_mut() = vec![("pr.landed".into(), r#"{"verdict":"ok"}"#.into())];
+        let accepted = with_write(
+            &sink,
+            "r",
+            "land",
+            "res",
+            "MINE",
+            b"{\"mode\":\"union\"}",
+            true,
+            vec!["orchestrator:o".into()],
+            2,
+            dummy_verb,
+        )
+        .expect("must recover from the lost race, not fail");
+        let log = sink.log.borrow();
+        let kinds: Vec<&str> = log.records().iter().map(|r| r.kind.as_str()).collect();
+        // The other writer's record survives AND ours landed — no last-writer-wins.
+        assert!(
+            kinds.contains(&"pr.landed"),
+            "the concurrent write must survive"
+        );
+        assert_eq!(
+            kinds.iter().filter(|k| **k == "pr.queued").count(),
+            1,
+            "our effect landed exactly once after the reload"
+        );
+        assert!(
+            kinds.contains(&IDEM_RECORDED_KIND),
+            "our idempotency ledger entry persisted (not dropped with the lost attempt)"
+        );
+        // The seq we returned is the one actually on the persisted head.
+        assert!(log.records().iter().any(|r| r.seq == accepted.seq));
+    }
+
+    #[test]
+    fn cas_conflict_same_key_winner_collapses_to_replay_no_double_effect() {
+        // The classic same-key race: another request with OUR key commits first
+        // (its effect + idem.recorded). Our persist loses the CAS; on reload we find
+        // the winner's ledger entry and REPLAY it — exactly one effect, no double.
+        let body = b"{\"mode\":\"union\"}";
+        let sink = cas_sink_with_pr("1");
+        *sink.pending_bump.borrow_mut() = winner_records("1", "SAME", body);
+        let accepted = with_write(
+            &sink,
+            "r",
+            "land",
+            "res",
+            "SAME",
+            body,
+            true,
+            vec!["orchestrator:o".into()],
+            2,
+            dummy_verb,
+        )
+        .expect("same-key race must resolve to a replay, not an error");
+        let log = sink.log.borrow();
+        assert_eq!(
+            log.records()
+                .iter()
+                .filter(|r| r.kind == "pr.queued")
+                .count(),
+            1,
+            "the same-key race must collapse to ONE effect (the winner's)"
+        );
+        assert_eq!(
+            log.records()
+                .iter()
+                .filter(|r| r.kind == IDEM_RECORDED_KIND)
+                .count(),
+            1,
+            "exactly one idempotency ledger entry for the key"
+        );
+        // We returned the winner's recorded outcome (replay), not a fresh one.
+        assert!(log.records().iter().any(|r| r.seq == accepted.seq));
+    }
+
+    #[test]
+    fn cas_exhaustion_fails_transient_503_with_no_partial_write() {
+        // Sustained contention: every persist loses the race. After the bounded
+        // budget the door fails honest + transient (503), and NONE of our records
+        // (verb effect or idempotency entry) leaked onto the head.
+        let sink = CasSink {
+            always_bump: true,
+            ..cas_sink_with_pr("1")
+        };
+        let err = with_write(
+            &sink,
+            "r",
+            "land",
+            "res",
+            "MINE",
+            b"{\"mode\":\"union\"}",
+            true,
+            vec!["orchestrator:o".into()],
+            2,
+            dummy_verb,
+        )
+        .expect_err("sustained contention must fail, not silently drop");
+        assert_eq!(err.status, 503, "exhaustion is a transient-retry failure");
+        let log = sink.log.borrow();
+        assert_eq!(
+            log.records()
+                .iter()
+                .filter(|r| r.kind == "pr.queued")
+                .count(),
+            0,
+            "no verb effect leaked from a losing attempt"
+        );
+        assert_eq!(
+            log.records()
+                .iter()
+                .filter(|r| r.kind == IDEM_RECORDED_KIND)
+                .count(),
+            0,
+            "no idempotency entry leaked from a losing attempt"
+        );
+        // It did try the full budget (each churns the head once).
+        assert_eq!(*sink.version.borrow(), u64::from(MAX_CAS_ATTEMPTS));
     }
 }
