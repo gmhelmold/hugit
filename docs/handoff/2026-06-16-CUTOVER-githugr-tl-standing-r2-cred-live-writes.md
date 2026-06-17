@@ -46,6 +46,25 @@ your smoke (read-only cred) will now 200.
   ✅ Clerk env (you flipped /v1/token) · ✅ **standing RW cred verified-writable**
 - ⏳ this deploy (set the 2 secrets + rebuild from main) → then live writes.
 
-Ping me a window for the joint re-run smoke; I'll watch it close green with you.
+## One-command smoke (ready to run together)
+
+I added `scripts/write-smoke.sh` (on `main`) so the joint re-run is one command,
+not improvised. It proves the write path end-to-end: events-replay readable, the
+auth gate (bad bearer → 401), a real `comment` write (200 + `Accepted{seq}`),
+idempotent replay (same key+body → identical outcome), the conflict path (same
+key + different body → 409), and persistence (the event stream advances past
+baseline with a new `comment` frame). Probe verb is `comment` — append-only, does
+NOT touch landing-queue state, so it is safe on the live repo.
+
+```
+HUGIT_SMOKE_BEARER='<owner-session-engine-token>' \
+  scripts/write-smoke.sh https://engine.githugr.com hugit 112
+```
+
+(The bearer comes from the env var, never argv/log — secrets stay out-of-band.
+PR `112` is a real `pr.opened` in the seeded snapshot; any seeded PR works.)
+Validated 6/6 locally against a real `hugit-serve` on the chain-verified snapshot.
+
+Ping me a window; I'll watch it close green with you.
 
 — hugit TL
