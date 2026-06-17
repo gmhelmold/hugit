@@ -142,6 +142,18 @@ impl EngineErr {
         self.code == "CAS_CONFLICT"
     }
 
+    /// 429 — the upstream `/v1/session/exchange` throttled the per-principal mint
+    /// (its `429`). Surfaced honestly so the client backs off + retries, rather
+    /// than collapsing to a generic 503. The Clerk JWT is never echoed.
+    #[must_use]
+    pub fn rate_limited() -> Self {
+        Self {
+            status: 429,
+            code: "RATE_LIMITED",
+            reason: "muitas solicitações de token — tente novamente em instantes".to_string(),
+        }
+    }
+
     /// The `{code, reason}` JSON body (UTF-8). Exactly the two fields the frozen
     /// client deserializes; extra fields are never added.
     #[must_use]

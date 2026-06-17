@@ -37,13 +37,11 @@ serde_json = { workspace = true }
 # tiny_http server, which stays TLS-free (edge terminates inbound).
 hmac       = { workspace = true }
 hex        = { workspace = true }
+# `ureq` serves BOTH the R2 S3 GET (read source) AND the outbound
+# `POST /v1/session/exchange` call for `/v1/token` (Option B — hugit forwards the
+# Clerk JWT to CoreLink rather than validating it locally). TLS is required
+# outbound; the inbound tiny_http server stays TLS-free (edge terminates).
 ureq       = { workspace = true }
-# Clerk JWKS / RS256 verification for POST /v1/token (Wave-5b). Already the single
-# version in the lock (a hugit-queue dep) → zero lock delta, no multiple-versions
-# hit. base64 (url-safe-no-pad) is used to decode the JWT azp claim; 0.22.1 is
-# already the single locked version.
-jsonwebtoken = "=9.3.1"
-base64       = { workspace = true }
 
 [dev-dependencies]
 hugit-refstore = { path = "../hugit-refstore", features = ["test-support"] }

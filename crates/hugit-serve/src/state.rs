@@ -26,7 +26,7 @@ use hugit_refstore::EventLog;
 
 use crate::error::EngineErr;
 use crate::sigv4;
-use crate::token::{ClerkValidator, TokenConfig, TokenStore};
+use crate::token::{SessionExchangeClient, SessionExchangeConfig, TokenStore};
 use crate::writes::CasToken;
 
 /// Where the engine reads canonical event logs from.
@@ -64,9 +64,10 @@ pub struct AppState {
     pub source: LogSource,
     /// The Wave-1 dev Bearer token (the P2-Clerk stub). Fail-closed: required.
     pub dev_token: String,
-    /// Clerk JWKS validator for `POST /v1/token` (None → dev-token-only; the
-    /// endpoint 404s without it). The P2 Clerk identity seam.
-    pub validator: Option<Arc<ClerkValidator>>,
+    /// CoreLink session-exchange client for `POST /v1/token` (Option B). `None` →
+    /// dev-token-only; the endpoint 404s without it (presence not disclosed). The
+    /// P2 Clerk identity seam: hugit forwards the Clerk JWT, CoreLink verifies it.
+    pub exchange: Option<Arc<SessionExchangeClient>>,
     /// In-process engine-token store. Always present so the lookup gate compiles
     /// uniformly; stays empty until a Clerk exchange mints a token. Single-host
     /// (the multi-instance shared store is the same P2 seam as the idem ledger).
@@ -99,12 +100,12 @@ impl AppState {
                 dir: PathBuf::from(dir),
             }
         };
-        let validator = TokenConfig::from_env()?.map(|cfg| Arc::new(cfg.into_validator()));
+        let exchange = SessionExchangeConfig::from_env()?.map(|cfg| Arc::new(cfg.into_client()));
         let token_store = Arc::new(TokenStore::new());
         Ok(Self {
             source,
             dev_token,
-            validator,
+            exchange,
             token_store,
         })
     }
@@ -119,7 +120,7 @@ impl AppState {
         Self {
             source: LogSource::Local { dir: log_dir },
             dev_token,
-            validator: None,
+            exchange: None,
             token_store: Arc::new(TokenStore::new()),
         }
     }
