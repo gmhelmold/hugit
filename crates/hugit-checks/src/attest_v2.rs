@@ -199,6 +199,52 @@ mod tests {
         );
     }
 
+    /// Reordering the artifacts must FAIL — the Vec order IS part of the binding
+    /// (the pre-image emits artifacts in slice order). Explicit defense-in-depth
+    /// proof of the "order is part of the binding" claim (adversarial-audit NIT).
+    #[test]
+    fn reordered_artifacts_are_rejected() {
+        let v = load_vector();
+        assert!(
+            v.artifacts.len() >= 2,
+            "vector must have ≥2 artifacts to test reorder"
+        );
+        let mut artifacts = v.artifacts.clone();
+        artifacts.reverse();
+        assert!(
+            !verify_result_binding_v2(
+                &v.fabric_pubkey_b64,
+                &v.memo_key,
+                &v.stdout_ref,
+                &v.stderr_ref,
+                v.exit,
+                &artifacts,
+                &v.sig_b64,
+            ),
+            "reordered artifacts must NOT verify (order is part of the binding)"
+        );
+    }
+
+    /// Flipping a v1-covered ref (`stdout_ref`) must FAIL — the v2 binding still
+    /// covers the v1 fields. Guards against a regression that dropped them from the
+    /// pre-image.
+    #[test]
+    fn flipped_stdout_ref_is_rejected() {
+        let v = load_vector();
+        assert!(
+            !verify_result_binding_v2(
+                &v.fabric_pubkey_b64,
+                &v.memo_key,
+                "cas:sha256:9999999999999999999999999999999999999999999999999999999999999999",
+                &v.stderr_ref,
+                v.exit,
+                &v.artifacts,
+                &v.sig_b64,
+            ),
+            "a flipped stdout_ref must NOT verify (v1 fields stay bound in v2)"
+        );
+    }
+
     /// Malformed inputs fail closed (no panic, returns false).
     #[test]
     fn malformed_inputs_fail_closed() {
