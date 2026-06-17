@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(serve): **CAS hardening — fail-closed on a missing R2 version token** (adversarial
+  audit of the PR #137 CAS guard). If an R2 GET returned no ETag for an existing object,
+  the captured `CasToken` was `Unsupported`, which on the write path would have made
+  `persist` an UNCONDITIONAL PUT — silently reintroducing last-writer-wins. R2 always
+  returns an ETag (so this is defense-in-depth against an anomalous response), but a
+  SILENT CAS bypass is exactly the class to close: the R2 write path now refuses an
+  `Unsupported` token with a 503 (no network PUT) rather than degrade. The snapshot
+  uploader's intentional unconditional create (`put`) is documented as seeding-only.
+  Test: `r2_persist_with_unsupported_token_fails_closed_not_unconditional`.
+
 - fix(deps): bump `git2` `0.20 → 0.21` (hugit-proto test-only dev-dep) to clear
   **RUSTSEC-2026-0183 / RUSTSEC-2026-0184** (git2 0.20 `Remote::list()` /
   `BlameHunk` unsoundness). Test-only and never shipped in the product binary, but
