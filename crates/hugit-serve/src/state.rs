@@ -227,7 +227,21 @@ impl LogSource {
                     EngineErr::unavailable(format!("local log rename failed: {e}"))
                 })
             }
-            LogSource::R2(c) => c.put_conditional(repo, bytes, expected).map(|_| ()),
+            LogSource::R2(c) => {
+                // FAIL-CLOSED (audit hardening): an `Unsupported` token on the R2
+                // write path means `fetch` got no ETag for an existing object — a
+                // PUT would then be UNCONDITIONAL (last-writer-wins), silently
+                // bypassing the CAS. R2 always returns an ETag, so this is
+                // defense-in-depth: refuse the non-CAS write rather than degrade
+                // silently. (The snapshot uploader's intentional unconditional
+                // create uses `put`, never this engine write path.)
+                if matches!(expected, CasToken::Unsupported) {
+                    return Err(EngineErr::unavailable(
+                        "engine storage returned no version token; refusing a non-CAS write",
+                    ));
+                }
+                c.put_conditional(repo, bytes, expected).map(|_| ())
+            }
         }
     }
 }
@@ -416,6 +430,11 @@ impl R2Config {
     /// snapshot upload — used by the `hugit-snapshot` bin, NOT the engine write
     /// path). The standing engine credential is read-only by design (a PUT 403s);
     /// this path is reached only with a read+WRITE credential. Returns the wire key.
+    ///
+    /// ⚠️ Unconditional by intent: this OVERWRITES the whole object (initial seeding).
+    /// It deliberately does NOT compare-and-swap, so running it against a repo that is
+    /// taking LIVE engine writes can clobber them — it is a seeding/operator tool, not
+    /// a steady-state writer. Steady-state writes go through `LogSink::persist` (CAS).
     pub fn put(&self, repo: &str, body: &[u8]) -> Result<String, EngineErr> {
         self.put_conditional(repo, body, &CasToken::Unsupported)
     }
@@ -555,6 +574,33 @@ mod tests {
         assert_eq!(c.endpoint, "https://acct123.r2.cloudflarestorage.com");
         assert_eq!(c.key_id, "k");
         assert_eq!(c.secret, "s");
+    }
+
+    #[test]
+    fn r2_persist_with_unsupported_token_fails_closed_not_unconditional() {
+        // Audit hardening: an `Unsupported` token on the R2 write path (fetch got no
+        // ETag) must REFUSE the write (no silent last-writer-wins), short-circuiting
+        // BEFORE any network PUT. Build an R2 source with dummy creds — the guard
+        // returns first, so no request is ever sent.
+        let cfg = R2Config::from_vars(vars(&[
+            ("HUGIT_SERVE_R2_ACCOUNT_ID", "acct123"),
+            ("HUGIT_SERVE_R2_BUCKET", "corelink-githugr-engine"),
+            ("HUGIT_SERVE_R2_KEY_ID", "k"),
+            ("HUGIT_SERVE_R2_SECRET", "s"),
+            ("HUGIT_SERVE_R2_TENANT_ID", "ee30f7ba"),
+        ]))
+        .expect("config");
+        let source = LogSource::R2(Box::new(cfg));
+        let err = source
+            .persist("hugit", b"{}", &CasToken::Unsupported)
+            .expect_err("an Unsupported token on R2 must fail-closed, not write unconditionally");
+        assert_eq!(err.status, 503);
+        assert_eq!(err.code, "ENGINE_UNAVAILABLE");
+        assert!(
+            err.reason.contains("no version token"),
+            "the reason must name the refused non-CAS write, got: {}",
+            err.reason
+        );
     }
 
     #[test]
