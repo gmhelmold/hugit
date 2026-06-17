@@ -120,14 +120,22 @@ struct PriorOutcome {
 /// replay the first resource's outcome (audit P0: URL-resourced verbs carry the id
 /// only in the URL, not the body — without `resource` keyed, the 2nd mutation is
 /// silently dropped).
+///
+/// Fail-CLOSED on corruption (audit hardening): a record that MATCHES the key tuple
+/// but whose stored `body_sha256`/`outcome` will not deserialize is a corrupt ledger
+/// entry — it returns `Err` (→ 503), NOT `Ok(None)`. The earlier `.ok()?` folded an
+/// unparseable matched outcome into "no prior found", which would silently
+/// RE-EXECUTE the verb (a double effect) — fail-open on the idempotency guard. A
+/// missing match is still `Ok(None)` (run the verb for the first time).
 fn idem_lookup(
     log: &EventLog,
     principal: &str,
     verb: &str,
     resource: &str,
     key: &str,
-) -> Option<PriorOutcome> {
-    log.records()
+) -> Result<Option<PriorOutcome>, EngineErr> {
+    let matched = log
+        .records()
         .iter()
         .filter(|r| r.kind == IDEM_RECORDED_KIND)
         .filter_map(|r| serde_json::from_str::<serde_json::Value>(&r.payload).ok())
@@ -136,15 +144,23 @@ fn idem_lookup(
                 && v.get("verb").and_then(|x| x.as_str()) == Some(verb)
                 && v.get("resource").and_then(|x| x.as_str()) == Some(resource)
                 && v.get("key").and_then(|x| x.as_str()) == Some(key)
-        })
-        .and_then(|v| {
-            let bh = v.get("body_sha256")?.as_str()?.to_string();
-            let accepted: Accepted = serde_json::from_value(v.get("outcome")?.clone()).ok()?;
-            Some(PriorOutcome {
-                body_sha256: bh,
-                accepted,
-            })
-        })
+        });
+    let Some(v) = matched else {
+        return Ok(None); // no prior for this key — first execution
+    };
+    // The key matched: its outcome MUST parse, or the ledger entry is corrupt.
+    let corrupt = || EngineErr::unavailable("idempotency ledger entry is corrupt");
+    let body_sha256 = v
+        .get("body_sha256")
+        .and_then(|x| x.as_str())
+        .ok_or_else(corrupt)?
+        .to_string();
+    let outcome = v.get("outcome").ok_or_else(corrupt)?.clone();
+    let accepted: Accepted = serde_json::from_value(outcome).map_err(|_| corrupt())?;
+    Ok(Some(PriorOutcome {
+        body_sha256,
+        accepted,
+    }))
 }
 
 /// Append the `idem.recorded` ledger entry for a successful write. Canonical JSON
@@ -264,7 +280,7 @@ where
         // Replay guard: a seen key returns the stored outcome (or 409 on a body
         // change) BEFORE the verb runs — so a lost-response retry (or a same-key
         // race lost above) never re-executes the effect.
-        if let Some(prior) = idem_lookup(&log, &principal, verb, resource, idem_key) {
+        if let Some(prior) = idem_lookup(&log, &principal, verb, resource, idem_key)? {
             if prior.body_sha256 != body_hash {
                 return Err(EngineErr::idem_mismatch());
             }
@@ -659,6 +675,65 @@ mod tests {
         assert_eq!(
             queued, 2,
             "a key reused across resources must NOT collapse to one effect"
+        );
+    }
+
+    #[test]
+    fn corrupt_idem_entry_with_matching_key_fails_closed_not_re_executes() {
+        // Audit H12: a ledger entry that MATCHES the key tuple but whose `outcome`
+        // will not deserialize must FAIL CLOSED (503), never fold to "no prior" and
+        // silently re-execute the verb (fail-open on the idempotency guard).
+        let sink = sink_with_pr("1");
+        // Seed a corrupt idem.recorded for (principal=orchestrator:o, verb=land,
+        // resource=res, key=K1): matching key tuple, but `outcome` is a bare string
+        // (not an Accepted object) → from_value fails.
+        let corrupt = serde_json::json!({
+            "body_sha256": "deadbeef",
+            "key": "K1",
+            "outcome": "not-an-accepted-object",
+            "principal": "orchestrator:o",
+            "resource": "res",
+            "verb": "land",
+        });
+        let payload = hugit_refstore::canonical_json(&corrupt.to_string()).unwrap();
+        sink.log.borrow_mut().append_for_test(
+            IDEM_RECORDED_KIND,
+            vec!["orchestrator:o".into()],
+            payload,
+            2,
+        );
+        let queued_before = sink
+            .log
+            .borrow()
+            .records()
+            .iter()
+            .filter(|r| r.kind == "pr.queued")
+            .count();
+        let err = with_write(
+            &sink,
+            "r",
+            "land",
+            "res",
+            "K1",
+            b"{\"mode\":\"union\"}",
+            true,
+            vec!["orchestrator:o".into()],
+            3,
+            dummy_verb,
+        )
+        .expect_err("a corrupt matched ledger entry must fail closed, not re-execute");
+        assert_eq!(err.status, 503);
+        assert_eq!(err.code, "ENGINE_UNAVAILABLE");
+        let queued_after = sink
+            .log
+            .borrow()
+            .records()
+            .iter()
+            .filter(|r| r.kind == "pr.queued")
+            .count();
+        assert_eq!(
+            queued_before, queued_after,
+            "the verb must NOT have re-executed (no new pr.queued)"
         );
     }
 

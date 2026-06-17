@@ -47,9 +47,11 @@ pub fn write_verdict(
 ) -> Result<Accepted, EngineErr> {
     let _ = repo;
     let verdict = parse_verdict_req(&req.verdict).ok_or_else(|| {
+        // Scrub the echoed value: it is attacker-supplied and goes back in the 400
+        // body — a secret-shaped invalid enum must not round-trip verbatim.
         EngineErr::invalid_request(format!(
             "veredito inválido {:?}; use \"approve\" ou \"request-changes\"",
-            req.verdict
+            scrub(&req.verdict)
         ))
     })?;
     if !pr_exists(log, pr) {
