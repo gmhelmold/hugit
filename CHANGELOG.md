@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(serve): **`POST /v1/token` via CoreLink session-exchange (Option B).** The endpoint
+  now DELEGATES Clerk-JWT verification to CoreLink's `/v1/session/exchange` instead of
+  validating the JWT locally (the Server-TL decision — "consume CoreLink, never fork"; no
+  duplicated azp/issuer/JWKS pipeline to drift). The client-facing contract is UNCHANGED
+  (`{subject_token, audience}` → `{engine_token, expires_in, accepted}`); only the internal
+  validation path changed.
+  - hugit forwards the user's Clerk session JWT (`Authorization: Bearer`, **no internal-auth
+    key** — the route is Clerk-JWT-gated) and mints its opaque engine token from the verified
+    `{principal, tenant, expires_ms}`. `token_plaintext` (the upstream `cas:rw` PAT) is
+    IGNORED — never stored or logged.
+  - Error mapping: exchange `401`|`403` → `401 TOKEN_INVALID` (the `403` is COLLAPSED — no
+    tenant-existence oracle on the mint path, per the frozen client §Q2 + the read-path
+    no-existence-leak doctrine); `429` → `429 RATE_LIMITED`; `405`/`5xx`/network/malformed-200
+    → `503 ENGINE_UNAVAILABLE`.
+  - The engine-token TTL is bounded by `min(ceiling, upstream remaining)` (`mint_with_ttl`),
+    so it never outlives the upstream session; an already-expired upstream session is refused
+    fail-closed. `fresh_auth = false` for exchange-minted principals (the contract carries no
+    `auth_time`; step-up must come from a fresh session, never `/v1/token` alone).
+  - New `HUGIT_SESSION_EXCHANGE_URL` (absent ⇒ the route 404s, dev-token-only). Removed the
+    now-dead local `ClerkValidator`/`JwksCache`/`TokenConfig` + the `jsonwebtoken` + `base64`
+    deps from hugit-serve (both remain in the lock via other crates). Mock-tested end-to-end
+    against the documented exchange contract (27 token tests). Live wiring needs the deployed
+    Worker pointed at the dev Clerk instance + the endpoint host (the disclosed P2 seams).
+
 - feat(checks): **`result_binding_sig_v2` verifier — closes the verdict-forgery window**
   (contract §7.1 amendment v1.4.0; the corelink-runners P0 security item, Path 1 =
   transcribe-in-hugit). The v1 binding covered `memo_key‖stdout_ref‖stderr_ref` but NOT

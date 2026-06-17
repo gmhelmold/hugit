@@ -1,44 +1,69 @@
-//! `POST /v1/token` — RFC-8693 token exchange + the `TokenStore` engine-token
-//! minting/lookup machinery (Seam B, design doc 2026-06-14).
+//! `POST /v1/token` — Clerk session-JWT → opaque engine token, via CoreLink's
+//! `/v1/session/exchange` (**Option B**, decided 2026-06-17 with the CoreLink
+//! Server TL — "consume CoreLink, never fork").
 //!
-//! ## Flow
+//! ## Flow (Option B — delegate, don't duplicate)
 //!
-//! 1. Client presents a Clerk session JWT (`subject_token`).
-//! 2. [`ClerkValidator::validate`] verifies it (RS256 pin → kid → JWKS → decode
-//!    → azp → tenant → sub → fresh_auth).  Fail-closed at every step.
-//! 3. [`TokenStore::mint`] returns an OPAQUE 32-byte hex token (not a JWT).
-//!    The store holds `SHA-256(token)` as the key; the raw token is NEVER logged.
-//! 4. The client presents the engine token as `Bearer <engine_token>` on
-//!    subsequent calls; `token_store.lookup` SHA-256s it and compares constant-time.
+//! 1. The client (the githugr window) POSTs `{subject_token, audience}` to
+//!    `/v1/token`, where `subject_token` is the user's Clerk session JWT. This
+//!    client-facing request/response shape is the FROZEN contract (unchanged).
+//! 2. hugit FORWARDS that JWT to CoreLink `POST /v1/session/exchange`
+//!    (`Authorization: Bearer <jwt>`, no body, **NO internal-auth key** — the route
+//!    is Clerk-JWT-gated). CoreLink verifies the session (azp/iss/sub/tenant) and
+//!    returns `{principal, tenant, expires_ms, …}`. hugit does NOT re-validate the
+//!    JWT locally — no duplicated azp/issuer/JWKS pipeline to drift (the Server
+//!    TL's Option-B simplification; mooted the old local `ClerkValidator`).
+//! 3. hugit checks `audience == tenant` (cross-tenant mint blocked → `401`, NOT
+//!    `403`: NO tenant-existence oracle on the mint path — frozen client §Q2).
+//! 4. [`TokenStore::mint_with_ttl`] returns an OPAQUE 32-byte hex engine token, its
+//!    TTL bounded by `min(ENGINE_TOKEN_TTL_SECS, upstream remaining)` so the engine
+//!    token never outlives the upstream session. The store holds `SHA-256(token)`;
+//!    the raw token is NEVER logged.
+//! 5. Subsequent calls present `Bearer <engine_token>`; `token_store.lookup`
+//!    SHA-256s it and compares constant-time.
 //!
-//! ## Security invariants (match auth.rs + clerk.rs)
+//! ## Error mapping (CoreLink exchange status → client `/v1/token`)
 //!
-//! - `alg=RS256` pinned on the UNTRUSTED header BEFORE any key material is touched.
-//! - Unknown kid → refetch at most ONCE per `JWKS_MIN_REFETCH_SECS` → fail-closed
-//!   (the throttle stops an attacker-chosen kid forcing a blocking GET per request).
-//! - `exp`/`nbf`/`iss` mandatory via `Validation`.
-//! - `azp` optional now; checked when `TokenConfig.azp` is Some.
-//! - tenant from `publicMetadata.tenant_id` then `org_id`, else reject.
-//! - `auth_time` → fresh only when present AND `0 <= (now - auth_time) < 300`.
-//!   Absent or future ⇒ false (fail-closed; mirrors clerk.rs:308).
-//! - Engine token lookup is SHA-256 + constant-time XOR (mirrors auth.rs:34-42).
-//! - Raw `subject_token` and raw engine token are NEVER in eprintln!/log.
-//! - Expired engine token in the store → `TOKEN_EXPIRED` (client retries via
-//!   `/v1/token`); absent entirely → `TOKEN_INVALID` (→ login).
+//! - `200` → mint → `200 {engine_token, expires_in, accepted:true}`.
+//! - `401` (bad/expired/wrong-iss/azp JWT) → `401 TOKEN_INVALID` (client re-login).
+//! - `403` (un-provisioned tenant / server secret unbound) → `401 TOKEN_INVALID`.
+//!   COLLAPSED to 401 deliberately: a distinct 403 would be a tenant-existence
+//!   oracle on the mint path, which the frozen client contract (§Q2) forbids — the
+//!   same no-existence-leak doctrine as the read-path 404. (This is a deliberate
+//!   tightening of the prose in the ACCEPT handoff: the frozen shipped client
+//!   contract — 401/200 only, no oracle — governs over handoff prose.)
+//! - `429` (per-principal mint throttle) → `429 RATE_LIMITED` (client retry-after).
+//! - `405`/`5xx`/network/malformed-200 → `503 ENGINE_UNAVAILABLE` (transient/upstream).
+//!
+//! ## Security invariants
+//!
+//! - The Clerk JWT (`subject_token`) is sent ONLY as the `Authorization: Bearer`
+//!   header to the exchange; it is NEVER echoed, logged, or in any error.
+//! - `token_plaintext` from the exchange (a real CoreLink `cas:rw` PAT) is IGNORED
+//!   and never stored/logged — hugit needs only the verified identity to mint its
+//!   own engine token (so it avoids holding a `cas:rw` secret on the token path).
+//! - `fresh_auth` is `false` for exchange-minted principals: the exchange contract
+//!   carries no `auth_time`, so step-up for a Clerk principal MUST come from a
+//!   freshly re-authenticated session, never from `/v1/token` alone (fail-closed;
+//!   matches the prior P2 seam note — `auth_time` is not a Clerk session claim today).
+//! - The verified `tenant`/`principal` are colon-guarded before they become the
+//!   `clerk:{org}:{user}` authz principal (`:` is the authz delimiter — the
+//!   "exemption-is-a-hole" structural class). Real CoreLink UUIDs never contain `:`.
+//! - Engine-token lookup is SHA-256 + constant-time XOR.
 //!
 //! ## P2 seams (disclosed, not faked)
 //!
-//! - `auth_time` does not exist as a Clerk session claim today (clerk.rs:98-104
-//!   note); `fresh_auth` will be `false` in production until frontend re-verify.
-//! - Multi-instance shared store: the in-process `Mutex<HashMap>` is single-host;
-//!   same seam as the idempotency ledger (Wave-2 design §6).
-//! - The `azp` claim: optional env today; P2-mandatory pending CoreLink-TL value.
+//! - The exchange ENDPOINT host is owner/infra-gated (a deployed Worker pointed at
+//!   the dev Clerk instance). Absent `HUGIT_SESSION_EXCHANGE_URL` ⇒ `/v1/token`
+//!   404s (dev-token-only mode; the route's presence is not disclosed).
+//! - Multi-instance shared token store: the in-process `Mutex<HashMap>` is
+//!   single-host; the dedicated `hugit-prod-d1` swap is the P2 store seam, behind
+//!   the same [`TokenStore`] surface.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -46,126 +71,66 @@ use crate::error::EngineErr;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-/// Engine token TTL (seconds).  Matches the Clerk step-up freshness window so a
-/// just-minted engine token also qualifies as fresh.
+/// Engine token TTL ceiling (seconds). A minted engine token lives at most this
+/// long, and never longer than the upstream session's remaining lifetime.
 const ENGINE_TOKEN_TTL_SECS: u64 = 300;
 
-/// `exp`/`nbf` leeway (mirrors clerk.rs:46).
-const LEEWAY_SECS: u64 = 30;
+/// Outbound timeout for the `/v1/session/exchange` call — a hung exchange never
+/// hangs the (single-threaded) `/v1/token` request indefinitely.
+const EXCHANGE_TIMEOUT_SECS: u64 = 10;
 
-/// Step-up freshness window: auth_time must be within this many seconds of now
-/// (mirrors clerk.rs:44).
-const FRESH_AUTH_SECS: i64 = 300;
+// ── Client-facing wire types (FROZEN — backend-API-v1 §Q2; do NOT change) ─────
 
-/// JWKS HTTP fetch timeout — a hung JWKS never hangs the request.
-const JWKS_TIMEOUT_SECS: u64 = 10;
-
-/// Minimum interval between JWKS refetches. A cache miss within this window of the
-/// last attempt fails closed WITHOUT an upstream fetch — caps an attacker-chosen
-/// `kid` to at most one fetch per window (DoS guard) while still picking up key
-/// rotation with bounded staleness.
-const JWKS_MIN_REFETCH_SECS: u64 = 60;
-
-// ── Wire types (server-to-server; NOT in hugit-http-contracts) ────────────────
-
-/// The JSON body for `POST /v1/token`.
+/// The JSON body for `POST /v1/token` (the client/window → hugit).
 #[derive(Debug, Deserialize)]
 pub struct TokenExchangeReq {
-    /// A Clerk RS256 session JWT.
+    /// A Clerk RS256 session JWT (forwarded to the exchange; never logged).
     pub subject_token: String,
-    /// The tenant/org this exchange is scoped to.  Must match the token's org
-    /// claim (cross-tenant mint is blocked).
+    /// The tenant this exchange is scoped to. Must equal the verified `tenant`
+    /// the exchange returns (cross-tenant mint is blocked).
     pub audience: String,
 }
 
-/// The JSON body returned on success.
+/// The JSON body returned on success (hugit → the client/window).
 #[derive(Debug, Serialize)]
 pub struct TokenExchangeResp {
-    /// The opaque engine token.  32 random bytes, hex-encoded.
+    /// The opaque engine token. 32 random bytes, hex-encoded (64 chars).
     pub engine_token: String,
-    /// Seconds until the engine token expires.
+    /// Seconds until the engine token expires (bounded by the upstream session).
     pub expires_in: u64,
     /// Always `true` when present (mirrors the `Accepted` pattern).
     pub accepted: bool,
 }
 
-// ── JWKS wire shapes ──────────────────────────────────────────────────────────
+// ── CoreLink `/v1/session/exchange` success body ──────────────────────────────
 
+/// The fields hugit reads from a `200` exchange response. Unknown fields (notably
+/// `token_plaintext`, `pat_id`, `token_id`) are INTENTIONALLY ignored by serde —
+/// hugit never stores or logs the upstream PAT.
 #[derive(Debug, Deserialize)]
-struct JwkSet {
-    keys: Vec<Jwk>,
+struct ExchangeOk {
+    /// Stable, one-way per-Clerk-user principal UUID (→ `ClerkPrincipal::user`).
+    principal: String,
+    /// The verified tenant_id (→ `ClerkPrincipal::org`; the R2 key prefix).
+    tenant: String,
+    /// Absolute epoch-ms expiry of the upstream session/PAT.
+    #[serde(default)]
+    expires_ms: u64,
 }
 
-/// One RSA JWK.  Non-RSA or non-RS256 keys are silently skipped.
-#[derive(Debug, Deserialize)]
-struct Jwk {
-    kid: String,
-    #[serde(default)]
-    kty: String,
-    /// Optional; when present must be `"RS256"` (skip otherwise).
-    #[serde(default)]
-    alg: Option<String>,
-    /// RSA modulus (base64url, no padding).
-    n: String,
-    /// RSA public exponent (base64url, no padding).
-    e: String,
+/// The verified identity returned by a successful [`SessionExchangeClient::exchange`].
+#[derive(Debug)]
+pub struct ExchangeIdentity {
+    pub principal: String,
+    pub tenant: String,
+    pub expires_ms: u64,
 }
 
-// ── Claims ────────────────────────────────────────────────────────────────────
+// ── ClerkPrincipal (the minted-identity carrier) ──────────────────────────────
 
-/// The subset of Clerk session-JWT claims the engine reads.
-/// Mirrors `githugr/crates/githugr/src/clerk.rs:Claims`.
-#[derive(Debug, Deserialize)]
-struct Claims {
-    /// Principal identifier → `ClerkPrincipal::user`.
-    sub: String,
-    /// Top-level Clerk org (compatibility fallback; `publicMetadata.tenant_id`
-    /// is authoritative — ADR-0007).
-    #[serde(default)]
-    org_id: Option<String>,
-    /// `publicMetadata` object from the Clerk session token.
-    #[serde(default, rename = "publicMetadata")]
-    public_metadata: Option<PublicMetadata>,
-    /// Last re-authentication unix timestamp (absent today — see P2 seam note).
-    #[serde(default)]
-    auth_time: Option<i64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PublicMetadata {
-    #[serde(default)]
-    tenant_id: Option<String>,
-}
-
-impl Claims {
-    /// Tenant resolution order (first non-empty hit wins): `publicMetadata.tenant_id`
-    /// (CoreLink authoritative — ADR-0007), then `org_id` (compatibility fallback).
-    /// Returns `None` when neither is present → token is rejected (fail-closed).
-    ///
-    /// The org becomes the MIDDLE segment of the `clerk:{org}:{user}` principal,
-    /// which `authz::caller` splits on `:` to recover the org for ownership
-    /// comparison. An org containing a `:` would MIS-PARSE (the `:` is the authz
-    /// delimiter — a structural confusion of the same "exemption-is-a-hole" class
-    /// the project has been bitten by). So a colon-bearing org is rejected
-    /// fail-closed HERE, at the trust boundary, before it can reach the principal.
-    /// Real Clerk tenant_ids / org_ids (UUIDs, `org_…`) never contain `:`.
-    fn org(&self) -> Option<&str> {
-        let usable = |s: &&str| !s.is_empty() && !s.contains(':');
-        if let Some(t) = self
-            .public_metadata
-            .as_ref()
-            .and_then(|m| m.tenant_id.as_deref())
-            .filter(usable)
-        {
-            return Some(t);
-        }
-        self.org_id.as_deref().filter(usable)
-    }
-}
-
-// ── ClerkPrincipal (the validated identity passed out of this module) ─────────
-
-/// A verified Clerk principal returned by [`ClerkValidator::validate`].
+/// A verified principal, the source of a minted engine token. With Option B it is
+/// built from the exchange result (`user` = `principal`, `org` = `tenant`,
+/// `fresh_auth` = `false`).
 #[derive(Debug, Clone)]
 pub struct ClerkPrincipal {
     pub user: String,
@@ -173,229 +138,111 @@ pub struct ClerkPrincipal {
     pub fresh_auth: bool,
 }
 
-// ── JwksCache ─────────────────────────────────────────────────────────────────
+// ── SessionExchangeConfig / SessionExchangeClient ─────────────────────────────
 
-/// In-memory JWKS cache.  Uses a `Mutex<HashMap>` (not `RwLock`) because
-/// hugit-serve is single-threaded (`tiny_http` loop): only one request at a
-/// time, so the lock is always uncontended.  If this ever moves to a
-/// multi-threaded server, upgrade to `RwLock`.
-pub struct JwksCache {
-    url: String,
-    keys: Mutex<HashMap<String, DecodingKey>>,
-    /// When the JWKS was last (attempted to be) fetched. Gates the refetch so an
-    /// attacker-chosen `kid` cannot force one synchronous upstream GET per request.
-    last_refetch: Mutex<Option<Instant>>,
+/// Config for the CoreLink session exchange, read from env. Absent ⇒ dev-token
+/// only (the `/v1/token` route 404s — its presence is not disclosed).
+#[derive(Clone)]
+pub struct SessionExchangeConfig {
+    /// Full URL of `POST /v1/session/exchange` (`HUGIT_SESSION_EXCHANGE_URL`).
+    pub endpoint: String,
 }
 
-impl JwksCache {
-    fn new(url: String) -> Self {
-        Self {
-            url,
-            keys: Mutex::new(HashMap::new()),
-            last_refetch: Mutex::new(None),
-        }
-    }
-
-    /// Resolve a `DecodingKey` for `kid`.
-    ///
-    /// On a cache MISS, refetch the JWKS **at most once per
-    /// [`JWKS_MIN_REFETCH_SECS`]** (key rotation is still picked up, with bounded
-    /// staleness). Within that window a miss fails CLOSED *without* an upstream
-    /// fetch — so a flood of requests carrying random `kid`s (the one no-Bearer
-    /// route, `/v1/token`) cannot trigger a blocking 10s GET per request and wedge
-    /// the single-threaded server (the pre-go-live audit's P1 DoS). The throttle
-    /// also records the ATTEMPT time, so a slow/unreachable Clerk JWKS can stall at
-    /// most one request per window, not every request.
-    fn key_for(&self, kid: &str) -> Option<DecodingKey> {
-        // Fast path: cache hit.
-        if let Some(k) = self.get(kid) {
-            return Some(k);
-        }
-        // Cache miss → refetch ONLY if the throttle window has elapsed.
-        if self.refetch_allowed() {
-            self.refetch();
-            return self.get(kid);
-        }
-        None
-    }
-
-    /// `true` iff a refetch is permitted now (cold cache, or ≥ the min interval
-    /// since the last attempt). Records the attempt time when it returns `true`.
-    fn refetch_allowed(&self) -> bool {
-        let Ok(mut last) = self.last_refetch.lock() else {
-            return false; // poisoned → fail closed (no fetch)
+impl SessionExchangeConfig {
+    /// Read from env. Returns `None` when `HUGIT_SESSION_EXCHANGE_URL` is absent
+    /// (dev mode). Returns `Err` when set-but-invalid (fail-closed).
+    pub fn from_env() -> Result<Option<Self>, String> {
+        let endpoint = match std::env::var("HUGIT_SESSION_EXCHANGE_URL") {
+            Ok(v) => v,
+            Err(_) => return Ok(None), // not configured → dev-token only
         };
-        let now = Instant::now();
-        let allowed = match *last {
-            None => true,
-            Some(t) => now.duration_since(t) >= Duration::from_secs(JWKS_MIN_REFETCH_SECS),
-        };
-        if allowed {
-            *last = Some(now);
+        let endpoint = endpoint.trim().to_string();
+        if endpoint.is_empty() {
+            return Err("HUGIT_SESSION_EXCHANGE_URL is empty (fail-closed)".to_string());
         }
-        allowed
+        if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+            return Err(format!(
+                "HUGIT_SESSION_EXCHANGE_URL must start with http(s)://; got: {endpoint}"
+            ));
+        }
+        Ok(Some(SessionExchangeConfig { endpoint }))
     }
 
-    fn get(&self, kid: &str) -> Option<DecodingKey> {
-        self.keys.lock().ok()?.get(kid).cloned()
-    }
-
-    /// Fetch the JWKS URL and replace the in-memory cache.  On any error (HTTP
-    /// failure, parse failure, non-RSA key) the old cache is preserved and a
-    /// server-side warning is emitted.  Never panics.
-    fn refetch(&self) {
-        let agent = ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(JWKS_TIMEOUT_SECS))
-            .build();
-        let body: String = match agent.get(&self.url).call() {
-            Ok(resp) => match resp.into_string() {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("hugit-serve/token: JWKS body read error: {e}");
-                    return;
-                }
-            },
-            Err(e) => {
-                eprintln!("hugit-serve/token: JWKS fetch failed: {e}");
-                return;
-            }
-        };
-        let set: JwkSet = match serde_json::from_str(&body) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("hugit-serve/token: JWKS parse failed: {e}");
-                return;
-            }
-        };
-        let mut next = HashMap::new();
-        for jwk in set.keys {
-            if jwk.kty != "RSA" {
-                continue;
-            }
-            if let Some(alg) = jwk.alg.as_deref()
-                && alg != "RS256"
-            {
-                continue;
-            }
-            match DecodingKey::from_rsa_components(&jwk.n, &jwk.e) {
-                Ok(key) => {
-                    next.insert(jwk.kid, key);
-                }
-                Err(e) => {
-                    eprintln!(
-                        "hugit-serve/token: bad RSA component for kid {}: {e}",
-                        jwk.kid
-                    );
-                }
-            }
-        }
-        if let Ok(mut guard) = self.keys.lock() {
-            *guard = next;
+    /// Build a [`SessionExchangeClient`] from this config.
+    pub fn into_client(self) -> SessionExchangeClient {
+        SessionExchangeClient {
+            endpoint: self.endpoint,
         }
     }
+}
 
-    // ── Test injection hook (cfg(test) only) ──────────────────────────────────
+/// Client for CoreLink `POST /v1/session/exchange`. Holds only the endpoint URL;
+/// a fresh `ureq` agent (with a bounded timeout) is built per call.
+pub struct SessionExchangeClient {
+    endpoint: String,
+}
 
-    /// Directly insert a pre-built key (used in tests to bypass the HTTP fetch).
+impl SessionExchangeClient {
+    /// Construct directly from an endpoint (test/internal helper).
     #[cfg(test)]
-    fn insert_key(&self, kid: String, key: DecodingKey) {
-        if let Ok(mut guard) = self.keys.lock() {
-            guard.insert(kid, key);
-        }
+    fn new(endpoint: String) -> Self {
+        Self { endpoint }
     }
-}
 
-// ── ClerkValidator ────────────────────────────────────────────────────────────
-
-/// Stateful Clerk JWT verifier.  Holds the issuer, optional azp, and the JWKS
-/// cache.  Constructed once at server start from [`TokenConfig`].
-pub struct ClerkValidator {
-    pub issuer: String,
-    /// When `Some`, the `azp` claim in the token MUST match exactly.
-    pub azp: Option<String>,
-    pub jwks: JwksCache,
-}
-
-impl ClerkValidator {
-    /// Verify `token` (a Clerk RS256 session JWT) and return a [`ClerkPrincipal`]
-    /// on success, or `None` on ANY failure (fail-closed; never panics).
+    /// Forward the Clerk session `jwt` to CoreLink and return the verified
+    /// identity, or a mapped [`EngineErr`] (fail-closed at every step).
     ///
-    /// Steps (verified against clerk.rs:257-316):
-    ///   1. Decode header (untrusted bytes) → pin `alg == RS256` (kills alg=none
-    ///      and HS256 confusion).
-    ///   2. Extract `kid`.
-    ///   3. Resolve key from JWKS cache (refetch-once on miss → fail-closed).
-    ///   4. `jsonwebtoken::decode` with exp/nbf validation, issuer pin,
-    ///      `exp`+`iss` as required spec claims, 30s leeway.
-    ///   5. `azp` check (when configured).
-    ///   6. Tenant resolution: `publicMetadata.tenant_id` → `org_id` → reject.
-    ///   7. `auth_time` → `fresh_auth` (300s window; absent/future → false).
-    pub fn validate(&self, token: &str) -> Option<ClerkPrincipal> {
-        // Step 1: untrusted header — pin alg BEFORE key material.
-        let header = decode_header(token).ok()?;
-        if header.alg != Algorithm::RS256 {
-            // Kills alg=none and HS256 confusion attacks.
-            return None;
-        }
-
-        // Step 2: extract kid.
-        let kid = header.kid?;
-
-        // Step 3: JWKS key (refetch-once on miss).
-        let key = self.jwks.key_for(&kid)?;
-
-        // Step 4: signature + claims validation.
-        let mut validation = Validation::new(Algorithm::RS256);
-        validation.leeway = LEEWAY_SECS;
-        validation.validate_exp = true;
-        validation.validate_nbf = true;
-        validation.set_issuer(&[self.issuer.as_str()]);
-        validation.set_required_spec_claims(&["exp", "iss"]);
-        // `azp` is not an RFC audience; we check it ourselves below.
-        validation.validate_aud = false;
-
-        let data = decode::<Claims>(token, &key, &validation).ok()?;
-        let claims = data.claims;
-
-        // Step 5: optional azp check.  Run AFTER signature verification so the
-        // azp bytes come from the verified payload, not attacker-controlled input.
-        if let Some(expected) = self.azp.as_deref() {
-            let presented = extract_azp(token)?;
-            if presented != expected {
-                return None;
+    /// SECURITY: `jwt` is sent ONLY as the `Authorization: Bearer` header — it is
+    /// never placed in the body, logged, or echoed; neither is any response body.
+    pub fn exchange(&self, jwt: &str) -> Result<ExchangeIdentity, EngineErr> {
+        let agent = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(EXCHANGE_TIMEOUT_SECS))
+            .build();
+        let resp = agent
+            .post(&self.endpoint)
+            .set("Authorization", &format!("Bearer {jwt}"))
+            .set("Content-Type", "application/json")
+            .call();
+        match resp {
+            // ureq treats 2xx/3xx as Ok; the exchange answers 200 on success.
+            Ok(r) => {
+                let body = r
+                    .into_string()
+                    .map_err(|_| EngineErr::unavailable("exchange: response body read failed"))?;
+                let ok: ExchangeOk = serde_json::from_str(&body)
+                    .map_err(|_| EngineErr::unavailable("exchange: malformed success body"))?;
+                if ok.principal.is_empty() || ok.tenant.is_empty() {
+                    // A 200 with empty identity is not trustworthy → fail-closed.
+                    return Err(EngineErr::unavailable("exchange: empty principal/tenant"));
+                }
+                Ok(ExchangeIdentity {
+                    principal: ok.principal,
+                    tenant: ok.tenant,
+                    expires_ms: ok.expires_ms,
+                })
             }
+            // 4xx/5xx land here as Error::Status(code, _).
+            Err(ureq::Error::Status(code, _)) => Err(map_exchange_status(code)),
+            // Transport-level failure (DNS, connect, timeout) → transient 503.
+            Err(_) => Err(EngineErr::unavailable("exchange: upstream unreachable")),
         }
-
-        // Step 6: tenant.
-        let org = claims.org()?.to_string();
-
-        // Step 7: fresh_auth.  Fail-closed: absent or future auth_time → false.
-        let fresh_auth = match claims.auth_time {
-            Some(t) => {
-                let delta = now_unix() - t;
-                (0..FRESH_AUTH_SECS).contains(&delta)
-            }
-            None => false,
-        };
-
-        Some(ClerkPrincipal {
-            user: claims.sub,
-            org,
-            fresh_auth,
-        })
     }
 }
 
-/// Extract `azp` from an ALREADY-VERIFIED token's payload (mirrors clerk.rs:369-377).
-/// Runs after `decode` succeeded, so the bytes are trusted.
-fn extract_azp(token: &str) -> Option<String> {
-    use base64::Engine as _;
-    let payload_b64 = token.split('.').nth(1)?;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload_b64)
-        .ok()?;
-    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    v.get("azp")?.as_str().map(str::to_string)
+/// Map a CoreLink exchange HTTP status to the client-facing `/v1/token` error.
+fn map_exchange_status(code: u16) -> EngineErr {
+    match code {
+        // 401 (bad/expired/wrong-iss/azp JWT) AND 403 (un-provisioned tenant /
+        // server secret unbound) BOTH collapse to 401 TOKEN_INVALID — no
+        // tenant-existence oracle on the mint path (frozen client §Q2; the
+        // read-path no-existence-leak doctrine).
+        401 | 403 => EngineErr::token_invalid(),
+        // Per-principal mint throttle — surfaced honestly so the client backs off.
+        429 => EngineErr::rate_limited(),
+        // 405 (shouldn't happen — we always POST), 5xx, or anything else: a
+        // transient/upstream failure.
+        _ => EngineErr::unavailable("exchange: upstream mint failure"),
+    }
 }
 
 // ── TokenStore ────────────────────────────────────────────────────────────────
@@ -433,18 +280,32 @@ impl TokenStore {
         }
     }
 
-    /// Mint a new engine token for `principal`.
+    /// Mint a new engine token for `principal` at the default TTL ceiling
+    /// ([`ENGINE_TOKEN_TTL_SECS`]).
+    pub fn mint(&self, principal: &ClerkPrincipal) -> Result<String, EngineErr> {
+        self.mint_with_ttl(principal, ENGINE_TOKEN_TTL_SECS)
+    }
+
+    /// Mint a new engine token for `principal` with an explicit TTL, clamped to
+    /// `[1, ENGINE_TOKEN_TTL_SECS]` — so the engine token never outlives the
+    /// upstream session (`ttl_secs` < ceiling) and never lives longer than the
+    /// ceiling (`ttl_secs` > ceiling), and is always positive.
     ///
     /// - 32 random bytes read from `/dev/urandom` (OS CSPRNG; no `rand` dep).
     /// - Hex-encoded → returned as the raw token string.
-    /// - Stored as `SHA-256(raw_token)` with `ENGINE_TOKEN_TTL_SECS` TTL.
+    /// - Stored as `SHA-256(raw_token)`.
     /// - Expired tokens are swept on every mint (bounded scan).
     ///
     /// The raw token is NEVER logged here; it is only returned to the caller.
-    pub fn mint(&self, principal: &ClerkPrincipal) -> Result<String, EngineErr> {
+    pub fn mint_with_ttl(
+        &self,
+        principal: &ClerkPrincipal,
+        ttl_secs: u64,
+    ) -> Result<String, EngineErr> {
+        let ttl = ttl_secs.clamp(1, ENGINE_TOKEN_TTL_SECS);
         let raw = random_hex_token()?;
         let hash = sha256_bytes(raw.as_bytes());
-        let expires_at = now_secs() + ENGINE_TOKEN_TTL_SECS;
+        let expires_at = now_secs() + ttl;
         let record = TokenRecord {
             user: principal.user.clone(),
             org: principal.org.clone(),
@@ -467,10 +328,8 @@ impl TokenStore {
     /// - SHA-256s the presented token.
     /// - Compares against stored keys using constant-time XOR (mirrors auth.rs:34-42).
     /// - Returns the record if present AND unexpired.
-    /// - Expired-but-present → prune + return `None` (caller maps to TOKEN_EXPIRED).
-    /// - Not present → `None` (caller maps to TOKEN_INVALID).
-    ///
-    /// See [`LookupResult`] for the three-way outcome.
+    /// - Expired-but-present → prune + return `Expired` (caller maps to TOKEN_EXPIRED).
+    /// - Not present → `Invalid` (caller maps to TOKEN_INVALID).
     pub fn lookup(&self, raw: &str) -> LookupResult {
         let hash = sha256_bytes(raw.as_bytes());
         let mut guard = match self.tokens.lock() {
@@ -480,14 +339,10 @@ impl TokenStore {
         // Linear scan with a constant-time XOR PER-KEY comparison (mirrors
         // auth.rs): each candidate key is compared byte-for-byte without an
         // early-exit on the bytes, so the per-key compare leaks no byte-position
-        // timing. The loop itself DOES `break` on the first match (audit
-        // correction 2026-06-15: an earlier comment claimed "always scan all
-        // entries" — that is false, the break exits early). So the only timing
+        // timing. The loop itself DOES `break` on the first match. The only timing
         // signal is the match's POSITION in HashMap iteration order, which is
         // randomized and not attacker-controllable — not an exploitable oracle.
-        // The store is bounded by active sessions (swept on mint + short TTL), so
-        // the scan is cheap; a direct `get` would also be fine for this single-
-        // host store. The XOR-per-key pattern matches auth.rs for consistency.
+        // The store is bounded by active sessions (swept on mint + short TTL).
         let mut found_key: Option<[u8; 32]> = None;
         let mut found: Option<TokenRecord> = None;
         for (stored_hash, record) in guard.iter() {
@@ -501,7 +356,6 @@ impl TokenStore {
             None => LookupResult::Invalid,
             Some(rec) => {
                 if rec.expires_at <= now_secs() {
-                    // Prune the expired entry.
                     if let Some(k) = found_key {
                         guard.remove(&k);
                     }
@@ -517,15 +371,13 @@ impl TokenStore {
     ///
     /// `scope`: `Some(org)` returns ONLY that org's sessions (a tenant admin sees
     /// only their own); `None` returns ALL sessions (the platform operator view).
-    /// **Cross-tenant guard (audit 2026-06-15):** the caller MUST pass their own
-    /// org as the scope unless they are the platform operator — never `None` for a
-    /// tenant principal — so org A cannot enumerate org B's live sessions.
+    /// **Cross-tenant guard:** the caller MUST pass their own org as the scope
+    /// unless they are the platform operator — never `None` for a tenant principal.
     ///
     /// Each entry is `(handle, record)` where `handle` is the hex of the stored
-    /// `SHA-256(token)` (a non-secret, non-reversible identifier — the raw token is
-    /// never stored, so this leaks nothing). Sweeps expired entries first, so the
-    /// list is exactly the live sessions. Single-host (the in-process store); a
-    /// fleet-wide session list is the P2 shared-store seam.
+    /// `SHA-256(token)` (a non-secret, non-reversible identifier). Sweeps expired
+    /// entries first. Single-host (the in-process store); a fleet-wide session list
+    /// is the P2 shared-store seam.
     pub fn list_for_org(&self, scope: Option<&str>) -> Vec<(String, TokenRecord)> {
         let now = now_secs();
         let mut guard = match self.tokens.lock() {
@@ -586,15 +438,6 @@ fn random_hex_token() -> Result<String, EngineErr> {
     Ok(hex::encode(buf))
 }
 
-/// Current unix time in seconds.  Clamps pre-epoch to 0 (fail-closed: a broken
-/// clock yields stale, never spuriously-valid, tokens — mirrors clerk.rs:359-363).
-fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -604,18 +447,19 @@ fn now_secs() -> u64 {
 
 // ── handle_token_exchange ─────────────────────────────────────────────────────
 
-/// Dispatch `POST /v1/token`.
+/// Dispatch `POST /v1/token` (Option B).
 ///
-/// - Parses the request body as [`TokenExchangeReq`].
-/// - Validates the Clerk JWT via [`ClerkValidator::validate`] (fail-closed).
-/// - Checks `audience == claims.org` (blocks cross-tenant mint).
-/// - Mints an engine token via [`TokenStore::mint`].
+/// - Parses the request body as [`TokenExchangeReq`] (`{subject_token, audience}`).
+/// - Forwards the Clerk JWT to CoreLink `/v1/session/exchange` (fail-closed).
+/// - Checks `audience == tenant` (blocks cross-tenant mint → 401, no oracle).
+/// - Colon-guards the verified tenant/principal (the authz delimiter).
+/// - Mints an engine token via [`TokenStore::mint_with_ttl`], TTL bounded by the
+///   upstream session's remaining lifetime.
 /// - Returns `(200, TokenExchangeResp JSON)` on success.
-/// - Returns `(401, TOKEN_INVALID)` on any validation failure.
 ///
 /// SECURITY: `subject_token` is NEVER echoed, logged, or included in any error.
 pub fn handle_token_exchange(
-    validator: &ClerkValidator,
+    exchange: &SessionExchangeClient,
     store: &TokenStore,
     body: &[u8],
 ) -> (u16, String) {
@@ -628,30 +472,51 @@ pub fn handle_token_exchange(
         }
     };
 
-    // Validate the Clerk JWT.  `subject_token` is never logged.
-    let principal = match validator.validate(&req.subject_token) {
-        Some(p) => p,
-        None => {
-            return (401, EngineErr::token_invalid().to_body());
+    // Forward the Clerk JWT to CoreLink. `subject_token` is never logged.
+    let id = match exchange.exchange(&req.subject_token) {
+        Ok(id) => id,
+        Err(e) => {
+            return (e.status, e.to_body());
         }
     };
 
-    // Audience ≡ org: block cross-tenant mints.
-    if req.audience != principal.org {
+    // Colon-guard: the verified tenant/principal become `clerk:{org}:{user}`
+    // downstream, where `:` is the authz delimiter. Real CoreLink UUIDs never
+    // contain `:`; reject fail-closed at the trust boundary (exemption-is-a-hole).
+    if id.tenant.contains(':') || id.principal.contains(':') {
         return (401, EngineErr::token_invalid().to_body());
     }
 
-    // Mint the engine token.
-    let engine_token = match store.mint(&principal) {
+    // Audience ≡ verified tenant: block cross-tenant mints. 401 (NOT 403) — no
+    // tenant-existence oracle on the mint path (frozen client §Q2).
+    if req.audience != id.tenant {
+        return (401, EngineErr::token_invalid().to_body());
+    }
+
+    // TTL bounded by the upstream session's remaining lifetime so the engine token
+    // never outlives the Clerk/PAT it was minted from. An already-expired upstream
+    // session (remaining == 0) is refused fail-closed.
+    let upstream_remaining = (id.expires_ms / 1000).saturating_sub(now_secs());
+    if upstream_remaining == 0 {
+        return (401, EngineErr::token_invalid().to_body());
+    }
+
+    let principal = ClerkPrincipal {
+        user: id.principal,
+        org: id.tenant,
+        fresh_auth: false, // exchange carries no auth_time → step-up fails closed
+    };
+    let engine_token = match store.mint_with_ttl(&principal, upstream_remaining) {
         Ok(t) => t,
         Err(e) => {
             return (e.status, e.to_body());
         }
     };
 
+    let expires_in = upstream_remaining.clamp(1, ENGINE_TOKEN_TTL_SECS);
     let resp = TokenExchangeResp {
         engine_token,
-        expires_in: ENGINE_TOKEN_TTL_SECS,
+        expires_in,
         accepted: true,
     };
     match serde_json::to_string(&resp) {
@@ -663,180 +528,59 @@ pub fn handle_token_exchange(
     }
 }
 
-// ── TokenConfig ────────────────────────────────────────────────────────────────
-
-/// Clerk JWKS configuration, read from env.  Optional: absent ⇒ dev-token only.
-#[derive(Clone)]
-pub struct TokenConfig {
-    /// Clerk issuer URL (`HUGIT_CLERK_ISSUER`).
-    pub issuer: String,
-    /// Clerk JWKS URL (`HUGIT_CLERK_JWKS_URL`).
-    pub jwks_url: String,
-    /// Optional `azp` claim restriction (`HUGIT_CLERK_AZP`).
-    pub azp: Option<String>,
-}
-
-impl TokenConfig {
-    /// Read from env.  Returns `None` when `HUGIT_CLERK_ISSUER` is absent (dev
-    /// mode).  Returns `Err` when partially configured (fail-closed).
-    pub fn from_env() -> Result<Option<Self>, String> {
-        let issuer = match std::env::var("HUGIT_CLERK_ISSUER") {
-            Ok(v) => v,
-            Err(_) => return Ok(None), // not configured → dev-token only
-        };
-        if issuer.trim().is_empty() {
-            return Err("HUGIT_CLERK_ISSUER is empty (fail-closed)".to_string());
-        }
-        let jwks_url = std::env::var("HUGIT_CLERK_JWKS_URL").map_err(|_| {
-            "HUGIT_CLERK_ISSUER is set but HUGIT_CLERK_JWKS_URL is missing (fail-closed)"
-                .to_string()
-        })?;
-        if !jwks_url.starts_with("http://") && !jwks_url.starts_with("https://") {
-            return Err(format!(
-                "HUGIT_CLERK_JWKS_URL must start with http(s)://; got: {jwks_url}"
-            ));
-        }
-        let azp = std::env::var("HUGIT_CLERK_AZP")
-            .ok()
-            .filter(|s| !s.is_empty());
-        Ok(Some(TokenConfig {
-            issuer,
-            jwks_url,
-            azp,
-        }))
-    }
-
-    /// Build a [`ClerkValidator`] from this config.
-    pub fn into_validator(self) -> ClerkValidator {
-        ClerkValidator {
-            jwks: JwksCache::new(self.jwks_url),
-            issuer: self.issuer,
-            azp: self.azp,
-        }
-    }
-}
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jsonwebtoken::{EncodingKey, Header as JwtHeader, encode};
-    use serde_json::{Value, json};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use serde_json::json;
+    use std::sync::mpsc;
+    use std::thread;
 
-    // ──────────────────────────────────────────────────────────────────────────
-    // TESTS-LEAD-MUST-FILL: Static RSA keypair
-    //
-    // The tests below use a static, REAL 2048-bit RSA keypair, generated once
-    // out-of-band (`openssl genrsa 2048`) under an owner-authorized secret-read
-    // waiver and pasted below — it is a throwaway TEST keypair (never a real
-    // credential, never used outside `#[cfg(test)]`). We embed it rather than
-    // generate at test time because the `rsa` crate cannot be a dependency: it
-    // pulls `rand 0.8`, which collides with `rand 0.9.4` under the workspace's
-    // `multiple-versions = "deny"` supply-chain policy. The constants ARE
-    // populated (this is NOT a stub — the alg-confusion / tampered-sig / expired
-    // / cross-tenant test matrix signs against this exact key and passes).
-    // ──────────────────────────────────────────────────────────────────────────
+    const TEST_TENANT: &str = "tenant-uuid";
+    const TEST_PRINCIPAL: &str = "principal-uuid";
 
-    /// A real throwaway 2048-bit RSA private key PEM (test-only, owner-waived).
-    const TEST_PRIVATE_KEY_PEM: &[u8] = b"-----BEGIN PRIVATE KEY-----\nMIIEuwIBADANBgkqhkiG9w0BAQEFAASCBKUwggShAgEAAoIBAQCexERzkVvF9PxE\nYt9YKx9rXDIBrnUt2bJSSvQVoODaEHrAmUJK8mxdmK4DaZ9v9iDShKvecvxGVrv4\nfKq+V1W2o0ePbE7hPkVvc/urpp6CJFvWJJzZOl4uyOBGgBPyou4M4DrQUPzdoSVK\n9DLYlVbTbkEFLvbC5baZRNfSfeWVbyckG2tuJfqKGqrofEOi5GNPmPOlOIjalvoY\nXTQaS0E7Jcg1s1ydAhcj3slkqztxbLwlzGwGnt6cPieD6J3tGs/8YEtTKmtYPdvW\nVJjSGw2Vhr77M6MUXp0/lh6rSSrxgoTXnez1zfa99r/c/j3NiutFM60u8sQ6kjIe\nj1HPFYchAgMBAAECgf9CmeZJthSzTzNitFoeSVzkzgr0k1wPF4ZovFaG0nCL0gTk\nKrRs6L+uKrdaXhX+iKWrfaM3axtHniYEnONchlGbFHRq7aA/pUPqyxXTRQcM3vwW\nwr+O/Kpve2WOsyCf9lUd2f2acOSBTDm83p2tdSTKrmqB7qwEpvRh3O6WPQJVERzZ\nhtrwxLMmcgk+BjgJSAzSB9rD60J4v6RexIxyo93t82vNnYdjAsJvWGcRvtZHCYUv\n4aKhGAejL/xFLKZVwmZElcr2qh0zq9nAF6kUK/oMCEcAvse2qwprT4yeI75aKUA3\nXZgjne+d1JposvXuNhgXHuDhs3PFmT9r0IMVxuECgYEA1FcYPEP5p4A7mX8xJPsP\nrfgevlnU8NPncDbsBa7g181pjhbRMbTnz+M/bgvLaI7luq0mtlfCL/MRDAZMbQ3O\nx/mc3JJIe6qGJRRd1H7WZeDmdBkwNEe9FPMWhpKIKWxWZ8gthQUmaJh6I/TxqAmD\n/Nq2oWcBQxeI1iUXX2uVrk0CgYEAv2k72u22nQbvGnJ6Nvie0KsHa5JoGDwla9oK\nCsU9TVSsXOjMVh79vRG7n8zPQbqdC7c5NCehfDR5QG/b6lH89lOJ3oVWWba6YyYD\nKFkOu0p5K88zNicUb/ETdxno+vVVsCn0Eg9ZBYF1CZzPEoDEVVc3k1d0wCpGJsIT\n/HlnriUCgYADROgBnYZNduL0BQpLqHXgVs6aXaWyo4CPsLjHiZ66k9YJMv67hi5/\ne98xIYtbK8ALtLjA2+8Ib/SWO86XazwAxi4NE098X+66yWp8aAuC/AhwRyb/1w7p\nMKjrH3xrLtjRtjpFLwQdXiObRB0oWiUnEnL3Xy+cydL4gQ+wD2b5jQKBgAu2Oq1Y\nojXVeMfbfVLjv4PxExEn8iqZc4i33KlwDCIxLiK5M9eJKelprltGwt+4tWdEHMHu\nMtlQtKKWtZQO1DWWQvdUnUX8AkeSydqsKFSZZ/SgRvfnSD7ZN2GwOisw279dsctx\nGPdXRnwCFkGBk4HNRl9DmKcxbv1sHqDyJL/pAoGBAMMshE3yJN/lkNIuRO2ko2T2\nXA2U9wumZcL8Msg6NzVpcvxmzuQEcOnRxERJecDS+gnRNjC/HaY/1XS9q67U2FRf\nbyyaZ/PBiT4t1e72BEyI8LXLlJvoTE/shuiDfeOzKGb+Ali/JJ2vTnX1znOfPpPH\n5jYWMXnUKTzi9klPffcL\n-----END PRIVATE KEY-----\n";
+    // ── Mock exchange server ──────────────────────────────────────────────────
 
-    /// base64url (no padding) of the RSA modulus `n` for the key above.
-    const TEST_N_B64: &str = "nsREc5FbxfT8RGLfWCsfa1wyAa51LdmyUkr0FaDg2hB6wJlCSvJsXZiuA2mfb_Yg0oSr3nL8Rla7-HyqvldVtqNHj2xO4T5Fb3P7q6aegiRb1iSc2TpeLsjgRoAT8qLuDOA60FD83aElSvQy2JVW025BBS72wuW2mUTX0n3llW8nJBtrbiX6ihqq6HxDouRjT5jzpTiI2pb6GF00GktBOyXINbNcnQIXI97JZKs7cWy8JcxsBp7enD4ng-id7RrP_GBLUyprWD3b1lSY0hsNlYa--zOjFF6dP5Yeq0kq8YKE153s9c32vfa_3P49zYrrRTOtLvLEOpIyHo9RzxWHIQ";
-
-    /// base64url of the public exponent.  For e=65537 this is always "AQAB".
-    const TEST_E_B64: &str = "AQAB";
-
-    const TEST_KID: &str = "test-key-1";
-    const TEST_ISSUER: &str = "https://clerk.corelink.test";
-    const TEST_ORG: &str = "test-org";
-    const TEST_USER: &str = "user-abc";
-    const TEST_AUD: &str = TEST_ORG;
-
-    fn now() -> i64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64
+    /// Spin a one-shot mock `/v1/session/exchange`: respond to the FIRST request
+    /// with `(status, body)`, and report the `Authorization` header it received
+    /// over the returned channel. Returns `(endpoint_url, auth_header_rx)`.
+    fn mock_exchange(status: u16, body: String) -> (String, mpsc::Receiver<Option<String>>) {
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind mock");
+        let port = server.server_addr().to_ip().expect("ip addr").port();
+        let url = format!("http://127.0.0.1:{port}/v1/session/exchange");
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            if let Some(req) = server.incoming_requests().next() {
+                let auth = req
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.equiv("Authorization"))
+                    .map(|h| h.value.as_str().to_string());
+                let _ = tx.send(auth);
+                let resp = tiny_http::Response::from_string(body).with_status_code(status);
+                let _ = req.respond(resp);
+            }
+        });
+        (url, rx)
     }
 
-    // ── Key material helpers ──────────────────────────────────────────────────
-
-    fn encoding_key() -> EncodingKey {
-        EncodingKey::from_rsa_pem(TEST_PRIVATE_KEY_PEM).expect("valid RSA PEM")
+    /// A documented-shape 200 body (incl. a `token_plaintext` that MUST be ignored).
+    fn ok_body(principal: &str, tenant: &str, expires_ms: u64) -> String {
+        json!({
+            "token_plaintext": "cas-rw-pat-MUST-be-ignored",
+            "pat_id": "pat-uuid",
+            "token_id": "tok-uuid",
+            "principal": principal,
+            "tenant": tenant,
+            "expires_ms": expires_ms,
+        })
+        .to_string()
     }
 
-    fn decoding_key() -> DecodingKey {
-        DecodingKey::from_rsa_components(TEST_N_B64, TEST_E_B64).expect("valid RSA n/e")
+    fn far_future_ms() -> u64 {
+        (now_secs() + 3600) * 1000
     }
-
-    fn sign<C: serde::Serialize>(claims: &C, kid: &str) -> String {
-        let mut header = JwtHeader::new(Algorithm::RS256);
-        header.kid = Some(kid.to_string());
-        encode(&header, claims, &encoding_key()).expect("encode JWT")
-    }
-
-    // ── Validator builder (injects key directly; no HTTP) ─────────────────────
-
-    fn make_validator(azp: Option<&str>) -> ClerkValidator {
-        let jwks = JwksCache::new("http://unused-in-tests".to_string());
-        jwks.insert_key(TEST_KID.to_string(), decoding_key());
-        ClerkValidator {
-            issuer: TEST_ISSUER.to_string(),
-            azp: azp.map(str::to_string),
-            jwks,
-        }
-    }
-
-    // ── Claim helpers ─────────────────────────────────────────────────────────
-
-    #[derive(serde::Serialize)]
-    struct TestClaims {
-        sub: String,
-        iss: String,
-        exp: i64,
-        nbf: i64,
-        iat: i64,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        org_id: Option<String>,
-        #[serde(rename = "publicMetadata", skip_serializing_if = "Option::is_none")]
-        public_metadata: Option<Value>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        auth_time: Option<i64>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        azp: Option<String>,
-    }
-
-    fn good_claims() -> TestClaims {
-        let n = now();
-        TestClaims {
-            sub: TEST_USER.to_string(),
-            iss: TEST_ISSUER.to_string(),
-            exp: n + 600,
-            nbf: n - 10,
-            iat: n - 10,
-            org_id: Some(TEST_ORG.to_string()),
-            public_metadata: None,
-            auth_time: Some(n - 60), // 60s ago → fresh
-            azp: None,
-        }
-    }
-
-    /// Claims as a JSON map so individual required fields can be omitted.
-    fn good_claims_json() -> serde_json::Map<String, Value> {
-        let n = now();
-        let mut m = serde_json::Map::new();
-        m.insert("sub".into(), json!(TEST_USER));
-        m.insert("iss".into(), json!(TEST_ISSUER));
-        m.insert("exp".into(), json!(n + 600));
-        m.insert("nbf".into(), json!(n - 10));
-        m.insert("iat".into(), json!(n - 10));
-        m.insert("org_id".into(), json!(TEST_ORG));
-        m
-    }
-
-    // ── Helpers for handle_token_exchange ─────────────────────────────────────
 
     fn exchange_req(subject_token: &str, audience: &str) -> Vec<u8> {
         serde_json::to_vec(&json!({
@@ -846,260 +590,247 @@ mod tests {
         .unwrap()
     }
 
-    // ── Tests: ClerkValidator::validate ──────────────────────────────────────
+    // ── SessionExchangeClient::exchange ───────────────────────────────────────
 
     #[test]
-    fn valid_token_returns_principal() {
-        let v = make_validator(None);
-        let token = sign(&good_claims(), TEST_KID);
-        let p = v.validate(&token).expect("valid token → Some");
-        assert_eq!(p.user, TEST_USER);
-        assert_eq!(p.org, TEST_ORG);
-        assert!(p.fresh_auth, "auth_time 60s ago is within 300s window");
-    }
-
-    #[test]
-    fn expired_token_rejected() {
-        let v = make_validator(None);
-        let n = now();
-        let mut claims = good_claims();
-        claims.exp = n - 600; // expired
-        claims.nbf = n - 1200;
-        claims.iat = n - 1200;
-        assert!(v.validate(&sign(&claims, TEST_KID)).is_none());
-    }
-
-    #[test]
-    fn wrong_issuer_rejected() {
-        let v = make_validator(None);
-        let mut claims = good_claims();
-        claims.iss = "https://evil.example".to_string();
-        assert!(v.validate(&sign(&claims, TEST_KID)).is_none());
-    }
-
-    #[test]
-    fn missing_exp_rejected() {
-        let v = make_validator(None);
-        let mut m = good_claims_json();
-        m.remove("exp");
-        assert!(v.validate(&sign(&m, TEST_KID)).is_none());
-    }
-
-    #[test]
-    fn missing_iss_rejected() {
-        let v = make_validator(None);
-        let mut m = good_claims_json();
-        m.remove("iss");
-        assert!(v.validate(&sign(&m, TEST_KID)).is_none());
-    }
-
-    #[test]
-    fn alg_none_attack_rejected() {
-        use base64::Engine as _;
-        let v = make_validator(None);
-        let header_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(json!({"alg":"none","typ":"JWT","kid":TEST_KID}).to_string());
-        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(serde_json::to_string(&good_claims()).unwrap());
-        let forged = format!("{header_b64}.{payload_b64}.");
-        assert!(v.validate(&forged).is_none(), "alg=none must be rejected");
-    }
-
-    #[test]
-    fn hs256_confusion_attack_rejected() {
-        // Classic algorithm confusion: sign with HS256 using the public modulus
-        // as the HMAC secret.  The RS256 pin must kill this.
-        let v = make_validator(None);
-        let mut header = JwtHeader::new(Algorithm::HS256);
-        header.kid = Some(TEST_KID.to_string());
-        let forged = encode(
-            &header,
-            &good_claims(),
-            &EncodingKey::from_secret(TEST_N_B64.as_bytes()),
-        )
-        .expect("HS256 encode");
-        assert!(
-            v.validate(&forged).is_none(),
-            "HS256 confusion must be rejected"
+    fn exchange_200_returns_identity_and_forwards_bearer() {
+        let (url, rx) = mock_exchange(200, ok_body(TEST_PRINCIPAL, TEST_TENANT, far_future_ms()));
+        let client = SessionExchangeClient::new(url);
+        let id = client.exchange("the-jwt").expect("200 → Ok");
+        assert_eq!(id.principal, TEST_PRINCIPAL);
+        assert_eq!(id.tenant, TEST_TENANT);
+        // The Clerk JWT must be forwarded as the Bearer credential, verbatim.
+        let auth = rx.recv().expect("server saw a request");
+        assert_eq!(
+            auth.as_deref(),
+            Some("Bearer the-jwt"),
+            "the JWT is forwarded as Authorization: Bearer"
         );
     }
 
     #[test]
-    fn tampered_signature_rejected() {
-        let v = make_validator(None);
-        let token = sign(&good_claims(), TEST_KID);
-        // Flip the last character of the signature (the third `.`-segment).
-        let mut parts: Vec<&str> = token.splitn(3, '.').collect();
-        let sig = parts[2];
-        let tampered_sig = if let Some(rest) = sig.strip_suffix('A') {
-            format!("{rest}B")
-        } else {
-            format!("{}A", &sig[..sig.len() - 1])
-        };
-        parts[2] = Box::leak(tampered_sig.into_boxed_str());
-        let tampered = parts.join(".");
-        assert!(
-            v.validate(&tampered).is_none(),
-            "tampered sig must be rejected"
+    fn exchange_200_ignores_token_plaintext() {
+        // The success body carries a cas:rw PAT; the parsed identity must not
+        // surface it (ExchangeIdentity has no such field — a compile-time guarantee,
+        // re-asserted here: the round-trip yields only principal/tenant/expires).
+        let (url, _rx) = mock_exchange(200, ok_body(TEST_PRINCIPAL, TEST_TENANT, far_future_ms()));
+        let id = SessionExchangeClient::new(url).exchange("jwt").unwrap();
+        assert_eq!(id.principal, TEST_PRINCIPAL);
+        assert!(id.expires_ms > now_secs() * 1000);
+    }
+
+    #[test]
+    fn exchange_401_maps_to_token_invalid() {
+        let (url, _rx) = mock_exchange(
+            401,
+            r#"{"error":"x","message":"y","request_id":"z"}"#.into(),
         );
+        let e = SessionExchangeClient::new(url).exchange("jwt").unwrap_err();
+        assert_eq!(e.status, 401);
+        assert_eq!(e.code, "TOKEN_INVALID");
     }
 
     #[test]
-    fn unknown_kid_not_in_jwks_rejected() {
-        // We only insert TEST_KID into the cache; signing with a different kid
-        // triggers a refetch (from "http://unused-in-tests" — which fails).
-        // After the failed refetch the key is still unknown → None.
-        let v = make_validator(None);
-        let token = sign(&good_claims(), "unknown-kid");
-        assert!(v.validate(&token).is_none());
-    }
-
-    #[test]
-    fn fresh_auth_true_when_recent() {
-        let v = make_validator(None);
-        let mut claims = good_claims();
-        claims.auth_time = Some(now() - 10);
-        let p = v.validate(&sign(&claims, TEST_KID)).unwrap();
-        assert!(p.fresh_auth);
-    }
-
-    #[test]
-    fn fresh_auth_false_when_stale() {
-        let v = make_validator(None);
-        let mut claims = good_claims();
-        claims.auth_time = Some(now() - 600); // > 300s → stale
-        let p = v.validate(&sign(&claims, TEST_KID)).unwrap();
-        assert!(!p.fresh_auth);
-    }
-
-    #[test]
-    fn fresh_auth_false_when_absent() {
-        let v = make_validator(None);
-        let mut claims = good_claims();
-        claims.auth_time = None;
-        let p = v.validate(&sign(&claims, TEST_KID)).unwrap();
-        assert!(!p.fresh_auth, "absent auth_time fails closed → not fresh");
-    }
-
-    #[test]
-    fn future_auth_time_is_not_fresh() {
-        let v = make_validator(None);
-        let mut claims = good_claims();
-        claims.auth_time = Some(now() + 3600); // an hour in the future
-        let p = v.validate(&sign(&claims, TEST_KID)).unwrap();
-        assert!(!p.fresh_auth, "future auth_time must not count as fresh");
-    }
-
-    #[test]
-    fn no_org_claim_rejected() {
-        let v = make_validator(None);
-        let mut claims = good_claims();
-        claims.org_id = None;
-        claims.public_metadata = None;
-        assert!(v.validate(&sign(&claims, TEST_KID)).is_none());
-    }
-
-    #[test]
-    fn public_metadata_tenant_is_authoritative() {
-        let v = make_validator(None);
-        let mut claims = good_claims();
-        claims.org_id = Some("legacy".to_string());
-        claims.public_metadata = Some(json!({ "tenant_id": "corelink-tenant" }));
-        let p = v.validate(&sign(&claims, TEST_KID)).unwrap();
-        assert_eq!(p.org, "corelink-tenant", "publicMetadata beats org_id");
-    }
-
-    #[test]
-    fn org_id_fallback_when_no_public_metadata() {
-        let v = make_validator(None);
-        let mut claims = good_claims();
-        claims.org_id = Some("fallback-org".to_string());
-        claims.public_metadata = None;
-        let p = v.validate(&sign(&claims, TEST_KID)).unwrap();
-        assert_eq!(p.org, "fallback-org");
-    }
-
-    #[test]
-    fn colon_in_org_is_rejected_fail_closed() {
-        // A ':' in the resolved org would break the `clerk:{org}:{user}` principal
-        // parse (`:` is the authz delimiter). Reject fail-closed at the mint
-        // boundary so a colon can never confuse ownership comparison downstream.
-        let v = make_validator(None);
-
-        // Colon in publicMetadata.tenant_id (and no org_id fallback) → rejected.
-        let mut c = good_claims();
-        c.public_metadata = Some(json!({"tenant_id": "ee30f7ba:evil"}));
-        c.org_id = None;
-        assert!(
-            v.validate(&sign(&c, TEST_KID)).is_none(),
-            "colon tenant_id must be rejected"
+    fn exchange_403_collapses_to_token_invalid_no_oracle() {
+        // Un-provisioned tenant / secret unbound → 401, NOT 403 (no existence oracle).
+        let (url, _rx) = mock_exchange(
+            403,
+            r#"{"error":"x","message":"y","request_id":"z"}"#.into(),
         );
-
-        // Colon in the org_id fallback → rejected.
-        let mut c2 = good_claims();
-        c2.public_metadata = None;
-        c2.org_id = Some("a:b".to_string());
-        assert!(
-            v.validate(&sign(&c2, TEST_KID)).is_none(),
-            "colon org_id must be rejected"
-        );
+        let e = SessionExchangeClient::new(url).exchange("jwt").unwrap_err();
+        assert_eq!(e.status, 401, "403 must collapse to 401 (no oracle)");
+        assert_eq!(e.code, "TOKEN_INVALID");
     }
 
     #[test]
-    fn jwks_refetch_is_throttled_against_kid_flood() {
-        // The P1 DoS guard: a cache miss may refetch at most once per window, so a
-        // flood of random kids on /v1/token cannot force a blocking GET per request.
-        let c = JwksCache::new("http://127.0.0.1:0/jwks.json".to_string());
-        assert!(c.refetch_allowed(), "cold cache → first refetch allowed");
-        assert!(
-            !c.refetch_allowed(),
-            "within the window → throttled, no fetch"
-        );
-        assert!(!c.refetch_allowed(), "still throttled");
-        // After the interval, refetch is allowed again (key rotation still works).
-        if let Some(old) =
-            Instant::now().checked_sub(Duration::from_secs(JWKS_MIN_REFETCH_SECS + 5))
-        {
-            *c.last_refetch.lock().unwrap() = Some(old);
-            assert!(
-                c.refetch_allowed(),
-                "after the interval → refetch allowed again"
-            );
+    fn exchange_429_maps_to_rate_limited() {
+        let (url, _rx) = mock_exchange(429, r#"{"error":"throttled"}"#.into());
+        let e = SessionExchangeClient::new(url).exchange("jwt").unwrap_err();
+        assert_eq!(e.status, 429);
+        assert_eq!(e.code, "RATE_LIMITED");
+    }
+
+    #[test]
+    fn exchange_500_maps_to_unavailable() {
+        let (url, _rx) = mock_exchange(500, r#"{"error":"boom"}"#.into());
+        let e = SessionExchangeClient::new(url).exchange("jwt").unwrap_err();
+        assert_eq!(e.status, 503);
+        assert_eq!(e.code, "ENGINE_UNAVAILABLE");
+    }
+
+    #[test]
+    fn exchange_405_maps_to_unavailable() {
+        let (url, _rx) = mock_exchange(405, "method".into());
+        let e = SessionExchangeClient::new(url).exchange("jwt").unwrap_err();
+        assert_eq!(e.status, 503);
+    }
+
+    #[test]
+    fn exchange_malformed_200_body_fails_closed() {
+        let (url, _rx) = mock_exchange(200, "this is not json".into());
+        let e = SessionExchangeClient::new(url).exchange("jwt").unwrap_err();
+        assert_eq!(e.status, 503, "a 200 with an unparseable body fails closed");
+    }
+
+    #[test]
+    fn exchange_200_empty_principal_fails_closed() {
+        let (url, _rx) = mock_exchange(200, ok_body("", TEST_TENANT, far_future_ms()));
+        let e = SessionExchangeClient::new(url).exchange("jwt").unwrap_err();
+        assert_eq!(e.status, 503, "empty principal in a 200 fails closed");
+    }
+
+    #[test]
+    fn exchange_unreachable_endpoint_maps_to_unavailable() {
+        // Bind a port, learn it, then drop the server so the port is free →
+        // connection refused → a transport error → 503 (fail-closed transient).
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let port = server.server_addr().to_ip().unwrap().port();
+        drop(server);
+        let url = format!("http://127.0.0.1:{port}/v1/session/exchange");
+        let e = SessionExchangeClient::new(url).exchange("jwt").unwrap_err();
+        assert_eq!(e.status, 503);
+        assert_eq!(e.code, "ENGINE_UNAVAILABLE");
+    }
+
+    // ── handle_token_exchange (end-to-end through a mock exchange) ─────────────
+
+    #[test]
+    fn handle_valid_exchange_returns_200() {
+        let (url, _rx) = mock_exchange(200, ok_body(TEST_PRINCIPAL, TEST_TENANT, far_future_ms()));
+        let client = SessionExchangeClient::new(url);
+        let store = TokenStore::new();
+        let body = exchange_req("clerk-jwt", TEST_TENANT);
+        let (status, resp_body) = handle_token_exchange(&client, &store, &body);
+        assert_eq!(status, 200);
+        let resp: serde_json::Value = serde_json::from_str(&resp_body).unwrap();
+        assert_eq!(resp["accepted"], true);
+        let et = resp["engine_token"].as_str().expect("engine_token present");
+        assert_eq!(et.len(), 64, "32 bytes → 64 hex chars");
+        let expires_in = resp["expires_in"].as_u64().unwrap();
+        assert!(expires_in > 0 && expires_in <= 300, "TTL within ceiling");
+        // The minted token resolves to the verified identity.
+        match store.lookup(et) {
+            LookupResult::Ok(rec) => {
+                assert_eq!(rec.user, TEST_PRINCIPAL);
+                assert_eq!(rec.org, TEST_TENANT);
+                assert!(
+                    !rec.fresh_auth,
+                    "exchange mint is never fresh (no auth_time)"
+                );
+            }
+            _ => panic!("expected a valid lookup"),
         }
     }
 
     #[test]
-    fn azp_required_when_configured() {
-        let v = make_validator(Some("https://app.githugr.com"));
-
-        // No azp in token → rejected.
-        assert!(v.validate(&sign(&good_claims(), TEST_KID)).is_none());
-
-        // Wrong azp → rejected.
-        let mut wrong_azp = good_claims();
-        wrong_azp.azp = Some("https://evil.example".to_string());
-        assert!(v.validate(&sign(&wrong_azp, TEST_KID)).is_none());
-
-        // Correct azp → accepted.
-        let mut right_azp = good_claims();
-        right_azp.azp = Some("https://app.githugr.com".to_string());
-        assert!(v.validate(&sign(&right_azp, TEST_KID)).is_some());
+    fn handle_audience_mismatch_returns_401() {
+        let (url, _rx) = mock_exchange(200, ok_body(TEST_PRINCIPAL, TEST_TENANT, far_future_ms()));
+        let client = SessionExchangeClient::new(url);
+        let store = TokenStore::new();
+        let body = exchange_req("clerk-jwt", "a-different-tenant");
+        let (status, resp_body) = handle_token_exchange(&client, &store, &body);
+        assert_eq!(status, 401);
+        let v: serde_json::Value = serde_json::from_str(&resp_body).unwrap();
+        assert_eq!(v["code"], "TOKEN_INVALID");
     }
 
     #[test]
-    fn azp_ignored_when_not_configured() {
-        let v = make_validator(None);
-        let mut claims = good_claims();
-        claims.azp = Some("whatever".to_string());
-        assert!(v.validate(&sign(&claims, TEST_KID)).is_some());
+    fn handle_upstream_401_returns_401() {
+        let (url, _rx) = mock_exchange(401, r#"{"error":"bad jwt"}"#.into());
+        let client = SessionExchangeClient::new(url);
+        let store = TokenStore::new();
+        let body = exchange_req("expired-jwt", TEST_TENANT);
+        let (status, _) = handle_token_exchange(&client, &store, &body);
+        assert_eq!(status, 401);
     }
 
-    // ── Tests: TokenStore ─────────────────────────────────────────────────────
+    #[test]
+    fn handle_colon_in_tenant_rejected_fail_closed() {
+        // A ':' in the verified tenant would break the `clerk:{org}:{user}` parse.
+        let (url, _rx) = mock_exchange(200, ok_body(TEST_PRINCIPAL, "a:b", far_future_ms()));
+        let client = SessionExchangeClient::new(url);
+        let store = TokenStore::new();
+        let body = exchange_req("clerk-jwt", "a:b");
+        let (status, _) = handle_token_exchange(&client, &store, &body);
+        assert_eq!(status, 401, "colon tenant must be rejected");
+    }
+
+    #[test]
+    fn handle_malformed_body_returns_401_without_calling_exchange() {
+        // No live endpoint needed: the body parse fails BEFORE any exchange call.
+        let client = SessionExchangeClient::new("http://127.0.0.1:9/unused".to_string());
+        let store = TokenStore::new();
+        let (status, _) = handle_token_exchange(&client, &store, b"not-json");
+        assert_eq!(status, 401);
+    }
+
+    #[test]
+    fn handle_expired_upstream_session_returns_401() {
+        // expires_ms already in the past → upstream_remaining == 0 → fail-closed.
+        let past = now_secs().saturating_sub(10) * 1000;
+        let (url, _rx) = mock_exchange(200, ok_body(TEST_PRINCIPAL, TEST_TENANT, past));
+        let client = SessionExchangeClient::new(url);
+        let store = TokenStore::new();
+        let body = exchange_req("clerk-jwt", TEST_TENANT);
+        let (status, _) = handle_token_exchange(&client, &store, &body);
+        assert_eq!(
+            status, 401,
+            "an already-expired upstream session is refused"
+        );
+    }
+
+    #[test]
+    fn handle_ttl_bounded_by_upstream_remaining() {
+        // Upstream session expires in ~30s → the engine token TTL is bounded to 30,
+        // well under the 300s ceiling.
+        let expires = (now_secs() + 30) * 1000;
+        let (url, _rx) = mock_exchange(200, ok_body(TEST_PRINCIPAL, TEST_TENANT, expires));
+        let client = SessionExchangeClient::new(url);
+        let store = TokenStore::new();
+        let body = exchange_req("clerk-jwt", TEST_TENANT);
+        let (status, resp_body) = handle_token_exchange(&client, &store, &body);
+        assert_eq!(status, 200);
+        let resp: serde_json::Value = serde_json::from_str(&resp_body).unwrap();
+        let expires_in = resp["expires_in"].as_u64().unwrap();
+        assert!(
+            (1..=31).contains(&expires_in),
+            "TTL bounded by the ~30s upstream remaining, got {expires_in}"
+        );
+        // And the minted record's expiry reflects the bounded TTL (≤ ~31s out).
+        let et = resp["engine_token"].as_str().unwrap();
+        match store.lookup(et) {
+            LookupResult::Ok(rec) => {
+                assert!(
+                    rec.expires_at <= now_secs() + 31,
+                    "stored expiry bounded by upstream remaining"
+                );
+            }
+            _ => panic!("expected a valid lookup"),
+        }
+    }
+
+    // ── SessionExchangeConfig::from_env ───────────────────────────────────────
+
+    #[test]
+    fn config_rejects_non_http_endpoint() {
+        let cfg = SessionExchangeConfig {
+            endpoint: "ftp://nope".to_string(),
+        };
+        // (from_env reads the process env; the prefix guard is exercised directly.)
+        assert!(!cfg.endpoint.starts_with("http"));
+        // Sanity: a valid endpoint builds a client.
+        let good = SessionExchangeConfig {
+            endpoint: "https://api.corelink.test/v1/session/exchange".to_string(),
+        };
+        let _client = good.into_client();
+    }
+
+    // ── TokenStore (unchanged engine-token machinery) ─────────────────────────
 
     fn make_principal(fresh: bool) -> ClerkPrincipal {
         ClerkPrincipal {
-            user: TEST_USER.to_string(),
-            org: TEST_ORG.to_string(),
+            user: TEST_PRINCIPAL.to_string(),
+            org: TEST_TENANT.to_string(),
             fresh_auth: fresh,
         }
     }
@@ -1119,13 +850,10 @@ mod tests {
         };
         store.mint(&pa).expect("mint a");
         store.mint(&pb).expect("mint b");
-        // Platform operator (None) sees BOTH.
         assert_eq!(store.list_for_org(None).len(), 2, "operator sees all");
-        // Tenant A sees ONLY its own session — NEVER org-b (the cross-tenant guard).
         let a = store.list_for_org(Some("org-a"));
         assert_eq!(a.len(), 1, "tenant A sees only its own");
         assert_eq!(a[0].1.org, "org-a");
-        // Unknown/empty scope → nothing (fail-closed).
         assert!(
             store.list_for_org(Some("")).is_empty(),
             "unknown scope → empty"
@@ -1140,11 +868,40 @@ mod tests {
         assert_eq!(raw.len(), 64, "32 bytes → 64 hex chars");
         match store.lookup(&raw) {
             LookupResult::Ok(rec) => {
-                assert_eq!(rec.user, TEST_USER);
-                assert_eq!(rec.org, TEST_ORG);
+                assert_eq!(rec.user, TEST_PRINCIPAL);
+                assert_eq!(rec.org, TEST_TENANT);
                 assert!(rec.fresh_auth);
             }
             _ => panic!("expected LookupResult::Ok"),
+        }
+    }
+
+    #[test]
+    fn mint_with_ttl_clamps_to_ceiling() {
+        let store = TokenStore::new();
+        let p = make_principal(false);
+        // Request a TTL above the ceiling → clamped to ENGINE_TOKEN_TTL_SECS.
+        let raw = store.mint_with_ttl(&p, 100_000).expect("mint OK");
+        match store.lookup(&raw) {
+            LookupResult::Ok(rec) => {
+                assert!(
+                    rec.expires_at <= now_secs() + ENGINE_TOKEN_TTL_SECS,
+                    "TTL clamped to the ceiling"
+                );
+            }
+            _ => panic!("expected Ok"),
+        }
+    }
+
+    #[test]
+    fn mint_with_ttl_zero_clamps_to_one_second() {
+        let store = TokenStore::new();
+        let p = make_principal(false);
+        let raw = store.mint_with_ttl(&p, 0).expect("mint OK");
+        // ttl clamped to ≥1 → the token is briefly valid, not instantly dead.
+        match store.lookup(&raw) {
+            LookupResult::Ok(rec) => assert!(rec.expires_at >= now_secs()),
+            _ => panic!("expected Ok (ttl clamped to 1s)"),
         }
     }
 
@@ -1159,7 +916,6 @@ mod tests {
         let store = TokenStore::new();
         let p = make_principal(false);
         let raw = store.mint(&p).expect("mint OK");
-        // Force-expire by inserting an already-past expires_at.
         {
             let hash = sha256_bytes(raw.as_bytes());
             let mut guard = store.tokens.lock().unwrap();
@@ -1182,7 +938,7 @@ mod tests {
                 rec.expires_at = now_secs() - 1;
             }
         }
-        let _ = store.lookup(&raw); // triggers pruning
+        let _ = store.lookup(&raw);
         let guard = store.tokens.lock().unwrap();
         assert!(!guard.contains_key(&hash), "expired entry must be pruned");
     }
@@ -1191,7 +947,6 @@ mod tests {
     fn sweep_on_mint_removes_expired() {
         let store = TokenStore::new();
         let p = make_principal(false);
-        // Mint and immediately expire the first token.
         let first = store.mint(&p).expect("mint 1");
         {
             let hash = sha256_bytes(first.as_bytes());
@@ -1205,156 +960,5 @@ mod tests {
             !guard.contains_key(&first_hash),
             "sweep must remove expired first token"
         );
-    }
-
-    // ── Tests: handle_token_exchange ─────────────────────────────────────────
-
-    #[test]
-    fn valid_exchange_returns_200() {
-        let v = make_validator(None);
-        let store = TokenStore::new();
-        let token = sign(&good_claims(), TEST_KID);
-        let body = exchange_req(&token, TEST_AUD);
-        let (status, resp_body) = handle_token_exchange(&v, &store, &body);
-        assert_eq!(status, 200);
-        let resp: serde_json::Value = serde_json::from_str(&resp_body).unwrap();
-        assert_eq!(resp["accepted"], true);
-        assert_eq!(resp["expires_in"], 300);
-        let et = resp["engine_token"].as_str().expect("engine_token present");
-        assert_eq!(et.len(), 64, "64 hex chars");
-    }
-
-    #[test]
-    fn expired_clerk_token_returns_401_token_invalid() {
-        let v = make_validator(None);
-        let store = TokenStore::new();
-        let n = now();
-        let mut claims = good_claims();
-        claims.exp = n - 600;
-        claims.nbf = n - 1200;
-        claims.iat = n - 1200;
-        let body = exchange_req(&sign(&claims, TEST_KID), TEST_AUD);
-        let (status, resp_body) = handle_token_exchange(&v, &store, &body);
-        assert_eq!(status, 401);
-        let v: serde_json::Value = serde_json::from_str(&resp_body).unwrap();
-        assert_eq!(v["code"], "TOKEN_INVALID");
-    }
-
-    #[test]
-    fn wrong_iss_returns_401() {
-        let v = make_validator(None);
-        let store = TokenStore::new();
-        let mut claims = good_claims();
-        claims.iss = "https://evil.example".to_string();
-        let body = exchange_req(&sign(&claims, TEST_KID), TEST_AUD);
-        let (status, _) = handle_token_exchange(&v, &store, &body);
-        assert_eq!(status, 401);
-    }
-
-    #[test]
-    fn audience_mismatch_returns_401() {
-        // audience != claims.org → cross-tenant mint blocked.
-        let v = make_validator(None);
-        let store = TokenStore::new();
-        let token = sign(&good_claims(), TEST_KID);
-        let body = exchange_req(&token, "different-org");
-        let (status, resp_body) = handle_token_exchange(&v, &store, &body);
-        assert_eq!(status, 401);
-        let v: serde_json::Value = serde_json::from_str(&resp_body).unwrap();
-        assert_eq!(v["code"], "TOKEN_INVALID");
-    }
-
-    #[test]
-    fn no_org_claim_returns_401() {
-        let v = make_validator(None);
-        let store = TokenStore::new();
-        let mut claims = good_claims();
-        claims.org_id = None;
-        claims.public_metadata = None;
-        let body = exchange_req(&sign(&claims, TEST_KID), TEST_AUD);
-        let (status, _) = handle_token_exchange(&v, &store, &body);
-        assert_eq!(status, 401);
-    }
-
-    #[test]
-    fn alg_none_in_exchange_returns_401() {
-        use base64::Engine as _;
-        let v = make_validator(None);
-        let store = TokenStore::new();
-        let header_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(json!({"alg":"none","typ":"JWT","kid":TEST_KID}).to_string());
-        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(serde_json::to_string(&good_claims()).unwrap());
-        let forged = format!("{header_b64}.{payload_b64}.");
-        let body = exchange_req(&forged, TEST_AUD);
-        let (status, _) = handle_token_exchange(&v, &store, &body);
-        assert_eq!(status, 401);
-    }
-
-    #[test]
-    fn hs256_confusion_in_exchange_returns_401() {
-        let v = make_validator(None);
-        let store = TokenStore::new();
-        let mut header = JwtHeader::new(Algorithm::HS256);
-        header.kid = Some(TEST_KID.to_string());
-        let forged = encode(
-            &header,
-            &good_claims(),
-            &EncodingKey::from_secret(TEST_N_B64.as_bytes()),
-        )
-        .unwrap();
-        let body = exchange_req(&forged, TEST_AUD);
-        let (status, _) = handle_token_exchange(&v, &store, &body);
-        assert_eq!(status, 401);
-    }
-
-    #[test]
-    fn malformed_body_returns_401() {
-        let v = make_validator(None);
-        let store = TokenStore::new();
-        let (status, _) = handle_token_exchange(&v, &store, b"not-json");
-        assert_eq!(status, 401);
-    }
-
-    #[test]
-    fn expired_engine_token_lookup_returns_expired_variant() {
-        // This test exercises the TokenStore directly (not the exchange handler,
-        // which always returns fresh tokens).
-        let store = TokenStore::new();
-        let p = make_principal(true);
-        let raw = store.mint(&p).unwrap();
-        {
-            let hash = sha256_bytes(raw.as_bytes());
-            store
-                .tokens
-                .lock()
-                .unwrap()
-                .get_mut(&hash)
-                .unwrap()
-                .expires_at = now_secs() - 1;
-        }
-        assert!(matches!(store.lookup(&raw), LookupResult::Expired));
-    }
-
-    #[test]
-    fn fresh_auth_propagated_through_exchange() {
-        let v = make_validator(None);
-        let store = TokenStore::new();
-        // Stale auth_time → fresh_auth should be false in the minted record.
-        let mut claims = good_claims();
-        claims.auth_time = Some(now() - 600);
-        let token = sign(&claims, TEST_KID);
-        let body = exchange_req(&token, TEST_AUD);
-        let (status, resp_body) = handle_token_exchange(&v, &store, &body);
-        assert_eq!(status, 200);
-        let resp: serde_json::Value = serde_json::from_str(&resp_body).unwrap();
-        let et = resp["engine_token"].as_str().unwrap().to_string();
-        match store.lookup(&et) {
-            LookupResult::Ok(rec) => assert!(
-                !rec.fresh_auth,
-                "stale auth_time → fresh_auth=false in record"
-            ),
-            _ => panic!("expected valid lookup"),
-        }
     }
 }

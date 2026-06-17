@@ -436,11 +436,12 @@ fn route_write(state: &AppState, url: &str, headers: &[Header], body: &[u8]) -> 
     let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     match segs.as_slice() {
         // POST /v1/token — the ONLY no-Bearer route (it IS the auth-issuance
-        // endpoint; the handler validates the Clerk JWT internally). Without a
-        // configured Clerk validator the endpoint does not exist → 404 (we do not
-        // disclose its presence in dev-only mode).
-        ["v1", "token"] => match &state.validator {
-            Some(v) => crate::token::handle_token_exchange(v, &state.token_store, body),
+        // endpoint; the handler forwards the Clerk JWT to CoreLink's
+        // `/v1/session/exchange`). Without a configured exchange client the
+        // endpoint does not exist → 404 (we do not disclose its presence in
+        // dev-only mode).
+        ["v1", "token"] => match &state.exchange {
+            Some(c) => crate::token::handle_token_exchange(c, &state.token_store, body),
             None => err(EngineErr::not_found()),
         },
         ["v1", "repos", repo, tail @ ..] => {
