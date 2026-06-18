@@ -27,6 +27,15 @@ hugit-refstore       = { path = "../hugit-refstore" }
 hugit-contracts      = { path = "../hugit-contracts" }
 hugit-ledger         = { path = "../hugit-ledger" }
 hugit-cli            = { path = "../hugit-cli" }
+# The git read seam: `resolve_blob_at_path` + `CasObjectSource` for the
+# `GET /v1/repos/{repo}/blob|edit/{*path}` content handlers (reverses the PS-18
+# deferral — actually serving file content from a git tree).
+hugit-proto          = { path = "../hugit-proto" }
+# `ObjectId` is `gix_hash::ObjectId` (the canonical git oid type the proto read
+# path is keyed by). Named directly for the `AppState.git_root_tree` field; the
+# version is pinned to the same `0.22` hugit-proto already resolves, so the
+# `multiple-versions = "deny"` ban is not tripped (no new transitive gix-* line).
+gix-hash   = "0.22"
 tiny_http  = { version = "0.12.0", default-features = false }
 sha2       = { workspace = true }
 serde      = { workspace = true }

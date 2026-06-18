@@ -72,6 +72,13 @@ pub struct AppState {
     /// uniformly; stays empty until a Clerk exchange mints a token. Single-host
     /// (the multi-instance shared store is the same P2 seam as the idem ledger).
     pub token_store: Arc<TokenStore>,
+    /// The git object source for the file-content reads (`blob`/`edit`). `None` =
+    /// the content seam is not wired (no `HUGIT_SERVE_GIT_DIR`) → those reads 404
+    /// honestly (NOT a fake blank file). When `Some`, paired with `git_root_tree`.
+    pub git_source: Option<Arc<hugit_proto::CasObjectSource>>,
+    /// The oid of HEAD's root tree in `git_source`, resolved once at boot. `None`
+    /// in lock-step with `git_source` (both present or both absent).
+    pub git_root_tree: Option<gix_hash::ObjectId>,
 }
 
 impl AppState {
@@ -102,11 +109,26 @@ impl AppState {
         };
         let exchange = SessionExchangeConfig::from_env()?.map(|cfg| Arc::new(cfg.into_client()));
         let token_store = Arc::new(TokenStore::new());
+
+        // The git content seam (`blob`/`edit` reads). Only wired when
+        // `HUGIT_SERVE_GIT_DIR` points at a real git directory; otherwise the
+        // file-content reads 404 honestly (the "content seam not live" answer,
+        // NOT a fake blank file). Loaded once at boot.
+        let (git_source, git_root_tree) = match std::env::var("HUGIT_SERVE_GIT_DIR") {
+            Ok(dir) if !dir.trim().is_empty() => {
+                let (cas, root) = load_git_dir(&dir)?;
+                (Some(Arc::new(cas)), Some(root))
+            }
+            _ => (None, None),
+        };
+
         Ok(Self {
             source,
             dev_token,
             exchange,
             token_store,
+            git_source,
+            git_root_tree,
         })
     }
 
@@ -114,7 +136,8 @@ impl AppState {
         Ok(LogSource::R2(Box::new(R2Config::from_env()?)))
     }
 
-    /// Explicit Local constructor (tests).
+    /// Explicit Local constructor (tests). No git content seam (both `None`) —
+    /// blob/edit reads 404 honestly until a deploy sets `HUGIT_SERVE_GIT_DIR`.
     #[must_use]
     pub fn new(log_dir: PathBuf, dev_token: String) -> Self {
         Self {
@@ -122,6 +145,8 @@ impl AppState {
             dev_token,
             exchange: None,
             token_store: Arc::new(TokenStore::new()),
+            git_source: None,
+            git_root_tree: None,
         }
     }
 
@@ -515,6 +540,91 @@ impl R2Config {
             Err(e) => Err(EngineErr::unavailable(format!("R2 PUT transport: {e}"))),
         }
     }
+}
+
+/// Load a git directory into a [`CasObjectSource`] and resolve HEAD's root-tree
+/// oid — the **live-infra seam** for the `blob`/`edit` file-content reads. Only
+/// invoked when `HUGIT_SERVE_GIT_DIR` is set; not exercised by the hermetic
+/// handler tests (those seed a `CasObjectSource` directly).
+///
+/// ## Why a `git` subprocess (not a reused hugit-proto reader)
+/// hugit-proto exposes the projection/pack-assembly read path, but no public
+/// entrypoint that ingests an on-disk git dir into a `CasObjectSource`; the only
+/// such reader in the workspace lives in `hugit-mirror` (`import::history`,
+/// `git cat-file`-backed), which is NOT a dependency of this serve crate. Rather
+/// than fork that logic OR add a heavyweight new dependency, this loader shells
+/// out to the local `git` binary — the same `cat-file`/`rev-list` plumbing
+/// hugit-mirror uses — to enumerate every object reachable from HEAD and stream
+/// it into the content-addressed store. The store verifies each object against
+/// its oid on insert ([`CasObjectSource`]'s content-addressing invariant), so a
+/// tampered git dir cannot smuggle mislabeled bytes into a served blob.
+///
+/// Returns `Err(String)` (→ a fatal boot error) if `git` is absent, the dir is
+/// not a repo, HEAD does not resolve, or an object fails to parse — fail-closed:
+/// a misconfigured content seam refuses to start rather than silently serving 404.
+fn load_git_dir(
+    git_dir: &str,
+) -> Result<(hugit_proto::CasObjectSource, gix_hash::ObjectId), String> {
+    use hugit_proto::{CasObjectSource, ObjectKind};
+    use std::process::Command;
+
+    // Run `git -C <dir> <args...>`, capturing stdout bytes; map any failure to a
+    // boot error string (no secret content — only the git dir path + git stderr).
+    let git = |args: &[&str]| -> Result<Vec<u8>, String> {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(git_dir)
+            .args(args)
+            .output()
+            .map_err(|e| format!("HUGIT_SERVE_GIT_DIR: failed to spawn `git`: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "HUGIT_SERVE_GIT_DIR={git_dir}: `git {}` failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Ok(out.stdout)
+    };
+
+    // Resolve HEAD's root tree oid.
+    let root_hex = String::from_utf8(git(&["rev-parse", "HEAD^{tree}"])?)
+        .map_err(|e| format!("HUGIT_SERVE_GIT_DIR: HEAD tree oid is not UTF-8: {e}"))?;
+    let root_hex = root_hex.trim();
+    let root_tree = gix_hash::ObjectId::from_hex(root_hex.as_bytes())
+        .map_err(|e| format!("HUGIT_SERVE_GIT_DIR: HEAD tree oid {root_hex:?} invalid: {e}"))?;
+
+    // Enumerate every object reachable from HEAD (`<oid> [path]` per line).
+    let listing = String::from_utf8(git(&["rev-list", "--objects", "HEAD"])?)
+        .map_err(|e| format!("HUGIT_SERVE_GIT_DIR: rev-list output is not UTF-8: {e}"))?;
+
+    let mut cas = CasObjectSource::new();
+    for line in listing.lines() {
+        // `rev-list --objects` emits `<40-hex-oid>` optionally followed by ` <path>`.
+        let oid_hex = line.split_whitespace().next().unwrap_or("");
+        if oid_hex.is_empty() {
+            continue;
+        }
+        // The object's type, then its raw body bytes (NO loose header — that is
+        // exactly the body `CasObjectSource` re-hashes against the oid).
+        let kind_raw = git(&["cat-file", "-t", oid_hex])?;
+        let kind_str = String::from_utf8_lossy(&kind_raw);
+        let kind = match kind_str.trim() {
+            "blob" => ObjectKind::Blob,
+            "tree" => ObjectKind::Tree,
+            "commit" => ObjectKind::Commit,
+            "tag" => ObjectKind::Tag,
+            // A reachable object of an unknown type cannot occur from a healthy
+            // git; skip it rather than abort (blob/tree walking does not need it).
+            _ => continue,
+        };
+        let body = git(&["cat-file", kind_str.trim(), oid_hex])?;
+        // Insert under the oid the bytes hash to; the store rejects a mismatch on
+        // the later `get`, so byte-identity to git is preserved.
+        cas.insert_raw(kind, body);
+    }
+
+    Ok((cas, root_tree))
 }
 
 /// A repo slug is a single safe path segment: non-empty, ≤100 chars, ASCII

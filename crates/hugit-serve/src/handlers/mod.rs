@@ -8,6 +8,7 @@
 
 pub mod admin;
 pub mod attention;
+pub mod blob;
 pub mod branches;
 pub mod campaign;
 pub mod checks;
@@ -15,6 +16,7 @@ pub mod commit_detail;
 pub mod commits;
 pub mod compare;
 pub mod dashboard;
+pub mod edit;
 pub mod events;
 pub mod home;
 pub mod insights;
@@ -35,6 +37,7 @@ pub mod viewer_can;
 
 pub use admin::{build_admin_overview, build_admin_tokens, build_audit, build_erasure};
 pub use attention::build_attention;
+pub use blob::build_blob;
 pub use branches::build_branches;
 pub use campaign::build_campaign;
 pub use checks::build_checks;
@@ -42,6 +45,7 @@ pub use commit_detail::build_commit_detail;
 pub use commits::build_commits;
 pub use compare::build_compare;
 pub use dashboard::build_dashboard;
+pub use edit::build_edit;
 pub use events::build_events;
 pub use home::build_home;
 pub use insights::build_insights;
