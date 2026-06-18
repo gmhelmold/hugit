@@ -28,8 +28,11 @@ are real, hermetically tested (real Ed25519/SHA-256 crypto), and have held every
 adversarial round (1–13) + a SOTA sweep. The integrity spine is genuinely solid.
 
 **What is NOT delivered ("built" ≠ "live" — the honest gap):**
-- **No live git wire protocol.** `hugit-proto` has full clone/fetch/push logic, but
-  nothing serves it — `git clone` against the deployed engine returns **404**.
+- **Git wire serving: clone/fetch BUILT (2026-06-18), push NOT.** `hugit-serve` now speaks the
+  git smart-HTTP upload-pack wire over `hugit-proto`'s clone/fetch logic — a REAL `git clone`
+  succeeds (CI-proven e2e). LIVE-gated on the deploy setting `HUGIT_SERVE_GIT_DIR` + a public repo;
+  until then `git clone` against the *deployed* engine still 404s (the image is stale). `git push`
+  (receive-pack) is deliberately **404** — a later wave.
 - **Substrate P2-gated / transferred.** CoreLink hot CAS + AC = a real `ureq` client
   with no live tenant; the runner fabric → `corelink-runners`; cold-store
   (`UnwiredColdStore`) persists no transcript blobs; **merge-as-re-execution records
@@ -68,7 +71,8 @@ single-digit % for a full multi-tenant end-to-end forge.**
 current `main` image (+ set `HUGIT_SESSION_EXCHANGE_URL` = the live
 `corelink-api.humangr.com/v1/session/exchange`) + set `HUGIT_SERVE_GIT_DIR` so the now-real
 blob/edit reads serve live (W5 logic landed 2026-06-18) → CoreLink P2 tenant (hot CAS+AC) →
-live git wire serving (`git clone`, still 404) → runner fabric live → GitHub App + live
+live git wire serving (clone/fetch BUILT 2026-06-18 — just set `HUGIT_SERVE_GIT_DIR`; push still
+a wave away) → runner fabric live → GitHub App + live
 mirror → multi-tenant Clerk + `hugit-prod-d1`.
 Most are owner/infra-gated, not "a few PRs". Per-capability status table + tracked
 seams: the audit doc above.
