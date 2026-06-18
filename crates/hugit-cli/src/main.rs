@@ -27,6 +27,7 @@ use hugit_cli::checks::{self, CheckArgs, ChecksArgs};
 use hugit_cli::export::{self, AccountState, Corpus};
 use hugit_cli::impact::{ImpactQuery, compute_impact};
 use hugit_cli::intent::{self, IntentArgs};
+use hugit_cli::issue::{self, IssueArgs};
 use hugit_cli::porcelain::PorcelainError;
 use hugit_cli::pr::{self, PrArgs};
 use hugit_cli::queue::{self, QueueArgs};
@@ -66,6 +67,8 @@ enum Command {
     Campaign(CampaignArgs),
     /// Intent ceremony: new / show (WP-PC2).
     Intent(IntentArgs),
+    /// Issue lifecycle: transition — move an issue's state (roadmap W2).
+    Issue(IssueArgs),
     /// Pull-request lifecycle: open / land / show (WP-PC3).
     Pr(PrArgs),
     /// Repo authz metadata: `meta set` records `repo.meta` (visibility + owner_tenant).
@@ -505,6 +508,7 @@ fn main() -> ExitCode {
         Command::Export(a) => run_export(a),
         Command::Campaign(a) => return campaign::run(a),
         Command::Intent(a) => return intent::run(a),
+        Command::Issue(a) => return issue::run(a),
         Command::Pr(a) => return pr::run(a),
         Command::Repo(a) => return repo::run(a),
         Command::Checks(a) => return checks::run(a),
