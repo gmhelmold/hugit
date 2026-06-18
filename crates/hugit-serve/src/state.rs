@@ -118,16 +118,25 @@ impl AppState {
         let exchange = SessionExchangeConfig::from_env()?.map(|cfg| Arc::new(cfg.into_client()));
         let token_store = Arc::new(TokenStore::new());
 
-        // The git content seam (`blob`/`edit` reads). Only wired when
-        // `HUGIT_SERVE_GIT_DIR` points at a real git directory; otherwise the
-        // file-content reads 404 honestly (the "content seam not live" answer,
-        // NOT a fake blank file). Loaded once at boot.
-        let (git_source, git_root_tree, git_refs) = match std::env::var("HUGIT_SERVE_GIT_DIR") {
-            Ok(dir) if !dir.trim().is_empty() => {
-                let (cas, root, refs) = load_git_dir(&dir)?;
-                (Some(Arc::new(cas)), Some(root), refs)
+        // The git content seam (`blob`/`edit` reads + the clone/fetch wire).
+        // Source precedence (F): `HUGIT_SERVE_CAS_URL` set → the live CoreLink CAS
+        // (mutable refs/oid-index manifests from hugit's R2, immutable objects from
+        // the CAS); else `HUGIT_SERVE_GIT_DIR` → a local git dir; else none → the
+        // content reads 404 honestly (NOT a fake blank file). Loaded once at boot.
+        let (git_source, git_root_tree, git_refs) = if std::env::var("HUGIT_SERVE_CAS_URL")
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+        {
+            let (cas, root, refs) = load_from_cas_env()?;
+            (Some(Arc::new(cas)), Some(root), refs)
+        } else {
+            match std::env::var("HUGIT_SERVE_GIT_DIR") {
+                Ok(dir) if !dir.trim().is_empty() => {
+                    let (cas, root, refs) = load_git_dir(&dir)?;
+                    (Some(Arc::new(cas)), Some(root), refs)
+                }
+                _ => (None, None, std::collections::BTreeMap::new()),
             }
-            _ => (None, None, std::collections::BTreeMap::new()),
         };
 
         Ok(Self {
@@ -462,6 +471,54 @@ impl R2Config {
         }
     }
 
+    /// Fetch an ARBITRARY R2 object by its full key (no `<repo>.json` shaping) —
+    /// the small generic GET the git-from-CAS loader needs for the mutable
+    /// `<tenant>/<repo>/refs.json` + `<tenant>/<repo>/oid-index.json` objects.
+    /// `Ok(None)` = absent (404); `Ok(Some(bytes))` = present; `Err` = a
+    /// transport/non-404 fault. Mirrors [`fetch`]'s SigV4 + generic-503 discipline
+    /// (no storage-topology leak to the client; specifics to the server log).
+    pub fn get_object(&self, key: &str) -> Result<Option<Vec<u8>>, EngineErr> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let signed = sigv4::sign_s3_get(
+            &self.host,
+            &self.bucket,
+            key,
+            &self.key_id,
+            &self.secret,
+            &self.region,
+            now,
+        );
+        let url = format!("{}/{}/{key}", self.endpoint, self.bucket);
+        let label = format!("r2://{}/{key}", self.bucket);
+        let resp = self
+            .agent
+            .get(&url)
+            .set("Authorization", &signed.authorization)
+            .set("x-amz-date", &signed.amz_date)
+            .set("x-amz-content-sha256", &signed.content_sha256)
+            .call();
+        match resp {
+            Ok(r) => {
+                let mut buf = Vec::new();
+                r.into_reader().read_to_end(&mut buf).map_err(|e| {
+                    eprintln!("hugit-serve: R2 body read failed for {label}: {e}");
+                    EngineErr::unavailable("engine storage read failed".to_string())
+                })?;
+                Ok(Some(buf))
+            }
+            Err(ureq::Error::Status(404, _)) => Ok(None),
+            Err(e) => {
+                eprintln!("hugit-serve: R2 GET failed for {label}: {e}");
+                Err(EngineErr::unavailable(
+                    "engine storage temporarily unavailable".to_string(),
+                ))
+            }
+        }
+    }
+
     /// PUT `body` to `<tenant_id>/<repo>.json` UNCONDITIONALLY (the one-shot
     /// snapshot upload — used by the `hugit-snapshot` bin, NOT the engine write
     /// path). The standing engine credential is read-only by design (a PUT 403s);
@@ -550,6 +607,103 @@ impl R2Config {
             Err(e) => Err(EngineErr::unavailable(format!("R2 PUT transport: {e}"))),
         }
     }
+
+    /// PUT `body` to an ARBITRARY R2 key UNCONDITIONALLY — the generic write the
+    /// git ingest bin uses to publish `<tenant>/<repo>/refs.json` +
+    /// `<tenant>/<repo>/oid-index.json` (the mutable manifests; the immutable git
+    /// objects go to the CAS, not R2). Like [`put`], this needs the one-shot RW
+    /// grant (the standing engine cred is read-only → 403). Returns the wire key.
+    pub fn put_object(&self, key: &str, body: &[u8]) -> Result<String, EngineErr> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let signed = sigv4::sign_s3_put(
+            &self.host,
+            &self.bucket,
+            key,
+            body,
+            &self.key_id,
+            &self.secret,
+            &self.region,
+            now,
+        );
+        let url = format!("{}/{}/{key}", self.endpoint, self.bucket);
+        let resp = self
+            .agent
+            .put(&url)
+            .set("Authorization", &signed.authorization)
+            .set("x-amz-date", &signed.amz_date)
+            .set("x-amz-content-sha256", &signed.content_sha256)
+            .send_bytes(body);
+        match resp {
+            Ok(r) if (200..300).contains(&r.status()) => Ok(format!("r2://{}/{key}", self.bucket)),
+            Ok(r) => Err(EngineErr::unavailable(format!(
+                "R2 PUT unexpected status {}",
+                r.status()
+            ))),
+            Err(ureq::Error::Status(403, _)) => Err(EngineErr::unavailable(
+                "R2 PUT 403 — the credential is not write-scoped (need the one-shot RW grant)"
+                    .to_string(),
+            )),
+            Err(ureq::Error::Status(s, _)) => {
+                Err(EngineErr::unavailable(format!("R2 PUT status {s}")))
+            }
+            Err(e) => Err(EngineErr::unavailable(format!("R2 PUT transport: {e}"))),
+        }
+    }
+}
+
+/// hugit's R2 as the mutable-manifest source for the git-from-CAS loader: maps
+/// the [`R2Config::get_object`] `EngineErr` to the loader's `String` error.
+impl crate::cas::R2Get for R2Config {
+    fn get_object(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
+        R2Config::get_object(self, key).map_err(|e| format!("R2 get {key}: {}", e.reason))
+    }
+}
+
+/// hugit's R2 as the mutable-manifest write target for the git-ingest bin: maps
+/// the [`R2Config::put_object`] `EngineErr` to the ingest's `String` error.
+impl crate::cas::R2Put for R2Config {
+    fn put_object(&self, key: &str, body: &[u8]) -> Result<(), String> {
+        R2Config::put_object(self, key, body)
+            .map(|_| ())
+            .map_err(|e| format!("R2 put {key}: {}", e.reason))
+    }
+}
+
+/// Build the git content seam from the live CoreLink CAS (the F-switch target):
+/// `HUGIT_SERVE_CAS_*` → a configured [`crate::cas::CasClient`]; the mutable
+/// `refs.json`/`oid-index.json` manifests from hugit's R2 (the same
+/// `HUGIT_SERVE_R2_*` config the log source uses); the single launch repo slug
+/// from `HUGIT_SERVE_CAS_REPO`. Fail-closed (→ a fatal boot error) on any missing
+/// piece or integrity violation. Tenant for the R2 manifest keys is
+/// `HUGIT_SERVE_CAS_TENANT_ID` (the CAS path tenant). Not exercised by the
+/// hermetic handler tests (those call [`crate::cas::load_from_cas`] with doubles).
+fn load_from_cas_env() -> Result<
+    (
+        hugit_proto::CasObjectSource,
+        gix_hash::ObjectId,
+        std::collections::BTreeMap<String, String>,
+    ),
+    String,
+> {
+    let cas = crate::cas::CasClient::from_env()
+        .map_err(|e| format!("HUGIT_SERVE_CAS_*: CAS client not configured: {e}"))?;
+    let tenant = std::env::var("HUGIT_SERVE_CAS_TENANT_ID")
+        .map_err(|_| "HUGIT_SERVE_CAS_TENANT_ID is not set (CAS source selected)".to_string())?;
+    let repo = std::env::var("HUGIT_SERVE_CAS_REPO")
+        .map_err(|_| "HUGIT_SERVE_CAS_REPO is not set (CAS source selected)".to_string())?;
+    if !is_safe_repo_slug(&repo) {
+        return Err(format!(
+            "HUGIT_SERVE_CAS_REPO is not a safe repo slug: {repo:?}"
+        ));
+    }
+    // The mutable manifests live in hugit's R2 (the same dedicated bucket the log
+    // source reads). The CAS source requires the R2 cred to be present too.
+    let r2 =
+        R2Config::from_env().map_err(|e| format!("CAS source needs the R2 manifest store: {e}"))?;
+    crate::cas::load_from_cas(&cas, &r2, &tenant, &repo)
 }
 
 /// Load a git directory into a [`CasObjectSource`] and resolve HEAD's root-tree
