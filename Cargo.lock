@@ -1044,12 +1044,14 @@ dependencies = [
 name = "hugit-serve"
 version = "0.1.0"
 dependencies = [
+ "gix-hash",
  "hex",
  "hmac",
  "hugit-cli",
  "hugit-contracts",
  "hugit-http-contracts",
  "hugit-ledger",
+ "hugit-proto",
  "hugit-refstore",
  "serde",
  "serde_json",

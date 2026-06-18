@@ -237,12 +237,16 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
                 return err(EngineErr::not_found());
             }
             // The query (stripped above) is re-passed for the param-driven reads.
+            // The git content seam (`blob`/`edit`) is threaded from state; `None`
+            // when no `HUGIT_SERVE_GIT_DIR` is wired → those reads 404 honestly.
             dispatch_repo(
                 repo,
                 tail,
                 url.split('?').nth(1).unwrap_or(""),
                 &log,
                 &principal,
+                state.git_source.as_ref(),
+                state.git_root_tree.as_ref(),
             )
         }
         // Identity-scoped reads (/v1/me/*): no {repo} path param — they bind the
@@ -715,6 +719,8 @@ fn dispatch_repo(
     query: &str,
     log: &hugit_refstore::EventLog,
     principal: &[String],
+    git_source: Option<&std::sync::Arc<hugit_proto::CasObjectSource>>,
+    root_tree: Option<&gix_hash::ObjectId>,
 ) -> (u16, String) {
     match tail {
         ["home"] => ok(&handlers::build_home(log, repo)),
@@ -798,6 +804,26 @@ fn dispatch_repo(
         }
         ["erasure"] => ok(&handlers::build_erasure(log, repo)),
         ["admin", "overview"] => ok(&handlers::build_admin_overview(log, repo)),
+        // File-content reads (PS-18 reversal): walk the git tree to the blob and
+        // serve its scrubbed content. `{*path}` is the multi-segment tail (joined
+        // with '/'); an EMPTY tail is not a file → fall through to 404. A path that
+        // does not resolve (or no git content seam wired) → 404, no content oracle.
+        // NOTE: distinct from the POST `edit/.../propose` WRITE route, handled by
+        // `dispatch_repo_write` — this is the GET read of the file to edit.
+        ["blob", rest @ ..] if !rest.is_empty() => {
+            let path = rest.join("/");
+            match handlers::build_blob(log, repo, &path, git_source, root_tree) {
+                Some(vm) => ok(&vm),
+                None => err(EngineErr::not_found()),
+            }
+        }
+        ["edit", rest @ ..] if !rest.is_empty() => {
+            let path = rest.join("/");
+            match handlers::build_edit(log, repo, &path, git_source, root_tree) {
+                Some(vm) => ok(&vm),
+                None => err(EngineErr::not_found()),
+            }
+        }
         _ => err(EngineErr::not_found()),
     }
 }
