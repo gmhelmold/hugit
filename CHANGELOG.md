@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(cli): **`hugit diag` + `hugit policy edit` go REAL — the last two reserved verbs (no stubs).**
+  Closes the design-gated pair from the honest audit; both are genuinely wired, not `not_implemented`.
+  - **`hugit diag --log --def-digest <hex> [--toolchain <hex>]`**: drives the REAL `hugit-diag`
+    bisect engine (`on_red_signal`) over a **log-backed `CheckOracle`** — projects an ordered
+    `History` from the `check.recorded` events on the canonical log (grouped by the
+    `(def_digest, toolchain_digest)` axes, chain-seq order) and answers each probe from the recorded
+    `exit` codes via `hugit_refstore::compute_memo_key` (no live ActionCache, no re-execution). Emits
+    the `DiagnosisObject` (culprit ref, diff-vs-green, suspect targets, bisect path) read-only — no
+    log append (no `diag.recorded` kind; mirrors `checks show`). A green/empty tip → honest
+    `{"diagnosis": null}` (exit 0); unknown def → `no_history`; >1 toolchain w/o `--toolchain` →
+    `ambiguous_toolchain`. Adds the `hugit-diag` dep + graduates `diag` RESERVED→`HUGIT_VERBS`.
+  - **`hugit policy edit --log --gate <id> (--enable|--disable) [--principal]`**: reconstructs the
+    current gate set by folding `policy.change` events over the new `hugit_policy::house_gates()`
+    baseline (latest-wins), toggles the named gate's `enabled`, and records the `{old, new}`
+    `policy.change` through the D14 `(Human, Endpoint::Policy)` guard (Human-only — a non-human
+    principal is denied fail-closed). Closed house set (`dco`/`changelog`/`secrets`); unknown gate →
+    `unknown_gate`/exit-2; a no-op edit records nothing (`changed:false`). `policy edit` joins the
+    `policy test` shipped in #145.
+  - `house_gates()` extracted in `hugit-policy` (no behavior change — `Engine::house` builds from it).
+    `diag` graduated in lockstep with `Command::Diag` (no-drift oracle ⑥ holds). clippy `-D warnings`
+    clean. This empties the design-gated backlog: every CLI verb the audit flagged is now real.
+
 - feat(serve): **`GET /v1/repos/{repo}/blob/{*path}` + `/edit/{*path}` serve REAL file content (roadmap W5 — reverses PS-18).**
   The owner-decided reversal of PS-18: blob/edit stop being honest-default fixtures and serve the
   actual file bytes from the git tree, via the new `hugit_proto::resolve_blob_at_path`.

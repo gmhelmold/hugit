@@ -24,6 +24,7 @@ use clap::{Parser, Subcommand};
 
 use hugit_cli::campaign::{self, CampaignArgs};
 use hugit_cli::checks::{self, CheckArgs, ChecksArgs};
+use hugit_cli::diag::{self, DiagArgs};
 use hugit_cli::export::{self, AccountState, Corpus};
 use hugit_cli::impact::{ImpactQuery, compute_impact};
 use hugit_cli::intent::{self, IntentArgs};
@@ -94,6 +95,8 @@ enum Command {
     Reject(DecisionArgs),
     /// Append a session note onto the canonical log (roadmap W3).
     Journal(JournalArgs),
+    /// Bisect a red check history into a structured diagnosis (read-only).
+    Diag(DiagArgs),
 }
 
 // ── why ────────────────────────────────────────────────────────────────────
@@ -537,6 +540,7 @@ fn main() -> ExitCode {
         Command::Approve(a) => return verdict::run_approve(a),
         Command::Reject(a) => return verdict::run_reject(a),
         Command::Journal(a) => return journal::run(a),
+        Command::Diag(a) => return diag::run(a),
     };
     match result {
         Ok(json) => {

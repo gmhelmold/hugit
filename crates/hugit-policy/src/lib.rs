@@ -106,6 +106,37 @@ pub struct GateDescriptor {
 
 // ─── engine ──────────────────────────────────────────────────────────────────
 
+/// The canonical house gate set (the baseline `Engine::house` enables).
+///
+/// Exposed so consumers can reconstruct the gate state without reaching into the
+/// private `Engine::gates` field — e.g. `hugit policy edit` folds `policy.change`
+/// events over THIS baseline to compute the current gate set. `Engine::house`
+/// builds its descriptors from this exact list, so the local≡forge gate set and
+/// the edit baseline cannot drift.
+pub fn house_gates() -> Vec<GateDescriptor> {
+    vec![
+        GateDescriptor {
+            id: "dco".into(),
+            description: "Every non-merge commit must carry a Signed-off-by: trailer (DCO).".into(),
+            enabled: true,
+        },
+        GateDescriptor {
+            id: "changelog".into(),
+            description:
+                "feat/fix commits require a non-empty ## [Unreleased] section in CHANGELOG.md."
+                    .into(),
+            enabled: true,
+        },
+        GateDescriptor {
+            id: "secrets".into(),
+            description:
+                "No commit may introduce obvious secret patterns (API keys, tokens, passwords)."
+                    .into(),
+            enabled: true,
+        },
+    ]
+}
+
 /// Type alias for a gate evaluator function.
 pub type GateFn = fn(&EvalContext) -> GateOutcome;
 
@@ -136,30 +167,7 @@ impl Engine {
         registry.insert("changelog".into(), changelog::eval);
         registry.insert("secrets".into(), secrets::eval);
 
-        let gates = vec![
-            GateDescriptor {
-                id: "dco".into(),
-                description: "Every non-merge commit must carry a Signed-off-by: trailer (DCO)."
-                    .into(),
-                enabled: true,
-            },
-            GateDescriptor {
-                id: "changelog".into(),
-                description:
-                    "feat/fix commits require a non-empty ## [Unreleased] section in CHANGELOG.md."
-                        .into(),
-                enabled: true,
-            },
-            GateDescriptor {
-                id: "secrets".into(),
-                description:
-                    "No commit may introduce obvious secret patterns (API keys, tokens, passwords)."
-                        .into(),
-                enabled: true,
-            },
-        ];
-
-        Self::new(gates, registry)
+        Self::new(house_gates(), registry)
     }
 
     /// Evaluate all enabled gates against `ctx`.

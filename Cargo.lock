@@ -880,6 +880,7 @@ dependencies = [
  "hex",
  "hugit-checks",
  "hugit-contracts",
+ "hugit-diag",
  "hugit-ledger",
  "hugit-policy",
  "hugit-queue",

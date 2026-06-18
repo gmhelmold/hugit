@@ -20,6 +20,7 @@
 
 pub mod campaign;
 pub mod checks;
+pub mod diag;
 pub mod export;
 pub mod ident;
 pub mod impact;
@@ -110,6 +111,11 @@ pub const HUGIT_VERBS: &[&str] = &[
     "approve", // hugit approve --intent --log       — record a single-lens approve
     "reject",  // hugit reject --intent --log        — record a single-lens reject
     "journal", // hugit journal note --log --note     — append a session note
+    // Diagnosis verb (roadmap W) — graduated from RESERVED, REAL. `diag` drives
+    // the hugit-diag bisect engine over a log-backed CheckOracle projected from
+    // `check.recorded` events — read-only structured diagnosis. LIVE the moment
+    // main.rs routes it; the no-drift oracle requires it here.
+    "diag", // hugit diag --log --def-digest [--toolchain] — bisect a red check history
 ];
 
 /// Planned hugit verb tokens that are RESERVED but NOT yet dispatched.
@@ -125,8 +131,8 @@ pub const HUGIT_VERBS: &[&str] = &[
 pub const HUGIT_RESERVED_VERBS: &[&str] = &[
     // Phase B — Orchestrator / Worker (planned)
     "land", // hugit land [--queue]        — union-testing landing queue
-    // (`check` + `verdict` graduated to HUGIT_VERBS at W0 — wedge EXECUTE wave.)
-    "diag", // hugit diag <failure>        — structured diagnosis
+    // (`check` + `verdict` graduated to HUGIT_VERBS at W0 — wedge EXECUTE wave;
+    // `diag` graduated at the diagnosis wave — log-backed bisect.)
     // Phase C — Workspace + context (planned)
     "ws",  // hugit ws spawn/attach/snap/gc — claim-fenced workspaces
     "ctx", // hugit ctx snap / resume      — short-horizon session resume
