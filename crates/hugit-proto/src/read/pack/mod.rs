@@ -273,3 +273,376 @@ pub fn assemble_pack(
 pub fn parse_oid(hex: &str) -> Result<ObjectId, PackError> {
     ObjectId::from_hex(hex.as_bytes()).map_err(|_| PackError::InvalidOid(hex.to_string()))
 }
+
+/// Walk a git tree to resolve a repo-relative path to its blob (oid + raw bytes).
+///
+/// Splits `path` on '/', descends subtree-by-subtree from `root_tree`, and on the
+/// final segment returns the blob's (ObjectId, bytes). Returns Ok(None) if any
+/// segment is absent, an intermediate segment is not a tree, or the final entry
+/// is not a blob.
+///
+/// SECURITY: empty segments, "." and ".." are REJECTED (return Ok(None)) — the
+/// walk can never escape the tree. (Git trees can't contain these names anyway,
+/// but reject explicitly as defence-in-depth.)
+///
+/// The tree object parse reuses `gix_object::TreeRefIter` — the same libgit2-class
+/// decoder the closure walk in [`crate::read::serve`] uses — so the byte-level git
+/// tree format is never reimplemented here, only walked.
+pub fn resolve_blob_at_path(
+    src: &dyn ObjectSource,
+    root_tree: &ObjectId,
+    path: &str,
+) -> Result<Option<(ObjectId, Vec<u8>)>, PackError> {
+    let segments: Vec<&str> = path.split('/').collect();
+    // An empty `path` splits to a single empty segment; the loop's reject below
+    // catches it. Defence-in-depth: reject any traversal-unsafe segment up front.
+    let last = segments.len().saturating_sub(1);
+
+    let mut current_tree = *root_tree;
+    for (idx, segment) in segments.iter().enumerate() {
+        // SECURITY: never walk through an empty / "." / ".." segment. A git tree
+        // cannot legally contain these names, but reject explicitly so a crafted
+        // or corrupt tree can never be coaxed into escaping the root.
+        if segment.is_empty() || *segment == "." || *segment == ".." {
+            return Ok(None);
+        }
+
+        // Load + confirm the current object is a tree. (A non-tree intermediate
+        // means the path descends through a file — no such entry.)
+        let object = match src.get(&current_tree)? {
+            Some(o) => o,
+            None => return Ok(None),
+        };
+        if object.kind != ObjectKind::Tree {
+            return Ok(None);
+        }
+
+        // Parse the tree's entries with the canonical decoder and find this
+        // segment by exact filename match (git tree names are raw bytes).
+        let entries = gix_object::TreeRefIter::from_bytes(&object.data)
+            .entries()
+            .map_err(|e| PackError::InvalidOid(format!("malformed tree {current_tree}: {e}")))?;
+        let entry = entries
+            .into_iter()
+            .find(|e| e.filename == segment.as_bytes());
+        let entry = match entry {
+            Some(e) => e,
+            None => return Ok(None),
+        };
+        let entry_oid = entry.oid.to_owned();
+
+        if idx == last {
+            // Final segment: it must be a blob (regular, executable, or symlink —
+            // git modes 100644 / 100755 / 120000). A tree (or gitlink) here is not
+            // a file at this path.
+            if !entry.mode.is_blob_or_symlink() {
+                return Ok(None);
+            }
+            let blob = match src.get(&entry_oid)? {
+                Some(o) => o,
+                None => return Ok(None),
+            };
+            if blob.kind != ObjectKind::Blob {
+                return Ok(None);
+            }
+            return Ok(Some((entry_oid, blob.data)));
+        }
+
+        // Intermediate segment: it must be a tree to descend into.
+        if !entry.mode.is_tree() {
+            return Ok(None);
+        }
+        current_tree = entry_oid;
+    }
+
+    // Unreachable for any non-empty `path`: the final segment always returns. An
+    // empty `path` is rejected by the empty-segment guard on the first iteration.
+    Ok(None)
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+
+    /// Git tree mode for a regular file blob.
+    const MODE_BLOB: &str = "100644";
+    /// Git tree mode for an executable blob.
+    const MODE_EXE: &str = "100755";
+    /// Git tree mode for a symlink blob.
+    const MODE_LINK: &str = "120000";
+    /// Git tree mode for a subtree.
+    const MODE_TREE: &str = "40000";
+
+    /// One entry to encode into a tree object.
+    struct TreeEntry<'a> {
+        mode: &'a str,
+        name: &'a str,
+        oid: ObjectId,
+    }
+
+    /// Build the raw bytes of a git tree object in the on-the-wire format:
+    /// a concatenation of `<ascii-octal-mode> <name>\0<20-byte-binary-oid>` with
+    /// NO separators. Entries are sorted by name, as git canonically requires, so
+    /// the bytes round-trip through `gix_object::TreeRefIter`.
+    fn build_tree_bytes(mut entries: Vec<TreeEntry<'_>>) -> Vec<u8> {
+        entries.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
+        let mut out = Vec::new();
+        for e in &entries {
+            out.extend_from_slice(e.mode.as_bytes());
+            out.push(b' ');
+            out.extend_from_slice(e.name.as_bytes());
+            out.push(0);
+            out.extend_from_slice(e.oid.as_bytes());
+        }
+        out
+    }
+
+    /// Build + insert a tree object; return its oid.
+    fn insert_tree(src: &mut CasObjectSource, entries: Vec<TreeEntry<'_>>) -> ObjectId {
+        src.insert_raw(ObjectKind::Tree, build_tree_bytes(entries))
+    }
+
+    #[test]
+    fn round_trip_tree_bytes_parse_back() {
+        // Prove the hand-built wire bytes decode into the entries we put in.
+        let mut src = CasObjectSource::new();
+        let blob_a = src.insert_raw(ObjectKind::Blob, b"alpha".to_vec());
+        let blob_b = src.insert_raw(ObjectKind::Blob, b"beta".to_vec());
+        let raw = build_tree_bytes(vec![
+            TreeEntry {
+                mode: MODE_BLOB,
+                name: "b.txt",
+                oid: blob_b,
+            },
+            TreeEntry {
+                mode: MODE_BLOB,
+                name: "a.txt",
+                oid: blob_a,
+            },
+        ]);
+        let entries = gix_object::TreeRefIter::from_bytes(&raw)
+            .entries()
+            .expect("hand-built tree bytes must decode");
+        assert_eq!(entries.len(), 2);
+        // Sorted by name on build: a.txt then b.txt.
+        assert_eq!(entries[0].filename, "a.txt".as_bytes());
+        assert_eq!(entries[0].oid.to_owned(), blob_a);
+        assert!(entries[0].mode.is_blob());
+        assert_eq!(entries[1].filename, "b.txt".as_bytes());
+        assert_eq!(entries[1].oid.to_owned(), blob_b);
+    }
+
+    #[test]
+    fn resolves_top_level_file() {
+        let mut src = CasObjectSource::new();
+        let blob = src.insert_raw(ObjectKind::Blob, b"hello world".to_vec());
+        let root = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_BLOB,
+                name: "README.md",
+                oid: blob,
+            }],
+        );
+
+        let got = resolve_blob_at_path(&src, &root, "README.md").unwrap();
+        let (oid, bytes) = got.expect("top-level file resolves");
+        assert_eq!(oid, blob);
+        assert_eq!(bytes, b"hello world");
+    }
+
+    #[test]
+    fn resolves_nested_file() {
+        // a/b/c.txt — two levels of subtree.
+        let mut src = CasObjectSource::new();
+        let blob = src.insert_raw(ObjectKind::Blob, b"deep content".to_vec());
+        let tree_b = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_BLOB,
+                name: "c.txt",
+                oid: blob,
+            }],
+        );
+        let tree_a = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_TREE,
+                name: "b",
+                oid: tree_b,
+            }],
+        );
+        let root = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_TREE,
+                name: "a",
+                oid: tree_a,
+            }],
+        );
+
+        let (oid, bytes) = resolve_blob_at_path(&src, &root, "a/b/c.txt")
+            .unwrap()
+            .expect("nested file resolves");
+        assert_eq!(oid, blob);
+        assert_eq!(bytes, b"deep content");
+    }
+
+    #[test]
+    fn resolves_executable_and_symlink_blobs() {
+        // 100755 and 120000 are blobs per the contract.
+        let mut src = CasObjectSource::new();
+        let exe = src.insert_raw(ObjectKind::Blob, b"#!/bin/sh\n".to_vec());
+        let link = src.insert_raw(ObjectKind::Blob, b"target/path".to_vec());
+        let root = insert_tree(
+            &mut src,
+            vec![
+                TreeEntry {
+                    mode: MODE_EXE,
+                    name: "run.sh",
+                    oid: exe,
+                },
+                TreeEntry {
+                    mode: MODE_LINK,
+                    name: "ln",
+                    oid: link,
+                },
+            ],
+        );
+
+        let (oid_e, _) = resolve_blob_at_path(&src, &root, "run.sh")
+            .unwrap()
+            .unwrap();
+        assert_eq!(oid_e, exe);
+        let (oid_l, b) = resolve_blob_at_path(&src, &root, "ln").unwrap().unwrap();
+        assert_eq!(oid_l, link);
+        assert_eq!(b, b"target/path");
+    }
+
+    #[test]
+    fn missing_path_is_none() {
+        let mut src = CasObjectSource::new();
+        let blob = src.insert_raw(ObjectKind::Blob, b"x".to_vec());
+        let root = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_BLOB,
+                name: "present.txt",
+                oid: blob,
+            }],
+        );
+
+        assert!(
+            resolve_blob_at_path(&src, &root, "absent.txt")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            resolve_blob_at_path(&src, &root, "no/such/path.txt")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn path_through_a_non_tree_is_none() {
+        // present.txt is a file; descending "into" it must be None, not an error.
+        let mut src = CasObjectSource::new();
+        let blob = src.insert_raw(ObjectKind::Blob, b"x".to_vec());
+        let root = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_BLOB,
+                name: "present.txt",
+                oid: blob,
+            }],
+        );
+
+        assert!(
+            resolve_blob_at_path(&src, &root, "present.txt/inner")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn final_entry_being_a_tree_is_none() {
+        // A directory at the final segment is not a blob.
+        let mut src = CasObjectSource::new();
+        let blob = src.insert_raw(ObjectKind::Blob, b"x".to_vec());
+        let sub = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_BLOB,
+                name: "f.txt",
+                oid: blob,
+            }],
+        );
+        let root = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_TREE,
+                name: "dir",
+                oid: sub,
+            }],
+        );
+
+        assert!(resolve_blob_at_path(&src, &root, "dir").unwrap().is_none());
+        // But the file inside it still resolves.
+        assert!(
+            resolve_blob_at_path(&src, &root, "dir/f.txt")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn rejects_traversal_segments() {
+        // SECURITY: empty / "." / ".." segments are rejected → Ok(None), never an
+        // escape and never an error.
+        let mut src = CasObjectSource::new();
+        let blob = src.insert_raw(ObjectKind::Blob, b"x".to_vec());
+        let sub = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_BLOB,
+                name: "b",
+                oid: blob,
+            }],
+        );
+        let root = insert_tree(
+            &mut src,
+            vec![
+                TreeEntry {
+                    mode: MODE_TREE,
+                    name: "a",
+                    oid: sub,
+                },
+                TreeEntry {
+                    mode: MODE_BLOB,
+                    name: "x",
+                    oid: blob,
+                },
+            ],
+        );
+
+        for bad in ["../x", "a/../b", "./x", "", "a//b"] {
+            assert!(
+                resolve_blob_at_path(&src, &root, bad).unwrap().is_none(),
+                "traversal-unsafe path {bad:?} must resolve to None"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_root_tree_is_none() {
+        // A root oid absent from the store → Ok(None), not an error.
+        let src = CasObjectSource::new();
+        let fake = parse_oid("0000000000000000000000000000000000000001").unwrap();
+        assert!(
+            resolve_blob_at_path(&src, &fake, "anything")
+                .unwrap()
+                .is_none()
+        );
+    }
+}

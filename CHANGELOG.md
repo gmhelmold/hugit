@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(proto): **`resolve_blob_at_path` — git tree-walk path→blob over the CAS (roadmap W5 foundation).**
+  The missing bridge between a repo-relative path and its blob content. `CasObjectSource` /
+  `ObjectSource` only exposed `get(oid)` / `contains(oid)`; nothing resolved `(tree, "src/foo.rs")`
+  → blob oid. New `hugit_proto::resolve_blob_at_path(src, root_tree, path)` walks the tree
+  subtree-by-subtree via the canonical `gix_object` decoder (git formats are NOT reimplemented),
+  returning `Ok(Some((oid, bytes)))` or `Ok(None)` (absent / intermediate-not-a-tree /
+  final-not-a-blob). **Security**: empty / `.` / `..` segments are rejected (`Ok(None)`) — the
+  walk can never escape the root; symlinks are returned as blob content, never *followed*;
+  gitlinks → `None`. Hermetic — `CasObjectSource::new()` is the test impl, no live tenant. 9 unit
+  tests incl. nested paths, exe/symlink modes, and the full traversal-rejection set. This is the
+  foundation the blob/edit serve reads (W5, reversing PS-18) build on; not yet wired to a handler.
+
 - feat(cli): **`hugit approve` / `hugit reject` / `hugit journal note` go REAL (roadmap W3 — no stubs).**
   Three more stakeholder/session verbs graduated RESERVED→`HUGIT_VERBS` with genuine wiring.
   - **`hugit approve` / `hugit reject` --intent --log [--tree-hash] [--recorded-at]**: thin
