@@ -881,6 +881,7 @@ dependencies = [
  "hugit-checks",
  "hugit-contracts",
  "hugit-ledger",
+ "hugit-policy",
  "hugit-queue",
  "hugit-refstore",
  "serde",

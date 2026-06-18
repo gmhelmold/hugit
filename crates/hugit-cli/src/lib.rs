@@ -25,12 +25,14 @@ pub mod ident;
 pub mod impact;
 pub mod intent;
 pub mod issue;
+pub mod policy;
 pub mod porcelain;
 pub mod pr;
 pub mod queue;
 pub mod redaction;
 pub mod repo;
 pub mod tournament;
+pub mod undo;
 pub mod verdict;
 pub mod why;
 
@@ -91,6 +93,14 @@ pub const HUGIT_VERBS: &[&str] = &[
     // ADR-0006). LIVE the moment main.rs routes it; the no-drift oracle requires
     // it here, not in HUGIT_RESERVED_VERBS.
     "issue", // hugit issue transition --log --n --to [--priority]
+    // Stakeholder verbs (roadmap W3) — graduated from RESERVED with REAL wiring
+    // (not stubs). `undo` appends a compensating event through the D14 Human-only
+    // guard (hugit_refstore::undo); `policy test` runs the house gate set
+    // (hugit_policy::Engine::house) — the SAME evaluator the forge landing path
+    // uses. LIVE the moment main.rs routes them; the no-drift oracle requires
+    // them here, not in HUGIT_RESERVED_VERBS.
+    "undo",   // hugit undo --log --seq [--actor]   — event-sourced compensating undo
+    "policy", // hugit policy test --context        — local≡forge gate preview
 ];
 
 /// Planned hugit verb tokens that are RESERVED but NOT yet dispatched.
@@ -112,13 +122,13 @@ pub const HUGIT_RESERVED_VERBS: &[&str] = &[
     "ws",  // hugit ws spawn/attach/snap/gc — claim-fenced workspaces
     "ctx", // hugit ctx snap / resume      — short-horizon session resume
     // Phase D — The forge verbs (planned)
-    "ledger",   // hugit ledger [--live]    — default history view
-    "review",   // hugit review <intent>    — grounded-evidence answers
-    "approve",  // hugit approve            — policy-gated approval
-    "reject",   // hugit reject             — policy-gated rejection
-    "watch",    // hugit watch              — TUI forge monitoring
-    "undo",     // hugit undo <op>          — event-sourced undo
-    "policy",   // hugit policy edit / test — declarative gate management
+    "ledger",  // hugit ledger [--live]    — default history view
+    "review",  // hugit review <intent>    — grounded-evidence answers
+    "approve", // hugit approve            — policy-gated approval
+    "reject",  // hugit reject             — policy-gated rejection
+    "watch",   // hugit watch              — TUI forge monitoring
+    // (`undo` + `policy` graduated to HUGIT_VERBS at W3 — stakeholder verbs,
+    // REAL-wired. `policy` ships `test` only; `policy edit` stays deferred.)
     "dispatch", // hugit dispatch <intent>  — workspace + context packet
     "fleet",    // hugit fleet              — machine-readable fleet state
     "journal",  // hugit journal note       — session note
