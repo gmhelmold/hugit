@@ -28,6 +28,7 @@ use hugit_cli::export::{self, AccountState, Corpus};
 use hugit_cli::impact::{ImpactQuery, compute_impact};
 use hugit_cli::intent::{self, IntentArgs};
 use hugit_cli::issue::{self, IssueArgs};
+use hugit_cli::journal::{self, JournalArgs};
 use hugit_cli::policy::{self, PolicyArgs};
 use hugit_cli::porcelain::PorcelainError;
 use hugit_cli::pr::{self, PrArgs};
@@ -35,7 +36,7 @@ use hugit_cli::queue::{self, QueueArgs};
 use hugit_cli::repo::{self, RepoArgs};
 use hugit_cli::tournament::{MAX_N_POLICY, produce_candidates};
 use hugit_cli::undo::{self, UndoArgs};
-use hugit_cli::verdict::{self, VerdictArgs};
+use hugit_cli::verdict::{self, DecisionArgs, VerdictArgs};
 use hugit_cli::why::resolver::LogEntry;
 use hugit_cli::why::{WhyQuery, resolve_why};
 
@@ -87,6 +88,12 @@ enum Command {
     Undo(UndoArgs),
     /// Declarative gate management: test — preview the house gates (roadmap W3).
     Policy(PolicyArgs),
+    /// Record a single-lens APPROVE verdict for an intent (roadmap W3).
+    Approve(DecisionArgs),
+    /// Record a single-lens REJECT verdict for an intent (roadmap W3).
+    Reject(DecisionArgs),
+    /// Append a session note onto the canonical log (roadmap W3).
+    Journal(JournalArgs),
 }
 
 // ── why ────────────────────────────────────────────────────────────────────
@@ -527,6 +534,9 @@ fn main() -> ExitCode {
         // Stakeholder verbs (W3) — REAL-wired, own their exit code (the one law).
         Command::Undo(a) => return undo::run(a),
         Command::Policy(a) => return policy::run(a),
+        Command::Approve(a) => return verdict::run_approve(a),
+        Command::Reject(a) => return verdict::run_reject(a),
+        Command::Journal(a) => return journal::run(a),
     };
     match result {
         Ok(json) => {

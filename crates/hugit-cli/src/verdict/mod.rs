@@ -400,6 +400,75 @@ fn record(args: VerdictArgs) -> Result<Value, PorcelainError> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// `hugit approve` / `hugit reject` — single-decision convenience verbs (W3)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// These are the stakeholder approve/reject verbs. They are thin, parity-faithful
+// wrappers over the SAME [`record`] path `hugit verdict` uses: each records a
+// single-lens `verdict.recorded` event with lens `"human-approval"` and result
+// `approve` / `reject`. This mirrors the live serve verb `POST /prs/{n}/verdict`
+// (which maps `approve` / `request-changes` into the same `verdict.recorded`
+// kind through `(Orchestrator, Land)`), so the CLI and the web surface produce
+// the identical wire fact — ADR-0006 (no web-only verb), no new D14 endpoint, no
+// matrix change. They always store (an unrecorded approval is meaningless), so
+// there is no `--store` flag.
+
+/// The fixed lens label a stakeholder approve/reject is recorded under.
+const STAKEHOLDER_LENS: &str = "human-approval";
+
+/// Arguments for `hugit approve` / `hugit reject` (identical shape).
+#[derive(clap::Args, Debug)]
+pub struct DecisionArgs {
+    /// The intent / change id to approve or reject.
+    #[arg(long)]
+    pub intent: String,
+    /// Path to the canonical JSON event log the decision is appended to.
+    #[arg(long)]
+    pub log: PathBuf,
+    /// Workspace Merkle tree hash of the reviewed snapshot (honest-default empty;
+    /// the real hash is a P2 live-infra seam — same as `hugit verdict`).
+    #[arg(long = "tree-hash", default_value = "")]
+    pub tree_hash: String,
+    /// Unix-ms timestamp to stamp the appended event with (0 = now / left as-is).
+    #[arg(long = "recorded-at", default_value_t = 0)]
+    pub recorded_at: u64,
+}
+
+/// `hugit approve` — record a single-lens APPROVE verdict for `--intent`.
+pub fn run_approve(args: DecisionArgs) -> ExitCode {
+    run_decision(args, "approve")
+}
+
+/// `hugit reject` — record a single-lens REJECT verdict for `--intent`.
+pub fn run_reject(args: DecisionArgs) -> ExitCode {
+    run_decision(args, "reject")
+}
+
+/// Build a single-lens [`VerdictArgs`] from a [`DecisionArgs`] + a fixed result
+/// and route it through the shared [`record`] path — one producer, one wire kind.
+fn run_decision(args: DecisionArgs, result: &str) -> ExitCode {
+    let verdict_args = VerdictArgs {
+        intent: args.intent,
+        log: args.log,
+        store: true,
+        lens: vec![STAKEHOLDER_LENS.to_string()],
+        result: vec![result.to_string()],
+        tree_hash: args.tree_hash,
+        recorded_at: args.recorded_at,
+    };
+    match record(verdict_args) {
+        Ok(value) => {
+            println!("{value}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            println!("{}", e.to_json());
+            e.exit_code()
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -708,6 +777,83 @@ mod recorder_tests {
         // intent-1's latest is still its approve, so an approve re-run dedups.
         let wanted = vec![("security".to_string(), Verdict::Approve)];
         assert!(find_existing_verdict(&log, "intent-1", &wanted).is_some());
+    }
+
+    /// A scratch log bootstrapped with one record (no `intent.landed`, so the
+    /// existence guard stays permissive) for driving `record` end-to-end.
+    fn scratch_log(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "hugit-decision-{}-{}-{:?}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("L.json");
+        let mut el = EventLog::new();
+        el.append_for_test("repo.init", vec!["orchestrator:hugit".to_string()], "{}", 0);
+        std::fs::write(&path, serde_json::to_string_pretty(el.records()).unwrap()).unwrap();
+        path
+    }
+
+    /// `hugit approve` records a single-lens `human-approval:approve` verdict that
+    /// aggregates to approve — exercising the exact VerdictArgs run_approve builds.
+    #[test]
+    fn single_lens_approve_records_approve_verdict() {
+        let path = scratch_log("approve");
+        let v = record(VerdictArgs {
+            intent: "i1".to_string(),
+            log: path.clone(),
+            store: true,
+            lens: vec![STAKEHOLDER_LENS.to_string()],
+            result: vec!["approve".to_string()],
+            tree_hash: String::new(),
+            recorded_at: 0,
+        })
+        .expect("approve records");
+        assert_eq!(v["aggregate"], "approve");
+        assert_eq!(v["stored"], true);
+        let recs: Vec<serde_json::Value> =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let vr = recs
+            .iter()
+            .find(|r| r["kind"] == VERDICT_RECORDED_KIND)
+            .expect("verdict.recorded appended");
+        let vo: VerdictObject = serde_json::from_str(vr["payload"].as_str().unwrap()).unwrap();
+        assert_eq!(vo.verdict, Verdict::Approve);
+        assert_eq!(
+            vo.claims_checked,
+            vec!["human-approval:approve".to_string()]
+        );
+    }
+
+    /// `hugit reject` records a single-lens `human-approval:reject` verdict that
+    /// aggregates to reject.
+    #[test]
+    fn single_lens_reject_records_reject_verdict() {
+        let path = scratch_log("reject");
+        let v = record(VerdictArgs {
+            intent: "i1".to_string(),
+            log: path.clone(),
+            store: true,
+            lens: vec![STAKEHOLDER_LENS.to_string()],
+            result: vec!["reject".to_string()],
+            tree_hash: String::new(),
+            recorded_at: 0,
+        })
+        .expect("reject records");
+        assert_eq!(v["aggregate"], "reject");
+        let recs: Vec<serde_json::Value> =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let vr = recs
+            .iter()
+            .find(|r| r["kind"] == VERDICT_RECORDED_KIND)
+            .expect("verdict.recorded appended");
+        let vo: VerdictObject = serde_json::from_str(vr["payload"].as_str().unwrap()).unwrap();
+        assert_eq!(vo.verdict, Verdict::Reject);
     }
 
     #[test]
