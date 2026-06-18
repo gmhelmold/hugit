@@ -24,6 +24,7 @@ pub mod export;
 pub mod ident;
 pub mod impact;
 pub mod intent;
+pub mod issue;
 pub mod porcelain;
 pub mod pr;
 pub mod queue;
@@ -85,6 +86,11 @@ pub const HUGIT_VERBS: &[&str] = &[
     // no-drift oracle requires them here, not in HUGIT_RESERVED_VERBS.
     "check",   // hugit check --def --log [--store] — memoized CI check (W-CHECK)
     "verdict", // hugit verdict …                   — adversarial verdict (W-VERDICT)
+    // Issue lifecycle (roadmap W2) — graduated from RESERVED. `issue transition`
+    // appends an `issue.transition` record (CLI parity with the serve verb,
+    // ADR-0006). LIVE the moment main.rs routes it; the no-drift oracle requires
+    // it here, not in HUGIT_RESERVED_VERBS.
+    "issue", // hugit issue transition --log --n --to [--priority]
 ];
 
 /// Planned hugit verb tokens that are RESERVED but NOT yet dispatched.

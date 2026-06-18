@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(cli): **`hugit issue transition` — CLI parity for `issue.transition` (roadmap W2).**
+  Restores ADR-0006 CLI parity (no web-only verb): the serve verb
+  `write_issue_transition` now has its `hugit issue transition --log --n --to
+  [--priority]` equivalent. Inline reimplementation (no `hugit-serve` dep — circular):
+  same 4-value `VALID_STATES`, priority scrubbed via the redaction seam, appended through
+  the D14 `(Orchestrator, Land)` guard, canonical-JSON scrub before the hash chain, atomic
+  `persist_log`. A missing `--log` is `log_not_found`/exit-2 (never a ghost record).
+  `issue` graduated RESERVED→`HUGIT_VERBS` + `Command::Issue` (the no-drift oracle holds).
+  Drafted by a spec→draft→verify fleet, lead-integrated; verify fixes applied (scrubbed
+  priority in the success JSON, `_lock` held without the no-op `map_err`, the public
+  `CampaignError` re-export, the missing-FILE test setup). clippy `-D warnings` clean.
+
 - feat(serve): **Wave A — 4 `/v1` read handlers go real + a knowledge honest-stub.** Closes
   the fixture/data-gated gap the honest audit flagged for the easy reads (the data-model
   reads — blob/edit/symbol — remain the owner-gated CAS seam, NOT in this wave).
