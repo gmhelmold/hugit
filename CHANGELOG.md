@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(serve): **git-from-CAS read path + ingest (the SOTA path for blob/edit/clone — replaces the baked-repo bridge).**
+  Pre-built against the CONFIRMED CoreLink CAS contract (Server TL, 2026-06-18) so blob/edit/`git clone`
+  can serve git objects from the CoreLink CAS instead of a local `HUGIT_SERVE_GIT_DIR` — no distroless
+  regression, no throwaway checkout. **Live-gated** on the (provisioned) CAS tenant + the githugr TL
+  wiring the env; hermetic + gate-green now.
+  - **`cas.rs` — `CasClient`** (the one contract-isolated module): `GET/PUT {CAS_URL}/v1/cas/{tenant}/{blake3}`,
+    `Authorization: Bearer <PAT>` + `x-corelink-scope: cas:r`/`cas:rw`, 200 bytes / 404+410→`Ok(None)` /
+    else `Err`; 64-hex key path-guard; HTTP behind a `CasTransport` trait (ureq live, in-memory in tests);
+    PAT held in a `Debug`-redacted config. CAS key = `blake3(bytes)` 64-hex (verified vs the canonical vector).
+  - **Double integrity (defense-in-depth):** on read, assert `blake3(bytes)==key` (CoreLink's content-verify,
+    mirrored our side — anti-poison) AND `insert_raw` re-derives the git SHA-1 AND that SHA-1 == the index oid.
+    Any mismatch / missing object / malformed framing → **fail-closed** (the engine refuses to start).
+  - **Mutable state in hugit R2 (CAS is immutable):** a refs manifest (`<tenant>/<repo>/refs.json` =
+    `{head, refs}`) + an oid→blake3 index (`<tenant>/<repo>/oid-index.json`), fetched via a new
+    `R2Config::get_object(key)`. `load_from_cas()` fills the SAME in-memory `CasObjectSource` the serve path
+    already uses → **AppState fields + blob/edit/clone call sites untouched.** `from_env`: `HUGIT_SERVE_CAS_URL`
+    → CAS, else `HUGIT_SERVE_GIT_DIR`, else 404.
+  - **Ingest bin (`bin/git-ingest.rs`):** enumerates the repo closure, PUTs each object's loose bytes under
+    its blake3 (cas:rw), writes refs.json + oid-index.json to R2 — the git analog of `bin/snapshot.rs`.
+  - Cross-tenant dedup + GDPR 410-erase inherited free (CoreLink CAS). 22 new hermetic `cas` tests (round-trip
+    ingest→load→`resolve_blob_at_path`, all fail-closed paths, the contract route/auth); `cargo test -p hugit-serve`
+    258 lib pass; clippy `-D warnings` clean; `cargo deny` bans ok. New deps single-version (`blake3 =1.5.5`
+    default-features-off + arrayref/arrayvec/constant_time_eq; `gix-object` = the line hugit-proto already resolves).
+    Deploy needs `HUGIT_SERVE_CAS_{URL,TENANT_ID,PAT}` + `HUGIT_SERVE_CAS_REPO` + the existing `HUGIT_SERVE_R2_*`.
+
 - feat(serve): **`git clone` works — git wire serving (upload-pack) goes live in the codebase.**
   The launch-blocking gap from the honest audit: `git clone` against the engine used to 404. Now
   `hugit-serve` speaks the git smart-HTTP wire over the clone/fetch logic `hugit-proto` already had.
