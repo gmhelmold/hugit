@@ -17,8 +17,10 @@ use std::process::ExitCode;
 
 use clap::Subcommand;
 
+pub mod edit;
 pub mod test;
 
+pub use edit::EditArgs;
 pub use test::TestArgs;
 
 /// `hugit policy <subcommand>`.
@@ -33,11 +35,14 @@ pub struct PolicyArgs {
 pub enum PolicyCommand {
     /// Run the house gate set against a context file and report each outcome.
     Test(TestArgs),
+    /// Toggle a house gate's enabled state (records a Human-only policy.change).
+    Edit(EditArgs),
 }
 
 /// Dispatch a `hugit policy` subcommand.
 pub fn run(args: PolicyArgs) -> ExitCode {
     match args.command {
         PolicyCommand::Test(a) => test::run(a),
+        PolicyCommand::Edit(a) => edit::run(a),
     }
 }
