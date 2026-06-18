@@ -10,6 +10,10 @@ allow = [
     "Unicode-3.0",
     "Unlicense",
     "BSD-3-Clause",
+    # arrayref (transitive via blake3, the git-from-CAS digest) uses BSD-2-Clause —
+    # the more-permissive sibling of BSD-3-Clause (drops the non-endorsement clause),
+    # OSI-approved + FSF-free, consistent with the permissive set already allowed.
+    "BSD-2-Clause",
     "ISC",
     # webpki-roots (transitive via ureq) uses Community Data License Agreement
     "CDLA-Permissive-2.0",
