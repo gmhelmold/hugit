@@ -1,9 +1,15 @@
 # Deploy cutover — make the W3/W5 work LIVE (engine redeploy + git-serving image)
 
-**From:** hugit techlead · **Date:** 2026-06-18 · **To:** owner (Cloudflare account) + githugr TL (engine image lane)
+**From:** hugit techlead · **Date:** 2026-06-18 · **To:** githugr TL (engine deploy lane) · **Relay:** owner
 **Why:** 8 PRs landed on hugit `main` today (#145–#150 + docs). The deployed engine
 (`engine.githugr.com`) still runs the **June-17 image** (`ENGINE_CACHE_BUST=2026-06-17-142-…`,
 commit `5782168`) — **none of today's work is live yet.** This is the exact, chewed cutover.
+
+> **Lanes (corrected):** BOTH steps below are the **githugr TL's** lane — that lane already owns the
+> `engine.githugr.com` Cloudflare deploy (it has run every prior engine cutover). The **owner does NOT
+> run any of this** — the owner's only role is to **relay this doc to the githugr TL** and make the one
+> posture call in STEP 2 (distroless → a git-capable base). hugit (this session) stays out of the
+> deploy per the engine-only fence.
 
 ## Probed live state (2026-06-18)
 | Surface | Live now | Note |
@@ -15,7 +21,7 @@ commit `5782168`) — **none of today's work is live yet.** This is the exact, c
 
 ---
 
-## STEP 1 — Redeploy the engine from current `main` (OWNER, ~5 min, no new infra)
+## STEP 1 — Redeploy the engine from current `main` (githugr TL, ~5 min, no new infra)
 
 This rebuilds `hugit-serve` from the current `../hugit` workspace and rolls a fresh container.
 Lights up **everything merged since `5782168`** that is log/R2-backed (Wave-A reads, issue/verdict

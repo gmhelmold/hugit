@@ -60,15 +60,20 @@
   <p>O motor <b>já está no ar</b> em <code>engine.githugr.com</code>, mas rodando
   <b>código velho (de 17/jun)</b>. <b>Nada que eu construí hoje está lá ainda.</b>
   O login real já funciona. Pra ligar o resto = <b>re-deployar</b> (subir de novo).</p>
-  <p style="margin-bottom:0">São <b>dois níveis</b>: 🟢 o que <b>você faz agora em ~5 min</b>,
-  e 🟡 uma parte que é do TL do githugr (eu já deixei a receita pronta).</p>
+  <p style="margin-bottom:0">⚠️ <b>Importante:</b> os dois passos abaixo são do
+  <b>TL do githugr</b> (é a faixa dele — ele já sobe o <code>engine.githugr.com</code>).
+  <b>Você (owner) não roda nada disso.</b> Teu papel é só <b>repassar este doc pro TL</b> e,
+  no Passo 2, decidir uma coisa de postura (te explico lá).</p>
 </div>
 
+<div class="tip" style="margin-top:0">📨 <b>O que cabe a VOCÊ:</b> repassar este guia pro TL do
+githugr. Só isso. O resto é mão dele.</div>
+
 <!-- ───────────────────────── STEP 1 ───────────────────────── -->
-<h2><span class="pill p-you">VOCÊ · ~5 min</span> Passo 1 — Re-deployar o motor</h2>
+<h2><span class="pill p-tl">TL githugr · ~5 min</span> Passo 1 — Re-deployar o motor</h2>
 <p style="margin-top:0;color:var(--mut)">Isso reconstrói o motor com o código de hoje e
 acende tudo que é baseado nos dados (os reads novos, paridade de verbos) + reconfirma o login.
-<b>É só ops, não precisa de nada novo.</b></p>
+<b>É só ops, não precisa de nada novo — e é a mão do TL do githugr, não tua.</b></p>
 
 <p class="where">⤵ Tudo isto é na pasta <code>../githugr</code> (NÃO no hugit).</p>
 
@@ -150,9 +155,10 @@ dados do R2, não de um repo. Então eles <b>não acendem só com o Passo 1</b> 
   <tr><td><code>git clone</code></td><td class="no">❌ (404)</td><td class="no">❌ ainda não</td><td class="ok">✅ acende</td></tr>
 </table>
 
-<div class="tip">🧭 <b>Resumo da estratégia:</b> faz o <b>Passo 1 agora</b> (rápido, é seu) →
-me diz o que o <code>readyz</code> respondeu → eu confirmo o que acendeu. O <b>Passo 2</b> a gente
-combina com o TL do githugr quando você quiser ligar o <code>git clone</code>/arquivos.</div>
+<div class="tip">🧭 <b>Resumo:</b> nenhum dos dois passos é tua mão de ops. <b>Você só repassa
+este doc pro TL do githugr.</b> O TL faz o Passo 1 (rápido) e te avisa; o Passo 2 (ligar o
+<code>git clone</code>/arquivos) ele faz quando combinarem — a única coisa que é decisão tua ali
+é a postura da imagem (perder um pouco do "mínimo" do container pra caber o <code>git</code>).</div>
 
 <div class="warn">
   <b>O que NÃO está nestes 2 passos</b> (continua dependendo de provisão maior, sem pressa):
