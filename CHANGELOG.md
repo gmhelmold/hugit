@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(serve): **`GET /v1/repos/{repo}/blob/{*path}` + `/edit/{*path}` serve REAL file content (roadmap W5 — reverses PS-18).**
+  The owner-decided reversal of PS-18: blob/edit stop being honest-default fixtures and serve the
+  actual file bytes from the git tree, via the new `hugit_proto::resolve_blob_at_path`.
+  - **`build_blob`/`build_edit`** resolve `(repo-relative path)` → blob bytes through the path→oid
+    tree-walk; `BlobVm.lines`/`EditVm.lines` are the REAL decoded content (UTF-8-lossy, CR-stripped,
+    1-based), `size` (human bytes), `lang` (extension→name). `blame`/`outline`/`tree`/`via_*` stay
+    honest-default (no attribution/symbol seam this wave — outline is W6). **Every line's text + the
+    URL path are scrubbed** at the read boundary (`crate::fmt::scrub` → `hugit_ledger::redact::apply`)
+    — file content may carry secrets, redacted on read.
+  - **No content oracle**: an unresolvable path, or the content seam not wired, returns `None` → 404
+    (never a fake blank file). `AppState` gains `git_source: Option<Arc<CasObjectSource>>` +
+    `git_root_tree`, populated at boot from `HUGIT_SERVE_GIT_DIR` (a `git rev-list`/`cat-file` eager
+    load that **fails closed** if the dir isn't a resolvable repo); absent → blob/edit 404 honestly.
+    This is the live-infra seam — the handlers are hermetically tested against a seeded
+    `CasObjectSource` (no live tenant); the boot loader is only exercised with a real git dir.
+  - `dispatch_repo` gains `blob`/`edit` GET arms (distinct from the POST `edit/.../propose` write).
+    Adds `hugit-proto` + `gix-hash` deps (cargo-deny `bans ok`, no new duplicate version). 10 new
+    hermetic tests (real content, nested paths, missing-path→None, absent-seam→None, secret
+    redaction); `cargo test -p hugit-serve` green; clippy `-D warnings` clean. `symbol` → W6.
+
 - feat(proto): **`resolve_blob_at_path` — git tree-walk path→blob over the CAS (roadmap W5 foundation).**
   The missing bridge between a repo-relative path and its blob content. `CasObjectSource` /
   `ObjectSource` only exposed `get(oid)` / `contains(oid)`; nothing resolved `(tree, "src/foo.rs")`
