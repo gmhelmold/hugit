@@ -39,8 +39,22 @@ adversarial round (1–13) + a SOTA sweep. The integrity spine is genuinely soli
 - **Identity = dev-token stub** live; the Clerk→engine-token exchange is code-complete
   (the CoreLink exchange endpoint is live), gated on the deploy env (`HUGIT_SESSION_EXCHANGE_URL`)
   + a stale deployed image + `hugit-prod-d1`.
-- **Absent entirely:** the semantic index (not even a WP). 10+ CLI verbs reserved but
-  unimplemented (approve/reject/undo/policy/ws/ctx/dispatch/fleet/journal/diag).
+- **Absent entirely:** the semantic index / symbol outline (needs a tree-sitter
+  `hugit-symbols` crate — W6, not built). CLI verbs still reserved-unimplemented:
+  ws/ctx/dispatch/fleet/land/ledger/review/watch + `diag` (its bisect backing is
+  auto-trigger-only — a manual verb needs a designed failure→History projection) +
+  `policy edit` (no gate-set mutation/persistence model yet).
+
+**Update 2026-06-18 (W3 + W5 landed — built, gate-green on `main`; live-serving still
+deploy-gated):** five reserved CLI verbs graduated to REAL (no stubs): `hugit undo`
+(event-sourced compensating undo, D14 Human-only — #145), `hugit policy test` (runs the
+real `Engine::house()`, local≡forge — #145), `hugit approve`/`hugit reject` (single-lens
+wrappers over `verdict::record`, serve-parity — #146), `hugit journal note` (appends a
+`journal.note` record to the canonical log — #146). File-content reads went REAL (PS-18
+reversed): `hugit_proto::resolve_blob_at_path` (path→blob git tree-walk, traversal-safe —
+#147) + `GET /v1/repos/{repo}/blob|edit/{*path}` serve actual file bytes, secret-scrubbed
+on read, 404-no-oracle, fail-closed boot loader (#148). **All hermetically tested; blob/edit
+live-serving needs `HUGIT_SERVE_GIT_DIR` set on a fresh deploy. `symbol` is still W6.**
 
 **What IS genuinely live (don't under-claim it either):** the `/v1` read+write API
 against the ONE `hugit` launch repo — 11/20 reads serve real chain-verified R2 data;
@@ -52,9 +66,10 @@ single-digit % for a full multi-tenant end-to-end forge.**
 
 **Critical path to a usable single-tenant forge (biggest → smallest):** deploy the
 current `main` image (+ set `HUGIT_SESSION_EXCHANGE_URL` = the live
-`corelink-api.humangr.com/v1/session/exchange`) → CoreLink P2 tenant (hot CAS+AC) →
-live git wire serving (the file-content/CAS seam, which also unblocks blob/edit/symbol)
-→ runner fabric live → GitHub App + live mirror → multi-tenant Clerk + `hugit-prod-d1`.
+`corelink-api.humangr.com/v1/session/exchange`) + set `HUGIT_SERVE_GIT_DIR` so the now-real
+blob/edit reads serve live (W5 logic landed 2026-06-18) → CoreLink P2 tenant (hot CAS+AC) →
+live git wire serving (`git clone`, still 404) → runner fabric live → GitHub App + live
+mirror → multi-tenant Clerk + `hugit-prod-d1`.
 Most are owner/infra-gated, not "a few PRs". Per-capability status table + tracked
 seams: the audit doc above.
 
