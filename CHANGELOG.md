@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(serve): **`git clone` works — git wire serving (upload-pack) goes live in the codebase.**
+  The launch-blocking gap from the honest audit: `git clone` against the engine used to 404. Now
+  `hugit-serve` speaks the git smart-HTTP wire over the clone/fetch logic `hugit-proto` already had.
+  - **`GET /<repo>/info/refs?service=git-upload-pack`** → the v1 advertisement (`# service=…` pkt +
+    flush, `HEAD` first with `object-format=sha1`/`symref=HEAD:<branch>` so the default branch checks
+    out, then name-sorted refs); **`POST /<repo>/git-upload-pack`** → `0008NAK\n` + the real V2
+    packfile from `serve_fetch`. pkt-line framing is hugit-proto's; the smart-HTTP envelope +
+    Content-Types (`application/x-git-upload-pack-{advertisement,result}`) are the serve layer's. A
+    binary-response bypass in `serve_on` (mirroring the SSE short-circuit) streams the packfile —
+    the `(u16, String)` route path can't carry binary.
+  - **`AppState`** gains `git_refs` (ref→tip oid, loaded via `git for-each-ref`); `load_git_dir`
+    switched to `git rev-list --objects --all` so every branch's closure is in the CAS.
+  - **Auth**: gated on the SAME `authz::authorize_read` predicate as `/v1` reads, with an
+    **unauthenticated** principal (git sends no Bearer) — only a publicly-readable repo is cloneable;
+    private/absent/not-live → uniform **404, no existence oracle**. No git dir wired → 404.
+  - **Proven by a REAL `git clone`** (not a mock): the e2e spawns `serve_on`, shells
+    `git clone http://127.0.0.1:<port>/<repo>`, and asserts success — all 7 objects, both branch
+    tips, `HEAD`=main, working-tree content. 8 wire tests (advertisement shape, NAK+PACK framing,
+    404 gating, push-out-of-scope). Two real interop bugs fixed in-crate (capability list on the
+    first `want` line; HEAD+symref for checkout) — `hugit-proto` untouched.
+  - **Scope**: clone/fetch only. `git push` (receive-pack) is **404 by design** (a later wave).
+    Live-serving is deploy-gated on `HUGIT_SERVE_GIT_DIR` + a public repo (hermetic + CI-proven now).
+    The server speaks smart-HTTP v1; v2 clients negotiate down (the test forces v1 for determinism).
+
 - feat(cli): **`hugit diag` + `hugit policy edit` go REAL — the last two reserved verbs (no stubs).**
   Closes the design-gated pair from the honest audit; both are genuinely wired, not `not_implemented`.
   - **`hugit diag --log --def-digest <hex> [--toolchain <hex>]`**: drives the REAL `hugit-diag`

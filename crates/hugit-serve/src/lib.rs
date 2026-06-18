@@ -22,6 +22,7 @@ pub mod auth;
 pub mod authz;
 pub mod error;
 pub mod fmt;
+pub mod git;
 pub mod handlers;
 pub mod server;
 pub mod sigv4;

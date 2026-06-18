@@ -79,6 +79,14 @@ pub struct AppState {
     /// The oid of HEAD's root tree in `git_source`, resolved once at boot. `None`
     /// in lock-step with `git_source` (both present or both absent).
     pub git_root_tree: Option<gix_hash::ObjectId>,
+    /// The git refs (`ref name → tip oid hex`) for the smart-HTTP wire serving
+    /// (`git clone`/`git fetch`). Populated from `for-each-ref` over the SAME
+    /// `HUGIT_SERVE_GIT_DIR` the objects were enumerated from — refs and objects
+    /// MUST be consistent (reading refs from a different projection could advertise
+    /// a tip whose closure is not in the CAS). Empty when no git dir is wired → the
+    /// git wire routes 404 honestly (git serving not live). This map IS the
+    /// `hugit_proto::RefView` source for the clone advertisement.
+    pub git_refs: std::collections::BTreeMap<String, String>,
 }
 
 impl AppState {
@@ -114,12 +122,12 @@ impl AppState {
         // `HUGIT_SERVE_GIT_DIR` points at a real git directory; otherwise the
         // file-content reads 404 honestly (the "content seam not live" answer,
         // NOT a fake blank file). Loaded once at boot.
-        let (git_source, git_root_tree) = match std::env::var("HUGIT_SERVE_GIT_DIR") {
+        let (git_source, git_root_tree, git_refs) = match std::env::var("HUGIT_SERVE_GIT_DIR") {
             Ok(dir) if !dir.trim().is_empty() => {
-                let (cas, root) = load_git_dir(&dir)?;
-                (Some(Arc::new(cas)), Some(root))
+                let (cas, root, refs) = load_git_dir(&dir)?;
+                (Some(Arc::new(cas)), Some(root), refs)
             }
-            _ => (None, None),
+            _ => (None, None, std::collections::BTreeMap::new()),
         };
 
         Ok(Self {
@@ -129,6 +137,7 @@ impl AppState {
             token_store,
             git_source,
             git_root_tree,
+            git_refs,
         })
     }
 
@@ -147,6 +156,7 @@ impl AppState {
             token_store: Arc::new(TokenStore::new()),
             git_source: None,
             git_root_tree: None,
+            git_refs: std::collections::BTreeMap::new(),
         }
     }
 
@@ -564,7 +574,14 @@ impl R2Config {
 /// a misconfigured content seam refuses to start rather than silently serving 404.
 fn load_git_dir(
     git_dir: &str,
-) -> Result<(hugit_proto::CasObjectSource, gix_hash::ObjectId), String> {
+) -> Result<
+    (
+        hugit_proto::CasObjectSource,
+        gix_hash::ObjectId,
+        std::collections::BTreeMap<String, String>,
+    ),
+    String,
+> {
     use hugit_proto::{CasObjectSource, ObjectKind};
     use std::process::Command;
 
@@ -594,8 +611,12 @@ fn load_git_dir(
     let root_tree = gix_hash::ObjectId::from_hex(root_hex.as_bytes())
         .map_err(|e| format!("HUGIT_SERVE_GIT_DIR: HEAD tree oid {root_hex:?} invalid: {e}"))?;
 
-    // Enumerate every object reachable from HEAD (`<oid> [path]` per line).
-    let listing = String::from_utf8(git(&["rev-list", "--objects", "HEAD"])?)
+    // Enumerate every object reachable from ANY ref (`--all`, not just HEAD) so a
+    // clone of any branch resolves its full closure from the CAS — the git wire
+    // advertisement lists every ref, so every ref's reachable objects must be
+    // present (a clone of a branch whose objects were not enumerated would 404
+    // mid-stream). `<oid> [path]` per line.
+    let listing = String::from_utf8(git(&["rev-list", "--objects", "--all"])?)
         .map_err(|e| format!("HUGIT_SERVE_GIT_DIR: rev-list output is not UTF-8: {e}"))?;
 
     let mut cas = CasObjectSource::new();
@@ -624,7 +645,22 @@ fn load_git_dir(
         cas.insert_raw(kind, body);
     }
 
-    Ok((cas, root_tree))
+    // The refs for the git wire advertisement (`git clone`/`git fetch`). Read from
+    // the SAME git dir as the objects so the two are consistent (the launch repo's
+    // refs, not the event-log projection — they must agree with the CAS closure).
+    // `for-each-ref` emits `<refname> <objectname>` per line (our chosen format).
+    let refs_listing =
+        String::from_utf8(git(&["for-each-ref", "--format=%(refname) %(objectname)"])?)
+            .map_err(|e| format!("HUGIT_SERVE_GIT_DIR: for-each-ref output is not UTF-8: {e}"))?;
+    let mut refs = std::collections::BTreeMap::new();
+    for line in refs_listing.lines() {
+        let mut it = line.split_whitespace();
+        if let (Some(name), Some(oid)) = (it.next(), it.next()) {
+            refs.insert(name.to_string(), oid.to_string());
+        }
+    }
+
+    Ok((cas, root_tree, refs))
 }
 
 /// A repo slug is a single safe path segment: non-empty, ≤100 chars, ASCII
