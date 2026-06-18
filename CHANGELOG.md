@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(serve): **Wave A — 4 `/v1` read handlers go real + a knowledge honest-stub.** Closes
+  the fixture/data-gated gap the honest audit flagged for the easy reads (the data-model
+  reads — blob/edit/symbol — remain the owner-gated CAS seam, NOT in this wave).
+  - **`GET /v1/repos/{repo}/new-pr` → NewPrVm**: campaigns (`campaign.opened`), commits
+    (`project_machine`, COMMITS_CAP newest after reverse), checks-ok (`check.recorded`),
+    base/head (`replay` RefState), policy_note (`policy.set`); presentation fields are
+    honest-default. Free-text scrubbed at the read boundary.
+  - **`GET /v1/me/login` → LoginVm**: PUBLIC (no Bearer — pre-match guard mirroring `/readyz`,
+    the auth entry-point); static presentational card.
+  - **`GET /v1/repos/{repo}/compare/{base}/{head}` → CompareVm**: branches/generated_branches
+    REAL from `replay` RefState; diff/commits/can_merge HONEST-STUB (TL decision — every
+    DiffVm in the codebase is a stub; no diffstat seam).
+  - **`GET /v1/repos/{repo}/search?q=` corrected**: pr_lifecycle uses `all_pr_queued`,
+    seq-indexed age, `seen` marked only on emit (post-cap).
+  - **`GET /v1/repos/{repo}/knowledge` → KnowledgeVm honest-stub**: P2 knowledge-index seam
+    disclosed via `engine_note`; nothing fabricated.
+  Built by a draft→adversarial-verify fleet, lead-integrated centrally (no parallel
+  tree-mutation), all P0/P1 fixes applied; clippy `-D warnings` clean, 226 lib tests green.
+
 - feat(serve): **`POST /v1/token` via CoreLink session-exchange (Option B).** The endpoint
   now DELEGATES Clerk-JWT verification to CoreLink's `/v1/session/exchange` instead of
   validating the JWT locally (the Server-TL decision — "consume CoreLink, never fork"; no

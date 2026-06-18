@@ -29,7 +29,7 @@
 use std::collections::BTreeMap;
 
 use hugit_cli::pr::{
-    PR_ABANDONED_KIND, PR_LANDED_KIND, PR_OPENED_KIND, PR_QUEUED_KIND, find_pr_opened,
+    PR_ABANDONED_KIND, PR_LANDED_KIND, PR_OPENED_KIND, find_pr_opened, find_pr_queued,
 };
 use hugit_http_contracts::search::{SearchIntentVm, SearchRefVm, SearchVm};
 use hugit_refstore::EventLog;
@@ -55,26 +55,21 @@ fn corpus_matches(corpus: &str, q_lower: &str) -> bool {
     !q_lower.is_empty() && corpus.to_lowercase().contains(q_lower)
 }
 
-/// Map the lifecycle state label to its Portuguese UI label.
-fn state_label_pt(open: bool, state: &str) -> &'static str {
-    match state {
-        "landed" => "pousou",
-        "abandoned" => "abandonado",
-        "queued" => "na fila",
-        _ if open => "proposto",
-        _ => "proposto",
-    }
-}
-
+/// Return the PR's open flag and Portuguese state label.
+///
+/// Uses `all_pr_queued` (via `find_pr_queued`) so that a PR that was queued
+/// then landed is correctly classified as "pousou", not "na fila". Terminal
+/// events (`pr.landed`, `pr.abandoned`) are checked first; the queue projection
+/// is consulted last and already excludes settled PRs by construction.
 fn pr_lifecycle(log: &EventLog, pr_id: &str) -> (bool, &'static str) {
     if has_pr_event(log, PR_LANDED_KIND, pr_id) {
-        (false, "landed")
+        (false, "pousou")
     } else if has_pr_event(log, PR_ABANDONED_KIND, pr_id) {
-        (false, "abandoned")
-    } else if has_pr_event(log, PR_QUEUED_KIND, pr_id) {
-        (true, "queued")
+        (false, "abandonado")
+    } else if find_pr_queued(log, pr_id).is_some() {
+        (true, "na fila")
     } else {
-        (true, "proposed")
+        (true, "proposto")
     }
 }
 
@@ -89,6 +84,10 @@ fn has_pr_event(log: &EventLog, kind: &str, pr_id: &str) -> bool {
 /// Fold `pr.opened` → matching PR hits. The match corpus is the PR number string,
 /// the campaign key, and the intent ids (all caller-supplied identifiers / keys);
 /// the campaign is the only echoed free-text and is scrubbed where interpolated.
+///
+/// Age provenance: `log.records().get(opened.seq as usize).recorded_at` — the
+/// seq-indexed record timestamp, not the iterator record's timestamp. `opened.seq`
+/// is the log position of the canonical `pr.opened` event for this PR.
 fn search_prs(log: &EventLog, q_lower: &str) -> Vec<SearchRefVm> {
     let mut out = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -115,13 +114,19 @@ fn search_prs(log: &EventLog, q_lower: &str) -> Vec<SearchRefVm> {
         if !corpus_matches(&corpus, q_lower) {
             continue;
         }
-        seen.insert(pr_id.to_string());
         if out.len() >= RESULT_CAP {
             break;
         }
-        let (open, state) = pr_lifecycle(log, &opened.pr_id);
-        let label = state_label_pt(open, state);
-        let age = humanize_age(record.recorded_at);
+        // Mark seen only once the PR is actually emitted (after the cap break),
+        // so a capped-out PR never suppresses a later same-id match.
+        seen.insert(pr_id.to_string());
+        let (open, label) = pr_lifecycle(log, &opened.pr_id);
+        // Age via the seq-indexed record, not the iterator record.
+        let age = log
+            .records()
+            .get(opened.seq as usize)
+            .map(|r| humanize_age(r.recorded_at))
+            .unwrap_or_default();
         let title = if opened.campaign.is_empty() {
             format!("PR #{} — {} intents", opened.pr_id, opened.intent_ids.len())
         } else {
@@ -317,6 +322,24 @@ mod tests {
         );
     }
 
+    fn queue_pr(log: &mut EventLog, pr_id: &str, item_id: &str, order_index: u64, at: u64) {
+        use hugit_cli::pr::PR_QUEUED_KIND;
+        append(
+            log,
+            PR_QUEUED_KIND,
+            serde_json::json!({
+                "pr_id": pr_id,
+                "item_id": item_id,
+                "order_index": order_index
+            }),
+            at,
+        );
+    }
+
+    fn land_pr(log: &mut EventLog, pr_id: &str, at: u64) {
+        append(log, PR_LANDED_KIND, serde_json::json!({"pr_id": pr_id}), at);
+    }
+
     fn issue(log: &mut EventLog, id: u32, to: &str, priority: Option<&str>, at: u64) {
         let pv = match priority {
             Some(p) => serde_json::json!({"issue_id": id, "priority": p, "to": to}),
@@ -338,6 +361,8 @@ mod tests {
             at,
         );
     }
+
+    // ── empty-log ────────────────────────────────────────────────────────────
 
     #[test]
     fn empty_log_honest_defaults() {
@@ -368,6 +393,8 @@ mod tests {
         assert_eq!(vm.q, "   ");
         assert_eq!(vm.intents_note, INTENTS_NOTE);
     }
+
+    // ── populated ────────────────────────────────────────────────────────────
 
     #[test]
     fn real_projection_pr_match_by_campaign() {
@@ -442,6 +469,41 @@ mod tests {
         open_pr(&mut log, "5", "SkewFix", &[], 100);
         let vm = build_search(&log, "r", "skewfix");
         assert_eq!(vm.prs.len(), 1);
+    }
+
+    /// Regression: a PR that was queued and then landed must show "pousou"
+    /// (open=false), NOT "na fila". `all_pr_queued` excludes settled PRs, so
+    /// `find_pr_queued` returns `None` after `pr.landed` — the old `has_pr_event`
+    /// path on `PR_QUEUED_KIND` was divergent from that contract.
+    #[test]
+    fn queued_then_landed_shows_pousou_not_na_fila() {
+        let mut log = EventLog::new();
+        open_pr(&mut log, "7", "wave-a", &["i-1"], 1000);
+        queue_pr(&mut log, "7", "item-001", 1, 2000);
+        land_pr(&mut log, "7", 3000);
+        let vm = build_search(&log, "r", "wave-a");
+        assert_eq!(vm.prs.len(), 1);
+        assert!(!vm.prs[0].open, "landed PR must not be open");
+        assert!(
+            vm.prs[0].meta.contains("pousou"),
+            "expected 'pousou' in meta, got: {}",
+            vm.prs[0].meta
+        );
+    }
+
+    #[test]
+    fn queued_pr_shows_na_fila_while_active() {
+        let mut log = EventLog::new();
+        open_pr(&mut log, "9", "wave-b", &["i-2"], 1000);
+        queue_pr(&mut log, "9", "item-002", 1, 2000);
+        let vm = build_search(&log, "r", "wave-b");
+        assert_eq!(vm.prs.len(), 1);
+        assert!(vm.prs[0].open, "queued PR must still be open");
+        assert!(
+            vm.prs[0].meta.contains("na fila"),
+            "expected 'na fila' in meta, got: {}",
+            vm.prs[0].meta
+        );
     }
 
     #[test]

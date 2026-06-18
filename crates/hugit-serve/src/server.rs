@@ -197,6 +197,13 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
         return (200, r#"{"ready":true}"#.to_string());
     }
 
+    // /v1/me/login — PUBLIC (no Bearer): the auth entry-point, served before any
+    // session exists. A pre-match guard (mirrors /readyz) so it bypasses the
+    // method gate + two_tier_auth. Static presentational card, no EventLog.
+    if method == &Method::Get && segs == ["v1", "me", "login"] {
+        return ok(&handlers::build_login());
+    }
+
     // All other routes are GET-only reads (writes are Wave-2).
     if method != &Method::Get {
         return err(EngineErr::not_found());
@@ -711,6 +718,9 @@ fn dispatch_repo(
 ) -> (u16, String) {
     match tail {
         ["home"] => ok(&handlers::build_home(log, repo)),
+        ["new-pr"] => ok(&handlers::build_new_pr(log, repo)),
+        ["knowledge"] => ok(&handlers::build_knowledge(log, repo)),
+        ["compare", base, head] => ok(&handlers::build_compare(log, repo, base, head)),
         ["landing"] => ok(&handlers::build_landing(log, repo)),
         ["checks"] => ok(&handlers::build_checks(log, repo)),
         ["commits"] => ok(&handlers::build_commits(log, repo)),
