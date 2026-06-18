@@ -14,6 +14,9 @@ hugit-refstore = { path = "../hugit-refstore" }
 # WP-PC1: the campaign porcelain drives the F3 rollup + Ledger projection.
 # WP-PC3: `hugit pr show` reads the F3 `pr_record` rollup for the cost block.
 hugit-ledger = { path = "../hugit-ledger" }
+# Roadmap W3: `hugit policy test` runs the house gate set (Engine::house) — the
+# SAME evaluator the forge landing path uses (local≡forge, WP-D6 ①).
+hugit-policy = { path = "../hugit-policy" }
 sha2 = { workspace = true }
 hex = { workspace = true }
 serde = { workspace = true }

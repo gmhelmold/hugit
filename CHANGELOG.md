@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(cli): **`hugit undo` + `hugit policy test` go REAL (roadmap W3 — no stubs).**
+  Two stakeholder verbs graduated RESERVED→`HUGIT_VERBS` with genuine backing wiring
+  (the drafted not-implemented stubs were rejected — a hollow `not_implemented` surface is
+  exactly the over-claim the honest audit denounced).
+  - **`hugit undo --log --seq [--actor]`**: thin porcelain over the event-sourced
+    `hugit_refstore::undo` — replays the prefix `[0, seq)`, computes the compensating event
+    that restores the ref, and appends it (history preserved, never a rewrite/deletion).
+    Human-only via the D14 `Endpoint::Undo` guard: a non-human/unrecognized principal is
+    denied fail-closed (`authz_denied`/exit-2, audit record persisted). `--actor` defaults to
+    `user:cli` and is structurally scrubbed before reaching the chain. Missing `--log` →
+    `log_not_found`; out-of-range `--seq` → `out_of_range`; tampered chain → `chain_broken`.
+  - **`hugit policy test --context <path>`**: runs `hugit_policy::Engine::house().eval` — the
+    SAME evaluator the forge landing path uses, so the local verdict is byte-identical
+    (`local ≡ forge`, WP-D6 ①). Reads a JSON `EvalContext` (CLI input seam, like `impact`'s
+    `GraphInput`), emits per-gate `{id, outcome, reason?}` + `all_pass`; a failing gate is a
+    real exit-0 result. Missing/malformed context → `context_not_found`/`parse_context`/exit-2.
+    Gate reasons scrubbed at the read boundary. `policy` ships `test` only — `policy edit`
+    stays deferred (no gate-set mutation/persistence model yet; an honest partial surface,
+    not a stub). `undo`/`policy` graduated in lockstep with `Command::Undo`/`Command::Policy`
+    (the no-drift oracle ⑥ holds count-equality). clippy `-D warnings` clean.
+
 - feat(cli): **`hugit issue transition` — CLI parity for `issue.transition` (roadmap W2).**
   Restores ADR-0006 CLI parity (no web-only verb): the serve verb
   `write_issue_transition` now has its `hugit issue transition --log --n --to

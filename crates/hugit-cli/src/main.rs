@@ -28,11 +28,13 @@ use hugit_cli::export::{self, AccountState, Corpus};
 use hugit_cli::impact::{ImpactQuery, compute_impact};
 use hugit_cli::intent::{self, IntentArgs};
 use hugit_cli::issue::{self, IssueArgs};
+use hugit_cli::policy::{self, PolicyArgs};
 use hugit_cli::porcelain::PorcelainError;
 use hugit_cli::pr::{self, PrArgs};
 use hugit_cli::queue::{self, QueueArgs};
 use hugit_cli::repo::{self, RepoArgs};
 use hugit_cli::tournament::{MAX_N_POLICY, produce_candidates};
+use hugit_cli::undo::{self, UndoArgs};
 use hugit_cli::verdict::{self, VerdictArgs};
 use hugit_cli::why::resolver::LogEntry;
 use hugit_cli::why::{WhyQuery, resolve_why};
@@ -81,6 +83,10 @@ enum Command {
     Check(CheckArgs),
     /// Convene an adversarial verdict panel (W-VERDICT stub — EXECUTE path).
     Verdict(VerdictArgs),
+    /// Undo an operation as a compensating event (Human-only — roadmap W3).
+    Undo(UndoArgs),
+    /// Declarative gate management: test — preview the house gates (roadmap W3).
+    Policy(PolicyArgs),
 }
 
 // ── why ────────────────────────────────────────────────────────────────────
@@ -518,6 +524,9 @@ fn main() -> ExitCode {
         // land the bodies. They own their own exit code (the WB0 one-exit law).
         Command::Check(a) => return checks::run_check(a),
         Command::Verdict(a) => return verdict::run(a),
+        // Stakeholder verbs (W3) — REAL-wired, own their exit code (the one law).
+        Command::Undo(a) => return undo::run(a),
+        Command::Policy(a) => return policy::run(a),
     };
     match result {
         Ok(json) => {
