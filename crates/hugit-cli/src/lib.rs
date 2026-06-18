@@ -25,6 +25,7 @@ pub mod ident;
 pub mod impact;
 pub mod intent;
 pub mod issue;
+pub mod journal;
 pub mod policy;
 pub mod porcelain;
 pub mod pr;
@@ -101,6 +102,14 @@ pub const HUGIT_VERBS: &[&str] = &[
     // them here, not in HUGIT_RESERVED_VERBS.
     "undo",   // hugit undo --log --seq [--actor]   — event-sourced compensating undo
     "policy", // hugit policy test --context        — local≡forge gate preview
+    // Stakeholder + session verbs (roadmap W3) — graduated from RESERVED, REAL.
+    // `approve`/`reject` record a single-lens `verdict.recorded` via the SAME
+    // path `hugit verdict` uses (parity with the serve POST /prs/{n}/verdict);
+    // `journal note` appends a `journal.note` record onto the canonical log. LIVE
+    // the moment main.rs routes them; the no-drift oracle requires them here.
+    "approve", // hugit approve --intent --log       — record a single-lens approve
+    "reject",  // hugit reject --intent --log        — record a single-lens reject
+    "journal", // hugit journal note --log --note     — append a session note
 ];
 
 /// Planned hugit verb tokens that are RESERVED but NOT yet dispatched.
@@ -122,16 +131,14 @@ pub const HUGIT_RESERVED_VERBS: &[&str] = &[
     "ws",  // hugit ws spawn/attach/snap/gc — claim-fenced workspaces
     "ctx", // hugit ctx snap / resume      — short-horizon session resume
     // Phase D — The forge verbs (planned)
-    "ledger",  // hugit ledger [--live]    — default history view
-    "review",  // hugit review <intent>    — grounded-evidence answers
-    "approve", // hugit approve            — policy-gated approval
-    "reject",  // hugit reject             — policy-gated rejection
-    "watch",   // hugit watch              — TUI forge monitoring
-    // (`undo` + `policy` graduated to HUGIT_VERBS at W3 — stakeholder verbs,
-    // REAL-wired. `policy` ships `test` only; `policy edit` stays deferred.)
+    "ledger", // hugit ledger [--live]    — default history view
+    "review", // hugit review <intent>    — grounded-evidence answers
+    "watch",  // hugit watch              — TUI forge monitoring
+    // (`undo`, `policy`, `approve`, `reject`, `journal` graduated to HUGIT_VERBS
+    // at W3 — stakeholder + session verbs, REAL-wired. `policy` ships `test` only;
+    // `policy edit` stays deferred.)
     "dispatch", // hugit dispatch <intent>  — workspace + context packet
     "fleet",    // hugit fleet              — machine-readable fleet state
-    "journal",  // hugit journal note       — session note
 ];
 
 /// The live verb registry as a stable accessor for downstream consumers.

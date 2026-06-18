@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(cli): **`hugit approve` / `hugit reject` / `hugit journal note` go REAL (roadmap W3 — no stubs).**
+  Three more stakeholder/session verbs graduated RESERVED→`HUGIT_VERBS` with genuine wiring.
+  - **`hugit approve` / `hugit reject` --intent --log [--tree-hash] [--recorded-at]**: thin
+    single-lens wrappers over the EXISTING `verdict::record` path — each records a
+    `verdict.recorded` event with lens `human-approval` and result `approve`/`reject`,
+    aggregating to that verdict. This mirrors the live serve verb `POST /prs/{n}/verdict`
+    (which maps `approve`/`request-changes` into the same `verdict.recorded` kind through
+    `(Orchestrator, Land)`) — ADR-0006 parity, **no new D14 endpoint, no matrix change**. They
+    always store (an unrecorded approval is meaningless). Reuse keeps one producer + one wire
+    kind; the idempotency/seal/existence guards of the verdict path apply unchanged.
+  - **`hugit journal note --log --note [--principal] [--workspace] [--intent]`**: appends a
+    `journal.note` record onto the CANONICAL event log (decided: unify with the log, not a
+    separate journal file), mirroring `issue.transition` — `(Orchestrator, Land)`, free-text
+    note + identifiers scrubbed at the boundary, canonical-JSON scrub before the hash chain,
+    atomic `persist_log`. Carries the D11 `JournalEntry`/`JournalKey` semantic fields
+    (note/principal/workspace_id/intent_id); the in-memory D11 `Journal` becomes a projection.
+    Empty note → `empty_note`/exit-2; missing `--log` → `log_not_found`. Freezes the
+    `journal.note` kind; a `write_journal_note` serve verb can mirror it later (ADR-0006).
+  - `approve`/`reject`/`journal` graduated in lockstep with `Command::Approve`/`Reject`/`Journal`
+    (the no-drift oracle ⑥ holds). clippy `-D warnings` clean.
+
 - feat(cli): **`hugit undo` + `hugit policy test` go REAL (roadmap W3 — no stubs).**
   Two stakeholder verbs graduated RESERVED→`HUGIT_VERBS` with genuine backing wiring
   (the drafted not-implemented stubs were rejected — a hollow `not_implemented` surface is
