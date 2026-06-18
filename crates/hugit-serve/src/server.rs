@@ -52,6 +52,16 @@ pub fn serve_on(state: AppState, server: Server) -> std::io::Result<()> {
             respond_sse(&state, &url, &headers, request);
             continue;
         }
+        // Git smart-HTTP (clone/fetch). Handled BEFORE the standard (status,String)
+        // path because a packfile is a BINARY Vec<u8> body with a git-specific
+        // Content-Type — it cannot ride `route_with_body`. The POST body was already
+        // read above (capped); it is threaded in (the upload-pack want/have lines are
+        // tiny, well under the cap). `respond_git` consumes `request` in every branch.
+        // Push (git-receive-pack) is intentionally out of scope and 404s here.
+        if crate::git::is_git_path(&url) {
+            crate::git::respond_git(&state, &method, &url, &body, request);
+            continue;
+        }
         // PANIC ISOLATION: a panic inside a handler must degrade to a 503 for THAT
         // request, never take down the whole single-threaded server.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
