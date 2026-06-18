@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deploy hugit — guia mastigadíssimo (18/jun)</title>
+<style>
+  :root{
+    --bg:#0e1116; --card:#161b22; --ink:#e6edf3; --mut:#9aa7b4;
+    --grn:#2ea043; --grn-bg:#0f2417; --amb:#d29922; --amb-bg:#2a210a;
+    --blu:#388bfd; --red:#f85149; --line:#30363d; --code:#0b0f14;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    padding:24px;max-width:880px;margin:0 auto}
+  h1{font-size:26px;margin:0 0 4px}
+  h2{font-size:21px;margin:34px 0 10px;display:flex;align-items:center;gap:10px}
+  .sub{color:var(--mut);margin:0 0 22px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;
+    padding:18px 20px;margin:16px 0}
+  .pill{display:inline-block;font-size:12px;font-weight:700;padding:3px 10px;
+    border-radius:999px;vertical-align:middle}
+  .p-you{background:var(--grn-bg);color:#56d364;border:1px solid var(--grn)}
+  .p-tl{background:var(--amb-bg);color:#e3b341;border:1px solid var(--amb)}
+  .num{display:inline-flex;width:30px;height:30px;border-radius:50%;
+    background:var(--blu);color:#fff;font-weight:700;align-items:center;
+    justify-content:center;font-size:15px;flex:0 0 auto}
+  pre{background:var(--code);border:1px solid var(--line);border-radius:8px;
+    padding:12px 14px;overflow:auto;font:14px/1.55 "SF Mono",Menlo,Consolas,monospace;
+    color:#d6e2f0;position:relative}
+  code{font-family:"SF Mono",Menlo,Consolas,monospace;background:#21262d;
+    padding:1px 6px;border-radius:5px;font-size:14px}
+  .step{display:flex;gap:14px;margin:18px 0;align-items:flex-start}
+  .step .body{flex:1}
+  .step .body b{color:#fff}
+  .does{color:var(--mut);font-size:14.5px;margin-top:6px}
+  table{border-collapse:collapse;width:100%;margin:10px 0;font-size:14.5px}
+  th,td{border:1px solid var(--line);padding:8px 10px;text-align:left}
+  th{background:#1c232b;color:var(--mut);font-weight:600}
+  .ok{color:#56d364;font-weight:700}.no{color:var(--red);font-weight:700}
+  .warn{background:var(--amb-bg);border:1px solid var(--amb);border-radius:8px;
+    padding:12px 14px;margin:14px 0;font-size:14.5px}
+  .tip{background:#0d1f2d;border:1px solid var(--blu);border-radius:8px;
+    padding:12px 14px;margin:14px 0;font-size:14.5px}
+  .big{font-size:18px}
+  .expect{color:#56d364;font-size:13px}
+  hr{border:0;border-top:1px solid var(--line);margin:28px 0}
+  .foot{color:var(--mut);font-size:13px;margin-top:30px}
+  .where{font-size:13px;color:var(--amb);font-weight:700}
+</style>
+</head>
+<body>
+
+<h1>🚀 Deploy do hugit — guia mastigadíssimo</h1>
+<p class="sub">18 de junho · pra acender ao vivo o que foi construído hoje</p>
+
+<div class="card">
+  <p class="big" style="margin-top:0"><b>A real, em uma frase:</b></p>
+  <p>O motor <b>já está no ar</b> em <code>engine.githugr.com</code>, mas rodando
+  <b>código velho (de 17/jun)</b>. <b>Nada que eu construí hoje está lá ainda.</b>
+  O login real já funciona. Pra ligar o resto = <b>re-deployar</b> (subir de novo).</p>
+  <p style="margin-bottom:0">São <b>dois níveis</b>: 🟢 o que <b>você faz agora em ~5 min</b>,
+  e 🟡 uma parte que é do TL do githugr (eu já deixei a receita pronta).</p>
+</div>
+
+<!-- ───────────────────────── STEP 1 ───────────────────────── -->
+<h2><span class="pill p-you">VOCÊ · ~5 min</span> Passo 1 — Re-deployar o motor</h2>
+<p style="margin-top:0;color:var(--mut)">Isso reconstrói o motor com o código de hoje e
+acende tudo que é baseado nos dados (os reads novos, paridade de verbos) + reconfirma o login.
+<b>É só ops, não precisa de nada novo.</b></p>
+
+<p class="where">⤵ Tudo isto é na pasta <code>../githugr</code> (NÃO no hugit).</p>
+
+<div class="step">
+  <span class="num">1</span>
+  <div class="body">
+    <b>Abre o arquivo <code>engine.wrangler.jsonc</code></b> e acha a linha
+    <code>ENGINE_CACHE_BUST</code>. Troca o valor por qualquer texto novo:
+    <pre>"image_vars": { "ENGINE_CACHE_BUST": "2026-06-18-w3w5-main" }</pre>
+    <div class="does">💡 <b>Por quê?</b> O Cloudflare guarda a imagem em cache. Se você não
+    mudar nada aqui, ele acha que é igual e <b>não reinicia</b> o servidor — aí seu deploy
+    "funciona" mas o código novo nunca sobe. Mudar esse texto força um container novo.</div>
+  </div>
+</div>
+
+<div class="step">
+  <span class="num">2</span>
+  <div class="body">
+    <b>No terminal, dentro de <code>../githugr</code>, roda:</b>
+    <pre>npx wrangler login          <span style="color:#6e7681"># só na 1ª vez (abre o navegador p/ logar na Cloudflare)</span>
+npx wrangler deploy -c engine.wrangler.jsonc</pre>
+    <div class="does">💡 <b>O que faz?</b> Reconstrói o motor (<code>hugit-serve</code>) a partir
+    do código atual e sobe um container novo na Cloudflare. Demora alguns minutos (ele compila
+    Rust). No fim ele imprime que deployou.</div>
+  </div>
+</div>
+
+<div class="step">
+  <span class="num">3</span>
+  <div class="body">
+    <b>Confere que subiu — cola no terminal:</b>
+    <pre>curl -sS https://engine.githugr.com/readyz</pre>
+    <div class="expect">✓ Esperado: responde <code>ready</code> (ou um JSON de OK).</div>
+  </div>
+</div>
+
+<div class="warn">⚠️ Se o deploy falhar dizendo erro de compilar/dependência, me chama —
+provavelmente é infra (o runner tem isso ~37% das vezes) ou algo que eu resolvo rápido.</div>
+
+<!-- ───────────────────────── STEP 2 ───────────────────────── -->
+<h2><span class="pill p-tl">TL do githugr</span> Passo 2 — Ligar o <code>git clone</code> + blob/edit</h2>
+<p style="margin-top:0;color:var(--mut)">Esses três <b>leem arquivos de um repositório git dentro
+do container</b>. Mas o container de hoje é mínimo (não tem o programa <code>git</code>) e lê os
+dados do R2, não de um repo. Então eles <b>não acendem só com o Passo 1</b> — precisa mexer na
+"receita" do container (<code>engine.Dockerfile</code> do githugr).</p>
+
+<div class="card">
+  <p style="margin-top:0"><b>Por que não é você?</b> Esse arquivo mora no repo do githugr e eu
+  tenho uma trava (fence) que me impede de mexer no repo dos outros. Eu já escrevi a receita
+  EXATA — é só o TL do githugr aplicar (3 coisas no <code>engine.Dockerfile</code>):</p>
+  <ol style="margin:0">
+    <li>Botar o programa <code>git</code> no container (hoje não tem).</li>
+    <li>Botar uma cópia do repo <code>hugit</code> dentro da imagem (ex.: em <code>/app/repo</code>).</li>
+    <li>Apontar <code>HUGIT_SERVE_GIT_DIR=/app/repo</code> + dar deploy de novo (igual o Passo 1).</li>
+  </ol>
+  <p style="margin-bottom:0;color:var(--mut);font-size:14px">A receita detalhada (com o diff exato)
+  está na versão <code>.md</code> deste doc, seção "STEP 2".</p>
+</div>
+
+<div class="step">
+  <span class="num">✓</span>
+  <div class="body">
+    <b>Depois do Passo 2, o teste final (o que prova tudo):</b>
+    <pre>git clone https://engine.githugr.com/hugit /tmp/hugit-clone</pre>
+    <div class="expect">✓ Esperado: clona de verdade, com o histórico real. Isso é o
+    <code>git clone</code> funcionando ao vivo pela 1ª vez. 🎯</div>
+  </div>
+</div>
+
+<hr>
+
+<!-- ───────────────────────── O QUE ACENDE ───────────────────────── -->
+<h2>📊 O que fica vivo depois de cada passo</h2>
+<table>
+  <tr><th>Funcionalidade</th><th>Agora</th><th>Depois do Passo 1</th><th>Depois do Passo 2</th></tr>
+  <tr><td>Login real</td><td class="ok">✅ já vivo</td><td class="ok">✅</td><td class="ok">✅</td></tr>
+  <tr><td>API <code>/v1</code> (reads/writes novos)</td><td class="no">código velho</td><td class="ok">✅ acende</td><td class="ok">✅</td></tr>
+  <tr><td>Ver conteúdo de arquivo (blob/edit)</td><td class="no">❌</td><td class="no">❌ ainda não</td><td class="ok">✅ acende</td></tr>
+  <tr><td><code>git clone</code></td><td class="no">❌ (404)</td><td class="no">❌ ainda não</td><td class="ok">✅ acende</td></tr>
+</table>
+
+<div class="tip">🧭 <b>Resumo da estratégia:</b> faz o <b>Passo 1 agora</b> (rápido, é seu) →
+me diz o que o <code>readyz</code> respondeu → eu confirmo o que acendeu. O <b>Passo 2</b> a gente
+combina com o TL do githugr quando você quiser ligar o <code>git clone</code>/arquivos.</div>
+
+<div class="warn">
+  <b>O que NÃO está nestes 2 passos</b> (continua dependendo de provisão maior, sem pressa):
+  tenant CoreLink P2 (CAS/runners ao vivo) · GitHub App + espelho · multi-tenant Clerk ·
+  <code>git push</code> (onda futura de código).
+</div>
+
+<p class="foot">Gerado pela sessão techlead do hugit · doc-fonte:
+<code>docs/handoff/2026-06-18-deploy-w3-w5-live-cutover.md</code> · 18/jun/2026</p>
+
+</body>
+</html>
