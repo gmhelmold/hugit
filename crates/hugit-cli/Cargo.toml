@@ -28,13 +28,6 @@ serde_json = { workspace = true }
 # entrypoint.
 clap = { version = "=4.6.1", features = ["derive"] }
 
-# Unix only: `setsid()` in the check-runner spawn (`pre_exec`) puts a check in its
-# OWN session, so the timeout's process-group kill (reaping backgrounded
-# grandchildren) is POSIX-isolated from hugit's own job/the engine container.
-# Resolves to the version already in the lockfile (no new version).
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
 # The real `hugit` binary (remediation R-cli defect #1). Library + bin in one
 # crate: the bin is a thin dispatch shell over the existing library verbs.
 [[bin]]

@@ -916,7 +916,6 @@ dependencies = [
  "hugit-policy",
  "hugit-queue",
  "hugit-refstore",
- "libc",
  "serde",
  "serde_json",
  "sha2",
