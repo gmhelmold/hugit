@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(cli): **`hugit check` timeout-kill can no longer signal its own process group (prod + CI safety).**
+  `kill_group` blind-fired `kill -<pid>` (negative pid = a process group) on every timeout. The child is
+  spawned with `process_group(0)`, but that isolation isn't guaranteed everywhere: on a GitHub-hosted linux
+  runner the group-signal took down the **whole job** (every CI run died ~1s into the `process_runner_times_out`
+  test — the migration off the self-hosted Mac exposed it; on macOS the same call EPERM'd, which is why it
+  looked harmless). Same hazard in prod (the engine container is **linux** — a timed-out check could SIGTERM
+  the engine's group). Fix: **always** `child.kill()` (single-PID SIGKILL — cannot reach any other process),
+  and group-signal for grandchild-reaping **only** when `/proc` confirms the child is a genuine isolated group
+  leader (`pgrp == pid` and `!= our pgrp`); unconfirmed/unparseable `/proc` → skip → degrade to the safe path.
+  Strictly safer than before; keeps orphan-reaping in the normal isolated case. (Bundled with the runner
+  migration since its ubuntu CI is what validates the linux path.)
+
 - feat(serve): **bulk CAS plane — batch upload/read/exists + dedup ingest (collapses 6.5k round-trips → ~4-8).**
   The hugit client for the FROZEN CoreLink bulk contract (Server TL, 2026-06-19), built in parallel with the
   server side. Turns the git-object ingest from thousands of per-object PUTs into a deduped, chunked batch.

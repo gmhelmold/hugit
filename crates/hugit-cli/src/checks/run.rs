@@ -1060,29 +1060,60 @@ fn shell_command(cmd: &str) -> Command {
     }
 }
 
-/// Kill the child's whole process GROUP and reap the direct child (no zombie).
+/// Kill the timed-out child and (best-effort) reap any backgrounded grandchildren.
 ///
-/// On Unix the child was spawned with `process_group(0)` so its pgid equals its
-/// pid; sending the signal to the negative pid (`kill -<pid>`) reaches every
-/// descendant — including a backgrounded grandchild that `child.kill()` alone
-/// would orphan past the timeout. We deliver SIGTERM then SIGKILL through the
-/// `kill(1)` binary (std-only — no libc/nix dep), then `wait()` the direct child
-/// so it is reaped. On non-Unix the std `child.kill()` is the best available.
+/// SAFETY (the load-bearing invariant): a check timeout must NEVER signal our own
+/// process group — i.e. it must not be able to SIGTERM `hugit check` itself, the
+/// cargo test harness, or (in prod) the linux engine container. The child was
+/// spawned with `process_group(0)` so it SHOULD be its own group leader, but that
+/// isolation is not guaranteed in every environment (observed: on a GitHub-hosted
+/// linux runner a blind `kill -<pid>` group-signal took down the whole job; on
+/// macOS the same call EPERM'd, which is why it looked harmless there). So we:
+///   1. ALWAYS `child.kill()` — a single-PID SIGKILL that cannot reach any other
+///      process; this kills the timed-out command (an `sh -c` execs the command,
+///      so the pid is the real process). This alone satisfies the timeout.
+///   2. ONLY on linux, and ONLY when `/proc` CONFIRMS the child is a genuine
+///      isolated group leader (its `pgrp == pid`) AND that group is NOT our own
+///      (`child_pgrp != self_pgrp`), additionally group-SIGKILL to reap orphaned
+///      grandchildren. If `/proc` is unreadable/unparseable, or isolation isn't
+///      confirmed, we SKIP the group-signal — degrading to (1), never risking a
+///      self-kill. (macOS has no `/proc` → always degrades to (1); the historic
+///      EPERM noise is gone.)
 fn kill_group(child: &mut std::process::Child) {
-    #[cfg(unix)]
+    // (2) Best-effort grandchild reap — GUARDED so it can never hit our own group.
+    // Done before child.kill() so the group-signal still reaches grandchildren.
+    #[cfg(target_os = "linux")]
     {
         let pid = child.id();
-        // Negative pid targets the whole group. TERM first (graceful), then KILL
-        // (so a TERM-ignoring child still dies). Best-effort: a failure only risks
-        // an orphan the OS reaps on the parent's exit — never a correctness loss.
-        let group = format!("-{pid}");
-        let _ = Command::new("kill").arg("-TERM").arg(&group).status();
-        let _ = Command::new("kill").arg("-KILL").arg(&group).status();
+        if let (Some(child_pgrp), Some(self_pgrp)) = (read_pgrp(pid), read_pgrp(std::process::id()))
+        {
+            // Confirmed: the child leads its OWN group (pgrp == pid), distinct from
+            // ours. Only then is `kill -<pid>` (the child's group) provably safe.
+            if child_pgrp == i64::from(pid) && child_pgrp != self_pgrp {
+                let group = format!("-{pid}");
+                let _ = Command::new("kill").arg("-TERM").arg(&group).status();
+                let _ = Command::new("kill").arg("-KILL").arg(&group).status();
+            }
+        }
     }
-    // Always also signal + reap the direct child (covers non-Unix and guarantees
-    // no zombie even if the group signal raced the child's own exit).
+
+    // (1) ALWAYS: single-PID kill + reap. Cannot signal any other process.
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// Read a process's process-group id (`pgrp`) from `/proc/<pid>/stat` (linux only,
+/// std-only). Returns `None` if `/proc` is absent/unreadable or the line can't be
+/// parsed — callers MUST treat `None` as "isolation unconfirmed → do not group-kill".
+///
+/// `/proc/<pid>/stat` is `pid (comm) state ppid pgrp …`; `comm` may contain spaces
+/// and parentheses, so we parse the fields AFTER the last `')'` (state, ppid, pgrp).
+#[cfg(target_os = "linux")]
+fn read_pgrp(pid: u32) -> Option<i64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after_comm = stat.rsplit_once(')')?.1;
+    // tokens after comm: [0]=state, [1]=ppid, [2]=pgrp
+    after_comm.split_whitespace().nth(2)?.parse::<i64>().ok()
 }
 
 /// Unix epoch milliseconds (best-effort; `0` if the clock is before the epoch).
