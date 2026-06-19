@@ -30,6 +30,7 @@ use hugit_cli::impact::{ImpactQuery, compute_impact};
 use hugit_cli::intent::{self, IntentArgs};
 use hugit_cli::issue::{self, IssueArgs};
 use hugit_cli::journal::{self, JournalArgs};
+use hugit_cli::ledger::{self, LedgerArgs};
 use hugit_cli::meta::{self, MetaArgs};
 use hugit_cli::policy::{self, PolicyArgs};
 use hugit_cli::porcelain::PorcelainError;
@@ -98,6 +99,8 @@ enum Command {
     Journal(JournalArgs),
     /// Bisect a red check history into a structured diagnosis (read-only).
     Diag(DiagArgs),
+    /// The default forge history view: asked→done→proven per campaign (Phase D).
+    Ledger(LedgerArgs),
 }
 
 // ── why ────────────────────────────────────────────────────────────────────
@@ -542,6 +545,7 @@ fn main() -> ExitCode {
         Command::Reject(a) => return verdict::run_reject(a),
         Command::Journal(a) => return journal::run(a),
         Command::Diag(a) => return diag::run(a),
+        Command::Ledger(a) => return ledger::run(a),
     };
     match result {
         Ok(json) => {
