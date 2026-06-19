@@ -182,6 +182,17 @@ const SCOPE_HEADER: &str = "x-corelink-scope";
 const SCOPE_READ: &str = "cas:r";
 const SCOPE_READ_WRITE: &str = "cas:rw";
 
+/// The FROZEN bulk-CAS content type (the native batch plane envelope; CoreLink
+/// answers 415 on any other type — modeled in the test double).
+const BATCH_CONTENT_TYPE: &str = "application/x-hugit-cas-batch";
+
+/// FROZEN cap: at most this many objects per batch request (upload / read / exists).
+pub const BATCH_MAX_OBJECTS: usize = 2000;
+
+/// FROZEN cap: at most this many bytes of OBJECT payload per batch request (the
+/// concatenated bytes for upload; the RETURNED `ok` bytes for read). 8 MiB.
+pub const BATCH_MAX_BYTES: usize = 8 * 1024 * 1024;
+
 /// The production default PAT secret-file path, relative to `$HOME`
 /// (`~/.hugit/secrets/corelink/pat` — the same handoff path the AC client uses).
 const DEFAULT_PAT_FILE_REL: &str = ".hugit/secrets/corelink/pat";
@@ -203,6 +214,16 @@ pub enum CasError {
     /// Required runtime config (URL/tenant/PAT) was missing/blank. Fail-closed:
     /// the client refuses to call without a credential rather than degrade.
     NotConfigured(String),
+    /// The server rejected the batch envelope with **415** (wrong `Content-Type`)
+    /// — a hard contract violation, not retryable.
+    BatchUnsupportedMediaType,
+    /// The server rejected the batch with **400** (framing error: manifest/byte
+    /// length mismatch or a truncated body) — a hard, non-retryable bug on our
+    /// side, surfaced rather than silently dropped.
+    BatchFraming(String),
+    /// A batch response body did not parse as the contract shape, or a returned
+    /// manifest was internally inconsistent (e.g. byte slice out of range).
+    BatchMalformedResponse(String),
 }
 
 impl std::fmt::Display for CasError {
@@ -214,6 +235,14 @@ impl std::fmt::Display for CasError {
             CasError::Transport(e) => write!(f, "CAS transport error: {e}"),
             CasError::Status(c) => write!(f, "CAS server returned unexpected HTTP {c}"),
             CasError::NotConfigured(w) => write!(f, "CAS client not configured: {w}"),
+            CasError::BatchUnsupportedMediaType => write!(
+                f,
+                "CAS batch rejected with 415 (wrong Content-Type; expected {BATCH_CONTENT_TYPE})"
+            ),
+            CasError::BatchFraming(w) => write!(f, "CAS batch framing error (HTTP 400): {w}"),
+            CasError::BatchMalformedResponse(w) => {
+                write!(f, "CAS batch response malformed: {w}")
+            }
         }
     }
 }
@@ -231,6 +260,19 @@ pub trait CasTransport {
     /// `PUT {url}` with a Bearer PAT + `cas:rw` scope and a raw body. Returns the
     /// response status.
     fn put(&self, url: &str, bearer: &str, body: &[u8]) -> Result<u16, CasError>;
+
+    /// `POST {url}` with a Bearer PAT, the given `scope` (`cas:r`/`cas:rw`), the
+    /// batch `content_type`, and a raw body. Returns `(status, body)` — the bulk
+    /// (batch) CAS plane. `body` is meaningful on 200 (the batch result) AND on
+    /// 413 (the `batch_too_large` JSON), so it is always returned verbatim.
+    fn post(
+        &self,
+        url: &str,
+        bearer: &str,
+        scope: &str,
+        content_type: &str,
+        body: &[u8],
+    ) -> Result<(u16, Vec<u8>), CasError>;
 }
 
 /// Runtime config for the CAS client: base URL, tenant, and the secret PAT. The
@@ -308,6 +350,33 @@ impl CasConfig {
             blake3
         ))
     }
+
+    /// The bulk-upload endpoint: `POST {base}/v1/cas/{tenant}/batch` (`cas:rw`).
+    fn batch_endpoint(&self) -> String {
+        format!(
+            "{}/v1/cas/{}/batch",
+            self.base_url.trim_end_matches('/'),
+            self.tenant
+        )
+    }
+
+    /// The bulk-read endpoint: `POST {base}/v1/cas/{tenant}/batch-read` (`cas:r`).
+    fn batch_read_endpoint(&self) -> String {
+        format!(
+            "{}/v1/cas/{}/batch-read",
+            self.base_url.trim_end_matches('/'),
+            self.tenant
+        )
+    }
+
+    /// The bulk-exists endpoint: `POST {base}/v1/cas/{tenant}/batch-exists` (`cas:r`).
+    fn batch_exists_endpoint(&self) -> String {
+        format!(
+            "{}/v1/cas/{}/batch-exists",
+            self.base_url.trim_end_matches('/'),
+            self.tenant
+        )
+    }
 }
 
 /// The CoreLink CAS object client over a pluggable [`CasTransport`].
@@ -320,6 +389,10 @@ pub struct CasClient<T: CasTransport = UreqCasTransport> {
     config: CasConfig,
     transport: T,
 }
+
+/// The result of a bulk read: each requested blake3 paired with its bytes
+/// (`Some` for an `ok` object) or `None` (`absent`/`gone`), in request order.
+pub type BatchReadResult = Vec<(String, Option<Vec<u8>>)>;
 
 impl<T: CasTransport> CasClient<T> {
     /// Construct over an explicit transport + config. Used in tests to inject a
@@ -357,6 +430,446 @@ impl<T: CasTransport> CasClient<T> {
             other => Err(CasError::Status(other)),
         }
     }
+
+    // ── Bulk (batch) CAS plane ────────────────────────────────────────────────
+
+    /// Bulk-upload `objects` (`(blake3, framed-bytes)`) to the CAS in one or more
+    /// batches that each respect the FROZEN caps (≤ [`BATCH_MAX_OBJECTS`] objects
+    /// AND ≤ [`BATCH_MAX_BYTES`] of object bytes). For each batch:
+    /// build the NDJSON manifest + blank line + concatenated bytes, POST it
+    /// (`cas:rw`, [`BATCH_CONTENT_TYPE`]), and parse the per-object status array.
+    ///
+    /// Resilience to the FROZEN contract's edges:
+    /// - **413** `batch_too_large` → the chunk is split in HALF (deterministic) and
+    ///   each half retried — so a stale local cap never wedges the upload.
+    /// - **415** → hard [`CasError::BatchUnsupportedMediaType`] (contract bug).
+    /// - **400** → hard [`CasError::BatchFraming`] (our framing is wrong).
+    /// - a per-object `error` status is returned to the caller (NOT retried here —
+    ///   the ingest layer decides the retry policy); `created`/`exists` are success.
+    ///
+    /// Returns the per-object `(blake3, UploadStatus)` in INPUT order. Every input
+    /// object appears exactly once (statuses are aggregated across chunks).
+    pub fn batch_upload(
+        &self,
+        objects: &[(String, Vec<u8>)],
+    ) -> Result<Vec<(String, UploadStatus)>, CasError> {
+        let mut out: Vec<(String, UploadStatus)> = Vec::with_capacity(objects.len());
+        for chunk in chunk_by_caps(objects, |(_, bytes)| bytes.len()) {
+            self.batch_upload_chunk(chunk, &mut out)?;
+        }
+        Ok(out)
+    }
+
+    /// Upload one already-cap-respecting chunk, appending its statuses to `out`.
+    /// On a 413 (a stale/over-tight cap raced the server's), split the chunk in
+    /// half and recurse — guaranteeing termination because a singleton chunk that
+    /// still 413s is a hard server-side rejection surfaced as an `error` status.
+    fn batch_upload_chunk(
+        &self,
+        chunk: &[(String, Vec<u8>)],
+        out: &mut Vec<(String, UploadStatus)>,
+    ) -> Result<(), CasError> {
+        if chunk.is_empty() {
+            return Ok(());
+        }
+        let body = build_upload_body(chunk);
+        let (status, resp) = self.transport.post(
+            &self.config.batch_endpoint(),
+            &self.config.bearer(),
+            SCOPE_READ_WRITE,
+            BATCH_CONTENT_TYPE,
+            &body,
+        )?;
+        match status {
+            200 => {
+                let parsed = parse_upload_response(&resp, chunk)?;
+                out.extend(parsed);
+                Ok(())
+            }
+            413 => {
+                // Over a cap the server enforces. A singleton cannot be split — a
+                // single object over the cap is unservable, so surface it as an
+                // `error` for that object (the contract's per-object error lane).
+                if chunk.len() == 1 {
+                    out.push((
+                        chunk[0].0.clone(),
+                        UploadStatus::Error("batch_too_large".into()),
+                    ));
+                    return Ok(());
+                }
+                let mid = chunk.len() / 2;
+                self.batch_upload_chunk(&chunk[..mid], out)?;
+                self.batch_upload_chunk(&chunk[mid..], out)
+            }
+            415 => Err(CasError::BatchUnsupportedMediaType),
+            400 => Err(CasError::BatchFraming(
+                "server rejected the upload manifest/byte framing".into(),
+            )),
+            other => Err(CasError::Status(other)),
+        }
+    }
+
+    /// Bulk-read the objects named by `hashes` from the CAS in cap-respecting
+    /// batches. Because the RETURNED byte sizes are unknown a priori, chunks are
+    /// formed by ≤ [`BATCH_MAX_OBJECTS`] hashes; a **413** (the server caps on the
+    /// RETURNED `ok` bytes) splits that chunk in half and retries — so an
+    /// unexpectedly-large set of returned blobs always converges.
+    ///
+    /// Returns `(blake3, Option<bytes>)` in INPUT order: `Some` for an `ok` object,
+    /// `None` for `absent`/`gone`. The caller (the boot loader) fails closed on a
+    /// `None` it required. 415/400 are hard errors (contract bugs).
+    pub fn batch_read(&self, hashes: &[String]) -> Result<BatchReadResult, CasError> {
+        let mut out: BatchReadResult = Vec::with_capacity(hashes.len());
+        // Read is bounded by RETURNED bytes (unknown here), so chunk by count only
+        // and let the 413-split handle an oversized return.
+        for chunk in hashes.chunks(BATCH_MAX_OBJECTS) {
+            self.batch_read_chunk(chunk, &mut out)?;
+        }
+        Ok(out)
+    }
+
+    fn batch_read_chunk(
+        &self,
+        chunk: &[String],
+        out: &mut BatchReadResult,
+    ) -> Result<(), CasError> {
+        if chunk.is_empty() {
+            return Ok(());
+        }
+        // Guard every requested hash BEFORE building a request (path/cross-tenant
+        // discipline parity with the single-object endpoint).
+        for h in chunk {
+            if !is_valid_cas_key(h) {
+                return Err(CasError::InvalidKey(format!(
+                    "batch-read hash must match ^[0-9a-f]{{64}}$ (got {} chars)",
+                    h.len()
+                )));
+            }
+        }
+        let body = build_hash_request(chunk);
+        let (status, resp) = self.transport.post(
+            &self.config.batch_read_endpoint(),
+            &self.config.bearer(),
+            SCOPE_READ,
+            BATCH_CONTENT_TYPE,
+            &body,
+        )?;
+        match status {
+            200 => {
+                let parsed = parse_read_response(&resp, chunk)?;
+                out.extend(parsed);
+                Ok(())
+            }
+            413 => {
+                if chunk.len() == 1 {
+                    // A single object whose bytes exceed the cap cannot be batch-read;
+                    // fall back to the single-object GET (which streams it whole).
+                    let bytes = self.get(&chunk[0])?;
+                    out.push((chunk[0].clone(), bytes));
+                    return Ok(());
+                }
+                let mid = chunk.len() / 2;
+                self.batch_read_chunk(&chunk[..mid], out)?;
+                self.batch_read_chunk(&chunk[mid..], out)
+            }
+            415 => Err(CasError::BatchUnsupportedMediaType),
+            400 => Err(CasError::BatchFraming(
+                "server rejected the batch-read hash-list framing".into(),
+            )),
+            other => Err(CasError::Status(other)),
+        }
+    }
+
+    /// Bulk-existence probe for `hashes` (the dedup primitive). Chunks by
+    /// ≤ [`BATCH_MAX_OBJECTS`] hashes (the request body is tiny — only the count cap
+    /// applies). Returns `(blake3, present)` in INPUT order. 415/400 → hard error.
+    pub fn batch_exists(&self, hashes: &[String]) -> Result<Vec<(String, bool)>, CasError> {
+        let mut out: Vec<(String, bool)> = Vec::with_capacity(hashes.len());
+        for chunk in hashes.chunks(BATCH_MAX_OBJECTS) {
+            if chunk.is_empty() {
+                continue;
+            }
+            for h in chunk {
+                if !is_valid_cas_key(h) {
+                    return Err(CasError::InvalidKey(format!(
+                        "batch-exists hash must match ^[0-9a-f]{{64}}$ (got {} chars)",
+                        h.len()
+                    )));
+                }
+            }
+            let body = build_hash_request(chunk);
+            let (status, resp) = self.transport.post(
+                &self.config.batch_exists_endpoint(),
+                &self.config.bearer(),
+                SCOPE_READ,
+                BATCH_CONTENT_TYPE,
+                &body,
+            )?;
+            match status {
+                200 => out.extend(parse_exists_response(&resp, chunk)?),
+                415 => return Err(CasError::BatchUnsupportedMediaType),
+                400 => {
+                    return Err(CasError::BatchFraming(
+                        "server rejected the batch-exists hash-list framing".into(),
+                    ));
+                }
+                other => return Err(CasError::Status(other)),
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// The per-object outcome of a [`CasClient::batch_upload`]. `Created`/`Exists` are
+/// success (the object is in the CAS); `Error` carries the server's message and is
+/// the only status the ingest layer retries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UploadStatus {
+    /// The object was freshly written.
+    Created,
+    /// The object was already present (dedup hit) — success, no write.
+    Exists,
+    /// The object FAILED (hash mismatch / R2 fault); the message is the server's.
+    Error(String),
+}
+
+// ── Batch wire framing (NDJSON manifest + blank line + concatenated bytes) ─────
+
+/// One manifest line on the UPLOAD request / READ response: `{"hash","len":…}`.
+#[derive(Serialize, Deserialize)]
+struct ManifestLine {
+    hash: String,
+    len: u64,
+}
+
+/// One per-hash line on a READ request / EXISTS request: `{"hash":…}`.
+#[derive(Serialize, Deserialize)]
+struct HashLine {
+    hash: String,
+}
+
+/// One element of the UPLOAD response array: `{"hash","status","error"}`.
+#[derive(Deserialize)]
+struct UploadResult {
+    hash: String,
+    status: String,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+/// One element of the EXISTS response array: `{"hash","present"}`.
+#[derive(Deserialize)]
+struct ExistsResult {
+    hash: String,
+    present: bool,
+}
+
+/// One manifest line on a READ response: `{"hash","len","status":"ok|absent|gone"}`.
+#[derive(Deserialize)]
+struct ReadManifestLine {
+    hash: String,
+    len: u64,
+    status: String,
+}
+
+/// Split `items` into consecutive chunks that each fit BOTH caps: ≤
+/// [`BATCH_MAX_OBJECTS`] items AND ≤ [`BATCH_MAX_BYTES`] of summed `size`. A single
+/// item larger than the byte cap is emitted as its own (over-cap) singleton chunk —
+/// the caller's 413-split then surfaces it as a per-object error rather than
+/// looping. Deterministic: the same input always splits the same way.
+fn chunk_by_caps<T>(items: &[T], size: impl Fn(&T) -> usize) -> Vec<&[T]> {
+    let mut chunks: Vec<&[T]> = Vec::new();
+    let mut start = 0;
+    let mut cur_bytes = 0usize;
+    let mut i = 0;
+    while i < items.len() {
+        let sz = size(&items[i]);
+        let count = i - start;
+        // Would adding item `i` break a cap? (And the chunk is non-empty so we can
+        // close it without producing an empty chunk.)
+        let breaks_count = count >= BATCH_MAX_OBJECTS;
+        let breaks_bytes = count > 0 && cur_bytes + sz > BATCH_MAX_BYTES;
+        if breaks_count || breaks_bytes {
+            chunks.push(&items[start..i]);
+            start = i;
+            cur_bytes = 0;
+            continue; // re-evaluate item `i` as the head of the new chunk.
+        }
+        cur_bytes += sz;
+        i += 1;
+    }
+    if start < items.len() {
+        chunks.push(&items[start..]);
+    }
+    chunks
+}
+
+/// Build the upload request body: NDJSON manifest (`{"hash","len"}` per object, in
+/// order) + a single blank line + the concatenated raw bytes (each exactly `len`).
+fn build_upload_body(chunk: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let mut body = Vec::new();
+    for (hash, bytes) in chunk {
+        let line = ManifestLine {
+            hash: hash.clone(),
+            len: bytes.len() as u64,
+        };
+        // `to_writer`-style: serialize then push a newline (NDJSON).
+        body.extend_from_slice(serde_json::to_vec(&line).unwrap_or_default().as_slice());
+        body.push(b'\n');
+    }
+    body.push(b'\n'); // the blank line terminating the manifest.
+    for (_, bytes) in chunk {
+        body.extend_from_slice(bytes);
+    }
+    body
+}
+
+/// Build a hash-list request body (READ / EXISTS): NDJSON `{"hash":…}` lines.
+fn build_hash_request(chunk: &[String]) -> Vec<u8> {
+    let mut body = Vec::new();
+    for hash in chunk {
+        let line = HashLine { hash: hash.clone() };
+        body.extend_from_slice(serde_json::to_vec(&line).unwrap_or_default().as_slice());
+        body.push(b'\n');
+    }
+    body
+}
+
+/// Parse the UPLOAD response (a JSON array of `{"hash","status","error"}`) into
+/// per-object `(blake3, UploadStatus)` in the SAME order as `chunk`. The server is
+/// partial-failure tolerant, so the array may interleave; we re-key by hash and
+/// emit in input order. A hash present in the request but absent from the response
+/// is a malformed response (fail closed).
+fn parse_upload_response(
+    resp: &[u8],
+    chunk: &[(String, Vec<u8>)],
+) -> Result<Vec<(String, UploadStatus)>, CasError> {
+    let results: Vec<UploadResult> = serde_json::from_slice(resp).map_err(|e| {
+        CasError::BatchMalformedResponse(format!("upload response is not a status array: {e}"))
+    })?;
+    let mut by_hash: BTreeMap<String, UploadStatus> = BTreeMap::new();
+    for r in results {
+        let status = match r.status.as_str() {
+            "created" => UploadStatus::Created,
+            "exists" => UploadStatus::Exists,
+            "error" => UploadStatus::Error(r.error.unwrap_or_else(|| "unspecified".into())),
+            other => {
+                return Err(CasError::BatchMalformedResponse(format!(
+                    "unknown upload status {other:?} for {}",
+                    r.hash
+                )));
+            }
+        };
+        by_hash.insert(r.hash, status);
+    }
+    let mut out = Vec::with_capacity(chunk.len());
+    for (hash, _) in chunk {
+        let status = by_hash.remove(hash).ok_or_else(|| {
+            CasError::BatchMalformedResponse(format!(
+                "upload response omitted a status for requested object {hash}"
+            ))
+        })?;
+        out.push((hash.clone(), status));
+    }
+    Ok(out)
+}
+
+/// Parse the READ response (manifest NDJSON + blank line + concatenated bytes) into
+/// `(blake3, Option<bytes>)` in the SAME order as `chunk`. `ok` → `Some(bytes)`
+/// sliced by `len`; `absent`/`gone` → `None` (no bytes). Fails closed on a manifest
+/// that does not split cleanly, a byte slice out of range, or an unknown status.
+fn parse_read_response(resp: &[u8], chunk: &[String]) -> Result<BatchReadResult, CasError> {
+    // Split on the FIRST blank line (`\n\n`): manifest, then the byte region.
+    let sep = find_blank_line(resp).ok_or_else(|| {
+        CasError::BatchMalformedResponse(
+            "batch-read response has no manifest/body separator".into(),
+        )
+    })?;
+    let manifest_region = &resp[..sep];
+    let bytes_region = &resp[sep + 2..]; // skip the "\n\n".
+
+    let mut manifest: Vec<ReadManifestLine> = Vec::new();
+    for line in manifest_region.split(|&b| b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let parsed: ReadManifestLine = serde_json::from_slice(line).map_err(|e| {
+            CasError::BatchMalformedResponse(format!("batch-read manifest line invalid: {e}"))
+        })?;
+        manifest.push(parsed);
+    }
+
+    // Walk the manifest in order, slicing the concatenated bytes for `ok` entries.
+    let mut by_hash: BTreeMap<String, Option<Vec<u8>>> = BTreeMap::new();
+    let mut cursor = 0usize;
+    for line in &manifest {
+        match line.status.as_str() {
+            "ok" => {
+                let len = line.len as usize;
+                let end = cursor
+                    .checked_add(len)
+                    .filter(|&e| e <= bytes_region.len())
+                    .ok_or_else(|| {
+                        CasError::BatchMalformedResponse(format!(
+                            "batch-read byte slice for {} (len {len}) runs past the body \
+                             (cursor {cursor}, body {})",
+                            line.hash,
+                            bytes_region.len()
+                        ))
+                    })?;
+                by_hash.insert(line.hash.clone(), Some(bytes_region[cursor..end].to_vec()));
+                cursor = end;
+            }
+            "absent" | "gone" => {
+                by_hash.insert(line.hash.clone(), None);
+            }
+            other => {
+                return Err(CasError::BatchMalformedResponse(format!(
+                    "unknown batch-read status {other:?} for {}",
+                    line.hash
+                )));
+            }
+        }
+    }
+
+    let mut out = Vec::with_capacity(chunk.len());
+    for hash in chunk {
+        let entry = by_hash.remove(hash).ok_or_else(|| {
+            CasError::BatchMalformedResponse(format!(
+                "batch-read response omitted requested hash {hash}"
+            ))
+        })?;
+        out.push((hash.clone(), entry));
+    }
+    Ok(out)
+}
+
+/// Parse the EXISTS response (JSON array of `{"hash","present"}`) into
+/// `(blake3, present)` in the SAME order as `chunk`.
+fn parse_exists_response(resp: &[u8], chunk: &[String]) -> Result<Vec<(String, bool)>, CasError> {
+    let results: Vec<ExistsResult> = serde_json::from_slice(resp).map_err(|e| {
+        CasError::BatchMalformedResponse(format!("exists response is not a present array: {e}"))
+    })?;
+    let mut by_hash: BTreeMap<String, bool> = BTreeMap::new();
+    for r in results {
+        by_hash.insert(r.hash, r.present);
+    }
+    let mut out = Vec::with_capacity(chunk.len());
+    for hash in chunk {
+        let present = by_hash.remove(hash).ok_or_else(|| {
+            CasError::BatchMalformedResponse(format!(
+                "exists response omitted requested hash {hash}"
+            ))
+        })?;
+        out.push((hash.clone(), present));
+    }
+    Ok(out)
+}
+
+/// Find the byte offset of the FIRST blank line (`\n\n`) in `buf` — the
+/// manifest/body separator. Returns the index of the first `\n` of the pair.
+fn find_blank_line(buf: &[u8]) -> Option<usize> {
+    buf.windows(2).position(|w| w == b"\n\n")
 }
 
 impl CasClient<UreqCasTransport> {
@@ -533,6 +1046,42 @@ impl CasTransport for UreqCasTransport {
             Err(e) => Err(CasError::Transport(e.to_string())),
         }
     }
+
+    fn post(
+        &self,
+        url: &str,
+        bearer: &str,
+        scope: &str,
+        content_type: &str,
+        body: &[u8],
+    ) -> Result<(u16, Vec<u8>), CasError> {
+        let resp = self
+            .agent
+            .post(url)
+            .set("Authorization", bearer)
+            .set(SCOPE_HEADER, scope)
+            .set("Content-Type", content_type)
+            .send_bytes(body);
+        match resp {
+            Ok(r) => {
+                let status = r.status();
+                let mut buf = Vec::new();
+                r.into_reader()
+                    .read_to_end(&mut buf)
+                    .map_err(|e| CasError::Transport(e.to_string()))?;
+                Ok((status, buf))
+            }
+            // Non-2xx surfaces as `Error::Status(code, resp)`; capture the body too
+            // (413 carries the `batch_too_large` JSON the splitter needs to see —
+            // though the splitter only branches on the code, the body is preserved).
+            Err(ureq::Error::Status(code, resp)) => {
+                let mut buf = Vec::new();
+                let _ = resp.into_reader().read_to_end(&mut buf);
+                Ok((code, buf))
+            }
+            Err(e) => Err(CasError::Transport(e.to_string())),
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -631,29 +1180,48 @@ pub fn load_from_cas<T: CasTransport, R: R2Get>(
         })?;
     let index = parse_oid_index(&index_bytes)?;
 
-    // 2+3. Pull every object from the CAS by its blake3, decode the loose framing,
-    // insert under its re-derived git oid, and assert that oid == the index oid.
+    // 2+3. BATCH-read every object from the CAS by its blake3 (one round-trip per
+    // chunk instead of one per object), decode the loose framing, insert under its
+    // re-derived git oid, and assert that oid == the index oid (DOUBLE integrity).
+    //
+    // The index can map several git oids to the SAME blake3 (identical content), so
+    // read the DISTINCT blake3s once and fan the bytes back out to each git oid.
+    let distinct_hashes: Vec<String> = index
+        .values()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let read = cas
+        .batch_read(&distinct_hashes)
+        .map_err(|e| format!("CAS batch-read failed: {e}"))?;
+    let mut bytes_by_blake3: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    for (blake3, maybe) in read {
+        // Fail closed on any absent/gone object — a misconfigured seam must not boot.
+        let framed = maybe.ok_or_else(|| {
+            format!("CAS object absent/gone for blake3 {blake3} (content seam incomplete)")
+        })?;
+        bytes_by_blake3.insert(blake3, framed);
+    }
+
     let mut store = CasObjectSource::new();
     for (git_oid_hex, blake3) in &index {
         let want_oid = gix_hash::ObjectId::from_hex(git_oid_hex.as_bytes())
             .map_err(|e| format!("oid-index: {git_oid_hex:?} is not a valid git oid: {e}"))?;
-        let framed = cas
-            .get(blake3)
-            .map_err(|e| format!("CAS get failed for {git_oid_hex} ({blake3}): {e}"))?
-            .ok_or_else(|| {
-                format!("CAS object absent for git oid {git_oid_hex} (blake3 {blake3})")
-            })?;
+        let framed = bytes_by_blake3.get(blake3).ok_or_else(|| {
+            format!("CAS object absent for git oid {git_oid_hex} (blake3 {blake3})")
+        })?;
         // Defense in depth: the bytes the CAS handed back MUST also blake3-hash to
         // the key we asked for. CoreLink verifies this on write; we re-verify on
         // read so a mis-serving CAS cannot smuggle bytes past the SHA-1 check.
-        let actual_blake3 = cas_key(&framed);
+        let actual_blake3 = cas_key(framed);
         if &actual_blake3 != blake3 {
             return Err(format!(
                 "CAS content-address violation for git oid {git_oid_hex}: asked for blake3 \
                  {blake3} but the bytes hash to {actual_blake3}"
             ));
         }
-        let (kind, body) = decode_loose(&framed)
+        let (kind, body) = decode_loose(framed)
             .map_err(|e| format!("CAS object for git oid {git_oid_hex} is malformed: {e}"))?;
         // `insert_raw` re-derives the git SHA-1 and files the object under it.
         let derived = store.insert_raw(kind, body);
@@ -704,15 +1272,58 @@ pub trait R2Put {
     fn put_object(&self, key: &str, body: &[u8]) -> Result<(), String>;
 }
 
+/// Batch-upload `objects`, then RETRY (once) any object the server marked `error`.
+/// A `created`/`exists` status is success. After the single retry, ANY still-`error`
+/// object fails the whole ingest (fail-closed — a half-uploaded closure is unservable).
+fn upload_with_retry<T: CasTransport>(
+    cas: &CasClient<T>,
+    objects: &[(String, Vec<u8>)],
+) -> Result<(), CasError> {
+    if objects.is_empty() {
+        return Ok(());
+    }
+    let statuses = cas.batch_upload(objects)?;
+    let mut failed: Vec<(String, Vec<u8>)> = Vec::new();
+    for (hash, status) in &statuses {
+        if let UploadStatus::Error(_) = status {
+            // Re-pair the failed hash with its bytes for the retry.
+            if let Some((_, bytes)) = objects.iter().find(|(h, _)| h == hash) {
+                failed.push((hash.clone(), bytes.clone()));
+            }
+        }
+    }
+    if failed.is_empty() {
+        return Ok(());
+    }
+    // One retry of just the errored objects.
+    let retried = cas.batch_upload(&failed)?;
+    let still: Vec<&str> = retried
+        .iter()
+        .filter_map(|(h, s)| matches!(s, UploadStatus::Error(_)).then_some(h.as_str()))
+        .collect();
+    if !still.is_empty() {
+        return Err(CasError::Transport(format!(
+            "{} object(s) still failed after one retry (e.g. {})",
+            still.len(),
+            still.first().copied().unwrap_or("?")
+        )));
+    }
+    Ok(())
+}
+
 /// Ingest a repo's enumerated object closure into the CoreLink CAS, then publish
 /// the mutable manifests to R2 — the transport-injected core of the `git-ingest`
-/// bin (the bin only does the `git` enumeration). For each object:
-/// [`encode_loose`] → [`cas_key`] (blake3) → `cas.put(blake3, framed)` → record
-/// `git_oid → blake3`. Then writes `<tenant>/<repo>/refs.json` (from `refs` +
-/// `head`) and `<tenant>/<repo>/oid-index.json`. Returns the object count.
+/// bin (the bin only does the `git` enumeration). DEDUP + BATCH path:
+/// 1. [`encode_loose`] + [`cas_key`] every object → `(git_oid, blake3, framed)`;
+/// 2. [`CasClient::batch_exists`] over ALL blake3s → upload ONLY the missing
+///    (the launch closure overlaps massively across re-ingests);
+/// 3. [`CasClient::batch_upload`] the missing (chunked to the FROZEN caps); a
+///    per-object `error` status is RETRIED once, then fails if it persists;
+/// 4. write `<tenant>/<repo>/refs.json` + `oid-index.json` (UNCHANGED).
 ///
-/// Fail-closed on any PUT failure, an unsafe slug, or a `head` not present in
-/// `refs` (so the loader's `manifest.refs[head]` lookup cannot fail at boot).
+/// Returns the total object count. Fail-closed on any batch error, a persistent
+/// per-object upload error, an unsafe slug, or a `head` not present in `refs` (so
+/// the loader's `manifest.refs[head]` lookup cannot fail at boot).
 pub fn ingest_repo<T: CasTransport, W: R2Put>(
     cas: &CasClient<T>,
     r2: &W,
@@ -728,15 +1339,50 @@ pub fn ingest_repo<T: CasTransport, W: R2Put>(
              inconsistent and the loader would fail at boot"
         ));
     }
+
+    // 1. Frame + key every object; build the git_oid → blake3 index up front.
     let mut index: OidIndex = BTreeMap::new();
+    // blake3 → framed bytes (the upload payload, keyed for dedup lookup). A single
+    // blake3 can back several git oids (identical content); store the bytes once.
+    let mut framed_by_blake3: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     for obj in objects {
         let framed = encode_loose(obj.kind, &obj.body);
         let blake3 = cas_key(&framed);
-        cas.put(&blake3, &framed)
-            .map_err(|e| format!("ingest: CAS PUT failed for git oid {}: {e}", obj.git_oid))?;
-        index.insert(obj.git_oid.clone(), blake3);
+        index.insert(obj.git_oid.clone(), blake3.clone());
+        framed_by_blake3.entry(blake3).or_insert(framed);
     }
 
+    // 2. Dedup: probe which distinct blake3s the CAS already holds, upload only the
+    // missing. Probe order is deterministic (BTreeMap iteration).
+    let all_hashes: Vec<String> = framed_by_blake3.keys().cloned().collect();
+    let present = cas
+        .batch_exists(&all_hashes)
+        .map_err(|e| format!("ingest: batch-exists (dedup probe) failed: {e}"))?;
+    let mut present_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (hash, is_present) in present {
+        if is_present {
+            present_set.insert(hash);
+        }
+    }
+    let missing: Vec<(String, Vec<u8>)> = framed_by_blake3
+        .iter()
+        .filter(|(h, _)| !present_set.contains(*h))
+        .map(|(h, b)| (h.clone(), b.clone()))
+        .collect();
+    let total_distinct = framed_by_blake3.len();
+    let already = present_set.len();
+
+    // 3. Upload the missing (chunked) — then retry any per-object `error` ONCE.
+    upload_with_retry(cas, &missing).map_err(|e| format!("ingest: batch-upload failed: {e}"))?;
+
+    let uploaded = missing.len();
+    eprintln!(
+        "git-ingest: {} objects ({total_distinct} distinct blobs), {already} already present \
+         (deduped), {uploaded} uploaded",
+        objects.len()
+    );
+
+    // 4. Publish the mutable manifests (UNCHANGED).
     let manifest = RefsManifest {
         head: head.to_string(),
         refs: refs.clone(),
@@ -879,12 +1525,183 @@ mod tests {
         objects: std::sync::Mutex<BTreeMap<String, Vec<u8>>>,
         /// Records the last scope header seen on GET/PUT for the auth assertion.
         last_get_bearer: std::sync::Mutex<Option<String>>,
+        /// If set, batch UPLOAD marks this many of the first objects in each batch
+        /// as `status:"error"` (partial-failure modeling). Decremented per object
+        /// failed so a RETRY of just the failed ones eventually succeeds.
+        fail_uploads: std::sync::Mutex<usize>,
+        /// If `Some(n)`, batch UPLOAD/READ enforces a HARD per-request cap of `n`
+        /// objects, answering 413 `batch_too_large` above it (to test the client's
+        /// split-and-retry without needing a 2000-object fixture).
+        small_cap: Option<usize>,
     }
 
     impl MapCasTransport {
         fn key_from_url(url: &str) -> String {
             url.rsplit('/').next().unwrap_or("").to_string()
         }
+
+        /// Serve `POST /batch` per the FROZEN contract: parse the NDJSON manifest +
+        /// blank line + concatenated bytes, verify framing (400) + caps (413), and
+        /// per object verify `blake3(bytes)==hash` (else that object → `error`).
+        fn serve_batch_upload(&self, body: &[u8]) -> Result<(u16, Vec<u8>), CasError> {
+            let sep = match find_blank_line(body) {
+                Some(s) => s,
+                None => return Ok((400, b"{\"error\":\"no manifest separator\"}".to_vec())),
+            };
+            let manifest = &body[..sep];
+            let bytes_region = &body[sep + 2..];
+            let mut entries: Vec<(String, usize)> = Vec::new();
+            let mut total_len = 0usize;
+            for line in manifest.split(|&b| b == b'\n') {
+                if line.is_empty() {
+                    continue;
+                }
+                let ml: ManifestLine = match serde_json::from_slice(line) {
+                    Ok(m) => m,
+                    Err(_) => return Ok((400, b"{\"error\":\"bad manifest line\"}".to_vec())),
+                };
+                total_len += ml.len as usize;
+                entries.push((ml.hash, ml.len as usize));
+            }
+            // Framing: Σlen MUST equal the byte region exactly (no truncation/excess).
+            if total_len != bytes_region.len() {
+                return Ok((400, b"{\"error\":\"byte length mismatch\"}".to_vec()));
+            }
+            // Cap (413).
+            if let Some(cap) = self.small_cap
+                && entries.len() > cap
+            {
+                return Ok((413, batch_too_large_body()));
+            }
+            // Walk the bytes, verify each object, optionally inject failures.
+            let mut cursor = 0usize;
+            let mut results = Vec::new();
+            let mut to_fail = *self.fail_uploads.lock().unwrap();
+            for (hash, len) in entries {
+                let bytes = &bytes_region[cursor..cursor + len];
+                cursor += len;
+                if to_fail > 0 {
+                    to_fail -= 1;
+                    *self.fail_uploads.lock().unwrap() -= 1;
+                    results.push(serde_json::json!({
+                        "hash": hash, "status": "error", "error": "injected fault"
+                    }));
+                    continue;
+                }
+                // Content-verify (anti-poisoning), exactly like the single PUT.
+                if cas_key(bytes) != hash {
+                    results.push(serde_json::json!({
+                        "hash": hash, "status": "error", "error": "hash mismatch"
+                    }));
+                    continue;
+                }
+                let fresh = self
+                    .objects
+                    .lock()
+                    .unwrap()
+                    .insert(hash.clone(), bytes.to_vec())
+                    .is_none();
+                results.push(serde_json::json!({
+                    "hash": hash,
+                    "status": if fresh { "created" } else { "exists" },
+                    "error": serde_json::Value::Null,
+                }));
+            }
+            Ok((200, serde_json::to_vec(&results).unwrap()))
+        }
+
+        /// Serve `POST /batch-read`: parse the NDJSON hash list, enforce the cap on
+        /// RETURNED bytes (413), and emit the manifest + blank line + concatenated
+        /// `ok` bytes (absent ones → `status:"absent"`, no bytes).
+        fn serve_batch_read(&self, body: &[u8]) -> Result<(u16, Vec<u8>), CasError> {
+            let mut hashes: Vec<String> = Vec::new();
+            for line in body.split(|&b| b == b'\n') {
+                if line.is_empty() {
+                    continue;
+                }
+                let hl: HashLine = match serde_json::from_slice(line) {
+                    Ok(h) => h,
+                    Err(_) => return Ok((400, b"{\"error\":\"bad hash line\"}".to_vec())),
+                };
+                hashes.push(hl.hash);
+            }
+            let store = self.objects.lock().unwrap();
+            // The cap is on RETURNED ok bytes: compute it, answer 413 if over.
+            let returned: usize = hashes
+                .iter()
+                .filter_map(|h| store.get(h))
+                .map(Vec::len)
+                .sum();
+            if let Some(cap) = self.small_cap
+                && hashes.len() > cap
+            {
+                return Ok((413, batch_too_large_body()));
+            }
+            // Also model the real byte cap (returned bytes), so the byte-driven split
+            // is exercised even without small_cap when a single read is huge.
+            if returned > BATCH_MAX_BYTES && hashes.len() > 1 {
+                return Ok((413, batch_too_large_body()));
+            }
+            let mut manifest = Vec::new();
+            let mut bytes_region = Vec::new();
+            for h in &hashes {
+                match store.get(h) {
+                    Some(bytes) => {
+                        manifest.extend_from_slice(
+                            serde_json::to_vec(&serde_json::json!({
+                                "hash": h, "len": bytes.len() as u64, "status": "ok"
+                            }))
+                            .unwrap()
+                            .as_slice(),
+                        );
+                        manifest.push(b'\n');
+                        bytes_region.extend_from_slice(bytes);
+                    }
+                    None => {
+                        manifest.extend_from_slice(
+                            serde_json::to_vec(&serde_json::json!({
+                                "hash": h, "len": 0u64, "status": "absent"
+                            }))
+                            .unwrap()
+                            .as_slice(),
+                        );
+                        manifest.push(b'\n');
+                    }
+                }
+            }
+            let mut out = manifest;
+            out.push(b'\n'); // blank-line separator.
+            out.extend_from_slice(&bytes_region);
+            Ok((200, out))
+        }
+
+        /// Serve `POST /batch-exists`: NDJSON hash list → `[{"hash","present"}]`.
+        fn serve_batch_exists(&self, body: &[u8]) -> Result<(u16, Vec<u8>), CasError> {
+            let mut results = Vec::new();
+            let store = self.objects.lock().unwrap();
+            for line in body.split(|&b| b == b'\n') {
+                if line.is_empty() {
+                    continue;
+                }
+                let hl: HashLine = match serde_json::from_slice(line) {
+                    Ok(h) => h,
+                    Err(_) => return Ok((400, b"{\"error\":\"bad hash line\"}".to_vec())),
+                };
+                let present = store.contains_key(&hl.hash);
+                results.push(serde_json::json!({ "hash": hl.hash, "present": present }));
+            }
+            Ok((200, serde_json::to_vec(&results).unwrap()))
+        }
+    }
+
+    /// The FROZEN 413 body shape.
+    fn batch_too_large_body() -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "error": "batch_too_large",
+            "limit_objects": BATCH_MAX_OBJECTS,
+            "limit_bytes": BATCH_MAX_BYTES,
+        }))
+        .unwrap()
     }
 
     impl CasTransport for MapCasTransport {
@@ -911,6 +1728,29 @@ mod tests {
                 .insert(key, body.to_vec())
                 .is_none();
             Ok(if fresh { 201 } else { 200 })
+        }
+
+        fn post(
+            &self,
+            url: &str,
+            _bearer: &str,
+            _scope: &str,
+            content_type: &str,
+            body: &[u8],
+        ) -> Result<(u16, Vec<u8>), CasError> {
+            // 415: the contract's wrong-Content-Type rejection.
+            if content_type != BATCH_CONTENT_TYPE {
+                return Ok((415, Vec::new()));
+            }
+            if url.ends_with("/batch") {
+                self.serve_batch_upload(body)
+            } else if url.ends_with("/batch-read") {
+                self.serve_batch_read(body)
+            } else if url.ends_with("/batch-exists") {
+                self.serve_batch_exists(body)
+            } else {
+                Ok((404, Vec::new()))
+            }
         }
     }
 
@@ -1239,6 +2079,35 @@ mod tests {
             fn put(&self, _url: &str, _bearer: &str, _body: &[u8]) -> Result<u16, CasError> {
                 Ok(201)
             }
+            fn post(
+                &self,
+                _url: &str,
+                _bearer: &str,
+                _scope: &str,
+                _content_type: &str,
+                body: &[u8],
+            ) -> Result<(u16, Vec<u8>), CasError> {
+                // batch-read: serve the SAME fixed bytes for whatever hash is asked
+                // (the misserving model). One hash requested → manifest ok + bytes.
+                let mut hash = String::new();
+                for line in body.split(|&b| b == b'\n') {
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if let Ok(h) = serde_json::from_slice::<HashLine>(line) {
+                        hash = h.hash;
+                        break;
+                    }
+                }
+                let mut out = serde_json::to_vec(&serde_json::json!({
+                    "hash": hash, "len": self.bytes.len() as u64, "status": "ok"
+                }))
+                .unwrap();
+                out.push(b'\n');
+                out.push(b'\n');
+                out.extend_from_slice(&self.bytes);
+                Ok((200, out))
+            }
         }
         let body = encode_loose(ObjectKind::Blob, b"the real bytes");
         let real_key = cas_key(&body);
@@ -1288,5 +2157,308 @@ mod tests {
         let r2 = MapR2::default(); // nothing seeded.
         let err = load_from_cas(&cas, &r2, "t", "hugit").unwrap_err();
         assert!(err.contains("refs.json absent"), "{err}");
+    }
+
+    // ── Batch ops: chunker, upload, read, exists ──────────────────────────────
+
+    #[test]
+    fn chunker_splits_by_object_count() {
+        // 6000 tiny items → ceil(6000/2000) = 3 chunks of ≤2000.
+        let items: Vec<(String, Vec<u8>)> = (0..6000)
+            .map(|i| (format!("{i:064x}"), vec![0u8; 4]))
+            .collect();
+        let chunks = chunk_by_caps(&items, |(_, b)| b.len());
+        assert_eq!(chunks.len(), 3);
+        for c in &chunks {
+            assert!(c.len() <= BATCH_MAX_OBJECTS);
+            let bytes: usize = c.iter().map(|(_, b)| b.len()).sum();
+            assert!(bytes <= BATCH_MAX_BYTES);
+        }
+        // No item lost and order preserved.
+        let total: usize = chunks.iter().map(|c| c.len()).sum();
+        assert_eq!(total, 6000);
+    }
+
+    #[test]
+    fn chunker_splits_by_byte_cap() {
+        // 5 items of 3 MiB each = 15 MiB → ≤8 MiB chunks → 2 fit per chunk → 3 chunks.
+        let three_mib = 3 * 1024 * 1024;
+        let items: Vec<(String, Vec<u8>)> = (0..5)
+            .map(|i| (format!("{i:064x}"), vec![0u8; three_mib]))
+            .collect();
+        let chunks = chunk_by_caps(&items, |(_, b)| b.len());
+        for c in &chunks {
+            let bytes: usize = c.iter().map(|(_, b)| b.len()).sum();
+            assert!(bytes <= BATCH_MAX_BYTES, "chunk over byte cap: {bytes}");
+        }
+        // 3 MiB items: 2 per 8 MiB chunk → [2,2,1].
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].len(), 2);
+        assert_eq!(chunks[2].len(), 1);
+    }
+
+    #[test]
+    fn chunker_emits_oversized_singleton() {
+        // A single item over the byte cap is its own chunk (the 413-split surfaces it).
+        let items: Vec<(String, Vec<u8>)> = vec![("a".repeat(64), vec![0u8; BATCH_MAX_BYTES + 1])];
+        let chunks = chunk_by_caps(&items, |(_, b)| b.len());
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), 1);
+    }
+
+    /// Build N distinct framed blob objects + their blake3 keys.
+    fn framed_blobs(n: usize) -> Vec<(String, Vec<u8>)> {
+        (0..n)
+            .map(|i| {
+                let framed = encode_loose(ObjectKind::Blob, format!("object-{i}").as_bytes());
+                (cas_key(&framed), framed)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn batch_upload_round_trips_and_dedups() {
+        let client = client_with(MapCasTransport::default());
+        let objs = framed_blobs(5);
+        let statuses = client.batch_upload(&objs).unwrap();
+        assert_eq!(statuses.len(), 5);
+        assert!(statuses.iter().all(|(_, s)| *s == UploadStatus::Created));
+        // Re-upload → all `exists` (dedup hit), order preserved.
+        let again = client.batch_upload(&objs).unwrap();
+        assert!(again.iter().all(|(_, s)| *s == UploadStatus::Exists));
+        for ((h1, _), (h2, _)) in objs.iter().zip(again.iter()) {
+            assert_eq!(h1, h2);
+        }
+    }
+
+    #[test]
+    fn batch_upload_surfaces_partial_failure() {
+        // Inject 2 failures; the first 2 objects come back `error`.
+        let t = MapCasTransport::default();
+        *t.fail_uploads.lock().unwrap() = 2;
+        let client = client_with(t);
+        let objs = framed_blobs(4);
+        let statuses = client.batch_upload(&objs).unwrap();
+        let errs = statuses
+            .iter()
+            .filter(|(_, s)| matches!(s, UploadStatus::Error(_)))
+            .count();
+        assert_eq!(errs, 2, "two injected failures surface as error");
+    }
+
+    #[test]
+    fn upload_with_retry_recovers_injected_failures() {
+        // 2 injected failures; the single retry of just those 2 finds the counter
+        // exhausted → succeeds. ingest's upload_with_retry must not return an error.
+        let t = MapCasTransport::default();
+        *t.fail_uploads.lock().unwrap() = 2;
+        let client = client_with(t);
+        let objs = framed_blobs(4);
+        upload_with_retry(&client, &objs).expect("retry recovers the transient failures");
+        // All 4 are now present.
+        for (h, _) in &objs {
+            assert!(client.get(h).unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn batch_upload_413_triggers_client_split_and_succeeds() {
+        // A hard cap of 2 objects/request → uploading 5 must split (5→2+2+1, then
+        // each half ≤2) and ultimately commit all 5.
+        let t = MapCasTransport {
+            small_cap: Some(2),
+            ..Default::default()
+        };
+        let client = client_with(t);
+        let objs = framed_blobs(5);
+        let statuses = client.batch_upload(&objs).unwrap();
+        // The chunker makes ONE chunk of 5 (under the FROZEN 2000 cap); the server's
+        // small_cap=2 forces 413 → the client halves until ≤2 → all created.
+        assert_eq!(statuses.len(), 5);
+        assert!(statuses.iter().all(|(_, s)| *s == UploadStatus::Created));
+        for (h, _) in &objs {
+            assert!(client.get(h).unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn batch_upload_415_on_wrong_content_type_is_hard_error() {
+        // Drive the transport's post directly with a wrong content type → 415.
+        let t = MapCasTransport::default();
+        let (status, _) = t
+            .post(
+                "https://x/v1/cas/t/batch",
+                "b",
+                SCOPE_READ_WRITE,
+                "application/json",
+                b"",
+            )
+            .unwrap();
+        assert_eq!(status, 415);
+    }
+
+    #[test]
+    fn batch_upload_400_on_truncated_body_is_hard_error() {
+        // A manifest claiming len=10 but only 3 body bytes → framing 400.
+        let t = MapCasTransport::default();
+        let mut body =
+            serde_json::to_vec(&serde_json::json!({"hash":"a".repeat(64),"len":10})).unwrap();
+        body.push(b'\n');
+        body.push(b'\n');
+        body.extend_from_slice(b"abc"); // only 3 bytes, manifest said 10.
+        let (status, _) = t
+            .post(
+                "https://x/v1/cas/t/batch",
+                "b",
+                SCOPE_READ_WRITE,
+                BATCH_CONTENT_TYPE,
+                &body,
+            )
+            .unwrap();
+        assert_eq!(status, 400);
+    }
+
+    #[test]
+    fn batch_read_reconstructs_bytes_by_len() {
+        let client = client_with(MapCasTransport::default());
+        let objs = framed_blobs(3);
+        client.batch_upload(&objs).unwrap();
+        let hashes: Vec<String> = objs.iter().map(|(h, _)| h.clone()).collect();
+        let read = client.batch_read(&hashes).unwrap();
+        assert_eq!(read.len(), 3);
+        for ((h, expect), (rh, got)) in objs.iter().zip(read.iter()) {
+            assert_eq!(h, rh, "order preserved");
+            assert_eq!(got.as_ref().unwrap(), expect, "bytes reconstructed by len");
+        }
+    }
+
+    #[test]
+    fn batch_read_absent_is_none() {
+        let client = client_with(MapCasTransport::default());
+        let absent = vec!["e".repeat(64)];
+        let read = client.batch_read(&absent).unwrap();
+        assert_eq!(read.len(), 1);
+        assert!(read[0].1.is_none(), "absent → None");
+    }
+
+    #[test]
+    fn batch_exists_correctness() {
+        let client = client_with(MapCasTransport::default());
+        let objs = framed_blobs(3);
+        client.batch_upload(&objs[..2]).unwrap(); // upload only the first 2.
+        let hashes: Vec<String> = objs.iter().map(|(h, _)| h.clone()).collect();
+        let exists = client.batch_exists(&hashes).unwrap();
+        assert_eq!(exists.len(), 3);
+        assert!(exists[0].1 && exists[1].1, "first two present");
+        assert!(!exists[2].1, "third absent");
+    }
+
+    #[test]
+    fn ingest_dedups_only_missing_uploaded() {
+        // Seed one repo; re-ingest the SAME closure → batch-exists finds all present
+        // → zero uploads. We assert via a transport that counts writes implicitly:
+        // a second ingest succeeds and the object set is unchanged.
+        let (cas, r2, _commit_hex, _blob_oid, _blob_body) = seed_repo();
+        let before = cas.transport.objects.lock().unwrap().len();
+        // Re-run ingest with the same objects → all already present.
+        let blob_body = b"hello from CAS\n".to_vec();
+        let blob_oid = git_oid(ObjectKind::Blob, &blob_body);
+        let tree_body = build_tree("100644", "README.md", blob_oid);
+        let tree_oid = git_oid(ObjectKind::Tree, &tree_body);
+        let commit_body = build_commit(tree_oid);
+        let commit_oid = git_oid(ObjectKind::Commit, &commit_body);
+        let objects = [
+            IngestObject {
+                git_oid: blob_oid.to_string(),
+                kind: ObjectKind::Blob,
+                body: blob_body,
+            },
+            IngestObject {
+                git_oid: tree_oid.to_string(),
+                kind: ObjectKind::Tree,
+                body: tree_body,
+            },
+            IngestObject {
+                git_oid: commit_oid.to_string(),
+                kind: ObjectKind::Commit,
+                body: commit_body,
+            },
+        ];
+        let mut refs = BTreeMap::new();
+        refs.insert("refs/heads/main".to_string(), commit_oid.to_string());
+        ingest_repo(
+            &cas,
+            &r2,
+            "tenant-1",
+            "hugit",
+            "refs/heads/main",
+            &refs,
+            &objects,
+        )
+        .unwrap();
+        let after = cas.transport.objects.lock().unwrap().len();
+        assert_eq!(
+            before, after,
+            "re-ingest of identical closure uploads nothing new"
+        );
+    }
+
+    #[test]
+    fn ingest_then_load_batched_resolves_blob_with_413_split() {
+        // End-to-end under a small server cap so BOTH ingest upload and load read
+        // exercise the 413 split, then resolve the seeded file.
+        let blob_body = b"hello batched CAS\n".to_vec();
+        let blob_oid = git_oid(ObjectKind::Blob, &blob_body);
+        let tree_body = build_tree("100644", "README.md", blob_oid);
+        let tree_oid = git_oid(ObjectKind::Tree, &tree_body);
+        let commit_body = build_commit(tree_oid);
+        let commit_oid = git_oid(ObjectKind::Commit, &commit_body);
+        let objects = [
+            IngestObject {
+                git_oid: blob_oid.to_string(),
+                kind: ObjectKind::Blob,
+                body: blob_body.clone(),
+            },
+            IngestObject {
+                git_oid: tree_oid.to_string(),
+                kind: ObjectKind::Tree,
+                body: tree_body,
+            },
+            IngestObject {
+                git_oid: commit_oid.to_string(),
+                kind: ObjectKind::Commit,
+                body: commit_body,
+            },
+        ];
+        let cfg = CasConfig::new("https://cas.example", "tenant-1", "secret-pat").unwrap();
+        let cas = CasClient::with_transport(
+            cfg,
+            MapCasTransport {
+                small_cap: Some(1), // force a 413 split on every multi-object batch.
+                ..Default::default()
+            },
+        );
+        let r2 = MapR2::default();
+        let mut refs = BTreeMap::new();
+        refs.insert("refs/heads/main".to_string(), commit_oid.to_string());
+        ingest_repo(
+            &cas,
+            &r2,
+            "tenant-1",
+            "hugit",
+            "refs/heads/main",
+            &refs,
+            &objects,
+        )
+        .unwrap();
+
+        let (store, root_tree, _refs) =
+            load_from_cas(&cas, &r2, "tenant-1", "hugit").expect("batched load succeeds");
+        let (resolved_oid, bytes) =
+            hugit_proto::resolve_blob_at_path(&store, &root_tree, "README.md")
+                .unwrap()
+                .expect("README.md resolves from the batch-loaded tree");
+        assert_eq!(resolved_oid, blob_oid);
+        assert_eq!(bytes, blob_body);
     }
 }
