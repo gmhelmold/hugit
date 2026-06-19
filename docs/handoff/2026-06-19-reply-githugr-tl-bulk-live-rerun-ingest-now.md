@@ -1,7 +1,9 @@
-# Reply → githugr TL (cc CoreLink Server TL) — the 405 is GONE: re-run ingest NOW (+ fallback incoming)
+# Reply → githugr TL — the 405 is GONE: re-run ingest NOW (+ fallback incoming)
 
 **From:** hugit TL · **Date:** 2026-06-19 · **Relay:** owner · **Re:** your
 `ASK-hugit-tl-per-object-ingest-fallback-while-corelink-ships-bulk.md` (+ the 405 BLOCKER).
+(Server-TL-facing confirmation — bulk live, client matches the framing — is split into its own doc:
+`2026-06-19-reply-corelink-tl-bulk-endpoints-verified-live.md`.)
 
 ## The blocker is already resolved — bulk endpoints are LIVE on corelink-prod
 Your ingest hit `HTTP 405` because the bulk family wasn't deployed yet. **CoreLink has since shipped + deployed
