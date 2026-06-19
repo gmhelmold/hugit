@@ -22,6 +22,7 @@ pub mod campaign;
 pub mod checks;
 pub mod diag;
 pub mod export;
+pub mod fleet;
 pub mod ident;
 pub mod impact;
 pub mod intent;
@@ -37,6 +38,7 @@ pub mod redaction;
 pub mod tournament;
 pub mod undo;
 pub mod verdict;
+pub mod watch;
 pub mod why;
 
 #[path = "../attention/mod.rs"]
@@ -127,6 +129,15 @@ pub const HUGIT_VERBS: &[&str] = &[
     // construction). LIVE the moment main.rs routes it; the no-drift oracle
     // requires it here, not in HUGIT_RESERVED_VERBS.
     "ledger", // hugit ledger --log [--campaign]    — default forge history view
+    // Forge read surface (Phase D) continued — graduated from RESERVED, REAL.
+    // `fleet` projects the canonical `--log` into the versioned
+    // `hugit_ledger::FleetState` schema (workspaces + agents); `watch` replays
+    // the classified, redacted event stream via `hugit_ledger::WatchDisplay`
+    // (the live SSE tail stays the serve surface). Both reuse the engine's own
+    // projection — one source of truth. LIVE the moment main.rs routes them; the
+    // no-drift oracle requires them here, not in HUGIT_RESERVED_VERBS.
+    "fleet", // hugit fleet --log                   — machine-readable fleet state
+    "watch", // hugit watch --log [--class]         — replay the forge event stream
 ];
 
 /// Planned hugit verb tokens that are RESERVED but NOT yet dispatched.
@@ -149,14 +160,13 @@ pub const HUGIT_RESERVED_VERBS: &[&str] = &[
     "ctx", // hugit ctx snap / resume      — short-horizon session resume
     // Phase D — The forge verbs (planned)
     // (`ledger` graduated to HUGIT_VERBS — Phase-D read surface, REAL-wired over
-    // the canonical `--log` via `hugit_ledger::Ledger`.)
+    // the canonical `--log` via `hugit_ledger::Ledger`; `fleet` + `watch`
+    // graduated alongside it — `hugit_ledger::FleetState` / `WatchDisplay`.)
     "review", // hugit review <intent>    — grounded-evidence answers
-    "watch",  // hugit watch              — TUI forge monitoring
     // (`undo`, `policy`, `approve`, `reject`, `journal` graduated to HUGIT_VERBS
     // at W3 — stakeholder + session verbs, REAL-wired. `policy` ships `test` only;
     // `policy edit` stays deferred.)
     "dispatch", // hugit dispatch <intent>  — workspace + context packet
-    "fleet",    // hugit fleet              — machine-readable fleet state
 ];
 
 /// The live verb registry as a stable accessor for downstream consumers.

@@ -26,6 +26,7 @@ use hugit_cli::campaign::{self, CampaignArgs};
 use hugit_cli::checks::{self, CheckArgs, ChecksArgs};
 use hugit_cli::diag::{self, DiagArgs};
 use hugit_cli::export::{self, AccountState, Corpus};
+use hugit_cli::fleet::{self, FleetArgs};
 use hugit_cli::impact::{ImpactQuery, compute_impact};
 use hugit_cli::intent::{self, IntentArgs};
 use hugit_cli::issue::{self, IssueArgs};
@@ -39,6 +40,7 @@ use hugit_cli::queue::{self, QueueArgs};
 use hugit_cli::tournament::{MAX_N_POLICY, produce_candidates};
 use hugit_cli::undo::{self, UndoArgs};
 use hugit_cli::verdict::{self, DecisionArgs, VerdictArgs};
+use hugit_cli::watch::{self, WatchArgs};
 use hugit_cli::why::resolver::LogEntry;
 use hugit_cli::why::{WhyQuery, resolve_why};
 
@@ -101,6 +103,10 @@ enum Command {
     Diag(DiagArgs),
     /// The default forge history view: asked→done→proven per campaign (Phase D).
     Ledger(LedgerArgs),
+    /// Machine-readable fleet state: workspaces + agents, versioned schema (Phase D).
+    Fleet(FleetArgs),
+    /// Replay the classified, redacted forge event stream (Phase D; live tail is serve).
+    Watch(WatchArgs),
 }
 
 // ── why ────────────────────────────────────────────────────────────────────
@@ -546,6 +552,8 @@ fn main() -> ExitCode {
         Command::Journal(a) => return journal::run(a),
         Command::Diag(a) => return diag::run(a),
         Command::Ledger(a) => return ledger::run(a),
+        Command::Fleet(a) => return fleet::run(a),
+        Command::Watch(a) => return watch::run(a),
     };
     match result {
         Ok(json) => {

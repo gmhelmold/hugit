@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(cli): **`hugit fleet` + `hugit watch` go REAL — the rest of the Phase-D forge read surface.**
+  Both graduate from `HUGIT_RESERVED_VERBS` to `HUGIT_VERBS` with REAL wiring (no stubs), reusing the
+  engine's own projections so every surface agrees by construction. `hugit fleet --log <path>` emits
+  the versioned `hugit_ledger::FleetState` schema (workspaces + agents, `last_seq`, `event_count`,
+  `malformed`) projected from `ws.state.*` / `agent.*` events — identifiers redacted, malformed
+  payloads counted not fabricated. `hugit watch --log <path> [--class <c>]` replays the classified,
+  redacted event stream via `hugit_ledger::WatchDisplay` (`landing` / `verdict` / `policy-change` /
+  `ws-state` / `other`); the live SSE tail stays the serve surface, render latency is deliberately
+  not surfaced (a static replay must be reproducible). Both obey the WB0 one-error/one-exit law; the
+  no-drift oracle holds (dispatched == registry); neither shadows a git command (WP-X5).
+
 - feat(cli): **`hugit ledger` goes REAL — the default forge history view (Phase D, graduated from RESERVED).**
   `hugit ledger --log <path> [--campaign <name>]` projects the canonical event log into the
   asked→done→proven history, reusing the SAME `hugit_ledger::Ledger` per-intent fold that
