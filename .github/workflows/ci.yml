@@ -28,6 +28,13 @@ on:
 permissions:
   contents: read
 
+# Collapse duplicate runs for the same ref to one (cancel the older). Guards
+# against double-triggered events (e.g. the humangr-labs→HumanGuardrail rename
+# fired dual push/PR events → two gates runs that canceled each other).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   gates:
     # GitHub-hosted runner (2026-06-19: org Actions billing unblocked — owner).
