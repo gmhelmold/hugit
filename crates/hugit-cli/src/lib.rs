@@ -27,12 +27,12 @@ pub mod impact;
 pub mod intent;
 pub mod issue;
 pub mod journal;
+pub mod meta;
 pub mod policy;
 pub mod porcelain;
 pub mod pr;
 pub mod queue;
 pub mod redaction;
-pub mod repo;
 pub mod tournament;
 pub mod undo;
 pub mod verdict;
@@ -75,7 +75,10 @@ pub const HUGIT_VERBS: &[&str] = &[
     "campaign", // hugit campaign open/close/show — campaign lifecycle (PC1)
     "intent",   // hugit intent new/show         — intent ceremony (PC2)
     "pr",       // hugit pr open/land/show        — pull-request lifecycle (PC3)
-    "repo",     // hugit repo meta set            — repo.meta producer (owner_tenant seam)
+    "meta",     // hugit meta set                 — repo.meta producer (owner_tenant seam).
+    //            Named `meta`, not `repo`: git 2.54 added a `git repo` builtin and
+    //            the WP-X5 namespace law forbids shadowing a git command, so the verb
+    //            yields the name to git. The on-wire event kind stays `repo.meta`.
     // Wedge-visibility verbs (SOTA-fix Wave B) — dispatched as honest
     // NOT-IMPLEMENTED stubs at WB0 (clap skeletons); WB2 fills the projection.
     // LIVE the moment main.rs routes them (the no-drift oracle asserts

@@ -1,4 +1,4 @@
-//! `hugit repo meta set` — append a `repo.meta` record (visibility + owner_tenant).
+//! `hugit meta set` — append a `repo.meta` record (visibility + owner_tenant).
 
 use serde_json::json;
 

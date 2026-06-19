@@ -30,11 +30,11 @@ use hugit_cli::impact::{ImpactQuery, compute_impact};
 use hugit_cli::intent::{self, IntentArgs};
 use hugit_cli::issue::{self, IssueArgs};
 use hugit_cli::journal::{self, JournalArgs};
+use hugit_cli::meta::{self, MetaArgs};
 use hugit_cli::policy::{self, PolicyArgs};
 use hugit_cli::porcelain::PorcelainError;
 use hugit_cli::pr::{self, PrArgs};
 use hugit_cli::queue::{self, QueueArgs};
-use hugit_cli::repo::{self, RepoArgs};
 use hugit_cli::tournament::{MAX_N_POLICY, produce_candidates};
 use hugit_cli::undo::{self, UndoArgs};
 use hugit_cli::verdict::{self, DecisionArgs, VerdictArgs};
@@ -76,7 +76,8 @@ enum Command {
     /// Pull-request lifecycle: open / land / show (WP-PC3).
     Pr(PrArgs),
     /// Repo authz metadata: `meta set` records `repo.meta` (visibility + owner_tenant).
-    Repo(RepoArgs),
+    /// Named `meta` (not `repo`): git 2.54's `git repo` builtin would collide (WP-X5).
+    Meta(MetaArgs),
     /// Memoized-CI checks: show / key — make the CI wedge visible (WP-WB2 stub).
     Checks(ChecksArgs),
     /// Landing-queue state: show — make the union-batch wedge visible (WP-WB2 stub).
@@ -526,7 +527,7 @@ fn main() -> ExitCode {
         Command::Intent(a) => return intent::run(a),
         Command::Issue(a) => return issue::run(a),
         Command::Pr(a) => return pr::run(a),
-        Command::Repo(a) => return repo::run(a),
+        Command::Meta(a) => return meta::run(a),
         Command::Checks(a) => return checks::run(a),
         Command::Queue(a) => return queue::run(a),
         // Wedge EXECUTE verbs (W0 scaffold): thin → the owning module's runner,
