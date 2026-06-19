@@ -36,7 +36,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     bulk-unsupported detection, ingest per-object fallback round-trip, load per-object fallback + integrity still
     enforced + fail-closed-on-missing, normal-bulk-default, 405-mid-upload. `cargo test -p hugit-serve` 279 lib
     pass; clippy `-D warnings` + `cargo deny` clean; no new deps.
->>>>>>> origin/main
 
 - feat(serve): **bulk CAS plane — batch upload/read/exists + dedup ingest (collapses 6.5k round-trips → ~4-8).**
   The hugit client for the FROZEN CoreLink bulk contract (Server TL, 2026-06-19), built in parallel with the
