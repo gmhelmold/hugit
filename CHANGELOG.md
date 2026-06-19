@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(serve): **bulk CAS plane — batch upload/read/exists + dedup ingest (collapses 6.5k round-trips → ~4-8).**
+  The hugit client for the FROZEN CoreLink bulk contract (Server TL, 2026-06-19), built in parallel with the
+  server side. Turns the git-object ingest from thousands of per-object PUTs into a deduped, chunked batch.
+  - **3 batch ops on `CasClient`** (route/auth/caps in the one isolated place in `cas.rs`): `batch_upload`
+    (`POST /v1/cas/{tenant}/batch`, cas:rw, NDJSON `{hash,len}` manifest + `\n` + length-framed concatenated
+    bytes, per-object `created|exists|error` status), `batch_read` (`/batch-read`, cas:r, manifest + bytes),
+    `batch_exists` (`/batch-exists`, cas:r, `{hash→present}`). Caps `≤2000 objects / ≤8 MiB`; `chunk_by_caps`
+    splits by both; a **413 `batch_too_large` → deterministic half-split + retry** (singleton → per-object
+    `error` / single-object fallback). 415 → hard `BatchUnsupportedMediaType`, 400 → hard `BatchFraming`.
+  - **Ingest dedup:** `git-ingest` now `batch_exists` over the whole closure → `batch_upload` only the missing
+    (chunked) → retry per-object errors once, fail-closed if any persist. (Git closures overlap heavily across
+    pushes → re-ingests upload almost nothing.) A blake3 backing multiple git oids is uploaded once.
+  - **Boot loader:** `load_from_cas` rewired from N per-object GETs → chunked `batch_read` (cold start
+    ~6,507 GETs → ~4-8 round-trips), **double-integrity preserved unchanged** (blake3==key AND re-derived git
+    SHA-1 == index oid; fail-closed on any absent/gone/mismatch). Single-object `get`/`put` kept as fallback.
+  - 14 new hermetic `cas` batch tests (round-trip + dedup, partial-failure + retry, 413-split, 415/400 hard,
+    chunker by count + bytes + oversized singleton); the in-memory double models all 3 endpoints incl.
+    415/400/413. `cargo test -p hugit-serve` **369 pass** (272 lib); clippy `-D warnings` + `cargo deny` clean.
+    No new deps. Live-gated on the CoreLink server-side endpoints landing + the deploy wiring.
+
 - feat(serve): **git-from-CAS read path + ingest (the SOTA path for blob/edit/clone — replaces the baked-repo bridge).**
   Pre-built against the CONFIRMED CoreLink CAS contract (Server TL, 2026-06-18) so blob/edit/`git clone`
   can serve git objects from the CoreLink CAS instead of a local `HUGIT_SERVE_GIT_DIR` — no distroless
