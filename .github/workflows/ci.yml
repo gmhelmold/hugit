@@ -28,12 +28,23 @@ on:
 permissions:
   contents: read
 
+# Collapse duplicate runs for the same ref to one (cancel the older). Guards
+# against double-triggered events (e.g. the humangr-labs→HumanGuardrail rename
+# fired dual push/PR events → two gates runs that canceled each other).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   gates:
-    # HuGR family CI runs on the self-hosted fleet, never GitHub-hosted
-    # (same labels as corelink-server; ubuntu-latest was a founding mistake
-    # that hit the org's Actions billing wall).
-    runs-on: [self-hosted, mac, corelink-builder]
+    # GitHub-hosted runner (2026-06-19: org Actions billing unblocked — owner).
+    # Switched off the single self-hosted Mac builder, which was contention-flaky
+    # (~37% PS-12b-class infra failures: lost toolchain PATH, registry-extraction
+    # races, CANCELLED runs) — ephemeral hosted runners are isolated, so the
+    # CARGO_HOME-isolation + per-step PATH-glob workarounds below are now belt-and-
+    # suspenders (harmless on ubuntu; kept to minimise this diff). ubuntu-latest
+    # also matches prod (the engine container is linux), not the dev Mac.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:

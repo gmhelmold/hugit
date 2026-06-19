@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **BREAKING (cli): the `hugit repo meta set` verb is renamed to `hugit meta set`.**
+  git 2.54 added a real `git repo` builtin, and the WP-X5 namespace law forbids any hugit verb
+  shadowing a git command — so the verb yields the name to git (the "embrace, don't assault /
+  don't deviate from git" doctrine). The redundant middle layer is dropped (`repo meta set` →
+  `meta set`). The **on-the-wire event kind is unchanged** (`repo.meta`, a frozen authz contract
+  the engine consumes): only the CLI surface renamed. Surfaced by the self-hosted-Mac → ubuntu CI
+  migration: the dev Mac runs git 2.51 (no `git repo`) so it passed there; the ubuntu runner runs
+  git 2.54 and correctly flagged the collision.
+- fix(invariants): **the WP-X5① no-shadow oracle now sources git's OWN commands, not `git help -a`.**
+  `git help -a` enumerates ambient external `git-*` binaries found on `PATH` (a CI runner's
+  third-party `git-repo` tool), making the namespace check host-dependent. It now shells
+  `git --list-cmds=builtins,main` (git's compiled-in + porcelain commands — deterministic across
+  machines) and parses one-command-per-line. The dead `parse_git_verbs` parser is removed in favor
+  of `parse_git_cmd_list`.
+- fix(cli): **`hugit check` timeout no longer process-group-signals — it can't take down its own caller (prod + CI safety).**
+  The timeout path `kill -<pid>` the check's process GROUP (negative pid) to also reap backgrounded grandchildren.
+  But a process-group signal took down the **whole CI job** on a GitHub-hosted linux runner — even with the child
+  in its own `setsid` session (POSIX says that should isolate it; the hosted runner's process model cancels the
+  job on any negative-pid signal in its tree regardless). Same hazard in prod: the engine container is **linux**,
+  so a timed-out check could SIGTERM the engine's process tree. The self-hosted Mac masked it (macOS EPERM'd the
+  group-kill); the migration off the Mac exposed it. **Fix:** `kill_group` now SIGKILLs **only the direct child's
+  PID** (the `sh -c` execs the command, so its PID is the real process — the timeout is fully satisfied), and the
+  output-drain join is **skipped on the timeout path** so a shell-forked grandchild holding the pipe open can't
+  delay the return (linux `sh -c` forks `sleep`; macOS execs it). Narrow cost: a check that *backgrounds* a
+  grandchild can leave it past the deadline — the OS reaps it on hugit's exit. The corresponding acceptance test
+  now asserts the **prompt timeout** (the load-bearing guarantee) rather than orphan-reaping. (Re-introducing
+  reaping WITHOUT a group signal — single-PID kill of enumerated descendants — is a tracked follow-up.) Bundled
+  with the runner migration since its ubuntu CI validates the linux path.
+
 - feat(serve): **git-ingest + load_from_cas auto-fall back to per-object when the bulk CAS plane is absent (405/404).**
   Robustness: an env where the CoreLink bulk endpoints aren't deployed (returns **405/404** on the batch route)
   must not hard-fail the ingest — it now transparently degrades to the always-live single-object path. (This is

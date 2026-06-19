@@ -1159,14 +1159,20 @@ fn a_directory_symlink_cycle_does_not_crash_the_tree_walk() {
     }
 }
 
-/// WH-CHECK [SHIP-BLOCKER — process-group kill]: a command that BACKGROUNDS a
-/// grandchild (`sleep 30 & … sleep 30`) is killed AS A GROUP at the timeout — the
-/// orphan grandchild dies too, and the wall-time ceiling is honoured (the verb
-/// returns in ~1-2 s, not 30 s). `child.kill()` alone would orphan the grandchild
-/// and let it survive past the deadline.
+/// WH-CHECK [process-group kill REMOVED for safety]: a command that BACKGROUNDS a
+/// grandchild (`sleep 30 & … sleep 30`) still TIMES OUT PROMPTLY — exit 2 /
+/// check_timeout, returning in ~1-2 s (NOT 30 s) — with the direct child killed by
+/// PID only. The runner deliberately does NOT process-group-signal: a negative-pid
+/// kill is unsafe on a linux runner / the engine container (it takes down the whole
+/// process tree, incl. our own job — observed on GitHub-hosted CI, even with
+/// `setsid`). So a backgrounded grandchild MAY outlive the deadline (OS-reaped on
+/// hugit's exit). The load-bearing guarantee asserted here is the PROMPT timeout —
+/// the orphan-held pipe must NOT block the return (the drain-thread join is skipped
+/// on timeout) — NOT that the orphan is reaped. (Reaping without a group signal —
+/// single-PID kill of enumerated descendants — is a tracked follow-up.)
 #[test]
 #[cfg(unix)]
-fn a_backgrounding_command_is_killed_with_its_whole_process_group() {
+fn a_backgrounding_command_times_out_promptly_without_a_group_signal() {
     let dir = scratch("pgroup");
     let log = dir.join("log.json");
     let ac = dir.join("ac.json");
@@ -1208,22 +1214,16 @@ fn a_backgrounding_command_is_killed_with_its_whole_process_group() {
         "the wall-time ceiling is honoured (did not wait the full 30 s): {elapsed:?}"
     );
 
-    // Give the group-kill a moment, then assert the orphan grandchild is DEAD.
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    // The grandchild recorded its pid. We do NOT assert it is dead: the runner no
+    // longer group-signals (that's the unsafe path), so a backgrounded grandchild
+    // may still be alive here — the OS reaps it on hugit's exit. Best-effort single-
+    // PID cleanup so the test doesn't leak a 30 s `sleep` (a positive pid is a
+    // single-process signal — never a group — so it's safe).
+    std::thread::sleep(std::time::Duration::from_millis(200));
     let pid = std::fs::read_to_string(&marker).unwrap_or_default();
-    let pid = pid.trim();
+    let pid = pid.trim().to_string();
     assert!(!pid.is_empty(), "the grandchild recorded its pid: {v}");
-    // `kill -0 <pid>` succeeds iff the process is still alive. It must be dead.
-    let alive = Command::new("kill")
-        .arg("-0")
-        .arg(pid)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    assert!(
-        !alive,
-        "the orphan grandchild (pid={pid}) was killed with the group, not left alive"
-    );
+    let _ = Command::new("kill").arg("-KILL").arg(&pid).status();
 }
 
 /// WH-CHECK [SHIP-BLOCKER — lock-poison]: a SLOW check holding mid-execute does

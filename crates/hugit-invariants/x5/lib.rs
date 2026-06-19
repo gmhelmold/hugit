@@ -7,10 +7,13 @@
 //!
 //! # The two invariants (WP-X5 owned items)
 //! ① **No hugit CLI verb shadows a git verb.** The test enumerates hugit's
-//!    verbs and asserts the intersection with `git help -a`'s verb set is
-//!    empty. The git verb list is generated from `git help -a` at test time —
-//!    never a hand-copied list (which would rot). A new shadowing verb
-//!    anywhere in hugit-cli turns this red.
+//!    verbs and asserts the intersection with git's command set is empty. The
+//!    git verb list is generated at test time from `git --list-cmds=builtins,main`
+//!    (git's OWN compiled-in + porcelain commands) — never `git help -a`, which
+//!    also lists ambient external `git-*` binaries on `PATH` and so varies by
+//!    machine (a CI runner's third-party `git-repo` once tripped this), and
+//!    never a hand-copied list (which would rot). A new shadowing verb anywhere
+//!    in hugit-cli turns this red.
 //! ② **Managed refs (`refs/hugit/…`) never collide with user branches/tags.**
 //!    A property test generates arbitrary user branch/tag names and asserts
 //!    none can collide with the `refs/hugit/…` reserved namespace, AND that
@@ -57,30 +60,24 @@ pub fn is_user_ref(ref_name: &str) -> bool {
     !ref_name.starts_with(HUGIT_REF_PREFIX)
 }
 
-/// Parse `git help -a` output and extract the verb tokens.
+/// Parse `git --list-cmds=<categories>` output into a verb set.
 ///
-/// The output format is lines with leading whitespace followed by the verb
-/// name and a description. This function extracts only the first token from
-/// each non-empty, non-header line (lines that start with whitespace and have
-/// a lowercase verb token).
-pub fn parse_git_verbs(git_help_output: &str) -> std::collections::HashSet<String> {
-    git_help_output
+/// Unlike `git help -a` (whose output is sectioned/indented AND includes ambient
+/// external `git-*` binaries found in `PATH` — e.g. a CI runner's third-party
+/// `git-repo` tool, which made the namespace oracle environment-dependent),
+/// `git --list-cmds=builtins,main` prints git's OWN command surface — one bare
+/// command per line, deterministic across machines. Each non-empty line IS a
+/// command token.
+pub fn parse_git_cmd_list(list_cmds_output: &str) -> std::collections::HashSet<String> {
+    list_cmds_output
         .lines()
-        .filter_map(|line| {
-            // Lines that list verbs start with whitespace and have a lowercase token.
-            let trimmed = line.trim_start();
-            if trimmed.is_empty() || !line.starts_with(' ') && !line.starts_with('\t') {
-                return None;
-            }
-            // The verb is the first whitespace-delimited token on the line.
-            let verb = trimmed.split_whitespace().next()?;
-            // Only include lines that look like verb entries (lowercase start, no colon).
-            if verb.starts_with(|c: char| c.is_ascii_lowercase() || c == '-') && !verb.contains(':')
-            {
-                Some(verb.to_string())
-            } else {
-                None
-            }
+        .map(str::trim)
+        .filter(|l| {
+            !l.is_empty()
+                && l.starts_with(|c: char| c.is_ascii_lowercase() || c == '-')
+                && !l.contains(char::is_whitespace)
+                && !l.contains(':')
         })
+        .map(str::to_string)
         .collect()
 }

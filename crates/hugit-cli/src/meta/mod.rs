@@ -1,4 +1,4 @@
-//! Repo metadata — `hugit repo meta set` (the `owner_tenant` producer).
+//! Repo metadata — `hugit meta set` (the `owner_tenant` producer).
 //!
 //! Records a **`repo.meta`** event (visibility + owning tenant) onto the canonical
 //! `--log`. This is the PRODUCER half of the engine's per-tenant authz seam: the
@@ -9,6 +9,11 @@
 //! scrub-on-append, atomic-persist chokepoint the campaign verbs use — the record
 //! is chain-valid by construction, never hand-assembled JSON.
 //!
+//! The CLI verb is `meta` (not `repo`): git 2.54 added a `git repo` builtin, and
+//! the WP-X5 namespace law forbids any hugit verb shadowing a git command — so
+//! the verb yields the name to git. The on-the-wire event kind stays `repo.meta`
+//! (a frozen authz contract the engine consumes); only the CLI surface renamed.
+//!
 //! Hermetic file seam: like the campaign/pr porcelain, it operates on local state
 //! via `--log <path>` (a JSON `[EventRecord, …]` array). Live R2 binding is the P2
 //! disclosed seam. Latest-wins: each `set` appends a new authoritative record.
@@ -18,24 +23,12 @@ use std::process::ExitCode;
 
 use clap::Subcommand;
 
-mod set_meta;
+mod set;
 
 /// The engine-consumed event kind (must match `authz::REPO_META_KIND`).
 pub const KIND_REPO_META: &str = "repo.meta";
 
-/// `hugit repo <subcommand>`.
-#[derive(clap::Args, Debug)]
-pub struct RepoArgs {
-    #[command(subcommand)]
-    pub command: RepoCommand,
-}
-
-#[derive(Subcommand, Debug)]
-pub enum RepoCommand {
-    /// Repo authz metadata: `set` records a `repo.meta` (visibility + owner_tenant).
-    Meta(MetaArgs),
-}
-
+/// `hugit meta <subcommand>` — repo authz metadata (visibility + owner_tenant).
 #[derive(clap::Args, Debug)]
 pub struct MetaArgs {
     #[command(subcommand)]
@@ -48,7 +41,7 @@ pub enum MetaCommand {
     Set(SetMetaArgs),
 }
 
-/// `hugit repo meta set` — record the repo's authz metadata.
+/// `hugit meta set` — record the repo's authz metadata.
 #[derive(clap::Args, Debug)]
 pub struct SetMetaArgs {
     /// Path to the JSON world file (the local event log). Read, then rewritten
@@ -73,11 +66,9 @@ pub struct SetMetaArgs {
     pub recorded_at: Option<u64>,
 }
 
-pub fn run(args: RepoArgs) -> ExitCode {
+pub fn run(args: MetaArgs) -> ExitCode {
     let result = match args.command {
-        RepoCommand::Meta(m) => match m.command {
-            MetaCommand::Set(a) => set_meta::run(a),
-        },
+        MetaCommand::Set(a) => set::run(a),
     };
     match result {
         Ok(json) => {

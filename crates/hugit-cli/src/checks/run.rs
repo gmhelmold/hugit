@@ -925,13 +925,11 @@ impl CheckRunner for ProcessRunner {
                 command.env(k, v);
             }
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            // The child becomes the leader of a fresh group whose pgid == its pid,
-            // so `kill -<pid>` (negative pid = the group) reaps the whole subtree.
-            command.process_group(0);
-        }
+        // NOTE: the child is intentionally NOT placed in its own process group /
+        // session. The timeout path (`kill_group`) signals only the direct child's
+        // PID — never a process group — because a process-group signal is unsafe on
+        // a GitHub-hosted linux runner / the linux engine container (it took down
+        // the whole CI job, even with `setsid` isolation). See `kill_group`.
         let mut child = command
             .spawn()
             .map_err(|e| ExecError::Run(format!("spawn `{}`: {e}", def.command)))?;
@@ -945,9 +943,9 @@ impl CheckRunner for ProcessRunner {
         // command the thread reads until EOF (pipe closed when the child exits).
         // On a flooding command it reads until the cap, then discards the rest via
         // a small fixed-size scratch buffer until EOF — the child is STILL
-        // unblocked. On timeout `kill_group` closes the child's write end of the
-        // pipe (the child's fd is gone after kill+wait), so the drain thread sees
-        // EOF and exits promptly.
+        // unblocked. On TIMEOUT we kill only the direct child, so a shell-forked
+        // grandchild may keep the pipe open; the drain-thread join is SKIPPED on the
+        // timeout path (the threads detach), so a lingering pipe never delays return.
         let stdout_handle = child.stdout.take();
         let stderr_handle = child.stderr.take();
 
@@ -985,21 +983,23 @@ impl CheckRunner for ProcessRunner {
         let stdout_thread = stdout_handle.map(|h| drain(Box::new(h)));
         let stderr_thread = stderr_handle.map(|h| drain(Box::new(h)));
 
-        // Poll for completion up to the deadline; kill the whole GROUP + reap on
-        // expiry (WH-CHECK: a backgrounding child must not outlive the ceiling).
-        // The drain threads run concurrently throughout: the child can never block
-        // on a full pipe regardless of how much output it emits (WJ-CHECK-DRAIN).
+        // Poll for completion up to the deadline; kill + reap the direct child on
+        // expiry (WH-CHECK: the check must not outlive the ceiling). The drain
+        // threads run concurrently throughout: the child can never block on a full
+        // pipe regardless of how much output it emits (WJ-CHECK-DRAIN).
         let poll_result = loop {
             match child.try_wait() {
                 Ok(Some(status)) => break Ok(status.code().unwrap_or(-1)),
                 Ok(None) => {
                     if start.elapsed() >= self.timeout {
-                        // Bounded ceiling reached: kill the whole process GROUP (so
-                        // orphan grandchildren die too), reap the direct child (no
-                        // zombie), and surface a structured timeout. The result is
-                        // NOT stored — a hang never poisons the cache.
-                        // The kill closes the child's write end of the pipes, so
-                        // the drain threads will see EOF and exit promptly.
+                        // Bounded ceiling reached: SIGKILL the direct child (a single
+                        // PID — never its process group, which is unsafe on a linux
+                        // runner/the engine; see `kill_group`) and reap it (no
+                        // zombie), then surface a structured timeout. The result is
+                        // NOT stored — a hang never poisons the cache. A shell-forked
+                        // grandchild may outlive this (OS-reaped on our exit); the
+                        // drain-thread join below is SKIPPED on this path so it can
+                        // never block on such an orphan.
                         kill_group(&mut child);
                         break Err(ExecError::Timeout(self.timeout.as_secs()));
                     }
@@ -1012,15 +1012,24 @@ impl CheckRunner for ProcessRunner {
             }
         };
 
-        // Join the drain threads so all pipe data is consumed before we return.
-        // On a normal exit the threads have already drained to EOF. On a timeout
-        // they drain the residual bytes left in the OS pipe buffer after the kill
-        // (at most a few KB) and then see EOF — the join is prompt.
-        if let Some(t) = stdout_thread {
-            let _ = t.join();
-        }
-        if let Some(t) = stderr_thread {
-            let _ = t.join();
+        // Join the drain threads ONLY when the child exited on its own — then the
+        // pipes are already at EOF and the join is immediate. On a TIMEOUT/error we
+        // kill only the direct child (never its process group — that is unsafe on a
+        // linux runner/the engine; see `kill_group`), so a shell-forked grandchild
+        // (linux `sh -c` forks `sleep`; macOS execs it) can still hold the pipe
+        // write-end open. Joining there would block until that orphan exits,
+        // defeating the timeout's promptness. The captured bytes are discarded
+        // regardless, so on timeout/error we DETACH the drain threads (drop the
+        // handles; they exit when the orphan or our process does) and return
+        // promptly. They still drained the pipe DURING the run (the no-block-on-full-
+        // pipe guarantee is the loop above, not this join).
+        if poll_result.is_ok() {
+            if let Some(t) = stdout_thread {
+                let _ = t.join();
+            }
+            if let Some(t) = stderr_thread {
+                let _ = t.join();
+            }
         }
 
         let exit = poll_result?;
@@ -1060,27 +1069,26 @@ fn shell_command(cmd: &str) -> Command {
     }
 }
 
-/// Kill the child's whole process GROUP and reap the direct child (no zombie).
+/// Kill the timed-out child and reap it (no zombie).
 ///
-/// On Unix the child was spawned with `process_group(0)` so its pgid equals its
-/// pid; sending the signal to the negative pid (`kill -<pid>`) reaches every
-/// descendant — including a backgrounded grandchild that `child.kill()` alone
-/// would orphan past the timeout. We deliver SIGTERM then SIGKILL through the
-/// `kill(1)` binary (std-only — no libc/nix dep), then `wait()` the direct child
-/// so it is reaped. On non-Unix the std `child.kill()` is the best available.
+/// SAFETY (the load-bearing invariant): a check timeout must NEVER be able to
+/// signal anything beyond its own command — not `hugit check` itself, not the CI
+/// job, and (in prod) NOT the linux engine container. So this does ONLY
+/// `child.kill()`: a SIGKILL to the child's single PID, which cannot reach any
+/// other process. The child is an `sh -c <cmd>` that execs the command, so its PID
+/// *is* the real process — killing it satisfies the timeout.
+///
+/// History: this used to `kill -<pid>` the child's process GROUP to also reap a
+/// backgrounded grandchild. But a process-group (negative-pid) signal took down
+/// the WHOLE CI job on a GitHub-hosted linux runner — even with the child in its
+/// own `setsid` session (POSIX says that should isolate it; the hosted runner's
+/// process model cancels the job regardless). Same hazard in prod (the engine is
+/// linux). So the group-signal is removed entirely. Narrow cost: a check that
+/// *backgrounds* a grandchild (`foo &`) can leave it past the deadline — the OS
+/// reaps such orphans on hugit's exit. (Re-introducing reaping WITHOUT a group
+/// signal — e.g. enumerating + single-PID-killing descendants via `/proc` — is a
+/// tracked follow-up.)
 fn kill_group(child: &mut std::process::Child) {
-    #[cfg(unix)]
-    {
-        let pid = child.id();
-        // Negative pid targets the whole group. TERM first (graceful), then KILL
-        // (so a TERM-ignoring child still dies). Best-effort: a failure only risks
-        // an orphan the OS reaps on the parent's exit — never a correctness loss.
-        let group = format!("-{pid}");
-        let _ = Command::new("kill").arg("-TERM").arg(&group).status();
-        let _ = Command::new("kill").arg("-KILL").arg(&group).status();
-    }
-    // Always also signal + reap the direct child (covers non-Unix and guarantees
-    // no zombie even if the group signal raced the child's own exit).
     let _ = child.kill();
     let _ = child.wait();
 }
