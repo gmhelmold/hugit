@@ -123,7 +123,6 @@ pub fn run_wave_with_envelope_capture<S: ColdBlobStore>(
         files.insert(path.clone(), content.clone());
 
         let mut rec = TrajectoryRecorder::start();
-        let born_at = unix_ms_now();
         rec.record_task_event(format!(
             "brief: land {pr_id} — run `{}` memoized and hand off green",
             cfg.check_def.command
@@ -186,7 +185,13 @@ pub fn run_wave_with_envelope_capture<S: ColdBlobStore>(
                 &format!("run-{pr_id}"),
                 Some("orq-dogfood-wave"),
                 "implementer",
-                born_at,
+                // Born + died MUST come from the recorder's single authoritative
+                // clock anchor (start()): finish() computes died_at = born_at +
+                // elapsed, so died_at >= born_at always holds. Reading the wall
+                // clock a SECOND time for born_at raced the recorder's anchor and
+                // could land a millisecond later than a sub-ms run's died_at,
+                // inverting the lifespan (intermittent CI failure).
+                t.born_at,
                 t.died_at,
             ),
             charter: format!("land {pr_id} with green checks"),
@@ -225,7 +230,6 @@ pub fn run_wave_with_envelope_capture<S: ColdBlobStore>(
 
     // ── the orchestrator session: plan → land the wave, recorded ─────────────
     let mut rec = TrajectoryRecorder::start();
-    let session_born = unix_ms_now();
     rec.record_task_event(format!(
         "plan: wave of {} PRs, campaign {DOGFOOD_CAMPAIGN}",
         cfg.entries.len()
@@ -275,7 +279,9 @@ pub fn run_wave_with_envelope_capture<S: ColdBlobStore>(
         unit_id,
         commit: "dogfood:wave-head".to_string(),
         tree_hash: "dogfood:wave-union".to_string(),
-        authorship: dogfood_authorship("orq-dogfood-wave", None, "main", session_born, t.died_at),
+        // `t.born_at` (not a second wall-clock read): the recorder's single
+        // authoritative anchor keeps died_at >= born_at — see the intent loop.
+        authorship: dogfood_authorship("orq-dogfood-wave", None, "main", t.born_at, t.died_at),
         charter: "land the dogfood wave".to_string(),
         campaign: Some(DOGFOOD_CAMPAIGN.to_string()),
         constraints: vec![],
@@ -334,13 +340,4 @@ pub fn run_wave_with_envelope_capture<S: ColdBlobStore>(
         pr_sessions,
         campaign_session,
     }
-}
-
-/// Current unix time in ms (the recorder owns the authoritative lifespan;
-/// this anchors `Spawn.born_at` to the same clock).
-fn unix_ms_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or(0)
 }

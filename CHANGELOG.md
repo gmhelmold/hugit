@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(dogfood): **the dogfood envelope's spawn lifespan can no longer invert (`died_at < born_at`) — a flaky CI failure.**
+  The intent/session envelopes read the wall clock a SECOND time for `Spawn.born_at` *after* the
+  `TrajectoryRecorder` already captured its own authoritative `born_at` at `start()`. `finish()`
+  computes `died_at = recorder.born_at + elapsed`, so for a sub-millisecond run (the AC-hit hermetic
+  path) `elapsed.as_millis() == 0` ⇒ `died_at == recorder.born_at`; if the second clock read had
+  crossed a millisecond tick, the envelope's `born_at` landed one ms LATER than `died_at`, inverting
+  the lifespan and tripping `acceptance_f2_dogfood`'s `died_at >= born_at` assertion. Now both come
+  from the recorder's single anchor (`t.born_at`); the dead second-read helper `unix_ms_now` is
+  removed. Latent on every host; surfaced intermittently on the ubuntu CI runner.
 - **BREAKING (cli): the `hugit repo meta set` verb is renamed to `hugit meta set`.**
   git 2.54 added a real `git repo` builtin, and the WP-X5 namespace law forbids any hugit verb
   shadowing a git command — so the verb yields the name to git (the "embrace, don't assault /
