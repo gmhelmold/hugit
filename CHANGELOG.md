@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(cli): **`hugit ledger` goes REAL — the default forge history view (Phase D, graduated from RESERVED).**
+  `hugit ledger --log <path> [--campaign <name>]` projects the canonical event log into the
+  asked→done→proven history, reusing the SAME `hugit_ledger::Ledger` per-intent fold that
+  `campaign show` / `queue show` read — so the ledger view AGREES with every other surface by
+  construction (one projection, never a second source of truth). Emits stable JSON: a per-campaign
+  rollup (`asked` / `done` / `proven` / `rejected`) + the redacted ledger entries; `--campaign`
+  scopes the view. Honest-null on a log with no `intent.landed` (entries `[]` + a disclosing `note`),
+  and the WB0 one-error/one-exit law (missing log ⇒ exit 2, `{"error":…}`). `--live` (the SSE tail)
+  stays the serve surface. Verb graduated `HUGIT_RESERVED_VERBS` → `HUGIT_VERBS`; the no-drift oracle
+  (`acceptance_rcli` ⑥) holds (dispatched == registry).
 - fix(dogfood): **the dogfood envelope's spawn lifespan can no longer invert (`died_at < born_at`) — a flaky CI failure.**
   The intent/session envelopes read the wall clock a SECOND time for `Spawn.born_at` *after* the
   `TrajectoryRecorder` already captured its own authoritative `born_at` at `start()`. `finish()`

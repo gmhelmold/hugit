@@ -27,6 +27,7 @@ pub mod impact;
 pub mod intent;
 pub mod issue;
 pub mod journal;
+pub mod ledger;
 pub mod meta;
 pub mod policy;
 pub mod porcelain;
@@ -119,6 +120,13 @@ pub const HUGIT_VERBS: &[&str] = &[
     // `check.recorded` events — read-only structured diagnosis. LIVE the moment
     // main.rs routes it; the no-drift oracle requires it here.
     "diag", // hugit diag --log --def-digest [--toolchain] — bisect a red check history
+    // Forge read surface (Phase D) — graduated from RESERVED with REAL wiring
+    // (not a stub). `ledger` projects the canonical `--log` into the
+    // asked→done→proven history via the SAME `hugit_ledger::Ledger` fold
+    // `campaign show` / `queue show` read (one projection, surfaces agree by
+    // construction). LIVE the moment main.rs routes it; the no-drift oracle
+    // requires it here, not in HUGIT_RESERVED_VERBS.
+    "ledger", // hugit ledger --log [--campaign]    — default forge history view
 ];
 
 /// Planned hugit verb tokens that are RESERVED but NOT yet dispatched.
@@ -140,7 +148,8 @@ pub const HUGIT_RESERVED_VERBS: &[&str] = &[
     "ws",  // hugit ws spawn/attach/snap/gc — claim-fenced workspaces
     "ctx", // hugit ctx snap / resume      — short-horizon session resume
     // Phase D — The forge verbs (planned)
-    "ledger", // hugit ledger [--live]    — default history view
+    // (`ledger` graduated to HUGIT_VERBS — Phase-D read surface, REAL-wired over
+    // the canonical `--log` via `hugit_ledger::Ledger`.)
     "review", // hugit review <intent>    — grounded-evidence answers
     "watch",  // hugit watch              — TUI forge monitoring
     // (`undo`, `policy`, `approve`, `reject`, `journal` graduated to HUGIT_VERBS
