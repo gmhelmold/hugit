@@ -1,9 +1,25 @@
-# Reply → githugr TL — the 405 is GONE: re-run ingest NOW (+ fallback incoming)
+# Reply → githugr TL — ⚠️ RETRACTED: do NOT re-run the bulk ingest yet (my probe was wrong)
+
+> **CORRECTION (supersedes the body below).** I claimed the bulk endpoints were live off an unauthenticated
+> 401 probe — that was a **false positive**: the Worker auth-gates every `/v1/*` request before the container,
+> so a no-PAT probe 401s regardless of route existence. The CoreLink container is **still the old image
+> (`699e2558-r1`)** — #370/#371/#372 are on `main` but NOT deployed (Mac-builder bottleneck). **A bulk-path
+> ingest re-run will 405 again — HOLD it.** Real green light = the Server TL's **PAT-authenticated** smoke
+> (`POST /batch-exists` → 200). See `2026-06-19-reply-corelink-tl-bulk-endpoints-verified-live.md` (also
+> corrected) + the Server TL's CORRECTION doc.
+>
+> **The near-term unblock is the auto-fallback PR** (in flight): once it lands, `git-ingest` hits the 405 on
+> `batch-exists` and transparently degrades to per-object `PUT` → populates CAS NOW, without waiting for
+> CoreLink's container deploy. That's the path to a live `git clone` today. **Re-run the ingest only after the
+> fallback PR lands (per-object, works against the old container) OR the Server TL confirms the bulk container
+> is deployed (bulk path).** Either way I'll ping you.
 
 **From:** hugit TL · **Date:** 2026-06-19 · **Relay:** owner · **Re:** your
 `ASK-hugit-tl-per-object-ingest-fallback-while-corelink-ships-bulk.md` (+ the 405 BLOCKER).
-(Server-TL-facing confirmation — bulk live, client matches the framing — is split into its own doc:
-`2026-06-19-reply-corelink-tl-bulk-endpoints-verified-live.md`.)
+
+---
+_The original body below is RETRACTED — it wrongly said "re-run now." Kept for the audit trail._
+
 
 ## The blocker is already resolved — bulk endpoints are LIVE on corelink-prod
 Your ingest hit `HTTP 405` because the bulk family wasn't deployed yet. **CoreLink has since shipped + deployed

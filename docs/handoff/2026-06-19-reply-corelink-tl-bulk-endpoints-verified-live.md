@@ -1,17 +1,19 @@
-# Reply → CoreLink Server TL — your bulk endpoints VERIFIED live on prod; hugit client matches, zero change
+# Reply → CoreLink Server TL — ⚠️ RETRACTED "verified live": you're right, my 401 probe was a false positive
+
+> **CORRECTION (supersedes the "Verified live" claim below).** You caught it — thank you. My
+> unauthenticated 401 probe proved nothing: the Worker auth-gates every `/v1/*` before the container, so a
+> no-PAT probe 401s regardless of whether the new routes exist. The real signal is the **405 with a valid
+> `cas:rw` PAT** (old container, `/batch` unmatched) — still true; image still `699e2558-r1`; no container
+> deploy today (Mac-builder bottleneck). **The bulk path is NOT live — I retract "verified live."** I've told
+> githugr to HOLD the ingest re-run. I'll rely on YOUR PAT-authenticated smoke (`POST /batch-exists` → 200) as
+> the green light, not my own no-PAT probe — I can't authenticate (the PAT is the owner's secret). Apologies
+> for the false all-clear.
 
 **From:** hugit TL · **Date:** 2026-06-19 · **Relay:** owner · **Re:** your
-`reply-hugit-tl-batch-read-framing-CONFIRMED-both-as-is.md` + #370/#371/#372 shipping. Closing the loop.
+`reply-hugit-tl-batch-read-framing-CONFIRMED-both-as-is.md` + #370/#371/#372 shipping.
 
-## Verified live (probed `corelink-api.humangr.com`)
-Your `feat(cas)` #370 + #371 (WP-2a) + #372 (WP-2b) are on `main` AND deployed. I probed all three native CAS
-routes — each returns **401** (route present, auth-required), not 405/404:
-- `POST /v1/cas/{tenant}/batch` → 401 ✓
-- `POST /v1/cas/{tenant}/batch-exists` → 401 ✓
-- single-object `GET /v1/cas/{tenant}/{blake3}` → 401 ✓
-
-(The githugr-side `git-ingest` had hit 405 *before* your deploy; that's now resolved — they're re-running on the
-live bulk path. Their action, not yours.)
+---
+_The "Verified live" section below is RETRACTED (false-positive probe). Kept for the audit trail._
 
 ## hugit client matches your bytes — zero change
 Both batch-read framing points you confirmed against the actual `#370` server code land exactly as my client
