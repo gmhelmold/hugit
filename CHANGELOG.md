@@ -7,20 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- fix(cli): **`hugit check` timeout-kill no longer process-group-signals — it can't take down its own caller (prod + CI safety).**
-  `kill_group` fired `kill -<pid>` (negative pid = a process group) on every timeout. The child is spawned
-  `process_group(0)` so that was *meant* to be isolated — but on a GitHub-hosted linux runner the group-signal
-  took down the **whole job** (every CI run died exactly when the `process_runner_times_out` test's 1s deadline
-  fired — the migration off the self-hosted Mac exposed it; on macOS the same call EPERM'd, masking the hazard).
-  Same hazard in prod (the engine container is **linux** — a timed-out check could SIGTERM the engine's process
-  tree). Fix: `kill_group` now does **only `child.kill()`** — a single-PID SIGKILL that cannot reach any other
-  process (the child is an `sh -c` that execs the command, so its PID is the real process; the timeout is fully
-  satisfied). The runner also now **skips joining the output-drain threads on the timeout path** (their captured
-  bytes are discarded anyway): a shell-forked grandchild — linux `sh -c` forks `sleep` where macOS execs it —
-  can hold the pipe write-end open, and joining would block until it exits, defeating the prompt timeout; the
-  threads detach and are reaped on process exit. Narrow cost: such a backgrounded grandchild can outlive the
-  deadline (OS-reaped on parent exit). (Bundled with the runner migration since its ubuntu CI validates the
-  linux path — and this is exactly the linux fork-vs-exec difference the self-hosted Mac never exercised.)
+- fix(cli): **`hugit check` runs each check in its own session (`setsid`) so the timeout group-kill can't take down its caller (prod + CI safety).**
+  The timeout path `kill -<pid>` the check's process GROUP (to reap backgrounded grandchildren). The child was
+  spawned `process_group(0)` (a new group, but the SAME session), which did NOT isolate it on a GitHub-hosted
+  linux runner: the group-signal took down the **whole CI job** (every run died exactly when the
+  `process_runner_times_out` 1s deadline fired — the migration off the self-hosted Mac exposed it; on macOS the
+  same call EPERM'd, masking the hazard). Same hazard in prod (the engine container is **linux** — a timed-out
+  check could SIGTERM the engine's process tree). Fix: spawn each check via `pre_exec(setsid)` so it leads its
+  OWN session (new session + group, pgid==pid); a process-group signal to that group is then POSIX-guaranteed to
+  reach ONLY the isolated session — never hugit / the job / the engine. The group-kill (and thus orphan-reaping —
+  the `a_backgrounding_command_is_killed_with_its_whole_process_group` guarantee) is preserved, now safely. Adds
+  the `libc` dep (unix-only, `cfg(unix)`; resolves to the lockfile's existing version). (Bundled with the runner
+  migration since its ubuntu CI validates the linux path — the exact session-isolation gap the self-hosted Mac
+  never exercised.)
 
 - feat(serve): **git-ingest + load_from_cas auto-fall back to per-object when the bulk CAS plane is absent (405/404).**
   Robustness: an env where the CoreLink bulk endpoints aren't deployed (returns **405/404** on the batch route)
