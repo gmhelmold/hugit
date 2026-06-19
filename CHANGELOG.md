@@ -7,17 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- fix(cli): **`hugit check` timeout-kill can no longer signal its own process group (prod + CI safety).**
-  `kill_group` blind-fired `kill -<pid>` (negative pid = a process group) on every timeout. The child is
-  spawned with `process_group(0)`, but that isolation isn't guaranteed everywhere: on a GitHub-hosted linux
-  runner the group-signal took down the **whole job** (every CI run died ~1s into the `process_runner_times_out`
-  test — the migration off the self-hosted Mac exposed it; on macOS the same call EPERM'd, which is why it
-  looked harmless). Same hazard in prod (the engine container is **linux** — a timed-out check could SIGTERM
-  the engine's group). Fix: **always** `child.kill()` (single-PID SIGKILL — cannot reach any other process),
-  and group-signal for grandchild-reaping **only** when `/proc` confirms the child is a genuine isolated group
-  leader (`pgrp == pid` and `!= our pgrp`); unconfirmed/unparseable `/proc` → skip → degrade to the safe path.
-  Strictly safer than before; keeps orphan-reaping in the normal isolated case. (Bundled with the runner
-  migration since its ubuntu CI is what validates the linux path.)
+- fix(cli): **`hugit check` timeout-kill no longer process-group-signals — it can't take down its own caller (prod + CI safety).**
+  `kill_group` fired `kill -<pid>` (negative pid = a process group) on every timeout. The child is spawned
+  `process_group(0)` so that was *meant* to be isolated — but on a GitHub-hosted linux runner the group-signal
+  took down the **whole job** (every CI run died exactly when the `process_runner_times_out` test's 1s deadline
+  fired — the migration off the self-hosted Mac exposed it; on macOS the same call EPERM'd, masking the hazard).
+  Same hazard in prod (the engine container is **linux** — a timed-out check could SIGTERM the engine's process
+  tree). Fix: `kill_group` now does **only `child.kill()`** — a single-PID SIGKILL that cannot reach any other
+  process (the child is an `sh -c` that execs the command, so its PID is the real process; the timeout is fully
+  satisfied). Narrow cost: a check that *backgrounds* a grandchild (`foo &`) can orphan it past the deadline —
+  the OS reaps such orphans on parent exit. (Bundled with the runner migration since its ubuntu CI is what
+  validates the linux path.)
 
 - feat(serve): **git-ingest + load_from_cas auto-fall back to per-object when the bulk CAS plane is absent (405/404).**
   Robustness: an env where the CoreLink bulk endpoints aren't deployed (returns **405/404** on the batch route)
