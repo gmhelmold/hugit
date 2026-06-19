@@ -15,9 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Same hazard in prod (the engine container is **linux** — a timed-out check could SIGTERM the engine's process
   tree). Fix: `kill_group` now does **only `child.kill()`** — a single-PID SIGKILL that cannot reach any other
   process (the child is an `sh -c` that execs the command, so its PID is the real process; the timeout is fully
-  satisfied). Narrow cost: a check that *backgrounds* a grandchild (`foo &`) can orphan it past the deadline —
-  the OS reaps such orphans on parent exit. (Bundled with the runner migration since its ubuntu CI is what
-  validates the linux path.)
+  satisfied). The runner also now **skips joining the output-drain threads on the timeout path** (their captured
+  bytes are discarded anyway): a shell-forked grandchild — linux `sh -c` forks `sleep` where macOS execs it —
+  can hold the pipe write-end open, and joining would block until it exits, defeating the prompt timeout; the
+  threads detach and are reaped on process exit. Narrow cost: such a backgrounded grandchild can outlive the
+  deadline (OS-reaped on parent exit). (Bundled with the runner migration since its ubuntu CI validates the
+  linux path — and this is exactly the linux fork-vs-exec difference the self-hosted Mac never exercised.)
 
 - feat(serve): **git-ingest + load_from_cas auto-fall back to per-object when the bulk CAS plane is absent (405/404).**
   Robustness: an env where the CoreLink bulk endpoints aren't deployed (returns **405/404** on the batch route)

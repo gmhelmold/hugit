@@ -928,8 +928,11 @@ impl CheckRunner for ProcessRunner {
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
-            // The child becomes the leader of a fresh group whose pgid == its pid,
-            // so `kill -<pid>` (negative pid = the group) reaps the whole subtree.
+            // Isolate the child in its own process group (defensive: a terminal
+            // signal to hugit's own group won't reach the check mid-run). We
+            // deliberately do NOT group-SIGNAL it on timeout — `kill_group` kills
+            // only the direct PID, because a group signal can reach our own job /
+            // the engine container on a linux runner.
             command.process_group(0);
         }
         let mut child = command
@@ -945,9 +948,9 @@ impl CheckRunner for ProcessRunner {
         // command the thread reads until EOF (pipe closed when the child exits).
         // On a flooding command it reads until the cap, then discards the rest via
         // a small fixed-size scratch buffer until EOF — the child is STILL
-        // unblocked. On timeout `kill_group` closes the child's write end of the
-        // pipe (the child's fd is gone after kill+wait), so the drain thread sees
-        // EOF and exits promptly.
+        // unblocked. On TIMEOUT we kill only the direct child, so a shell-forked
+        // grandchild may keep the pipe open; the drain-thread join is SKIPPED on the
+        // timeout path (the threads detach), so a lingering pipe never delays return.
         let stdout_handle = child.stdout.take();
         let stderr_handle = child.stderr.take();
 
@@ -985,21 +988,23 @@ impl CheckRunner for ProcessRunner {
         let stdout_thread = stdout_handle.map(|h| drain(Box::new(h)));
         let stderr_thread = stderr_handle.map(|h| drain(Box::new(h)));
 
-        // Poll for completion up to the deadline; kill the whole GROUP + reap on
-        // expiry (WH-CHECK: a backgrounding child must not outlive the ceiling).
-        // The drain threads run concurrently throughout: the child can never block
-        // on a full pipe regardless of how much output it emits (WJ-CHECK-DRAIN).
+        // Poll for completion up to the deadline; kill + reap the child on expiry
+        // (WH-CHECK: the check must not outlive the ceiling). The drain threads run
+        // concurrently throughout: the child can never block on a full pipe
+        // regardless of how much output it emits (WJ-CHECK-DRAIN).
         let poll_result = loop {
             match child.try_wait() {
                 Ok(Some(status)) => break Ok(status.code().unwrap_or(-1)),
                 Ok(None) => {
                     if start.elapsed() >= self.timeout {
-                        // Bounded ceiling reached: kill the whole process GROUP (so
-                        // orphan grandchildren die too), reap the direct child (no
-                        // zombie), and surface a structured timeout. The result is
-                        // NOT stored — a hang never poisons the cache.
-                        // The kill closes the child's write end of the pipes, so
-                        // the drain threads will see EOF and exit promptly.
+                        // Bounded ceiling reached: SIGKILL the direct child (a
+                        // single PID — never its process group, which on a linux
+                        // runner/container can reach our own job/engine) and reap it
+                        // (no zombie), then surface a structured timeout. The result
+                        // is NOT stored — a hang never poisons the cache. A
+                        // shell-forked grandchild may outlive this (it's reaped by
+                        // the OS on our exit); the drain-thread join below is skipped
+                        // on this path so it cannot block on such an orphan.
                         kill_group(&mut child);
                         break Err(ExecError::Timeout(self.timeout.as_secs()));
                     }
@@ -1012,15 +1017,25 @@ impl CheckRunner for ProcessRunner {
             }
         };
 
-        // Join the drain threads so all pipe data is consumed before we return.
-        // On a normal exit the threads have already drained to EOF. On a timeout
-        // they drain the residual bytes left in the OS pipe buffer after the kill
-        // (at most a few KB) and then see EOF — the join is prompt.
-        if let Some(t) = stdout_thread {
-            let _ = t.join();
-        }
-        if let Some(t) = stderr_thread {
-            let _ = t.join();
+        // Join the drain threads ONLY when the child exited on its own — then the
+        // pipes are already at EOF and the join is immediate. On a TIMEOUT/error we
+        // kill only the DIRECT child (never its process group — a group signal could
+        // reach our own job/the engine; see `kill_group`), so a backgrounded
+        // grandchild that the shell forked (e.g. linux `sh -c` forks `sleep`, unlike
+        // macOS which execs it) can still hold the pipe write-end open. Joining there
+        // would block until that orphan exits (defeating the timeout's promptness).
+        // The captured bytes are discarded regardless, so on timeout/error we DETACH
+        // the drain threads (drop the handles; they exit when the orphan or our
+        // process does) and return promptly. They still drained the pipe DURING the
+        // run (the no-block-on-full-pipe guarantee holds — that is the loop above,
+        // not this join).
+        if poll_result.is_ok() {
+            if let Some(t) = stdout_thread {
+                let _ = t.join();
+            }
+            if let Some(t) = stderr_thread {
+                let _ = t.join();
+            }
         }
 
         let exit = poll_result?;
