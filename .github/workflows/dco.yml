@@ -10,8 +10,9 @@ permissions:
 
 jobs:
   dco:
-    # Self-hosted fleet (same labels as corelink-server) — never GitHub-hosted.
-    runs-on: [self-hosted, mac, corelink-builder]
+    # GitHub-hosted (2026-06-19: org Actions billing unblocked — owner). Pure
+    # git/shell job, fully portable; off the contention-flaky self-hosted Mac.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
