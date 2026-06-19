@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(serve): **git-ingest + load_from_cas auto-fall back to per-object when the bulk CAS plane is absent (405/404).**
+  Robustness: an env where the CoreLink bulk endpoints aren't deployed (returns **405/404** on the batch route)
+  must not hard-fail the ingest — it now transparently degrades to the always-live single-object path. (This is
+  also the near-term unblock: it lets `git-ingest` populate CAS against the *current* container before the bulk
+  container deploys.)
+  - New `CasError::BulkUnsupported(u16)` — a **405 OR 404 on the batch route itself** (distinct from the 413
+    split / 415 / 400 framing errors, and from a per-object 404/410 which stays object-absence).
+  - **Ingest:** if `batch_exists` (the first bulk call) reports `BulkUnsupported`, skip the dedup probe and PUT
+    every object via the idempotent single-object `put` (201 fresh / 200 exists → dedup implicit server-side);
+    a mid-run `batch_upload` 405 degrades the remaining uploads too. refs/index publish + `ingested N` unchanged.
+  - **Boot loader:** `load_from_cas` falls back from `batch_read` to a per-object `get` loop — the **double
+    integrity (blake3==key AND re-derived git SHA-1==index oid) is enforced identically on both paths**; a
+    per-object GET 404/410 for an *indexed* object is corruption → fail closed.
+  - 7 new hermetic tests (the in-memory double can 405/404 the batch route while serving single-object PUT/GET):
+    bulk-unsupported detection, ingest per-object fallback round-trip, load per-object fallback + integrity still
+    enforced + fail-closed-on-missing, normal-bulk-default, 405-mid-upload. `cargo test -p hugit-serve` 279 lib
+    pass; clippy `-D warnings` + `cargo deny` clean; no new deps.
+
 - feat(serve): **bulk CAS plane — batch upload/read/exists + dedup ingest (collapses 6.5k round-trips → ~4-8).**
   The hugit client for the FROZEN CoreLink bulk contract (Server TL, 2026-06-19), built in parallel with the
   server side. Turns the git-object ingest from thousands of per-object PUTs into a deduped, chunked batch.

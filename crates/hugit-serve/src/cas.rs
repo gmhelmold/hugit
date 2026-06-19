@@ -217,6 +217,14 @@ pub enum CasError {
     /// The server rejected the batch envelope with **415** (wrong `Content-Type`)
     /// — a hard contract violation, not retryable.
     BatchUnsupportedMediaType,
+    /// The bulk (batch) CAS plane is **NOT deployed** in this environment: the
+    /// batch route itself answered **405** (Method Not Allowed) or **404** (Not
+    /// Found). This is distinct from a per-object 404 (object absence, handled in
+    /// [`CasClient::get`]) and from 413/415/400 (which are real bulk-plane
+    /// responses): it signals "no bulk plane here", so the caller must transparently
+    /// degrade to the always-live single-object [`CasClient::put`]/[`CasClient::get`]
+    /// path rather than fail. Carries the observed status (405 or 404).
+    BulkUnsupported(u16),
     /// The server rejected the batch with **400** (framing error: manifest/byte
     /// length mismatch or a truncated body) — a hard, non-retryable bug on our
     /// side, surfaced rather than silently dropped.
@@ -238,6 +246,11 @@ impl std::fmt::Display for CasError {
             CasError::BatchUnsupportedMediaType => write!(
                 f,
                 "CAS batch rejected with 415 (wrong Content-Type; expected {BATCH_CONTENT_TYPE})"
+            ),
+            CasError::BulkUnsupported(code) => write!(
+                f,
+                "CAS bulk plane not deployed (HTTP {code} on the batch route) — \
+                 the caller should fall back to the single-object path"
             ),
             CasError::BatchFraming(w) => write!(f, "CAS batch framing error (HTTP 400): {w}"),
             CasError::BatchMalformedResponse(w) => {
@@ -501,6 +514,9 @@ impl<T: CasTransport> CasClient<T> {
                 self.batch_upload_chunk(&chunk[..mid], out)?;
                 self.batch_upload_chunk(&chunk[mid..], out)
             }
+            // The bulk plane is not deployed here (the batch route itself does not
+            // exist) — signal the caller to degrade to per-object uploads.
+            404 | 405 => Err(CasError::BulkUnsupported(status)),
             415 => Err(CasError::BatchUnsupportedMediaType),
             400 => Err(CasError::BatchFraming(
                 "server rejected the upload manifest/byte framing".into(),
@@ -572,6 +588,8 @@ impl<T: CasTransport> CasClient<T> {
                 self.batch_read_chunk(&chunk[..mid], out)?;
                 self.batch_read_chunk(&chunk[mid..], out)
             }
+            // The bulk plane is not deployed here — degrade to per-object GET.
+            404 | 405 => Err(CasError::BulkUnsupported(status)),
             415 => Err(CasError::BatchUnsupportedMediaType),
             400 => Err(CasError::BatchFraming(
                 "server rejected the batch-read hash-list framing".into(),
@@ -607,6 +625,8 @@ impl<T: CasTransport> CasClient<T> {
             )?;
             match status {
                 200 => out.extend(parse_exists_response(&resp, chunk)?),
+                // The bulk plane is not deployed here — signal per-object fallback.
+                404 | 405 => return Err(CasError::BulkUnsupported(status)),
                 415 => return Err(CasError::BatchUnsupportedMediaType),
                 400 => {
                     return Err(CasError::BatchFraming(
@@ -1192,9 +1212,30 @@ pub fn load_from_cas<T: CasTransport, R: R2Get>(
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect();
-    let read = cas
-        .batch_read(&distinct_hashes)
-        .map_err(|e| format!("CAS batch-read failed: {e}"))?;
+    // If the bulk plane is NOT deployed (405/404 on the batch-read route), degrade
+    // to the always-live per-object `get` loop over the distinct hashes. The
+    // double-integrity (blake3==key below + git-SHA-1==index-oid in the insert loop)
+    // is identical on either path — a per-object GET 404/410 (absent) is corruption
+    // for an INDEXED object and still fails closed.
+    let read: BatchReadResult = match cas.batch_read(&distinct_hashes) {
+        Ok(read) => read,
+        Err(CasError::BulkUnsupported(code)) => {
+            eprintln!(
+                "load_from_cas: bulk CAS plane absent (HTTP {code}) on batch-read — \
+                 falling back to per-object read of {} object(s)",
+                distinct_hashes.len()
+            );
+            let mut out: BatchReadResult = Vec::with_capacity(distinct_hashes.len());
+            for h in &distinct_hashes {
+                let bytes = cas
+                    .get(h)
+                    .map_err(|e| format!("CAS per-object read failed for blake3 {h}: {e}"))?;
+                out.push((h.clone(), bytes));
+            }
+            out
+        }
+        Err(e) => return Err(format!("CAS batch-read failed: {e}")),
+    };
     let mut bytes_by_blake3: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     for (blake3, maybe) in read {
         // Fail closed on any absent/gone object — a misconfigured seam must not boot.
@@ -1311,6 +1352,22 @@ fn upload_with_retry<T: CasTransport>(
     Ok(())
 }
 
+/// Upload `objects` (`(blake3, framed-bytes)`) via the always-live, idempotent
+/// single-object [`CasClient::put`] — the per-object fallback used when the bulk
+/// plane is absent (405/404 on the batch route). PUT is implicitly deduped
+/// server-side (201 created / 200 exists), so no separate exists-probe is needed.
+/// Fail-closed on the FIRST object that cannot be PUT (a half-uploaded closure is
+/// unservable, exactly as the bulk path's persistent-error rule).
+fn put_objects_individually<T: CasTransport>(
+    cas: &CasClient<T>,
+    objects: &[(String, Vec<u8>)],
+) -> Result<(), CasError> {
+    for (blake3, framed) in objects {
+        cas.put(blake3, framed)?;
+    }
+    Ok(())
+}
+
 /// Ingest a repo's enumerated object closure into the CoreLink CAS, then publish
 /// the mutable manifests to R2 — the transport-injected core of the `git-ingest`
 /// bin (the bin only does the `git` enumeration). DEDUP + BATCH path:
@@ -1354,33 +1411,76 @@ pub fn ingest_repo<T: CasTransport, W: R2Put>(
 
     // 2. Dedup: probe which distinct blake3s the CAS already holds, upload only the
     // missing. Probe order is deterministic (BTreeMap iteration).
+    //
+    // The FIRST bulk call is `batch_exists`. If it answers `BulkUnsupported` (the
+    // bulk plane is NOT deployed: 405/404 on the batch route), we cannot dedup-probe
+    // in bulk — degrade the WHOLE ingest to the per-object path: every framed object
+    // is PUT via the always-live, idempotent single-object `put_object` (the server
+    // dedups implicitly: 201 fresh / 200 exists), and we skip the dedup probe.
     let all_hashes: Vec<String> = framed_by_blake3.keys().cloned().collect();
-    let present = cas
-        .batch_exists(&all_hashes)
-        .map_err(|e| format!("ingest: batch-exists (dedup probe) failed: {e}"))?;
-    let mut present_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for (hash, is_present) in present {
-        if is_present {
-            present_set.insert(hash);
-        }
-    }
-    let missing: Vec<(String, Vec<u8>)> = framed_by_blake3
-        .iter()
-        .filter(|(h, _)| !present_set.contains(*h))
-        .map(|(h, b)| (h.clone(), b.clone()))
-        .collect();
     let total_distinct = framed_by_blake3.len();
-    let already = present_set.len();
+    match cas.batch_exists(&all_hashes) {
+        Ok(present) => {
+            let mut present_set: std::collections::BTreeSet<String> =
+                std::collections::BTreeSet::new();
+            for (hash, is_present) in present {
+                if is_present {
+                    present_set.insert(hash);
+                }
+            }
+            let missing: Vec<(String, Vec<u8>)> = framed_by_blake3
+                .iter()
+                .filter(|(h, _)| !present_set.contains(*h))
+                .map(|(h, b)| (h.clone(), b.clone()))
+                .collect();
+            let already = present_set.len();
 
-    // 3. Upload the missing (chunked) — then retry any per-object `error` ONCE.
-    upload_with_retry(cas, &missing).map_err(|e| format!("ingest: batch-upload failed: {e}"))?;
+            // 3. Upload the missing (chunked) — then retry any per-object `error`
+            // ONCE. If the UPLOAD discovers the bulk plane is absent mid-stream
+            // (batch_exists worked but batch_upload 405s — a partially-deployed
+            // server), degrade the remaining uploads to per-object too.
+            match upload_with_retry(cas, &missing) {
+                Ok(()) => {}
+                Err(CasError::BulkUnsupported(code)) => {
+                    eprintln!(
+                        "git-ingest: bulk CAS plane absent (HTTP {code}) on upload — \
+                         falling back to per-object ingest of {} object(s)",
+                        missing.len()
+                    );
+                    put_objects_individually(cas, &missing)
+                        .map_err(|e| format!("ingest: per-object upload fallback failed: {e}"))?;
+                }
+                Err(e) => return Err(format!("ingest: batch-upload failed: {e}")),
+            }
 
-    let uploaded = missing.len();
-    eprintln!(
-        "git-ingest: {} objects ({total_distinct} distinct blobs), {already} already present \
-         (deduped), {uploaded} uploaded",
-        objects.len()
-    );
+            let uploaded = missing.len();
+            eprintln!(
+                "git-ingest: {} objects ({total_distinct} distinct blobs), {already} already \
+                 present (deduped), {uploaded} uploaded",
+                objects.len()
+            );
+        }
+        Err(CasError::BulkUnsupported(code)) => {
+            // The bulk plane is not deployed. Skip the dedup probe entirely and PUT
+            // every distinct object via the idempotent single-object path.
+            let all_objects: Vec<(String, Vec<u8>)> = framed_by_blake3
+                .iter()
+                .map(|(h, b)| (h.clone(), b.clone()))
+                .collect();
+            eprintln!(
+                "git-ingest: bulk CAS plane absent (HTTP {code}) — falling back to per-object \
+                 ingest of {total_distinct} object(s)"
+            );
+            put_objects_individually(cas, &all_objects)
+                .map_err(|e| format!("ingest: per-object upload fallback failed: {e}"))?;
+            eprintln!(
+                "git-ingest: {} objects ({total_distinct} distinct blobs), per-object ingest \
+                 (bulk plane absent), {total_distinct} uploaded",
+                objects.len()
+            );
+        }
+        Err(e) => return Err(format!("ingest: batch-exists (dedup probe) failed: {e}")),
+    }
 
     // 4. Publish the mutable manifests (UNCHANGED).
     let manifest = RefsManifest {
@@ -1533,6 +1633,11 @@ mod tests {
         /// objects, answering 413 `batch_too_large` above it (to test the client's
         /// split-and-retry without needing a 2000-object fixture).
         small_cap: Option<usize>,
+        /// If set, the batch endpoints (`/batch`, `/batch-read`, `/batch-exists`)
+        /// answer this status (405 or 404) — modeling an environment where the bulk
+        /// plane is NOT deployed — while single-object GET/PUT keep serving. Drives
+        /// the per-object auto-fallback.
+        batch_absent_status: Option<u16>,
     }
 
     impl MapCasTransport {
@@ -1738,6 +1843,11 @@ mod tests {
             content_type: &str,
             body: &[u8],
         ) -> Result<(u16, Vec<u8>), CasError> {
+            // Bulk plane NOT deployed: the batch route answers 405/404 (regardless
+            // of content type — the route simply does not exist).
+            if let Some(code) = self.batch_absent_status {
+                return Ok((code, Vec::new()));
+            }
             // 415: the contract's wrong-Content-Type rejection.
             if content_type != BATCH_CONTENT_TYPE {
                 return Ok((415, Vec::new()));
@@ -2460,5 +2570,318 @@ mod tests {
                 .expect("README.md resolves from the batch-loaded tree");
         assert_eq!(resolved_oid, blob_oid);
         assert_eq!(bytes, blob_body);
+    }
+
+    // ── Bulk-plane-absent auto-fallback (405/404 on the batch route) ───────────
+
+    /// The three batch ops surface a 405/404 on the batch route as
+    /// `BulkUnsupported`, distinct from 413/415/400 and a per-object 404.
+    #[test]
+    fn batch_ops_report_bulk_unsupported_on_405_and_404() {
+        for code in [405u16, 404] {
+            let t = MapCasTransport {
+                batch_absent_status: Some(code),
+                ..Default::default()
+            };
+            let client = client_with(t);
+            let objs = framed_blobs(3);
+            let hashes: Vec<String> = objs.iter().map(|(h, _)| h.clone()).collect();
+
+            let up = client.batch_upload(&objs).unwrap_err();
+            assert!(
+                matches!(up, CasError::BulkUnsupported(c) if c == code),
+                "{up:?}"
+            );
+            let rd = client.batch_read(&hashes).unwrap_err();
+            assert!(
+                matches!(rd, CasError::BulkUnsupported(c) if c == code),
+                "{rd:?}"
+            );
+            let ex = client.batch_exists(&hashes).unwrap_err();
+            assert!(
+                matches!(ex, CasError::BulkUnsupported(c) if c == code),
+                "{ex:?}"
+            );
+        }
+    }
+
+    /// `ingest_repo` against a bulk-absent (405) double succeeds via per-object PUT;
+    /// every object lands; refs/index are written; it round-trips through
+    /// `load_from_cas` (which ALSO falls back to per-object GET here).
+    #[test]
+    fn ingest_falls_back_to_per_object_when_bulk_absent_405() {
+        let blob_body = b"hello no-bulk CAS\n".to_vec();
+        let blob_oid = git_oid(ObjectKind::Blob, &blob_body);
+        let tree_body = build_tree("100644", "README.md", blob_oid);
+        let tree_oid = git_oid(ObjectKind::Tree, &tree_body);
+        let commit_body = build_commit(tree_oid);
+        let commit_oid = git_oid(ObjectKind::Commit, &commit_body);
+        let objects = [
+            IngestObject {
+                git_oid: blob_oid.to_string(),
+                kind: ObjectKind::Blob,
+                body: blob_body.clone(),
+            },
+            IngestObject {
+                git_oid: tree_oid.to_string(),
+                kind: ObjectKind::Tree,
+                body: tree_body,
+            },
+            IngestObject {
+                git_oid: commit_oid.to_string(),
+                kind: ObjectKind::Commit,
+                body: commit_body,
+            },
+        ];
+        let cfg = CasConfig::new("https://cas.example", "tenant-1", "secret-pat").unwrap();
+        let cas = CasClient::with_transport(
+            cfg,
+            MapCasTransport {
+                batch_absent_status: Some(405), // bulk plane not deployed.
+                ..Default::default()
+            },
+        );
+        let r2 = MapR2::default();
+        let mut refs = BTreeMap::new();
+        refs.insert("refs/heads/main".to_string(), commit_oid.to_string());
+        let n = ingest_repo(
+            &cas,
+            &r2,
+            "tenant-1",
+            "hugit",
+            "refs/heads/main",
+            &refs,
+            &objects,
+        )
+        .expect("ingest succeeds via per-object fallback");
+        assert_eq!(n, 3);
+
+        // Every object landed in the CAS (PUT'd individually).
+        assert_eq!(cas.transport.objects.lock().unwrap().len(), 3);
+        // refs.json + oid-index.json were published.
+        assert!(
+            r2.get_object(&refs_manifest_key("tenant-1", "hugit"))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            r2.get_object(&oid_index_key("tenant-1", "hugit"))
+                .unwrap()
+                .is_some()
+        );
+
+        // Round-trip back through load_from_cas (also bulk-absent → per-object GET).
+        let (store, root_tree, refs) =
+            load_from_cas(&cas, &r2, "tenant-1", "hugit").expect("load via per-object GET");
+        assert_eq!(
+            refs.get("refs/heads/main").unwrap(),
+            &commit_oid.to_string()
+        );
+        let (resolved_oid, bytes) =
+            hugit_proto::resolve_blob_at_path(&store, &root_tree, "README.md")
+                .unwrap()
+                .expect("README.md resolves from the per-object-loaded tree");
+        assert_eq!(resolved_oid, blob_oid);
+        assert_eq!(bytes, blob_body);
+    }
+
+    /// `load_from_cas` against a bulk-absent (404) double succeeds via per-object
+    /// GET. (Seed via the normal bulk path, then re-point the client at a
+    /// bulk-absent transport that shares the same object store.)
+    #[test]
+    fn load_falls_back_to_per_object_get_when_bulk_absent_404() {
+        // Seed normally (bulk plane present).
+        let (cas, r2, commit_hex, blob_oid, blob_body) = seed_repo();
+        // Move the seeded objects into a bulk-absent transport.
+        let seeded = cas.transport.objects.lock().unwrap().clone();
+        let cfg = CasConfig::new("https://cas.example", "tenant-1", "secret-pat").unwrap();
+        let no_bulk = MapCasTransport {
+            objects: std::sync::Mutex::new(seeded),
+            batch_absent_status: Some(404),
+            ..Default::default()
+        };
+        let cas = CasClient::with_transport(cfg, no_bulk);
+
+        let (store, root_tree, refs) =
+            load_from_cas(&cas, &r2, "tenant-1", "hugit").expect("load via per-object GET");
+        assert_eq!(refs.get("refs/heads/main").unwrap(), &commit_hex);
+        let (resolved_oid, bytes) =
+            hugit_proto::resolve_blob_at_path(&store, &root_tree, "README.md")
+                .unwrap()
+                .expect("README.md resolves via the per-object GET fallback");
+        assert_eq!(resolved_oid, blob_oid);
+        assert_eq!(bytes, blob_body);
+    }
+
+    /// Double-integrity is STILL enforced on the per-object GET fallback path: a
+    /// blake3 mismatch (the CAS serves bytes that don't hash to the asked key) fails
+    /// closed even when the bulk plane is absent.
+    #[test]
+    fn load_per_object_fallback_still_enforces_blake3_integrity() {
+        // A misserving transport that ALSO 405s the batch route, forcing per-object
+        // GET — which returns bytes that don't hash to the requested key.
+        struct NoBulkMisservingTransport {
+            bytes: Vec<u8>,
+        }
+        impl CasTransport for NoBulkMisservingTransport {
+            fn get(&self, _url: &str, _bearer: &str) -> Result<(u16, Vec<u8>), CasError> {
+                Ok((200, self.bytes.clone()))
+            }
+            fn put(&self, _url: &str, _bearer: &str, _body: &[u8]) -> Result<u16, CasError> {
+                Ok(201)
+            }
+            fn post(
+                &self,
+                _url: &str,
+                _bearer: &str,
+                _scope: &str,
+                _content_type: &str,
+                _body: &[u8],
+            ) -> Result<(u16, Vec<u8>), CasError> {
+                Ok((405, Vec::new())) // bulk plane absent → forces per-object GET.
+            }
+        }
+        let body = encode_loose(ObjectKind::Blob, b"the real bytes");
+        let real_key = cas_key(&body);
+        let cfg = CasConfig::new("https://cas", "t", "p").unwrap();
+        let cas = CasClient::with_transport(cfg, NoBulkMisservingTransport { bytes: body });
+        let r2 = MapR2::default();
+        let asked_key = "d".repeat(64); // valid shape, ≠ real_key.
+        assert_ne!(asked_key, real_key);
+        let git_oid_hex = "1".repeat(40);
+        let mut index: OidIndex = BTreeMap::new();
+        index.insert(git_oid_hex.clone(), asked_key);
+        r2.put_object(
+            &oid_index_key("t", "hugit"),
+            &serde_json::to_vec(&index).unwrap(),
+        )
+        .unwrap();
+        let mut refs = BTreeMap::new();
+        refs.insert("refs/heads/main".to_string(), git_oid_hex);
+        let manifest = RefsManifest {
+            head: "refs/heads/main".to_string(),
+            refs,
+        };
+        r2.put_object(
+            &refs_manifest_key("t", "hugit"),
+            &serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let err = load_from_cas(&cas, &r2, "t", "hugit").unwrap_err();
+        assert!(err.contains("content-address violation"), "{err}");
+    }
+
+    /// A per-object GET 404 during the bulk-absent fallback load (a missing INDEXED
+    /// object) is corruption and fails closed.
+    #[test]
+    fn load_per_object_fallback_fails_closed_on_missing_object() {
+        // Seed normally then re-point at a bulk-absent transport with an EMPTY store
+        // (the indexed object is gone) → per-object GET 404 → Ok(None) → fail closed.
+        let (_cas, r2, _commit_hex, _blob_oid, _blob_body) = seed_repo();
+        let cfg = CasConfig::new("https://cas.example", "tenant-1", "secret-pat").unwrap();
+        let empty_no_bulk = MapCasTransport {
+            batch_absent_status: Some(405),
+            ..Default::default()
+        };
+        let cas = CasClient::with_transport(cfg, empty_no_bulk);
+        let err = load_from_cas(&cas, &r2, "tenant-1", "hugit").unwrap_err();
+        assert!(err.contains("absent") || err.contains("gone"), "{err}");
+    }
+
+    /// The normal bulk path still takes precedence when the double is NOT bulk-absent
+    /// (a re-assertion that the default path is unchanged).
+    #[test]
+    fn normal_bulk_path_is_the_default_when_not_absent() {
+        let (cas, r2, commit_hex, blob_oid, blob_body) = seed_repo();
+        // No batch_absent_status → bulk ops serve normally.
+        let (store, root_tree, refs) =
+            load_from_cas(&cas, &r2, "tenant-1", "hugit").expect("bulk load succeeds");
+        assert_eq!(refs.get("refs/heads/main").unwrap(), &commit_hex);
+        let (resolved_oid, bytes) =
+            hugit_proto::resolve_blob_at_path(&store, &root_tree, "README.md")
+                .unwrap()
+                .expect("README.md resolves via the bulk path");
+        assert_eq!(resolved_oid, blob_oid);
+        assert_eq!(bytes, blob_body);
+    }
+
+    /// 405 MID-UPLOAD: `batch_exists` succeeds (bulk present) but `batch_upload`
+    /// then answers 405 (a partially-deployed server) → the remaining uploads
+    /// degrade to per-object PUT and the ingest still succeeds.
+    #[test]
+    fn ingest_degrades_when_upload_405s_after_exists_ok() {
+        /// A transport that serves `batch-exists` (all absent) + single-object
+        /// GET/PUT normally, but answers 405 on `/batch` (upload) — modeling a server
+        /// where exists is deployed but the upload route is not.
+        #[derive(Default)]
+        struct ExistsOkUpload405 {
+            inner: MapCasTransport,
+        }
+        impl CasTransport for ExistsOkUpload405 {
+            fn get(&self, url: &str, bearer: &str) -> Result<(u16, Vec<u8>), CasError> {
+                self.inner.get(url, bearer)
+            }
+            fn put(&self, url: &str, bearer: &str, body: &[u8]) -> Result<u16, CasError> {
+                self.inner.put(url, bearer, body)
+            }
+            fn post(
+                &self,
+                url: &str,
+                bearer: &str,
+                scope: &str,
+                content_type: &str,
+                body: &[u8],
+            ) -> Result<(u16, Vec<u8>), CasError> {
+                if url.ends_with("/batch") {
+                    return Ok((405, Vec::new())); // upload route not deployed.
+                }
+                self.inner.post(url, bearer, scope, content_type, body)
+            }
+        }
+        let blob_body = b"mid-upload-405 blob\n".to_vec();
+        let blob_oid = git_oid(ObjectKind::Blob, &blob_body);
+        let tree_body = build_tree("100644", "README.md", blob_oid);
+        let tree_oid = git_oid(ObjectKind::Tree, &tree_body);
+        let commit_body = build_commit(tree_oid);
+        let commit_oid = git_oid(ObjectKind::Commit, &commit_body);
+        let objects = [
+            IngestObject {
+                git_oid: blob_oid.to_string(),
+                kind: ObjectKind::Blob,
+                body: blob_body.clone(),
+            },
+            IngestObject {
+                git_oid: tree_oid.to_string(),
+                kind: ObjectKind::Tree,
+                body: tree_body,
+            },
+            IngestObject {
+                git_oid: commit_oid.to_string(),
+                kind: ObjectKind::Commit,
+                body: commit_body,
+            },
+        ];
+        let cfg = CasConfig::new("https://cas.example", "tenant-1", "secret-pat").unwrap();
+        let cas = CasClient::with_transport(cfg, ExistsOkUpload405::default());
+        let r2 = MapR2::default();
+        let mut refs = BTreeMap::new();
+        refs.insert("refs/heads/main".to_string(), commit_oid.to_string());
+        let n = ingest_repo(
+            &cas,
+            &r2,
+            "tenant-1",
+            "hugit",
+            "refs/heads/main",
+            &refs,
+            &objects,
+        )
+        .expect("ingest succeeds despite upload-405 (per-object fallback)");
+        assert_eq!(n, 3);
+        assert_eq!(
+            cas.transport.inner.objects.lock().unwrap().len(),
+            3,
+            "all objects PUT individually after the upload-405"
+        );
     }
 }
