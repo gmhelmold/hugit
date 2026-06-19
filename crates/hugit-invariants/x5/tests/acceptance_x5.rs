@@ -3,10 +3,12 @@
 //!
 //! Owned items (one `#[test] item_<n>_<slug>` each):
 //!   ① `item_1_no_hugit_verb_shadows_git_verb` — no hugit CLI verb matches
-//!      any verb emitted by `git help -a`. The git verb list is generated at
-//!      test time by shelling out to the local `git` binary — never a hand-
-//!      copied list (which would rot). A new shadowing verb in hugit-cli
-//!      turns this red immediately.
+//!      any command in git's OWN command set, generated at test time by
+//!      shelling out to `git --list-cmds=builtins,main` (compiled-in +
+//!      porcelain — deterministic across machines). NOT `git help -a`, which
+//!      also enumerates ambient external `git-*` binaries on `PATH` and so
+//!      varies by host. A new shadowing verb in hugit-cli turns this red
+//!      immediately.
 //!   ② `item_2_managed_refs_no_collision` — a property test over a large
 //!      corpus of arbitrary user branch/tag names asserts that no user ref can
 //!      collide with the `refs/hugit/…` managed namespace, and that a managed
@@ -14,7 +16,7 @@
 //!      partition are exercised.
 
 use hugit_invariants::x5::{
-    HUGIT_REF_PREFIX, HUGIT_VERBS, is_managed_ref, is_user_ref, parse_git_verbs,
+    HUGIT_REF_PREFIX, HUGIT_VERBS, is_managed_ref, is_user_ref, parse_git_cmd_list,
 };
 use std::collections::HashSet;
 use std::process::Command;
@@ -39,30 +41,35 @@ fn item_1a_verb_set_is_the_real_cli_registry() {
 
 // ── ① no hugit CLI verb shadows a git verb ───────────────────────────────────
 //
-// Load-bearing: git verb set generated at test time via `git help -a`.
-// Any hugit verb that also appears in git's verb list is a namespace violation.
+// Load-bearing: git verb set generated at test time via `git --list-cmds`.
+// Any hugit verb that also appears in git's command set is a namespace violation.
 #[test]
 fn item_1_no_hugit_verb_shadows_git_verb() {
     // Shell out to the local git binary — the oracle is the real git, not a
-    // hand-maintained list that would rot. HUGIT_VERBS must be disjoint from
-    // the set `git help -a` emits on this machine.
+    // hand-maintained list that would rot. The source is `--list-cmds=builtins,main`
+    // (git's OWN compiled-in + porcelain commands), NOT `git help -a`: the latter
+    // also enumerates ambient external `git-*` binaries found on `PATH`, which
+    // vary by host (a CI runner's third-party `git-repo` tool made this oracle
+    // environment-dependent). HUGIT_VERBS must be disjoint from git's commands.
     let output = Command::new("git")
-        .args(["help", "-a"])
+        .args(["--list-cmds=builtins,main"])
         .output()
-        .expect("git help -a must be runnable (git is required by the acceptance suite)");
+        .expect(
+            "git --list-cmds=builtins,main must be runnable (git is required by the acceptance suite)",
+        );
 
     assert!(
         output.status.success(),
-        "git help -a exited with non-zero status: {:?}",
+        "git --list-cmds=builtins,main exited with non-zero status: {:?}",
         output.status
     );
 
-    let git_help_text = String::from_utf8_lossy(&output.stdout);
-    let git_verbs: HashSet<String> = parse_git_verbs(&git_help_text);
+    let git_cmd_text = String::from_utf8_lossy(&output.stdout);
+    let git_verbs: HashSet<String> = parse_git_cmd_list(&git_cmd_text);
 
     assert!(
         !git_verbs.is_empty(),
-        "git help -a produced no verb tokens — the parser is broken or git output format changed"
+        "git --list-cmds=builtins,main produced no command tokens — the parser is broken or git output format changed"
     );
 
     // Build the hugit verb set (from the canonical constant).
@@ -78,7 +85,7 @@ fn item_1_no_hugit_verb_shadows_git_verb() {
 
     assert!(
         shadowing.is_empty(),
-        "NAMESPACE VIOLATION: the following hugit verbs shadow git verbs from `git help -a`:\n  {}\n\
+        "NAMESPACE VIOLATION: the following hugit verbs shadow git commands from `git --list-cmds=builtins,main`:\n  {}\n\
          Each shadowed verb is a broken namespace law. Remove or rename these hugit verbs.",
         shadowing.join(", ")
     );
