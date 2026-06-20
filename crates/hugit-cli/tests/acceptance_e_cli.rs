@@ -161,7 +161,7 @@ fn campaign_open_redacts_secrets_in_charter_owner_on_write_and_read() {
         "--charter",
         &format!("ship it; key {REAL_SHAPE_PAT}"),
         "--owner",
-        "gustavo@humangr.com",
+        "owner@example.com",
     ]);
     assert!(
         out.status.success(),
@@ -202,7 +202,7 @@ fn campaign_open_redacts_secrets_in_charter_owner_on_write_and_read() {
         "--charter",
         "ignored on re-open",
         "--owner",
-        "gustavo@humangr.com",
+        "owner@example.com",
     ]);
     let reopen_s = stdout_of(&reopen);
     assert!(reopen.status.success());

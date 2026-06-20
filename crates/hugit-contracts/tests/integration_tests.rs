@@ -300,7 +300,7 @@ fn derived_campaign_rollup_roundtrips() {
         campaign: "auth-hardening".into(),
         charter: "harden the authentication edge".into(),
         owner: CampaignOwner {
-            principal: "gustavo@humangr.com".into(),
+            principal: "owner@example.com".into(),
         },
         envelope_ref: "cas:c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9c4a9".into(),
         pr_ids: vec!["128".into(), "129".into()],
