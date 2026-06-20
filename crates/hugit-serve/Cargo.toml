@@ -27,6 +27,9 @@ hugit-refstore       = { path = "../hugit-refstore" }
 hugit-contracts      = { path = "../hugit-contracts" }
 hugit-ledger         = { path = "../hugit-ledger" }
 hugit-cli            = { path = "../hugit-cli" }
+# W6 symbol outline: turns the resolved blob bytes into the `outline` the blob
+# read serves (fills the prior `outline: []` honest-default).
+hugit-symbols        = { path = "../hugit-symbols" }
 # The git read seam: `resolve_blob_at_path` + `CasObjectSource` for the
 # `GET /v1/repos/{repo}/blob|edit/{*path}` content handlers (reverses the PS-18
 # deferral — actually serving file content from a git tree).

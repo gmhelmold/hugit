@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(serve): **the W6 symbol outline is now LIVE on `GET /v1/repos/{repo}/blob/{*path}`.**
+  `build_blob` fills the previously honest-default `outline: []` with a real outline computed from the
+  resolved blob bytes via `hugit_symbols::outline_blob` (extension → `lang_for_ext`, the single source
+  of truth; unsupported/extensionless files → empty, never fabricated). Symbol `name`s pass through the
+  same `scrub` read-boundary as the line text, so a secret-shaped identifier (e.g. a `const`/`static`
+  name) is redacted in the outline too — the outline can't become a redaction bypass past the
+  line-level scrub. `kind` is the frozen wire vocabulary; the consumer VM (`OutlineItemVm`) is
+  unchanged. New tests cover multi-kind capture, unsupported-lang-empty, and the symbol-name scrub.
+
 - test(perf): **de-flake the N-2 reconcile scaling test (ratio headroom + larger base).**
   `reconcile_in_sync_scales_linearly_not_quadratically` flaked on the contended runner at 4.19×
   against a `< 4×` bound (a docs-only PR, so pure machine noise). The ratio assertion was right but
