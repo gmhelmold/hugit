@@ -7,11 +7,14 @@
 //! property (WP-D6 ①), so `policy test` gives a byte-identical local preview of
 //! what the forge gate will decide.
 //!
-//! `policy edit` (mutating the gate set via a guarded `policy.change` event) is
-//! deferred: the engine has no gate-set persistence/mutation model yet (no
-//! current-gates-from-log accumulator, no apply-mutation), so wiring `edit` would
-//! require a design decision rather than a faithful mirror. `policy` is therefore
-//! graduated as `test`-only — an honest partial surface, not a stub.
+//! `policy edit` (`hugit policy edit --gate <name> --enable|--disable`) is ALSO
+//! REAL: it reconstructs the current gate set by folding prior `policy.change`
+//! events over the [`hugit_policy::house_gates`] baseline (latest-wins), toggles
+//! the named gate, and appends the new set as a Human-only `policy.change` record
+//! (the [`hugit_policy::emit_policy_change`] wire shape) through the D14
+//! Human-only guard. The log IS the gate-set persistence model — an append-only
+//! accumulator, no second store. So `policy` ships BOTH `test` and `edit`; neither
+//! is a stub.
 
 use std::process::ExitCode;
 
