@@ -9,10 +9,12 @@
 //!
 //! ## REAL vs honest-default
 //! - **REAL** (from the git object): `path` (scrubbed), `lines` (decoded +
-//!   scrubbed), `size` (byte count → human string), `lang` (extension → name).
+//!   scrubbed), `size` (byte count → human string), `lang` (extension → name),
+//!   `outline` (W6 — the symbol outline parsed from the blob bytes via
+//!   [`hugit_symbols::outline_blob`], symbol names scrubbed at the read boundary;
+//!   empty for an unsupported language, never fabricated).
 //! - **HONEST-DEFAULT** (no local engine seam this wave — NOT faked, documented
 //!   here): `blame: []` (the deep why-blame is the intent-graph seam),
-//!   `outline: []` (no symbol index — the semantic index is absent entirely),
 //!   `tree: []` (no sidebar file-tree projection), `via_intent`/`via_model:
 //!   None` (no last-writer-intent attribution seam). `actions` mirrors the
 //!   sibling pt-BR locale.
@@ -73,12 +75,42 @@ pub fn build_blob(
         lines,
         // HONEST-DEFAULT: the deep why-blame is the intent-graph seam (not wired).
         blame: vec![],
-        // HONEST-DEFAULT: no symbol outline (the semantic index is absent).
-        outline: vec![],
+        // REAL (W6): the symbol outline, parsed from the blob bytes via
+        // hugit-symbols. Empty for an unsupported language (honest, not faked).
+        outline: compute_outline(path, &bytes),
         actions: blob_actions(),
         // HONEST-DEFAULT: no sidebar file-tree projection this wave.
         tree: vec![],
     })
+}
+
+/// Compute the symbol outline for `path`'s content via `hugit-symbols` (W6).
+///
+/// The file extension selects the language ([`hugit_symbols::lang_for_ext`], the
+/// single source of truth); an unsupported/extensionless file yields an empty
+/// outline — the honest default, never a fabricated structure. Each symbol's
+/// `name` passes through [`scrub`] at the read boundary: a name derived from
+/// source (e.g. a `const`/`static` identifier, or an `impl … for …` display
+/// string) could embed a secret-shaped token, and the outline must not become a
+/// redaction bypass past the line-level scrub. `kind` is the frozen wire token
+/// ([`hugit_symbols::SymbolKind::as_wire_str`]); `active` is a UI-cursor flag the
+/// parser never sets.
+fn compute_outline(path: &str, bytes: &[u8]) -> Vec<hugit_http_contracts::blob::OutlineItemVm> {
+    let Some(ext) = path.rsplit('.').next().filter(|e| *e != path) else {
+        return vec![];
+    };
+    let Some(lang) = hugit_symbols::lang_for_ext(ext) else {
+        return vec![];
+    };
+    hugit_symbols::outline_blob(lang, bytes)
+        .into_iter()
+        .map(|item| hugit_http_contracts::blob::OutlineItemVm {
+            kind: item.kind.as_wire_str().to_string(),
+            name: scrub(&item.name),
+            line: item.line,
+            active: false,
+        })
+        .collect()
 }
 
 /// The blob toolbar actions, in the sibling pt-BR locale/voice.
@@ -224,11 +256,81 @@ mod tests {
         assert_eq!(vm.lines[0].number, 1);
         assert_eq!(vm.lines[1].text, "let x = 1;");
         assert_eq!(vm.lines[2].text, ""); // trailing newline
-        // Honest defaults.
+        // REAL (W6): the outline carries the one top-level fn from the content.
+        assert_eq!(vm.outline.len(), 1, "outline: {:?}", vm.outline);
+        assert_eq!(vm.outline[0].kind, "fn");
+        assert_eq!(vm.outline[0].name, "main");
+        assert_eq!(vm.outline[0].line, 1);
+        // Honest defaults (still absent this wave).
         assert!(vm.blame.is_empty());
-        assert!(vm.outline.is_empty());
         assert!(vm.tree.is_empty());
         assert!(vm.via_intent.is_none());
+    }
+
+    #[test]
+    fn outline_captures_multiple_kinds_and_unsupported_lang_is_empty() {
+        let mut src = CasObjectSource::new();
+        let content = "pub struct Point;\npub fn area() -> u32 { 0 }\n";
+        let blob = src.insert_raw(ObjectKind::Blob, content.as_bytes().to_vec());
+        let txt = src.insert_raw(ObjectKind::Blob, b"plain text, no lang".to_vec());
+        let root = insert_tree(
+            &mut src,
+            vec![
+                TreeEntry {
+                    mode: MODE_BLOB,
+                    name: "m.rs",
+                    oid: blob,
+                },
+                TreeEntry {
+                    mode: MODE_BLOB,
+                    name: "notes.txt",
+                    oid: txt,
+                },
+            ],
+        );
+        let src = Arc::new(src);
+
+        let vm = build_blob(&log(), "r", "m.rs", Some(&src), Some(&root)).expect("rs resolves");
+        let kinds: Vec<(&str, &str)> = vm
+            .outline
+            .iter()
+            .map(|o| (o.kind.as_str(), o.name.as_str()))
+            .collect();
+        assert!(kinds.contains(&("struct", "Point")), "outline: {kinds:?}");
+        assert!(kinds.contains(&("fn", "area")), "outline: {kinds:?}");
+
+        // An unsupported extension (.txt) yields an empty outline — honest, not faked.
+        let vm_txt =
+            build_blob(&log(), "r", "notes.txt", Some(&src), Some(&root)).expect("txt resolves");
+        assert!(
+            vm_txt.outline.is_empty(),
+            "unsupported lang → empty outline"
+        );
+    }
+
+    #[test]
+    fn outline_symbol_name_is_scrubbed_at_the_read_boundary() {
+        // A secret-shaped identifier name must be redacted in the outline, not
+        // just in the line text — the outline must not be a redaction bypass.
+        let mut src = CasObjectSource::new();
+        let content = "const gho_16C7e42F292c6912E7710c838347Ae178B4a: u32 = 1;\n";
+        let blob = src.insert_raw(ObjectKind::Blob, content.as_bytes().to_vec());
+        let root = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_BLOB,
+                name: "s.rs",
+                oid: blob,
+            }],
+        );
+        let src = Arc::new(src);
+
+        let vm = build_blob(&log(), "r", "s.rs", Some(&src), Some(&root)).expect("resolves");
+        let names: String = vm.outline.iter().map(|o| o.name.clone()).collect();
+        assert!(
+            !names.contains("gho_16C7e42F292c6912E7710c838347Ae178B4a"),
+            "a secret-shaped symbol name must be scrubbed in the outline: {names}"
+        );
     }
 
     #[test]
