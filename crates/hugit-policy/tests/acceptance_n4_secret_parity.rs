@@ -158,11 +158,30 @@ fn clean_rust_code_passes() {
     );
 }
 
+/// A **bare** 64-hex run in a *file* (not an identifier slot) is flagged by
+/// the policy gate after the N-5 upgrade to `redact::apply`. WF-1 in the
+/// free-text engine says a bare 40/64-hex run in free text REDACTS — it could
+/// be an HMAC, Django SECRET_KEY, or a hex API key of exactly content-address
+/// shape. A PREFIXED form (`sha256:<hex>`, `cas:<hex>`) survives in both the
+/// engine and the gate.
 #[test]
-fn sha256_digest_passes() {
+fn bare_sha256_hex_is_flagged_in_file_context() {
+    // WF-1: bare 64-hex in file content → the gate now flags it.
+    // is_structural_secret alone would not catch it, but redact::apply does.
+    let content = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    let gate_verdict = secrets::eval(&ctx_with_file("probe.txt", content));
+    assert!(
+        matches!(gate_verdict, GateOutcome::Fail { .. }),
+        "N-5: bare 64-hex in file context must be flagged by the policy gate (WF-1)"
+    );
+}
+
+/// A PREFIXED sha256 content-address ref must NOT be flagged.
+#[test]
+fn prefixed_sha256_digest_passes_gate() {
     assert_clean(
-        "sha-256 hex digest",
-        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "prefixed sha256 content-address ref",
+        "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     );
 }
 

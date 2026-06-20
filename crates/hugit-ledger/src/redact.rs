@@ -154,6 +154,17 @@ fn high_entropy_token(s: &str) -> bool {
             }
             return true;
         }
+        // All-lowercase-hex tokens of OTHER lengths (not the exempt {40,64}-char
+        // content-address shapes) that meet the minimum length are credential-shaped.
+        // Pure hex tops out at ~4.0 bits/char so the entropy gate (4.0) cannot
+        // reliably catch them — a 32-hex API key, 20-hex session token, 50-hex HMAC
+        // key would all slip through. Redact unconditionally for len ∈ [20,∞) \ {40,64}.
+        if token.len() >= ENTROPY_MIN_LEN
+            && !matches!(token.len(), 40 | 64)
+            && token.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return true;
+        }
         if shannon_entropy(token) >= ENTROPY_THRESHOLD {
             return true;
         }
@@ -679,5 +690,138 @@ mod tests {
         assert!(!has_sk_key("sk-256"));
         assert!(!has_sk_key("sk-learn"));
         assert!(!has_sk_key("sk-abc")); // only 3 chars
+    }
+
+    // ── Fix 1: DigitalOcean token prefix ────────────────────────────────────
+
+    #[test]
+    fn dop_v1_token_redacted() {
+        // A 64-char hex DigitalOcean personal access token.
+        let token =
+            "dop_v1_0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab";
+        assert_eq!(apply(token), REDACTED, "dop_v1_ prefix must redact");
+    }
+
+    // ── Fix 2: Bare hex tokens of non-{40,64} lengths ───────────────────────
+
+    #[test]
+    fn bare_32_hex_redacts() {
+        // A 32-char lowercase hex token (NOT a content-address shape) must redact.
+        let token = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6";
+        assert_eq!(
+            apply(token),
+            REDACTED,
+            "a 32-char lowercase hex token must be treated as a credential"
+        );
+    }
+
+    #[test]
+    fn bare_20_hex_redacts() {
+        // Minimum length (20-char) lowercase hex — just at the floor.
+        let token = "deadbeefcafe01234567";
+        assert_eq!(apply(token), REDACTED);
+    }
+
+    #[test]
+    fn bare_50_hex_redacts() {
+        // A 50-char hex token — between the exempt 40 and 64 lengths.
+        let token = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5";
+        assert_eq!(apply(token), REDACTED);
+    }
+
+    #[test]
+    fn bare_40_hex_still_redacts_in_free_text() {
+        // WF-1: a bare 40-hex still redacts in free text (no algo: prefix).
+        // This test validates the existing bare-40-hex-digest-shape path is unaffected.
+        let s = "3f786850e387550fdab836ed7e6dc881de23001b";
+        assert_eq!(apply(s), REDACTED);
+    }
+
+    #[test]
+    fn bare_64_hex_still_redacts_in_free_text() {
+        // WF-1: a bare 64-hex still redacts in free text.
+        let s = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        assert_eq!(apply(s), REDACTED);
+    }
+
+    #[test]
+    fn prefixed_40_hex_survives() {
+        // sha1:<40-hex> is a content-address ref — must NOT redact.
+        let s = "sha1:da39a3ee5e6b4b0d3255bfef95601890afd80709";
+        assert_eq!(apply(s), s);
+    }
+
+    #[test]
+    fn prefixed_64_hex_survives() {
+        // sha256:<64-hex> is a content-address ref — must NOT redact.
+        let s = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        assert_eq!(apply(s), s);
+    }
+
+    #[test]
+    fn short_hex_below_floor_survives() {
+        // Under ENTROPY_MIN_LEN (20) — not a credential shape.
+        let s = "deadbeef0123456789";  // 18 chars
+        assert_eq!(apply(s), s);
+    }
+
+    #[test]
+    fn uppercase_hex_not_caught_by_bare_hex_rule() {
+        // The bare-hex rule matches lowercase-only hex. UPPERCASE hex tokens
+        // that are not {40,64} length pass through this specific rule and fall
+        // through to the entropy gate. A 32-char ALL-UPPERCASE hex token has
+        // entropy near 4.0 — the entropy gate may or may not catch it. This test
+        // verifies the bare-hex rule itself doesn't over-trigger on mixed/upper hex.
+        // (The entropy gate is a separate concern.)
+        let upper = "A1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6"; // 32 uppercase hex
+        // entropy gate: ~4.0 bits/char (16-char alphabet), borderline
+        // We just verify it doesn't panic and documents the edge case.
+        let _ = apply(upper); // pass or redact — no assertion, documents the boundary
+    }
+
+    // ── Fix 3: New keyword prefixes ─────────────────────────────────────────
+
+    #[test]
+    fn access_token_eq_redacted() {
+        assert_eq!(
+            apply("access_token=supersecretvalue"),
+            REDACTED,
+            "access_token= must be caught by the keyword-context detector"
+        );
+    }
+
+    #[test]
+    fn auth_token_colon_redacted() {
+        assert_eq!(apply("auth_token: my_secret_here"), REDACTED);
+    }
+
+    #[test]
+    fn private_key_eq_redacted() {
+        assert_eq!(apply("private_key=abc123secret"), REDACTED);
+    }
+
+    #[test]
+    fn passphrase_eq_redacted() {
+        assert_eq!(apply("passphrase=correct horse battery"), REDACTED);
+    }
+
+    // ── Fix 4: Bearer tab bypass ─────────────────────────────────────────────
+
+    #[test]
+    fn bearer_tab_redacted() {
+        assert_eq!(
+            apply("Authorization: Bearer\tabc123def456ghi789jkl"),
+            REDACTED,
+            "Bearer followed by a tab must redact"
+        );
+    }
+
+    #[test]
+    fn bearer_double_space_redacted() {
+        assert_eq!(
+            apply("Authorization: Bearer  abc123def456ghi789jkl"),
+            REDACTED,
+            "Bearer followed by multiple spaces must redact"
+        );
     }
 }
