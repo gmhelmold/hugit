@@ -281,6 +281,109 @@ pub fn parse_oid(hex: &str) -> Result<ObjectId, PackError> {
     ObjectId::from_hex(hex.as_bytes()).map_err(|_| PackError::InvalidOid(hex.to_string()))
 }
 
+/// One entry returned by [`list_tree_at_dir`]: the name and kind of a single
+/// node in the containing directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeEntry {
+    /// The entry's filename (not a full path — just the leaf name).
+    pub name: String,
+    /// `true` if this entry is a subtree (directory); `false` if it is a blob
+    /// (regular file or executable). Symlinks and gitlinks are excluded.
+    pub is_dir: bool,
+}
+
+/// List the direct children of the directory that *contains* `path`.
+///
+/// For `path = "src/lib.rs"` this lists the entries of the `src/` directory.
+/// For `path = "README.md"` (a root-level file) this lists the root tree.
+///
+/// Only regular blobs (mode 100644/100755) and subtrees (mode 40000) are
+/// returned — symlinks (mode 120000) and gitlinks (mode 160000) are **excluded**
+/// (symlinks expose filesystem paths and bypass secret-scrub; gitlinks are
+/// submodule pointers, not useful as sidebar file-tree nodes).
+///
+/// Fail-closed: any missing object, malformed tree, or traversal-unsafe path
+/// segment yields an empty `Vec` rather than an error — the caller renders a
+/// sidebar with no entries, never a broken response.
+pub fn list_tree_at_dir(
+    src: &dyn ObjectSource,
+    root_tree: &ObjectId,
+    path: &str,
+) -> Vec<TreeEntry> {
+    list_tree_at_dir_inner(src, root_tree, path).unwrap_or_default()
+}
+
+fn list_tree_at_dir_inner(
+    src: &dyn ObjectSource,
+    root_tree: &ObjectId,
+    path: &str,
+) -> Option<Vec<TreeEntry>> {
+    // Compute the *parent directory* of `path`.  For "src/lib.rs" the parent is
+    // "src"; for "README.md" (no '/') the parent is the root tree itself.
+    let parent_segments: Vec<&str> = {
+        let segments: Vec<&str> = path.split('/').collect();
+        // All segments except the final (the file leaf).  May be empty for
+        // root-level files.
+        segments[..segments.len().saturating_sub(1)].to_vec()
+    };
+
+    // Walk from root_tree through each parent segment.
+    let mut current_tree = *root_tree;
+    for segment in &parent_segments {
+        // Reject traversal-unsafe segments (same defence-in-depth as
+        // `resolve_blob_at_path`).
+        if segment.is_empty() || *segment == "." || *segment == ".." {
+            return None;
+        }
+
+        let obj = src.get(&current_tree).ok()??;
+        if obj.kind != ObjectKind::Tree {
+            return None;
+        }
+
+        let entries = gix_object::TreeRefIter::from_bytes(&obj.data)
+            .entries()
+            .ok()?;
+        let entry = entries
+            .into_iter()
+            .find(|e| e.filename == segment.as_bytes())?;
+
+        // The intermediate must be a tree; fail-closed on any other kind.
+        if !entry.mode.is_tree() {
+            return None;
+        }
+        current_tree = entry.oid.to_owned();
+    }
+
+    // Now `current_tree` is the OID of the directory we want to list.
+    let obj = src.get(&current_tree).ok()??;
+    if obj.kind != ObjectKind::Tree {
+        return None;
+    }
+
+    let raw_entries = gix_object::TreeRefIter::from_bytes(&obj.data)
+        .entries()
+        .ok()?;
+
+    let mut result = Vec::with_capacity(raw_entries.len());
+    for e in raw_entries {
+        let mode = e.mode;
+        // Exclude symlinks (is_link) and gitlinks/commits (is_commit). Only
+        // blobs and subtrees are useful sidebar entries.
+        if mode.is_link() || mode.is_commit() {
+            continue;
+        }
+        let name = String::from_utf8_lossy(e.filename).into_owned();
+        let is_dir = mode.is_tree();
+        result.push(TreeEntry { name, is_dir });
+    }
+
+    // Return entries in the order the tree stores them (name-sorted, git
+    // canonical).  The caller may re-sort if needed; we stay faithful to the
+    // git object.
+    Some(result)
+}
+
 /// Walk a git tree to resolve a repo-relative path to its blob (oid + raw bytes).
 ///
 /// Splits `path` on '/', descends subtree-by-subtree from `root_tree`, and on the
@@ -662,5 +765,196 @@ mod resolve_tests {
                 .unwrap()
                 .is_none()
         );
+    }
+}
+
+#[cfg(test)]
+mod list_tree_tests {
+    use super::*;
+
+    const MODE_BLOB: &str = "100644";
+    const MODE_EXE: &str = "100755";
+    const MODE_LINK: &str = "120000";
+    const MODE_TREE: &str = "40000";
+
+    struct TreeEntry<'a> {
+        mode: &'a str,
+        name: &'a str,
+        oid: ObjectId,
+    }
+
+    fn build_tree_bytes(mut entries: Vec<TreeEntry<'_>>) -> Vec<u8> {
+        entries.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
+        let mut out = Vec::new();
+        for e in &entries {
+            out.extend_from_slice(e.mode.as_bytes());
+            out.push(b' ');
+            out.extend_from_slice(e.name.as_bytes());
+            out.push(0);
+            out.extend_from_slice(e.oid.as_bytes());
+        }
+        out
+    }
+
+    fn insert_tree(src: &mut CasObjectSource, entries: Vec<TreeEntry<'_>>) -> ObjectId {
+        src.insert_raw(ObjectKind::Tree, build_tree_bytes(entries))
+    }
+
+    /// A root-level file → list the root tree's entries.
+    #[test]
+    fn list_root_level_file_returns_root_entries() {
+        let mut src = CasObjectSource::new();
+        let a = src.insert_raw(ObjectKind::Blob, b"a".to_vec());
+        let b = src.insert_raw(ObjectKind::Blob, b"b".to_vec());
+        let sub = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_BLOB,
+                name: "inner.rs",
+                oid: a,
+            }],
+        );
+        let root = insert_tree(
+            &mut src,
+            vec![
+                TreeEntry {
+                    mode: MODE_BLOB,
+                    name: "lib.rs",
+                    oid: a,
+                },
+                TreeEntry {
+                    mode: MODE_BLOB,
+                    name: "main.rs",
+                    oid: b,
+                },
+                TreeEntry {
+                    mode: MODE_TREE,
+                    name: "src",
+                    oid: sub,
+                },
+            ],
+        );
+
+        let entries = list_tree_at_dir(&src, &root, "lib.rs");
+        assert_eq!(entries.len(), 3, "entries: {entries:?}");
+
+        let lib = entries.iter().find(|e| e.name == "lib.rs").expect("lib.rs present");
+        assert!(!lib.is_dir);
+        let main = entries.iter().find(|e| e.name == "main.rs").expect("main.rs present");
+        assert!(!main.is_dir);
+        let src_entry = entries.iter().find(|e| e.name == "src").expect("src present");
+        assert!(src_entry.is_dir);
+    }
+
+    /// A nested file → list its parent directory's entries.
+    #[test]
+    fn list_nested_file_returns_parent_entries() {
+        let mut src = CasObjectSource::new();
+        let blob = src.insert_raw(ObjectKind::Blob, b"x".to_vec());
+        let sub = insert_tree(
+            &mut src,
+            vec![
+                TreeEntry {
+                    mode: MODE_BLOB,
+                    name: "foo.rs",
+                    oid: blob,
+                },
+                TreeEntry {
+                    mode: MODE_BLOB,
+                    name: "bar.rs",
+                    oid: blob,
+                },
+            ],
+        );
+        let root = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_TREE,
+                name: "crate",
+                oid: sub,
+            }],
+        );
+
+        let entries = list_tree_at_dir(&src, &root, "crate/foo.rs");
+        assert_eq!(entries.len(), 2, "entries: {entries:?}");
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"foo.rs"), "foo.rs in {names:?}");
+        assert!(names.contains(&"bar.rs"), "bar.rs in {names:?}");
+    }
+
+    /// Symlinks and gitlinks are excluded; regular blobs + executable blobs pass.
+    #[test]
+    fn symlinks_and_gitlinks_excluded() {
+        let mut src = CasObjectSource::new();
+        let real = src.insert_raw(ObjectKind::Blob, b"real".to_vec());
+        let link_blob = src.insert_raw(ObjectKind::Blob, b"target".to_vec());
+        // A gitlink (submodule) uses a Commit oid — use a dummy blob here since
+        // mode alone determines gitlink exclusion (mode 160000).
+        let commit_dummy = src.insert_raw(ObjectKind::Blob, b"".to_vec());
+        let root = insert_tree(
+            &mut src,
+            vec![
+                TreeEntry {
+                    mode: MODE_BLOB,
+                    name: "real.rs",
+                    oid: real,
+                },
+                TreeEntry {
+                    mode: MODE_EXE,
+                    name: "run.sh",
+                    oid: real,
+                },
+                TreeEntry {
+                    mode: MODE_LINK,
+                    name: "link.rs",
+                    oid: link_blob,
+                },
+                TreeEntry {
+                    mode: "160000", // gitlink / submodule
+                    name: "submod",
+                    oid: commit_dummy,
+                },
+            ],
+        );
+
+        let entries = list_tree_at_dir(&src, &root, "real.rs");
+        assert_eq!(entries.len(), 2, "only blobs/exe should be listed: {entries:?}");
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"real.rs"));
+        assert!(names.contains(&"run.sh"));
+        assert!(!names.contains(&"link.rs"), "symlink must be excluded");
+        assert!(!names.contains(&"submod"), "gitlink must be excluded");
+    }
+
+    /// A missing root oid → empty list, not a panic/error.
+    #[test]
+    fn missing_root_tree_returns_empty() {
+        let src = CasObjectSource::new();
+        let fake = parse_oid("0000000000000000000000000000000000000042").unwrap();
+        let entries = list_tree_at_dir(&src, &fake, "anything.rs");
+        assert!(entries.is_empty(), "missing root → empty, not error");
+    }
+
+    /// Traversal-unsafe path segments yield an empty list.
+    #[test]
+    fn traversal_unsafe_paths_return_empty() {
+        let mut src = CasObjectSource::new();
+        let blob = src.insert_raw(ObjectKind::Blob, b"x".to_vec());
+        let root = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_BLOB,
+                name: "safe.rs",
+                oid: blob,
+            }],
+        );
+
+        for bad in ["../safe.rs", "./safe.rs", "a//b.rs"] {
+            let entries = list_tree_at_dir(&src, &root, bad);
+            assert!(
+                entries.is_empty(),
+                "traversal-unsafe path {bad:?} must return empty, got {entries:?}"
+            );
+        }
     }
 }
