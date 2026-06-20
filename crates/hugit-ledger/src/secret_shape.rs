@@ -80,7 +80,7 @@ pub const KNOWN_PREFIXES: &[&str] = &[
     "dop_v1_", // DigitalOcean personal access token
     // NOTE: "Bearer" is intentionally NOT here — Bearer matching requires a
     // trailing whitespace check (space OR tab) handled by `has_bearer_token`.
-    "eyJ",     // JWT header (base64 of `{"`)
+    "eyJ", // JWT header (base64 of `{"`)
 ];
 
 // ── Structural-secret detector (the four entropy-independent classes) ────────
@@ -599,7 +599,9 @@ mod tests {
 
     #[test]
     fn passphrase_keyword_is_caught() {
-        assert!(has_keyword_context_secret("passphrase=correct horse battery"));
+        assert!(has_keyword_context_secret(
+            "passphrase=correct horse battery"
+        ));
         assert!(is_structural_secret("passphrase=correct horse battery"));
     }
 
@@ -607,8 +609,12 @@ mod tests {
 
     #[test]
     fn bearer_space_is_structural_secret() {
-        assert!(has_bearer_token("Authorization: Bearer abc123def456ghi789jkl"));
-        assert!(is_structural_secret("Authorization: Bearer abc123def456ghi789jkl"));
+        assert!(has_bearer_token(
+            "Authorization: Bearer abc123def456ghi789jkl"
+        ));
+        assert!(is_structural_secret(
+            "Authorization: Bearer abc123def456ghi789jkl"
+        ));
     }
 
     #[test]
@@ -625,7 +631,9 @@ mod tests {
     #[test]
     fn bearer_double_space_is_structural_secret() {
         // "Bearer" followed by multiple spaces also fires (the first space triggers it).
-        assert!(has_bearer_token("Authorization: Bearer  abc123def456ghi789jkl"));
+        assert!(has_bearer_token(
+            "Authorization: Bearer  abc123def456ghi789jkl"
+        ));
         assert!(is_structural_secret(
             "Authorization: Bearer  abc123def456ghi789jkl"
         ));

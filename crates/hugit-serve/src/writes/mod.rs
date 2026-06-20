@@ -80,7 +80,10 @@ pub(crate) fn asserted_class(principal_chain: &[String]) -> Result<PrincipalClas
     if actor.starts_with("orchestrator:") || actor.starts_with("clerk:") {
         // A non-empty org/user segment is required (a bare `clerk:`/`orchestrator:`
         // is malformed → no authenticated driver → deny).
-        if actor.split_once(':').is_some_and(|(_, rest)| !rest.is_empty()) {
+        if actor
+            .split_once(':')
+            .is_some_and(|(_, rest)| !rest.is_empty())
+        {
             return Ok(PrincipalClass::Orchestrator);
         }
     }

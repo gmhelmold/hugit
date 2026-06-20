@@ -161,7 +161,9 @@ fn high_entropy_token(s: &str) -> bool {
         // key would all slip through. Redact unconditionally for len ∈ [20,∞) \ {40,64}.
         if token.len() >= ENTROPY_MIN_LEN
             && !matches!(token.len(), 40 | 64)
-            && token.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            && token
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
         {
             return true;
         }
@@ -697,8 +699,7 @@ mod tests {
     #[test]
     fn dop_v1_token_redacted() {
         // A 64-char hex DigitalOcean personal access token.
-        let token =
-            "dop_v1_0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab";
+        let token = "dop_v1_0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab";
         assert_eq!(apply(token), REDACTED, "dop_v1_ prefix must redact");
     }
 
@@ -761,7 +762,7 @@ mod tests {
     #[test]
     fn short_hex_below_floor_survives() {
         // Under ENTROPY_MIN_LEN (20) — not a credential shape.
-        let s = "deadbeef0123456789";  // 18 chars
+        let s = "deadbeef0123456789"; // 18 chars
         assert_eq!(apply(s), s);
     }
 

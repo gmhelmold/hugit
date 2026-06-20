@@ -205,9 +205,16 @@ mod tests {
         let mut log = EventLog::new();
         seed_pr_opened(&mut log, "7");
         assert_eq!(
-            write_land(&mut log, "r", 7, &land_req("union"), vec!["model:claude".into()], 1)
-                .expect_err("a model must NOT land")
-                .status,
+            write_land(
+                &mut log,
+                "r",
+                7,
+                &land_req("union"),
+                vec!["model:claude".into()],
+                1
+            )
+            .expect_err("a model must NOT land")
+            .status,
             503
         );
         assert!(log.records().iter().all(|r| r.kind != PR_QUEUED_KIND));
@@ -218,9 +225,16 @@ mod tests {
         let mut log = EventLog::new();
         seed_pr_opened(&mut log, "9");
         assert_eq!(
-            write_land(&mut log, "r", 9, &land_req("union"), vec!["weird:x".into()], 1)
-                .expect_err("unknown principal denied")
-                .status,
+            write_land(
+                &mut log,
+                "r",
+                9,
+                &land_req("union"),
+                vec!["weird:x".into()],
+                1
+            )
+            .expect_err("unknown principal denied")
+            .status,
             404,
             "unclassifiable principal fails closed (404, no oracle)"
         );

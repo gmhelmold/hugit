@@ -166,9 +166,15 @@ mod tests {
         let _s0 = seed(&mut log, "pr.opened", 1);
         let s1 = seed(&mut log, "pr.queued", 2);
         assert_eq!(
-            write_undo(&mut log, "r", &UndoReq { op_seq: s1 }, vec!["weird:x".into()], 3)
-                .expect_err("unknown principal denied")
-                .status,
+            write_undo(
+                &mut log,
+                "r",
+                &UndoReq { op_seq: s1 },
+                vec!["weird:x".into()],
+                3
+            )
+            .expect_err("unknown principal denied")
+            .status,
             404
         );
         assert_eq!(
