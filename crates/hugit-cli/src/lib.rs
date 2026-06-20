@@ -35,6 +35,7 @@ pub mod porcelain;
 pub mod pr;
 pub mod queue;
 pub mod redaction;
+pub mod symbol;
 pub mod tournament;
 pub mod undo;
 pub mod verdict;
@@ -138,6 +139,12 @@ pub const HUGIT_VERBS: &[&str] = &[
     // no-drift oracle requires them here, not in HUGIT_RESERVED_VERBS.
     "fleet", // hugit fleet --log                   — machine-readable fleet state
     "watch", // hugit watch --log [--class]         — replay the forge event stream
+    // Semantic index (W6) — graduated with REAL wiring (not a stub). `symbol`
+    // outlines a LOCAL source file via the `hugit-symbols` tree-sitter crate (the
+    // SAME producer the serve `/v1` blob `outline` uses — one source of truth).
+    // Does NOT shadow a git command (X5-checked). LIVE the moment main.rs routes
+    // it; the no-drift oracle requires it here, not in HUGIT_RESERVED_VERBS.
+    "symbol", // hugit symbol --file <path>          — local symbol outline
 ];
 
 /// Planned hugit verb tokens that are RESERVED but NOT yet dispatched.

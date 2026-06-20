@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(cli): **`hugit symbol --file <path>` — the W6 semantic index gets a CLI surface.**
+  Graduated from reserved to a REAL verb: reads a local source file, derives its language from the
+  extension (`hugit_symbols::lang_for_ext`, the single source of truth), and emits the symbol outline
+  as stable JSON (`{file, lang, outline:[{kind,name,line}]}`) under the WB0 one-error/one-exit law.
+  Reuses the SAME `hugit_symbols::outline_blob` producer the serve `/v1` blob outline uses (one source
+  of truth — CLI and forge agree by construction). An unsupported/extensionless file is an honest empty
+  outline (`lang:null`), never an error; a missing file is `{"error":{kind:"file_not_found",…}}`, exit
+  2. Symbol names are scrubbed at the read boundary (no redaction bypass). `symbol` does not shadow a
+  git command (X5-verified); the no-drift oracle holds (registry == dispatched).
+
 - feat(serve): **the W6 symbol outline is now LIVE on `GET /v1/repos/{repo}/blob/{*path}`.**
   `build_blob` fills the previously honest-default `outline: []` with a real outline computed from the
   resolved blob bytes via `hugit_symbols::outline_blob` (extension → `lang_for_ext`, the single source

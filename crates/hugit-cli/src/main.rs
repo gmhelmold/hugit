@@ -37,6 +37,7 @@ use hugit_cli::policy::{self, PolicyArgs};
 use hugit_cli::porcelain::PorcelainError;
 use hugit_cli::pr::{self, PrArgs};
 use hugit_cli::queue::{self, QueueArgs};
+use hugit_cli::symbol::{self, SymbolArgs};
 use hugit_cli::tournament::{MAX_N_POLICY, produce_candidates};
 use hugit_cli::undo::{self, UndoArgs};
 use hugit_cli::verdict::{self, DecisionArgs, VerdictArgs};
@@ -107,6 +108,8 @@ enum Command {
     Fleet(FleetArgs),
     /// Replay the classified, redacted forge event stream (Phase D; live tail is serve).
     Watch(WatchArgs),
+    /// Outline a local source file's symbols (W6 semantic index; serve serves it on /v1 blob).
+    Symbol(SymbolArgs),
 }
 
 // ── why ────────────────────────────────────────────────────────────────────
@@ -554,6 +557,7 @@ fn main() -> ExitCode {
         Command::Ledger(a) => return ledger::run(a),
         Command::Fleet(a) => return fleet::run(a),
         Command::Watch(a) => return watch::run(a),
+        Command::Symbol(a) => return symbol::run(a),
     };
     match result {
         Ok(json) => {
