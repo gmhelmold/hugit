@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- chore: **pre-open-source hardening (Apache-2.0) + adversarial-audit fixes.** An 11-agent adversarial
+  sweep ahead of going open-source (`docs/review/2026-06-20-adversarial-pre-opensource-audit.md`)
+  surfaced fixes, all landed together:
+  - **fix(serve): D14 authz enforced on the live write boundary** — write verbs derived the principal
+    class from a hardcoded literal (matrix was decorative); now derived from the authenticated principal
+    chain, fail-closed. `authorize_read` split `Anonymous` (may read Public — the git-clone gate) from
+    `Unknown` (a present-but-unclassifiable bearer → denied everywhere).
+  - **fix(ledger,policy): close secret-redaction misses** — DigitalOcean `dop_v1_` tokens, bare 32-char
+    hex, more keyword prefixes (`auth_token`/`access_token`/`private_key`/…), `Bearer`+any-whitespace;
+    the policy pre-commit secrets gate now routes content through the full `redact::apply` (catches
+    high-entropy unprefixed secrets that the structural-only gate missed).
+  - **fix(serve,proto): robustness/DoS** — reject symlink (mode 120000) blobs (fs-path leak + scrub
+    bypass); 10 MiB blob cap; bounded search scan; 256-byte Idempotency-Key cap; poisoned-mutex `.expect()`
+    on webhook + AC request paths replaced with `into_inner()` recovery (no crash).
+  - **chore: Apache-2.0** LICENSE + per-crate license fields; sanitized infra recon-data from source
+    (runner IP, secret paths, personal email); hardened `.gitignore`; added SECURITY/CONTRIBUTING/CoC;
+    honesty true-up of README + CLAUDE.md.
+
 - feat(serve): **lazy / on-demand CAS object load — boot reads manifests only, not the whole closure.**
   The git-from-CAS source (`HUGIT_SERVE_CAS_URL` → blob/edit/outline + clone/fetch) used to **eagerly**
   load the entire object closure into memory at boot — one CAS read per object. For the launch repo
