@@ -24,6 +24,7 @@ use clap::{Parser, Subcommand};
 
 use hugit_cli::campaign::{self, CampaignArgs};
 use hugit_cli::checks::{self, CheckArgs, ChecksArgs};
+use hugit_cli::ctx::{self, CtxArgs};
 use hugit_cli::diag::{self, DiagArgs};
 use hugit_cli::export::{self, AccountState, Corpus};
 use hugit_cli::fleet::{self, FleetArgs};
@@ -110,6 +111,8 @@ enum Command {
     Watch(WatchArgs),
     /// Outline a local source file's symbols (W6 semantic index; serve serves it on /v1 blob).
     Symbol(SymbolArgs),
+    /// Short-horizon session resume (D11): `ctx resume` reconstructs from journal.note records.
+    Ctx(CtxArgs),
 }
 
 // ── why ────────────────────────────────────────────────────────────────────
@@ -558,6 +561,7 @@ fn main() -> ExitCode {
         Command::Fleet(a) => return fleet::run(a),
         Command::Watch(a) => return watch::run(a),
         Command::Symbol(a) => return symbol::run(a),
+        Command::Ctx(a) => return ctx::run(a),
     };
     match result {
         Ok(json) => {
