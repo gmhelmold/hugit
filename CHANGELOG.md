@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- test(perf): **de-flake the N-2 reconcile scaling test (ratio headroom + larger base).**
+  `reconcile_in_sync_scales_linearly_not_quadratically` flaked on the contended runner at 4.19×
+  against a `< 4×` bound (a docs-only PR, so pure machine noise). The ratio assertion was right but
+  the band sat too close to the linear/quadratic midpoint and the 2k base was noise-dominated (fixed
+  per-run overhead inflates a small baseline's ratio). Fixed by raising the probes to 3k→7.5k (same
+  2.5× event ratio, but the larger base amortizes fixed overhead → ratio now ~2.3–2.6× locally) and
+  widening the band to `< 5×` — still a clear gap below the quadratic 6.25× signal. Stays a RATIO
+  assertion (never absolute wall-clock); the O(n²) regression guard is intact.
+
 - docs: **honesty correction — `policy edit` is REAL (not deferred), and the W6 status is updated.**
   The `policy/mod.rs` module doc + CLAUDE.md still described `hugit policy edit` as deferred ("no
   gate-set mutation/persistence model yet"), but it is fully wired: it folds prior `policy.change`
