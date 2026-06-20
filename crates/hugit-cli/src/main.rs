@@ -38,6 +38,7 @@ use hugit_cli::policy::{self, PolicyArgs};
 use hugit_cli::porcelain::PorcelainError;
 use hugit_cli::pr::{self, PrArgs};
 use hugit_cli::queue::{self, QueueArgs};
+use hugit_cli::review::{self, ReviewArgs};
 use hugit_cli::symbol::{self, SymbolArgs};
 use hugit_cli::tournament::{MAX_N_POLICY, produce_candidates};
 use hugit_cli::undo::{self, UndoArgs};
@@ -113,6 +114,8 @@ enum Command {
     Symbol(SymbolArgs),
     /// Short-horizon session resume (D11): `ctx resume` reconstructs from journal.note records.
     Ctx(CtxArgs),
+    /// Grounded-evidence Q&A over the log (D7): cite real check/verdict evidence or refuse.
+    Review(ReviewArgs),
 }
 
 // ── why ────────────────────────────────────────────────────────────────────
@@ -562,6 +565,7 @@ fn main() -> ExitCode {
         Command::Watch(a) => return watch::run(a),
         Command::Symbol(a) => return symbol::run(a),
         Command::Ctx(a) => return ctx::run(a),
+        Command::Review(a) => return review::run(a),
     };
     match result {
         Ok(json) => {

@@ -36,6 +36,7 @@ pub mod porcelain;
 pub mod pr;
 pub mod queue;
 pub mod redaction;
+pub mod review;
 pub mod symbol;
 pub mod tournament;
 pub mod undo;
@@ -153,6 +154,13 @@ pub const HUGIT_VERBS: &[&str] = &[
     // `ctx snap` (the P2 JournalStore writer) is deliberately NOT offered yet.
     // Does NOT shadow a git command (X5). LIVE the moment main.rs routes it.
     "ctx", // hugit ctx resume --log --workspace --intent — short-horizon resume
+    // Grounded-evidence review Q&A (D7 half) — graduated from RESERVED with REAL
+    // wiring. `review` answers a question STRICTLY by grounded retrieval over
+    // evidence projected from the log's `check.recorded` / `verdict.recorded`
+    // records, via `crate::verdict::qa::answer_question` — an explicit Refusal
+    // when nothing grounds it, never a fabricated answer. Does NOT shadow a git
+    // command (X5). LIVE the moment main.rs routes it.
+    "review", // hugit review --log --question [--intent] — grounded-evidence Q&A
 ];
 
 /// Planned hugit verb tokens that are RESERVED but NOT yet dispatched.
@@ -177,8 +185,8 @@ pub const HUGIT_RESERVED_VERBS: &[&str] = &[
     // Phase D — The forge verbs (planned)
     // (`ledger` graduated to HUGIT_VERBS — Phase-D read surface, REAL-wired over
     // the canonical `--log` via `hugit_ledger::Ledger`; `fleet` + `watch`
-    // graduated alongside it — `hugit_ledger::FleetState` / `WatchDisplay`.)
-    "review", // hugit review <intent>    — grounded-evidence answers
+    // graduated alongside it — `hugit_ledger::FleetState` / `WatchDisplay`;
+    // `review` graduated — grounded-evidence Q&A over the log via `verdict::qa`.)
     // (`undo`, `policy`, `approve`, `reject`, `journal` graduated to HUGIT_VERBS
     // at W3 — stakeholder + session verbs, REAL-wired. `policy` ships `test` only;
     // `policy edit` stays deferred.)

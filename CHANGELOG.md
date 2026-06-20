@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(cli): **`hugit review` — grounded-evidence Q&A over the log (D7), graduated from reserved.**
+  `hugit review --log <path> --question <text> [--intent <id>]` answers a human-review question
+  STRICTLY by grounded retrieval over evidence projected from the log's `check.recorded` /
+  `verdict.recorded` records, reusing the engine's own `verdict::qa::answer_question` +
+  `EvidenceStore`. Returns either `{"answer":"cited","citations":[…],"excerpts":[…]}` (every citation
+  a real evidence ref) or `{"answer":"refused","reason":…}` — it NEVER fabricates. Honest-thin by
+  design: the forever-log scrubs rich bodies on append, so evidence is the surviving structured
+  metadata (check name/exit/cache, verdict aggregate/lenses); a question needing a full stdout/diff
+  body legitimately refuses until the served-evidence (CAS) path is live. Empty `--question` →
+  `empty_question` (exit 2); missing log → `log_not_found`. `--intent` scopes verdict evidence
+  (matched scrubbed). Does not shadow git (X5); no-drift oracle holds. With `ctx` (#166), this
+  completes PR-D.
+
 - feat(cli): **`hugit ctx resume` — short-horizon session resume (D11), graduated from reserved.**
   Reconstructs a crashed/replaced agent's session from the canonical log's `journal.note` records,
   WITHIN the supported 7-day horizon, reusing the engine's own
