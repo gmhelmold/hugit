@@ -117,6 +117,13 @@ pub enum PackError {
     /// The git library failed while writing pack bytes.
     #[error("pack write failed: {0}")]
     Write(String),
+    /// The backing object source (e.g. a remote CAS) failed to fetch or decode an
+    /// object it should hold. Distinct from [`PackError::MissingObject`] (a clean
+    /// absence): this is a transport/decode error or a fail-closed "indexed object
+    /// is gone" — a lazy source surfaces it here so a broken seam never serves
+    /// partial/empty bytes into a clone.
+    #[error("object source error: {0}")]
+    Source(String),
 }
 
 /// The CAS object-get surface the read path consumes.

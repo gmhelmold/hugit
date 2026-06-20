@@ -31,7 +31,7 @@ pub fn build_edit(
     _log: &EventLog,
     repo: &str,
     path: &str,
-    src: Option<&Arc<hugit_proto::CasObjectSource>>,
+    src: Option<&Arc<dyn hugit_proto::ObjectSource + Send + Sync>>,
     root_tree: Option<&ObjectId>,
 ) -> Option<EditVm> {
     let (src, root_tree) = (src?, root_tree?);
@@ -135,7 +135,7 @@ mod tests {
                 oid: blob,
             }],
         );
-        let src = Arc::new(src);
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
 
         let vm = build_edit(&log(), "r", "f.txt", Some(&src), Some(&root)).expect("present file");
         assert_eq!(vm.path, "f.txt");
@@ -161,7 +161,7 @@ mod tests {
                 oid: blob,
             }],
         );
-        let src = Arc::new(src);
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
         assert!(build_edit(&log(), "r", "nope.txt", Some(&src), Some(&root)).is_none());
     }
 
@@ -183,7 +183,7 @@ mod tests {
                 oid: blob,
             }],
         );
-        let src = Arc::new(src);
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
 
         let vm = build_edit(&log(), "r", "s.txt", Some(&src), Some(&root)).expect("resolves");
         let joined: String = vm.lines.iter().map(|l| l.text.clone()).collect();

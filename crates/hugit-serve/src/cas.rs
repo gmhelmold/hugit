@@ -36,7 +36,7 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use hugit_proto::{CasObjectSource, ObjectKind};
+use hugit_proto::{CasObjectSource, GitObject, ObjectKind, PackError};
 use serde::{Deserialize, Serialize};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -192,6 +192,14 @@ pub const BATCH_MAX_OBJECTS: usize = 2000;
 /// FROZEN cap: at most this many bytes of OBJECT payload per batch request (the
 /// concatenated bytes for upload; the RETURNED `ok` bytes for read). 8 MiB.
 pub const BATCH_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// CLIENT request-sizing for the read/exists probes (well UNDER the frozen 2000
+/// cap — not a contract change). A 2000-object exists/read makes the server do
+/// ~2000 R2 round-trips in one request, which blows past the client read-timeout
+/// AND the edge's ~100s request ceiling (observed: 2026-06-20 engine boot +
+/// git-ingest dedup both timed out at 2000). 256 keeps each request fast; the
+/// boot's full read just becomes a few more sequential round-trips.
+pub const BATCH_REQUEST_CHUNK: usize = 256;
 
 /// The production default PAT secret-file path, relative to `$HOME`
 /// (`~/.hugit/secrets/corelink/pat` — the same handoff path the AC client uses).
@@ -537,8 +545,10 @@ impl<T: CasTransport> CasClient<T> {
     pub fn batch_read(&self, hashes: &[String]) -> Result<BatchReadResult, CasError> {
         let mut out: BatchReadResult = Vec::with_capacity(hashes.len());
         // Read is bounded by RETURNED bytes (unknown here), so chunk by count only
+        // — and by BATCH_REQUEST_CHUNK (256), NOT the frozen 2000 cap: a 2000-object
+        // read makes the server do ~2000 R2 fetches in one request → boot timeout.
         // and let the 413-split handle an oversized return.
-        for chunk in hashes.chunks(BATCH_MAX_OBJECTS) {
+        for chunk in hashes.chunks(BATCH_REQUEST_CHUNK) {
             self.batch_read_chunk(chunk, &mut out)?;
         }
         Ok(out)
@@ -603,7 +613,7 @@ impl<T: CasTransport> CasClient<T> {
     /// applies). Returns `(blake3, present)` in INPUT order. 415/400 → hard error.
     pub fn batch_exists(&self, hashes: &[String]) -> Result<Vec<(String, bool)>, CasError> {
         let mut out: Vec<(String, bool)> = Vec::with_capacity(hashes.len());
-        for chunk in hashes.chunks(BATCH_MAX_OBJECTS) {
+        for chunk in hashes.chunks(BATCH_REQUEST_CHUNK) {
             if chunk.is_empty() {
                 continue;
             }
@@ -1022,7 +1032,7 @@ impl UreqCasTransport {
     pub fn new() -> Self {
         Self {
             agent: ureq::AgentBuilder::new()
-                .timeout(Duration::from_secs(30))
+                .timeout(Duration::from_secs(90))
                 .build(),
         }
     }
@@ -1164,6 +1174,15 @@ pub type CasLoad = (
     BTreeMap<String, String>,
 );
 
+/// The output of [`load_manifests_from_cas`] — the LAZY counterpart of [`CasLoad`]:
+/// a [`LazyCasObjectSource`] (objects fetched on demand) plus the same root-tree +
+/// refs. Same shape as `CasLoad`, so the call sites are untouched.
+pub type LazyCasLoad<T = UreqCasTransport> = (
+    LazyCasObjectSource<T>,
+    gix_hash::ObjectId,
+    BTreeMap<String, String>,
+);
+
 /// Boot-load a repo's git objects from hugit's R2 (mutable manifests) + the
 /// CoreLink CAS (immutable objects), with **DOUBLE integrity**:
 ///
@@ -1287,6 +1306,162 @@ pub fn load_from_cas<T: CasTransport, R: R2Get>(
     let root_tree = root_tree_of_commit(&store, &head_oid)?;
 
     Ok((store, root_tree, manifest.refs))
+}
+
+/// A **lazy, on-demand** [`hugit_proto::ObjectSource`] backed by the CoreLink CAS.
+///
+/// Boot loads ONLY the oid→blake3 index (a few KB of `oid-index.json`); each git
+/// object is fetched from the CAS the first time it is served (clone / blob /
+/// outline), verified (blake3 + git-SHA-1 double-integrity, same as the eager
+/// path), and cached so repeated reads don't re-hit R2. This keeps boot O(1) in
+/// the object count — the eager [`load_from_cas`] is O(objects) (one CAS read
+/// each) and blew past the container start window for a real repo (~200s for the
+/// 6862-object hugit closure → CF kills the container; 2026-06-20 incident). The
+/// distroless / no-git-binary invariant (#151) is preserved.
+pub struct LazyCasObjectSource<T: CasTransport = UreqCasTransport> {
+    /// git oid → its blake3 CAS key (the whole `oid-index.json`, parsed once).
+    index: BTreeMap<gix_hash::ObjectId, String>,
+    /// The CAS client used to fetch object bytes on demand.
+    cas: CasClient<T>,
+    /// First-fetch cache: a served object is decoded + verified once, then reused.
+    cache: std::sync::Mutex<BTreeMap<gix_hash::ObjectId, GitObject>>,
+}
+
+impl<T: CasTransport> LazyCasObjectSource<T> {
+    /// Build a lazy source over an oid→blake3 `index` and an owned CAS client.
+    #[must_use]
+    pub fn new(index: BTreeMap<gix_hash::ObjectId, String>, cas: CasClient<T>) -> Self {
+        Self {
+            index,
+            cas,
+            cache: std::sync::Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// The number of objects the index references (the boot footprint — what the
+    /// eager path would have pre-loaded).
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.index.len()
+    }
+
+    /// Whether the index is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.index.is_empty()
+    }
+}
+
+impl<T: CasTransport + Send + Sync> hugit_proto::ObjectSource for LazyCasObjectSource<T> {
+    fn get(&self, oid: &gix_hash::ObjectId) -> Result<Option<GitObject>, PackError> {
+        // Served before? Return the decoded+verified object from the cache.
+        if let Some(obj) = self
+            .cache
+            .lock()
+            .expect("lazy CAS cache mutex poisoned")
+            .get(oid)
+        {
+            return Ok(Some(obj.clone()));
+        }
+        // Not in the index → a CLEAN absence (Ok(None)), exactly like the eager store.
+        let Some(blake3) = self.index.get(oid) else {
+            return Ok(None);
+        };
+        // Indexed → the object MUST be fetchable. A transport error or an absent
+        // object is a broken seam, surfaced as PackError::Source (fail-closed) —
+        // never a silent empty/partial serve.
+        let framed = self
+            .cas
+            .get(blake3)
+            .map_err(|e| {
+                PackError::Source(format!("CAS fetch failed for git oid {oid} (blake3 {blake3}): {e}"))
+            })?
+            .ok_or_else(|| {
+                PackError::Source(format!(
+                    "CAS object absent for indexed git oid {oid} (blake3 {blake3}) — content seam incomplete"
+                ))
+            })?;
+        // Defense in depth: the returned bytes must hash to the blake3 we asked for.
+        let actual_blake3 = cas_key(&framed);
+        if actual_blake3 != *blake3 {
+            return Err(PackError::Source(format!(
+                "CAS content-address violation for git oid {oid}: asked blake3 {blake3}, bytes hash to {actual_blake3}"
+            )));
+        }
+        let (kind, body) = decode_loose(&framed).map_err(|e| {
+            PackError::Source(format!(
+                "CAS object for git oid {oid} is malformed loose framing: {e}"
+            ))
+        })?;
+        let obj = GitObject::new(kind, body);
+        // Double-integrity: the git SHA-1 the bytes derive to MUST equal the asked oid.
+        let derived = obj.try_oid()?;
+        if &derived != oid {
+            return Err(PackError::AddressMismatch {
+                stored: *oid,
+                actual: derived,
+            });
+        }
+        self.cache
+            .lock()
+            .expect("lazy CAS cache mutex poisoned")
+            .insert(*oid, obj.clone());
+        Ok(Some(obj))
+    }
+
+    fn contains(&self, oid: &gix_hash::ObjectId) -> bool {
+        self.index.contains_key(oid)
+    }
+}
+
+/// Manifest-only boot loader: the LAZY counterpart of [`load_from_cas`].
+///
+/// Reads ONLY `refs.json` + `oid-index.json` from R2 and resolves HEAD's root
+/// tree (a couple of on-demand fetches — the commit + its tree), then hands back
+/// a [`LazyCasObjectSource`] that fetches the rest on demand. Boot cost is the
+/// index size + 2 objects, NOT the whole closure.
+pub fn load_manifests_from_cas<T: CasTransport + Send + Sync, R: R2Get>(
+    cas: CasClient<T>,
+    r2: &R,
+    tenant: &str,
+    repo: &str,
+) -> Result<LazyCasLoad<T>, String> {
+    // The mutable manifests from R2 (fail-closed on absence — same as the eager path).
+    let refs_bytes = r2
+        .get_object(&refs_manifest_key(tenant, repo))?
+        .ok_or_else(|| format!("refs.json absent for {tenant}/{repo} (content seam not seeded)"))?;
+    let manifest = parse_refs_manifest(&refs_bytes)?;
+
+    let index_bytes = r2
+        .get_object(&oid_index_key(tenant, repo))?
+        .ok_or_else(|| {
+            format!("oid-index.json absent for {tenant}/{repo} (content seam not seeded)")
+        })?;
+    let index_raw = parse_oid_index(&index_bytes)?;
+
+    // Re-key the oid→blake3 index by ObjectId (O(log n) get on the serve path).
+    let mut index: BTreeMap<gix_hash::ObjectId, String> = BTreeMap::new();
+    for (oid_hex, blake3) in &index_raw {
+        let oid = gix_hash::ObjectId::from_hex(oid_hex.as_bytes())
+            .map_err(|e| format!("oid-index: {oid_hex:?} is not a valid git oid: {e}"))?;
+        index.insert(oid, blake3.clone());
+    }
+
+    let source = LazyCasObjectSource::new(index, cas);
+
+    // Resolve HEAD's root tree — two on-demand fetches (the HEAD commit + its
+    // tree id is read from the commit), NOT the full closure.
+    let head_oid_hex = manifest.refs.get(&manifest.head).ok_or_else(|| {
+        format!(
+            "refs.json head {:?} has no entry in refs (manifest is inconsistent)",
+            manifest.head
+        )
+    })?;
+    let head_oid = gix_hash::ObjectId::from_hex(head_oid_hex.as_bytes())
+        .map_err(|e| format!("head oid {head_oid_hex:?} is not a valid git oid: {e}"))?;
+    let root_tree = root_tree_of_commit(&source, &head_oid)?;
+
+    Ok((source, root_tree, manifest.refs))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1505,10 +1680,9 @@ pub fn ingest_repo<T: CasTransport, W: R2Put>(
 /// is never re-derived by hand). Fail-closed if the commit is absent, is not a
 /// commit, or does not decode.
 fn root_tree_of_commit(
-    store: &CasObjectSource,
+    store: &dyn hugit_proto::ObjectSource,
     head: &gix_hash::ObjectId,
 ) -> Result<gix_hash::ObjectId, String> {
-    use hugit_proto::ObjectSource as _;
     let obj = store
         .get(head)
         .map_err(|e| format!("loading HEAD commit {head} failed: {e}"))?
@@ -2711,6 +2885,58 @@ mod tests {
                 .expect("README.md resolves via the per-object GET fallback");
         assert_eq!(resolved_oid, blob_oid);
         assert_eq!(bytes, blob_body);
+    }
+
+    /// LAZY load: boot reads only the manifests (no full-closure pre-load); a blob
+    /// resolves by fetching its objects from the CAS ON DEMAND, byte-identical to
+    /// the eager path, and a second read serves from the cache.
+    #[test]
+    fn lazy_source_resolves_blob_on_demand_and_caches() {
+        let (cas, r2, commit_hex, blob_oid, blob_body) = seed_repo();
+        let (lazy, root_tree, refs) =
+            load_manifests_from_cas(cas, &r2, "tenant-1", "hugit").expect("manifests load lazily");
+        assert_eq!(refs.get("refs/heads/main").unwrap(), &commit_hex);
+        // The blob is fetched on demand (it was never pre-loaded at boot).
+        let (resolved_oid, bytes) =
+            hugit_proto::resolve_blob_at_path(&lazy, &root_tree, "README.md")
+                .unwrap()
+                .expect("README.md resolves on demand");
+        assert_eq!(resolved_oid, blob_oid);
+        assert_eq!(bytes, blob_body);
+        // Second resolve serves from the cache → identical bytes.
+        let again = hugit_proto::resolve_blob_at_path(&lazy, &root_tree, "README.md")
+            .unwrap()
+            .expect("second resolve from cache");
+        assert_eq!(again.1, blob_body);
+        // contains() reflects the index without a fetch.
+        use hugit_proto::ObjectSource as _;
+        assert!(lazy.contains(&blob_oid));
+    }
+
+    /// Fail-closed: an oid the index references but the CAS no longer holds fails as
+    /// a `PackError` (content seam incomplete) — never a silent empty serve. An oid
+    /// NOT in the index is a clean absence (`Ok(None)`).
+    #[test]
+    fn lazy_source_fails_closed_when_indexed_object_absent() {
+        use hugit_proto::ObjectSource as _;
+        let cfg = CasConfig::new("https://cas.example", "tenant-1", "secret-pat").unwrap();
+        // Empty store → every get is a 404 (absent).
+        let cas = CasClient::with_transport(cfg, MapCasTransport::default());
+        let body = b"missing object\n";
+        let oid = git_oid(ObjectKind::Blob, body);
+        let blake3 = cas_key(&encode_loose(ObjectKind::Blob, body));
+        let mut index = BTreeMap::new();
+        index.insert(oid, blake3);
+        let lazy = LazyCasObjectSource::new(index, cas);
+        // Indexed but absent in the CAS → fail closed.
+        let err = lazy.get(&oid).unwrap_err();
+        assert!(
+            matches!(err, PackError::Source(_)),
+            "indexed-but-absent must fail closed, got {err:?}"
+        );
+        // Not in the index → clean absence, not an error.
+        let other = git_oid(ObjectKind::Blob, b"not indexed\n");
+        assert!(lazy.get(&other).unwrap().is_none());
     }
 
     /// Double-integrity is STILL enforced on the per-object GET fallback path: a
