@@ -773,30 +773,133 @@ fn load_git_dir(
     let listing = String::from_utf8(git(&["rev-list", "--objects", "--all"])?)
         .map_err(|e| format!("HUGIT_SERVE_GIT_DIR: rev-list output is not UTF-8: {e}"))?;
 
+    // The reachable oid set (`rev-list --objects` emits `<oid> [path]` per line).
+    let oids: Vec<&str> = listing
+        .lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .filter(|o| !o.is_empty())
+        .collect();
+
+    // Stream EVERY reachable object through ONE `git cat-file --batch` process
+    // instead of spawning two `git` subprocesses per object. The launch repo has
+    // thousands of objects (6.8k+ at this writing); per-object spawns made boot
+    // take MINUTES — past the container healthcheck window, and boot is fail-closed
+    // (a slow boot ⇒ an unhealthy container ⇒ a broken deploy). `--batch` reads
+    // oids on stdin and emits, per object, a header line `<oid> SP <type> SP
+    // <size> LF` followed by exactly `<size>` raw body bytes and a trailing LF.
+    // The body is the loose-header-less object bytes — exactly what
+    // `CasObjectSource` re-hashes against the oid.
     let mut cas = CasObjectSource::new();
-    for line in listing.lines() {
-        // `rev-list --objects` emits `<40-hex-oid>` optionally followed by ` <path>`.
-        let oid_hex = line.split_whitespace().next().unwrap_or("");
-        if oid_hex.is_empty() {
-            continue;
+    if !oids.is_empty() {
+        use std::io::{Read, Write};
+
+        let mut child = Command::new("git")
+            .arg("-C")
+            .arg(git_dir)
+            .args(["cat-file", "--batch"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| {
+                format!("HUGIT_SERVE_GIT_DIR: failed to spawn `git cat-file --batch`: {e}")
+            })?;
+
+        // Feed oids on a writer thread while we drain stdout on this thread, and
+        // drain stderr on a third — writing all oids before reading stdout would
+        // deadlock once the OS pipe buffer fills (object bodies can be MBs).
+        let oids_owned: Vec<String> = oids.iter().map(|s| s.to_string()).collect();
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        let writer = std::thread::spawn(move || -> std::io::Result<()> {
+            for oid in &oids_owned {
+                stdin.write_all(oid.as_bytes())?;
+                stdin.write_all(b"\n")?;
+            }
+            Ok(()) // drop(stdin) closes the pipe so cat-file finishes
+        });
+        let mut stderr_pipe = child.stderr.take().expect("piped stderr");
+        let errs = std::thread::spawn(move || {
+            let mut s = String::new();
+            let _ = stderr_pipe.read_to_string(&mut s);
+            s
+        });
+
+        let mut out = Vec::new();
+        child
+            .stdout
+            .take()
+            .expect("piped stdout")
+            .read_to_end(&mut out)
+            .map_err(|e| format!("HUGIT_SERVE_GIT_DIR: reading `git cat-file --batch`: {e}"))?;
+
+        let writer_res = writer.join();
+        let stderr_text = errs.join().unwrap_or_default();
+        let status = child
+            .wait()
+            .map_err(|e| format!("HUGIT_SERVE_GIT_DIR: `git cat-file --batch` wait: {e}"))?;
+        match writer_res {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                return Err(format!(
+                    "HUGIT_SERVE_GIT_DIR: writing oids to `git cat-file --batch`: {e}"
+                ));
+            }
+            Err(_) => {
+                return Err("HUGIT_SERVE_GIT_DIR: the cat-file writer thread panicked".to_string());
+            }
         }
-        // The object's type, then its raw body bytes (NO loose header — that is
-        // exactly the body `CasObjectSource` re-hashes against the oid).
-        let kind_raw = git(&["cat-file", "-t", oid_hex])?;
-        let kind_str = String::from_utf8_lossy(&kind_raw);
-        let kind = match kind_str.trim() {
-            "blob" => ObjectKind::Blob,
-            "tree" => ObjectKind::Tree,
-            "commit" => ObjectKind::Commit,
-            "tag" => ObjectKind::Tag,
-            // A reachable object of an unknown type cannot occur from a healthy
-            // git; skip it rather than abort (blob/tree walking does not need it).
-            _ => continue,
-        };
-        let body = git(&["cat-file", kind_str.trim(), oid_hex])?;
-        // Insert under the oid the bytes hash to; the store rejects a mismatch on
-        // the later `get`, so byte-identity to git is preserved.
-        cas.insert_raw(kind, body);
+        if !status.success() {
+            return Err(format!(
+                "HUGIT_SERVE_GIT_DIR: `git cat-file --batch` failed: {}",
+                stderr_text.trim()
+            ));
+        }
+
+        // Parse the stream: repeated `<oid> SP <type> SP <size> LF <body> LF`. A
+        // `<oid> SP missing LF` line (no body) cannot occur for a rev-list oid but
+        // is handled defensively.
+        let mut i = 0usize;
+        while i < out.len() {
+            let nl = match out[i..].iter().position(|&b| b == b'\n') {
+                Some(p) => i + p,
+                None => break, // no trailing header — stop
+            };
+            let header = std::str::from_utf8(&out[i..nl])
+                .map_err(|_| "HUGIT_SERVE_GIT_DIR: non-UTF-8 cat-file header".to_string())?;
+            i = nl + 1;
+            let mut parts = header.split(' ');
+            let _oid = parts.next().unwrap_or("");
+            let type_str = parts.next().unwrap_or("");
+            if type_str == "missing" {
+                continue; // no body follows
+            }
+            let size: usize = parts
+                .next()
+                .and_then(|s| s.parse().ok())
+                .ok_or_else(|| format!("HUGIT_SERVE_GIT_DIR: bad cat-file header {header:?}"))?;
+            let kind = match type_str {
+                "blob" => ObjectKind::Blob,
+                "tree" => ObjectKind::Tree,
+                "commit" => ObjectKind::Commit,
+                "tag" => ObjectKind::Tag,
+                // A reachable object of an unknown type cannot occur from a healthy
+                // git; skip its body rather than abort.
+                _ => {
+                    i += size + 1; // body + trailing LF
+                    continue;
+                }
+            };
+            if i + size > out.len() {
+                return Err("HUGIT_SERVE_GIT_DIR: truncated cat-file object body".to_string());
+            }
+            // Insert under the oid the bytes hash to; the store rejects a mismatch
+            // on the later `get`, so byte-identity to git is preserved.
+            cas.insert_raw(kind, out[i..i + size].to_vec());
+            i += size;
+            if i < out.len() && out[i] == b'\n' {
+                i += 1; // trailing LF after the body
+            }
+        }
     }
 
     // The refs for the git wire advertisement (`git clone`/`git fetch`). Read from
