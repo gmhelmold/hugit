@@ -48,7 +48,19 @@ pub const SK_MIN_SUFFIX_LEN: usize = 20;
 /// Keyword prefixes (lowercase) that gate the keyword-context detector. Each
 /// keyword is followed by `=`/`:` and a value — the value is a credential
 /// regardless of entropy.
-pub const KEYWORD_PREFIXES: &[&str] = &["password", "passwd", "secret", "token", "api_key", "pwd"];
+pub const KEYWORD_PREFIXES: &[&str] = &[
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "api_key",
+    "pwd",
+    "auth_token",
+    "access_token",
+    "private_key",
+    "credential",
+    "passphrase",
+];
 
 /// Known credential prefixes that are secrets by construction (except `sk-`,
 /// which is handled separately with a length gate). A field containing any of
@@ -65,8 +77,10 @@ pub const KNOWN_PREFIXES: &[&str] = &[
     "xoxa-",
     "xoxs-",
     "clp_",
-    "Bearer ",
-    "eyJ", // JWT header (base64 of `{"`)
+    "dop_v1_", // DigitalOcean personal access token
+    // NOTE: "Bearer" is intentionally NOT here — Bearer matching requires a
+    // trailing whitespace check (space OR tab) handled by `has_bearer_token`.
+    "eyJ",     // JWT header (base64 of `{"`)
 ];
 
 // ── Structural-secret detector (the four entropy-independent classes) ────────
@@ -89,6 +103,7 @@ pub const KNOWN_PREFIXES: &[&str] = &[
 pub fn is_structural_secret(s: &str) -> bool {
     s.contains(SECRET_MARKER)
         || KNOWN_PREFIXES.iter().any(|p| s.contains(p))
+        || has_bearer_token(s)
         || has_sk_key(s)
         || (s.contains("-----BEGIN") && s.contains("PRIVATE KEY"))
         || has_connection_string_password(s)
@@ -128,6 +143,33 @@ pub fn has_sk_key(s: &str) -> bool {
             return true;
         }
         let advance = pos + needle.len();
+        if advance >= search.len() {
+            break;
+        }
+        search = &search[advance..];
+    }
+    false
+}
+
+/// True iff `s` contains a `Bearer` token — `Bearer` immediately followed by
+/// one or more ASCII whitespace characters (space OR tab). This covers both
+/// `Bearer <token>` and `Bearer\t<token>` (and multiple spaces), while NOT
+/// firing on bare prose use of the word "Bearer" with no whitespace after it.
+/// The `Bearer` prefix is separated from `KNOWN_PREFIXES` precisely because
+/// the whitespace-following check cannot be expressed as a plain `contains`.
+pub fn has_bearer_token(s: &str) -> bool {
+    let needle = "Bearer";
+    let mut search = s;
+    while let Some(pos) = search.find(needle) {
+        let after_bearer = pos + needle.len();
+        if search
+            .as_bytes()
+            .get(after_bearer)
+            .is_some_and(|b| *b == b' ' || *b == b'\t')
+        {
+            return true;
+        }
+        let advance = after_bearer;
         if advance >= search.len() {
             break;
         }
@@ -512,5 +554,87 @@ mod tests {
             "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5"
         )); // 50-hex
         assert!(!is_safe_identifier_shape("123456789012345678901234")); // 24-digit
+    }
+
+    // ── Fix 1: DigitalOcean token prefix ────────────────────────────────────
+
+    #[test]
+    fn dop_v1_token_is_structural_secret() {
+        // A realistic DigitalOcean personal access token (dop_v1_ + 64 hex chars).
+        let token = "dop_v1_0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab";
+        assert!(
+            is_structural_secret(token),
+            "dop_v1_ prefix must be a structural secret"
+        );
+    }
+
+    // ── Fix 3: Extended keyword prefixes ────────────────────────────────────
+
+    #[test]
+    fn access_token_keyword_is_caught() {
+        assert!(
+            has_keyword_context_secret("access_token=supersecretvalue"),
+            "access_token= must trigger the keyword-context detector"
+        );
+        assert!(is_structural_secret("access_token=supersecretvalue"));
+    }
+
+    #[test]
+    fn auth_token_keyword_is_caught() {
+        assert!(has_keyword_context_secret("auth_token=my_secret_here"));
+        assert!(is_structural_secret("auth_token=my_secret_here"));
+    }
+
+    #[test]
+    fn private_key_keyword_is_caught() {
+        assert!(has_keyword_context_secret("private_key=abc123secret"));
+        assert!(is_structural_secret("private_key=abc123secret"));
+    }
+
+    #[test]
+    fn credential_keyword_is_caught() {
+        assert!(has_keyword_context_secret("credential=mysecretcred"));
+        assert!(is_structural_secret("credential=mysecretcred"));
+    }
+
+    #[test]
+    fn passphrase_keyword_is_caught() {
+        assert!(has_keyword_context_secret("passphrase=correct horse battery"));
+        assert!(is_structural_secret("passphrase=correct horse battery"));
+    }
+
+    // ── Fix 4: Bearer tab bypass ─────────────────────────────────────────────
+
+    #[test]
+    fn bearer_space_is_structural_secret() {
+        assert!(has_bearer_token("Authorization: Bearer abc123def456ghi789jkl"));
+        assert!(is_structural_secret("Authorization: Bearer abc123def456ghi789jkl"));
+    }
+
+    #[test]
+    fn bearer_tab_is_structural_secret() {
+        assert!(
+            has_bearer_token("Authorization: Bearer\tabc123def456ghi789jkl"),
+            "Bearer followed by tab must be detected"
+        );
+        assert!(is_structural_secret(
+            "Authorization: Bearer\tabc123def456ghi789jkl"
+        ));
+    }
+
+    #[test]
+    fn bearer_double_space_is_structural_secret() {
+        // "Bearer" followed by multiple spaces also fires (the first space triggers it).
+        assert!(has_bearer_token("Authorization: Bearer  abc123def456ghi789jkl"));
+        assert!(is_structural_secret(
+            "Authorization: Bearer  abc123def456ghi789jkl"
+        ));
+    }
+
+    #[test]
+    fn bearer_without_whitespace_does_not_fire() {
+        // "Bearer" immediately followed by a non-whitespace char does NOT fire.
+        assert!(!has_bearer_token("BearerScheme"));
+        assert!(!has_bearer_token("Bearer:nospace"));
     }
 }
