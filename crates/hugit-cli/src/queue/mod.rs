@@ -363,7 +363,8 @@ mod tests {
 
     /// Persist a seeded log to a unique temp path and run `queue show` over it.
     fn show_over(log: &EventLog, tag: &str, campaign: Option<&str>) -> Value {
-        let dir = std::env::temp_dir().join(format!("hugit-queue-show-{}-{tag}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("hugit-queue-show-{}-{tag}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("queue-seed.json");
         std::fs::write(&path, serde_json::to_vec_pretty(log.records()).unwrap()).unwrap();
@@ -422,7 +423,12 @@ mod tests {
         assert_eq!(batches[0]["member_count"], 2);
         // The bisected failing pair is not log-recorded → honest null + disclosed.
         assert!(batches[0]["failing_pair"].is_null());
-        assert!(out["state_machine_note"].as_str().unwrap().contains("failing_pair"));
+        assert!(
+            out["state_machine_note"]
+                .as_str()
+                .unwrap()
+                .contains("failing_pair")
+        );
     }
 
     /// A union batch with an outstanding member REJECT surfaces `state:"union_fail"`

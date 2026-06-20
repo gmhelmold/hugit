@@ -95,7 +95,10 @@ fn project(args: &SymbolArgs) -> Result<Value, PorcelainError> {
         (Some(file), None) => project_file(file),
         (None, Some(git_ref)) => {
             // --ref requires --path, enforced by clap; unwrap is safe.
-            let path = args.ref_path.as_deref().expect("clap requires --path with --ref");
+            let path = args
+                .ref_path
+                .as_deref()
+                .expect("clap requires --path with --ref");
             let git_dir = resolve_git_dir(args.git_dir.as_deref())?;
             project_ref(&git_dir, git_ref, path)
         }
@@ -165,7 +168,11 @@ fn project_file(file: &std::path::Path) -> Result<Value, PorcelainError> {
 // ── --ref path ───────────────────────────────────────────────────────────────
 
 /// Resolve `refspec` → root tree → path → blob bytes, outline, and return JSON.
-fn project_ref(git_dir: &std::path::Path, refspec: &str, path: &str) -> Result<Value, PorcelainError> {
+fn project_ref(
+    git_dir: &std::path::Path,
+    refspec: &str,
+    path: &str,
+) -> Result<Value, PorcelainError> {
     // 1. Resolve the ref to the root tree oid.
     let root_tree = git_source::resolve_ref_root_tree(git_dir, refspec).map_err(|e| {
         PorcelainError::new(
@@ -178,16 +185,15 @@ fn project_ref(git_dir: &std::path::Path, refspec: &str, path: &str) -> Result<V
 
     // 2. Walk the tree to the blob.
     let src = git_source::GitCatFileSource::new(git_dir.to_path_buf());
-    let blob_bytes =
-        hugit_proto::resolve_blob_at_path(&src, &root_tree, path).map_err(|e| {
-            PorcelainError::new(
-                "git_object_error",
-                format!("reading git objects for `{path}` at `{refspec}`: {e}"),
-                "check that the ref and path are correct and the git repository is intact",
-            )
-            .with_context("ref", json!(refspec))
-            .with_context("path", json!(path))
-        })?;
+    let blob_bytes = hugit_proto::resolve_blob_at_path(&src, &root_tree, path).map_err(|e| {
+        PorcelainError::new(
+            "git_object_error",
+            format!("reading git objects for `{path}` at `{refspec}`: {e}"),
+            "check that the ref and path are correct and the git repository is intact",
+        )
+        .with_context("ref", json!(refspec))
+        .with_context("path", json!(path))
+    })?;
 
     // 3. A missing path (not an error, just absent) → clean not_found.
     let (_oid, bytes) = blob_bytes.ok_or_else(|| {
@@ -263,7 +269,7 @@ mod tests {
         };
         let v = project(&args).expect("project_file should succeed");
         assert_eq!(v["lang"], "rust");
-        assert!(v["outline"].as_array().unwrap().len() >= 1);
+        assert!(!v["outline"].as_array().unwrap().is_empty());
         std::fs::remove_file(rs_path).ok();
     }
 
@@ -319,7 +325,10 @@ mod tests {
         let v = project(&args).expect("project_ref should succeed at HEAD");
         assert_eq!(v["lang"], "rust", "porcelain.rs is Rust");
         let outline = v["outline"].as_array().expect("outline array");
-        assert!(!outline.is_empty(), "HEAD outline of porcelain.rs must not be empty");
+        assert!(
+            !outline.is_empty(),
+            "HEAD outline of porcelain.rs must not be empty"
+        );
     }
 
     /// Outline the same committed file via `--ref HEAD` and `--file`, confirming
@@ -366,7 +375,10 @@ mod tests {
             .iter()
             .map(|s| s["name"].as_str().unwrap_or(""))
             .collect();
-        assert_eq!(ref_names, file_names, "symbol names from --ref and --file must match");
+        assert_eq!(
+            ref_names, file_names,
+            "symbol names from --ref and --file must match"
+        );
     }
 
     /// `--ref HEAD --path path/that/does/not/exist.rs` returns `path_not_found`.

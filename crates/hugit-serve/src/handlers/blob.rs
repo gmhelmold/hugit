@@ -315,7 +315,10 @@ mod tests {
         // REAL: the sidebar tree lists the one file in the root dir.
         assert_eq!(vm.tree.len(), 1, "tree: {:?}", vm.tree);
         assert_eq!(vm.tree[0].name, "main.rs");
-        assert!(vm.tree[0].current, "the requested file must be marked current");
+        assert!(
+            vm.tree[0].current,
+            "the requested file must be marked current"
+        );
         assert!(!vm.tree[0].is_dir);
     }
 
@@ -564,17 +567,29 @@ mod tests {
         assert_eq!(vm.tree.len(), 3, "tree entries: {:?}", vm.tree);
 
         // lib.rs is the requested file → current: true.
-        let lib = vm.tree.iter().find(|e| e.name == "lib.rs").expect("lib.rs in tree");
+        let lib = vm
+            .tree
+            .iter()
+            .find(|e| e.name == "lib.rs")
+            .expect("lib.rs in tree");
         assert!(lib.current, "requested file must be marked current");
         assert!(!lib.is_dir);
 
         // main.rs is a sibling → current: false.
-        let main = vm.tree.iter().find(|e| e.name == "main.rs").expect("main.rs in tree");
+        let main = vm
+            .tree
+            .iter()
+            .find(|e| e.name == "main.rs")
+            .expect("main.rs in tree");
         assert!(!main.current);
         assert!(!main.is_dir);
 
         // src is a subdirectory.
-        let src_row = vm.tree.iter().find(|e| e.name == "src").expect("src in tree");
+        let src_row = vm
+            .tree
+            .iter()
+            .find(|e| e.name == "src")
+            .expect("src in tree");
         assert!(!src_row.current);
         assert!(src_row.is_dir);
 
@@ -632,14 +647,26 @@ mod tests {
 
         assert_eq!(vm.tree.len(), 3, "tree entries: {:?}", vm.tree);
 
-        let util = vm.tree.iter().find(|e| e.name == "util.rs").expect("util.rs in tree");
+        let util = vm
+            .tree
+            .iter()
+            .find(|e| e.name == "util.rs")
+            .expect("util.rs in tree");
         assert!(util.current, "requested file must be marked current");
         assert!(!util.is_dir);
 
-        let lib_row = vm.tree.iter().find(|e| e.name == "lib.rs").expect("lib.rs in tree");
+        let lib_row = vm
+            .tree
+            .iter()
+            .find(|e| e.name == "lib.rs")
+            .expect("lib.rs in tree");
         assert!(!lib_row.current);
 
-        let handlers_row = vm.tree.iter().find(|e| e.name == "handlers").expect("handlers in tree");
+        let handlers_row = vm
+            .tree
+            .iter()
+            .find(|e| e.name == "handlers")
+            .expect("handlers in tree");
         assert!(handlers_row.is_dir);
         assert!(!handlers_row.current);
     }
@@ -671,7 +698,12 @@ mod tests {
             .expect("real file resolves");
 
         // Only real.rs should appear; link.rs is excluded.
-        assert_eq!(vm.tree.len(), 1, "tree should exclude symlinks: {:?}", vm.tree);
+        assert_eq!(
+            vm.tree.len(),
+            1,
+            "tree should exclude symlinks: {:?}",
+            vm.tree
+        );
         assert_eq!(vm.tree[0].name, "real.rs");
     }
 }

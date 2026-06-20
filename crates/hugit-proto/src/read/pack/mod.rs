@@ -838,11 +838,20 @@ mod list_tree_tests {
         let entries = list_tree_at_dir(&src, &root, "lib.rs");
         assert_eq!(entries.len(), 3, "entries: {entries:?}");
 
-        let lib = entries.iter().find(|e| e.name == "lib.rs").expect("lib.rs present");
+        let lib = entries
+            .iter()
+            .find(|e| e.name == "lib.rs")
+            .expect("lib.rs present");
         assert!(!lib.is_dir);
-        let main = entries.iter().find(|e| e.name == "main.rs").expect("main.rs present");
+        let main = entries
+            .iter()
+            .find(|e| e.name == "main.rs")
+            .expect("main.rs present");
         assert!(!main.is_dir);
-        let src_entry = entries.iter().find(|e| e.name == "src").expect("src present");
+        let src_entry = entries
+            .iter()
+            .find(|e| e.name == "src")
+            .expect("src present");
         assert!(src_entry.is_dir);
     }
 
@@ -918,7 +927,11 @@ mod list_tree_tests {
         );
 
         let entries = list_tree_at_dir(&src, &root, "real.rs");
-        assert_eq!(entries.len(), 2, "only blobs/exe should be listed: {entries:?}");
+        assert_eq!(
+            entries.len(),
+            2,
+            "only blobs/exe should be listed: {entries:?}"
+        );
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"real.rs"));
         assert!(names.contains(&"run.sh"));

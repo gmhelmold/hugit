@@ -161,7 +161,11 @@ mod tests {
     fn open_git_dir_finds_repo_from_cwd() {
         let cwd = env::current_dir().expect("cwd");
         let root = open_git_dir(&cwd).expect("should find .git");
-        assert!(root.join(".git").exists(), ".git must exist at {}", root.display());
+        assert!(
+            root.join(".git").exists(),
+            ".git must exist at {}",
+            root.display()
+        );
     }
 
     /// `open_git_dir` from a non-git temp dir returns an error.
@@ -201,8 +205,15 @@ mod tests {
         let root = open_git_dir(&cwd).expect("find repo");
         let oid = resolve_ref_root_tree(&root, "HEAD").expect("HEAD tree");
         let src = GitCatFileSource::new(root);
-        let obj = src.get(&oid).expect("no error").expect("object must be present");
-        assert_eq!(obj.kind, ObjectKind::Tree, "HEAD tree must be a Tree object");
+        let obj = src
+            .get(&oid)
+            .expect("no error")
+            .expect("object must be present");
+        assert_eq!(
+            obj.kind,
+            ObjectKind::Tree,
+            "HEAD tree must be a Tree object"
+        );
         assert!(!obj.data.is_empty(), "tree body must be non-empty");
     }
 
