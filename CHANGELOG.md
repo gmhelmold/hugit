@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(checks): **the orphan reaper can no longer SIGKILL an unrelated process (PID-reuse TOCTOU).**
+  The descendant sweep added for orphan reaping enumerated PIDs, then killed the direct child, then
+  signalled the enumerated PIDs — but between enumeration and signalling a grandchild can exit and its
+  PID be RECYCLED by an unrelated process, so `kill -KILL` would hit a stranger, violating the
+  reaper's own load-bearing invariant ("never signal beyond our own subtree"). Fixed by (a) reaping
+  descendants BEFORE the direct child (while the subtree linkage is still live) and (b) re-verifying,
+  immediately before signalling, that each PID's `/proc` ancestry STILL terminates at the direct child
+  (`is_descendant_of` — a fresh upward PPid walk); a recycled PID now parented elsewhere is skipped.
+  The window shrinks to check-then-immediately-kill, with OS-reaps-on-exit as the backstop. (Audit
+  finding on the #159 reaper.)
+- fix(ledger): **the fleet projection no longer drops distinct agents/workspaces with secret-shaped ids.**
+  `FleetState::from_records` redacted `agent_id`/`workspace_id` BEFORE using them as `HashMap` keys, so
+  two distinct secret-shaped ids both collapsed to the single `[REDACTED]` key and collided — the
+  second `agent.assigned` overwrote the first and a `completed`/`failed` updated the wrong entry
+  (silent state-corruption / agent loss, not a leak). Now the fold keys on the RAW id and redacts ONLY
+  at the final emission (the same raw-index pattern the `Ledger` fold uses), so distinct entities stay
+  distinct while no raw id is ever surfaced. New acceptance test plants two distinct secret-shaped
+  agents + asserts both survive AND that no raw secret appears at the verb boundary.
+- fix(ledger): **`hugit watch` routes the rendered line's `kind` through redaction too (defense-in-depth).**
+  `render_record` redacted only the payload, embedding `kind` verbatim; now every record-derived string
+  in the line goes through the redaction filter (each component separately, so a secret in one field
+  can't collapse the whole structured line). Numeric `seq`/`recorded_at` cannot carry a secret.
+- fix(ledger): **`hugit fleet` now actually calls `FleetState::validate()` before emitting.**
+  The schema doc claimed "validated on every emission" but the verb never called it; the verb now
+  validates (a failure is an internal fault, exit 1) so the doc claim is true rather than aspirational.
+
 - fix(cli): **`hugit check` timeouts reap a backgrounded grandchild again — without an unsafe process-group signal.**
   When a checked command backgrounds a grandchild (`foo & …`), the linux `sh -c` FORKS it, so killing
   the direct child by PID left the orphan running past the deadline (the OS only reaped it on hugit's

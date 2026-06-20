@@ -56,6 +56,12 @@ pub fn run(args: FleetArgs) -> ExitCode {
 fn project(args: &FleetArgs) -> Result<Value, PorcelainError> {
     let log = load_event_log(&args.log)?;
     let state = FleetState::from_records(log.records());
+    // Honour the schema doc-claim ("validated on every emission") at the verb
+    // boundary — a validation failure is an internal fault (exit 1), never a
+    // partial/garbage body.
+    state
+        .validate()
+        .map_err(|e| PorcelainError::internal(format!("fleet state invalid: {e}")))?;
     serde_json::to_value(&state)
         .map_err(|e| PorcelainError::internal(format!("serialise fleet state: {e}")))
 }

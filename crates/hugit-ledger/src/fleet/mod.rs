@@ -98,10 +98,21 @@ impl FleetState {
     /// Malformed records (non-JSON payloads) are counted in `malformed` rather
     /// than silently coalesced to "unknown".  Surfaced strings are routed
     /// through the view-boundary redaction filter (④).
+    ///
+    /// The fold keys its maps on the RAW (un-redacted) identifiers and redacts
+    /// ONLY at the final emission. Redacting before keying would collapse every
+    /// secret-shaped id to the single `[REDACTED]` marker, so two distinct
+    /// secret-shaped agents/workspaces would collide on one key — the second
+    /// silently overwriting the first, and a completed/failed update landing on
+    /// the wrong entry. Raw-key + redact-on-emit keeps distinct entities distinct
+    /// while still never surfacing a raw id (the same pattern the `Ledger` fold
+    /// uses with its raw-id index).
     pub fn from_records(records: &[EventRecord]) -> Self {
+        // Keyed on the RAW id (see doc above); the raw id never leaves this fn —
+        // it is redacted at the emission step below.
         let mut workspaces: std::collections::HashMap<String, WorkspaceState> =
             std::collections::HashMap::new();
-        let mut agents: std::collections::HashMap<String, AgentEntry> =
+        let mut agents: std::collections::HashMap<String, (String, AgentState)> =
             std::collections::HashMap::new();
         let mut last_seq = 0u64;
         let event_count = records.len() as u64;
@@ -125,13 +136,12 @@ impl FleetState {
                         .get("workspace_id")
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or("unknown");
-                    let ws_id = redact::apply(raw_ws_id);
                     let new_state = match kind {
                         "ws.state.active" => WorkspaceState::Active,
                         "ws.state.closed" => WorkspaceState::Closed,
                         _ => WorkspaceState::Idle,
                     };
-                    workspaces.insert(ws_id, new_state);
+                    workspaces.insert(raw_ws_id.to_string(), new_state);
                 }
                 "agent.assigned" => {
                     let raw_agent_id = payload
@@ -142,15 +152,10 @@ impl FleetState {
                         .get("workspace_id")
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or("unknown");
-                    let agent_id = redact::apply(raw_agent_id);
-                    let ws_id = redact::apply(raw_ws_id);
+                    // Value carries the RAW workspace_id (redacted at emission).
                     agents.insert(
-                        agent_id.clone(),
-                        AgentEntry {
-                            agent_id,
-                            workspace_id: ws_id,
-                            state: AgentState::Assigned,
-                        },
+                        raw_agent_id.to_string(),
+                        (raw_ws_id.to_string(), AgentState::Assigned),
                     );
                 }
                 "agent.completed" => {
@@ -158,9 +163,8 @@ impl FleetState {
                         .get("agent_id")
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or("unknown");
-                    let agent_id = redact::apply(raw_agent_id);
-                    if let Some(entry) = agents.get_mut(&agent_id) {
-                        entry.state = AgentState::Completed;
+                    if let Some(entry) = agents.get_mut(raw_agent_id) {
+                        entry.1 = AgentState::Completed;
                     }
                 }
                 "agent.failed" => {
@@ -168,26 +172,34 @@ impl FleetState {
                         .get("agent_id")
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or("unknown");
-                    let agent_id = redact::apply(raw_agent_id);
-                    if let Some(entry) = agents.get_mut(&agent_id) {
-                        entry.state = AgentState::Failed;
+                    if let Some(entry) = agents.get_mut(raw_agent_id) {
+                        entry.1 = AgentState::Failed;
                     }
                 }
                 _ => {} // inert event; advances the chain, no fleet state change.
             }
         }
 
-        // Build sorted vecs for deterministic output.
+        // Build sorted vecs for deterministic output — redacting the raw ids ONLY
+        // here, at the view boundary (④), so distinct entities stayed distinct
+        // above while no raw id is ever surfaced.
         let mut workspace_vec: Vec<WorkspaceEntry> = workspaces
             .into_iter()
-            .map(|(id, state)| WorkspaceEntry {
-                workspace_id: id,
+            .map(|(raw_id, state)| WorkspaceEntry {
+                workspace_id: redact::apply(&raw_id),
                 state,
             })
             .collect();
         workspace_vec.sort_by(|a, b| a.workspace_id.cmp(&b.workspace_id));
 
-        let mut agent_vec: Vec<AgentEntry> = agents.into_values().collect();
+        let mut agent_vec: Vec<AgentEntry> = agents
+            .into_iter()
+            .map(|(raw_agent_id, (raw_ws_id, state))| AgentEntry {
+                agent_id: redact::apply(&raw_agent_id),
+                workspace_id: redact::apply(&raw_ws_id),
+                state,
+            })
+            .collect();
         agent_vec.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
 
         FleetState {

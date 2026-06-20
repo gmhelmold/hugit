@@ -1088,33 +1088,41 @@ fn shell_command(cmd: &str) -> Command {
 /// signal surface is bounded to single POSITIVE pids by construction, so a group
 /// signal is structurally impossible.
 ///
-/// The sequence:
-///   1. (linux) Enumerate the child's transitive descendants from `/proc` BEFORE
-///      killing it — once the direct child dies its children reparent to init
-///      (PID 1) and the PPid linkage back to our subtree is lost, so the
-///      enumeration MUST happen while the tree is still intact.
-///   2. SIGKILL the direct child by its single PID and reap it (`child.wait()`).
+/// The sequence (order matters — see the PID-reuse guard):
+///   1. (linux) Enumerate the child's transitive descendants from `/proc` while
+///      the tree is intact.
+///   2. (linux) SIGKILL each enumerated descendant by its single positive PID,
+///      BUT re-verify — immediately before signalling — that the PID's `/proc`
+///      ancestry STILL terminates at the direct child. This is done BEFORE
+///      reaping the child (step 3) so the subtree linkage is still live for the
+///      re-verification. (PID-reuse guard: between enumeration and signalling a
+///      descendant can exit and its PID be recycled by an unrelated process; the
+///      ancestry re-check ensures we only ever SIGKILL a PID still inside our own
+///      subtree, never a stranger — the load-bearing safety invariant.)
+///   3. SIGKILL the direct child by its single PID and reap it (`child.wait()`).
 ///      The child is an `sh -c <cmd>`; on linux `sh` may FORK the command (and a
 ///      `foo &` grandchild), on macOS it EXECs it.
-///   3. (linux) SIGKILL each enumerated descendant by its single positive PID
-///      (`kill -KILL <pid>…`). The OS still reaps any straggler on hugit's exit;
-///      this just makes it PROMPT so a backgrounded grandchild cannot outlive the
-///      deadline. Best-effort: a failed signal is ignored (never a crash).
 ///
-/// The descendant sweep is linux-only: macOS `sh -c` execs the command (no forked
-/// grandchild to reap) and has no `/proc`. The direct-child kill suffices there.
+/// The OS still reaps any straggler on hugit's exit; the descendant sweep just
+/// makes it PROMPT so a backgrounded grandchild cannot outlive the deadline.
+/// Best-effort: a failed signal is ignored (never a crash). The sweep is
+/// linux-only: macOS `sh -c` execs the command (no forked grandchild to reap) and
+/// has no `/proc`. The direct-child kill suffices there.
 fn kill_group(child: &mut std::process::Child) {
-    // (1) Enumerate descendants while the process tree is still intact.
+    // (1)+(2) Enumerate + reap descendants WHILE the child is still alive, so the
+    // ancestry re-check in `reap_pids` can confirm each PID is still in our subtree
+    // (PID-reuse guard). Reaping before the child also catches a direct child of
+    // `sh` that is NOT `sh` itself (which `child.kill()` alone would orphan).
     #[cfg(target_os = "linux")]
-    let descendants = linux_descendant_pids(child.id());
+    {
+        let root = child.id();
+        let descendants = linux_descendant_pids(root);
+        reap_pids(&descendants, root);
+    }
 
-    // (2) SIGKILL + reap the direct child (single PID — never a process group).
+    // (3) SIGKILL + reap the direct child (single PID — never a process group).
     let _ = child.kill();
     let _ = child.wait();
-
-    // (3) Prompt single-PID reaping of any backgrounded descendant (linux).
-    #[cfg(target_os = "linux")]
-    reap_pids(&descendants);
 }
 
 /// Enumerate the transitive descendant PIDs of `root` from `/proc` (linux).
@@ -1168,25 +1176,73 @@ fn linux_descendant_pids(root: u32) -> Vec<u32> {
     descendants
 }
 
-/// SIGKILL each PID by its single positive value (`kill -KILL <pid>…`, linux).
+/// SIGKILL each PID by its single positive value (`kill -KILL <pid>…`, linux),
+/// AFTER re-verifying its `/proc` ancestry still terminates at `root`.
 ///
 /// Positive pids ONLY — a process-group (negative-pid) signal is structurally
 /// impossible here, preserving the load-bearing safety invariant in [`kill_group`].
-/// One subprocess for the whole batch; best-effort (a failure to signal is ignored
-/// — the OS reaps the straggler on hugit's exit). Using the `kill` binary (already
-/// the cleanup primitive in the acceptance tests) avoids a new `libc` direct
-/// dependency + its `unsafe` and the X4 exact-pin obligation.
+///
+/// PID-reuse guard: a PID enumerated earlier may have exited and been recycled by
+/// an UNRELATED process before we signal it; SIGKILLing it blind would violate the
+/// "never signal beyond our own subtree" invariant. So each candidate is
+/// re-checked with [`is_descendant_of`] (a fresh upward PPid walk) immediately
+/// before signalling, and only those still rooted at `root` are killed. The caller
+/// runs this WHILE `root` is still alive, so the linkage is live for the check.
+/// There remains a microscopic TOCTOU between the check and the `kill` subprocess,
+/// but the window is now check-then-immediately-kill (was: kill child, then a much
+/// later sweep), and the OS-reaps-on-exit backstop covers any straggler.
+///
+/// One subprocess for the whole batch; best-effort (a failure to signal is ignored).
+/// Using the `kill` binary (already the cleanup primitive in the acceptance tests)
+/// avoids a new `libc` direct dependency + its `unsafe` and the X4 exact-pin obligation.
 #[cfg(target_os = "linux")]
-fn reap_pids(pids: &[u32]) {
-    if pids.is_empty() {
+fn reap_pids(pids: &[u32], root: u32) {
+    let live: Vec<String> = pids
+        .iter()
+        .filter(|&&pid| is_descendant_of(pid, root))
+        .map(|pid| pid.to_string())
+        .collect();
+    if live.is_empty() {
         return;
     }
     let mut cmd = Command::new("kill");
     cmd.arg("-KILL");
-    for pid in pids {
-        cmd.arg(pid.to_string());
+    for pid in &live {
+        cmd.arg(pid);
     }
     let _ = cmd.status();
+}
+
+/// Read the PPid (parent PID) of `pid` from `/proc/<pid>/stat` (linux). Returns
+/// `None` if the process is gone / unreadable. The `comm` field is parenthesised
+/// and may contain spaces or `)`, so we parse the fixed fields AFTER the last `)`.
+#[cfg(target_os = "linux")]
+fn ppid_of(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after = stat.rfind(')').map(|i| &stat[i + 1..])?;
+    let mut fields = after.split_whitespace();
+    let _state = fields.next();
+    fields.next().and_then(|p| p.parse::<u32>().ok())
+}
+
+/// Whether `pid`'s current `/proc` ancestry chain terminates at `root` (linux) —
+/// i.e. `pid` is STILL a transitive descendant of `root` right now. Walks PPid
+/// upward, bounded (a cap guards against a cycle/races), stopping at `root` (true),
+/// PID 0/1/unreadable (false). Re-reads `/proc` live, so a recycled PID whose new
+/// parent is outside our subtree returns false (the PID-reuse guard).
+#[cfg(target_os = "linux")]
+fn is_descendant_of(mut pid: u32, root: u32) -> bool {
+    if pid == root {
+        return false; // root itself is killed directly, never via the sweep.
+    }
+    for _ in 0..1024 {
+        match ppid_of(pid) {
+            Some(ppid) if ppid == root => return true,
+            Some(ppid) if ppid > 1 => pid = ppid,
+            _ => return false, // reached init/kernel/unreadable without hitting root.
+        }
+    }
+    false
 }
 
 /// Unix epoch milliseconds (best-effort; `0` if the clock is before the epoch).
