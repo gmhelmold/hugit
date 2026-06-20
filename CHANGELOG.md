@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(cli): **`hugit ctx resume` — short-horizon session resume (D11), graduated from reserved.**
+  Reconstructs a crashed/replaced agent's session from the canonical log's `journal.note` records,
+  WITHIN the supported 7-day horizon, reusing the engine's own
+  `hugit_ledger::journal::ctx_resume_from_journal` + horizon enforcement (local ≡ any future serve
+  mirror). Emits a stable JSON `{workspace_id, intent_id, tenant_id, entries, last_recorded_at,
+  horizon_ms, reconstructed:true}`. **Honest refusal, never a silent stale reconstruction:** beyond the
+  horizon → `beyond_horizon` (with `age_ms`/`horizon_ms`), an empty binding → `empty_journal`, missing
+  log → `log_not_found` — all exit 2. The binding join scrubs `--workspace`/`--intent` the SAME way
+  the writer scrubbed them (else a secret-shaped binding would silently miss). `--now-ms` overrides the
+  clock; since `journal.note` records are written with `recorded_at=0` (clock-untrusted forever-log),
+  resuming a LOCAL log needs `--now-ms` in that time base (documented). `ctx snap` stays P2-gated. Does
+  not shadow git (X5); no-drift oracle holds.
+
 - feat(cli): **`hugit symbol --file <path>` — the W6 semantic index gets a CLI surface.**
   Graduated from reserved to a REAL verb: reads a local source file, derives its language from the
   extension (`hugit_symbols::lang_for_ext`, the single source of truth), and emits the symbol outline

@@ -20,6 +20,7 @@
 
 pub mod campaign;
 pub mod checks;
+pub mod ctx;
 pub mod diag;
 pub mod export;
 pub mod fleet;
@@ -145,6 +146,13 @@ pub const HUGIT_VERBS: &[&str] = &[
     // Does NOT shadow a git command (X5-checked). LIVE the moment main.rs routes
     // it; the no-drift oracle requires it here, not in HUGIT_RESERVED_VERBS.
     "symbol", // hugit symbol --file <path>          — local symbol outline
+    // Short-horizon session resume (D11) — graduated from RESERVED with REAL
+    // wiring. `ctx resume` reconstructs a crashed/replaced session from the log's
+    // `journal.note` records via `hugit_ledger::journal::ctx_resume_from_journal`,
+    // refusing honestly beyond the horizon (never a silent stale reconstruction).
+    // `ctx snap` (the P2 JournalStore writer) is deliberately NOT offered yet.
+    // Does NOT shadow a git command (X5). LIVE the moment main.rs routes it.
+    "ctx", // hugit ctx resume --log --workspace --intent — short-horizon resume
 ];
 
 /// Planned hugit verb tokens that are RESERVED but NOT yet dispatched.
@@ -163,8 +171,9 @@ pub const HUGIT_RESERVED_VERBS: &[&str] = &[
     // (`check` + `verdict` graduated to HUGIT_VERBS at W0 — wedge EXECUTE wave;
     // `diag` graduated at the diagnosis wave — log-backed bisect.)
     // Phase C — Workspace + context (planned)
-    "ws",  // hugit ws spawn/attach/snap/gc — claim-fenced workspaces
-    "ctx", // hugit ctx snap / resume      — short-horizon session resume
+    "ws", // hugit ws spawn/attach/snap/gc — claim-fenced workspaces
+    // (`ctx` graduated to HUGIT_VERBS — `ctx resume` is REAL over the log's
+    // journal.note records; `ctx snap` stays P2-gated on the DO/R2 JournalStore.)
     // Phase D — The forge verbs (planned)
     // (`ledger` graduated to HUGIT_VERBS — Phase-D read surface, REAL-wired over
     // the canonical `--log` via `hugit_ledger::Ledger`; `fleet` + `watch`
