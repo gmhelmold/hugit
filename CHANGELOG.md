@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(symbols): **new `hugit-symbols` crate — the W6 semantic-index / symbol-outline producer (marquee gap).**
+  The first slice of the whitepaper "semantic index": `outline_blob(Lang, &[u8]) -> Vec<SymbolItem>`
+  parses a blob with tree-sitter and returns a deterministic, flat outline of top-level AND nested
+  declarations (Rust first: fn/struct/enum/trait/impl/mod/const/static/macro/type). Pure + headless
+  (no I/O, no serde); `SymbolKind::as_wire_str` emits the FROZEN wire vocabulary that maps 1:1 onto the
+  existing `hugit_http_contracts::blob::OutlineItemVm`. Total + bounded: non-UTF-8/binary/oversized
+  (>2 MiB)/unparseable input returns an empty outline, never a panic/OOM. The grander AC-memoized
+  cross-tenant index wraps this pure core later (as the check executor wraps check execution). Deps
+  `tree-sitter`/`tree-sitter-rust`/`streaming-iterator` are exact-pinned (X4); `cc` was already a
+  workspace build-dep, so this adds vendored C *grammar* source, not a new toolchain class; a justified
+  `deny.toml` skip-tree covers the build-dep-only indexmap→hashbrown dup. Consumers (serve blob outline,
+  `hugit symbol` verb) wire in a follow-up. 12 hermetic tests; `cargo deny` green.
+
 - fix(checks): **the orphan reaper can no longer SIGKILL an unrelated process (PID-reuse TOCTOU).**
   The descendant sweep added for orphan reaping enumerated PIDs, then killed the direct child, then
   signalled the enumerated PIDs — but between enumeration and signalling a grandchild can exit and its

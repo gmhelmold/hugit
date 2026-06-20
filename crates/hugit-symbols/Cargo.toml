@@ -1,0 +1,18 @@
+[package]
+name = "hugit-symbols"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license-file.workspace = true
+
+[dependencies]
+# W6 semantic-index / symbol-outline producer. tree-sitter + the Rust grammar
+# compile a vendored C grammar via the `cc` build-dep — `cc` is ALREADY a
+# workspace build requirement (blake3/libgit2-sys/libz-sys/ring pull it), so this
+# adds C *grammar* source, not a new toolchain class. Exact-pinned per the X4
+# supply-chain invariant (see [workspace.dependencies]).
+tree-sitter = { workspace = true }
+tree-sitter-rust = { workspace = true }
+# tree-sitter 0.26's query-cursor API yields a StreamingIterator (lending iter).
+streaming-iterator = { workspace = true }
