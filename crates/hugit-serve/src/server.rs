@@ -522,7 +522,17 @@ fn dispatch_repo_write(
     principal: Vec<String>,
     fresh_auth: bool,
 ) -> (u16, String) {
-    let idem = header_val(headers, "Idempotency-Key").unwrap_or_default();
+    // Idempotency-Key cap (DoS / R2 log-bloat guard): reject keys that exceed the
+    // max before anything is persisted. 256 bytes is large enough for any UUID or
+    // structured key a well-behaved client sends; over-cap is a 400.
+    const MAX_IDEM_KEY_BYTES: usize = 256;
+    let idem_raw = header_val(headers, "Idempotency-Key").unwrap_or_default();
+    if idem_raw.len() > MAX_IDEM_KEY_BYTES {
+        return err(EngineErr::invalid_request(
+            "Idempotency-Key excede o limite de 256 bytes",
+        ));
+    }
+    let idem = idem_raw;
     // Step-up is satisfied by a fresh Clerk session (Tier-1 `fresh_auth`, derived
     // from the signed `auth_time`) OR — for the DEV path ONLY — the explicit
     // `X-Step-Up` header. The header is honored solely for the single trusted dev

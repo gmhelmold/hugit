@@ -339,10 +339,11 @@ pub fn resolve_blob_at_path(
         let entry_oid = entry.oid.to_owned();
 
         if idx == last {
-            // Final segment: it must be a blob (regular, executable, or symlink —
-            // git modes 100644 / 100755 / 120000). A tree (or gitlink) here is not
-            // a file at this path.
-            if !entry.mode.is_blob_or_symlink() {
+            // Final segment: it must be a regular or executable blob (git modes
+            // 100644 / 100755). Symlinks (120000) are NOT served — they expose
+            // filesystem paths and bypass secret-scrub (DoS/info-leak fix). A
+            // tree (40000) or gitlink (160000) here is not a file at this path.
+            if !entry.mode.is_blob() {
                 return Ok(None);
             }
             let blob = match src.get(&entry_oid)? {
@@ -496,34 +497,44 @@ mod resolve_tests {
     }
 
     #[test]
-    fn resolves_executable_and_symlink_blobs() {
-        // 100755 and 120000 are blobs per the contract.
+    fn resolves_executable_blob() {
+        // 100755 is a regular executable blob — must resolve normally.
         let mut src = CasObjectSource::new();
         let exe = src.insert_raw(ObjectKind::Blob, b"#!/bin/sh\n".to_vec());
-        let link = src.insert_raw(ObjectKind::Blob, b"target/path".to_vec());
         let root = insert_tree(
             &mut src,
-            vec![
-                TreeEntry {
-                    mode: MODE_EXE,
-                    name: "run.sh",
-                    oid: exe,
-                },
-                TreeEntry {
-                    mode: MODE_LINK,
-                    name: "ln",
-                    oid: link,
-                },
-            ],
+            vec![TreeEntry {
+                mode: MODE_EXE,
+                name: "run.sh",
+                oid: exe,
+            }],
         );
 
         let (oid_e, _) = resolve_blob_at_path(&src, &root, "run.sh")
             .unwrap()
             .unwrap();
         assert_eq!(oid_e, exe);
-        let (oid_l, b) = resolve_blob_at_path(&src, &root, "ln").unwrap().unwrap();
-        assert_eq!(oid_l, link);
-        assert_eq!(b, b"target/path");
+    }
+
+    #[test]
+    fn symlink_entry_is_not_served() {
+        // Mode 120000 (symlink) must NOT be served — it leaks fs paths and
+        // bypasses secret scrub. resolve_blob_at_path must return Ok(None).
+        let mut src = CasObjectSource::new();
+        let link = src.insert_raw(ObjectKind::Blob, b"target/path".to_vec());
+        let root = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_LINK,
+                name: "ln",
+                oid: link,
+            }],
+        );
+
+        assert!(
+            resolve_blob_at_path(&src, &root, "ln").unwrap().is_none(),
+            "a symlink tree entry must resolve to None, not its target bytes"
+        );
     }
 
     #[test]
