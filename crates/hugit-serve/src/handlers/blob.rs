@@ -32,6 +32,11 @@ use hugit_refstore::EventLog;
 
 use crate::fmt::scrub;
 
+/// Maximum blob size (in bytes) that will be buffered into RAM and served.
+/// Blobs larger than this return `None` (→ 404) rather than OOMing the server.
+/// 10 MB is generous enough for any source file a human would reasonably view.
+const MAX_BLOB_BYTES: usize = 10 * 1024 * 1024;
+
 /// Build the blob view-model for `path` at HEAD. `Some(BlobVm)` when the git
 /// content seam is wired AND `path` resolves to a blob; `None` otherwise (→ 404).
 ///
@@ -57,6 +62,12 @@ pub fn build_blob(
         Ok(Some(found)) => found,
         Ok(None) | Err(_) => return None,
     };
+
+    // DoS / OOM guard: refuse to buffer a multi-GB file into RAM.
+    // Return None (→ 404) for oversized blobs rather than exhausting memory.
+    if bytes.len() > MAX_BLOB_BYTES {
+        return None;
+    }
 
     let size = humanize_bytes(bytes.len());
     let lang = lang_for_path(path);
@@ -421,5 +432,48 @@ mod tests {
         assert_eq!(humanize_bytes(999), "999 B");
         assert_eq!(humanize_bytes(1500), "1.5 KB");
         assert_eq!(humanize_bytes(2_500_000), "2.5 MB");
+    }
+
+    #[test]
+    fn blob_over_size_cap_returns_none_not_oom() {
+        // A blob exceeding MAX_BLOB_BYTES must return None (→ 404) rather than
+        // buffering the whole thing into RAM and OOMing the server.
+        let mut src = CasObjectSource::new();
+        // Allocate one byte over the cap.
+        let big = vec![b'A'; MAX_BLOB_BYTES + 1];
+        let blob = src.insert_raw(ObjectKind::Blob, big);
+        let root = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_BLOB,
+                name: "huge.bin",
+                oid: blob,
+            }],
+        );
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
+
+        // Must be None — not OOM, not a partial result.
+        assert!(
+            build_blob(&log(), "r", "huge.bin", Some(&src), Some(&root)).is_none(),
+            "a blob over the cap must not be served"
+        );
+
+        // A blob AT (not over) the cap is still served.
+        let mut src2 = CasObjectSource::new();
+        let exact = vec![b'B'; MAX_BLOB_BYTES];
+        let blob2 = src2.insert_raw(ObjectKind::Blob, exact);
+        let root2 = insert_tree(
+            &mut src2,
+            vec![TreeEntry {
+                mode: MODE_BLOB,
+                name: "exact.bin",
+                oid: blob2,
+            }],
+        );
+        let src2: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src2);
+        assert!(
+            build_blob(&log(), "r", "exact.bin", Some(&src2), Some(&root2)).is_some(),
+            "a blob exactly at the cap must still be served"
+        );
     }
 }
