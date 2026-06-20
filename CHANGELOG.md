@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(symbols): **multi-language symbol outline — Rust-only → 8 more languages (SOTA).**
+  `hugit-symbols` now outlines TypeScript (+TSX), JavaScript, Python, Go, Java, C, C++ and Ruby in
+  addition to Rust — closing the "only speaks Rust" prototype gap. One shared `outline_with` engine
+  drives every language; each language pairs a tree-sitter `.scm` query with a per-language
+  `Classifier` closure that handles what a query alone can't express (C++ callable disambiguation,
+  Python/Ruby method-vs-function by enclosing scope, Go `type:`-child struct/interface/type, JS
+  arrow-vs-variable). `SymbolKind` gains the SOTA vocabulary (function/method/constructor/class/
+  interface/namespace/field/variable/constant/module) alongside the unchanged Rust kinds; the frozen
+  `OutlineItemVm` wire shape is untouched (kind is a free string — githugr adds icons for the new
+  kinds, non-blocking). The contract holds for every language: deterministic, total (non-UTF-8/binary/
+  oversized >2 MiB/unparseable → empty, never panic), 1-based lines, source-ordered. Each grammar is
+  `=`-pinned (X4) and `cargo deny`-clean (the existing tree-sitter skip-tree covers the build-dep dups).
+  67 hermetic tests across the languages. Built in parallel (8 worktree-isolated agents, one per
+  language) then consolidated + cold-verified centrally.
+
 - feat(cli): **`hugit review` — grounded-evidence Q&A over the log (D7), graduated from reserved.**
   `hugit review --log <path> --question <text> [--intent <id>]` answers a human-review question
   STRICTLY by grounded retrieval over evidence projected from the log's `check.recorded` /
