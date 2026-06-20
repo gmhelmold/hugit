@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-license-file.workspace = true
+license.workspace = true
 
 # B8 dogfood harness: drives the full Phase-B stack end-to-end through
 # the actual hugit-queue + hugit-checks + hugit-refstore surfaces. Consumes

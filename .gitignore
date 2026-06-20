@@ -5,3 +5,19 @@
 
 # Local Action Cache produced by `hugit check --store` during snapshot builds (not a source artifact)
 engine-snapshots/*.ac
+
+# Secrets and credentials — never commit
+.env
+.env.*
+*.pem
+*.key
+*.crt
+wrangler.toml
+ingest.env
+.dev.vars
+
+# Editor / OS artifacts
+*.swp
+.DS_Store
+.idea/
+.vscode/

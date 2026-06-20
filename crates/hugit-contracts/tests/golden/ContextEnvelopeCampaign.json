@@ -14,7 +14,7 @@
       "born_at": 1716990000000,
       "died_at": 1717010000000
     },
-    "operator": "gustavo@humangr.com"
+    "operator": "owner@example.com"
   },
   "charter": "harden the authentication edge",
   "campaign": "auth-hardening",

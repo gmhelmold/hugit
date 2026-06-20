@@ -20,7 +20,8 @@ allow = [
     # zlib-rs (transitive via gix-features) uses the zlib/libpng license
     "Zlib",
 ]
-# Our own crates are closed-source / no SPDX license — ignore them.
+# Our own crates are Apache-2.0 (workspace root); ignore them in the
+# third-party license audit (they are first-party, not dependencies).
 private = { ignore = true }
 
 [bans]
