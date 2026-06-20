@@ -729,7 +729,7 @@ fn dispatch_repo(
     query: &str,
     log: &hugit_refstore::EventLog,
     principal: &[String],
-    git_source: Option<&std::sync::Arc<hugit_proto::CasObjectSource>>,
+    git_source: Option<&std::sync::Arc<dyn hugit_proto::ObjectSource + Send + Sync>>,
     root_tree: Option<&gix_hash::ObjectId>,
 ) -> (u16, String) {
     match tail {

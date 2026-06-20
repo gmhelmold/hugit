@@ -44,7 +44,7 @@ pub fn build_blob(
     _log: &EventLog,
     repo: &str,
     path: &str,
-    src: Option<&Arc<hugit_proto::CasObjectSource>>,
+    src: Option<&Arc<dyn hugit_proto::ObjectSource + Send + Sync>>,
     root_tree: Option<&ObjectId>,
 ) -> Option<BlobVm> {
     // The content seam: both the source and the root tree must be present.
@@ -242,7 +242,7 @@ mod tests {
                 oid: blob,
             }],
         );
-        let src = Arc::new(src);
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
 
         let vm = build_blob(&log(), "hugit", "main.rs", Some(&src), Some(&root))
             .expect("a present blob resolves to Some");
@@ -288,7 +288,7 @@ mod tests {
                 },
             ],
         );
-        let src = Arc::new(src);
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
 
         let vm = build_blob(&log(), "r", "m.rs", Some(&src), Some(&root)).expect("rs resolves");
         let kinds: Vec<(&str, &str)> = vm
@@ -323,7 +323,7 @@ mod tests {
                 oid: blob,
             }],
         );
-        let src = Arc::new(src);
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
 
         let vm = build_blob(&log(), "r", "s.rs", Some(&src), Some(&root)).expect("resolves");
         let names: String = vm.outline.iter().map(|o| o.name.clone()).collect();
@@ -353,7 +353,7 @@ mod tests {
                 oid: sub,
             }],
         );
-        let src = Arc::new(src);
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
 
         let vm = build_blob(&log(), "r", "a/c.txt", Some(&src), Some(&root)).expect("nested file");
         assert_eq!(vm.lines[0].text, "deep");
@@ -372,7 +372,7 @@ mod tests {
                 oid: blob,
             }],
         );
-        let src = Arc::new(src);
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
         assert!(build_blob(&log(), "r", "absent.txt", Some(&src), Some(&root)).is_none());
     }
 
@@ -401,7 +401,7 @@ mod tests {
                 oid: blob,
             }],
         );
-        let src = Arc::new(src);
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
 
         let vm = build_blob(&log(), "r", "cfg.rs", Some(&src), Some(&root)).expect("resolves");
         let joined: String = vm.lines.iter().map(|l| l.text.clone()).collect();

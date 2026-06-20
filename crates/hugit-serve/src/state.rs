@@ -75,7 +75,7 @@ pub struct AppState {
     /// The git object source for the file-content reads (`blob`/`edit`). `None` =
     /// the content seam is not wired (no `HUGIT_SERVE_GIT_DIR`) → those reads 404
     /// honestly (NOT a fake blank file). When `Some`, paired with `git_root_tree`.
-    pub git_source: Option<Arc<hugit_proto::CasObjectSource>>,
+    pub git_source: Option<Arc<dyn hugit_proto::ObjectSource + Send + Sync>>,
     /// The oid of HEAD's root tree in `git_source`, resolved once at boot. `None`
     /// in lock-step with `git_source` (both present or both absent).
     pub git_root_tree: Option<gix_hash::ObjectId>,
@@ -128,12 +128,14 @@ impl AppState {
             .unwrap_or(false)
         {
             let (cas, root, refs) = load_from_cas_env()?;
-            (Some(Arc::new(cas)), Some(root), refs)
+            let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(cas);
+            (Some(src), Some(root), refs)
         } else {
             match std::env::var("HUGIT_SERVE_GIT_DIR") {
                 Ok(dir) if !dir.trim().is_empty() => {
                     let (cas, root, refs) = load_git_dir(&dir)?;
-                    (Some(Arc::new(cas)), Some(root), refs)
+                    let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(cas);
+                    (Some(src), Some(root), refs)
                 }
                 _ => (None, None, std::collections::BTreeMap::new()),
             }
@@ -680,14 +682,7 @@ impl crate::cas::R2Put for R2Config {
 /// piece or integrity violation. Tenant for the R2 manifest keys is
 /// `HUGIT_SERVE_CAS_TENANT_ID` (the CAS path tenant). Not exercised by the
 /// hermetic handler tests (those call [`crate::cas::load_from_cas`] with doubles).
-fn load_from_cas_env() -> Result<
-    (
-        hugit_proto::CasObjectSource,
-        gix_hash::ObjectId,
-        std::collections::BTreeMap<String, String>,
-    ),
-    String,
-> {
+fn load_from_cas_env() -> Result<crate::cas::LazyCasLoad, String> {
     let cas = crate::cas::CasClient::from_env()
         .map_err(|e| format!("HUGIT_SERVE_CAS_*: CAS client not configured: {e}"))?;
     let tenant = std::env::var("HUGIT_SERVE_CAS_TENANT_ID")
@@ -703,7 +698,10 @@ fn load_from_cas_env() -> Result<
     // source reads). The CAS source requires the R2 cred to be present too.
     let r2 =
         R2Config::from_env().map_err(|e| format!("CAS source needs the R2 manifest store: {e}"))?;
-    crate::cas::load_from_cas(&cas, &r2, &tenant, &repo)
+    // LAZY boot: read only the manifests + resolve HEAD's tree; objects are
+    // fetched from the CAS on demand at serve time (the eager full-closure load
+    // doesn't fit the container start window — 2026-06-20 incident).
+    crate::cas::load_manifests_from_cas(cas, &r2, &tenant, &repo)
 }
 
 /// Load a git directory into a [`CasObjectSource`] and resolve HEAD's root-tree

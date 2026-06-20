@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(serve): **lazy / on-demand CAS object load — boot reads manifests only, not the whole closure.**
+  The git-from-CAS source (`HUGIT_SERVE_CAS_URL` → blob/edit/outline + clone/fetch) used to **eagerly**
+  load the entire object closure into memory at boot — one CAS read per object. For the launch repo
+  (6,862 objects) that meant ~200s of sequential per-object reads, blowing past the Cloudflare Container
+  start window (the container is killed) and re-paid on every scale-to-zero cold start (the 2026-06-20
+  engine outage). New `LazyCasObjectSource`: boot reads ONLY `refs.json` + `oid-index.json` (a few KB)
+  and resolves HEAD's tree (2 on-demand fetches); each object is fetched from the CAS the first time it
+  is served, blake3 + git-SHA-1 double-verified (fail-closed via the new `PackError::Source`), and cached.
+  `git_source` becomes `Arc<dyn ObjectSource>`; the distroless / no-git-binary invariant is preserved.
+  Also: CAS batch read/exists now chunk at `BATCH_REQUEST_CHUNK` (256), not the frozen 2,000 cap, with a
+  90s client timeout — a 2,000-object batch makes the CAS do ~2,000 R2 round-trips in one request and
+  times out (this also unblocked the `git-ingest` dedup probe). Verified: local boot against the LIVE CAS
+  binds in **8s** (was >200s); 281 existing + 2 new hermetic lazy-source tests green.
+
 - fix(serve): **`load_git_dir` boots in seconds, not minutes — one `git cat-file --batch`, not 2 spawns/object.**
   The git content-seam loader (`HUGIT_SERVE_GIT_DIR` → blob/edit/outline reads + clone/fetch) spawned
   TWO `git` subprocesses per object (`cat-file -t` + `cat-file <type>`) over `rev-list --objects --all`.
