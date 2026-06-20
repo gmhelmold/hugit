@@ -96,19 +96,32 @@ enum Caller {
     Operator,
     /// A tenant principal (`clerk:{org}:{user}`) carrying its org.
     Tenant(String),
-    /// Unrecognized principal — fail-closed on private.
+    /// NO principal at all — an UNAUTHENTICATED request (the git wire sends no
+    /// Bearer; `authorize_read(&[], …)`). Anonymous may read a PUBLIC repo (that
+    /// is the public-clone gate), nothing private.
+    Anonymous,
+    /// A PRESENT but UNRECOGNIZED principal — an unknown bearer prefix, a
+    /// malformed/garbage identity. This is NOT anonymous: someone presented an
+    /// identity the engine cannot classify. Fail-closed EVERYWHERE, including on
+    /// `public` (audit 2026-06-20: an unknown bearer must not read — only a
+    /// genuinely anonymous request reads public).
     Unknown,
 }
 
 fn caller(principal: &[String]) -> Caller {
     match principal.first().map(String::as_str) {
+        // A truly empty chain = no credential presented = anonymous.
+        None => Caller::Anonymous,
         Some(p) if p.starts_with("orchestrator:") => Caller::Operator,
         Some(p) => match p.strip_prefix("clerk:") {
-            // "clerk:{org}:{user}" → the org segment.
-            Some(rest) => Caller::Tenant(rest.split(':').next().unwrap_or("").to_string()),
+            // "clerk:{org}:{user}" → the org segment (must be non-empty).
+            Some(rest) => match rest.split(':').next().unwrap_or("") {
+                "" => Caller::Unknown, // "clerk:" / "clerk::user" — malformed, deny.
+                org => Caller::Tenant(org.to_string()),
+            },
+            // A present, non-empty principal with an UNKNOWN prefix — not anon, deny.
             None => Caller::Unknown,
         },
-        None => Caller::Unknown,
     }
 }
 
@@ -116,15 +129,22 @@ fn caller(principal: &[String]) -> Caller {
 /// caller maps deny to a 404, no existence leak).
 ///
 /// - Operator → always allow (platform/dev bypass; the bootstrap).
-/// - `public` → allow anyone authenticated.
+/// - `public` → allow the operator, any tenant, and a genuinely ANONYMOUS request
+///   (the public git-clone gate). An UNKNOWN/unclassifiable principal (a present
+///   but unrecognized bearer) is denied even on public — it must not read (audit
+///   2026-06-20). "No principal (anon)" ≠ "unknown bearer".
 /// - `private` → allow ONLY a tenant principal whose org equals a SET
-///   `owner_tenant`. A private repo with no `owner_tenant`, or an unknown caller,
-///   is denied.
+///   `owner_tenant`. A private repo with no `owner_tenant`, an anonymous request,
+///   or an unknown caller, is denied.
 #[must_use]
 pub fn authorize_read(principal: &[String], meta: &RepoMeta) -> bool {
     match caller(principal) {
         Caller::Operator => true,
+        // An unrecognized principal (present-but-unclassifiable bearer) reads
+        // NOTHING — not even public. Only a genuinely anonymous request reads public.
+        Caller::Unknown => false,
         c => match meta.visibility {
+            // Operator (above), Tenant, or Anonymous may read public.
             Visibility::Public => true,
             Visibility::Private => {
                 matches!((c, &meta.owner_tenant), (Caller::Tenant(org), Some(owner)) if &org == owner)
@@ -275,8 +295,46 @@ mod tests {
             &private(Some("org-a"))
         ));
         assert!(!authorize_read(&[], &private(Some("org-a"))));
-        // ...but an unknown principal can still read a PUBLIC repo (it IS authed).
-        assert!(authorize_read(&["weird:thing".to_string()], &public()));
+    }
+
+    #[test]
+    fn unknown_bearer_denied_on_public_but_anon_allowed() {
+        // THE hole this closes (audit 2026-06-20): a PRESENT but unrecognized
+        // principal (an unknown bearer prefix / malformed identity) must NOT read,
+        // even a PUBLIC repo. It is distinct from a genuinely anonymous request
+        // (empty chain — the git clone gate), which MUST still read public.
+        assert!(
+            !authorize_read(&["weird:thing".to_string()], &public()),
+            "an unknown bearer must NOT read public"
+        );
+        assert!(
+            !authorize_read(&["clerk:".to_string()], &public()),
+            "a malformed clerk principal (empty org) must NOT read public"
+        );
+        assert!(
+            !authorize_read(&["clerk::user".to_string()], &public()),
+            "a clerk principal with empty org must NOT read public"
+        );
+        // ...but an ANONYMOUS request (no credential at all) reads public — the
+        // public git-clone gate stays open.
+        assert!(
+            authorize_read(&[], &public()),
+            "anonymous public read (the clone gate) must still work"
+        );
+    }
+
+    #[test]
+    fn anonymous_public_clone_gate_and_private_denied() {
+        // The exact predicate the git wire calls: `authorize_read(&[], meta)`.
+        assert!(authorize_read(&[], &public()), "anon clones a public repo");
+        assert!(
+            !authorize_read(&[], &private(Some("org-a"))),
+            "anon never reads a private repo"
+        );
+        assert!(
+            !authorize_read(&[], &private(None)),
+            "anon never reads an unowned-private repo"
+        );
     }
 
     fn append(log: &mut EventLog, kind: &str, payload: Value) {

@@ -9,7 +9,7 @@
 
 use hugit_http_contracts::actions::Accepted;
 use hugit_http_contracts::write_requests::UndoReq;
-use hugit_refstore::{Endpoint, EventLog, PrincipalClass};
+use hugit_refstore::{Endpoint, EventLog};
 use serde_json::json;
 
 use crate::error::EngineErr;
@@ -50,9 +50,12 @@ pub fn write_undo(
     let payload_value = json!({ "op_seq": op_seq });
     let payload = hugit_refstore::canonical_json(&payload_value.to_string())
         .unwrap_or_else(|| payload_value.to_string());
+    // D14: assert the REAL caller's class (chain-derived, fail-closed), never a
+    // hardcoded `Human` — else any caller would pass the undo cell.
+    let class = crate::writes::asserted_class(&principal_chain)?;
     let record = log
         .append_authorized(
-            PrincipalClass::Human,
+            class,
             Endpoint::Undo,
             OP_UNDONE_KIND,
             principal_chain,
@@ -127,6 +130,54 @@ mod tests {
                 .status,
             400
         );
+    }
+
+    #[test]
+    fn worker_subagent_principal_cannot_undo() {
+        // THE D14 hole this closes: the verb used to assert a HARDCODED `Human`
+        // class, so any caller passed the undo cell. Now the class is derived from
+        // the real principal — a worker/subagent (`agent:`/`worker:`) is DENIED.
+        let mut log = EventLog::new();
+        let _s0 = seed(&mut log, "pr.opened", 1);
+        let s1 = seed(&mut log, "pr.queued", 2);
+        let before = log.records().len();
+        let err = write_undo(
+            &mut log,
+            "r",
+            &UndoReq { op_seq: s1 },
+            vec!["agent:runner-03".to_string()],
+            3,
+        )
+        .expect_err("a worker must NOT undo");
+        assert_eq!(err.status, 503, "denied append maps fail-honest to 503");
+        // No compensating op.undone landed; only the D14 authz.denied audit record.
+        assert!(
+            log.records().iter().all(|r| r.kind != OP_UNDONE_KIND),
+            "the undo must not have taken effect"
+        );
+        assert!(log.records().len() > before, "the denial was audited");
+    }
+
+    #[test]
+    fn unclassifiable_principal_cannot_undo_fail_closed() {
+        // An unknown bearer prefix / empty chain must fail CLOSED (404, no oracle),
+        // never default into Human.
+        let mut log = EventLog::new();
+        let _s0 = seed(&mut log, "pr.opened", 1);
+        let s1 = seed(&mut log, "pr.queued", 2);
+        assert_eq!(
+            write_undo(&mut log, "r", &UndoReq { op_seq: s1 }, vec!["weird:x".into()], 3)
+                .expect_err("unknown principal denied")
+                .status,
+            404
+        );
+        assert_eq!(
+            write_undo(&mut log, "r", &UndoReq { op_seq: s1 }, vec![], 3)
+                .expect_err("empty chain denied")
+                .status,
+            404
+        );
+        assert!(log.records().iter().all(|r| r.kind != OP_UNDONE_KIND));
     }
 
     #[test]
