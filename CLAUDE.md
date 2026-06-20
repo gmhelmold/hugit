@@ -42,11 +42,9 @@ adversarial round (1–13) + a SOTA sweep. The integrity spine is genuinely soli
 - **Identity = dev-token stub** live; the Clerk→engine-token exchange is code-complete
   (the CoreLink exchange endpoint is live), gated on the deploy env (`HUGIT_SESSION_EXCHANGE_URL`)
   + a stale deployed image + `hugit-prod-d1`.
-- **Partially built / not-yet-wired:** the semantic index / symbol outline — the
-  `hugit-symbols` tree-sitter crate IS built (W6, #161, on `main`: `outline_blob`
-  → frozen `OutlineItemVm` vocabulary), but its CONSUMERS are not yet wired (the
-  serve blob/edit `outline` field still emits the honest `[]` default, and there
-  is no `hugit symbol` CLI verb yet — both a tracked follow-up).
+- **Symbol outline IS wired** (W6, #161 + follow-up): `hugit_symbols::outline_blob`
+  is called from `blob.rs:80` (`compute_outline`) and the `hugit symbol --file` CLI
+  verb is real. The `hugit-symbols` tree-sitter crate supports TS/JS/Python/Go/Java/C/C++/Ruby.
 - **Still reserved-unimplemented CLI verbs:** `ws`/`ctx`/`dispatch`/`land`/`review`.
   Of these, `ctx resume` + `review` (grounded Q&A) are buildable-now over the log
   (tracked PR-D); `ws`/`dispatch`/`land` are P2/transferred-gated (workspace exec
@@ -64,14 +62,16 @@ wrappers over `verdict::record`, serve-parity — #146), `hugit journal note` (a
 reversed): `hugit_proto::resolve_blob_at_path` (path→blob git tree-walk, traversal-safe —
 #147) + `GET /v1/repos/{repo}/blob|edit/{*path}` serve actual file bytes, secret-scrubbed
 on read, 404-no-oracle, fail-closed boot loader (#148). **All hermetically tested; blob/edit
-live-serving needs `HUGIT_SERVE_GIT_DIR` set on a fresh deploy. `symbol` is still W6.**
+live-serving needs `HUGIT_SERVE_GIT_DIR` set on a fresh deploy. `symbol` (W6) is wired —
+`blob.rs` calls `compute_outline` → `hugit_symbols::outline_blob`; `hugit symbol --file` is real.**
 
 **What IS genuinely live (don't under-claim it either):** the `/v1` read+write API
 against the ONE `hugit` launch repo — 11/20 reads serve real chain-verified R2 data;
 the 9 POST verbs are code-complete + R2-CAS-persisted (proven against prod R2),
 `authz`-gated (the one deployed security boundary, 404-no-oracle); `hugit check`/
 `verdict` are real EXECUTE paths; `hugit export` is a real zero-dependency exit-proof;
-SSE replay-then-close. **Magnitude: ~15–20% live for the `/v1` API on the hugit repo;
+SSE replay-then-close. The engine is **lazy git-from-CAS** (boots from the CoreLink
+CAS, ~5 s cold-start). **Magnitude: ~15–20% live for the `/v1` API on the hugit repo;
 single-digit % for a full multi-tenant end-to-end forge.**
 
 **Critical path to a usable single-tenant forge (biggest → smallest):** deploy the

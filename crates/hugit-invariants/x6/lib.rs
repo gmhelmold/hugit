@@ -56,9 +56,20 @@ pub struct HugitRunnerBox {
 /// This constant is the single source of truth for item ② assertions. Adding
 /// a box here that shares a Hetzner project with CoreLink would immediately
 /// turn the isolation-assertion test RED.
+///
+/// # IPv4 placeholder
+/// The real runner IP is provisioned via the `HUGIT_RUNNER_IPV4` environment
+/// variable at deploy time and never baked into the binary. The placeholder
+/// value below (`0.0.0.0`) satisfies the structural isolation assertions
+/// without shipping a real IP address.
+pub const HUGIT_RUNNER_IPV4: &str = match option_env!("HUGIT_RUNNER_IPV4") {
+    Some(ip) => ip,
+    None => "0.0.0.0",
+};
+
 pub const HUGIT_RUNNER_FLEET: &[HugitRunnerBox] = &[HugitRunnerBox {
     hostname: "hugit-runner-01",
-    ipv4: "91.99.11.196",
+    ipv4: HUGIT_RUNNER_IPV4,
     hetzner_project: "hugit",
     ssh_key_name: "hugit-runner-01",
     box_type: "Hetzner Cloud CPX32",

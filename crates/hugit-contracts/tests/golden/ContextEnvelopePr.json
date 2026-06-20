@@ -14,7 +14,7 @@
       "born_at": 1717000000000,
       "died_at": 1717004200000
     },
-    "operator": "gustavo@humangr.com"
+    "operator": "owner@example.com"
   },
   "charter": "land auth-hardening wave 1: refresh-window fixes",
   "campaign": "auth-hardening",
