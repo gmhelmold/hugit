@@ -42,11 +42,18 @@ adversarial round (1–13) + a SOTA sweep. The integrity spine is genuinely soli
 - **Identity = dev-token stub** live; the Clerk→engine-token exchange is code-complete
   (the CoreLink exchange endpoint is live), gated on the deploy env (`HUGIT_SESSION_EXCHANGE_URL`)
   + a stale deployed image + `hugit-prod-d1`.
-- **Absent entirely:** the semantic index / symbol outline (needs a tree-sitter
-  `hugit-symbols` crate — W6, not built). CLI verbs still reserved-unimplemented:
-  ws/ctx/dispatch/fleet/land/ledger/review/watch + `diag` (its bisect backing is
-  auto-trigger-only — a manual verb needs a designed failure→History projection) +
-  `policy edit` (no gate-set mutation/persistence model yet).
+- **Partially built / not-yet-wired:** the semantic index / symbol outline — the
+  `hugit-symbols` tree-sitter crate IS built (W6, #161, on `main`: `outline_blob`
+  → frozen `OutlineItemVm` vocabulary), but its CONSUMERS are not yet wired (the
+  serve blob/edit `outline` field still emits the honest `[]` default, and there
+  is no `hugit symbol` CLI verb yet — both a tracked follow-up).
+- **Still reserved-unimplemented CLI verbs:** `ws`/`ctx`/`dispatch`/`land`/`review`.
+  Of these, `ctx resume` + `review` (grounded Q&A) are buildable-now over the log
+  (tracked PR-D); `ws`/`dispatch`/`land` are P2/transferred-gated (workspace exec
+  core → `corelink-runners`; land EXECUTE needs the runner+AC fabric).
+  (`fleet`/`ledger`/`watch` graduated to REAL — #157/#158; `diag` graduated —
+  log-backed bisect; `policy edit` graduated — guarded `policy.change` over the
+  house baseline, the append-only log IS the gate-set store.)
 
 **Update 2026-06-18 (W3 + W5 landed — built, gate-green on `main`; live-serving still
 deploy-gated):** five reserved CLI verbs graduated to REAL (no stubs): `hugit undo`

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- docs: **honesty correction — `policy edit` is REAL (not deferred), and the W6 status is updated.**
+  The `policy/mod.rs` module doc + CLAUDE.md still described `hugit policy edit` as deferred ("no
+  gate-set mutation/persistence model yet"), but it is fully wired: it folds prior `policy.change`
+  events over the `house_gates` baseline and appends a Human-only `policy.change` (the append-only log
+  IS the gate-set store). CLAUDE.md's "absent entirely" bullet is corrected: the `hugit-symbols` crate
+  is now built (consumers not yet wired); `fleet`/`ledger`/`watch`/`diag` are graduated. The code, not
+  the stale narrative, is ground truth.
+
 - feat(symbols): **new `hugit-symbols` crate — the W6 semantic-index / symbol-outline producer (marquee gap).**
   The first slice of the whitepaper "semantic index": `outline_blob(Lang, &[u8]) -> Vec<SymbolItem>`
   parses a blob with tree-sitter and returns a deterministic, flat outline of top-level AND nested
