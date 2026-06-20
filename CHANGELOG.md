@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(serve): **`load_git_dir` boots in seconds, not minutes — one `git cat-file --batch`, not 2 spawns/object.**
+  The git content-seam loader (`HUGIT_SERVE_GIT_DIR` → blob/edit/outline reads + clone/fetch) spawned
+  TWO `git` subprocesses per object (`cat-file -t` + `cat-file <type>`) over `rev-list --objects --all`.
+  The launch repo has 6,854 objects → ~13.7k spawns → boot took MINUTES, past the container healthcheck
+  window — and boot is fail-closed, so a slow boot would mark the container unhealthy = a broken/rolled-
+  back deploy (this blocked the STEP-2 git-serving deploy). Now the reachable oid set is streamed through
+  ONE long-lived `git cat-file --batch` process (oids on a writer thread, stdout drained concurrently to
+  avoid a pipe-buffer deadlock, stderr on a third thread), parsing the `<oid> <type> <size>\n<body>\n`
+  framing — byte-identical bodies, same `CasObjectSource` re-hash invariant. Verified on the real repo:
+  boot 9s (was minutes), `git clone` of all 6,854 objects succeeds, cloned HEAD == served HEAD, `git
+  fsck` clean. Unblocks STEP 2.
+
 - feat(symbols): **multi-language symbol outline — Rust-only → 8 more languages (SOTA).**
   `hugit-symbols` now outlines TypeScript (+TSX), JavaScript, Python, Go, Java, C, C++ and Ruby in
   addition to Rust — closing the "only speaks Rust" prototype gap. One shared `outline_with` engine
