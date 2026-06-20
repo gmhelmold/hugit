@@ -229,7 +229,7 @@ fn envelope(
                 born_at: born,
                 died_at: died,
             },
-            operator: "gustavo@humangr.com".to_string(),
+            operator: "owner@example.com".to_string(),
         },
         charter: format!("endurecer a borda de autenticação — {id}"),
         campaign: Some(CAMPAIGN.to_string()),
@@ -788,7 +788,7 @@ fn null_refs_and_missing_envelope_tolerated() {
 
     // Human author (no model session) → principal, never a subagent.
     assert_eq!(rec.author.kind, PrAuthorKind::Human);
-    assert_eq!(rec.author.principal.as_deref(), Some("gustavo@humangr.com"));
+    assert_eq!(rec.author.principal.as_deref(), Some("owner@example.com"));
     assert_eq!(rec.author.model, None);
     assert_eq!(rec.author.run_id, None);
 
@@ -928,7 +928,7 @@ fn campaign_rollup_over_multi_pr_campaign() {
 
     // Identity facts off the campaign's own envelope.
     assert_eq!(camp.campaign, CAMPAIGN);
-    assert_eq!(camp.owner.principal, "gustavo@humangr.com");
+    assert_eq!(camp.owner.principal, "owner@example.com");
     assert_eq!(camp.envelope_ref, "cas:campaign-envelope");
     assert_eq!(camp.pr_ids, vec!["PR-128", "PR-129", "PR-130", "PR-131"]);
     assert_eq!(camp.pr_count, 4);

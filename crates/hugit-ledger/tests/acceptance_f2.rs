@@ -86,7 +86,7 @@ fn authorship() -> Authorship {
             born_at: 1_717_000_100_000,
             died_at: 1_717_000_195_000,
         },
-        operator: "gustavo@humangr.com".to_string(),
+        operator: "owner@example.com".to_string(),
     }
 }
 

@@ -130,7 +130,7 @@ fn write_world(dir: &std::path::Path, events: &[Ev]) -> PathBuf {
         let payload = canonical_json(&payload).unwrap_or(payload);
         log.append_for_test(
             e.kind.to_string(),
-            vec!["user:gustavo@humangr.com".to_string()],
+            vec!["user:owner@example.com".to_string()],
             payload,
             T0 + i as u64,
         );
@@ -181,7 +181,7 @@ fn list_shows_opened_campaign_with_charter_and_owner() {
         "--charter",
         "harden the auth border",
         "--owner",
-        "gustavo@humangr.com",
+        "owner@example.com",
     ]);
     assert!(ok, "open succeeded");
 
@@ -194,7 +194,7 @@ fn list_shows_opened_campaign_with_charter_and_owner() {
     let c = &campaigns[0];
     assert_eq!(c["campaign"], CAMPAIGN);
     assert_eq!(c["charter"], "harden the auth border");
-    assert_eq!(c["owner"], "gustavo@humangr.com");
+    assert_eq!(c["owner"], "owner@example.com");
     assert_eq!(c["opened"], true);
     assert_eq!(c["closed"], false);
     assert_eq!(c["abandoned"], false);
@@ -535,7 +535,7 @@ fn open_idempotent_rerun_carries_charter_and_owner() {
         "--charter",
         "harden auth",
         "--owner",
-        "gustavo@humangr.com",
+        "owner@example.com",
     ];
 
     let (ok1, v1) = run(&args);
@@ -672,7 +672,7 @@ fn list_shows_abandoned_campaign_state() {
         "--charter",
         "c",
         "--owner",
-        "gustavo@humangr.com",
+        "owner@example.com",
     ]);
     assert!(ok);
 

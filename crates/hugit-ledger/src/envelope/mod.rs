@@ -997,10 +997,10 @@ mod tests {
 
         // A legitimate operator email is NOT secret-shaped — it survives.
         let mut d2 = draft(Altitude::Intent);
-        d2.authorship.operator = "gustavo@humangr.com".to_string();
+        d2.authorship.operator = "owner@example.com".to_string();
         let closed2 = close_envelope(&d2, CaptureLevel::Full, &store).expect("closes");
         assert_eq!(
-            closed2.envelope.authorship.operator, "gustavo@humangr.com",
+            closed2.envelope.authorship.operator, "owner@example.com",
             "a legit email is not secret-shaped and survives"
         );
     }
