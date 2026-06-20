@@ -189,8 +189,15 @@ impl WatchDisplay {
 }
 
 /// Render one EventRecord to a display string, applying view-boundary redaction.
+///
+/// EVERY record-derived string in the line goes through the redaction filter, not
+/// only the payload (defense-in-depth): `kind` is routed through `redact::apply`
+/// too so the guarantee covers the whole text field even if a future record kind
+/// carries free text. `seq`/`recorded_at` are numeric and cannot carry a secret.
+/// Each component is redacted SEPARATELY (rather than the assembled line) so a
+/// secret in one field cannot collapse the entire structured line to the marker.
 fn render_record(record: &EventRecord) -> String {
-    let kind = &record.kind;
+    let kind = redact::apply(&record.kind);
     let payload_display = redact::apply(&record.payload);
     format!(
         "[seq={seq} kind={kind} at={at}] {payload}",
