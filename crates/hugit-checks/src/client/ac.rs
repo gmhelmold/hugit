@@ -196,11 +196,14 @@ impl InMemoryAc {
 
 impl ActionCache for InMemoryAc {
     fn lookup(&self, memo_key: &str) -> Result<Option<CheckResult>, AcError> {
-        *self.lookups.lock().expect("lookups lock poisoned") += 1;
+        // Recover a poisoned lock via into_inner() — the AC is best-effort
+        // cache state; a prior panic inside the critical section must not
+        // crash an unrelated check-run request.
+        *self.lookups.lock().unwrap_or_else(|e| e.into_inner()) += 1;
         let hit = self
             .store
             .lock()
-            .expect("store lock poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .get(memo_key)
             .cloned();
         // Run the content-address guard on the in-memory backend too (WG-CACHE):
@@ -220,7 +223,7 @@ impl ActionCache for InMemoryAc {
         guard_axes_not_secret(result)?;
         self.store
             .lock()
-            .expect("store lock poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .insert(result.memo_key.clone(), result.clone());
         Ok(())
     }

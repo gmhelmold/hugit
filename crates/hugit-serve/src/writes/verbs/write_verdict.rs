@@ -12,7 +12,7 @@ use hugit_contracts::VerdictObject;
 use hugit_contracts::verdict_object::Verdict;
 use hugit_http_contracts::actions::Accepted;
 use hugit_http_contracts::write_requests::VerdictReq;
-use hugit_refstore::{Endpoint, EventLog, PrincipalClass};
+use hugit_refstore::{Endpoint, EventLog};
 
 use crate::error::EngineErr;
 use crate::fmt::scrub;
@@ -78,9 +78,13 @@ pub fn write_verdict(
         .map_err(|e| EngineErr::unavailable(format!("verdict serialize: {e}")))?;
     let payload = hugit_refstore::canonical_json(&vo_json).unwrap_or(vo_json);
 
+    // D14: assert the REAL caller's class (chain-derived, fail-closed), never a
+    // hardcoded `Orchestrator` — else a worker/model could record a verdict (a
+    // landing-gate input) over the serve path. Used for BOTH appends below.
+    let class = crate::writes::asserted_class(&principal_chain)?;
     let record = log
         .append_authorized(
-            PrincipalClass::Orchestrator,
+            class,
             Endpoint::Land,
             VERDICT_RECORDED_KIND,
             principal_chain.clone(),
@@ -101,7 +105,7 @@ pub fn write_verdict(
             let cpayload =
                 hugit_refstore::canonical_json(&raw.to_string()).unwrap_or_else(|| raw.to_string());
             log.append_authorized(
-                PrincipalClass::Orchestrator,
+                class,
                 Endpoint::Push,
                 PR_COMMENT_KIND,
                 principal_chain,

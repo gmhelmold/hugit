@@ -8,7 +8,7 @@
 
 use hugit_http_contracts::actions::Accepted;
 use hugit_http_contracts::write_requests::PolicyReq;
-use hugit_refstore::{Endpoint, EventLog, PrincipalClass};
+use hugit_refstore::{Endpoint, EventLog};
 use serde_json::json;
 
 use crate::error::EngineErr;
@@ -60,9 +60,12 @@ pub fn write_policy(
     };
     let payload = hugit_refstore::canonical_json(&payload_value.to_string())
         .unwrap_or_else(|| payload_value.to_string());
+    // D14: assert the REAL caller's class (chain-derived, fail-closed), never a
+    // hardcoded `Orchestrator` — else any caller would pass the policy write cell.
+    let class = crate::writes::asserted_class(&principal_chain)?;
     let record = log
         .append_authorized(
-            PrincipalClass::Orchestrator,
+            class,
             Endpoint::Land,
             POLICY_SET_KIND,
             principal_chain,

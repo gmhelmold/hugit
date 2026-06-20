@@ -14,7 +14,7 @@
       "born_at": 1717000000000,
       "died_at": 1717004200000
     },
-    "operator": "gustavo@humangr.com"
+    "operator": "owner@example.com"
   },
   "charter": "orchestrator session orq-014: plan and land auth-hardening wave 1",
   "campaign": "auth-hardening",

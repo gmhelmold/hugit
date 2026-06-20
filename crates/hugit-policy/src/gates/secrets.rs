@@ -2,8 +2,8 @@
 //!
 //! Mirrors the house's CI secrets enforcement (WP-D6, item ①).
 //! Checks file contents for well-known secret signatures by routing every
-//! detection decision through the ONE shared primitive:
-//! [`hugit_ledger::secret_shape::is_structural_secret`].
+//! detection decision through the full redaction engine:
+//! [`hugit_ledger::redact::apply`].
 //!
 //! N-4: previously this gate kept its own hand-maintained prefix list that
 //! had diverged from the engine detector (`hugit_ledger::secret_shape`),
@@ -11,15 +11,21 @@
 //! connection-string-password detection, and the `cas:` value-gate.  The
 //! third scrub copy is deleted; detection now comes from the single source
 //! of truth (Wave M / M-2).
+//!
+//! N-5: upgraded from `is_structural_secret` (which missed high-entropy
+//! unprefixed secrets) to `redact::apply` — a secret is flagged when
+//! `apply(content) != content`, i.e. the full 5-detector engine (structural
+//! classes + entropy scan + bare-hex credential shapes) detects something.
 
 use crate::{EvalContext, GateOutcome};
-use hugit_ledger::secret_shape::is_structural_secret;
+use hugit_ledger::redact::apply as redact_apply;
 
 /// Evaluate the secrets gate.
 ///
-/// **Pass**: no file content contains a structural secret as detected by
-/// [`is_structural_secret`].
-/// **Fail**: at least one file introduces a structural secret pattern.
+/// **Pass**: no file content contains a secret as detected by the full
+/// 5-detector redaction engine ([`hugit_ledger::redact::apply`]).
+/// **Fail**: at least one file introduces a secret pattern (structural classes,
+/// entropy scan, or bare-hex credential shapes).
 /// **Blocked**: a changed file has no content entry in the context — fail-closed;
 ///   we cannot vouch for content we have not seen.
 ///
@@ -33,14 +39,17 @@ pub fn eval(ctx: &EvalContext) -> GateOutcome {
     for path in &ctx.changed_files {
         match ctx.file_contents.get(path) {
             Some(content) => {
-                // Route through the one shared primitive — no local prefix list.
-                // is_structural_secret checks: known credential prefixes
-                // (ghp_, gho_, ghs_, github_pat_, AKIA, xoxb-, xoxp-, xoxo-,
-                // xoxa-, xoxs-, clp_, Bearer, eyJ), PEM private key headers,
-                // connection-string passwords, and keyword-context secrets
-                // (password=, token=, secret=, api_key=, ...).
-                if is_structural_secret(content) {
-                    hits.push(format!("{path}: matched structural secret pattern"));
+                // Route through the full 5-detector redaction engine. A secret
+                // is present when apply() returns the REDACTED sentinel rather
+                // than the original string. This covers: structural prefixes
+                // (ghp_, gho_, ghs_, github_pat_, AKIA, xoxb-/xoxp-/xoxo-/
+                // xoxa-/xoxs-, clp_, dop_v1_, Bearer <ws>, eyJ), PEM private
+                // key headers, connection-string passwords, keyword-context
+                // secrets (password=, access_token=, private_key=, …), AND
+                // high-entropy unprefixed secrets + bare-hex credential shapes
+                // that is_structural_secret alone would miss.
+                if redact_apply(content) != content.as_str() {
+                    hits.push(format!("{path}: matched secret pattern"));
                 }
             }
             None => {
@@ -158,5 +167,48 @@ mod tests {
             matches!(eval(&ctx), GateOutcome::Fail { .. }),
             "a URL containing `password=` must be flagged (fail-closed)"
         );
+    }
+
+    // ── Fix 5: high-entropy unprefixed secrets caught via redact::apply ──────────
+
+    /// An AWS secret access key (40-char base64 — NOT an AKIA prefix) must be
+    /// flagged by the policy gate via the entropy scan. Previously the gate only
+    /// called `is_structural_secret` which misses this class.
+    #[test]
+    fn aws_secret_key_high_entropy_fails() {
+        // wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY — the canonical AWS example
+        // secret access key. It has no known prefix but high entropy (base64 mix).
+        let ctx = ctx_with_file(
+            "config.toml",
+            "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        );
+        assert!(
+            matches!(eval(&ctx), GateOutcome::Fail { .. }),
+            "an AWS secret access key must be flagged by the policy gate"
+        );
+    }
+
+    /// A high-entropy unprefixed 32-char base64 secret must be caught.
+    #[test]
+    fn high_entropy_unprefixed_secret_fails() {
+        // A 32-char dense random base64 blob with no known prefix.
+        let ctx = ctx_with_file(
+            "src/config.rs",
+            r#"let secret = "8Kp2mZ9qLx4vTn7wRj3sYb6cFd1gHe0";"#,
+        );
+        assert!(
+            matches!(eval(&ctx), GateOutcome::Fail { .. }),
+            "a high-entropy unprefixed credential must be caught by the policy gate"
+        );
+    }
+
+    /// Clean file with no secrets passes the gate.
+    #[test]
+    fn clean_code_passes_gate() {
+        let ctx = ctx_with_file(
+            "src/lib.rs",
+            "pub fn greet(name: &str) -> String { format!(\"Hello, {}!\", name) }",
+        );
+        assert_eq!(eval(&ctx), GateOutcome::Pass);
     }
 }

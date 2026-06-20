@@ -9,7 +9,7 @@ use hugit_cli::pr::{PR_QUEUED_KIND, all_pr_queued, find_pr_opened};
 use hugit_contracts::event_record::EventRecord;
 use hugit_http_contracts::actions::Accepted;
 use hugit_http_contracts::write_requests::LandReq;
-use hugit_refstore::{Endpoint, EventLog, PrincipalClass};
+use hugit_refstore::{Endpoint, EventLog};
 use serde_json::json;
 
 use crate::error::EngineErr;
@@ -59,9 +59,12 @@ pub fn write_land(
     let payload = hugit_refstore::canonical_json(&payload_value.to_string())
         .unwrap_or_else(|| payload_value.to_string());
 
+    // D14: assert the REAL caller's class (chain-derived, fail-closed), never a
+    // hardcoded `Orchestrator` — else a worker/model could land over the serve path.
+    let class = crate::writes::asserted_class(&principal_chain)?;
     let record: EventRecord = log
         .append_authorized(
-            PrincipalClass::Orchestrator,
+            class,
             Endpoint::Land,
             PR_QUEUED_KIND,
             principal_chain,
@@ -171,6 +174,76 @@ mod tests {
         let err = write_land(&mut log, "myrepo", 7, &land_req("squash"), chain(), 1_000)
             .expect_err("must 400");
         assert_eq!(err.status, 400);
+        assert!(log.records().iter().all(|r| r.kind != PR_QUEUED_KIND));
+    }
+
+    #[test]
+    fn worker_subagent_principal_cannot_land() {
+        // THE D14 hole this closes: the verb used to assert a HARDCODED
+        // `Orchestrator` class, so any caller passed the land cell. Now the class
+        // is derived from the real principal — a worker/subagent is DENIED land.
+        let mut log = EventLog::new();
+        seed_pr_opened(&mut log, "42");
+        let err = write_land(
+            &mut log,
+            "r",
+            42,
+            &land_req("union"),
+            vec!["agent:runner-03".to_string()],
+            2_000,
+        )
+        .expect_err("a worker must NOT land");
+        assert_eq!(err.status, 503, "denied append maps fail-honest to 503");
+        assert!(
+            log.records().iter().all(|r| r.kind != PR_QUEUED_KIND),
+            "the land must not have taken effect"
+        );
+    }
+
+    #[test]
+    fn model_principal_cannot_land() {
+        let mut log = EventLog::new();
+        seed_pr_opened(&mut log, "7");
+        assert_eq!(
+            write_land(
+                &mut log,
+                "r",
+                7,
+                &land_req("union"),
+                vec!["model:claude".into()],
+                1
+            )
+            .expect_err("a model must NOT land")
+            .status,
+            503
+        );
+        assert!(log.records().iter().all(|r| r.kind != PR_QUEUED_KIND));
+    }
+
+    #[test]
+    fn unclassifiable_principal_cannot_land_fail_closed() {
+        let mut log = EventLog::new();
+        seed_pr_opened(&mut log, "9");
+        assert_eq!(
+            write_land(
+                &mut log,
+                "r",
+                9,
+                &land_req("union"),
+                vec!["weird:x".into()],
+                1
+            )
+            .expect_err("unknown principal denied")
+            .status,
+            404,
+            "unclassifiable principal fails closed (404, no oracle)"
+        );
+        assert_eq!(
+            write_land(&mut log, "r", 9, &land_req("union"), vec![], 1)
+                .expect_err("empty chain denied")
+                .status,
+            404
+        );
         assert!(log.records().iter().all(|r| r.kind != PR_QUEUED_KIND));
     }
 

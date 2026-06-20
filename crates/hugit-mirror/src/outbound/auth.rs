@@ -82,7 +82,28 @@ impl AppAuth {
         }
     }
 
-    /// The default dev credential directory under the user's home.
+    /// Resolve the App credential directory.
+    ///
+    /// Resolution order (mirrors the `cas.rs` PAT-file pattern):
+    /// 1. `HUGIT_GITHUB_APP_SECRET_DIR` env var — explicit override; useful for
+    ///    non-default layouts (staging, CI credential injection, etc.).
+    /// 2. `~/.hugit/secrets/github-app-dev` — the conventional dev default,
+    ///    assembled from `$HOME` (never a hardcoded literal path).
+    ///
+    /// Returns `None` only when no override is set AND `$HOME` is absent.
+    pub fn resolve_secret_dir() -> Option<PathBuf> {
+        if let Ok(p) = std::env::var("HUGIT_GITHUB_APP_SECRET_DIR") {
+            let p = p.trim().to_string();
+            if !p.is_empty() {
+                return Some(PathBuf::from(p));
+            }
+        }
+        Self::default_dev_dir()
+    }
+
+    /// The default dev credential directory under the user's home
+    /// (`~/.hugit/secrets/github-app-dev`). Prefer [`AppAuth::resolve_secret_dir`]
+    /// in production code so that `HUGIT_GITHUB_APP_SECRET_DIR` is honoured.
     pub fn default_dev_dir() -> Option<PathBuf> {
         std::env::var_os("HOME").map(|home| {
             Path::new(&home)

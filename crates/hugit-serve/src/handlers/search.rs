@@ -44,6 +44,11 @@ const STATE_OPEN: &str = "open";
 const ISSUES_CAP: usize = 500;
 /// Per-bucket result cap — the VM IS the page; fail-honest beyond it.
 const RESULT_CAP: usize = 200;
+/// Maximum log records scanned per search query. Without this short-circuit a
+/// single query against a huge log can stall the single-threaded server for
+/// seconds (DoS fix). This is a scan-side guard; the RESULT_CAP is the
+/// output-side guard — both must hold.
+const MAX_RECORDS_TO_SCAN: usize = 50_000;
 /// Static UI caption (a fixed doctrine string, not log-derived, not fabricated data).
 const INTENTS_NOTE: &str = "intents carregam o porquê.";
 /// Static caption — NOT a timing (there is no real timer; never echo a fake "0,04s").
@@ -91,7 +96,12 @@ fn has_pr_event(log: &EventLog, kind: &str, pr_id: &str) -> bool {
 fn search_prs(log: &EventLog, q_lower: &str) -> Vec<SearchRefVm> {
     let mut out = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for record in log.records().iter().filter(|r| r.kind == PR_OPENED_KIND) {
+    for record in log
+        .records()
+        .iter()
+        .take(MAX_RECORDS_TO_SCAN)
+        .filter(|r| r.kind == PR_OPENED_KIND)
+    {
         let Ok(v) = serde_json::from_str::<Value>(&record.payload) else {
             continue;
         };
@@ -159,7 +169,7 @@ struct IssueState {
 /// same u32 bound + `ISSUES_CAP`). `priority` is scrubbed at the read boundary.
 fn fold_transitions(log: &EventLog) -> BTreeMap<u32, IssueState> {
     let mut map: BTreeMap<u32, IssueState> = BTreeMap::new();
-    for record in log.records() {
+    for record in log.records().iter().take(MAX_RECORDS_TO_SCAN) {
         if record.kind != ISSUE_TRANSITION_KIND {
             continue;
         }
@@ -238,7 +248,7 @@ fn search_intents(log: &EventLog, q_lower: &str) -> Vec<SearchIntentVm> {
         return Vec::new();
     };
     let mut out = Vec::new();
-    for intent in intent_log.intents() {
+    for intent in intent_log.intents().iter().take(MAX_RECORDS_TO_SCAN) {
         if out.len() >= RESULT_CAP {
             break;
         }

@@ -14,7 +14,7 @@
       "born_at": 1717000100000,
       "died_at": 1717000195000
     },
-    "operator": "gustavo@humangr.com"
+    "operator": "owner@example.com"
   },
   "charter": "chore: bump toolchain pin",
   "campaign": null,

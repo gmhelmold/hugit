@@ -14,7 +14,7 @@
       "born_at": 1717000000000,
       "died_at": 1717000840000
     },
-    "operator": "gustavo@humangr.com"
+    "operator": "owner@example.com"
   },
   "charter": "fix: refresh token reused the old iat, shortening the window",
   "campaign": "auth-hardening",

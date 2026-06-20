@@ -403,3 +403,40 @@ fn invalid_body_is_400() {
     let (status, _b) = post(&state, "/v1/repos/hugit/prs/1/land", &headers, b"not json");
     assert_eq!(status, 400);
 }
+
+#[test]
+fn idempotency_key_over_cap_is_rejected() {
+    // An Idempotency-Key longer than 256 bytes must be rejected with 400
+    // INVALID_REQUEST before anything is persisted (DoS / R2 log-bloat guard).
+    let (state, _d) = state_with_open_pr();
+    let long_key = "x".repeat(257);
+    let headers = vec![
+        hdr("Authorization", &format!("Bearer {TOKEN}")),
+        hdr("Idempotency-Key", &long_key),
+    ];
+    let (status, body) = post(
+        &state,
+        "/v1/repos/hugit/prs/1/land",
+        &headers,
+        br#"{"mode":"union"}"#,
+    );
+    assert_eq!(status, 400, "an over-cap key must be rejected: {body}");
+    assert!(
+        body.contains("INVALID_REQUEST"),
+        "error code must be INVALID_REQUEST: {body}"
+    );
+
+    // A key exactly at the cap (256 bytes) must be accepted.
+    let exact_key = "y".repeat(256);
+    let headers2 = vec![
+        hdr("Authorization", &format!("Bearer {TOKEN}")),
+        hdr("Idempotency-Key", &exact_key),
+    ];
+    let (status2, body2) = post(
+        &state,
+        "/v1/repos/hugit/prs/1/land",
+        &headers2,
+        br#"{"mode":"union"}"#,
+    );
+    assert_eq!(status2, 200, "a 256-byte key must be accepted: {body2}");
+}

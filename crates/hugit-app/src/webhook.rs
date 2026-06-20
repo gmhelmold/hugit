@@ -187,13 +187,17 @@ impl WebhookProcessor {
 
     /// Register (or update) the installation token for an installation.
     pub fn store_token(&self, installation_id: &str, token: &str) {
-        let mut store = self.token_store.lock().expect("token_store lock poisoned");
+        // Recover a poisoned lock via into_inner() — the token cache is
+        // best-effort state; a prior panic inside the critical section is
+        // not a reason to crash an incoming webhook request.
+        let mut store = self.token_store.lock().unwrap_or_else(|e| e.into_inner());
         store.insert(installation_id.to_string(), Some(token.to_string()));
     }
 
     /// Retrieve the installation token, if present and not revoked.
     pub fn get_token(&self, installation_id: &str) -> Option<String> {
-        let store = self.token_store.lock().expect("token_store lock poisoned");
+        // Same poison-recovery policy as store_token — cache is best-effort.
+        let store = self.token_store.lock().unwrap_or_else(|e| e.into_inner());
         store.get(installation_id).and_then(Clone::clone)
     }
 
@@ -267,7 +271,7 @@ impl WebhookProcessor {
         // Remove/zero the token slot; token_revoked = true only if there was
         // an active (Some) token.
         let token_revoked = {
-            let mut store = self.token_store.lock().expect("token_store lock poisoned");
+            let mut store = self.token_store.lock().unwrap_or_else(|e| e.into_inner());
             match store.remove(installation_id) {
                 Some(Some(_)) => {
                     // Zero the slot after removal (tombstone).

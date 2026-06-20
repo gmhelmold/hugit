@@ -35,10 +35,60 @@
 pub mod verbs;
 
 use hugit_http_contracts::actions::Accepted;
-use hugit_refstore::EventLog;
+use hugit_refstore::{EventLog, PrincipalClass};
 use sha2::{Digest, Sha256};
 
 use crate::error::EngineErr;
+
+/// Derive the D14 principal CLASS to assert from the engine-resolved
+/// `principal_chain`, **fail-closed**.
+///
+/// THE hole this closes (authz audit 2026-06-20): the write verbs previously
+/// handed `append_authorized` a HARDCODED class (undo→Human, land/policy/verdict
+/// →Orchestrator) regardless of who actually called — so the D14 matrix always
+/// "passed" and a worker/model/subagent could `land`/`undo`/`policy`/`verdict`
+/// over the serve path. The asserted class MUST be derived from the authenticated
+/// actor (the chain tail), so the matrix is decided against the REAL caller.
+///
+/// ## Mapping the SERVE-layer principals onto the D14 classes
+///
+/// The D14 classifier ([`PrincipalClass::classify`]) understands the event-log
+/// identity prefixes (`user:`/`human:`/`orchestrator:`/`worker:`/`agent:`/
+/// `model:`). The serve write path is driven by the two ENGINE-RESOLVED
+/// authenticated principals (`two_tier_auth`), which use a different vocabulary:
+///
+/// - `orchestrator:hugit` — the platform/dev OPERATOR → [`Orchestrator`].
+/// - `clerk:{org}:{user}` — an authenticated OWNING-TENANT forge driver. It has
+///   already cleared the ownership gate ([`crate::authz::authorize_write`]) in
+///   [`with_write`] before any verb runs, so on the serve write surface it acts
+///   as the repo's INTEGRATION authority → [`Orchestrator`].
+///
+/// Everything else falls back to [`PrincipalClass::classify`], so a WORKER
+/// (`agent:`/`worker:`) or MODEL (`model:`) is recognized and then DENIED by the
+/// frozen matrix inside [`EventLog::append_authorized`] (land/verdict/policy are
+/// `Orchestrator`-only; undo is `Human`-only) — that IS the hole being closed.
+///
+/// Fail-closed: an empty chain (anonymous) or an unclassifiable actor (unknown
+/// prefix, bare string, empty id) is denied — mapped to `404` (the write
+/// boundary's no-existence-oracle convention), NOT defaulted into a class.
+pub(crate) fn asserted_class(principal_chain: &[String]) -> Result<PrincipalClass, EngineErr> {
+    let actor = principal_chain.last().map(String::as_str).unwrap_or("");
+    // The serve-layer authenticated forge drivers (operator + owning tenant) map
+    // to the integration authority; everything else goes through the D14
+    // classifier (so worker/model are recognized → matrix-denied, not silently
+    // allowed) and an unclassifiable principal fails closed.
+    if actor.starts_with("orchestrator:") || actor.starts_with("clerk:") {
+        // A non-empty org/user segment is required (a bare `clerk:`/`orchestrator:`
+        // is malformed → no authenticated driver → deny).
+        if actor
+            .split_once(':')
+            .is_some_and(|(_, rest)| !rest.is_empty())
+        {
+            return Ok(PrincipalClass::Orchestrator);
+        }
+    }
+    PrincipalClass::classify(actor).ok_or_else(EngineErr::not_found)
+}
 
 /// The `idem.recorded` event kind — the idempotency ledger's record.
 pub const IDEM_RECORDED_KIND: &str = "idem.recorded";
@@ -314,6 +364,45 @@ where
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    #[test]
+    fn asserted_class_is_chain_derived_fail_closed() {
+        // The serve-layer authenticated forge drivers (operator + owning tenant)
+        // map to the integration authority (Orchestrator).
+        assert_eq!(
+            asserted_class(&["orchestrator:hugit".into()]).unwrap(),
+            PrincipalClass::Orchestrator
+        );
+        assert_eq!(
+            asserted_class(&["clerk:org-a:user-1".into()]).unwrap(),
+            PrincipalClass::Orchestrator,
+            "an authenticated owning tenant drives the forge as the integration authority"
+        );
+        // D14 identity prefixes classify normally (the chain TAIL is the actor).
+        assert_eq!(
+            asserted_class(&["user:gustavo".into()]).unwrap(),
+            PrincipalClass::Human
+        );
+        assert_eq!(
+            asserted_class(&["agent:runner".into()]).unwrap(),
+            PrincipalClass::Worker
+        );
+        assert_eq!(
+            asserted_class(&["model:claude".into()]).unwrap(),
+            PrincipalClass::Model
+        );
+        // The actor is the LAST link (a human-delegated worker IS a worker).
+        assert_eq!(
+            asserted_class(&["user:g".into(), "agent:r".into()]).unwrap(),
+            PrincipalClass::Worker
+        );
+        // Unclassifiable / empty / malformed ⇒ denied 404 (no oracle), never
+        // defaulted into a class.
+        assert_eq!(asserted_class(&["weird:x".into()]).unwrap_err().status, 404);
+        assert_eq!(asserted_class(&["nobody".into()]).unwrap_err().status, 404);
+        assert_eq!(asserted_class(&["clerk:".into()]).unwrap_err().status, 404);
+        assert_eq!(asserted_class(&[]).unwrap_err().status, 404);
+    }
 
     /// An in-memory sink over a single repo's log — the testable `LogSink`.
     struct MemSink {
