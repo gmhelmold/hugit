@@ -32,3 +32,13 @@ anyhow    = "=1.0.102"
 
 # HTTP
 ureq = "=2.12.1"
+
+# Semantic index / symbol outline (W6, hugit-symbols). tree-sitter + the Rust
+# grammar compile a vendored C grammar via `cc` (already a workspace build-dep
+# via blake3/libgit2-sys/libz-sys/ring) — C *grammar* source, not a new toolchain
+# class. Exact-pinned per the X4 supply-chain invariant; licenses MIT / MIT OR
+# Apache-2.0 (deny-clear). streaming-iterator is required by tree-sitter 0.26's
+# lending query-cursor API.
+tree-sitter        = "=0.26.9"
+tree-sitter-rust   = "=0.24.2"
+streaming-iterator = "=0.1.9"
