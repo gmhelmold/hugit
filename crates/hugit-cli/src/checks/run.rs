@@ -926,10 +926,11 @@ impl CheckRunner for ProcessRunner {
             }
         }
         // NOTE: the child is intentionally NOT placed in its own process group /
-        // session. The timeout path (`kill_group`) signals only the direct child's
-        // PID — never a process group — because a process-group signal is unsafe on
-        // a GitHub-hosted linux runner / the linux engine container (it took down
-        // the whole CI job, even with `setsid` isolation). See `kill_group`.
+        // session. The timeout path (`kill_group`) signals only single, POSITIVE
+        // PIDs — the direct child plus (on linux) its descendants enumerated from
+        // `/proc` — never a process group, because a process-group signal is unsafe
+        // on a GitHub-hosted linux runner / the linux engine container (it took
+        // down the whole CI job, even with `setsid` isolation). See `kill_group`.
         let mut child = command
             .spawn()
             .map_err(|e| ExecError::Run(format!("spawn `{}`: {e}", def.command)))?;
@@ -996,10 +997,12 @@ impl CheckRunner for ProcessRunner {
                         // PID — never its process group, which is unsafe on a linux
                         // runner/the engine; see `kill_group`) and reap it (no
                         // zombie), then surface a structured timeout. The result is
-                        // NOT stored — a hang never poisons the cache. A shell-forked
-                        // grandchild may outlive this (OS-reaped on our exit); the
-                        // drain-thread join below is SKIPPED on this path so it can
-                        // never block on such an orphan.
+                        // NOT stored — a hang never poisons the cache. On linux
+                        // `kill_group` ALSO reaps any shell-forked/backgrounded
+                        // grandchild by single PID (enumerated from `/proc` before the
+                        // child dies), so a `foo &` cannot outlive the deadline; the
+                        // drain-thread join below is still SKIPPED on this path so it
+                        // can never block on a not-yet-reaped pipe holder.
                         kill_group(&mut child);
                         break Err(ExecError::Timeout(self.timeout.as_secs()));
                     }
@@ -1013,16 +1016,18 @@ impl CheckRunner for ProcessRunner {
         };
 
         // Join the drain threads ONLY when the child exited on its own — then the
-        // pipes are already at EOF and the join is immediate. On a TIMEOUT/error we
-        // kill only the direct child (never its process group — that is unsafe on a
-        // linux runner/the engine; see `kill_group`), so a shell-forked grandchild
-        // (linux `sh -c` forks `sleep`; macOS execs it) can still hold the pipe
-        // write-end open. Joining there would block until that orphan exits,
-        // defeating the timeout's promptness. The captured bytes are discarded
-        // regardless, so on timeout/error we DETACH the drain threads (drop the
-        // handles; they exit when the orphan or our process does) and return
-        // promptly. They still drained the pipe DURING the run (the no-block-on-full-
-        // pipe guarantee is the loop above, not this join).
+        // pipes are already at EOF and the join is immediate. On a TIMEOUT/error
+        // `kill_group` SIGKILLs the direct child + (on linux) its enumerated
+        // descendants by single PID — never a process group (that is unsafe on a
+        // linux runner/the engine; see `kill_group`). Reaping is best-effort/async
+        // w.r.t. the OS delivering SIGKILL, so a grandchild (linux `sh -c` forks
+        // `sleep`; macOS execs it) MIGHT still hold the pipe write-end open for a
+        // beat. Joining there could block until it exits, defeating the timeout's
+        // promptness. The captured bytes are discarded regardless, so on
+        // timeout/error we DETACH the drain threads (drop the handles; they exit
+        // when the pipe holder or our process does) and return promptly. They still
+        // drained the pipe DURING the run (the no-block-on-full-pipe guarantee is
+        // the loop above, not this join).
         if poll_result.is_ok() {
             if let Some(t) = stdout_thread {
                 let _ = t.join();
@@ -1069,28 +1074,119 @@ fn shell_command(cmd: &str) -> Command {
     }
 }
 
-/// Kill the timed-out child and reap it (no zombie).
+/// Kill the timed-out child, reap it (no zombie), then PROMPTLY reap any
+/// backgrounded descendant by SINGLE PID (Task #36 — orphan reaping restored
+/// WITHOUT a process-group signal).
 ///
 /// SAFETY (the load-bearing invariant): a check timeout must NEVER be able to
-/// signal anything beyond its own command — not `hugit check` itself, not the CI
-/// job, and (in prod) NOT the linux engine container. So this does ONLY
-/// `child.kill()`: a SIGKILL to the child's single PID, which cannot reach any
-/// other process. The child is an `sh -c <cmd>` that execs the command, so its PID
-/// *is* the real process — killing it satisfies the timeout.
+/// signal anything beyond its own command's subtree — not `hugit check` itself,
+/// not the CI job, and (in prod) NOT the linux engine container. We therefore
+/// NEVER send a process-group (negative-pid) signal: a group kill took down the
+/// WHOLE CI job on a GitHub-hosted linux runner even with the child in its own
+/// `setsid` session (POSIX says that should isolate it; the hosted runner's
+/// process model cancels the job regardless), and the engine is linux too. The
+/// signal surface is bounded to single POSITIVE pids by construction, so a group
+/// signal is structurally impossible.
 ///
-/// History: this used to `kill -<pid>` the child's process GROUP to also reap a
-/// backgrounded grandchild. But a process-group (negative-pid) signal took down
-/// the WHOLE CI job on a GitHub-hosted linux runner — even with the child in its
-/// own `setsid` session (POSIX says that should isolate it; the hosted runner's
-/// process model cancels the job regardless). Same hazard in prod (the engine is
-/// linux). So the group-signal is removed entirely. Narrow cost: a check that
-/// *backgrounds* a grandchild (`foo &`) can leave it past the deadline — the OS
-/// reaps such orphans on hugit's exit. (Re-introducing reaping WITHOUT a group
-/// signal — e.g. enumerating + single-PID-killing descendants via `/proc` — is a
-/// tracked follow-up.)
+/// The sequence:
+///   1. (linux) Enumerate the child's transitive descendants from `/proc` BEFORE
+///      killing it — once the direct child dies its children reparent to init
+///      (PID 1) and the PPid linkage back to our subtree is lost, so the
+///      enumeration MUST happen while the tree is still intact.
+///   2. SIGKILL the direct child by its single PID and reap it (`child.wait()`).
+///      The child is an `sh -c <cmd>`; on linux `sh` may FORK the command (and a
+///      `foo &` grandchild), on macOS it EXECs it.
+///   3. (linux) SIGKILL each enumerated descendant by its single positive PID
+///      (`kill -KILL <pid>…`). The OS still reaps any straggler on hugit's exit;
+///      this just makes it PROMPT so a backgrounded grandchild cannot outlive the
+///      deadline. Best-effort: a failed signal is ignored (never a crash).
+///
+/// The descendant sweep is linux-only: macOS `sh -c` execs the command (no forked
+/// grandchild to reap) and has no `/proc`. The direct-child kill suffices there.
 fn kill_group(child: &mut std::process::Child) {
+    // (1) Enumerate descendants while the process tree is still intact.
+    #[cfg(target_os = "linux")]
+    let descendants = linux_descendant_pids(child.id());
+
+    // (2) SIGKILL + reap the direct child (single PID — never a process group).
     let _ = child.kill();
     let _ = child.wait();
+
+    // (3) Prompt single-PID reaping of any backgrounded descendant (linux).
+    #[cfg(target_os = "linux")]
+    reap_pids(&descendants);
+}
+
+/// Enumerate the transitive descendant PIDs of `root` from `/proc` (linux).
+///
+/// Builds the PID→PPid map by reading the PPid field of every `/proc/<pid>/stat`,
+/// then BFS-collects every PID transitively parented by `root` (excluding `root`
+/// itself — the caller kills it directly). The `comm` field (the 2nd stat field)
+/// is wrapped in parentheses and may itself contain spaces or `)`, so we split
+/// AFTER the LAST `)` to read `state` then `ppid` — the canonical robust
+/// `/proc/<pid>/stat` parse. Any unreadable/short-lived entry is skipped
+/// (best-effort: a missed descendant is OS-reaped on hugit's exit, never a crash).
+#[cfg(target_os = "linux")]
+fn linux_descendant_pids(root: u32) -> Vec<u32> {
+    // pid -> ppid for every process currently visible in /proc.
+    let mut parent_of: BTreeMap<u32, u32> = BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        // Only numeric `/proc/<pid>` entries are processes (skip `self`, `cpuinfo`…).
+        let Some(pid) = name.to_str().and_then(|n| n.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue; // process exited between read_dir and open — skip.
+        };
+        // `<pid> (comm) <state> <ppid> …` — comm can contain spaces and ')', so
+        // parse the fixed fields AFTER the last ')'.
+        let Some(after) = stat.rfind(')').map(|i| &stat[i + 1..]) else {
+            continue;
+        };
+        let mut fields = after.split_whitespace();
+        let _state = fields.next();
+        if let Some(ppid) = fields.next().and_then(|p| p.parse::<u32>().ok()) {
+            parent_of.insert(pid, ppid);
+        }
+    }
+
+    // BFS from `root` over the parent map: collect every transitive descendant.
+    let mut descendants: Vec<u32> = Vec::new();
+    let mut frontier = vec![root];
+    while let Some(cur) = frontier.pop() {
+        for (&pid, &ppid) in &parent_of {
+            if ppid == cur && pid != root && !descendants.contains(&pid) {
+                descendants.push(pid);
+                frontier.push(pid);
+            }
+        }
+    }
+    descendants
+}
+
+/// SIGKILL each PID by its single positive value (`kill -KILL <pid>…`, linux).
+///
+/// Positive pids ONLY — a process-group (negative-pid) signal is structurally
+/// impossible here, preserving the load-bearing safety invariant in [`kill_group`].
+/// One subprocess for the whole batch; best-effort (a failure to signal is ignored
+/// — the OS reaps the straggler on hugit's exit). Using the `kill` binary (already
+/// the cleanup primitive in the acceptance tests) avoids a new `libc` direct
+/// dependency + its `unsafe` and the X4 exact-pin obligation.
+#[cfg(target_os = "linux")]
+fn reap_pids(pids: &[u32]) {
+    if pids.is_empty() {
+        return;
+    }
+    let mut cmd = Command::new("kill");
+    cmd.arg("-KILL");
+    for pid in pids {
+        cmd.arg(pid.to_string());
+    }
+    let _ = cmd.status();
 }
 
 /// Unix epoch milliseconds (best-effort; `0` if the clock is before the epoch).

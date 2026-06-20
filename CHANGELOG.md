@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(cli): **`hugit check` timeouts reap a backgrounded grandchild again — without an unsafe process-group signal.**
+  When a checked command backgrounds a grandchild (`foo & …`), the linux `sh -c` FORKS it, so killing
+  the direct child by PID left the orphan running past the deadline (the OS only reaped it on hugit's
+  exit). The prior fix had REMOVED the process-group (negative-pid) kill that used to reap it, because
+  a group signal took down the whole CI job on a GitHub-hosted linux runner even under `setsid` (and
+  the prod engine is linux too). This restores orphan reaping WITHOUT a group signal: on linux the
+  timeout path enumerates the child's transitive descendants from `/proc` (PID→PPid map, robust
+  `stat` parse) BEFORE killing the child — once it dies its children reparent to init and the linkage
+  is lost — then SIGKILLs each by its single POSITIVE PID (`kill -KILL <pid>…`), so a process-group
+  signal is structurally impossible. macOS `sh -c` execs the command (no forked grandchild) and has no
+  `/proc`, so the sweep is linux-only; the prompt-timeout guarantee is unchanged on every host. Closes
+  the tracked follow-up to the process-group-kill removal.
+
 - feat(cli): **`hugit fleet` + `hugit watch` go REAL — the rest of the Phase-D forge read surface.**
   Both graduate from `HUGIT_RESERVED_VERBS` to `HUGIT_VERBS` with REAL wiring (no stubs), reusing the
   engine's own projections so every surface agrees by construction. `hugit fleet --log <path>` emits

@@ -1159,17 +1159,22 @@ fn a_directory_symlink_cycle_does_not_crash_the_tree_walk() {
     }
 }
 
-/// WH-CHECK [process-group kill REMOVED for safety]: a command that BACKGROUNDS a
-/// grandchild (`sleep 30 & … sleep 30`) still TIMES OUT PROMPTLY — exit 2 /
-/// check_timeout, returning in ~1-2 s (NOT 30 s) — with the direct child killed by
-/// PID only. The runner deliberately does NOT process-group-signal: a negative-pid
-/// kill is unsafe on a linux runner / the engine container (it takes down the whole
-/// process tree, incl. our own job — observed on GitHub-hosted CI, even with
-/// `setsid`). So a backgrounded grandchild MAY outlive the deadline (OS-reaped on
-/// hugit's exit). The load-bearing guarantee asserted here is the PROMPT timeout —
-/// the orphan-held pipe must NOT block the return (the drain-thread join is skipped
-/// on timeout) — NOT that the orphan is reaped. (Reaping without a group signal —
-/// single-PID kill of enumerated descendants — is a tracked follow-up.)
+/// WH-CHECK [process-group kill REMOVED for safety] + Task #36 [orphan reaping
+/// restored without a group signal]: a command that BACKGROUNDS a grandchild
+/// (`sleep 30 & … sleep 30`) TIMES OUT PROMPTLY — exit 2 / check_timeout,
+/// returning in ~1-2 s (NOT 30 s). The runner deliberately does NOT
+/// process-group-signal: a negative-pid kill is unsafe on a linux runner / the
+/// engine container (it takes down the whole process tree, incl. our own job —
+/// observed on GitHub-hosted CI, even with `setsid`). Instead it enumerates the
+/// child's descendants from `/proc` BEFORE killing it and SIGKILLs each by single
+/// POSITIVE PID.
+///
+/// Two guarantees are asserted: (1) the PROMPT timeout — the orphan-held pipe must
+/// NOT block the return (the drain-thread join is skipped on timeout); and (2) on
+/// LINUX, the backgrounded grandchild IS reaped (Task #36) — its recorded PID is
+/// no longer alive shortly after the timeout. On non-linux unix (macOS) `sh -c`
+/// execs the command (no forked grandchild) and there is no `/proc`, so only the
+/// prompt-timeout guarantee is asserted there.
 #[test]
 #[cfg(unix)]
 fn a_backgrounding_command_times_out_promptly_without_a_group_signal() {
@@ -1214,16 +1219,53 @@ fn a_backgrounding_command_times_out_promptly_without_a_group_signal() {
         "the wall-time ceiling is honoured (did not wait the full 30 s): {elapsed:?}"
     );
 
-    // The grandchild recorded its pid. We do NOT assert it is dead: the runner no
-    // longer group-signals (that's the unsafe path), so a backgrounded grandchild
-    // may still be alive here — the OS reaps it on hugit's exit. Best-effort single-
-    // PID cleanup so the test doesn't leak a 30 s `sleep` (a positive pid is a
-    // single-process signal — never a group — so it's safe).
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    // The grandchild recorded its pid.
     let pid = std::fs::read_to_string(&marker).unwrap_or_default();
     let pid = pid.trim().to_string();
     assert!(!pid.is_empty(), "the grandchild recorded its pid: {v}");
-    let _ = Command::new("kill").arg("-KILL").arg(&pid).status();
+
+    // (2) On LINUX the descendant sweep (Task #36) reaps the backgrounded
+    // grandchild by single PID. SIGKILL delivery is prompt but asynchronous, so
+    // poll briefly for the pid to become not-alive (`kill -0 <pid>` fails once the
+    // process is gone). A positive pid is a single-process probe — never a group.
+    #[cfg(target_os = "linux")]
+    {
+        let mut reaped = false;
+        for _ in 0..50 {
+            // `kill -0` succeeds iff the pid is alive (and signalable). A non-zero
+            // exit means the grandchild is gone — reaped by the descendant sweep.
+            let alive = Command::new("kill")
+                .arg("-0")
+                .arg(&pid)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !alive {
+                reaped = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(40));
+        }
+        // Best-effort cleanup in case the assertion is about to fail (don't leak a
+        // 30 s sleep into the CI runner).
+        if !reaped {
+            let _ = Command::new("kill").arg("-KILL").arg(&pid).status();
+        }
+        assert!(
+            reaped,
+            "the backgrounded grandchild (pid {pid}) was reaped by the /proc \
+             descendant sweep on linux"
+        );
+    }
+
+    // On non-linux unix (macOS): no /proc descendant sweep, so the grandchild may
+    // still be alive — best-effort single-PID cleanup so the test never leaks a
+    // 30 s `sleep` (a positive pid is a single-process signal, never a group).
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let _ = Command::new("kill").arg("-KILL").arg(&pid).status();
+    }
 }
 
 /// WH-CHECK [SHIP-BLOCKER — lock-poison]: a SLOW check holding mid-execute does
