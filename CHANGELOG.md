@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(cli): **make the wedge visible — `hugit checks` + `hugit queue show`.** The product thesis (union
+  landing queue + memoized CI) was built but unreachable from the porcelain (SOTA-audit P1). `hugit checks`
+  now surfaces the 3-axis memo key (`tree ‖ def ‖ toolchain`), HIT/MISS, and the cached proof ref;
+  `hugit queue show` surfaces the union-batch composition, state machine, and the implicated PR on a
+  UNION-FAIL. Projects only real recorded fields — honest `null`/`recorded:false` where the data isn't
+  event-sourced yet (cached proof-refs + the bisected failing-pair, both tracked to wire next).
+
+- feat(serve): **`blob.tree` file-tree sidebar** — `GET /v1/repos/{repo}/blob/{*path}` now lists the
+  current directory's entries (via a new fail-closed `hugit_proto::list_tree_at_dir`, symlinks excluded)
+  instead of the honest `[]` default.
+
+- feat(cli): **`hugit symbol --ref <ref>`** — outline a file from a committed git ref (not just a local
+  working-tree file), resolving the path through `resolve_blob_at_path` over a lazy `git cat-file` source.
+
+- chore: scrub the personal email `gustavo@humangr.com` from ~13 test fixtures (→ `owner@example.com`) ahead of open-source.
+
 - chore: **pre-open-source hardening (Apache-2.0) + adversarial-audit fixes.** An 11-agent adversarial
   sweep ahead of going open-source (`docs/review/2026-06-20-adversarial-pre-opensource-audit.md`)
   surfaced fixes, all landed together:
