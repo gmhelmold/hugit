@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- chore: **comprehensive infra-recon sanitize** (pre-open-source) — runner IP/hostname, Clerk dev host, GitHub App id, and tenant UUIDs scrubbed from source/tests/scripts + the engine-snapshot seed (placeholders; tests green).
+
 - feat(cli): **make the wedge visible — `hugit checks` + `hugit queue show`.** The product thesis (union
   landing queue + memoized CI) was built but unreachable from the porcelain (SOTA-audit P1). `hugit checks`
   now surfaces the 3-axis memo key (`tree ‖ def ‖ toolchain`), HIT/MISS, and the cached proof ref;
