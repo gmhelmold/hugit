@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-B4a acceptance suite — hugit-queue crate, core engine (items ①②⑤).
-# Contract: docs/plan/wp-contracts/WP-B4a.md.
+# Acceptance harness for WP-B4a.
 # Owned items: ① A+B-red pair excluded+named · ② 5 disjoint greens land, 0 re-runs
 #              · ⑤ lands in queue order; out-of-order structurally prevented.
 # Oracle: crates/hugit-queue/tests/acceptance_wp-b4a.rs must exist with

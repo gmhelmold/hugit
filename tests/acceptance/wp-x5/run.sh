@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-X5 acceptance suite — namespace laws.
-# Contract: docs/plan/wp-contracts/WP-X5.md
+# Acceptance harness for WP-X5.
 # Owned items:
 #   ① no hugit CLI verb shadows a git verb (mechanized check against `git help -a`)
 #   ② managed refs (refs/hugit/…) never collide with arbitrary user branches/tags (property test)

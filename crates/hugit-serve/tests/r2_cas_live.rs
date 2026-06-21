@@ -12,8 +12,8 @@
 //! Run it manually with a WRITE-scoped R2 credential sourced out-of-band, e.g.:
 //!
 //! ```sh
-//! set -a; . ~/Downloads/githugr-engine-r2-rw-standing.txt; set +a
-//! export HUGIT_SERVE_R2_BUCKET=corelink-githugr-engine
+//! set -a; . ./your-r2-credentials.env; set +a
+//! export HUGIT_SERVE_R2_BUCKET=example-bucket
 //! export HUGIT_SERVE_R2_TENANT_ID=00000000-0000-4000-8000-000000000001
 //! cargo test -p hugit-serve --test r2_cas_live -- --ignored --nocapture
 //! ```

@@ -85,7 +85,7 @@ mod tests {
     use super::*;
 
     fn human() -> Vec<String> {
-        vec!["user:gustavo".to_string()]
+        vec!["user:alice".to_string()]
     }
     fn seed(log: &mut EventLog, kind: &str, at: u64) -> u64 {
         log.append_for_test(kind, human(), r#"{"x":1}"#.to_string(), at)

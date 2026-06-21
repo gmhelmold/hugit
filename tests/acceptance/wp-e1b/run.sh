@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-E1b acceptance suite — verified mirror: failure modes (outage, partial divergence, one-way) (items ② ④ ⑤ ⑥ ⑦).
-# Contract: docs/plan/wp-contracts/WP-E1b.md
+# Acceptance harness for WP-E1b.
 # Owned items:
 #   ②    divergence → alarm + repair + incident
 #   ④(+) GitHub 429/5xx for N hours: durable queue, bounded backoff, no drop/reorder;

@@ -1,5 +1,5 @@
 //! WP-X2 acceptance oracle — attestation end-to-end with Ed25519 PUBLIC
-//! verification. Contract: `docs/plan/wp-contracts/WP-X2.md`.
+//! verification. Contract: `the work-package contract`.
 //!
 //! Owned items (one `#[test] item_<n>_<slug>` each):
 //!   ① `item_1_full_chain_resolves` — the full provenance chain (tree + def +

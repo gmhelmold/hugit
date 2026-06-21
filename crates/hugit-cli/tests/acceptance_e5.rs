@@ -1,6 +1,6 @@
 //! Acceptance suite for WP-E5 — export + exit proofs (the anti-lock-in guarantee).
 //!
-//! Contract: docs/plan/wp-contracts/WP-E5.md
+//! Acceptance test for the export and exit-proofs contract (WP-E5).
 //! One `#[test] item_<n>_<slug>` per owned acceptance item (①–⑨).
 //!
 //! ① one-command dump: git artifact + documented JSON envelope

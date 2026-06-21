@@ -6,7 +6,7 @@
 //! `state::load_git_dir` produces — so the blob/edit/clone call sites never learn
 //! whether the objects came from a local `git` dir or the live CoreLink CAS.
 //!
-//! ## The confirmed CoreLink CAS contract (CoreLink Server TL, 2026-06-18)
+//! ## The confirmed CoreLink CAS contract
 //!
 //! CoreLink's CAS is content-addressed AND content-VERIFIED by **BLAKE3-256, a
 //! 64-hex lowercase digest**. The store key is `blake3(bytes)`, NOT the git oid:

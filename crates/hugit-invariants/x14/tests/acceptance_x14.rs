@@ -1,5 +1,5 @@
 //! WP-X14 acceptance oracle — deep-link referential integrity (lifecycle).
-//! Contract: `docs/plan/wp-contracts/WP-X14.md`.
+//! Contract: `the work-package contract`.
 //!
 //! Owned items (VERBATIM from the contract; each item has a dedicated `#[test]`
 //! plus adversarial guards that go RED on the gamed/broken case):

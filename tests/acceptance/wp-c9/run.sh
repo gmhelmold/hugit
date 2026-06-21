@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-C9 acceptance suite — workspace lifecycle (spawn/attach/resume).
-# Contract: docs/plan/wp-contracts/WP-C9.md
+# Acceptance harness for WP-C9.
 # Owned items:
 #   ① attach joins live workspace (same fence/materialization) without respawn
 #   ② resume restores state+fence; resumed ws cannot exceed original path_set

@@ -409,7 +409,7 @@ fn record(args: VerdictArgs) -> Result<Value, PorcelainError> {
 // `approve` / `reject`. This mirrors the live serve verb `POST /prs/{n}/verdict`
 // (which maps `approve` / `request-changes` into the same `verdict.recorded`
 // kind through `(Orchestrator, Land)`), so the CLI and the web surface produce
-// the identical wire fact — ADR-0006 (no web-only verb), no new D14 endpoint, no
+// the identical wire fact — no web-only verb, no new D14 endpoint, no
 // matrix change. They always store (an unrecorded approval is meaningless), so
 // there is no `--store` flag.
 

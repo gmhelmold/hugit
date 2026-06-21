@@ -1,6 +1,6 @@
 //! WP-D13 acceptance tests — tournament: N candidates, judge panel, budget-bounded.
 //!
-//! Contract: docs/plan/wp-contracts/WP-D13.md.
+//! Acceptance test for the tournament contract (WP-D13).
 //! Oracle:   tests/acceptance/wp-d13/run.sh.
 //!
 //! Naming convention (binding, pre-decided by the lead):

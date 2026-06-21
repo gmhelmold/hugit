@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-E2b acceptance suite — PR/issue → proposed intents + fidelity contract.
-# Contract: docs/plan/wp-contracts/WP-E2b.md
+# Acceptance harness for WP-E2b.
 # Owned items:
 #   ② PRs/issues → proposed intents w/ provenance
 #   ⑥(R3) PR/issue fidelity contract: stated set (body, comment/review threads, state,

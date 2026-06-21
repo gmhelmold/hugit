@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-D9 acceptance suite — attention queue.
-# Contract: docs/plan/wp-contracts/WP-D9.md
+# Acceptance harness for WP-D9.
 # Owned items (verbatim from decomposition v2.0 — D9①–⑤):
 #   ① fixture with known policy/blast/confidence → documented composite
 #      ordering reproduced

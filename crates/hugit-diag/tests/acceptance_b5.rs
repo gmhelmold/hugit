@@ -1,6 +1,6 @@
 //! WP-B5 acceptance tests — auto-bisect over memoized checks + DiagnosisObject.
 //!
-//! Contract: docs/plan/wp-contracts/WP-B5.md
+//! Acceptance test for the auto-bisect contract (WP-B5).
 //! Owned items (VERBATIM from decomposition v2.0 §2):
 //!   ① culprit ≤log₂ execs
 //!   ② diff-vs-green + suspects

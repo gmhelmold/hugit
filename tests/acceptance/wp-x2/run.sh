@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-X2 acceptance suite — attestation end-to-end.
-# Contract: docs/plan/wp-contracts/WP-X2.md
+# Acceptance harness for WP-X2.
 # Owned items:
 #   ① artifact attestation resolves full chain (tree+def+runner+model+principal) cryptographically
 #   ② tampered/unsigned attestation rejected at promotion

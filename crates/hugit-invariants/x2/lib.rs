@@ -1,4 +1,4 @@
-//! hugit-invariants — Squad-X attestation-end-to-end invariant (WP-X2).
+//! hugit-invariants — attestation-end-to-end invariant (WP-X2).
 //!
 //! This module proves the four attestation invariants behind the
 //! [`AttestationChain`](hugit_contracts::AttestationChain) object class — using

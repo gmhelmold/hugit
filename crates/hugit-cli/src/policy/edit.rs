@@ -233,7 +233,7 @@ mod tests {
             gate: "dco".to_string(),
             enable: false,
             disable: true,
-            principal: Some("user:gustavo".to_string()),
+            principal: Some("user:alice".to_string()),
         })
         .expect("disable ok");
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();

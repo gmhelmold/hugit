@@ -1,6 +1,6 @@
 //! WP-D9 acceptance tests — attention queue.
 //!
-//! Contract: docs/plan/wp-contracts/WP-D9.md.
+//! Contract: the work-package contract.
 //! Oracle:   tests/acceptance/wp-d9/run.sh.
 //!
 //! Naming convention (binding, pre-decided by the lead):

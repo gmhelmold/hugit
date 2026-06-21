@@ -1,5 +1,5 @@
 //! Seamless **forge-arbitrated bidirectional** GitHub ↔ hugit sync
-//! (`docs/design/2026-06-08-seamless-bidirectional-sync.md` — supersedes E6).
+//! (supersedes E6).
 //!
 //! The old E6 was a *naive symmetric mirror* (deliberately deferred). This
 //! module replaces it with a model that feels like instant two-way sync to the

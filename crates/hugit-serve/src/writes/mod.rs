@@ -315,7 +315,7 @@ where
         // race sees the winner's records — including its idempotency ledger entry).
         let (mut log, token) = sink.load(repo)?;
 
-        // WRITE-SIDE PER-TENANT GATE (ADR-0007 §3 — the engine re-decides on EVERY
+        // WRITE-SIDE PER-TENANT GATE (the engine re-decides on EVERY
         // verb, not just reads): the caller must OWN the repo (or be the operator)
         // to mutate it. Uses `authorize_WRITE`, NOT the read gate — write permission
         // is OWNERSHIP, never read-visibility: a `public` repo is readable by all
@@ -380,7 +380,7 @@ mod tests {
         );
         // D14 identity prefixes classify normally (the chain TAIL is the actor).
         assert_eq!(
-            asserted_class(&["user:gustavo".into()]).unwrap(),
+            asserted_class(&["user:alice".into()]).unwrap(),
             PrincipalClass::Human
         );
         assert_eq!(

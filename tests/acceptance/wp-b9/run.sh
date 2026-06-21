@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-B9 acceptance suite — hugit-app/exit, exit telemetry + money gate (items ①–⑥).
-# Contract: docs/plan/wp-contracts/WP-B9.md.
+# Acceptance harness for WP-B9.
 # Owned items:
 #   ① per-install activity → week-3 retention computable vs ≥40% threshold
 #      (privacy-documented)

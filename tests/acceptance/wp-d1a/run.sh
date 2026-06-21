@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-D1a acceptance suite — hugit-refstore log core (append, hash chain, replay, tamper).
-# Contract: docs/plan/wp-contracts/WP-D1a.md
+# Acceptance harness for WP-D1a.
 # Owned items (verbatim):
 #   ① 10k-event replay identical
 #   ② tamper detected

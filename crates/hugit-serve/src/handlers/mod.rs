@@ -2,8 +2,7 @@
 //!
 //! Each handler receives an ALREADY-verified [`EventLog`](hugit_refstore::EventLog)
 //! and returns its frozen [`hugit_http_contracts`] view-model. Bodies are filled
-//! per the source map in `docs/plan/2026-06-13-hugit-serve-wave1-master-plan.md`
-//! (§0/§5): REAL engine data where it exists, the documented honest default
+//! with REAL engine data where it exists, the documented honest default
 //! elsewhere — never faked. Signatures are FROZEN (the scaffold ⇄ handler seam).
 
 pub mod admin;

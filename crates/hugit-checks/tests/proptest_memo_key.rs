@@ -1,6 +1,6 @@
 //! O-1 (T-8) — PROPERTY tests for the three-axis memo key security spine.
 //!
-//! The review sweep (`docs/review/sweep-2026-06-12/tests.md`, T-8) found the
+//! An adversarial review sweep (T-8) found the
 //! memo key had ONLY hand-crafted fixtures. This is the class the mode-bit
 //! stale-green (Wave N) came from: an axis silently dropped from the key serves a
 //! cached green where the real run now fails. This suite generates random

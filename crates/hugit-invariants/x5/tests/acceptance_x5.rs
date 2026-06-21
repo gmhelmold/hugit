@@ -1,5 +1,5 @@
 //! WP-X5 acceptance oracle — namespace laws: no git-verb shadow, ref-namespace
-//! non-collision. Contract: `docs/plan/wp-contracts/WP-X5.md`.
+//! non-collision. Contract: `the work-package contract`.
 //!
 //! Owned items (one `#[test] item_<n>_<slug>` each):
 //!   ① `item_1_no_hugit_verb_shadows_git_verb` — no hugit CLI verb matches

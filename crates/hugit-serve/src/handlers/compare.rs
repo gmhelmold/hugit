@@ -47,8 +47,8 @@ pub fn build_compare(log: &EventLog, repo: &str, base: &str, head: &str) -> Comp
     // ── HONEST-STUB: diff, commits, can_merge, notes ─────────────────────────
     // No diffstat seam exists in this codebase (every DiffVm in hugit-serve is
     // an empty struct-literal stub; confirmed by inspecting pr_detail, review,
-    // and intent_detail). These fields are disclosed as stubs per ADR-0007 and
-    // the master-plan honesty discipline — never faked.
+    // and intent_detail). These fields are honestly disclosed as stubs —
+    // never faked.
     CompareVm {
         repo: repo.to_string(),
         base: scrub(base), // free text echoed from the URL — scrubbed

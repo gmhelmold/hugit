@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-D8 acceptance suite — experiment harness + gate binding.
-# Contract: docs/plan/wp-contracts/WP-D8.md
+# Acceptance harness for WP-D8.
 # Owned items:
 #   ① every wave auto-contributes datapoints
 #   ② dashboard: disjointness %, regen agree/disagree, n

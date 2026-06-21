@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-B10 acceptance suite — hugit-queue + hugit-checks, negative scope (items ①②).
-# Contract: docs/plan/wp-contracts/WP-B10.md.
+# Acceptance harness for WP-B10.
 # Owned items (ABSENCE assertions):
 #   ① no claim/lease acquired at dispatch — conflict discovery happens ONLY at
 #      landing/union (assert mechanism absent)

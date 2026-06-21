@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-X3 acceptance suite — context privacy.
-# Contract: docs/plan/wp-contracts/WP-X3.md
+# Acceptance harness for WP-X3.
 # Owned items:
 #   ① context/journals tenant-scoped (cross-tenant fetch denied)
 #   ② redaction at capture AND export

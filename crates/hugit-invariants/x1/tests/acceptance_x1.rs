@@ -1,5 +1,5 @@
 //! WP-X1 acceptance oracle — tenant-isolation RED-TEAM. Contract:
-//! `docs/plan/wp-contracts/WP-X1.md`. The owned items ARE the attack scripts.
+//! `the work-package contract`. The owned items ARE the attack scripts.
 //!
 //! Owned items (VERBATIM from the contract; one `#[test] item_<n>_<slug>` each):
 //!   ① tenant B requesting a key whose private bytes came from tenant A →

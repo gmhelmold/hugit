@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-D14 acceptance suite — hugit-refstore forge authz.
-# Contract: docs/plan/wp-contracts/WP-D14.md
+# Acceptance harness for WP-D14.
 # Owned items (verbatim):
 #   ① mutating endpoints (push/land/undo/policy) reject unauthorized principals
 #   ② permission model documented + golden-tested per principal class

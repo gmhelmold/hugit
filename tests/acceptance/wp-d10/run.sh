@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-D10 acceptance suite — why + impact.
-# Contract: docs/plan/wp-contracts/WP-D10.md
+# Acceptance harness for WP-D10.
 # Owned items (verbatim):
 #   ① hugit why <line|symbol> → originating intent + charter/author/model/cost, matching event log
 #   ② hugit impact <path|change> → golden affected-set on known build graph

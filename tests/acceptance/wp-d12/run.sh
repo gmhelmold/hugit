@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-D12 acceptance suite — regen gate.
-# Contract: docs/plan/wp-contracts/WP-D12.md
+# Acceptance harness for WP-D12.
 # Owned items:
 #   ① regen only on opt-in scope; non-opted repo never regens
 #   ② regen lands only if acceptance re-passes AND fresh independent adversarial verdict approves

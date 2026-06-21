@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-B4b acceptance suite — hugit-queue crate, GitHub integration surface (items ③④⑥).
-# Contract: docs/plan/wp-contracts/WP-B4b.md.
+# Acceptance harness for WP-B4b.
 # Owned items:
 #   ③ force-push recompute — on force-push webhook, prior union invalidated, EventRecord written
 #   ④ crash idempotent (kill-test) — worker killed mid-land; on restart: no double-merge,

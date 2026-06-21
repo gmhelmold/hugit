@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-C4 acceptance suite — hugit-checks regen driver (items ①②③④⑤⑥).
-# Contract: docs/plan/wp-contracts/WP-C4.md.
+# Acceptance harness for WP-C4.
 # Owned items:
 #   ① lockfile union regen green, 0 markers
 #   ② deterministic regen

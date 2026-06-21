@@ -1,7 +1,7 @@
 //! Shared wire atoms reused across ≥2 `/v1` view-models (landing · checks ·
 //! pr_detail). Frozen ONE place so the per-screen modules never define them twice
 //! (the shared-type drift trap). Transcribed BYTE-FOR-FIELD from the canonical
-//! `../githugr/crates/githugr-vm/src/provider.rs`; derives are copied VERBATIM
+//! companion web frontend's view-model definitions; derives are copied VERBATIM
 //! (note: f64-bearing atoms like `CostVm` derive `PartialEq` only, never `Eq` —
 //! match exactly).
 

@@ -1,6 +1,6 @@
 //! WP-B4b acceptance oracle — items ③④⑥ of B4 (the GitHub integration surface).
 //!
-//! Contract: docs/plan/wp-contracts/WP-B4b.md.
+//! Acceptance test for the GitHub integration surface contract (WP-B4b).
 //! Owned items:
 //!   ③ force-push recompute — prior union invalidated, re-folded via B4a,
 //!      EventRecord written; no stale union may land.

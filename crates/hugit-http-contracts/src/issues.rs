@@ -1,6 +1,6 @@
 //! `GET /v1/repos/{repo}/issues` → `IssuesVm` and its issue-specific nested
 //! types. Transcribed BYTE-FOR-FIELD from the canonical
-//! `../githugr/crates/githugr-vm/src/provider.rs`.
+//! companion web frontend's view-model definitions.
 
 use serde::{Deserialize, Serialize};
 
@@ -155,7 +155,7 @@ mod tests {
     #[test]
     fn issues_vm_round_trips() {
         let vm = IssuesVm {
-            repo: "humangr/corelink-server".to_string(),
+            repo: "acme/myrepo".to_string(),
             doctrine: "uma issue é um intent estacionado em PROPOSED.".to_string(),
             yours_count: 3,
             open: vec![make_row(412, "open")],

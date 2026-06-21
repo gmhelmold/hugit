@@ -1,5 +1,5 @@
 //! WP-B2a acceptance oracle — checks-as-code client + local executor +
-//! three-axis memo key. Contract: `docs/plan/wp-contracts/WP-B2a.md`.
+//! three-axis memo key. Acceptance test for the checks-client contract (WP-B2a).
 //!
 //! Owned items (VERBATIM from decomposition v2.0 §2; B2a owns ①②⑥⑦):
 //!   ① repeat tree+def→AC hit, 0 exec, <500ms

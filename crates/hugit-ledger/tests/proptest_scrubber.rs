@@ -1,6 +1,6 @@
 //! O-1 (T-8) — PROPERTY tests for the redaction scrubber security spine.
 //!
-//! The review sweep (`docs/review/sweep-2026-06-12/tests.md`, T-8) found the
+//! An adversarial review sweep (T-8) found the
 //! scrubber / `is_structural_secret` / `is_safe_identifier_shape` had ONLY
 //! hand-crafted fixtures and ZERO property/fuzz coverage. This suite asserts the
 //! redaction invariants hold over GENERATED inputs — random strings AND

@@ -1,4 +1,4 @@
-//! hugit-invariants — Squad-X erasure × provenance × mirror invariant (WP-X12).
+//! hugit-invariants — erasure × provenance × mirror invariant (WP-X12).
 //!
 //! This module proves the **three-way composition** of erasure, provenance, and
 //! the GitHub mirror holds as a standing, falsifiable invariant — without owning

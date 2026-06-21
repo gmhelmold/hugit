@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-D4 acceptance suite — intents native + projection.
-# Contract: docs/plan/wp-contracts/WP-D4.md
+# Acceptance harness for WP-D4.
 # Owned items: ① commits embed intent_id, reproducible from log
 #              ② two altitudes consistent (50-intent fixture)
 #              ③ sidecar corpus importable

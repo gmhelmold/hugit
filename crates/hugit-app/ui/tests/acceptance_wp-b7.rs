@@ -1,7 +1,7 @@
 //! WP-B7 acceptance tests — hugit-app-ui surface v0.
 //!
 //! One `#[test]` per owned item, named `item_<n>_<slug>` per the lead's
-//! convention. Contract: docs/plan/wp-contracts/WP-B7.md.
+//! convention. Contract: the work-package contract.
 //!
 //! Item ① — live status page: renders install + PR check state, JSON round-trip
 //! Item ② — exactly one edited comment/PR: upsert-by-stable-marker, count == 1

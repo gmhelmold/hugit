@@ -1,6 +1,6 @@
 //! WP-B3 acceptance tests — affected-targets v0.
 //!
-//! Contract: docs/plan/wp-contracts/WP-B3.md.
+//! Acceptance test for the affected-targets contract (WP-B3).
 //! Oracle:   tests/acceptance/wp-b3/run.sh.
 //!
 //! Naming convention (binding, pre-decided by the lead):

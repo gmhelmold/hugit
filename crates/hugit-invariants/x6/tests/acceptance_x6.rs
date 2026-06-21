@@ -1,6 +1,6 @@
 //! WP-X6 acceptance oracle — resource non-interference: infra isolation +
 //! structural accounting + (live-gated) latency/availability measurement.
-//! Contract: `docs/plan/wp-contracts/WP-X6.md`.
+//! Contract: `the work-package contract`.
 //!
 //! Owned items (one `#[test] item_<n>_<slug>` per item):
 //!   ① `item_1_corelink_unaffected_under_hugit_load` — hugit at full load

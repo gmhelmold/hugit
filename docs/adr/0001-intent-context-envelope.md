@@ -1,7 +1,7 @@
 # ADR-0001 — Intent context envelope (`context.json`)
 
-- **Status:** RATIFIED in full (owner, 2026-06-10): §7.1 capture + §7.2
-  retention + §7.3 cost-visibility (admin-defined toggle, default all) DECIDED. Owner-directed extension
+- **Status:** Accepted — 2026-06-10: §7.1 capture + §7.2
+  retention + §7.3 cost-visibility (admin-defined toggle, default all) decided. Extension
   same date: **the envelope exists at all three altitudes** — the PR carries
   the orchestrator-session envelope (trajectory + snapshot), the campaign its
   own (§2.4) — not just computed metric rollups.
@@ -43,27 +43,23 @@ stored once by content hash (deduped across intents), referenced here, scrubbed
 by the redaction policy, retention-bounded, **tenant-private, never training
 data** (whitepaper §13).
 
-**One envelope per authored unit, at every altitude** (owner-directed
-2026-06-10): the **intent** carries the subagent's envelope; the **PR** carries
+**One envelope per authored unit, at every altitude** (decided 2026-06-10):
+the **intent** carries the subagent's envelope; the **PR** carries
 the **orchestrator-session envelope** (the session transcript that planned,
 dispatched and landed the bundle, plus its context snapshot); the **campaign**
 carries its own; and the **session** itself is a first-class fourth altitude
-(owner, same date — see below). Metric **rollups** (§2.3) stay derived/computed;
+(same date — see below). Metric **rollups** (§2.3) stay derived/computed;
 the **envelopes are captured**, not derived. Same shape at every altitude — only
 `altitude` + the authored-unit id change. This is what makes the stack
 auditable top-down: campaign session ⊃ PR session ⊃ intent trajectory.
 
-**The two-transcript imperative (owner, 2026-06-10 — second directive):**
-*"os metadados de todas as camadas — intent, PR, campanha, sessão — devem ter
-Full transcript (da camada) e compacted transcript (por camada); esses 2 são
-imperativos em todas as camadas."* Concretely: at EVERY altitude the captured
-envelope MUST carry both `raw_transcript_ref` (the full transcript of that
-layer) and `task_transcript_ref` (the compacted transcript — "task" and
-"compacted" are the same thing; the owner's term is compacted). Null refs for
-these two exist ONLY under an explicit customer-tenant opt-down (§3 ladder),
+**The two-transcript imperative (2026-06-10 — second directive):**
+at EVERY altitude the captured envelope MUST carry both `raw_transcript_ref`
+(the full transcript of that layer) and `task_transcript_ref` (the compacted
+transcript). Null refs for these two exist ONLY under an explicit
+customer-tenant opt-down (§3 ladder),
 never by omission. **Campaign capture is not optional**: the campaign-driving
-session(s) are captured like any other — the owner observed correctly that
-nothing captured campaign transcripts before this directive. **Session** is
+session(s) are captured like any other. **Session** is
 its own altitude because one session may author several PRs/campaigns: the
 session envelope is the physical home of that session's full + compacted
 blobs; PR/campaign envelopes reference into it (CAS-deduped), each still
@@ -89,8 +85,8 @@ human-annotation track alongside the machine trajectory.
 {
   "schema_version": "1.2.0",          // semver; deny_unknown_fields on freeze
   // 1.0.0 → 1.1.0 (2026-06-10): Altitude gains Session (fourth altitude)
-  // 1.1.0 → 1.2.0 (WA4): cost_usd_micros integer micro-USD replaces cost_usd f64
-  "altitude": "intent",               // intent | pr | campaign | session (owner 2026-06-10)
+  // 1.1.0 → 1.2.0 (Amendment 1.2.0): cost_usd_micros integer micro-USD replaces cost_usd f64
+  "altitude": "intent",               // intent | pr | campaign | session (decided 2026-06-10)
   "intent_id": "a31",                 // the authored-unit id (pr_id / campaign at higher altitudes)
   "commit": "a31f9c…",                // git commit this intent enriches
   "tree_hash": "…",
@@ -105,7 +101,7 @@ human-annotation track alongside the machine trajectory.
       "parent_run_id": "…",           // the orchestrator that spawned it (nullable)
       "born_at": 0, "died_at": 0      // unix ms — the agent's lifespan
     },
-    "operator": "gustavo@humangr.com" // human principal who dispatched
+    "operator": "owner@example.com" // human principal who dispatched
   },
 
   // — intent: the "why" —
@@ -182,7 +178,7 @@ not hidden**. The forge computes this record; it is not stored per envelope.
   "intent_ids": ["a31","a2f","a30"],
   "intent_count": 3, "agent_count": 3, "models_used": ["opus-4.8","sonnet-4.6"],
 
-  // — the PR's OWN captured envelope (owner 2026-06-10): the orchestrator
+  // — the PR's OWN captured envelope (decided 2026-06-10): the orchestrator
   //   session that planned/dispatched/landed this bundle. Same shape as the
   //   intent envelope (§2.2, altitude:"pr"); ref'd here, captured not derived.
   //   If one session authors several PRs, each PR refs the same session blob
@@ -237,9 +233,9 @@ decomposition, plus campaign progress:
 {
   "campaign": "auth-hardening",
   "charter": "endurecer a borda de autenticação",   // human-defined goal
-  "owner": { "principal": "gustavo@humangr.com" },  // human — never a subagent
+  "owner": { "principal": "owner@example.com" },  // human — never a subagent
   "envelope_ref": "cas:…",            // campaign's own envelope (altitude:"campaign"):
-                                      // the campaign-level session(s) + snapshot (owner 2026-06-10)
+                                      // the campaign-level session(s) + snapshot (decided 2026-06-10)
   "pr_ids": ["128","129"], "pr_count": 2,
   "intent_count": 5, "agent_count": 5, "models_used": ["opus-4.8","sonnet-4.6"],
   "cost": { /* work · orchestration · verification · ci · waste · total — Σ over PRs */ },
@@ -265,12 +261,11 @@ Transcripts may carry secrets/PII (whitepaper §13). Therefore:
 
 - **Always tenant-private, never cross-tenant, never training data.** Scrubbed
   with `REDACTED_MARKER` per `redaction_policy` before the blob is written.
-- **Default capture level is `full` — RATIFIED, non-negotiable (owner
-  2026-06-10):** *"transcript 100% tem que ser salvo sempre, inegociável — o
-  fato de ser maior é ainda mais motivo pra salvar tudo."* Applies at every
-  altitude (subagent intents, orchestrator PR sessions, campaign sessions).
-  The level ladder below survives only as a **per-repo privacy opt-DOWN for
-  customer tenants** (their data, their dial) — never as our default:
+- **Default capture level is `full` — decided 2026-06-10, non-negotiable.**
+  Applies at every altitude (subagent intents, orchestrator PR sessions,
+  campaign sessions). The level ladder below survives only as a
+  **per-repo privacy opt-DOWN for customer tenants** (their data, their dial)
+  — never as the system default:
 
   | Level | Stores | Use |
   |---|---|---|
@@ -280,11 +275,11 @@ Transcripts may carry secrets/PII (whitepaper §13). Therefore:
   | `full` | + `raw_transcript_ref` | **the default** — forensics / replay |
 
   Refs absent below their level are `null`; consumers must tolerate nulls.
-- **Retention: keep forever by default — RATIFIED by the same directive**
-  ("salvo **sempre**"): no automatic TTL/GC on trajectory blobs. Content
-  leaves storage only via the explicit erasure path (tenant request →
-  tombstone: *"o conteúdo é apagável; a prova, não"*) — never via a timer.
-- **Storage tier — owner-directed (2026-06-10): trajectory blobs do NOT ride
+- **Retention: keep forever by default — decided 2026-06-10:** no automatic
+  TTL/GC on trajectory blobs. Content leaves storage only via the explicit
+  erasure path (tenant request → tombstone: the content is erasable; the
+  proof is not) — never via a timer.
+- **Storage tier — decided 2026-06-10: trajectory blobs do NOT ride
   the CoreLink hot path.** The AC/CAS fast tier exists for memoized CI
   (latency on the check path). Transcripts are write-once/read-rarely
   archive: they go to a **cheap cold object store** behind the same
@@ -339,38 +334,32 @@ Transcripts may carry secrets/PII (whitepaper §13). Therefore:
 - **Skip cost/time metrics** — rejected: the forge's differentiator is making
   agent work accountable; omitting metrics guts the value.
 
-## 7. Owner ratification record
+## 7. Decision record
 
-1. **Default capture level — RATIFIED (owner, 2026-06-10): `full`, always,
-   non-negotiable.** Owner verbatim: *"Sub agents by default transcript 100%
-   tem que ser salvo sempre, inegociável. […] o fato de ser maior é ainda mais
-   motivo pra salvar tudo."* (The §7-recommended `task` default is rejected.)
-2. **Retention — RATIFIED by the same directive: forever by default, no
-   TTL/GC.** "Salvo sempre" reads literally; erasure only via the explicit
-   tombstone path, never a timer. (The 90-day GC recommendation is rejected.)
-3. **`cost_usd` visibility — RATIFIED (owner, 2026-06-10):** an
-   **admin-controlled per-repo setting** — *"todo mundo, ou só admin (o admin
-   define)"*. Default: visible to all members (trust by transparency); the
-   repo admin can restrict to admin-only. githugr renders cost behind this
-   one toggle. §7 is now FULLY ratified.
+1. **Default capture level — decided 2026-06-10: `full`, always,
+   non-negotiable.** (The §7-recommended `task` default is rejected.)
+2. **Retention — decided by the same directive: forever by default, no
+   TTL/GC.** Erasure only via the explicit tombstone path, never a timer.
+   (The 90-day GC recommendation is rejected.)
+3. **`cost_usd` visibility — decided 2026-06-10:** an
+   **admin-controlled per-repo setting**. Default: visible to all members
+   (trust by transparency); the repo admin can restrict to admin-only.
+   githugr renders cost behind this one toggle. §7 is now fully decided.
 
-**Owner-directed extension (2026-06-10), same authority as ratification:**
+**Extension decided 2026-06-10, same authority:**
 the envelope exists at all three altitudes — **each PR carries its
 orchestrator-session envelope** (session transcript + context snapshot +
 campaign), **each campaign its own**, alongside the intents' envelopes
-(§2, §2.3 `envelope_ref`). Owner rationale: *"assim teríamos as camadas:
-transcript da sessão, snapshot de contexto e cia da campanha, de cada PR, e
-dos intents — muito mais transparente e auditável."*
+(§2, §2.3 `envelope_ref`).
 
-**Second owner directive (2026-06-10, later the same day):** the
+**Second directive (2026-06-10, later the same day):** the
 **two-transcript imperative** — full + compacted transcripts mandatory at
 EVERY layer (intent · PR · campaign · **session**, now a fourth first-class
-altitude), campaign capture explicitly included ("hoje acho que campanha não
-captura nada" — correct, fixed in WP-F2's scope). Contract consequence:
+altitude), campaign capture explicitly included. Contract consequence:
 `Altitude` gains `Session`, schema_version bumps 1.0.0 → 1.1.0 (additive;
 amended same-day as the freeze, zero producers existed).
 
-**Amendment 1.2.0 (WA4, SOTA-audit Wave A, 2026-06-11 — owner-ratified):**
+**Amendment 1.2.0 (2026-06-11):**
 `cost_usd: f64` replaced by `cost_usd_micros: u64` (integer micro-USD) across
 all nine cost fields in `IntentMetrics` and the `CostBucket` sub-struct used in
 `PrRecord`/`CampaignRollup`. Rationale: f64 accumulation is not bit-exact at

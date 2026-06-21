@@ -42,7 +42,7 @@ mod tests {
     #[test]
     fn edit_vm_round_trips() {
         let vm = EditVm {
-            repo: "humangr/corelink-server".to_string(),
+            repo: "acme/myrepo".to_string(),
             path: "crates/auth/src/token.rs".to_string(),
             workspace_note: "Workspace efêmero, só seu.".to_string(),
             lines: vec![

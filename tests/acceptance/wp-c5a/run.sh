@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-C5a acceptance suite — sparse fence materialization + path enforcement.
-# Contract: docs/plan/wp-contracts/WP-C5a.md
+# Acceptance harness for WP-C5a.
 # Owned items: ① outside path_set → ENOENT
 # Claims: crates/hugit-fence/{materialize,enforce}
 # Oracle: crates/hugit-fence/tests/acceptance_c5a.rs

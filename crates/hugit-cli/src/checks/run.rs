@@ -133,7 +133,7 @@ fn builtin_command(name: &str) -> Option<&'static str> {
 /// to such a file changes the gate's outcome while leaving the memo key unchanged
 /// → a stale green. That unbounded-read case is the SAME class as the disclosed P2
 /// hermetic-execution / files-outside-the-captured-tree seam (the runner-side
-/// isolated rootfs of campaign #1 — where the action physically cannot read
+/// isolated rootfs of the runner fabric — where the action physically cannot read
 /// outside the seeded tree axis): it is NOT closable locally by enumerating more
 /// globs. We do NOT pretend the enumeration is complete for `test`'s fixtures;
 /// the bounded config vectors are closed, the unbounded-fixture vector stays the
@@ -354,7 +354,7 @@ const TOOLCHAIN_PROBE_UNAVAILABLE: &str = "toolchain-unprobed";
 //
 // OUT OF LOCAL SCOPE (disclosed P2 runner-sandbox seam — NOT closed here):
 // whole-filesystem confinement (files outside `--root`, pruned dirs), network, and
-// clock. Those require the runner-side isolated rootfs (campaign #1) where the
+// clock. Those require the runner-side isolated rootfs (the runner fabric) where the
 // action physically cannot read outside the seeded tree axis. The local executor
 // mirrors that contract's SOUNDNESS for cwd/env/PATH; it does not exceed it.
 

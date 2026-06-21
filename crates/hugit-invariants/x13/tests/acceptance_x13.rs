@@ -1,5 +1,5 @@
 //! WP-X13 acceptance oracle — legibility × degradation/erasure.
-//! Contract: `docs/plan/wp-contracts/WP-X13.md`.
+//! Contract: `the work-package contract`.
 //!
 //! Owned items (VERBATIM from the contract; `#[test] item_<n>_…` each, plus
 //! adversarial guards proving each oracle goes RED on the gamed/broken case):

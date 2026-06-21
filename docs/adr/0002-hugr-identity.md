@@ -1,14 +1,12 @@
 # ADR-0002 — HuGR identity: one account, CoreLink machinery
 
-- **Status:** Accepted (owner-ratified 2026-06-09 — "de acordo 100%")
+- **Status:** Accepted — 2026-06-09
 - **Date:** 2026-06-09
 - **Applies to:** family-wide — **hugit** (canonical, this file) · **githugr**
   (first consumer; thin companion) · **corelink-runners** (companion) ·
-  **corelink-workspaces** (companion, delivered via
-  `docs/handoff/2026-06-09-hugr-identity-rollout.md`) · **corelink-server**
-  (the producer; work items in the same handoff)
-- **Resolves:** githugr `docs/product/product.md` §10 decision 6
-  ("identity unification").
+  **corelink-workspaces** (companion) · **corelink-server**
+  (the producer)
+- **Resolves:** identity unification across the HuGR product family.
 
 ## 1. Context
 
@@ -38,7 +36,7 @@ and a contract**, not a service.
 2. **CoreLink machinery underneath (the no-rebuild law).**
    - *Sessions/login:* the existing production **Clerk** instance — one user
      pool across surfaces (CoreLink dashboard, githugr; multi-domain/satellite
-     configuration — exact mechanism validated by the corelink techlead), with
+     configuration — exact mechanism validated by the CoreLink team), with
      the **GitHub social connection** enabled. That IS githugr's
      "sign in with GitHub" — zero new infrastructure.
    - *Accounts/tenancy:* **org = tenant_id, 1:1** — the same unit CoreLink

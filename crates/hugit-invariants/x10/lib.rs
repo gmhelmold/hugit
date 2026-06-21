@@ -1,4 +1,4 @@
-//! hugit-invariants — Squad-X adjacent-product boundary invariant (WP-X10).
+//! hugit-invariants — adjacent-product boundary invariant (WP-X10).
 //!
 //! Proves the **reformed focus gate**: hugit and CoreLink share a tenant-API
 //! channel (hugit is a paying CoreLink tenant that uses CAS/AC/R2), but that
@@ -171,7 +171,7 @@ pub fn assert_scope_separation() -> Result<(), String> {
 /// Item ⑤ is the **precondition for item ④**: the fleet-scale write-storm
 /// test (④) MUST NOT run unless ⑤ is in place and `enforced = true`.
 ///
-/// Source: `docs/plan/provisioning-day0.md` §P2 (to be provisioned); the cap
+/// Source: the provisioning record (to be provisioned); the cap
 /// is declared here as the policy fixture that the live test will verify is
 /// actually applied to the hugit CoreLink-tenant account.
 #[derive(Debug, Clone)]

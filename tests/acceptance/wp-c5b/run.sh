@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-C5b acceptance suite — secrets broker + escape red-team harness.
-# Contract: docs/plan/wp-contracts/WP-C5b.md
+# Acceptance harness for WP-C5b.
 # Owned items:
 #   ② zero secret material in job (red-team env/proc/disk)
 #   ③ broker calls audited w/ principal chain

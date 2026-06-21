@@ -196,7 +196,7 @@ mod tests {
         let mut log = EventLog::new();
         let rec = record_ref_update(
             &mut log,
-            vec!["user:gustavo".into()],
+            vec!["user:alice".into()],
             "refs/heads/main",
             "fe8f5f1e013d57d0629ff3999a71986ffc2b05fb",
             1_717_000_000_000,

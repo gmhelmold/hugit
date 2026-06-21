@@ -2,7 +2,7 @@
 //!
 //! The authz DECISION lives in the engine and is re-decided **fail-closed on
 //! every `/v1/repos/{repo}/*` read** — the window's `viewer_can` is a cosmetic
-//! hint only (githugr TL request 2026-06-15 / ADR-0007 §3). A denied private repo
+//! hint only. A denied private repo
 //! is a **404** (identical to a non-existent repo — no existence oracle).
 //!
 //! The decision uses the ENGINE-RESOLVED principal (from `two_tier_auth`), never

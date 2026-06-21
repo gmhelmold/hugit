@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-D2a acceptance suite — pack assembly + clone/fetch core.
-# Contract: docs/plan/wp-contracts/WP-D2a.md
+# Acceptance harness for WP-D2a.
 # Owned items (verbatim from decomposition v2.0 — D2a):
 #   ① clone byte-identical to mirror
 #   ② delta-only fetch

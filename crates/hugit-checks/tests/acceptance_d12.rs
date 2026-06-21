@@ -1,6 +1,6 @@
 //! WP-D12 acceptance — regenerative-rebase **landing gate**.
 //!
-//! Contract: docs/plan/wp-contracts/WP-D12.md
+//! Acceptance test for the landing gate contract (WP-D12).
 //! Oracle: tests/acceptance/wp-d12/run.sh
 //!
 //! Owned items (one `#[test] item_<n>_<slug>` each):

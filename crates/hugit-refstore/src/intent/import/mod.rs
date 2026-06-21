@@ -258,7 +258,7 @@ mod guard_tests {
         // human / orchestrator / worker (subagent) / model — all allowed for the
         // intent namespace (refs/hugit/**) via the Push cell.
         for actor in [
-            "user:gustavo",
+            "user:alice",
             "orchestrator:lead",
             "agent:runner-03",
             "model:claude",

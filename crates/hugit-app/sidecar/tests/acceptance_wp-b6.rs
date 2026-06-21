@@ -1,7 +1,7 @@
 //! WP-B6 acceptance tests — hugit-app-sidecar intent sidecar.
 //!
 //! One `#[test]` per owned item, named `item_<n>_<slug>` per the lead's
-//! convention. Contract: docs/plan/wp-contracts/WP-B6.md.
+//! convention. Contract: the work-package contract.
 //!
 //! Item ① — parse/validate/render
 //! Item ② — malformed sidecar → actionable comment (never silent drop, never

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-D13 acceptance suite — tournament.
-# Contract: docs/plan/wp-contracts/WP-D13.md
+# Acceptance harness for WP-D13.
 # Owned items:
 #   ① -n N produces N independent candidates
 #   ② judge panel selects per documented criteria (fixture w/ known-best)

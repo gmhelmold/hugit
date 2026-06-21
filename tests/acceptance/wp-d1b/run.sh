@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-D1b acceptance suite — hugit-refstore compaction/cold-tier + recovery + undo.
-# Contract: docs/plan/wp-contracts/WP-D1b.md
+# Acceptance harness for WP-D1b.
 # Owned items (verbatim):
 #   ③ compaction replay-equivalent, hot log bounded
 #   ④ undo restores + preserves history

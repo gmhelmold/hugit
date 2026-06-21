@@ -1,6 +1,6 @@
 //! WP-D8 acceptance tests — experiment harness + gate binding.
 //!
-//! Contract: docs/plan/wp-contracts/WP-D8.md
+//! Acceptance test for the experiment-harness contract (WP-D8).
 //! One `#[test] item_<n>_<slug>` per owned item ①–⑨.
 //! Gate-binding items ⑥⑧⑨ are state-machine + attestation fixture proofs (local).
 

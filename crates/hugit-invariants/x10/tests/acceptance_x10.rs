@@ -1,6 +1,6 @@
 //! WP-X10 acceptance oracle — the focus gate (adjacent-product boundary +
 //! shared API-tenancy).
-//! Contract: `docs/plan/wp-contracts/WP-X10.md`.
+//! Contract: `the work-package contract`.
 //!
 //! Owned items (one `#[test] item_<n>_<slug>` per item):
 //!
