@@ -1020,11 +1020,19 @@ mod tests {
 
     // ── SSRF allowlist / SessionExchangeConfig ────────────────────────────────
 
-    /// Helper: temporarily set an env var for the duration of the closure.
-    /// NOT thread-safe (env is process-global); only use in single-threaded
-    /// tests or with a Mutex.
+    /// Serializes every test that mutates the process-global env. cargo runs
+    /// tests concurrently in one process, so two `with_env` calls would otherwise
+    /// race on the shared `HUGIT_SESSION_EXCHANGE_URL` (observed: a CI flake where
+    /// one test removed the var while another was mid-`from_env`).
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Helper: temporarily set an env var for the duration of the closure, under
+    /// the process-wide [`ENV_LOCK`] so env-touching tests never run concurrently.
     fn with_env<F: FnOnce()>(key: &str, val: &str, f: F) {
-        // Safety: tests that touch env vars must not run concurrently.
+        // Recover from a poisoned lock (a prior test panicked mid-closure) — the
+        // env is restored below regardless, so the guard's data is irrelevant.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Safety: serialized by ENV_LOCK above; no other test mutates env concurrently.
         unsafe { std::env::set_var(key, val) };
         f();
         unsafe { std::env::remove_var(key) };
