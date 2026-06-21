@@ -121,6 +121,17 @@ pub struct PrCardVm {
     #[serde(default)]
     pub landed_ago: String,
     pub drawer: PrDrawerVm,
+
+    // F5 — per-PR queue wedge fields (additive; serde-default so old clients ignore them).
+    /// This PR's 1-based position in the active landing queue (matches the
+    /// `list_badge` "na fila #N"). REAL from the `pr.queued` order_index; `None`
+    /// when this PR is not actively queued.
+    #[serde(default)]
+    pub queue_position: Option<u32>,
+    /// Estimated seconds until this PR lands. Honest-`None` until a real estimator
+    /// seam exists (no timing seam yet).
+    #[serde(default)]
+    pub eta_seconds: Option<u64>,
 }
 
 /// A column item: a lone PR card or a campaign bundle of cards. Externally
@@ -180,17 +191,6 @@ pub struct LandingVm {
     pub list_groups: Vec<LandingListGroupVm>,
     #[serde(default)]
     pub filter_pills: Vec<String>,
-
-    // F5 — queue wedge fields (additive; serde-default so old clients ignore them).
-    /// The 1-based queue position of the first actively-queued PR on this log.
-    /// REAL: populated from the landing/queue projection (`pr.queued` order_index)
-    /// when at least one PR is in the active queue. `None` when the queue is empty.
-    #[serde(default)]
-    pub queue_position: Option<u32>,
-    /// Estimated seconds until the first queued PR lands.
-    /// Honest-`None` until a real estimator exists (no timing seam yet).
-    #[serde(default)]
-    pub eta_seconds: Option<u64>,
 }
 
 #[cfg(test)]
@@ -244,42 +244,15 @@ mod tests {
         let reparsed: LandingVm =
             serde_json::from_str(&serde_json::to_string(&vm).unwrap()).unwrap();
         assert_eq!(vm, reparsed, "LandingVm round-trip is lossless");
-        // F5: canonical JSON has no queue_position/eta_seconds — they must default to None.
+        // F5: canonical JSON has no per-PR queue_position/eta_seconds — they
+        // default to None on the PR card.
         assert_eq!(
-            vm.queue_position, None,
-            "queue_position defaults to None when absent from JSON"
+            card.queue_position, None,
+            "PrCardVm.queue_position defaults to None when absent from JSON"
         );
         assert_eq!(
-            vm.eta_seconds, None,
-            "eta_seconds defaults to None when absent from JSON"
+            card.eta_seconds, None,
+            "PrCardVm.eta_seconds defaults to None when absent from JSON"
         );
-    }
-
-    /// F5: `LandingVm.queue_position` is `Some` when a queued PR exists,
-    /// and `eta_seconds` stays `None` (no estimator seam). Exercises the
-    /// real-populated path and the honest-None path in the same fixture.
-    #[test]
-    fn landing_vm_queue_position_some_eta_seconds_none() {
-        let json_with_queue = r#"{
-          "repo": "hugit",
-          "main_green": false,
-          "main_status": "",
-          "open_count": 1,
-          "columns": [],
-          "campaigns": [],
-          "queue_position": 1,
-          "eta_seconds": null
-        }"#;
-        let vm: LandingVm =
-            serde_json::from_str(json_with_queue).expect("LandingVm with queue_position parses");
-        assert_eq!(
-            vm.queue_position,
-            Some(1),
-            "queue_position Some(1) round-trips"
-        );
-        assert_eq!(vm.eta_seconds, None, "eta_seconds None round-trips");
-        let back: LandingVm = serde_json::from_str(&serde_json::to_string(&vm).unwrap()).unwrap();
-        assert_eq!(back.queue_position, Some(1));
-        assert_eq!(back.eta_seconds, None);
     }
 }

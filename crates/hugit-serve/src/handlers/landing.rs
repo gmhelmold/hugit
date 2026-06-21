@@ -277,6 +277,10 @@ fn build_card(
             conflict_note: None,                     // STUB
             summary_diff: None,                      // STUB
         },
+        // F5: this PR's 1-based queue position (REAL from pr.queued order_index;
+        // None when not actively queued). Matches the `list_badge` "na fila #N".
+        queue_position: pos.map(|p| (p + 1) as u32),
+        eta_seconds: None, // HONEST-None — no timing estimator seam yet
     }
 }
 
@@ -322,23 +326,6 @@ fn ordered_open_prs(log: &EventLog) -> Vec<OpenedPr> {
         }
     }
     ordered
-}
-
-/// The 1-based queue position of the first actively-queued PR (the "head of
-/// the queue"), or `None` when the active queue is empty.
-///
-/// `all_pr_queued` returns only non-landed/non-abandoned PRs ordered by
-/// `order_index`; the first entry is the PR that will land next. We expose
-/// position 1 (the head) at the `LandingVm` level as a global queue signal.
-fn landing_queue_position(log: &EventLog) -> Option<u32> {
-    let queued = all_pr_queued(log);
-    if queued.is_empty() {
-        None
-    } else {
-        // The smallest order_index in the active queue is the head of the queue.
-        // Display as 1-based (matches the per-card `list_badge` convention).
-        Some(1)
-    }
 }
 
 /// Build the landing view-model from a verified event log.
@@ -396,9 +383,6 @@ pub fn build_landing(log: &EventLog, repo: &str) -> LandingVm {
         })
         .collect();
 
-    // F5 — queue position: REAL from the active queue projection.
-    let queue_position = landing_queue_position(log);
-
     LandingVm {
         repo: repo.to_string(),     // REAL
         main_green: false,          // STUB — NO local main-CI status seam
@@ -415,8 +399,5 @@ pub fn build_landing(log: &EventLog, repo: &str) -> LandingVm {
             "Bloqueado".to_string(),
             "Pousado hoje".to_string(),
         ],
-        // F5 — queue wedge fields.
-        queue_position,    // REAL — head of the active queue; None when empty
-        eta_seconds: None, // HONEST-None — no timing estimator seam yet
     }
 }

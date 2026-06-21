@@ -557,6 +557,14 @@ pub fn load_event_log(path: &Path) -> Result<EventLog, PorcelainError> {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Git-proximate auto-init: a fresh repo has no `.hugit/log.json` yet.
+            // When the path is the conventional default, treat an absent log as
+            // an EMPTY log (honest "nothing recorded yet") rather than erroring —
+            // no `init` ceremony to start using hugit. An explicit, non-default
+            // `--log <path>` that's missing is still a hard error (likely a typo).
+            if path == std::path::Path::new(crate::log_resolve::DEFAULT_LOG_PATH) {
+                return Ok(EventLog::new());
+            }
             return Err(PorcelainError::log_not_found(path));
         }
         Err(e) => return Err(PorcelainError::io("read log", path, &e)),
@@ -617,6 +625,26 @@ mod tests {
         assert_eq!(v["axes"]["tree_hash"], "aa");
         assert_eq!(v["axes"]["def_digest"], "bb");
         assert_eq!(v["axes"]["toolchain_digest"], "cc");
+    }
+
+    #[test]
+    fn absent_default_log_is_an_empty_log_not_an_error() {
+        // Git-proximate auto-init: the conventional default path, when absent,
+        // loads as an empty log (no `init` ceremony). An explicit missing path
+        // is still a hard error (likely a typo).
+        let default = std::path::Path::new(crate::log_resolve::DEFAULT_LOG_PATH);
+        assert!(
+            !default.exists(),
+            "test precondition: no .hugit/log.json in cwd"
+        );
+        let log = load_event_log(default).expect("absent default → empty, not error");
+        assert_eq!(log.records().len(), 0);
+
+        let explicit = std::path::Path::new("does/not/exist/zzz-explicit.json");
+        assert!(
+            load_event_log(explicit).is_err(),
+            "an explicit, missing, non-default path must still error"
+        );
     }
 
     #[test]

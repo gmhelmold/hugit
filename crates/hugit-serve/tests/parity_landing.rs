@@ -19,14 +19,15 @@ fn push(log: &mut EventLog, kind: &str, payload: serde_json::Value, at: u64) {
     log.append_for_test(kind, vec!["test".to_string()], payload.to_string(), at);
 }
 
-/// Collect every lone `PrCardVm` across all columns of a `LandingVm`.
+/// Collect every `PrCardVm` across all columns of a `LandingVm` — both lone
+/// cards AND cards bundled under a campaign.
 fn all_cards(vm: &LandingVm) -> Vec<&PrCardVm> {
     vm.columns
         .iter()
         .flat_map(|c| c.items.iter())
-        .filter_map(|item| match item {
-            LandingItemVm::Card(c) => Some(c.as_ref()),
-            _ => None,
+        .flat_map(|item| match item {
+            LandingItemVm::Card(c) => vec![c.as_ref()],
+            LandingItemVm::Bundle { cards, .. } => cards.iter().collect(),
         })
         .collect()
 }
@@ -217,6 +218,8 @@ fn landing_item_card_round_trips_externally_tagged() {
             conflict_note: None,
             summary_diff: None,
         },
+        queue_position: Some(2),
+        eta_seconds: None,
     };
     let item = LandingItemVm::Card(Box::new(card));
 
@@ -240,19 +243,14 @@ fn landing_item_card_round_trips_externally_tagged() {
 
 // ── F5: queue_position and eta_seconds ────────────────────────────────────────
 
-/// F5: empty log → `queue_position` is `None` (no queued PRs).
-/// `eta_seconds` is always `None` (no estimator seam exists).
+/// F5: empty log → no PR cards at all (so no per-PR `queue_position`).
 #[test]
-fn empty_log_queue_position_none_eta_none() {
+fn empty_log_has_no_cards_so_no_queue_position() {
     let log = EventLog::new();
     let vm = build_landing(&log, "hugit");
-    assert_eq!(
-        vm.queue_position, None,
-        "queue_position is None when no PRs are queued"
-    );
-    assert_eq!(
-        vm.eta_seconds, None,
-        "eta_seconds is always None (no estimator seam)"
+    assert!(
+        all_cards(&vm).is_empty(),
+        "an empty log projects no PR cards"
     );
 }
 
@@ -262,15 +260,17 @@ fn empty_log_queue_position_none_eta_none() {
 fn queued_pr_makes_queue_position_some() {
     let mut log = EventLog::new();
 
-    // Open a PR.
+    // Open a PR (mirror the projected-card payload shape).
     push(
         &mut log,
         "pr.opened",
         serde_json::json!({
             "pr_id": "42",
             "campaign": "wave-f5",
+            "author_kind": "orchestrator",
             "intent_ids": ["i-1"],
-            "title": "test pr"
+            "principal": serde_json::Value::Null,
+            "run_id": "r-1",
         }),
         1_000,
     );
@@ -289,13 +289,17 @@ fn queued_pr_makes_queue_position_some() {
     );
 
     let vm = build_landing(&log, "hugit");
+    let card = all_cards(&vm)
+        .into_iter()
+        .find(|c| c.number == 42)
+        .expect("the queued PR projects a card");
     assert_eq!(
-        vm.queue_position,
+        card.queue_position,
         Some(1),
-        "queue_position is Some(1) when one PR is queued"
+        "the queued PR's card carries its 1-based queue_position"
     );
     assert_eq!(
-        vm.eta_seconds, None,
+        card.eta_seconds, None,
         "eta_seconds stays None (no estimator)"
     );
 }

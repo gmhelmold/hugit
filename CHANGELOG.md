@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(product): **Wave-1 product refinement** (the "fit like a glove" pass).
+  - **CLI git-proximity:** `--log` now defaults to `$HUGIT_LOG` else `.hugit/log.json` (no more passing it every time); a fresh repo auto-inits (absent default log = empty, no ceremony); `check run|show|key` (merged `check`+`checks`); `verdict approve|reject` (folded the top-level `approve`/`reject`); `pr queue` + `pr land` (replaced `pr land --settle`); top-level `note` (was `journal note`); bare `hugit` prints help on a TTY; internal jargon stripped from `--help`.
+  - **serve:** `git push` returns a clear 403 message (not a silent 404); `/readyz` exposes `git_serving`; interim real code search over the git tree; `GET /v1/orgs/{name}` (thin real `OrgVm`).
+  - **contracts (additive, non-breaking):** raw-integer cost fields (`cost_*_micros`/`*_count`) + `spend_proof` alongside the display strings; F5 wedge fields — per-PR `queue_position`/`eta_seconds` on the PR card, `conflict_pair`, `cache_efficiency_pct` (real where data exists, honest-null otherwise).
+  - **docs:** README/product lead with the value couplet + an honest live/next/roadmap status table; surfaced `export`/`import`/`undo`/`symbol`; one beachhead ICP.
+
 - chore(redact): break the contiguous secret signatures in the scrubber's FAKE test-vectors (Slack/SendGrid/Stripe) via runtime-invariant `\x` escapes — identical bytes at runtime (redaction + tests unchanged), but the source no longer trips GitHub push-protection / secret-scanning, so the public mirror keeps push-protection ON.
 
 - fix(security): **HTTP/git-wire DoS + SSRF hardening** (convergence-audit wave 2) — cap `list_tree_at_dir` (2000 entries) + path depth (64); cap `symbol --ref` blob read (10 MiB) + reject leading-dash refspec; SSRF-allowlist `HUGIT_SESSION_EXCHANGE_URL` (trusted host suffixes, fail-closed); cap the CAS error-body read (64 KiB) and `search` `q` (1024 B). (upload-pack pack-size accounting deferred — needs protocol flow-control.)

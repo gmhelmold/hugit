@@ -45,9 +45,9 @@ the hugit repo itself. The rest is honest about where it stands:
 | `hugit import` — bring your repo | **LIVE** | `hugit import` pulls a GitHub repo into the forge without leaving GitHub |
 | `/v1` read+write API | **LIVE (1 repo)** | 11/20 reads serve chain-verified data; 9 POST verbs CAS-persisted + authz-gated; SSE replay |
 | `hugit check` / `hugit verdict` | **LIVE** | real policy-engine EXECUTE paths; `hugit policy test` runs local≡forge |
-| `hugit approve` / `hugit reject` | **LIVE** | single-lens wrappers over the canonical verdict record |
+| `hugit verdict approve` / `hugit verdict reject` | **LIVE** | single-lens wrappers over the canonical verdict record |
 | `hugit undo` | **LIVE** | event-sourced compensating undo; force-push data-loss is unexpressible |
-| `hugit journal note` | **LIVE** | appends a signed record to the canonical log |
+| `hugit note` | **LIVE** | appends a signed record to the canonical log |
 | `hugit fleet` / `hugit ledger` / `hugit watch` | **LIVE** | real log-backed commands |
 | `hugit diag` | **LIVE** | log-backed bisect |
 | `hugit policy edit` | **LIVE** | append-only policy changes over the house baseline |
