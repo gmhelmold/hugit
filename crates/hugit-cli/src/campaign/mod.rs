@@ -54,9 +54,9 @@ pub struct CampaignArgs {
 /// The campaign subcommand surface (WP-PC1 + WP-WB-CAMP).
 #[derive(Subcommand, Debug)]
 pub enum CampaignCommand {
-    /// Open a campaign: charter + human owner (D14) → `campaign.opened` record.
+    /// Open a campaign: charter + human owner → records `campaign.opened`.
     Open(OpenArgs),
-    /// Close (SEAL) a campaign: whole-bundle proof + Ledger "provado" + cost rollup.
+    /// Close (SEAL) a campaign: whole-bundle proof + proven count + cost rollup.
     Close(CloseArgs),
     /// Show campaign progress: landed / in-flight / blocked.
     Show(ShowArgs),
@@ -73,16 +73,16 @@ pub enum CampaignCommand {
 pub struct OpenArgs {
     /// Path to the JSON world file (the local event log + envelopes). Read,
     /// then rewritten with the appended `campaign.opened` record.
-    #[arg(long)]
-    pub log: PathBuf,
+    #[arg(long, help = crate::log_resolve::LOG_FLAG_HELP)]
+    pub log: Option<PathBuf>,
     /// The campaign key (stable identifier; the landing-queue bundle key).
     #[arg(long)]
     pub campaign: String,
     /// Human-readable charter — the campaign's "why".
     #[arg(long)]
     pub charter: String,
-    /// The owning **human** principal (D14: a campaign is owned by a human,
-    /// never a subagent).
+    /// The owning human principal (a campaign is owned by a human, never an
+    /// agent).
     #[arg(long)]
     pub owner: String,
 }
@@ -92,8 +92,8 @@ pub struct OpenArgs {
 pub struct CloseArgs {
     /// Path to the JSON world file. Read, then rewritten with the appended
     /// `campaign.closed` record on success.
-    #[arg(long)]
-    pub log: PathBuf,
+    #[arg(long, help = crate::log_resolve::LOG_FLAG_HELP)]
+    pub log: Option<PathBuf>,
     /// The campaign key to close.
     #[arg(long)]
     pub campaign: String,
@@ -109,8 +109,8 @@ pub struct CloseArgs {
 #[derive(clap::Args, Debug)]
 pub struct ShowArgs {
     /// Path to the JSON world file. Read-only — `show` never writes.
-    #[arg(long)]
-    pub log: PathBuf,
+    #[arg(long, help = crate::log_resolve::LOG_FLAG_HELP)]
+    pub log: Option<PathBuf>,
     /// The campaign key to project.
     #[arg(long)]
     pub campaign: String,
@@ -120,8 +120,8 @@ pub struct ShowArgs {
 #[derive(clap::Args, Debug)]
 pub struct ListArgs {
     /// Path to the JSON world file. Read-only — `list` never writes.
-    #[arg(long)]
-    pub log: PathBuf,
+    #[arg(long, help = crate::log_resolve::LOG_FLAG_HELP)]
+    pub log: Option<PathBuf>,
 }
 
 /// `hugit campaign abandon` — mark a campaign abandoned (idempotent).
@@ -129,8 +129,8 @@ pub struct ListArgs {
 pub struct AbandonArgs {
     /// Path to the JSON world file. Read, then rewritten with the appended
     /// `campaign.abandoned` record on success.
-    #[arg(long)]
-    pub log: PathBuf,
+    #[arg(long, help = crate::log_resolve::LOG_FLAG_HELP)]
+    pub log: Option<PathBuf>,
     /// The campaign key to abandon.
     #[arg(long)]
     pub campaign: String,

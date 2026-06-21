@@ -32,8 +32,8 @@ use crate::porcelain::PorcelainError;
 pub struct WatchArgs {
     /// Path to the canonical JSON event log (`[EventRecord, …]`) — the one
     /// `--log` seam every porcelain verb shares.
-    #[arg(long)]
-    pub log: PathBuf,
+    #[arg(long, help = crate::log_resolve::LOG_FLAG_HELP)]
+    pub log: Option<PathBuf>,
     /// Optional class filter: `landing` | `verdict` | `policy-change` |
     /// `ws-state` | `other`. Unmatched ⇒ an empty (honest) line set.
     #[arg(long)]
@@ -57,7 +57,8 @@ pub fn run(args: WatchArgs) -> ExitCode {
 
 /// Project the classified, redacted event stream from the canonical log.
 fn project(args: &WatchArgs) -> Result<Value, PorcelainError> {
-    let log = load_event_log(&args.log)?;
+    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+    let log = load_event_log(&log_path)?;
     let mut display = WatchDisplay::new();
     let lines = display.process_batch(log.records());
 

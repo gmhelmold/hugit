@@ -30,8 +30,8 @@ use hugit_policy::{GateDescriptor, POLICY_CHANGE_KIND, house_gates};
 #[derive(clap::Args, Debug)]
 pub struct EditArgs {
     /// Path to the canonical JSON event log (`[EventRecord, …]`).
-    #[arg(long)]
-    pub log: PathBuf,
+    #[arg(long, help = crate::log_resolve::LOG_FLAG_HELP)]
+    pub log: Option<PathBuf>,
 
     /// The gate id to toggle (`dco` | `changelog` | `secrets`).
     #[arg(long)]
@@ -90,8 +90,11 @@ fn do_run(args: EditArgs) -> Result<String, CampaignError> {
         .map(crate::redaction::scrub)
         .unwrap_or_else(|| "user:cli".to_string());
 
+    // Resolve the default --log ($HUGIT_LOG → .hugit/log.json) once.
+    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+
     // ── Lock BEFORE load (WC1); bootstrap=false (a policy edit needs a log) ───
-    let (_lock, world) = World::lock_and_load(&args.log, false)?;
+    let (_lock, world) = World::lock_and_load(&log_path, false)?;
 
     // ── Reconstruct the current gate set: fold policy.change over the baseline ─
     // Start from the house baseline; each policy.change's `new` (a serialised
@@ -182,7 +185,7 @@ fn do_run(args: EditArgs) -> Result<String, CampaignError> {
         })?;
 
     // ── Atomic persist (WC1) ──────────────────────────────────────────────────
-    persist_log(&args.log, &log)?;
+    persist_log(&log_path, &log)?;
 
     Ok(json!({
         "gate": args.gate,
@@ -229,7 +232,7 @@ mod tests {
         let log = scratch("disable");
         let before = records(&log).len();
         let out = do_run(EditArgs {
-            log: log.clone(),
+            log: Some(log.clone()),
             gate: "dco".to_string(),
             enable: false,
             disable: true,
@@ -259,7 +262,7 @@ mod tests {
     fn second_edit_folds_over_first() {
         let log = scratch("fold");
         do_run(EditArgs {
-            log: log.clone(),
+            log: Some(log.clone()),
             gate: "dco".to_string(),
             enable: false,
             disable: true,
@@ -268,7 +271,7 @@ mod tests {
         .expect("disable");
         // Now re-enable — the fold must see dco currently disabled and flip it.
         let out = do_run(EditArgs {
-            log: log.clone(),
+            log: Some(log.clone()),
             gate: "dco".to_string(),
             enable: true,
             disable: false,
@@ -287,7 +290,7 @@ mod tests {
         let before = records(&log).len();
         // dco is enabled by default; --enable is a no-op.
         let out = do_run(EditArgs {
-            log: log.clone(),
+            log: Some(log.clone()),
             gate: "dco".to_string(),
             enable: true,
             disable: false,
@@ -304,7 +307,7 @@ mod tests {
     fn unknown_gate_is_rejected() {
         let log = scratch("unknown");
         let err = do_run(EditArgs {
-            log: log.clone(),
+            log: Some(log.clone()),
             gate: "nonsense".to_string(),
             enable: false,
             disable: true,
@@ -320,7 +323,7 @@ mod tests {
     fn missing_enable_disable_is_invalid() {
         let log = scratch("noflag");
         let err = do_run(EditArgs {
-            log,
+            log: Some(log),
             gate: "dco".to_string(),
             enable: false,
             disable: false,
@@ -338,7 +341,7 @@ mod tests {
             std::env::temp_dir().join(format!("hugit-policy-edit-missing-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let err = do_run(EditArgs {
-            log: dir.join("no-such.json"),
+            log: Some(dir.join("no-such.json")),
             gate: "dco".to_string(),
             enable: false,
             disable: true,

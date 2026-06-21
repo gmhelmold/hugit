@@ -40,6 +40,7 @@ fn record_check(log: &str, dir: &Path, name: &str, cmd: &str) {
     let ac = dir.join(format!("{name}.ac"));
     let (code, v) = run(&[
         "check",
+        "run",
         "--def",
         name,
         "--cmd",

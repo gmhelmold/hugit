@@ -125,6 +125,7 @@ fn check_redacts_free_text_secrets_in_principal_and_cmd_on_the_log() {
     // `--principal` (the principal-chain string), which remains scrubbed at rest.
     let out = run(&[
         "check",
+        "run",
         "--def",
         "deploy-check",
         "--cmd",
@@ -195,6 +196,7 @@ fn verdict_redacts_secrets_in_intent_and_lens_on_the_log() {
 
     let out = run(&[
         "verdict",
+        "record",
         "--intent",
         &format!("intent-{PAT}"),
         "--log",
@@ -399,13 +401,13 @@ fn pr_queued_and_landed_redact_secret_pr_id_on_the_log() {
     // unaffected): open → land → settle, all exit-0, log carries no PAT.
     let clean_pr = "pr-clean-1";
     assert!(open_pr(log_s, clean_pr, "run-1").status.success());
-    let land = run(&["pr", "land", "--log", log_s, "--pr", clean_pr]);
+    let land = run(&["pr", "queue", "--log", log_s, "--pr", clean_pr]);
     assert!(
         land.status.success(),
         "pr land exits 0: {}",
         stdout_of(&land)
     );
-    let settle = run(&["pr", "land", "--log", log_s, "--pr", clean_pr, "--settle"]);
+    let settle = run(&["pr", "land", "--log", log_s, "--pr", clean_pr]);
     assert!(
         settle.status.success(),
         "pr land --settle exits 0: {}",
@@ -434,6 +436,7 @@ fn legit_digest_survives_the_scrub_on_a_real_check_recorded_row() {
 
     let out = run(&[
         "check",
+        "run",
         "--def",
         "green-check",
         "--cmd",

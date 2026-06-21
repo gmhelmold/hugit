@@ -166,13 +166,13 @@ fn full_wedge_chain_campaign_intent_pr_check_verdict_proven() {
     assert_chain_verifies(&log);
 
     // ── Step 4: pr land (enqueue) ────────────────────────────────────────────
-    let (code, v) = run(&["pr", "land", "--log", log_s, "--pr", pr_id]);
+    let (code, v) = run(&["pr", "queue", "--log", log_s, "--pr", pr_id]);
     assert_eq!(code, 0, "step 4: pr land exits 0: {v}");
     assert_eq!(v["queued"], true, "PR is queued: {v}");
     assert_chain_verifies(&log);
 
     // ── Step 5: pr land --settle (land) ─────────────────────────────────────
-    let (code, v) = run(&["pr", "land", "--log", log_s, "--pr", pr_id, "--settle"]);
+    let (code, v) = run(&["pr", "land", "--log", log_s, "--pr", pr_id]);
     assert_eq!(code, 0, "step 5: pr land --settle exits 0: {v}");
     assert_eq!(v["landed"], true, "PR landed: {v}");
     assert_eq!(v["already_landed"], false, "first settle: {v}");
@@ -187,6 +187,7 @@ fn full_wedge_chain_campaign_intent_pr_check_verdict_proven() {
     // verb runs, records, and the key is a 64-char digest — not the gate result.
     let check_args = &[
         "check",
+        "run",
         "--def",
         "fmt",
         "--log",
@@ -247,7 +248,7 @@ fn full_wedge_chain_campaign_intent_pr_check_verdict_proven() {
     // The rate is either 50% (miss + hit rows) or 0% / null if only the MISS
     // row landed.  We assert what is STABLE: the KPIs are non-null and
     // `checks show` exits 0 with a positive check_count.
-    let (code, show) = run(&["checks", "show", "--log", log_s]);
+    let (code, show) = run(&["check", "show", "--log", log_s]);
     assert_eq!(code, 0, "step 8: checks show exits 0: {show}");
     assert!(
         show["check_count"].as_u64().unwrap_or(0) >= 1,
@@ -275,8 +276,8 @@ fn full_wedge_chain_campaign_intent_pr_check_verdict_proven() {
 
     // ── Step 9: hugit verdict --intent --lens c --result approve --store ─────
     let (code, v) = run(&[
-        "verdict", "--log", log_s, "--store", "--intent", intent_id, "--lens", "c", "--result",
-        "approve",
+        "verdict", "record", "--log", log_s, "--store", "--intent", intent_id, "--lens", "c",
+        "--result", "approve",
     ]);
     assert_eq!(code, 0, "step 9: verdict exits 0: {v}");
     assert_eq!(

@@ -29,19 +29,19 @@ use hugit_diag::bisect::{
     BisectError, CheckOracle, History, ProbeOutcome, ProbeVerdict, RedSignal, on_red_signal,
 };
 
-/// The event kind the wedge EXECUTE path (`hugit check --store`) appends.
+/// The event kind the wedge EXECUTE path (`hugit check run --store`) appends.
 const CHECK_RECORDED_KIND: &str = "check.recorded";
 
 /// Arguments for `hugit diag`.
 #[derive(clap::Args, Debug)]
 pub struct DiagArgs {
-    /// Path to the canonical JSON event log (`[EventRecord, …]`). Read + chain-
-    /// verified; the `check.recorded` events on it are the diagnosis input.
-    #[arg(long)]
-    pub log: PathBuf,
+    /// Path to the canonical JSON event log. Defaults to $HUGIT_LOG, else
+    /// .hugit/log.json. The `check.recorded` events on it are the diagnosis input.
+    #[arg(long, help = crate::log_resolve::LOG_FLAG_HELP)]
+    pub log: Option<PathBuf>,
 
     /// The check definition digest (axis 2 of the memo key) to diagnose. Get it
-    /// from `hugit check` output or `hugit checks show`.
+    /// from `hugit check run` output or `hugit check show`.
     #[arg(long = "def-digest")]
     pub def_digest: String,
 
@@ -131,7 +131,8 @@ pub fn run(args: DiagArgs) -> ExitCode {
 
 fn do_run(args: DiagArgs) -> Result<String, PorcelainError> {
     // Load + chain-verify the log (log_not_found / parse_log / chain_broken).
-    let log = load_event_log(&args.log)?;
+    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+    let log = load_event_log(&log_path)?;
 
     // ── Project the check.recorded rows for this def_digest ───────────────────
     // Ordered by chain seq (records() is in seq order); filter by the def axis
@@ -173,8 +174,8 @@ fn do_run(args: DiagArgs) -> Result<String, PorcelainError> {
                     .map(|t| format!(" + toolchain '{}'", crate::redaction::scrub(t)))
                     .unwrap_or_default()
             ),
-            "record check runs first (`hugit check --def … --store`) or pass a \
-             --def-digest that exists on the log (see `hugit checks show`)",
+            "record check runs first (`hugit check run --def … --store`) or pass a \
+             --def-digest that exists on the log (see `hugit check show`)",
         ));
     }
 
@@ -315,7 +316,7 @@ mod tests {
         });
 
         let result = do_run(DiagArgs {
-            log: path,
+            log: Some(path),
             def_digest: DEF.to_string(),
             toolchain: Some(TC.to_string()),
         })
@@ -343,7 +344,7 @@ mod tests {
             record_check(log, &"b".repeat(64), DEF, TC, 0); // green tip
         });
         let result = do_run(DiagArgs {
-            log: path,
+            log: Some(path),
             def_digest: DEF.to_string(),
             toolchain: Some(TC.to_string()),
         })
@@ -359,7 +360,7 @@ mod tests {
             record_check(log, &"a".repeat(64), DEF, TC, 1);
         });
         let err = do_run(DiagArgs {
-            log: path,
+            log: Some(path),
             def_digest: "deadbeef".to_string(),
             toolchain: None,
         })
@@ -377,7 +378,7 @@ mod tests {
             record_check(log, &"a".repeat(64), DEF, tc2, 1);
         });
         let err = do_run(DiagArgs {
-            log: path,
+            log: Some(path),
             def_digest: DEF.to_string(),
             toolchain: None,
         })
@@ -392,7 +393,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("hugit-diag-missing-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let err = do_run(DiagArgs {
-            log: dir.join("no-such.json"),
+            log: Some(dir.join("no-such.json")),
             def_digest: DEF.to_string(),
             toolchain: None,
         })

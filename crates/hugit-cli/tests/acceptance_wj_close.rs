@@ -81,8 +81,8 @@ fn land_intent(log_s: &str, store_s: &str, campaign: &str, intent_id: &str) {
 fn record_verdict(log_s: &str, intent_id: &str, result: &str) {
     let out = Command::new(hugit_bin())
         .args([
-            "verdict", "--log", log_s, "--store", "--intent", intent_id, "--lens", "security",
-            "--result", result,
+            "verdict", "record", "--log", log_s, "--store", "--intent", intent_id, "--lens",
+            "security", "--result", result,
         ])
         .output()
         .expect("hugit runs");
@@ -250,8 +250,8 @@ fn g_post_close_verdict_revision_does_not_rewrite_seal_fact() {
     // refused with `campaign_sealed`/exit-2 — the mutation never reaches the log.
     let post_close_out = Command::new(hugit_bin())
         .args([
-            "verdict", "--log", log_s, "--store", "--intent", intent_id, "--lens", "security",
-            "--result", "approve",
+            "verdict", "record", "--log", log_s, "--store", "--intent", intent_id, "--lens",
+            "security", "--result", "approve",
         ])
         .output()
         .expect("hugit runs");

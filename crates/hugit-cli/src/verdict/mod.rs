@@ -43,6 +43,7 @@ pub use hugit_contracts::{IntentSidecar, Verdict, VerdictObject};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use clap::Subcommand;
 use serde_json::{Value, json};
 
 use crate::checks::load_event_log;
@@ -58,27 +59,46 @@ use crate::pr::filelock::{FileLock, LockError, atomic_write};
 /// the recorder targets; the campaign read and the recorder agree by this const.
 pub const VERDICT_RECORDED_KIND: &str = "verdict.recorded";
 
-/// `hugit verdict` flags — the adversarial-verdict EXECUTE path (W-VERDICT,
-/// ported onto W0's frozen flat `verdict` entry point at W-INT).
+/// `hugit verdict <subcommand>` — the adversarial-verdict verb.
 ///
-/// Convenes a multi-lens adversarial panel for `--intent` (one `--lens NAME
-/// --result approve|fix_first|reject` pair per lens, positionally paired) and —
-/// with `--store` — records the aggregate [`VerdictObject`] onto the canonical
-/// `--log` as a [`VERDICT_RECORDED_KIND`] event the way `campaign show` reads it.
-///
-/// W0 froze the seam `--intent --log [--store]`; W-INT ports the W-VERDICT
-/// recorder body in behind it and adds the *additive* `--lens` / `--result` /
-/// `--tree-hash` / `--recorded-at` flags — all optional-or-repeatable, so the
-/// frozen `--intent --log [--store]` contract is unchanged.
+/// Git-proximity cleanup: the single-lens stakeholder decisions that used to be
+/// the top-level `hugit approve` / `hugit reject` verbs now live UNDER `verdict`
+/// (`verdict approve` / `verdict reject`), alongside the full multi-lens panel
+/// (`verdict record`). One concept, one verb, three subcommands — no two extra
+/// top-level tokens for what is a verdict.
 #[derive(clap::Args, Debug)]
 pub struct VerdictArgs {
+    #[command(subcommand)]
+    pub command: VerdictCommand,
+}
+
+/// The verdict subcommand surface — `record` (multi-lens panel) / `approve` /
+/// `reject` (single-lens stakeholder decisions).
+#[derive(Subcommand, Debug)]
+pub enum VerdictCommand {
+    /// Convene a multi-lens adversarial panel and record its aggregate verdict.
+    Record(VerdictRecordArgs),
+    /// Record a single-lens APPROVE verdict for an intent (stakeholder decision).
+    Approve(DecisionArgs),
+    /// Record a single-lens REJECT verdict for an intent (stakeholder decision).
+    Reject(DecisionArgs),
+}
+
+/// `hugit verdict record` flags — convene a multi-lens adversarial panel for
+/// `--intent` (one `--lens NAME --result approve|fix_first|reject` pair per lens,
+/// positionally paired) and — with `--store` — record the aggregate
+/// [`VerdictObject`] onto the canonical `--log` as a [`VERDICT_RECORDED_KIND`]
+/// event the way `campaign show` reads it.
+#[derive(clap::Args, Debug)]
+pub struct VerdictRecordArgs {
     /// The intent / change id to convene the verdict panel over.
     #[arg(long)]
     pub intent: String,
     /// Path to the canonical JSON event log — the shared `--log` seam the
     /// recorded verdict is appended to and `campaign show` projects `proven` from.
-    #[arg(long)]
-    pub log: PathBuf,
+    /// Defaults to $HUGIT_LOG, else .hugit/log.json.
+    #[arg(long, help = crate::log_resolve::LOG_FLAG_HELP)]
+    pub log: Option<PathBuf>,
     /// Record the [`VerdictObject`] onto the log as a `verdict.recorded` event
     /// (the recorder seam `campaign show` reads). Omit to convene without
     /// persisting (a dry panel).
@@ -109,7 +129,17 @@ pub struct VerdictArgs {
 /// verdict (intent, per-lens breakdown, aggregate), or the canonical
 /// `{"error":{…}}` envelope (exit 2) on any fault.
 pub fn run(args: VerdictArgs) -> ExitCode {
-    match record(args) {
+    match args.command {
+        VerdictCommand::Record(a) => emit(record(a)),
+        VerdictCommand::Approve(a) => run_approve(a),
+        VerdictCommand::Reject(a) => run_reject(a),
+    }
+}
+
+/// Emit a `Result<Value, PorcelainError>` as stable JSON on stdout under the one
+/// error/exit law.
+fn emit(result: Result<Value, PorcelainError>) -> ExitCode {
+    match result {
         Ok(value) => {
             println!("{value}");
             ExitCode::SUCCESS
@@ -150,7 +180,7 @@ pub fn run(args: VerdictArgs) -> ExitCode {
 /// The `--store` append routes through `append_authorized(Orchestrator, Land)` —
 /// the same guard the `pr.queued` append uses (WA2b: the orchestrator lands
 /// changes through the queue; recording a verdict is its integration primitive).
-fn record(args: VerdictArgs) -> Result<Value, PorcelainError> {
+fn record(args: VerdictRecordArgs) -> Result<Value, PorcelainError> {
     // ── Validate lens/result pairs ────────────────────────────────────────────
     if args.lens.is_empty() {
         return Err(PorcelainError::new(
@@ -253,7 +283,8 @@ fn record(args: VerdictArgs) -> Result<Value, PorcelainError> {
     }
 
     // ── Acquire advisory lock + load log ─────────────────────────────────────
-    let path = &args.log;
+    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+    let path = &log_path;
     let _lock = FileLock::acquire(path).map_err(|e| lock_error(e, path))?;
     let log = load_event_log(path)?;
 
@@ -422,9 +453,10 @@ pub struct DecisionArgs {
     /// The intent / change id to approve or reject.
     #[arg(long)]
     pub intent: String,
-    /// Path to the canonical JSON event log the decision is appended to.
-    #[arg(long)]
-    pub log: PathBuf,
+    /// Path to the canonical JSON event log the decision is appended to. Defaults
+    /// to $HUGIT_LOG, else .hugit/log.json.
+    #[arg(long, help = crate::log_resolve::LOG_FLAG_HELP)]
+    pub log: Option<PathBuf>,
     /// Workspace Merkle tree hash of the reviewed snapshot (honest-default empty;
     /// the real hash is a P2 live-infra seam — same as `hugit verdict`).
     #[arg(long = "tree-hash", default_value = "")]
@@ -434,20 +466,20 @@ pub struct DecisionArgs {
     pub recorded_at: u64,
 }
 
-/// `hugit approve` — record a single-lens APPROVE verdict for `--intent`.
-pub fn run_approve(args: DecisionArgs) -> ExitCode {
+/// `hugit verdict approve` — record a single-lens APPROVE verdict for `--intent`.
+fn run_approve(args: DecisionArgs) -> ExitCode {
     run_decision(args, "approve")
 }
 
-/// `hugit reject` — record a single-lens REJECT verdict for `--intent`.
-pub fn run_reject(args: DecisionArgs) -> ExitCode {
+/// `hugit verdict reject` — record a single-lens REJECT verdict for `--intent`.
+fn run_reject(args: DecisionArgs) -> ExitCode {
     run_decision(args, "reject")
 }
 
 /// Build a single-lens [`VerdictArgs`] from a [`DecisionArgs`] + a fixed result
 /// and route it through the shared [`record`] path — one producer, one wire kind.
 fn run_decision(args: DecisionArgs, result: &str) -> ExitCode {
-    let verdict_args = VerdictArgs {
+    let verdict_args = VerdictRecordArgs {
         intent: args.intent,
         log: args.log,
         store: true,
@@ -804,9 +836,9 @@ mod recorder_tests {
     #[test]
     fn single_lens_approve_records_approve_verdict() {
         let path = scratch_log("approve");
-        let v = record(VerdictArgs {
+        let v = record(VerdictRecordArgs {
             intent: "i1".to_string(),
-            log: path.clone(),
+            log: Some(path.clone()),
             store: true,
             lens: vec![STAKEHOLDER_LENS.to_string()],
             result: vec!["approve".to_string()],
@@ -835,9 +867,9 @@ mod recorder_tests {
     #[test]
     fn single_lens_reject_records_reject_verdict() {
         let path = scratch_log("reject");
-        let v = record(VerdictArgs {
+        let v = record(VerdictRecordArgs {
             intent: "i1".to_string(),
-            log: path.clone(),
+            log: Some(path.clone()),
             store: true,
             lens: vec![STAKEHOLDER_LENS.to_string()],
             result: vec!["reject".to_string()],

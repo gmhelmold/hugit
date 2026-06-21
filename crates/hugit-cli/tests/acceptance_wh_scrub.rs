@@ -105,6 +105,7 @@ fn check_toolchain_secret_is_rejected_at_the_door() {
     // a secret-shaped axis at the door rather than persisting+scrubbing it.
     let out = run(&[
         "check",
+        "run",
         "--def",
         "green",
         "--cmd",
@@ -164,6 +165,7 @@ fn verdict_tree_hash_secret_is_rejected_at_the_door() {
     // The PAT is routed RAW into `--tree-hash`, which becomes `tree_hash`.
     let out = run(&[
         "verdict",
+        "record",
         "--intent",
         "i1",
         "--log",
@@ -209,6 +211,7 @@ fn verdict_legit_cas_tree_hash_survives_verbatim() {
     const CAS64: &str = "cas:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
     let out = run(&[
         "verdict",
+        "record",
         "--intent",
         "i1",
         "--log",
@@ -258,6 +261,7 @@ fn real_content_address_digests_still_survive_value_gating() {
 
     let out = run(&[
         "check",
+        "run",
         "--def",
         "green",
         "--cmd",

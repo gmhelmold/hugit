@@ -39,8 +39,8 @@ use crate::campaign::world::{World, persist_log};
 pub struct UndoArgs {
     /// Path to the JSON event log (`[EventRecord, …]`). Read, then rewritten
     /// with the appended compensating record.
-    #[arg(long)]
-    pub log: PathBuf,
+    #[arg(long, help = crate::log_resolve::LOG_FLAG_HELP)]
+    pub log: Option<PathBuf>,
 
     /// The sequence number (`seq`) of the operation to undo.
     #[arg(long)]
@@ -81,12 +81,15 @@ fn do_run(args: UndoArgs) -> Result<String, CampaignError> {
         .map(crate::redaction::scrub)
         .unwrap_or_else(|| "user:cli".to_string());
 
+    // Resolve the default --log ($HUGIT_LOG → .hugit/log.json) once.
+    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+
     // ── Lock BEFORE load (WC1 discipline) ────────────────────────────────────
     // `bootstrap = false`: an undo requires the log to already exist (you cannot
     // undo on a non-existent log). A missing `--log` is `log_not_found`/exit-2,
     // never a ghost record. `_lock` is held across the compute→append→persist
     // critical section until scope end (Drop releases).
-    let (_lock, world) = World::lock_and_load(&args.log, false)?;
+    let (_lock, world) = World::lock_and_load(&log_path, false)?;
 
     // ── Undo through the REAL backing (D14 Human-only guard) ──────────────────
     // `hugit_refstore::undo` re-verifies the chain (fail-closed), computes the
@@ -100,7 +103,7 @@ fn do_run(args: UndoArgs) -> Result<String, CampaignError> {
             // ── Atomic persist (WC1 — truncation-proof) ──────────────────────
             // `_lock` (bound above) stays held across compute→append→persist
             // until scope end.
-            persist_log(&args.log, &log)?;
+            persist_log(&log_path, &log)?;
             // The compensator is the last record on the now-extended chain.
             let appended_seq = log.records().last().map(|r| r.seq).ok_or_else(|| {
                 CampaignError::new("internal", "undo appended no record", "report this bug")
@@ -119,7 +122,7 @@ fn do_run(args: UndoArgs) -> Result<String, CampaignError> {
         // Every other UndoError variant errors BEFORE any append (the log is
         // unmutated), so we only persist on the Denied path.
         Err(e @ UndoError::Denied(_)) => {
-            persist_log(&args.log, &log)?;
+            persist_log(&log_path, &log)?;
             Err(map_undo_error(&e, args.seq))
         }
         Err(e) => Err(map_undo_error(&e, args.seq)),
@@ -227,7 +230,7 @@ mod tests {
         let before = records(&log).len();
 
         let result = do_run(UndoArgs {
-            log: log.clone(),
+            log: Some(log.clone()),
             seq: 1,
             actor: Some("user:alice".to_string()),
         })
@@ -252,7 +255,7 @@ mod tests {
     fn default_actor_is_human_and_accepted() {
         let log = scratch_two_updates("default-actor");
         do_run(UndoArgs {
-            log,
+            log: Some(log),
             seq: 1,
             actor: None,
         })
@@ -270,7 +273,7 @@ mod tests {
             .count();
 
         let err = do_run(UndoArgs {
-            log: log.clone(),
+            log: Some(log.clone()),
             seq: 1,
             actor: Some("agent:runner-03".to_string()),
         })
@@ -296,7 +299,7 @@ mod tests {
         let before = records(&log).len();
 
         let err = do_run(UndoArgs {
-            log: log.clone(),
+            log: Some(log.clone()),
             seq: 99,
             actor: Some("user:alice".to_string()),
         })
@@ -319,7 +322,7 @@ mod tests {
         let absent = dir.join("no-such.json");
 
         let err = do_run(UndoArgs {
-            log: absent,
+            log: Some(absent),
             seq: 0,
             actor: Some("user:alice".to_string()),
         })
@@ -341,7 +344,7 @@ mod tests {
         // Denied (not a human principal after scrub), but the assertion is that
         // the raw PAT never lands on the log.
         let _ = do_run(UndoArgs {
-            log: log.clone(),
+            log: Some(log.clone()),
             seq: 1,
             actor: Some(pat.to_string()),
         });

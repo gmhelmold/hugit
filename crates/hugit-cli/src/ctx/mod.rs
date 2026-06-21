@@ -69,8 +69,8 @@ pub enum CtxCommand {
 #[derive(clap::Args, Debug)]
 pub struct ResumeArgs {
     /// Path to the canonical JSON event log (`[EventRecord, …]`).
-    #[arg(long)]
-    pub log: PathBuf,
+    #[arg(long, help = crate::log_resolve::LOG_FLAG_HELP)]
+    pub log: Option<PathBuf>,
     /// The workspace id binding to reconstruct (matched scrubbed — see module doc).
     #[arg(long)]
     pub workspace: String,
@@ -110,7 +110,8 @@ fn resume_run(args: ResumeArgs) -> ExitCode {
 
 /// Project the reconstructed context from the chain-verified log.
 fn project(args: &ResumeArgs) -> Result<Value, PorcelainError> {
-    let log = load_event_log(&args.log)?;
+    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+    let log = load_event_log(&log_path)?;
 
     // Scrub the caller's binding the SAME way the writer did, so the match lands
     // on the stored (scrubbed) value rather than silently missing.

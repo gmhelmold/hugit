@@ -82,6 +82,7 @@ fn item_1_record_3_lens_verdict_exit_zero_stable_json() {
 
     let (code, v) = run(&[
         "verdict",
+        "record",
         "--log",
         log.to_str().unwrap(),
         "--store",
@@ -132,6 +133,7 @@ fn item_2_verdict_null_to_real_after_record() {
 
     let (code, _v) = run(&[
         "verdict",
+        "record",
         "--log",
         log.to_str().unwrap(),
         "--store",
@@ -162,6 +164,7 @@ fn item_3_idempotent_second_record_is_a_noop() {
 
     let args = [
         "verdict",
+        "record",
         "--log",
         log.to_str().unwrap(),
         "--store",
@@ -205,6 +208,7 @@ fn item_4_payload_round_trips_as_verdict_object() {
 
     let (code, _) = run(&[
         "verdict",
+        "record",
         "--log",
         log.to_str().unwrap(),
         "--store",
@@ -247,6 +251,7 @@ fn item_5_missing_log_is_log_not_found_exit_2() {
     let missing = dir.join("does-not-exist.json");
     let (code, v) = run(&[
         "verdict",
+        "record",
         "--log",
         missing.to_str().unwrap(),
         "--store",
@@ -273,6 +278,7 @@ fn item_6_lens_result_mismatch_is_exit_2() {
     write_empty_log(&log);
     let (code, v) = run(&[
         "verdict",
+        "record",
         "--log",
         log.to_str().unwrap(),
         "--store",
@@ -301,6 +307,7 @@ fn item_7_invalid_result_token_is_exit_2() {
     write_empty_log(&log);
     let (code, v) = run(&[
         "verdict",
+        "record",
         "--log",
         log.to_str().unwrap(),
         "--store",
@@ -329,6 +336,7 @@ fn item_8_aggregate_all_approve_vs_any_reject() {
     write_empty_log(&log_a);
     let (code, v) = run(&[
         "verdict",
+        "record",
         "--log",
         log_a.to_str().unwrap(),
         "--store",
@@ -351,6 +359,7 @@ fn item_8_aggregate_all_approve_vs_any_reject() {
     write_empty_log(&log_b);
     let (code, v) = run(&[
         "verdict",
+        "record",
         "--log",
         log_b.to_str().unwrap(),
         "--store",
@@ -415,6 +424,7 @@ fn b2_verdict_on_ghost_intent_is_intent_not_found_exit_2() {
     // Now attempt a verdict for a ghost intent that was NEVER created.
     let (code, v) = run(&[
         "verdict",
+        "record",
         "--log",
         log.to_str().unwrap(),
         "--store",
@@ -481,6 +491,7 @@ fn b2_verdict_on_real_landed_intent_succeeds() {
     // Verdict on the real intent must succeed (exit 0, verdict_recorded).
     let (code, v) = run(&[
         "verdict",
+        "record",
         "--log",
         log.to_str().unwrap(),
         "--store",
@@ -563,8 +574,8 @@ fn b3_b4_landed_intent_with_approve_verdict_shows_proven_in_campaign() {
 
     // Record an approve verdict for the landed intent.
     let (code, v) = run(&[
-        "verdict", "--log", log_s, "--store", "--intent", intent_id, "--lens", "security",
-        "--result", "approve",
+        "verdict", "record", "--log", log_s, "--store", "--intent", intent_id, "--lens",
+        "security", "--result", "approve",
     ]);
     assert_eq!(code, 0, "verdict recorded: {v}");
     assert_eq!(v["aggregate"], "approve", "{v}");
@@ -605,6 +616,7 @@ fn item_9_dry_panel_without_store_records_nothing() {
     write_empty_log(&log);
     let (code, v) = run(&[
         "verdict",
+        "record",
         "--log",
         log.to_str().unwrap(),
         "--intent",
@@ -691,8 +703,8 @@ fn wh_proven_reject_verdict_not_counted_as_proven() {
 
     // Record a REJECT verdict.
     let (code, v) = run(&[
-        "verdict", "--log", log_s, "--store", "--intent", intent_id, "--lens", "security",
-        "--result", "reject",
+        "verdict", "record", "--log", log_s, "--store", "--intent", intent_id, "--lens",
+        "security", "--result", "reject",
     ]);
     assert_eq!(code, 0, "reject verdict recorded: {v}");
     assert_eq!(v["aggregate"], "reject", "aggregate must be reject: {v}");
@@ -782,6 +794,7 @@ fn wh_proven_mixed_reject_aggregate_not_proven() {
     // Record a mixed panel: approve + reject → aggregate = reject.
     let (code, v) = run(&[
         "verdict",
+        "record",
         "--log",
         log_s,
         "--store",
@@ -886,6 +899,7 @@ fn wh_proven_approve_non_regression() {
     // Record an APPROVE verdict.
     let (code, v) = run(&[
         "verdict",
+        "record",
         "--log",
         log_s,
         "--store",
@@ -943,6 +957,7 @@ fn item_10_different_lens_set_appends_new_record_not_false_dedup() {
     // First panel: security + contracts.
     let (code1, v1) = run(&[
         "verdict",
+        "record",
         "--log",
         log.to_str().unwrap(),
         "--store",
@@ -964,6 +979,7 @@ fn item_10_different_lens_set_appends_new_record_not_false_dedup() {
     // Second panel: security + contracts + impact (different lens set).
     let (code2, v2) = run(&[
         "verdict",
+        "record",
         "--log",
         log.to_str().unwrap(),
         "--store",
@@ -1053,6 +1069,7 @@ fn wj_dedup_latest_only_approve_reject_approve_proven_one() {
     let verdict_args = |result: &str| {
         [
             "verdict".to_string(),
+            "record".to_string(),
             "--log".to_string(),
             log_s.to_string(),
             "--store".to_string(),
@@ -1118,6 +1135,7 @@ fn wj_immediate_rerun_is_still_already_recorded() {
 
     let args = [
         "verdict",
+        "record",
         "--log",
         log.to_str().unwrap(),
         "--store",
@@ -1156,6 +1174,7 @@ fn wj_approve_then_approve_is_idempotent() {
     write_empty_log(&log);
     let args = [
         "verdict",
+        "record",
         "--log",
         log.to_str().unwrap(),
         "--store",
@@ -1190,6 +1209,7 @@ fn wj_intent_and_lens_secret_zero_verbatim_in_log() {
     let secret = "sk-proj-AAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     let (code, _v) = run(&[
         "verdict",
+        "record",
         "--log",
         log.to_str().unwrap(),
         "--store",
@@ -1263,8 +1283,8 @@ fn wj_intent_not_found_error_does_not_echo_secret() {
     // (no such landed intent) AND the error must not echo the raw secret.
     let secret = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     let (code, v) = run(&[
-        "verdict", "--log", log_s, "--store", "--intent", secret, "--lens", "security", "--result",
-        "approve",
+        "verdict", "record", "--log", log_s, "--store", "--intent", secret, "--lens", "security",
+        "--result", "approve",
     ]);
     assert_eq!(code, 2, "intent_not_found exit-2: {v}");
     assert_eq!(v["error"]["kind"], "intent_not_found", "{v}");

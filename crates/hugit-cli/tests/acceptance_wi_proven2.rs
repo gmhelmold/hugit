@@ -91,8 +91,8 @@ fn bootstrap_campaign_with_intent(
 fn record_verdict(log_s: &str, intent_id: &str, result: &str) {
     let out = Command::new(hugit_bin())
         .args([
-            "verdict", "--log", log_s, "--store", "--intent", intent_id, "--lens", "security",
-            "--result", result,
+            "verdict", "record", "--log", log_s, "--store", "--intent", intent_id, "--lens",
+            "security", "--result", result,
         ])
         .output()
         .expect("hugit runs");

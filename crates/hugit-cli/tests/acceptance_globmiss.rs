@@ -102,6 +102,7 @@ fn run_check(def: &str, root: &Path, log: &Path, ac: &Path) -> (i32, Value) {
     let out = Command::new(hugit_bin())
         .args([
             "check",
+            "run",
             "--def",
             def,
             "--log",

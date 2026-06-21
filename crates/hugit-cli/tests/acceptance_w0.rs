@@ -67,6 +67,7 @@ fn check_dispatches_into_its_real_body() {
     let out = Command::new(hugit_bin())
         .args([
             "check",
+            "run",
             "--def",
             "fmt",
             "--log",
@@ -91,6 +92,7 @@ fn check_with_store_dispatches_into_its_real_body() {
     let out = Command::new(hugit_bin())
         .args([
             "check",
+            "run",
             "--def",
             "not-a-builtin",
             "--log",
@@ -116,6 +118,7 @@ fn verdict_dispatches_into_its_real_body() {
     let out = Command::new(hugit_bin())
         .args([
             "verdict",
+            "record",
             "--intent",
             "intent-1",
             "--log",

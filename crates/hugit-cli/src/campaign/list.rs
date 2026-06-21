@@ -19,9 +19,10 @@ use super::show::progress_counts;
 use super::world::World;
 
 pub fn run(args: ListArgs) -> Result<String, CampaignError> {
+    let log_path = crate::log_resolve::resolve_log(args.log.clone());
     // Read-only query: a MISSING --log is an explicit `log_not_found` (exit-2),
     // never a silent empty world (P-CAMPAIGN-EMPTY).
-    let world = World::load_existing(&args.log)?;
+    let world = World::load_existing(&log_path)?;
     let keys = world.all_campaign_keys();
 
     let campaigns: Vec<_> = keys

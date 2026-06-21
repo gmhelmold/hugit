@@ -46,8 +46,9 @@ pub enum MetaCommand {
 pub struct SetMetaArgs {
     /// Path to the JSON world file (the local event log). Read, then rewritten
     /// with the appended `repo.meta` record. `--log` doubles as the output path.
-    #[arg(long)]
-    pub log: PathBuf,
+    /// Defaults to $HUGIT_LOG, else .hugit/log.json.
+    #[arg(long, help = crate::log_resolve::LOG_FLAG_HELP)]
+    pub log: Option<PathBuf>,
     /// Visibility: `public` (readable by anyone) or `private` (owner-only reads).
     /// Visibility governs READS; writes are always owner/operator-only.
     #[arg(long)]
@@ -57,7 +58,7 @@ pub struct SetMetaArgs {
     /// owner's per-session token cannot read/write a private repo.
     #[arg(long, default_value = "")]
     pub owner_tenant: String,
-    /// The owning **human** principal recording the change (D14).
+    /// The owning human principal recording the change.
     #[arg(long, default_value = "humangr")]
     pub by: String,
     /// Optional explicit record timestamp (ms). Omitted ⇒ 0 (the porcelain

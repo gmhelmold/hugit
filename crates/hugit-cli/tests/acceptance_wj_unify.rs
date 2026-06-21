@@ -111,14 +111,14 @@ fn pr_two_distinct_40hex_pr_ids_do_not_collapse_and_land_their_own() {
     );
 
     // Land B → must address B (the original collapse landed A for any --pr).
-    let land_b = stdout_json(&run(&["pr", "land", "--log", log_s, "--pr", PR_B]));
+    let land_b = stdout_json(&run(&["pr", "queue", "--log", log_s, "--pr", PR_B]));
     assert_eq!(
         land_b["pr_id"], PR_B,
         "land B must address B, not A: {land_b}"
     );
 
     // Land an UNOPENED 40-hex C → `unknown_pr`, NOT a resolve-to-A collapse.
-    let land_c = run(&["pr", "land", "--log", log_s, "--pr", PR_C]);
+    let land_c = run(&["pr", "queue", "--log", log_s, "--pr", PR_C]);
     let v = stdout_json(&land_c);
     assert_eq!(
         v["error"]["kind"], "unknown_pr",
@@ -190,8 +190,8 @@ fn intent_ulid_id_survives_is_verdictable_and_advances_proven() {
 
     // verdict --intent <ULID> must RESOLVE (not intent_not_found) and record.
     let verdict = run(&[
-        "verdict", "--log", log_s, "--intent", ULID_1, "--store", "--lens", "security", "--result",
-        "approve",
+        "verdict", "record", "--log", log_s, "--intent", ULID_1, "--store", "--lens", "security",
+        "--result", "approve",
     ]);
     let vv = stdout_json(&verdict);
     assert!(verdict.status.success(), "verdict (ULID) exits 0: {vv}");

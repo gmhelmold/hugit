@@ -142,7 +142,7 @@ fn cross_verb_cycle_composes_on_one_canonical_log() {
     assert_eq!(v["already_exists"], false);
 
     // ④ pr land — enters the union queue (still in-flight: queued, not landed).
-    let (ok, v, _) = run(&["pr", "land", "--log", log, "--pr", "1"]);
+    let (ok, v, _) = run(&["pr", "queue", "--log", log, "--pr", "1"]);
     assert!(ok, "pr land exits 0: {v}");
     assert_eq!(v["queued"], true);
 
@@ -222,7 +222,7 @@ fn cross_verb_cycle_composes_on_one_canonical_log() {
     assert!(ok);
     assert_eq!(v["already_exists"], true, "pr open idempotent");
 
-    let (ok, v, _) = run(&["pr", "land", "--log", log, "--pr", "1"]);
+    let (ok, v, _) = run(&["pr", "queue", "--log", log, "--pr", "1"]);
     assert!(ok);
     assert_eq!(v["already_queued"], true, "pr land idempotent");
 
@@ -445,7 +445,7 @@ fn wf2_pr_abandon_releases_campaign_close_to_reach_closed_true() {
         "i1",
     ]);
     assert!(ok, "pr open exits 0: {e}");
-    let (ok, _, e) = run(&["pr", "land", "--log", log, "--pr", "1"]);
+    let (ok, _, e) = run(&["pr", "queue", "--log", log, "--pr", "1"]);
     assert!(ok, "pr land exits 0: {e}");
 
     // PRE-FIX REPRO: close refuses (the PR is in-flight/queued).

@@ -99,6 +99,7 @@ fn cold_run_executes_records_miss_then_warm_rerun_is_a_hit_then_show_is_real() {
     let common = || -> Vec<String> {
         vec![
             "check".into(),
+            "run".into(),
             "--def".into(),
             "green-check".into(),
             // An ad-hoc, instant, deterministic command — `true` always exits 0.
@@ -154,7 +155,7 @@ fn cold_run_executes_records_miss_then_warm_rerun_is_a_hit_then_show_is_real() {
     );
 
     // ── 3. `checks show` now reports REAL, non-null wedge KPIs. ──────────────
-    let (code, show) = run(&["checks", "show", "--log", &log.display().to_string()]);
+    let (code, show) = run(&["check", "show", "--log", &log.display().to_string()]);
     assert_eq!(code, 0, "checks show exits 0: {show}");
     // Two `check.recorded` rows (one miss, one hit) were appended by THIS verb.
     assert_eq!(show["check_count"], 2, "two checks recorded: {show}");
@@ -201,6 +202,7 @@ fn editing_an_input_inside_the_glob_busts_the_cache_to_a_miss() {
     let args = || -> Vec<String> {
         vec![
             "check".into(),
+            "run".into(),
             "--def".into(),
             "green-check".into(),
             "--cmd".into(),
@@ -249,6 +251,7 @@ fn store_refuses_a_missing_log_with_the_canonical_envelope() {
     let root = seed_tree(&dir);
     let (code, v) = run(&[
         "check",
+        "run",
         "--def",
         "green-check",
         "--cmd",
@@ -276,6 +279,7 @@ fn unknown_def_without_cmd_is_a_structured_error() {
     write_empty_log(&log);
     let (code, v) = run(&[
         "check",
+        "run",
         "--def",
         "not-a-builtin",
         "--log",
@@ -297,6 +301,7 @@ fn dry_run_without_store_records_nothing_on_the_log() {
     let root = seed_tree(&dir);
     let (code, dry) = run(&[
         "check",
+        "run",
         "--def",
         "green-check",
         "--cmd",
@@ -313,7 +318,7 @@ fn dry_run_without_store_records_nothing_on_the_log() {
     assert_eq!(code, 0, "dry run exits 0: {dry}");
     assert_eq!(dry["stored"], false, "no --store ⇒ not recorded: {dry}");
 
-    let (code, show) = run(&["checks", "show", "--log", &log.display().to_string()]);
+    let (code, show) = run(&["check", "show", "--log", &log.display().to_string()]);
     assert_eq!(code, 0, "checks show exits 0: {show}");
     assert_eq!(
         show["check_count"], 0,
@@ -346,6 +351,7 @@ fn memoized_red_stays_red_warm_hit_does_not_mask_failure() {
     let common = || -> Vec<String> {
         vec![
             "check".into(),
+            "run".into(),
             "--def".into(),
             "red-check".into(),
             "--cmd".into(),
@@ -406,6 +412,7 @@ fn saved_ms_is_positive_after_warm_hit_on_slow_command() {
     let common = || -> Vec<String> {
         vec![
             "check".into(),
+            "run".into(),
             "--def".into(),
             "slow-check".into(),
             "--cmd".into(),
@@ -447,7 +454,7 @@ fn saved_ms_is_positive_after_warm_hit_on_slow_command() {
     assert_eq!(warm["duration_ms"], 0, "a HIT has duration_ms:0: {warm}");
 
     // `checks show` — `saved_ms` is the cold duration saved by the HIT.
-    let (code, show) = run(&["checks", "show", "--log", &log.display().to_string()]);
+    let (code, show) = run(&["check", "show", "--log", &log.display().to_string()]);
     assert_eq!(code, 0, "checks show exits 0: {show}");
     let saved = show["kpis"]["saved_ms"].as_u64().unwrap_or(0);
     assert!(
@@ -514,6 +521,7 @@ fn changing_a_result_affecting_env_var_busts_the_memo_key_no_stale_green() {
 fn check_args(def: &str, cmd: &str, log: &Path, ac: &Path, root: &Path) -> Vec<String> {
     vec![
         "check".into(),
+        "run".into(),
         "--def".into(),
         def.into(),
         "--cmd".into(),
@@ -632,6 +640,7 @@ fn omitting_toolchain_yields_a_real_digest_axis() {
     // No --toolchain flag.
     let (code, v) = run(&[
         "check",
+        "run",
         "--def",
         "tc-real-check",
         "--cmd",
@@ -646,7 +655,7 @@ fn omitting_toolchain_yields_a_real_digest_axis() {
     ]);
     assert_eq!(code, 0, "runs without --toolchain: {v}");
     // The recorded row carries the resolved toolchain_digest; read it back.
-    let (_, show) = run(&["checks", "show", "--log", &log.display().to_string()]);
+    let (_, show) = run(&["check", "show", "--log", &log.display().to_string()]);
     let mk = show["checks"][0]["memo_key"].as_str().unwrap();
     assert_eq!(mk.len(), 64, "memo key is a 64-char digest: {show}");
     // The toolchain digest itself is either a 64-char sha256 hex (rustc probed) or
@@ -655,6 +664,7 @@ fn omitting_toolchain_yields_a_real_digest_axis() {
     // explicit toolchain equal to "local-toolchain" and confirming a DIFFERENT key.
     let (_, explicit) = run(&[
         "check",
+        "run",
         "--def",
         "tc-real-check",
         "--cmd",
@@ -688,6 +698,7 @@ fn a_hanging_command_times_out_with_a_structured_error() {
     let start = std::time::Instant::now();
     let (code, v) = run(&[
         "check",
+        "run",
         "--def",
         "hang-check",
         "--cmd",
@@ -724,6 +735,7 @@ fn missing_log_without_store_is_log_not_found_not_a_silent_green() {
     let root = seed_tree(&dir);
     let (code, v) = run(&[
         "check",
+        "run",
         "--def",
         "dry-check",
         "--cmd",
@@ -760,6 +772,7 @@ fn builtin_def_with_cmd_reports_cmd_ignored() {
     // we only care about the cmd_ignored signal, not the gate's exit.
     let (_, v) = run(&[
         "check",
+        "run",
         "--def",
         "fmt",
         "--cmd",
@@ -932,7 +945,7 @@ fn concurrent_checks_do_not_double_record_even_if_both_execute() {
     //
     // This FAILS if dedup broke: executed == 2 → inflated KPIs.
     // This also FAILS if executed == 0 → no execution at all (something is wrong).
-    let (_, show) = run(&["checks", "show", "--log", &log.display().to_string()]);
+    let (_, show) = run(&["check", "show", "--log", &log.display().to_string()]);
     let executed = show["kpis"]["executed"].as_u64().unwrap_or(0);
     assert_eq!(
         executed, 1,
@@ -954,7 +967,7 @@ fn concurrent_checks_do_not_double_record_even_if_both_execute() {
     // `checks show` runs `verify_chain` internally; a non-0 exit here means the
     // chain was corrupted during concurrent appends (the lock-serialized atomic
     // seam must prevent this).
-    let (show_code, show_v) = run(&["checks", "show", "--log", &log.display().to_string()]);
+    let (show_code, show_v) = run(&["check", "show", "--log", &log.display().to_string()]);
     assert_eq!(
         show_code, 0,
         "checks show exits 0 — the hash chain survived the concurrent storm: {show_v}"
@@ -1006,7 +1019,7 @@ fn check_store_is_idempotent_repeated_runs_do_not_inflate_kpis() {
     }
 
     // The log holds EXACTLY two rows (1 miss + 1 hit) — never five.
-    let (_, show) = run(&["checks", "show", "--log", &log.display().to_string()]);
+    let (_, show) = run(&["check", "show", "--log", &log.display().to_string()]);
     assert_eq!(
         show["check_count"], 2,
         "five identical runs leave exactly two rows (1 miss + 1 hit), not five: {show}"
@@ -1192,6 +1205,7 @@ fn a_backgrounding_command_times_out_promptly_without_a_group_signal() {
     let start = std::time::Instant::now();
     let (code, v) = run(&[
         "check",
+        "run",
         "--def",
         "bg-check",
         "--cmd",
@@ -1317,7 +1331,7 @@ fn a_slow_check_does_not_poison_the_ac_lock_for_a_concurrent_check() {
     assert_eq!(scode, 0, "the slow check itself completes: {sv}");
 
     // Both checks recorded — the log was never poisoned.
-    let (_, show) = run(&["checks", "show", "--log", &log.display().to_string()]);
+    let (_, show) = run(&["check", "show", "--log", &log.display().to_string()]);
     assert_eq!(
         show["check_count"], 2,
         "both the slow and the concurrent check recorded — no poison: {show}"
@@ -1344,6 +1358,7 @@ fn an_identical_ad_hoc_cmd_run_is_a_cache_hit_even_with_state_under_root() {
     let args = || -> Vec<String> {
         vec![
             "check".into(),
+            "run".into(),
             "--def".into(),
             "adhoc-memo-check".into(),
             "--cmd".into(),
@@ -1431,6 +1446,7 @@ fn large_output_command_completes_promptly_no_pipe_buffer_deadlock() {
     let start = std::time::Instant::now();
     let (code, v) = run(&[
         "check",
+        "run",
         "--def",
         "drain-check",
         "--cmd",
@@ -1506,6 +1522,7 @@ fn concurrent_show_is_not_locked_out_during_a_flood_check() {
         thread::spawn(move || {
             run(&[
                 "check",
+                "run",
                 "--def",
                 "drain-lock-check",
                 "--cmd",
@@ -1533,7 +1550,7 @@ fn concurrent_show_is_not_locked_out_during_a_flood_check() {
     // until the flood check's record_on_log finished — potentially seconds.
     // With the fix it returns in milliseconds.
     let show_start = std::time::Instant::now();
-    let (show_code, show_v) = run(&["checks", "show", "--log", &log_str]);
+    let (show_code, show_v) = run(&["check", "show", "--log", &log_str]);
     let show_elapsed = show_start.elapsed();
 
     // `checks show` must complete promptly (well under 5 s, typically < 100 ms).

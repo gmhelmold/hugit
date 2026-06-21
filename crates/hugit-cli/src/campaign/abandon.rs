@@ -22,12 +22,13 @@ use super::output::CampaignError;
 use super::world::{KIND_CAMPAIGN_ABANDONED, World, append_authorized_and_persist};
 
 pub fn run(args: AbandonArgs) -> Result<String, CampaignError> {
+    let log_path = crate::log_resolve::resolve_log(args.log.clone());
     // Lock BEFORE the load and hold it across the whole load→mutate→persist
     // (WF-CLI2 bug 2). `abandon` is a read-must-exist mutation: a missing `--log`
     // is `log_not_found`/exit-2, never a bootstrapped empty world that would let
     // a `campaign.abandoned` ghost-record be created from nothing (WF-CLI2 bug 1)
     // — so it loads with `bootstrap = false`.
-    let (lock, world) = World::lock_and_load(&args.log, false)?;
+    let (lock, world) = World::lock_and_load(&log_path, false)?;
     let key = &args.campaign;
 
     // Redaction parity (Wave E, P-REDACT-SURFACE): scrub the free-text reason
@@ -93,7 +94,7 @@ pub fn run(args: AbandonArgs) -> Result<String, CampaignError> {
     append_authorized_and_persist(
         &lock,
         &world,
-        &args.log,
+        &log_path,
         KIND_CAMPAIGN_ABANDONED,
         &owner,
         payload,

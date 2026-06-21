@@ -67,6 +67,7 @@ fn run_check(
     let mut c = Command::new(hugit_bin());
     c.args([
         "check",
+        "run",
         "--def",
         "adhoc-ps11",
         "--cmd",
