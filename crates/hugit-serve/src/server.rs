@@ -806,6 +806,18 @@ fn dispatch_repo(
         // Admin control-plane reads (operator area) — pure projections over the
         // verified log, no P2 infra. Audit timeline, erasure governance history,
         // the one-call overview.
+        //
+        // SECURITY (audit 2026-06-20): these are gated on OPERATOR status, NOT on
+        // read-visibility. `authorize_read` (run by the caller above) opens NORMAL
+        // repo screens to anonymous/any-tenant callers when the repo is `public`
+        // (the documented anonymous-`git clone` gate) — but the control plane
+        // (authz/denial timeline, principal chains, record hashes, erasure
+        // governance, admin overview) must NEVER ride that gate. A non-operator
+        // gets the uniform 404 (same as a denied read — no existence oracle)
+        // REGARDLESS of the repo's visibility.
+        ["audit" | "erasure", ..] | ["admin", ..] if !crate::authz::is_operator(principal) => {
+            err(EngineErr::not_found())
+        }
         ["audit"] => {
             let since = query_param(query, "since").parse::<u64>().unwrap_or(0);
             let limit = query_param(query, "limit").parse::<usize>().unwrap_or(0);

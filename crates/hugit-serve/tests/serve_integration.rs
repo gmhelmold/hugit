@@ -169,7 +169,8 @@ fn per_tenant_read_gate_enforces_visibility_and_owner() {
     // Operator (dev-token) → 200 (bypass keeps single-tenant/dev working).
     let (s, _b) = route(&state, &Method::Get, "/v1/repos/acme/home", &bearer(TOKEN));
     assert_eq!(s, 200, "operator bypass");
-    // The gate covers EVERY repo read — including the admin reads.
+    // The read gate covers EVERY repo read — including the admin reads — for a
+    // cross-tenant caller.
     let (s, _b) = route(
         &state,
         &Method::Get,
@@ -177,13 +178,18 @@ fn per_tenant_read_gate_enforces_visibility_and_owner() {
         &bearer(&tok_b),
     );
     assert_eq!(s, 404, "gate covers admin reads too (cross-tenant)");
+    // The admin/audit control plane is OPERATOR-only (audit 2026-06-20): even the
+    // OWNING tenant — which passes the read gate for normal screens — gets 404 on
+    // the control plane. Only the operator reads /audit.
     let (s, _b) = route(
         &state,
         &Method::Get,
         "/v1/repos/acme/audit",
         &bearer(&tok_a),
     );
-    assert_eq!(s, 200, "owning tenant reads admin too");
+    assert_eq!(s, 404, "owning tenant is NOT the operator → no admin plane");
+    let (s, _b) = route(&state, &Method::Get, "/v1/repos/acme/audit", &bearer(TOKEN));
+    assert_eq!(s, 200, "only the operator reads /audit");
 }
 
 #[test]
@@ -259,6 +265,81 @@ fn public_repo_is_readable_cross_tenant() {
     // A public repo is readable by ANY authenticated tenant.
     let (s, _b) = route(&state, &Method::Get, "/v1/repos/acme/home", &bearer(&tok_b));
     assert_eq!(s, 200, "public repo readable cross-tenant");
+}
+
+/// THE hole this closes (pre-open-source audit 2026-06-20): the operator/admin
+/// control-plane reads (audit timeline, erasure governance, admin overview) were
+/// gated ONLY by read-visibility. The moment a repo is set `public` (the
+/// documented anonymous-`git clone` gate), any anonymous/any-tenant caller could
+/// read the admin plane. The fix gates these on OPERATOR status, not visibility:
+/// a non-operator gets the uniform 404 EVEN on a public repo, while normal repo
+/// screens (home) stay open to anonymous/any-tenant on a public repo.
+#[test]
+fn admin_control_plane_is_operator_only_even_on_a_public_repo() {
+    use hugit_serve::token::ClerkPrincipal;
+    // A PUBLIC repo owned by org-a — the exact config that opens anonymous clone.
+    let mut log = EventLog::new();
+    log.append_for_test(
+        "repo.meta",
+        vec![],
+        serde_json::json!({"visibility":"public","owner_tenant":"org-a"}).to_string(),
+        0,
+    );
+    let log_json = serde_json::to_string_pretty(log.records()).unwrap();
+    let (state, _d) = state_with_repo("acme", &log_json);
+
+    // A normal (non-operator) tenant — even the OWNING tenant (org-a) is NOT the
+    // operator, so the control plane is closed to it too.
+    let tok_owner = state
+        .token_store
+        .mint(&ClerkPrincipal {
+            user: "u-a".into(),
+            org: "org-a".into(),
+            fresh_auth: false,
+        })
+        .expect("mint owner");
+    let tok_other = state
+        .token_store
+        .mint(&ClerkPrincipal {
+            user: "u-b".into(),
+            org: "org-b".into(),
+            fresh_auth: false,
+        })
+        .expect("mint other");
+
+    let admin_routes = [
+        "/v1/repos/acme/audit?since=0&limit=50",
+        "/v1/repos/acme/erasure",
+        "/v1/repos/acme/admin/overview",
+    ];
+
+    for url in admin_routes {
+        // (a) ANONYMOUS (no Bearer) → 401 BEFORE any resource work (auth-first).
+        let (s, _b) = route(&state, &Method::Get, url, &[]);
+        assert_eq!(s, 401, "anonymous needs a Bearer first: {url}");
+
+        // (a) A normal tenant — owner AND a different tenant — gets the uniform
+        // 404 on the control plane even though the repo is PUBLIC (no oracle).
+        let (s, b) = route(&state, &Method::Get, url, &bearer(&tok_owner));
+        assert_eq!(s, 404, "owning tenant is NOT the operator → 404: {url}");
+        assert!(b.contains("NOT_FOUND"), "uniform 404 body: {url}");
+        let (s, _b) = route(&state, &Method::Get, url, &bearer(&tok_other));
+        assert_eq!(s, 404, "a different tenant → 404 on public admin: {url}");
+
+        // (b) The OPERATOR (dev-token) still gets the control plane.
+        let (s, _b) = route(&state, &Method::Get, url, &bearer(TOKEN));
+        assert_eq!(s, 200, "operator reads the control plane: {url}");
+    }
+
+    // (c) A normal repo screen (home) is STILL open to any tenant on a public
+    // repo — only the admin/audit/erasure/overview plane became operator-only.
+    let (s, _b) = route(
+        &state,
+        &Method::Get,
+        "/v1/repos/acme/home",
+        &bearer(&tok_other),
+    );
+    assert_eq!(s, 200, "public home still readable cross-tenant");
 }
 
 #[test]
