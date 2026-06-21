@@ -1,8 +1,7 @@
 //! `GET /v1/repos/{repo}/search?q=` → [`SearchVm`].
 //!
 //! The `log` is ALREADY chain-verified by the caller. This is a text search over
-//! the event log — there is NO code/blob index here (that is the P2 CAS source
-//! seam), so `code`/`commits` are honest-empty by construction, never faked.
+//! the event log AND (when a git source is wired) over git blob contents.
 //!
 //! REAL backbone (each matched + echoed field is scrubbed at this read boundary):
 //! - `prs` — folds `pr.opened` (`hugit_cli::pr` projection): a PR matches when its
@@ -18,20 +17,31 @@
 //! - `intents` — folds `intent.landed` via `intents_from_log`: a match is over
 //!   `intent_id` + charter. `id`/`charter` (first line, scrubbed)/`age` are REAL;
 //!   `model`/`pr`/`status` are honest-defaults (`intent.landed` carries none).
+//! - `code` (F4c interim) — when a git source is wired (`git_source` + `root_tree`
+//!   are `Some`), a REAL grep over the git tree's blob contents. Bounded: at most
+//!   `CODE_FILE_CAP` files scanned, `CODE_MATCH_CAP` total hits, and blobs larger
+//!   than `CODE_BLOB_BYTES_CAP` are skipped (mirrors the existing `RESULT_CAP` /
+//!   `MAX_RECORDS_TO_SCAN` guards). Results are secret-scrubbed at the read boundary
+//!   (same `scrub` applied to every `code` hit line and path). `code_total` is the
+//!   true match count before the cap (may exceed `code.len()`). When no git source
+//!   is wired `code`/`code_total` remain honest-empty (never faked).
 //!
-//! HONEST-DEFAULT (no local seam — never fabricated): `code`/`code_total` (no blob
-//! index), `commits` (no git-commit-message records), `people_count` (no people
-//! index; the principal chain is a redacted seam, not a directory), and the
-//! `SearchIntentVm` `model`/`pr`/`status` fields. An empty/whitespace-only `q`
-//! short-circuits to all-empty result lists (the `repo`/`q`/static notes still
-//! populate) — an honest no-op, not a "match everything" dump.
+//! HONEST-DEFAULT (no local seam — never fabricated): `commits` (no
+//! git-commit-message records), `people_count` (no people index; the principal
+//! chain is a redacted seam, not a directory), and the `SearchIntentVm`
+//! `model`/`pr`/`status` fields. An empty/whitespace-only `q` short-circuits to
+//! all-empty result lists (the `repo`/`q`/static notes still populate) — an honest
+//! no-op, not a "match everything" dump.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
+use gix_hash::ObjectId;
 use hugit_cli::pr::{
     PR_ABANDONED_KIND, PR_LANDED_KIND, PR_OPENED_KIND, find_pr_opened, find_pr_queued,
 };
-use hugit_http_contracts::search::{SearchIntentVm, SearchRefVm, SearchVm};
+use hugit_http_contracts::search::{SearchCodeVm, SearchIntentVm, SearchRefVm, SearchVm};
+use hugit_proto::{ObjectKind, ObjectSource};
 use hugit_refstore::EventLog;
 use hugit_refstore::intent::intents_from_log;
 use serde_json::Value;
@@ -53,6 +63,23 @@ const MAX_RECORDS_TO_SCAN: usize = 50_000;
 const INTENTS_NOTE: &str = "intents carregam o porquê.";
 /// Static caption — NOT a timing (there is no real timer; never echo a fake "0,04s").
 const INDEX_NOTE: &str = "índice do log de eventos";
+
+// ── F4c interim code search bounds ───────────────────────────────────────────
+
+/// Maximum number of tree files visited per code search (depth-first, BFS order).
+/// Mirrors the existing `MAX_RECORDS_TO_SCAN` discipline: a single search must
+/// never stall the single-threaded server. 2000 files bounds the CAS budget.
+const CODE_FILE_CAP: usize = 2_000;
+/// Maximum number of line hits emitted in `code` before the result cap kicks in.
+/// `code_total` continues counting (the caller can page). Mirrors `RESULT_CAP`.
+const CODE_MATCH_CAP: usize = 200;
+/// Maximum blob size (bytes) that is read + searched inline. A blob larger than
+/// 50 KiB is skipped (counted as 0 hits for that file). This prevents a single
+/// huge generated file from dominating the search budget.
+const CODE_BLOB_BYTES_CAP: usize = 50 * 1024;
+/// Maximum number of matching lines PER FILE emitted into `code`. Keeps one huge
+/// file from consuming the whole result budget at the expense of other files.
+const CODE_LINES_PER_FILE_CAP: usize = 10;
 
 /// Case-insensitive substring match over a SCRUB-SAFE corpus. An empty/whitespace
 /// `q` never matches (the caller short-circuits, but this stays correct standalone).
@@ -268,8 +295,120 @@ fn search_intents(log: &EventLog, q_lower: &str) -> Vec<SearchIntentVm> {
     out
 }
 
-/// Build the search view-model (router calls `build_search(log, repo, q)`).
-pub fn build_search(log: &EventLog, repo: &str, q: &str) -> SearchVm {
+// ── F4c interim code search (git tree grep) ──────────────────────────────────
+
+/// One stack frame for the iterative DFS tree walk used by `search_code`.
+struct TreeFrame {
+    /// The oid of this tree object.
+    oid: ObjectId,
+    /// The repo-relative path prefix for this directory (e.g. `"src/handlers"`).
+    /// Empty string for the root.
+    prefix: String,
+}
+
+/// Grep the git tree's blob contents for `q_lower` (case-insensitive). Returns
+/// `(code_hits, code_total)` where `code_total` is the TRUE match count across all
+/// blobs (may exceed `CODE_MATCH_CAP`; `code_hits` is the capped subset).
+///
+/// The walk is depth-first iterative (no recursion stack overflow on deep trees).
+/// Files/bytes/matches are bounded by `CODE_FILE_CAP` / `CODE_BLOB_BYTES_CAP` /
+/// `CODE_MATCH_CAP`. Results are secret-scrubbed at the read boundary.
+fn search_code(
+    src: &dyn ObjectSource,
+    root_tree: &ObjectId,
+    q_lower: &str,
+) -> (Vec<SearchCodeVm>, usize) {
+    let mut hits: Vec<SearchCodeVm> = Vec::new();
+    let mut code_total: usize = 0;
+    let mut files_visited: usize = 0;
+
+    // DFS stack: start at the root tree.
+    let mut stack: Vec<TreeFrame> = vec![TreeFrame {
+        oid: *root_tree,
+        prefix: String::new(),
+    }];
+
+    while let Some(frame) = stack.pop() {
+        if files_visited >= CODE_FILE_CAP {
+            break;
+        }
+        // Fetch the tree object; skip on error (fail-closed, not abort).
+        let tree_obj = match src.get(&frame.oid) {
+            Ok(Some(o)) if o.kind == ObjectKind::Tree => o,
+            _ => continue,
+        };
+        let entries = match gix_object::TreeRefIter::from_bytes(&tree_obj.data).entries() {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries {
+            if files_visited >= CODE_FILE_CAP {
+                break;
+            }
+            // Skip symlinks and gitlinks (mirrors list_tree_at_dir).
+            if entry.mode.is_link() || entry.mode.is_commit() {
+                continue;
+            }
+            let name = String::from_utf8_lossy(entry.filename);
+            let path = if frame.prefix.is_empty() {
+                name.into_owned()
+            } else {
+                format!("{}/{name}", frame.prefix)
+            };
+            if entry.mode.is_tree() {
+                // Push subtree onto the DFS stack.
+                stack.push(TreeFrame {
+                    oid: entry.oid.to_owned(),
+                    prefix: path,
+                });
+                continue;
+            }
+            // It's a blob: fetch + search.
+            files_visited += 1;
+            let blob_obj = match src.get(&entry.oid.to_owned()) {
+                Ok(Some(o)) if o.kind == ObjectKind::Blob => o,
+                _ => continue,
+            };
+            if blob_obj.data.len() > CODE_BLOB_BYTES_CAP {
+                continue; // too large — skip this file
+            }
+            // Decode lossily (binary blobs render as mojibake but don't panic).
+            let text = String::from_utf8_lossy(&blob_obj.data);
+            let path_scrubbed = scrub(&path);
+            let mut file_hits: Vec<(u32, String)> = Vec::new();
+            for (i, line) in text.lines().enumerate() {
+                if line.to_lowercase().contains(q_lower) {
+                    code_total += 1;
+                    if hits.len() < CODE_MATCH_CAP && file_hits.len() < CODE_LINES_PER_FILE_CAP {
+                        // 1-based line number; scrub the line text at the read boundary.
+                        file_hits.push(((i as u32) + 1, scrub(line)));
+                    }
+                }
+            }
+            if !file_hits.is_empty() {
+                hits.push(SearchCodeVm {
+                    path: path_scrubbed,
+                    lines: file_hits,
+                    lines_tokens: vec![], // no syntax-highlight this wave
+                });
+            }
+        }
+    }
+    (hits, code_total)
+}
+
+/// Build the search view-model.
+///
+/// When a git source (`git_source` + `root_tree`) is wired, a REAL interim code
+/// search (F4c) greps the git tree's blob contents. Without a git source,
+/// `code`/`code_total` are honest-empty (never faked).
+pub fn build_search(
+    log: &EventLog,
+    repo: &str,
+    q: &str,
+    git_source: Option<&Arc<dyn hugit_proto::ObjectSource + Send + Sync>>,
+    root_tree: Option<&ObjectId>,
+) -> SearchVm {
     let q_echo = scrub(q); // caller free-text round-trips into the VM — scrub it
     let q_lower = q.trim().to_lowercase();
 
@@ -284,18 +423,29 @@ pub fn build_search(log: &EventLog, repo: &str, q: &str) -> SearchVm {
         )
     };
 
+    // F4c interim code search: real git-tree grep when the content seam is wired.
+    // No git source → honest-empty (not faked).
+    let (code, code_total) = if !q_lower.is_empty()
+        && let Some(src) = git_source
+        && let Some(root) = root_tree
+    {
+        search_code(src.as_ref(), root, &q_lower)
+    } else {
+        (vec![], 0)
+    };
+
     SearchVm {
         repo: repo.to_string(),
         q: q_echo,
         index_note: INDEX_NOTE.to_string(),
-        code: vec![], // honest-default: no blob/code index (P2 CAS seam)
+        code,
         prs,
         issues,
         intents_note: INTENTS_NOTE.to_string(),
         intents,
         commits: vec![], // honest-default: no git-commit-message records
         people_count: 0, // honest-default: no people/identity index
-        code_total: 0,   // honest-default: paired with empty code
+        code_total,      // REAL when git source wired; 0 otherwise (honest-empty)
     }
 }
 
@@ -376,7 +526,7 @@ mod tests {
 
     #[test]
     fn empty_log_honest_defaults() {
-        let vm = build_search(&EventLog::new(), "r", "anything");
+        let vm = build_search(&EventLog::new(), "r", "anything", None, None);
         assert!(vm.prs.is_empty());
         assert!(vm.issues.is_empty());
         assert!(vm.intents.is_empty());
@@ -398,7 +548,7 @@ mod tests {
         issue(&mut log, 7, "open", None, 100);
         intent(&mut log, "i-1", "fix the thing", 100);
         // Whitespace-only q matches nothing but still populates repo/q/notes.
-        let vm = build_search(&log, "r", "   ");
+        let vm = build_search(&log, "r", "   ", None, None);
         assert!(vm.prs.is_empty() && vm.issues.is_empty() && vm.intents.is_empty());
         assert_eq!(vm.q, "   ");
         assert_eq!(vm.intents_note, INTENTS_NOTE);
@@ -411,7 +561,7 @@ mod tests {
         let mut log = EventLog::new();
         open_pr(&mut log, "128", "auth-wave", &["a31", "a32"], 100);
         open_pr(&mut log, "999", "other", &["z9"], 200);
-        let vm = build_search(&log, "r", "auth-wave");
+        let vm = build_search(&log, "r", "auth-wave", None, None);
         assert_eq!(vm.prs.len(), 1);
         assert_eq!(vm.prs[0].number, 128);
         assert!(vm.prs[0].open);
@@ -431,7 +581,7 @@ mod tests {
             serde_json::json!({"pr_id": "42"}),
             200,
         );
-        let vm = build_search(&log, "r", "needle-intent");
+        let vm = build_search(&log, "r", "needle-intent", None, None);
         assert_eq!(vm.prs.len(), 1);
         assert_eq!(vm.prs[0].number, 42);
         assert!(!vm.prs[0].open);
@@ -443,7 +593,7 @@ mod tests {
         let mut log = EventLog::new();
         issue(&mut log, 412, "open", Some("P0"), 100);
         issue(&mut log, 7, "closed", None, 100);
-        let vm = build_search(&log, "r", "412");
+        let vm = build_search(&log, "r", "412", None, None);
         assert_eq!(vm.issues.len(), 1);
         assert_eq!(vm.issues[0].number, 412);
         assert!(vm.issues[0].open);
@@ -462,7 +612,7 @@ mod tests {
             100,
         );
         intent(&mut log, "b99", "unrelated change", 200);
-        let vm = build_search(&log, "r", "refresh");
+        let vm = build_search(&log, "r", "refresh", None, None);
         assert_eq!(vm.intents.len(), 1);
         assert_eq!(vm.intents[0].id, "a31");
         // Charter is FIRST LINE only.
@@ -477,7 +627,7 @@ mod tests {
     fn case_insensitive_match() {
         let mut log = EventLog::new();
         open_pr(&mut log, "5", "SkewFix", &[], 100);
-        let vm = build_search(&log, "r", "skewfix");
+        let vm = build_search(&log, "r", "skewfix", None, None);
         assert_eq!(vm.prs.len(), 1);
     }
 
@@ -491,7 +641,7 @@ mod tests {
         open_pr(&mut log, "7", "wave-a", &["i-1"], 1000);
         queue_pr(&mut log, "7", "item-001", 1, 2000);
         land_pr(&mut log, "7", 3000);
-        let vm = build_search(&log, "r", "wave-a");
+        let vm = build_search(&log, "r", "wave-a", None, None);
         assert_eq!(vm.prs.len(), 1);
         assert!(!vm.prs[0].open, "landed PR must not be open");
         assert!(
@@ -506,7 +656,7 @@ mod tests {
         let mut log = EventLog::new();
         open_pr(&mut log, "9", "wave-b", &["i-2"], 1000);
         queue_pr(&mut log, "9", "item-002", 1, 2000);
-        let vm = build_search(&log, "r", "wave-b");
+        let vm = build_search(&log, "r", "wave-b", None, None);
         assert_eq!(vm.prs.len(), 1);
         assert!(vm.prs[0].open, "queued PR must still be open");
         assert!(
@@ -521,7 +671,7 @@ mod tests {
         let mut log = EventLog::new();
         open_pr(&mut log, "13", &format!("camp-{PAT}"), &["i-1"], 100);
         // q must match the corpus so the PR surfaces and the campaign is echoed.
-        let vm = build_search(&log, "r", "camp-");
+        let vm = build_search(&log, "r", "camp-", None, None);
         assert_eq!(vm.prs.len(), 1);
         let j = serde_json::to_string(&vm).unwrap();
         assert!(!j.contains(PAT), "PAT must not appear in the VM JSON");
@@ -532,7 +682,7 @@ mod tests {
     fn redaction_pat_in_charter_not_leaked() {
         let mut log = EventLog::new();
         intent(&mut log, "needle", &format!("secret {PAT} here"), 100);
-        let vm = build_search(&log, "r", "needle");
+        let vm = build_search(&log, "r", "needle", None, None);
         assert_eq!(vm.intents.len(), 1);
         let j = serde_json::to_string(&vm).unwrap();
         assert!(!j.contains(PAT));
@@ -542,7 +692,7 @@ mod tests {
     fn redaction_pat_in_issue_priority_not_leaked() {
         let mut log = EventLog::new();
         issue(&mut log, 77, "open", Some(PAT), 100);
-        let vm = build_search(&log, "r", "77");
+        let vm = build_search(&log, "r", "77", None, None);
         assert_eq!(vm.issues.len(), 1);
         let j = serde_json::to_string(&vm).unwrap();
         assert!(!j.contains(PAT));
@@ -551,7 +701,7 @@ mod tests {
     #[test]
     fn redaction_pat_in_query_echo_not_leaked() {
         let q = format!("find {PAT}");
-        let vm = build_search(&EventLog::new(), "r", &q);
+        let vm = build_search(&EventLog::new(), "r", &q, None, None);
         let j = serde_json::to_string(&vm).unwrap();
         assert!(!j.contains(PAT));
     }
@@ -562,7 +712,7 @@ mod tests {
         for n in 0..(RESULT_CAP as u32 + 25) {
             open_pr(&mut log, &n.to_string(), "needle", &[], 100 + n as u64);
         }
-        let vm = build_search(&log, "r", "needle");
+        let vm = build_search(&log, "r", "needle", None, None);
         assert_eq!(vm.prs.len(), RESULT_CAP);
     }
 
@@ -572,8 +722,94 @@ mod tests {
         open_pr(&mut log, "1", "wave-test", &["i-1"], 100);
         issue(&mut log, 1, "open", Some("P1"), 100);
         intent(&mut log, "i-1", "charter line one", 100);
-        let vm = build_search(&log, "humangr/hugit", "1");
+        let vm = build_search(&log, "humangr/hugit", "1", None, None);
         let j = serde_json::to_string(&vm).unwrap();
         assert_eq!(vm, serde_json::from_str::<SearchVm>(&j).unwrap());
+    }
+
+    // ── F4c: interim code search (git tree grep) ─────────────────────────────
+
+    /// Build a minimal CAS with a single file so code search can find a real hit.
+    fn make_git_src_with_file(
+        path: &str,
+        content: &[u8],
+    ) -> (Arc<dyn hugit_proto::ObjectSource + Send + Sync>, ObjectId) {
+        use hugit_proto::{CasObjectSource, ObjectKind};
+
+        let mut cas = CasObjectSource::new();
+        let blob_oid = cas.insert_raw(ObjectKind::Blob, content.to_vec());
+
+        // Build the tree bytes: `100644 <name>\0<20-byte-oid>`.
+        let mut tree_bytes = Vec::new();
+        tree_bytes.extend_from_slice(b"100644 ");
+        // Only the leaf name (no path separators in a tree entry).
+        let leaf = path.rsplit('/').next().unwrap_or(path);
+        tree_bytes.extend_from_slice(leaf.as_bytes());
+        tree_bytes.push(0);
+        tree_bytes.extend_from_slice(blob_oid.as_bytes());
+        let root_oid = cas.insert_raw(ObjectKind::Tree, tree_bytes);
+
+        (Arc::new(cas), root_oid)
+    }
+
+    #[test]
+    fn code_search_finds_real_hit_when_git_source_wired() {
+        // F4c: a wired git source + a query that matches a file's content →
+        // real code hits in the VM (NOT honest-empty).
+        let content = b"fn frobnicate(x: u32) -> u32 { x + 1 }\n";
+        let (src, root) = make_git_src_with_file("lib.rs", content);
+        let vm = build_search(&EventLog::new(), "r", "frobnicate", Some(&src), Some(&root));
+        assert!(
+            !vm.code.is_empty(),
+            "code must be non-empty when git source is wired and query matches"
+        );
+        assert_eq!(vm.code[0].path, "lib.rs");
+        assert_eq!(vm.code[0].lines.len(), 1);
+        assert_eq!(vm.code[0].lines[0].0, 1); // 1-based line number
+        assert!(
+            vm.code[0].lines[0].1.contains("frobnicate"),
+            "line text: {}",
+            vm.code[0].lines[0].1
+        );
+        assert!(vm.code_total >= 1, "code_total must be at least 1");
+    }
+
+    #[test]
+    fn code_search_is_case_insensitive() {
+        let content = b"const MAX_FROB: usize = 42;\n";
+        let (src, root) = make_git_src_with_file("cfg.rs", content);
+        let vm = build_search(&EventLog::new(), "r", "max_frob", Some(&src), Some(&root));
+        assert!(
+            !vm.code.is_empty(),
+            "case-insensitive match must return a hit"
+        );
+    }
+
+    #[test]
+    fn code_search_empty_when_no_git_source() {
+        // Without a git source, code / code_total are honest-empty (not faked).
+        let vm = build_search(&EventLog::new(), "r", "frobnicate", None, None);
+        assert!(vm.code.is_empty(), "no git source → code must be empty");
+        assert_eq!(vm.code_total, 0);
+    }
+
+    #[test]
+    fn code_search_secret_in_file_is_scrubbed() {
+        // A secret embedded in a file must be scrubbed at the read boundary —
+        // the raw secret must NOT appear in the code hit lines.
+        let secret = "ghp_16C7e42F292c6912E7710c838347Ae178B4a";
+        let content = format!("const KEY: &str = \"{secret}\";\n");
+        let (src, root) = make_git_src_with_file("secret.rs", content.as_bytes());
+        // q matches the file (via the KEY word before the secret)
+        let vm = build_search(&EventLog::new(), "r", "key", Some(&src), Some(&root));
+        let j = serde_json::to_string(&vm).unwrap();
+        assert!(
+            !j.contains(secret),
+            "secret must be scrubbed from code hit lines: {j}"
+        );
+        assert!(
+            j.contains("[REDACTED]"),
+            "REDACTED sentinel must appear in place of secret: {j}"
+        );
     }
 }

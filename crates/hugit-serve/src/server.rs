@@ -203,8 +203,13 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
     let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
     // /readyz — unauthenticated liveness/readiness (the window's boot probe).
+    // `git_serving` reflects whether `HUGIT_SERVE_GIT_DIR` (or the CAS source)
+    // is wired at boot — a missing true here means clone/fetch are not live.
+    // No repo content is leaked; it is a capability flag only.
     if method == &Method::Get && segs == ["readyz"] {
-        return (200, r#"{"ready":true}"#.to_string());
+        let git_serving = state.git_source.is_some();
+        let body = format!(r#"{{"ready":true,"git_serving":{git_serving}}}"#);
+        return (200, body);
     }
 
     // /v1/me/login — PUBLIC (no Bearer): the auth entry-point, served before any
@@ -308,6 +313,34 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
                         return err(EngineErr::not_found());
                     }
                     ok(&handlers::build_attention(log, repo))
+                },
+            )
+        }
+        // `GET /v1/orgs/{name}` — thin real org view. `name` is the path param;
+        // the repos list comes from the launch repo's log (the engine's one known
+        // repo). Auth + the per-tenant read gate apply (same as `/v1/me/*`).
+        // Multi-tenant repo enumeration is the P2 seam — we emit exactly the one
+        // loaded row, never fabricate sibling rows.
+        ["v1", "orgs", org_name] => {
+            let (principal, _) = match two_tier_auth(state, headers) {
+                Ok(p) => p,
+                Err(e) => return err(e),
+            };
+            let repo = ME_DEFAULT_REPO;
+            with_log(
+                || {
+                    state
+                        .load_verified(repo)
+                        .map_err(|e| hide_load_err(&principal, e))
+                },
+                |log| {
+                    if !crate::authz::authorize_read(
+                        &principal,
+                        &crate::authz::project_repo_meta(log),
+                    ) {
+                        return err(EngineErr::not_found());
+                    }
+                    ok(&handlers::build_org(log, org_name, repo))
                 },
             )
         }
@@ -768,7 +801,9 @@ fn dispatch_repo(
             // An unbounded `q` that is lowercased per record is a CPU/memory DoS.
             // 1 024 bytes is ample for any real search term.
             q.truncate(1024);
-            ok(&handlers::build_search(log, repo, &q))
+            ok(&handlers::build_search(
+                log, repo, &q, git_source, root_tree,
+            ))
         }
         // viewer-can mirrors the REAL per-caller write gate (`authorize_write`,
         // ownership) for THIS repo (audit 2026-06-16) — using the real caller +
