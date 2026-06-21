@@ -37,14 +37,13 @@ concurrency:
 
 jobs:
   gates:
-    # GitHub-hosted runner (2026-06-19: org Actions billing unblocked — owner).
-    # Switched off the single self-hosted Mac builder, which was contention-flaky
-    # (~37% PS-12b-class infra failures: lost toolchain PATH, registry-extraction
-    # races, CANCELLED runs) — ephemeral hosted runners are isolated, so the
-    # CARGO_HOME-isolation + per-step PATH-glob workarounds below are now belt-and-
-    # suspenders (harmless on ubuntu; kept to minimise this diff). ubuntu-latest
-    # also matches prod (the engine container is linux), not the dev Mac.
-    runs-on: ubuntu-latest
+    # Self-hosted Mac builder (2026-06-21: org GitHub-hosted Actions minutes hit the
+    # cap mid-day → hosted jobs failed with 0 steps; owner: "vai rodando selfhosted,
+    # sem billing por hora"). The CARGO_HOME-isolation + per-step PATH-glob steps
+    # below are REQUIRED on this box (the rustup `cargo` proxy vanishes per-step) —
+    # they're the reason the steps already run on self-hosted unchanged. Trade-off:
+    # the box is contention-flaky (~37% infra fails); re-run a 0-step/CANCELLED fail.
+    runs-on: [self-hosted, macOS]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
