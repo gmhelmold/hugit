@@ -237,3 +237,65 @@ fn landing_item_card_round_trips_externally_tagged() {
         hunks: vec![],
     };
 }
+
+// ── F5: queue_position and eta_seconds ────────────────────────────────────────
+
+/// F5: empty log → `queue_position` is `None` (no queued PRs).
+/// `eta_seconds` is always `None` (no estimator seam exists).
+#[test]
+fn empty_log_queue_position_none_eta_none() {
+    let log = EventLog::new();
+    let vm = build_landing(&log, "hugit");
+    assert_eq!(
+        vm.queue_position, None,
+        "queue_position is None when no PRs are queued"
+    );
+    assert_eq!(
+        vm.eta_seconds, None,
+        "eta_seconds is always None (no estimator seam)"
+    );
+}
+
+/// F5: a PR that is queued via `pr.queued` → `queue_position` is `Some(1)` (the
+/// head of the active queue). `eta_seconds` stays `None` (honest).
+#[test]
+fn queued_pr_makes_queue_position_some() {
+    let mut log = EventLog::new();
+
+    // Open a PR.
+    push(
+        &mut log,
+        "pr.opened",
+        serde_json::json!({
+            "pr_id": "42",
+            "campaign": "wave-f5",
+            "intent_ids": ["i-1"],
+            "title": "test pr"
+        }),
+        1_000,
+    );
+
+    // Queue the PR (pr.queued — the `all_pr_queued` seam reads this record kind).
+    push(
+        &mut log,
+        "pr.queued",
+        serde_json::json!({
+            "pr_id": "42",
+            "item_id": "42#0",
+            "order_index": 0,
+            "mode": "union"
+        }),
+        2_000,
+    );
+
+    let vm = build_landing(&log, "hugit");
+    assert_eq!(
+        vm.queue_position,
+        Some(1),
+        "queue_position is Some(1) when one PR is queued"
+    );
+    assert_eq!(
+        vm.eta_seconds, None,
+        "eta_seconds stays None (no estimator)"
+    );
+}

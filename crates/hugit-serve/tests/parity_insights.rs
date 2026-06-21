@@ -107,3 +107,52 @@ fn secret_in_charter_redacts_in_ledger_row() {
         "secret-shaped charter scrubs in the ledger row"
     );
 }
+
+// ── F4a: raw integer fields on insights VM ────────────────────────────────────
+
+/// F4a: on an empty log, the x-ray rows and totals are absent, so there are no
+/// raw-int fields to check — but the VM is still valid and round-trips.
+#[test]
+fn empty_log_raw_int_fields_are_absent() {
+    let vm = build_insights(&EventLog::new(), "hugit");
+    assert!(vm.cost_xray.is_empty());
+    assert!(vm.cost_xray_totals.is_none());
+    let json = serde_json::to_string(&vm).unwrap();
+    let back: hugit_http_contracts::InsightsVm = serde_json::from_str(&json).unwrap();
+    assert_eq!(vm, back);
+}
+
+/// F4a: ledger rows built from a log carry honest-zero raw-int cost fields
+/// (no cost seam on `intent.landed` events — the ledger view has no USD figures).
+#[test]
+fn ledger_row_raw_int_cost_fields_are_honest_zero() {
+    let mut log = EventLog::new();
+    push(
+        &mut log,
+        "campaign.opened",
+        serde_json::json!({ "campaign": "wf4a" }),
+        1_000,
+    );
+    push(
+        &mut log,
+        "intent.landed",
+        serde_json::json!({
+            "intent_id": "i-f4a", "campaign": "wf4a",
+            "charter": "add feature", "deep_link_target": "i-f4a"
+        }),
+        2_000,
+    );
+    let vm = build_insights(&log, "hugit");
+    let row = &vm.ledger.campaigns[0].rows[0];
+    // The ledger view has no cost seam: all cost fields are honest-zero.
+    assert_eq!(row.cost_micros, 0, "cost_micros honest-zero on ledger row");
+    assert_eq!(
+        row.savings_micros, 0,
+        "savings_micros honest-zero on ledger row"
+    );
+    assert_eq!(
+        row.tokens_count, 0,
+        "tokens_count honest-zero on ledger row"
+    );
+    assert_eq!(row.spend_proof, None, "spend_proof None on ledger row");
+}
