@@ -22,38 +22,109 @@ pub struct XrayDrillRowVm {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CostXrayRowVm {
     pub campaign: CampaignChipVm,
+    // deprecated: format in the view
     pub tokens: String,
     pub prs_int: String,
     /// decomp-bar segment widths (work, orch, verif, ci) as percentages.
     pub decomp_pcts: (u32, u32, u32, u32),
+    // deprecated: format in the view
     pub cost_total: String,
+    // deprecated: format in the view
     pub waste: String,
+    // deprecated: format in the view
     pub cache_saved: String,
     pub first_pass: String,
     pub drill_rows: Vec<XrayDrillRowVm>,
+
+    // F4a — raw integer fields (additive; serde-default so old clients ignore them).
+    /// Raw token count for the campaign row (same source as `tokens` string).
+    #[serde(default)]
+    pub tokens_count: u64,
+    /// Total cost in integer micro-USD (1 USD = 1_000_000); same source as `cost_total`.
+    #[serde(default)]
+    pub cost_total_micros: u64,
+    /// Waste cost in integer micro-USD; same source as `waste`.
+    #[serde(default)]
+    pub waste_micros: u64,
+    /// CI cache savings in integer micro-USD; honest-zero until the cache-$ seam exists.
+    #[serde(default)]
+    pub cache_saved_micros: u64,
+
+    // F4a — spend attestation.
+    /// Content-addressed ref to the envelope's signed record — provability hook.
+    /// `Some` when the PR-altitude envelope was captured and its `cas:` ref is
+    /// available; `None` when no envelope was captured for this campaign row.
+    #[serde(default)]
+    pub spend_proof: Option<String>,
+
+    // F5 — cache efficiency (honest-`None` until the CI-cost/cache seam exists).
+    /// Cache efficiency percentage (0–100); `None` until the CI pricing seam
+    /// supplies both `saved_usd_micros` and `cost_usd_micros`.
+    #[serde(default)]
+    pub cache_efficiency_pct: Option<u8>,
 }
 
 /// The Cost X-ray `<tfoot>` totals row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct XrayTotalsVm {
+    // deprecated: format in the view
     pub tokens: String,
     pub prs_int: String,
+    // deprecated: format in the view
     pub cost: String,
+    // deprecated: format in the view
     pub waste: String,
+    // deprecated: format in the view
     pub cache_saved: String,
     pub first_pass: String,
+
+    // F4a — raw integer totals (additive; serde-default so old clients ignore them).
+    /// Total raw token count across all campaigns.
+    #[serde(default)]
+    pub tokens_count: u64,
+    /// Grand total cost in integer micro-USD.
+    #[serde(default)]
+    pub cost_micros: u64,
+    /// Grand total waste in integer micro-USD.
+    #[serde(default)]
+    pub waste_micros: u64,
+    /// Grand total CI savings in integer micro-USD; honest-zero until the cache-$ seam exists.
+    #[serde(default)]
+    pub cache_saved_micros: u64,
 }
 
 /// The "Para onde foi o custo" global cost-decomposition card.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GlobalDecompVm {
     pub bar_pcts: (u32, u32, u32, u32),
+    // deprecated: format in the view
     pub work_usd: String,
+    // deprecated: format in the view
     pub orchestration_usd: String,
+    // deprecated: format in the view
     pub verification_usd: String,
+    // deprecated: format in the view
     pub ci_usd: String,
+    // deprecated: format in the view
     pub waste_usd: String,
     pub overhead_pct: String,
+
+    // F4a — raw integer decomposition fields (additive; serde-default so old clients ignore them).
+    /// Work cost in integer micro-USD.
+    #[serde(default)]
+    pub work_micros: u64,
+    /// Orchestration cost in integer micro-USD.
+    #[serde(default)]
+    pub orchestration_micros: u64,
+    /// Verification cost in integer micro-USD.
+    #[serde(default)]
+    pub verification_micros: u64,
+    /// CI cost in integer micro-USD.
+    #[serde(default)]
+    pub ci_micros: u64,
+    /// Waste cost in integer micro-USD.
+    #[serde(default)]
+    pub waste_micros: u64,
 }
 
 /// One contributor row in the full-width Contribuição card.
@@ -101,8 +172,27 @@ pub struct LedgerRowVm {
     pub intent_chips: Vec<String>,
     pub verdict_chips: Vec<String>,
     pub proof_note: String,
+    // deprecated: format in the view
     pub cost: String,
+    // deprecated: format in the view
     pub savings: String,
+
+    // F4a — raw integer cost fields (additive; serde-default so old clients ignore them).
+    /// Total cost for this ledger entry in integer micro-USD.
+    #[serde(default)]
+    pub cost_micros: u64,
+    /// Cache savings for this entry in integer micro-USD; honest-zero when no seam.
+    #[serde(default)]
+    pub savings_micros: u64,
+    /// Raw token count for this entry; honest-zero when no envelope is present.
+    #[serde(default)]
+    pub tokens_count: u64,
+
+    // F4a — spend attestation.
+    /// Content-addressed ref to the envelope's signed record — provability hook.
+    /// `Some(cas_ref)` when the intent-altitude envelope was captured; `None` otherwise.
+    #[serde(default)]
+    pub spend_proof: Option<String>,
 }
 
 /// One campaign block in the Ledger view.
@@ -226,6 +316,13 @@ mod tests {
             cache_saved: "$161".to_string(),
             first_pass: "90%".to_string(),
             drill_rows: vec![drill_row],
+            // F4a raw int fields
+            tokens_count: 5_100_000,
+            cost_total_micros: 24_000_000,
+            waste_micros: 2_000_000,
+            cache_saved_micros: 0,
+            spend_proof: Some("cas:abc123".to_string()),
+            cache_efficiency_pct: None,
         };
         let ledger_row = LedgerRowVm {
             intent_id: "a31".to_string(),
@@ -242,6 +339,11 @@ mod tests {
             proof_note: "checks 11 verdes · byte-idêntico ×3".to_string(),
             cost: "$0.04".to_string(),
             savings: "cache poupou $3.10".to_string(),
+            // F4a raw int fields
+            cost_micros: 40_000,
+            savings_micros: 3_100_000,
+            tokens_count: 0,
+            spend_proof: None,
         };
         let envelope_ref = LedgerEnvelopeRefVm {
             header: "sessão da campanha orq-014 · opus-4.8 · 7–9 jun".to_string(),
@@ -289,6 +391,11 @@ mod tests {
                 waste: "$11".to_string(),
                 cache_saved: "$312".to_string(),
                 first_pass: "88%".to_string(),
+                // F4a raw int totals
+                tokens_count: 14_200_000,
+                cost_micros: 94_000_000,
+                waste_micros: 11_000_000,
+                cache_saved_micros: 0,
             }),
             tokens_by_model: vec![("opus-4.8".to_string(), 9_100_000u64)],
             tokens_by_model_legend: "14.2M total · cache hit-rate 88%".to_string(),
@@ -300,6 +407,12 @@ mod tests {
                 ci_usd: "$8".to_string(),
                 waste_usd: "$11".to_string(),
                 overhead_pct: "17%".to_string(),
+                // F4a raw int decomp fields
+                work_micros: 52_000_000,
+                orchestration_micros: 14_000_000,
+                verification_micros: 9_000_000,
+                ci_micros: 8_000_000,
+                waste_micros: 11_000_000,
             }),
             contrib: vec![ContribRowVm {
                 name: "opus-4.8".to_string(),
@@ -339,5 +452,154 @@ mod tests {
         let json = serde_json::to_string(&vm).expect("InsightsVm serializes");
         let reparsed: InsightsVm = serde_json::from_str(&json).expect("InsightsVm deserializes");
         assert_eq!(vm, reparsed, "InsightsVm round-trip is lossless");
+    }
+
+    /// F4a: raw integer fields on `CostXrayRowVm` are present and survive a round-trip.
+    /// Tests both the real-populated path (`tokens_count`, `cost_total_micros`, `waste_micros`,
+    /// `spend_proof: Some`) and the honest-null/zero path (`cache_saved_micros: 0`,
+    /// `cache_efficiency_pct: None`).
+    #[test]
+    fn cost_xray_row_raw_int_fields_round_trip() {
+        let chip = CampaignChipVm {
+            id: "c1".to_string(),
+            label: "c1".to_string(),
+            color_class: "".to_string(),
+            display_label: "c1".to_string(),
+        };
+        let row = CostXrayRowVm {
+            campaign: chip,
+            tokens: "5.1M".to_string(),
+            prs_int: "1·2".to_string(),
+            decomp_pcts: (0, 0, 0, 0),
+            cost_total: "$24.00".to_string(),
+            waste: "$2.00".to_string(),
+            cache_saved: String::new(),
+            first_pass: String::new(),
+            drill_rows: vec![],
+            // real-populated:
+            tokens_count: 5_100_000,
+            cost_total_micros: 24_000_000,
+            waste_micros: 2_000_000,
+            // honest-zero (no cache-$ seam):
+            cache_saved_micros: 0,
+            // real spend_proof:
+            spend_proof: Some("cas:abc123proof".to_string()),
+            // honest-None (no CI seam):
+            cache_efficiency_pct: None,
+        };
+        let json = serde_json::to_string(&row).expect("serializes");
+        let back: CostXrayRowVm = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(back.tokens_count, 5_100_000, "tokens_count round-trips");
+        assert_eq!(
+            back.cost_total_micros, 24_000_000,
+            "cost_total_micros round-trips"
+        );
+        assert_eq!(back.waste_micros, 2_000_000, "waste_micros round-trips");
+        assert_eq!(back.cache_saved_micros, 0, "cache_saved_micros honest-zero");
+        assert_eq!(
+            back.spend_proof,
+            Some("cas:abc123proof".to_string()),
+            "spend_proof Some round-trips"
+        );
+        assert_eq!(
+            back.cache_efficiency_pct, None,
+            "cache_efficiency_pct honest-None"
+        );
+    }
+
+    /// F4a: serde-default — old JSON without the new raw int fields deserializes cleanly
+    /// (backward compat for the live githugr window).
+    #[test]
+    fn cost_xray_row_missing_new_fields_default_to_zero_and_none() {
+        let old_json = r#"{
+            "campaign": {"id":"c","label":"c","color_class":"","display_label":"c"},
+            "tokens": "1.0M", "prs_int": "1·1", "decomp_pcts": [0,0,0,0],
+            "cost_total": "$1.00", "waste": "$0.00", "cache_saved": "",
+            "first_pass": "", "drill_rows": []
+        }"#;
+        let row: CostXrayRowVm = serde_json::from_str(old_json).expect("old JSON parses");
+        assert_eq!(row.tokens_count, 0, "tokens_count defaults to 0");
+        assert_eq!(row.cost_total_micros, 0, "cost_total_micros defaults to 0");
+        assert_eq!(row.waste_micros, 0, "waste_micros defaults to 0");
+        assert_eq!(
+            row.cache_saved_micros, 0,
+            "cache_saved_micros defaults to 0"
+        );
+        assert_eq!(row.spend_proof, None, "spend_proof defaults to None");
+        assert_eq!(
+            row.cache_efficiency_pct, None,
+            "cache_efficiency_pct defaults to None"
+        );
+    }
+
+    /// F4a: raw integer totals on `XrayTotalsVm` are present and round-trip.
+    #[test]
+    fn xray_totals_raw_int_fields_round_trip() {
+        let totals = XrayTotalsVm {
+            tokens: "14.2M".to_string(),
+            prs_int: "9·18".to_string(),
+            cost: "$94".to_string(),
+            waste: "$11".to_string(),
+            cache_saved: String::new(),
+            first_pass: String::new(),
+            tokens_count: 14_200_000,
+            cost_micros: 94_000_000,
+            waste_micros: 11_000_000,
+            cache_saved_micros: 0,
+        };
+        let json = serde_json::to_string(&totals).expect("serializes");
+        let back: XrayTotalsVm = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(back.tokens_count, 14_200_000);
+        assert_eq!(back.cost_micros, 94_000_000);
+        assert_eq!(back.waste_micros, 11_000_000);
+        assert_eq!(back.cache_saved_micros, 0);
+    }
+
+    /// F4a: raw integer fields on `LedgerRowVm` — real-populated and honest-zero paths.
+    #[test]
+    fn ledger_row_raw_int_fields_and_spend_proof() {
+        let row_with_proof = LedgerRowVm {
+            intent_id: "x1".to_string(),
+            asked: "do the thing".to_string(),
+            done_status: "mergeado".to_string(),
+            proven_status: "verde".to_string(),
+            verdict: None,
+            when: "now".to_string(),
+            model: String::new(),
+            done_body: String::new(),
+            pr_number: None,
+            intent_chips: vec![],
+            verdict_chips: vec![],
+            proof_note: String::new(),
+            cost: String::new(),
+            savings: String::new(),
+            // honest-zero: no cost seam on ledger entries
+            cost_micros: 0,
+            savings_micros: 0,
+            tokens_count: 0,
+            // honest-None: no envelope ref on ledger view
+            spend_proof: None,
+        };
+        let json = serde_json::to_string(&row_with_proof).expect("serializes");
+        let back: LedgerRowVm = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(back.cost_micros, 0, "cost_micros honest-zero");
+        assert_eq!(back.savings_micros, 0, "savings_micros honest-zero");
+        assert_eq!(back.tokens_count, 0, "tokens_count honest-zero");
+        assert_eq!(back.spend_proof, None, "spend_proof honest-None");
+    }
+
+    /// F4a: `LedgerRowVm` old JSON without new fields deserializes cleanly (backward compat).
+    #[test]
+    fn ledger_row_missing_new_fields_default() {
+        let old_json = r#"{
+            "intent_id":"x1","asked":"do","done_status":"m","proven_status":"v",
+            "verdict":null,"when":"now","model":"","done_body":"","pr_number":null,
+            "intent_chips":[],"verdict_chips":[],"proof_note":"","cost":"","savings":""
+        }"#;
+        let row: LedgerRowVm = serde_json::from_str(old_json).expect("old JSON parses");
+        assert_eq!(row.cost_micros, 0);
+        assert_eq!(row.savings_micros, 0);
+        assert_eq!(row.tokens_count, 0);
+        assert_eq!(row.spend_proof, None);
     }
 }
