@@ -1,7 +1,18 @@
 # hugit
 
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+
 > **hug it** — the git-compatible, LLM-native forge. Embrace the community,
 > fix the workflow.
+
+## Quick start
+
+```sh
+git clone https://github.com/HumanGuardrail/hugit.git
+cd hugit
+cargo build --release
+./target/release/hugit --help
+```
 
 **Status (2026-06-20):** A **19-package** Rust workspace. The integrity spine
 (Ed25519/SHA-256 crypto, policy engine, Squad-X platform invariants) is

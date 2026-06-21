@@ -315,7 +315,7 @@ impl ResourceAccountingModel {
 /// Requires BOTH env vars to be set and non-empty:
 /// - `HUGIT_RUNNER_HOST` — the hugit runner box (load source for item ①).
 /// - `HUGIT_CORELINK_PROBE_URL` — a CoreLink prod endpoint to probe latency
-///   (e.g. `https://api.corelink.humangr.com/health`).
+///   (e.g. `https://<your-corelink-url>/health`).
 pub fn live_lane_active() -> bool {
     let runner = std::env::var("HUGIT_RUNNER_HOST")
         .ok()

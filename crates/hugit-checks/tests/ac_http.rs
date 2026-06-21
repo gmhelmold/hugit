@@ -106,7 +106,7 @@ impl HttpTransport for MockTransport {
 
 const TENANT: &str = "acme";
 const PAT: &str = "corelink_pat_SECRETVALUE_must_never_leak";
-const BASE: &str = "https://api.corelink.humangr.com";
+const BASE: &str = "https://corelink-api.example.com";
 
 /// A `CheckResult` whose `memo_key` is the REAL three-axis key over its own
 /// axes — so the content-address guard accepts it as a valid hit.

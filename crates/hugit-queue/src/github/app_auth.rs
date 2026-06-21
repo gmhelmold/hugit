@@ -179,11 +179,11 @@ mod tests {
             },
             Installation {
                 id: 42,
-                account_login: "HumanGR-Labs".to_string(),
+                account_login: "Example-Org".to_string(),
                 repository_selection: "selected".to_string(),
             },
         ];
-        let found = select_installation(&installs, "humangr-labs").expect("found");
+        let found = select_installation(&installs, "example-org").expect("found");
         assert_eq!(found.id, 42);
         assert!(select_installation(&installs, "nobody").is_none());
     }
