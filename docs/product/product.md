@@ -13,12 +13,14 @@
 
 ---
 
-## 1. The one-sentence product
+## 1. The value couplet
 
-**The git-compatible, LLM-native forge: parallel agent work lands through a
-union-tested queue onto an always-green `main`, CI is memoized to near-zero by
-content, every commit carries its intent/context/proof — and it rides GitHub
-first, so adopting it requires migrating nothing.**
+**Your agent fleet ships branches that are green alone and red together. hugit
+lands them on a `main` that is always green and re-runs zero CI it has already
+paid for — on your existing GitHub repos, migrating nothing.**
+
+That is the one thing hugit is for. Everything else below is how it delivers
+that promise and what comes next.
 
 ---
 
@@ -44,7 +46,11 @@ first, so adopting it requires migrating nothing.**
 
 ## 3. Who it's for (ICPs) & user stories
 
-### ICP-A — Agent-fleet teams (the wedge)
+### Beachhead ICP — Fleet operators (the wedge)
+
+The fleet operator is an engineer or orchestrator running 10–50 agents in
+parallel. They are the primary ICP. Every other persona is expansion from here.
+
 - *"My orchestrator runs 10–50 agents. Each branch is green alone and red
   together. I spend my evenings reconciling work that machines produced in
   minutes."* → the union-testing landing queue: batches tested together
@@ -53,57 +59,66 @@ first, so adopting it requires migrating nothing.**
 - *"Every push re-runs a CI suite that already ran on 95% of this tree."* →
   `check(tree ‖ def ‖ toolchain)` memoized in the AC: a hit is a lookup, zero
   execution.
+- hugit itself is its own design partner: we run agent fleets daily and our own
+  landing pain is the spec. Real hit-rates and cost decomposition are published
+  — not claimed.
 
-### ICP-B — Platform / CI leads on GitHub (the first dollar)
+### Expansion ICP-B — Platform / CI leads on GitHub (the first dollar)
 - *"I'm not migrating my repos. Give me the wins on the repo I already have."*
   → the landing layer rides GitHub via the App: memoized checks + the union
   queue + verdicts, zero migration ask; the mirror is the permanent escape
   hatch.
 
-### ICP-C — Engineering leadership / finance (the buyer)
+### Expansion ICP-C — Engineering leadership / finance (the buyer)
 - *"Agent tooling costs me $200–600/dev/mo across five vendors and spikes when
   the team ships."* → one flat, predictable bill (the consolidation prize);
   never metered on the customer's own compute.
 
-### ICP-D — jj users (a beachhead, not the GTM)
+### Expansion ICP-D — jj users
 - *"jj has change-ids and no native forge."* → hugit serves git AND jj over
   the same CAS (phase D); stable intent identity ≅ change-id.
-
-### ICP-E — HuGR itself (design partner #0)
-- *"We orchestrate fleets daily; our own landing pain is the spec."* → dogfood
-  (B8) with honest hit-rates, published.
 
 ---
 
 ## 4. The product surface
 
-| Capability | What the customer gets | Why it's ours to win |
-|---|---|---|
-| **Union-tested landing queue** (B4) | batches of green PRs tested **together** pre-land; `main` always green; failing pair excluded, rest proceeds | proven blueprint (Uber SubmitQueue) + two upgrades: advisory claims + memoized verification — no forge ships it |
-| **Memoized checks** (B2) | cache-hit ⇒ zero execution; honest partial hit-rates, measured never promised | requires a production CAS/AC — years of substrate, already live |
-| **Derived-file regeneration** | lockfiles/codegen **never text-merged** — regenerated deterministically | kills the #1 measured git pain |
-| **Intent + context envelope** (ADR-0001) | every commit carries charter, trajectory (3 altitudes), metrics, verdicts | the durable record of ephemeral authors; feeds why-blame/ledger (githugr) |
-| **Claims as fences** (C5) | a workspace materializes ONLY what the intent claimed; blast radius = the claim | safety by construction; advisory for conflict-hints (the union test is the oracle) |
-| **Auto-bisect + flake intelligence** (B5/C6) | red → culprit in ≤log₂ probes over memoized checks; flakes quarantined, annotated | bisect is ~free only when checks are memoized |
-| **Event-sourced refs + universal undo** (D1) | force-push data loss is **unexpressible**; every op reversible | agents do dumb things; undo is the trust feature |
-| **Bidirectional GitHub mirror** (E1/E2 + sync) | branches round-trip; `main` single-writer via the queue; incidents preserved as refs, never dropped | a broken bridge kills trust — ours is forge-arbitrated by design |
-| **Actions shim** (E4) | imported repos keep `.github/workflows` running (supported subset, explicit) | absorption discipline: nothing absorbed worse |
-| **Provenance / attestation** (X2/X8) | SLSA-class chain **including the model layer**: which model, whose instruction, what cost | falls out of the object model; GitHub cannot express it |
-| **Export / exit** (E5/B9) | full git + JSON snapshot, redaction applied, exit-proof | the exit guarantee is also the DR plan |
+Status key: **LIVE** = serving real data today · **BUILT** = gate-green, deploy-gated · **ROADMAP** = logic designed/hermetic, not yet executing live.
+
+| Capability | Status | What the customer gets | Why it's ours to win |
+|---|---|---|---|
+| **Union-tested landing queue** | **ROADMAP** | batches of green PRs tested **together** pre-land; `main` always green; failing pair excluded, rest proceeds | proven blueprint (Uber SubmitQueue) + two upgrades: advisory claims + memoized verification — no forge ships it |
+| **Memoized checks** | **ROADMAP** | cache-hit ⇒ zero execution; honest partial hit-rates, measured never promised | requires a production CAS/AC — years of substrate, already live |
+| **Derived-file regeneration** | **ROADMAP** | lockfiles/codegen **never text-merged** — regenerated deterministically | kills the #1 measured git pain |
+| **Intent + context envelope** | **LIVE** (write path) | every commit carries charter, trajectory (3 altitudes), metrics, verdicts | the durable record of ephemeral authors |
+| **Claims as fences** | **LIVE** (hermetic) | a workspace materializes ONLY what the intent claimed; blast radius = the claim | safety by construction; the union test is the runtime oracle |
+| **Auto-bisect + flake intelligence** | **LIVE** (`hugit diag`) | red → culprit in ≤log₂ probes over memoized checks; flakes quarantined, annotated | bisect is ~free only when checks are memoized |
+| **Event-sourced refs + universal undo** | **LIVE** (`hugit undo`) | force-push data loss is **unexpressible**; every op reversible | agents do dumb things; undo is the trust feature |
+| **Symbol outline** | **LIVE** (`hugit symbol`) | structured symbol map of any source file — TS/JS/Python/Go/Java/C/C++/Ruby | standalone; no server; the "first aha" |
+| **Export / exit guarantee** | **LIVE** (`hugit export`) | full git + JSON snapshot, redaction applied, exit-proof | the exit guarantee is also the DR plan |
+| **Import** | **LIVE** (`hugit import`) | bring a GitHub repo without leaving GitHub | zero migration ask; reversible at every rung |
+| **Provenance / attestation** | **LIVE** (object model) | SLSA-class chain **including the model layer**: which model, whose instruction, what cost | falls out of the object model; GitHub cannot express it |
+| **Bidirectional GitHub mirror** | **ROADMAP** | branches round-trip; `main` single-writer via the queue; incidents preserved as refs, never dropped | a broken bridge kills trust — ours is forge-arbitrated by design |
+| **Actions shim** | **ROADMAP** | imported repos keep `.github/workflows` running (supported subset, explicit) | absorption discipline: nothing absorbed worse |
+| **`git clone` / `git fetch`** | **BUILT, deploy-gated** | smart-HTTP upload-pack; `git clone` succeeds in CI | live once `HUGIT_SERVE_GIT_DIR` is set on deploy |
+| **`git push`** | **ROADMAP** | receive-pack; returns 404 today | later wave |
 
 ## 5. The killer features, ranked
 
-1. **Union testing at fleet scale** — the wedge; the landing problem solved
-   empirically, not predictively.
-2. **Memoized checks** — CI that mostly never runs; the margin and the speed
-   are the same number.
-3. **Derived-file regeneration** — highest pain-to-effort ratio in the
-   portfolio.
-4. **The context envelope + three-altitude metrics** (ADR-0001) — fleet
-   legibility; the buying reason as fleets become normal (surfaced by githugr).
-5. **Auto-bisect culprit-finding** — a default, not a luxury.
-6. **Universal undo** — nothing is ever lost, by construction.
-7. *(gated)* **Regenerative rebase** — opt-in forever for non-trivial intents;
+Status key: **LIVE** = working today · **ROADMAP** = designed, not yet executing live.
+
+1. **Union testing at fleet scale** *(ROADMAP)* — the wedge; the landing problem solved
+   empirically, not predictively. Algorithm built + hermetically proven; needs live runner fabric.
+2. **Memoized checks** *(ROADMAP)* — CI that mostly never runs; the margin and the speed
+   are the same number. Needs live runner + Action Cache substrate.
+3. **Derived-file regeneration** *(ROADMAP)* — highest pain-to-effort ratio in the
+   portfolio; lockfiles/codegen regenerated, never text-merged.
+4. **The context envelope + three-altitude metrics** *(LIVE — write path)* — fleet
+   legibility; every commit carries charter, model, cost, verdicts.
+5. **Auto-bisect culprit-finding** *(LIVE — `hugit diag`)* — log-backed bisect; a default, not a luxury.
+6. **Universal undo** *(LIVE — `hugit undo`)* — nothing is ever lost, by construction.
+7. **Symbol outline** *(LIVE — `hugit symbol`)* — structured symbol map; the "first aha"; standalone, no server.
+8. **Export / exit guarantee** *(LIVE — `hugit export`)* — also the DR plan; zero lock-in.
+9. *(ROADMAP)* **Regenerative rebase** — opt-in forever for non-trivial intents;
    adversarial re-verdict mandatory (review-panel demotion stands).
 
 ## 6. Deliberately NOT the product
