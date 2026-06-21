@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-C10 acceptance suite — pricing no-shock guard (items ① ②).
-# Contract: docs/plan/wp-contracts/WP-C10.md
+# Acceptance harness for WP-C10.
 # Owned items:
 #   ① driving a tenant to budget exhaustion on EACH metered surface
 #      (runner minutes, shadow spend, storage) → system caps/degrades

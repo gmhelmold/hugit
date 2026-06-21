@@ -1,5 +1,5 @@
 //! Acceptance oracle — seamless **forge-arbitrated bidirectional** GitHub ↔ hugit
-//! sync (`docs/design/2026-06-08-seamless-bidirectional-sync.md`; supersedes E6).
+//! sync (supersedes E6).
 //!
 //! Owned acceptance items (VERBATIM in intent from the design's "Owned
 //! acceptance" ①–⑤):

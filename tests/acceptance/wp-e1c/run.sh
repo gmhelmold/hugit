@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-E1c acceptance suite — verified mirror: bootstrap + disaster recovery (items ⑧ ⑨ ⑪).
-# Contract: docs/plan/wp-contracts/WP-E1c.md
+# Acceptance harness for WP-E1c.
 # Owned items:
 #   ⑧(R3)  cold-seed bootstrap: full history → fresh GitHub repo, hash-verified, resumable mid-seed
 #   ⑨🔧    GitHub-side loss DR: App revocation or mirror-repo deletion/rename → incident → recoverable;

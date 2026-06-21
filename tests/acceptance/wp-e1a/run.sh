@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-E1a acceptance suite — verified mirror: outbound sync + hash verify + ordering/queue (items ① ③ ⑩).
-# Contract: docs/plan/wp-contracts/WP-E1a.md
+# Acceptance harness for WP-E1a.
 # Owned items:
 #   ①  landing on GitHub <60s hash-verified
 #   ③  72h soak 100% verified

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-B6 acceptance suite — hugit-app/sidecar, intent sidecar (items ①②③④).
-# Contract: docs/plan/wp-contracts/WP-B6.md.
+# Acceptance harness for WP-B6.
 # Owned items: ① parsed/validated/rendered · ② malformed→actionable comment
 #              · ③ corpus→CAS by intent_id · ④(R2) sidecar is non-authoritative
 # Oracle: crates/hugit-app/sidecar/tests/acceptance_wp-b6.rs must exist with

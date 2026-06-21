@@ -1,6 +1,6 @@
 //! WP-D7 acceptance tests — adversarial verdict panels + grounded review Q&A.
 //!
-//! Contract: docs/plan/wp-contracts/WP-D7.md.
+//! Acceptance test for the verdict-panels contract (WP-D7).
 //! Oracle:   tests/acceptance/wp-d7/run.sh.
 //!
 //! Naming convention (binding, pre-decided by the lead):

@@ -1,7 +1,7 @@
 //! WP-C8 acceptance oracle — shadow checks (snapshot-cadence, budget-capped,
 //! non-gating). One `#[test] item_<n>_<slug>` per owned acceptance item.
 //!
-//! Contract: docs/plan/wp-contracts/WP-C8.md
+//! Acceptance test for the shadow-checks contract (WP-C8).
 //!   ① N writes in one snapshot window → exactly ONE shadow pass at boundary
 //!      (not N, not 0)
 //!   ② shadow runs decrement tenant budget; cap halts shadows, explicit jobs

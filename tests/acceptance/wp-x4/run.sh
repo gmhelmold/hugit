@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-X4 acceptance suite — supply chain: image pinning + integrity + fail-closed.
-# Contract: docs/plan/wp-contracts/WP-X4.md
+# Acceptance harness for WP-X4.
 # Owned items:
 #   ① runner images content-pinned + integrity-verified at spawn
 #   ② App dependencies pinned + verified in CI

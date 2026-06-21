@@ -1,6 +1,6 @@
 //! WP-C4 acceptance tests — derived-file regeneration drivers v0.
 //!
-//! Contract: docs/plan/wp-contracts/WP-C4.md
+//! Acceptance test for the derived-file regeneration contract (WP-C4).
 //! Items ① lockfile regen green · ② deterministic regen · ③ non-lockfile
 //! untouched · ④ three derived classes + hand-edits discarded · ⑤ fail-closed
 //! · ⑥ method proof (merge path never entered for derived paths).

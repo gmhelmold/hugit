@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-D3a acceptance suite — receive-pack → CAS + log (push core).
-# Contract: docs/plan/wp-contracts/WP-D3a.md
+# Acceptance harness for WP-D3a.
 # Owned item (verbatim from decomposition v2.0 — D3a):
 #   ① push→clone round-trip identical
 # Red-team items (D3a source-of-truth bar, owned by D3a):

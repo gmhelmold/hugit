@@ -1,5 +1,5 @@
 //! WP-B2b acceptance oracle — runner-side execution + honesty.
-//! Contract: `docs/plan/wp-contracts/WP-B2b.md`.
+//! Acceptance test for the runner-side execution contract (WP-B2b).
 //!
 //! Owned items (VERBATIM from decomposition v2.0 §2; B2b owns ③④⑤):
 //!   ③ local≡runner BYTE-IDENTICAL (artifact/digest compare, NOT result-equal)

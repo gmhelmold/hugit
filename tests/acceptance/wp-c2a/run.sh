@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-C2a acceptance suite — ephemeral runner: lease lifecycle + isolation.
-# Contract: docs/plan/wp-contracts/WP-C2a.md
+# Acceptance harness for WP-C2a.
 # Owned items: ① destroy leaves nothing (forensic re-scan)
 #              ② lease isolation (tmp/net)
 # Claims: crates/hugit-runner/{lease,isolation,teardown}

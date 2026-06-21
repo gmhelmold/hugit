@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # WP-D3b acceptance suite — push concurrency + total order + external-change
 #                            + flag/negatives.
-# Contract: docs/plan/wp-contracts/WP-D3b.md
+# Acceptance harness for WP-D3b.
 # Owned items (verbatim from decomposition v2.0 — D3b):
 #   ② concurrent pushes: total order, correct stale rejection
 #   ③ raw push = external-change w/ attribution

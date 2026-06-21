@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-D11 acceptance suite — journals + resume.
-# Contract: docs/plan/wp-contracts/WP-D11.md
+# Acceptance harness for WP-D11.
 # Owned items (verbatim):
 #   ① journal persisted as tenant-private object bound to ws/intent
 #   ② post-crash ctx resume reconstructs session within supported horizon

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-C3 acceptance suite — cache-warm boot.
-# Contract: docs/plan/wp-contracts/WP-C3.md
+# Acceptance harness for WP-C3.
 # Owned items:
 #   ① warm ≤10s vs cold ≥60s
 #   ② toolchain layers shared (one physical copy per content hash, across jobs)

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-E2a acceptance suite — git history import (byte-identity, LFS, resumable, idempotency).
-# Contract: docs/plan/wp-contracts/WP-E2a.md
+# Acceptance harness for WP-E2a.
 # Owned items:
 #   ① 1k-commit public import byte-identical
 #   ③ idempotent re-import

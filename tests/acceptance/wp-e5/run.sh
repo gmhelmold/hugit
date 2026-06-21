@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-E5 acceptance suite — export + exit proofs (anti-lock-in guarantee).
-# Contract: docs/plan/wp-contracts/WP-E5.md
+# Acceptance harness for WP-E5.
 # Owned items:
 #   ① one-command dump git + documented JSON
 #   ② restore round-trip reproduces refs+intents+events

@@ -1,6 +1,6 @@
 //! WP-B10 acceptance oracle — phase-B negative scope asserts (items ①②).
 //!
-//! Contract: docs/plan/wp-contracts/WP-B10.md.
+//! Acceptance test for the phase-B negative scope contract (WP-B10).
 //! Owned items (ABSENCE assertions):
 //!   ① no claim/lease acquired at dispatch — conflict discovery happens ONLY at
 //!      landing/union (assert mechanism absent).

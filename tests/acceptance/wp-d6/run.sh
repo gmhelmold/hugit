@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-D6 acceptance suite — hugit-policy engine (gates, fail-closed, audit).
-# Contract: docs/plan/wp-contracts/WP-D6.md
+# Acceptance harness for WP-D6.
 # Owned items (verbatim):
 #   ① 3 ported gates local≡forge
 #   ② engine down→landing blocks (kill-test)

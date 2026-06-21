@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-D5 acceptance suite — ledger + watch + fleet.
-# Contract: docs/plan/wp-contracts/WP-D5.md
+# Acceptance harness for WP-D5.
 # Owned items (verbatim from decomposition v2.0 — D5①–⑥):
 #   ① asked→done→proven per campaign
 #   ② watch: EventRecord-to-display p95 <2s (measured per event class)

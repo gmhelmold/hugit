@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-E4 acceptance suite — Actions-YAML compatibility shim (items ① ② ③ ④).
-# Contract: docs/plan/wp-contracts/WP-E4.md
+# Acceptance harness for WP-E4.
 # Owned items:
 #   ① the SUPPORTED subset is a published contract; "supported" = proven-to-execute,
 #      not merely documented
@@ -29,7 +29,7 @@ CRATE_ROOT="crates/hugit-runner"
 CRATE_NAME="hugit-runner"
 SHIM_DIR="$CRATE_ROOT/src/shim"
 ACCEPTANCE_FILE="$CRATE_ROOT/tests/acceptance_e4.rs"
-SUPPORTED_SUBSET_DOC="docs/shim/supported-subset.md"
+SUPPORTED_SUBSET_DOC="crates/hugit-runner/src/shim/supported-subset.md"
 
 export HUGIT_RUNNER_HOST=203.0.113.10
 export HUGIT_GH_TEST_REPO="humangr-labs/hugit-fleet-syn-1"

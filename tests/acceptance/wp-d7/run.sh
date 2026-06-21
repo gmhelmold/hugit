@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-D7 acceptance suite — verdict panels + review Q&A.
-# Contract: docs/plan/wp-contracts/WP-D7.md
+# Acceptance harness for WP-D7.
 # Owned items (verbatim):
 #   ① lenses isolated (prompt audit)
 #   ② valid VerdictObject[] + evidence refs

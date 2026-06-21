@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-B1 acceptance suite — hugit-app Worker skeleton (all 5 owned items).
-# Contract: docs/plan/wp-contracts/WP-B1.md. Green = forged-webhook 401+audit,
+# Acceptance harness for WP-B1. Green = forged-webhook 401+audit,
 # PR event persisted ack<1s, check-run on real PR, least-privilege manifest,
 # uninstall revokes+halts (audited). RED on absent crate.
 #
@@ -57,6 +57,6 @@ check "⑤ installation.revoked EventRecord wired in src" \
 
 # Claims boundary guards RETIRED (lead, wave D1.2 integration): the
 # "sidecar//ui/ absent" asserts were B1-wave isolation fences; B6/B7 now
-# legitimately own those paths. Rationale in .techlead/state/wave-d1.md.
+# legitimately own those paths.
 
 finish

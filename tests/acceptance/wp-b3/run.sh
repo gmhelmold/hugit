@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-B3 acceptance suite — affected-targets v0 (all 3 owned items).
-# Contract: docs/plan/wp-contracts/WP-B3.md. Green = golden sets cargo/pnpm/turbo,
+# Acceptance harness for WP-B3. Green = golden sets cargo/pnpm/turbo,
 # root edit→full set, unknown ecosystem→full set fail-open. RED on absent crate.
 #
 # Naming convention (pre-decided by the lead, binding for the agent):

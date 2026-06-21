@@ -1,6 +1,6 @@
 //! WP-C7 acceptance oracle — items ①②③ of C7 (per-tenant budgets + queue fairness).
 //!
-//! Contract: docs/plan/wp-contracts/WP-C7.md.
+//! Acceptance test for the per-tenant budgets and queue fairness contract (WP-C7).
 //! Owned items:
 //!   ① exhausted→queued not dropped; surfaced as defined status field + event
 //!   ② fairness bound: under contention, every tenant's p95 queue wait ≤ P95_WAIT_BOUND_MS

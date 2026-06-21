@@ -1,6 +1,6 @@
 //! WP-B4a acceptance oracle — items ①②⑤ of B4 (the pure union-queue engine).
 //!
-//! Contract: docs/plan/wp-contracts/WP-B4a.md.
+//! Acceptance test for the pure union-queue engine contract (WP-B4a).
 //! Owned items:
 //!   ① A+B-red pair excluded + NAMED (minimal_failing_pair).
 //!   ② 5 disjoint greens land in parallel lanes with 0 check re-runs.

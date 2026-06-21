@@ -1,7 +1,7 @@
 //! WP-C6 acceptance oracle — flake-stats collector + quarantine policy +
 //! false-positive guard.
 //!
-//! Contract: `docs/plan/wp-contracts/WP-C6.md`
+//! Acceptance test for the flake-stats and quarantine contract (WP-C6).
 //! One `#[test] item_<n>_<slug>` per owned item ①–④ (VERBATIM from contract).
 //!
 //! All items are proved hermetically with deterministic fixtures — no live

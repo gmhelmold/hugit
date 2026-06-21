@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-C7 acceptance suite — hugit-queue crate, budgets + queue fairness (items ①②③).
-# Contract: docs/plan/wp-contracts/WP-C7.md.
+# Acceptance harness for WP-C7.
 # Owned items:
 #   ① exhausted→queued not dropped; surfaced as defined status field + event
 #   ② fairness bound: under contention, every tenant's p95 queue wait ≤ defined bound

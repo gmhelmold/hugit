@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-C2b acceptance suite — ephemeral runner: concurrency/throughput + crash recovery + expiry.
-# Contract: docs/plan/wp-contracts/WP-C2b.md
+# Acceptance harness for WP-C2b.
 # Owned items: ③ expiry hard-kill
 #              ④ ≥8 concurrent/box
 #              ⑤(R2) box crash mid-job: job detected lost → requeued/surfaced,

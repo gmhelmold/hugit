@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-01 acceptance suite — workspace scaffold (12 crates, CI gates green on
-# empty, DCO + changelog config). Contract: docs/plan/wp-contracts/WP-01.md.
+# empty, DCO + changelog config). Acceptance harness for WP-01.
 # RED on a non-workspace tree; GREEN only when the scaffold lands.
 #
 # Lead adjudication on record (wave-day0): hugit-contracts joins the workspace

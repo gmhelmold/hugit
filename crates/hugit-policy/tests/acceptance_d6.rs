@@ -5,7 +5,7 @@
 //! ② engine down → landing blocks (kill-test)
 //! ③ policy change = audited event
 //!
-//! Contract: docs/plan/wp-contracts/WP-D6.md
+//! Acceptance test for the policy-engine contract (WP-D6).
 //! Oracle: these tests (crates/hugit-policy/tests/acceptance_d6.rs)
 
 use hugit_policy::{

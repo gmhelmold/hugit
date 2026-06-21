@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-B7 acceptance suite — hugit-app/ui, surface v0 (items ①②③④).
-# Contract: docs/plan/wp-contracts/WP-B7.md.
+# Acceptance harness for WP-B7.
 # Owned items: ① live status page · ② exactly one edited comment/PR
 #              · ③ saved-minutes links to CheckResult set (auditable)
 #              · ④(R3) "$ saved" derived from minutes via versioned, auditable

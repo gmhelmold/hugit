@@ -1,6 +1,6 @@
 //! WP-C10 acceptance oracle — items ① ② of C10 (pricing no-shock guard).
 //!
-//! Contract: docs/plan/wp-contracts/WP-C10.md
+//! Acceptance test for the pricing no-shock guard contract (WP-C10).
 //! Claims:   crates/hugit-queue/budget/no_shock/
 //!
 //! Owned acceptance items:

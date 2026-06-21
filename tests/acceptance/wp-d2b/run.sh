@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # WP-D2b acceptance suite — client matrix + jj stacks + CPU/chunked fallback
 #                            + degradation kill-test + scale ceilings.
-# Contract: docs/plan/wp-contracts/WP-D2b.md
+# Acceptance harness for WP-D2b.
 # Owned items (verbatim from decomposition v2.0 — D2b):
 #   ③ clients: git 2.40+/jj/libgit2
 #   ④ 500MB fixture: per-request CPU-time p95 ≤70% of the platform per-request

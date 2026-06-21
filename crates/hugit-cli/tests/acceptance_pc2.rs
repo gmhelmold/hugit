@@ -1,8 +1,7 @@
 //! WP-PC2 acceptance — `hugit intent new/show`.
 //!
-//! Spec: docs/plan/2026-06-10-cli-porcelain-wave.md (Design law: stable JSON
-//! stdout, structured errors w/ suggested fix, idempotency, hermetic-first) +
-//! docs/product/headless-engine.md §5.4.
+//! Design law: stable JSON stdout, structured errors w/ suggested fix,
+//! idempotency, hermetic-first.
 //!
 //! These tests drive the REAL refstore/projection paths — `intent new` lands a
 //! frozen `IntentSidecar` through `hugit_refstore::intent::import_sidecar` onto

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-E3 acceptance suite — status / badge compatibility emitter (items ① ② ③).
-# Contract: docs/plan/wp-contracts/WP-E3.md
+# Acceptance harness for WP-E3.
 # Owned items:
 #   ① checks appear as GitHub statuses
 #   ② badge reflects true state within a stated staleness bound;

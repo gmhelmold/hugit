@@ -33,7 +33,7 @@
   "snapshot": {
     "files_read": [
       {
-        "path": "docs/plan/wave-1.md",
+        "path": "src/lib.rs",
         "hash": "sha256:77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa"
       }
     ],

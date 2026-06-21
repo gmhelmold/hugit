@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-C8 acceptance suite — shadow checks (snapshot-cadence, budget-capped, non-gating).
-# Contract: docs/plan/wp-contracts/WP-C8.md
+# Acceptance harness for WP-C8.
 # Owned items:
 #   ① N writes in one snapshot window → exactly ONE shadow pass at boundary
 #      (not N, not 0)

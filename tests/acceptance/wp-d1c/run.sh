@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-D1c acceptance suite — hugit-refstore concurrency/perf (serialization, p99).
-# Contract: docs/plan/wp-contracts/WP-D1c.md
+# Acceptance harness for WP-D1c.
 # Owned items (verbatim):
 #   ⑤ 100 concurrent ops: serialized, 0 loss, p99<500ms
 # Oracle: crates/hugit-refstore/tests/acceptance_d1c.rs

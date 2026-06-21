@@ -1,6 +1,6 @@
 //! O-1 (T-8) — PROPERTY tests for the event-log hash chain security spine.
 //!
-//! The review sweep (`docs/review/sweep-2026-06-12/tests.md`, T-8) found the
+//! An adversarial review sweep (T-8) found the
 //! hash chain had ONLY hand-crafted tamper fixtures. This suite generates random
 //! chains of N records AND a random single mutation, and asserts:
 //!

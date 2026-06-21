@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-00 acceptance suite — hugit-contracts crate (all 15 frozen types).
-# Contract: docs/plan/wp-contracts/WP-00.md. Green = every frozen contract
+# Acceptance harness for WP-00. Green = every frozen contract
 # ships as Rust type + committed JSON Schema + golden serde round-trip,
 # with a schema-drift assertion. RED on an empty/absent crate.
 #

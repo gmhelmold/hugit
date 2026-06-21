@@ -1,7 +1,7 @@
 //! WP-B1 acceptance tests — hugit-app GitHub App skeleton.
 //!
 //! One `#[test]` per owned item, named `item_<n>_<slug>` per the lead's
-//! convention. Contract: docs/plan/wp-contracts/WP-B1.md.
+//! convention. Acceptance test for the GitHub App skeleton contract (WP-B1).
 //!
 //! Item ① — forged webhook → 401 + audit EventRecord
 //! Item ② — PR event persisted, ack < 1s (wall-clock gated)

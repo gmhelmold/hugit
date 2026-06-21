@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WP-B2a acceptance suite — checks client: CheckDef format + local executor + memo key.
-# Contract: docs/plan/wp-contracts/WP-B2a.md
+# Acceptance harness for WP-B2a.
 # Owned items (B2a owns ①②⑥⑦ of B2; B2b owns ③④⑤):
 #   ① repeat tree+def → AC hit, 0 exec, <500ms
 #   ② glob sensitivity: in-glob edit → rerun; out-of-glob edit → hit
