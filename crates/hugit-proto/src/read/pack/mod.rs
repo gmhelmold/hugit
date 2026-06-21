@@ -1013,7 +1013,10 @@ mod list_tree_tests {
         let src = CasObjectSource::new();
         let fake_root = parse_oid("0000000000000000000000000000000000000001").unwrap();
         // Build a path with MAX_PATH_DEPTH + 1 segments.
-        let deep: String = (0..=MAX_PATH_DEPTH).map(|i| format!("dir{i}")).collect::<Vec<_>>().join("/");
+        let deep: String = (0..=MAX_PATH_DEPTH)
+            .map(|i| format!("dir{i}"))
+            .collect::<Vec<_>>()
+            .join("/");
         let entries = list_tree_at_dir(&src, &fake_root, &deep);
         assert!(
             entries.is_empty(),
@@ -1058,7 +1061,10 @@ mod resolve_depth_tests {
         let src = CasObjectSource::new();
         let fake_root = parse_oid("0000000000000000000000000000000000000002").unwrap();
         // Build a path with MAX_PATH_DEPTH + 1 segments.
-        let deep: String = (0..=MAX_PATH_DEPTH).map(|i| format!("d{i}")).collect::<Vec<_>>().join("/");
+        let deep: String = (0..=MAX_PATH_DEPTH)
+            .map(|i| format!("d{i}"))
+            .collect::<Vec<_>>()
+            .join("/");
         let result = resolve_blob_at_path(&src, &fake_root, &deep)
             .expect("must not error on over-depth path");
         assert!(result.is_none(), "over-depth path must resolve to None");

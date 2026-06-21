@@ -157,12 +157,7 @@ pub struct SessionExchangeConfig {
 ///
 /// `.humangr.com` covers `corelink-api.humangr.com` and any future subdomain.
 /// `localhost` / `127.0.0.1` / `[::1]` are allowed for integration tests.
-const EXCHANGE_URL_TRUSTED_SUFFIXES: &[&str] = &[
-    ".humangr.com",
-    "localhost",
-    "127.0.0.1",
-    "[::1]",
-];
+const EXCHANGE_URL_TRUSTED_SUFFIXES: &[&str] = &[".humangr.com", "localhost", "127.0.0.1", "[::1]"];
 
 /// Extract the host (without port) from a URL string (`scheme://host[:port]/path`).
 fn extract_host(url: &str) -> Option<&str> {
@@ -1107,17 +1102,8 @@ mod tests {
             extract_host("http://localhost:9000/path"),
             Some("localhost")
         );
-        assert_eq!(
-            extract_host("http://127.0.0.1:8080/"),
-            Some("127.0.0.1")
-        );
-        assert_eq!(
-            extract_host("http://[::1]:3000/path"),
-            Some("[::1]")
-        );
-        assert_eq!(
-            extract_host("https://example.com"),
-            Some("example.com")
-        );
+        assert_eq!(extract_host("http://127.0.0.1:8080/"), Some("127.0.0.1"));
+        assert_eq!(extract_host("http://[::1]:3000/path"), Some("[::1]"));
+        assert_eq!(extract_host("https://example.com"), Some("example.com"));
     }
 }

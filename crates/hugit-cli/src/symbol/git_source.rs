@@ -110,9 +110,7 @@ impl ObjectSource for GitCatFileSource {
             stdout
                 .take((MAX_BLOB_BYTES as u64) + 1)
                 .read_to_end(&mut buf)
-                .map_err(|e| {
-                    PackError::Source(format!("git cat-file read {oid_hex}: {e}"))
-                })?;
+                .map_err(|e| PackError::Source(format!("git cat-file read {oid_hex}: {e}")))?;
         }
         // Wait for the child so it doesn't become a zombie.
         let status = child
