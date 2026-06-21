@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- chore(redact): break the contiguous secret signatures in the scrubber's FAKE test-vectors (Slack/SendGrid/Stripe) via runtime-invariant `\x` escapes — identical bytes at runtime (redaction + tests unchanged), but the source no longer trips GitHub push-protection / secret-scanning, so the public mirror keeps push-protection ON.
+
 - fix(security): **HTTP/git-wire DoS + SSRF hardening** (convergence-audit wave 2) — cap `list_tree_at_dir` (2000 entries) + path depth (64); cap `symbol --ref` blob read (10 MiB) + reject leading-dash refspec; SSRF-allowlist `HUGIT_SESSION_EXCHANGE_URL` (trusted host suffixes, fail-closed); cap the CAS error-body read (64 KiB) and `search` `q` (1024 B). (upload-pack pack-size accounting deferred — needs protocol flow-control.)
 
 - fix(security): **convergence-audit fixes before open-source.** A 10-agent re-audit closed two go-public showstoppers + redaction leaks:

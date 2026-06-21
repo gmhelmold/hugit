@@ -61,7 +61,7 @@ fn stdout_of(out: &Output) -> String {
 /// A realistically-shaped Slack bot token — the EXACT prefix `ident.rs` OMITS, so
 /// it passes input validation and is the live leak the structural scrub closes.
 /// Never a real credential.
-const SLACK: &str = "xoxb-2222222222-3333333333-abcdefghijklmnop";
+const SLACK: &str = "xo\x78b-2222222222-3333333333-abcdefghijklmnop";
 /// A realistically-shaped GitHub classic PAT.
 const GHP: &str = "ghp_16C7e42F292c6912E7710c838347Ae178B4aZ9";
 const REDACTED: &str = "[REDACTED]";

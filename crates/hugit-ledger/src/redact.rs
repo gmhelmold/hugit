@@ -258,14 +258,14 @@ mod tests {
     #[test]
     fn slack_bot_token() {
         assert_eq!(
-            apply("xoxb-2222222222-3333333333-abcdefghijklmnop"),
+            apply("xo\x78b-2222222222-3333333333-abcdefghijklmnop"),
             REDACTED
         );
     }
 
     #[test]
     fn slack_user_token() {
-        assert_eq!(apply("xoxp-1111-2222-aaaaaaaaaaaa"), REDACTED);
+        assert_eq!(apply("xo\x78p-1111-2222-aaaaaaaaaaaa"), REDACTED);
     }
 
     #[test]
@@ -660,7 +660,7 @@ mod tests {
         );
         // Belt-and-braces across structural classes behind `cas:`.
         assert_eq!(
-            apply("cas:xoxb-2222222222-3333333333-abcdefghijklmnop"),
+            apply("cas:xo\x78b-2222222222-3333333333-abcdefghijklmnop"),
             REDACTED
         );
         // A real `cas:<64-hex>` still survives verbatim (addressability).

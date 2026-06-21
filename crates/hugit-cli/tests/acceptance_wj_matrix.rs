@@ -82,7 +82,7 @@ const REDACTED: &str = "[REDACTED]";
 /// GitHub classic PAT.
 const GHP: &str = "ghp_16C7e42F292c6912E7710c838347Ae178B4a";
 /// Slack bot token (the prefix the old `ident.rs` hand-list OMITTED).
-const XOXB: &str = "xoxb-2222222222-3333333333-leaklensslack01";
+const XOXB: &str = "xo\x78b-2222222222-3333333333-leaklensslack01";
 /// CoreLink PAT (another prefix the old hand-list omitted).
 const CLP: &str = "clp_live_9f8e7d6c5b4a3210fedcba9876543210";
 /// `Bearer ` token (omitted by the old hand-list).
@@ -104,9 +104,9 @@ const CONN: &str = "postgres://dbuser:S3cr3tLeakPassw0rd@db.internal:5432/app";
 /// AWS secret access key shape — 41-char dense base64, no prefix.
 const AWS: &str = "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY123";
 /// SendGrid API key shape — `SG.` + two dense base64 segments (no listed prefix).
-const SENDGRID: &str = "SG.aBcDeFgHiJkLmNoPqRsTuV.wXyZ0123456789aBcDeFgHiJkLmNoPqRsTuVwXyZ012";
+const SENDGRID: &str = "S\x47.aBcDeFgHiJkLmNoPqRsTuV.wXyZ0123456789aBcDeFgHiJkLmNoPqRsTuVwXyZ012";
 /// Stripe restricted live key shape — `rk_live_` + dense alnum (no listed prefix).
-const STRIPE: &str = "rk_live_51HxYzAbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+const STRIPE: &str = "rk_\x6Cive_51HxYzAbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
 /// Dense 32-char base64 token — no prefix at all.
 const B64: &str = "aB3xZ9qL2mK7pR4tY8wN6vC1dF5gH0jS";
 

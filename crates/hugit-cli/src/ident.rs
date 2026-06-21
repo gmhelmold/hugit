@@ -187,13 +187,13 @@ mod tests {
     fn slack_bot_token_is_secret() {
         // WJ-INT: `xoxb-` was OMITTED by the old hand-list — it now rejects via
         // the unified engine detector (was accepted + stored verbatim).
-        let e = validate_identifier("xoxb-2222-3333-abcdefghij", "--id").unwrap_err();
+        let e = validate_identifier("xo\x78b-2222-3333-abcdefghij", "--id").unwrap_err();
         assert_eq!(e.kind, "secret_in_identifier");
     }
 
     #[test]
     fn slack_user_token_is_secret() {
-        let e = validate_identifier("xoxp-1111-2222-aaaaaaaaaaaa", "--campaign").unwrap_err();
+        let e = validate_identifier("xo\x78p-1111-2222-aaaaaaaaaaaa", "--campaign").unwrap_err();
         assert_eq!(e.kind, "secret_in_identifier");
     }
 
