@@ -31,8 +31,8 @@ for c in "${CRATES[@]}"; do
   check "crate $c present (Cargo.toml + src/lib.rs)" \
     bash -c "test -f crates/$c/Cargo.toml && test -f crates/$c/src/lib.rs"
 done
-# Amended (lead, wave D2): hugit-invariants admitted — Squad-X's shared home
-# (decomposition §217; sanctioned new structure, same class as the wave-D1.2
+# Amended: hugit-invariants admitted — the platform-invariants crate's shared home
+# (sanctioned structure, same class as the earlier
 # nested-sub-crate amendment). Nested sub-crates (hugit-app/ui, /exit) are
 # covered by the glob and live under their parent, so the basename roster only
 # gates top-level crates/* members.
