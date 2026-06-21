@@ -3,7 +3,7 @@
 //! Currently ships `transition` (`hugit issue transition --log <path> --n <n>
 //! --to <state> [--priority <p>]`), which appends an `issue.transition` record
 //! onto the canonical `--log` through the D14 Orchestrator/Land guard — CLI
-//! parity with the serve verb `write_issue_transition` (ADR-0006: no web-only verb).
+//! parity with the serve verb `write_issue_transition` (no web-only verb).
 
 use std::process::ExitCode;
 

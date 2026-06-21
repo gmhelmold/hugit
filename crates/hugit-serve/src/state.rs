@@ -11,7 +11,7 @@
 //! ## Source (engine-storage)
 //! - **Local** (`HUGIT_SERVE_LOG_DIR`): `<dir>/<repo>.json` — the dev/test default.
 //! - **R2** (`HUGIT_SERVE_R2_*`): `<tenant_id>/<repo>.json` from the dedicated
-//!   `corelink-githugr-engine` bucket over the S3 API, SigV4-signed
+//!   `<your-r2-bucket>` bucket over the S3 API, SigV4-signed
 //!   ([`crate::sigv4`]). The bucket key contract is CoreLink's
 //!   (`<tenant_id>/<repo>.json`; tenant = Clerk `publicMetadata.tenant_id`). Until
 //!   real Clerk auth (the P2 identity seam) the tenant is the configured
@@ -45,7 +45,7 @@ pub struct R2Config {
     pub endpoint: String,
     /// `<account_id>.r2.cloudflarestorage.com` (the signed `host` header).
     pub host: String,
-    /// `corelink-githugr-engine`.
+    /// e.g. `example-bucket`.
     pub bucket: String,
     /// SigV4 region — R2 uses `auto`.
     pub region: String,
@@ -970,7 +970,7 @@ mod tests {
     fn r2_config_accepts_engine_native_names() {
         let c = R2Config::from_vars(vars(&[
             ("HUGIT_SERVE_R2_ACCOUNT_ID", "acct123"),
-            ("HUGIT_SERVE_R2_BUCKET", "corelink-githugr-engine"),
+            ("HUGIT_SERVE_R2_BUCKET", "example-bucket"),
             ("HUGIT_SERVE_R2_KEY_ID", "k"),
             ("HUGIT_SERVE_R2_SECRET", "s"),
             ("HUGIT_SERVE_R2_TENANT_ID", "test-tenant-1"),
@@ -992,7 +992,7 @@ mod tests {
             ),
             ("HUGIT_SERVE_R2_ACCESS_KEY_ID", "k"),
             ("HUGIT_SERVE_R2_SECRET_ACCESS_KEY", "s"),
-            ("HUGIT_SERVE_R2_BUCKET", "corelink-githugr-engine"),
+            ("HUGIT_SERVE_R2_BUCKET", "example-bucket"),
             ("HUGIT_SERVE_R2_REGION", "auto"),
             ("HUGIT_SERVE_R2_TENANT_ID", "test-tenant-1"),
         ]))
@@ -1011,7 +1011,7 @@ mod tests {
         // returns first, so no request is ever sent.
         let cfg = R2Config::from_vars(vars(&[
             ("HUGIT_SERVE_R2_ACCOUNT_ID", "acct123"),
-            ("HUGIT_SERVE_R2_BUCKET", "corelink-githugr-engine"),
+            ("HUGIT_SERVE_R2_BUCKET", "example-bucket"),
             ("HUGIT_SERVE_R2_KEY_ID", "k"),
             ("HUGIT_SERVE_R2_SECRET", "s"),
             ("HUGIT_SERVE_R2_TENANT_ID", "test-tenant-1"),

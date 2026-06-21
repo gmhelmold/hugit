@@ -42,7 +42,7 @@ mod tests {
     #[test]
     fn releases_vm_round_trips() {
         let vm = ReleasesVm {
-            repo: "humangr/corelink-server".to_string(),
+            repo: "acme/myrepo".to_string(),
             total_count: 8,
             stable_count: 5,
             year: "2026".to_string(),

@@ -1,6 +1,6 @@
 //! `GET /v1/repos/{repo}/security` → `SecurityVm` and its nested types.
 //! Transcribed BYTE-FOR-FIELD from the canonical
-//! `../githugr/crates/githugr-vm/src/provider.rs`.
+//! companion web frontend's view-model definitions.
 
 use serde::{Deserialize, Serialize};
 
@@ -125,7 +125,7 @@ mod tests {
     #[test]
     fn security_vm_round_trips() {
         let vm = SecurityVm {
-            repo: "humangr/corelink-server".to_string(),
+            repo: "acme/myrepo".to_string(),
             posture: vec![KpiVm {
                 label: "SLSA".to_string(),
                 value: "L2".to_string(),

@@ -9,8 +9,8 @@ license.workspace = true
 # The FROZEN wire view-models for the `/v1` HTTP surface (githugr ⇄ hugit).
 #
 # These types are transcribed BYTE-FOR-FIELD from the canonical source —
-# `../githugr/crates/githugr-vm/src/provider.rs` — and are the response shapes
-# `hugit-serve` serializes and the `githugr-live` client deserializes. They are
+# the companion web frontend's view-model definitions — and are the response shapes
+# `hugit-serve` serializes and the companion web frontend deserializes. They are
 # EXTERNAL + FROZEN: a field name/type/serde-attr change here is a wire break
 # and must be made in lock-step with the githugr window (the same discipline as
 # the byte-identical `conformance/` vectors). Pure serde + std — NO heavy deps,

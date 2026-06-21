@@ -1,4 +1,4 @@
-# hugit-invariants — Squad-X cross-cutting invariant test crate.
+# hugit-invariants — platform invariants: a cross-cutting invariant test crate.
 #
 # Houses red-team / invariant suites that hold ACROSS production crates without
 # owning any production path. WP-X4's spawn-surface oracle transferred to

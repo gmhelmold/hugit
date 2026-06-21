@@ -2,7 +2,7 @@
 //! engine), backend-API-v1 §1 reads.
 //!
 //! Every type here is transcribed **byte-for-field** from the canonical source
-//! `../githugr/crates/githugr-vm/src/provider.rs` — field names, types, and serde
+//! (the companion web frontend's view-model definitions) — field names, types, and serde
 //! attributes (`#[serde(default)]`, `#[serde(rename)]`) and even the exact derives
 //! (`Eq` only where the source has it — f64-bearing types are `PartialEq`-only)
 //! match EXACTLY, so `hugit-serve` serializes precisely what the frozen

@@ -89,10 +89,10 @@ impl std::error::Error for TamperError {}
 ///
 /// Cryptographic authentication against a competent rewriter is the **P2
 /// server-side seam (PS-8)**: the CoreLink per-repo Durable Object event-log
-/// (Seam D of `docs/handoff/2026-06-11-corelink-p2-ceiling-request.md`) enforces
-/// server-side append-only chaining, and the transparency log (Seam E) provides
+/// enforces
+/// server-side append-only chaining, and the transparency log provides
 /// an externally-verifiable inclusion proof. These are the peer of the AC HMAC
-/// seam (Seam A, honestly disclosed in `crates/hugit-cli/src/checks/run.rs`).
+/// seam.
 /// This function's role is local partial-tamper detection — it remains correct
 /// and necessary for that purpose. Logic is UNCHANGED.
 pub fn verify_chain(records: &[EventRecord]) -> Result<(), TamperError> {

@@ -248,13 +248,13 @@ mod guard_tests {
         let r = "refs/heads/main";
         log.append(
             "ref.update",
-            vec!["user:gustavo".into()],
+            vec!["user:alice".into()],
             canonical_update(r, &"a".repeat(40)),
             1,
         );
         log.append(
             "ref.update",
-            vec!["user:gustavo".into()],
+            vec!["user:alice".into()],
             canonical_update(r, &"b".repeat(40)),
             2,
         );
@@ -265,7 +265,7 @@ mod guard_tests {
     fn human_undo_succeeds() {
         let mut log = two_update_log();
         let before = log.len();
-        let comp = undo(&mut log, 1, vec!["user:gustavo".into()], 3).expect("a human may undo");
+        let comp = undo(&mut log, 1, vec!["user:alice".into()], 3).expect("a human may undo");
         assert_eq!(comp.kind, "ref.update");
         // exactly one event appended (the compensator), no audit record.
         assert_eq!(log.len(), before + 1);

@@ -1,6 +1,5 @@
 //! `POST /v1/token` — Clerk session-JWT → opaque engine token, via CoreLink's
-//! `/v1/session/exchange` (**Option B**, decided 2026-06-17 with the CoreLink
-//! Server TL — "consume CoreLink, never fork").
+//! `/v1/session/exchange` (**Option B** — "consume CoreLink, never fork").
 //!
 //! ## Flow (Option B — delegate, don't duplicate)
 //!

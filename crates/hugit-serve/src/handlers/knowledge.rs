@@ -113,7 +113,7 @@ mod tests {
     #[test]
     fn populated_vm_round_trips() {
         let vm = KnowledgeVm {
-            repo: "humangr/corelink-server".to_string(),
+            repo: "acme/myrepo".to_string(),
             lead: "Pergunte ao repo.".to_string(),
             ask_placeholder: "pergunte qualquer coisa…".to_string(),
             model: "opus-4.8".to_string(),
@@ -134,7 +134,7 @@ mod tests {
                     },
                     AnswerSegmentVm::Cite {
                         label: "a31".to_string(),
-                        href: "/r/humangr/corelink-server/intent/a31".to_string(),
+                        href: "/r/acme/myrepo/intent/a31".to_string(),
                     },
                     AnswerSegmentVm::Mono {
                         text: "iat".to_string(),
@@ -143,7 +143,7 @@ mod tests {
                 trail: vec![TrailStepVm {
                     icon: "○".to_string(),
                     label: "intent a31".to_string(),
-                    href: "/r/humangr/corelink-server/intent/a31".to_string(),
+                    href: "/r/acme/myrepo/intent/a31".to_string(),
                 }],
                 anchored_note: "ancorado em proveniência assinada".to_string(),
                 cost_note: "custou $0.013 · opus-4.8 · sua chave (BYOK)".to_string(),

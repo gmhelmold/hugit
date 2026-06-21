@@ -60,7 +60,7 @@ mod tests {
     #[test]
     fn campaign_vm_round_trips() {
         let vm = CampaignVm {
-            repo: "humangr/corelink-server".to_string(),
+            repo: "acme/myrepo".to_string(),
             name: "auth-hardening".to_string(),
             chip: CampaignChipVm {
                 id: "auth".to_string(),
@@ -117,7 +117,7 @@ mod tests {
                 session_summary: "planejou e selou o bundle".to_string(),
                 compact_transcript_ref: "cas:b81c… · 41 KB".to_string(),
                 raw_transcript_ref: "cas:9d4f… · 2.1 MB".to_string(),
-                snapshot_files: vec!["docs/plan/wave-auth.md".to_string()],
+                snapshot_files: vec!["notes/wave-auth.md".to_string()],
                 context_json: "{}".to_string(),
                 context_cas: "cas:a7e0…".to_string(),
                 compact_context_ref: "cas:6d28…".to_string(),

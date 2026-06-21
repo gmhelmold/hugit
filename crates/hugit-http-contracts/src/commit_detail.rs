@@ -36,7 +36,7 @@ mod tests {
     #[test]
     fn commit_detail_vm_round_trips() {
         let vm = CommitDetailVm {
-            repo: "humangr/corelink-server".to_string(),
+            repo: "acme/myrepo".to_string(),
             sha: "f3a91c".to_string(),
             parent_sha: "a31f9c".to_string(),
             title: "fix: sessão expira cedo no refresh".to_string(),

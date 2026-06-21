@@ -3,7 +3,7 @@
 //! Hand-rolled over the workspace's existing crypto pins (`hmac` + `sha2` +
 //! `hex`) — ZERO new crypto dependency, consistent with the supply-chain-strict,
 //! async-free workspace. Scope is deliberately tiny: sign a single unsigned-body
-//! GET (the engine only READS objects from the dedicated `corelink-githugr-engine`
+//! GET (the engine only READS objects from the dedicated `<your-r2-bucket>`
 //! bucket). It is NOT a general AWS SDK.
 //!
 //! Correctness is proven offline against the canonical AWS SigV4 test suite:
@@ -324,7 +324,7 @@ mod tests {
     fn sign_s3_get_is_well_formed() {
         let s = sign_s3_get(
             "acct.r2.cloudflarestorage.com",
-            "corelink-githugr-engine",
+            "example-bucket",
             "tenant-uuid/hugit.json",
             "AKIDEXAMPLE",
             "secret",
@@ -353,7 +353,7 @@ mod tests {
         let body = b"[]"; // a minimal (empty) event log
         let s = sign_s3_put(
             "acct.r2.cloudflarestorage.com",
-            "corelink-githugr-engine",
+            "example-bucket",
             "tenant-uuid/hugit.json",
             body,
             "AKIDEXAMPLE",

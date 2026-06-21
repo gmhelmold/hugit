@@ -1,6 +1,6 @@
 //! `GET /v1/repos/{repo}/home` → `RepoHomeVm` and its home-specific nested types.
 //! Transcribed BYTE-FOR-FIELD from the canonical
-//! `../githugr/crates/githugr-vm/src/provider.rs`. All-`Eq` (no floats).
+//! companion web frontend's view-model definitions. All-`Eq` (no floats).
 
 use serde::{Deserialize, Serialize};
 
@@ -90,7 +90,7 @@ mod tests {
           "repo": "hugit", "branch": "main", "branch_count": 12,
           "files": [{ "name": "src", "is_dir": true, "intent_id": null, "message": "refactor: split modules", "age": "há 2h" }],
           "readme_html": "<h1>hugit</h1><p>…</p>",
-          "about": { "description": "…", "topics": ["rust"], "release": "v1.0.0", "contributors": ["gustavo"], "stars": "1.2k", "forks": "84", "updated_ago": "há 8 min", "license": "proprietary", "releases_count": 8, "languages": [["Rust", "94%"]], "contributors_suffix": "· 6 + 4 agentes" },
+          "about": { "description": "…", "topics": ["rust"], "release": "v1.0.0", "contributors": ["gustavo"], "stars": "1.2k", "forks": "84", "updated_ago": "há 8 min", "license": "Apache-2.0", "releases_count": 8, "languages": [["Rust", "94%"]], "contributors_suffix": "· 6 + 4 agentes" },
           "synergy": { "lines": [["espelho GitHub", "sincronizado · 2 min"]] },
           "tag_count": 7, "commit_count": "4.832",
           "last_commit": { "author": "opus-4.8", "intent_id": "a31", "message": "fix: sessão expira cedo", "short_sha": "a31f9c", "age": "há 8 min" },

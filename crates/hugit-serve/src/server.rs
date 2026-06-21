@@ -238,7 +238,7 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
                 Err(e) => return err(hide_load_err(&principal, e)),
             };
             // PER-TENANT READ GATE (fail-closed, re-decided server-side on every
-            // repo read — githugr TL request 2026-06-15 / ADR-0007 §3): a denied
+            // repo read): a denied
             // PRIVATE repo is a 404, identical to a non-existent one (no existence
             // oracle). Operator (dev/orchestrator) bypass keeps single-tenant dev +
             // the launch repo working until owner_tenant is assigned.

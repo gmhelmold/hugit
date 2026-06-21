@@ -39,7 +39,7 @@ version = "1.0.3"
 name = "wasip3"
 version = "0.4.0"
 
-# tree-sitter (W6 hugit-symbols, symbol outline): its build-script's serde_json
+# tree-sitter (hugit-symbols, symbol outline): its build-script's serde_json
 # enables the `indexmap` feature, pulling indexmap 2.14 → hashbrown 0.17, which
 # duplicates gix's hashbrown 0.16. Build-dep-only + transitive (we don't choose
 # tree-sitter's bundled serde_json features); not collapsible from our side.

@@ -1,6 +1,6 @@
 //! `GET /v1/repos/{repo}/intents/{id}` → `IntentDetailVm` and its nested types.
 //! Transcribed BYTE-FOR-FIELD from the canonical
-//! `../githugr/crates/githugr-vm/src/provider.rs`; derives copied verbatim.
+//! companion web frontend's view-model definitions; derives copied verbatim.
 
 use serde::{Deserialize, Serialize};
 
@@ -160,7 +160,7 @@ mod tests {
             body_res_terms: vec!["→ 88 linhas".to_string()],
         };
         let vm = IntentDetailVm {
-            repo: "humangr/corelink-server".to_string(),
+            repo: "acme/myrepo".to_string(),
             id: "a31".to_string(),
             title: "fix: sessão expira cedo no refresh".to_string(),
             status: "landed".to_string(),
