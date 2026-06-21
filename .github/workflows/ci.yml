@@ -1,13 +1,12 @@
 name: CI
 
 on:
-  # Fork-guard note (PS-5, WF-DOCS): `pull_request` runs fork code on the
-  # self-hosted runner. Accepted risk: this repo is PRIVATE — fork PRs require
-  # write access; no external contributors. Risk = LOW.
-  # If the repo goes public: switch to `pull_request_target` with a protected
-  # environment approval gate, or add a fork-origin guard:
+  # Fork-guard (PS-5, WF-DOCS): the `gates` job carries
   #   if: github.event.pull_request.head.repo.fork == false
-  # to prevent untrusted fork code from running on the corelink-builder machine.
+  # so forked PRs never run untrusted code on the self-hosted runner.
+  # Push events (maintainer-owned refs) are unaffected.
+  # `pull_request_target` was considered but rejected: it runs with base-repo
+  # secrets in scope, making it strictly riskier than the fork-guard approach.
   # Docs-only changes do NOT run CI (owner directive 2026-06-12): a change whose
   # files ALL match these globs skips the runner entirely — no point burning a
   # ~14-24 min self-hosted cycle to "verify" markdown. A change that touches ANY
@@ -43,6 +42,9 @@ jobs:
     # below are REQUIRED on this box (the rustup `cargo` proxy vanishes per-step) —
     # they're the reason the steps already run on self-hosted unchanged. Trade-off:
     # the box is contention-flaky (~37% infra fails); re-run a 0-step/CANCELLED fail.
+    # Fork-guard: skip the self-hosted runner for PRs from forks; only run for
+    # maintainer PRs (same repo) and push events. Fork PRs are trusted-source only.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false
     runs-on: [self-hosted, macOS]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
