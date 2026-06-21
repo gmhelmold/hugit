@@ -69,14 +69,17 @@ pub fn build_new_pr(log: &EventLog, repo: &str) -> NewPrVm {
         .map(|(name, _)| name.as_str())
         .collect();
 
-    // base: the default branch (main > master > first plain > "").
-    let base = pick_default_branch(&plain_branches);
+    // base: the default branch (main > master > first plain > ""), scrubbed.
+    // Branch names are free-text ref components from the log and must pass
+    // the redaction seam before being echoed into the view-model.
+    let base = scrub(&pick_default_branch(&plain_branches));
 
     // head: the first intent/* branch, else "" (no candidate to compare yet).
+    // Scrubbed for the same reason as base.
     let head = all_heads
         .iter()
         .find(|(name, _)| name.starts_with("intent/"))
-        .map(|(name, _)| name.clone())
+        .map(|(name, _)| scrub(name))
         .unwrap_or_default();
 
     // ── REAL: checks_ok index (mirrors commits.rs / branches.rs) ───────────

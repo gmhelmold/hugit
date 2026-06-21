@@ -197,7 +197,10 @@ pub fn export(
     let refs: Vec<RefEntry> = ref_state
         .iter()
         .map(|(name, target)| RefEntry {
-            name: name.to_string(),
+            // Branch/tag ref names are free-text components from the event log;
+            // scrub them so a secret-shaped name (e.g. `refs/heads/ghp_…`) does
+            // not escape verbatim into the export envelope or the git artifact.
+            name: hugit_ledger::redact::apply(name),
             target: target.to_string(),
         })
         .collect();

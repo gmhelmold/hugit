@@ -38,10 +38,12 @@ pub fn build_commits(log: &EventLog, repo: &str) -> CommitsVm {
         .collect();
 
     // Partition into plain branches and generated (intent/*) branches.
+    // Branch names are free-text ref components from the log and must be
+    // scrubbed at the read boundary (a branch named `feature/ghp_…` must redact).
     let generated_branches: Vec<String> = all_head_refs
         .iter()
         .filter(|b| b.starts_with("intent/"))
-        .cloned()
+        .map(|b| scrub(b))
         .collect();
 
     let plain_branches: Vec<String> = all_head_refs
@@ -51,13 +53,15 @@ pub fn build_commits(log: &EventLog, repo: &str) -> CommitsVm {
         .collect();
 
     // Pick HEAD: prefer "main", then "master", then first lexicographic plain.
-    let branch = pick_head(&plain_branches);
+    let branch = scrub(&pick_head(&plain_branches));
 
-    // other_branches = plain branches minus current HEAD.
+    // other_branches = plain branches minus current HEAD (scrubbed).
+    // A branch name that looks like a secret (e.g. `feature/ghp_…`) must be
+    // redacted at the read boundary, exactly as free-text fields are.
     let other_branches: Vec<String> = plain_branches
         .iter()
-        .filter(|b| b.as_str() != branch)
-        .cloned()
+        .filter(|b| scrub(b.as_str()) != branch)
+        .map(|b| scrub(b))
         .collect();
 
     // ── checks_ok index: which commit shas have a successful check.recorded ──
@@ -369,5 +373,43 @@ mod tests {
     #[test]
     fn pick_head_empty_is_empty_string() {
         assert_eq!(pick_head(&[]), "");
+    }
+
+    // ── Branch name scrubbing ────────────────────────────────────────────────
+
+    #[test]
+    fn secret_shaped_branch_name_is_scrubbed_in_commits_vm() {
+        // Push a ref.update record for a branch whose name is secret-shaped.
+        let mut log = EventLog::new();
+        log.append_for_test(
+            "ref.update",
+            vec!["o".into()],
+            serde_json::json!({
+                "ref": "refs/heads/feature/ghp_16C7e42F292c6912E7710c838347Ae178B4a",
+                "target": "aabbccddeeff00112233445566778899aabbccdd"
+            })
+            .to_string(),
+            1000,
+        );
+
+        let vm = build_commits(&log, "hugit");
+
+        // The branch field must not carry the raw secret-shaped name.
+        assert_ne!(
+            vm.branch, "feature/ghp_16C7e42F292c6912E7710c838347Ae178B4a",
+            "secret-shaped branch name must be scrubbed in CommitsVm.branch"
+        );
+        assert!(
+            !vm.branch.contains("ghp_"),
+            "raw secret token must not appear in CommitsVm.branch: {}",
+            vm.branch
+        );
+        // other_branches and generated_branches are also scrubbed.
+        for b in vm.other_branches.iter().chain(vm.generated_branches.iter()) {
+            assert!(
+                !b.contains("ghp_"),
+                "secret-shaped token must not appear in other_branches/generated_branches: {b}"
+            );
+        }
     }
 }
