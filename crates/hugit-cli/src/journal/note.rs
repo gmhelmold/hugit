@@ -21,7 +21,7 @@
 //!
 //! No serve verb exists yet; this CLI verb FREEZES the `journal.note` kind. A
 //! `write_journal_note` serve verb can mirror it later with zero interface change
-//! (ADR-0006), exactly as `issue.transition` did.
+//! (CLI/serve parity — no web-only verb), exactly as `issue.transition` did.
 
 use std::path::PathBuf;
 use std::process::ExitCode;

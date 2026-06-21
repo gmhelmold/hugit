@@ -17,7 +17,7 @@
 //! PRODUCER — metrics + 3-altitude trajectory capture at unit close,
 //! redact-on-write via [`redact`], cold blob store seam. Relocated here from
 //! `hugit-runner` (WP-R4, 2026-06-10): capture is forge domain; the
-//! execution core transferred to corelink-runners (campaign #1).
+//! execution core transferred to corelink-runners.
 
 pub mod deeplink;
 pub mod envelope;

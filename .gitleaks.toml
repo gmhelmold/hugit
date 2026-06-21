@@ -15,10 +15,20 @@ paths = [
     "crates/hugit-ledger/tests/acceptance_f2.rs",
     "crates/hugit-ledger/tests/proptest_scrubber.rs",
     "crates/hugit-policy/tests/acceptance_n4_secret_parity.rs",
+    "crates/hugit-cli/tests/acceptance_symbol.rs",
+    "crates/hugit-cli/src/export/redaction.rs",
+    "crates/hugit-cli/src/porcelain.rs",
+    "crates/hugit-serve/src/handlers/blob.rs",
+    "crates/hugit-serve/src/handlers/edit.rs",
+    "crates/hugit-serve/src/handlers/commits.rs",
+    "crates/hugit-serve/src/fmt.rs",
 ]
 regexes = [
     # Fake GitHub PAT used as a redaction test vector.
     "ghp_16C7e42F292c6912E7710c838347Ae178B4a",
+    # Fake GitHub OAuth / server-to-server tokens (same fake body) used as vectors.
+    "gho_16C7e42F292c6912E7710c838347Ae178B4a",
+    "ghs_16C7e42F292c6912E7710c838347Ae178B4a",
     # AWS example access key (the canonical public example from AWS docs).
     "AKIAIOSFODNN7EXAMPLE",
     # Slack token prefixes used in fixture strings.

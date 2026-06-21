@@ -715,14 +715,14 @@ mod tests {
         let r = "refs/heads/main";
         s.submit(Op::new(
             "ref.update",
-            vec!["user:gustavo".into()],
+            vec!["user:alice".into()],
             format!(r#"{{"ref":"{r}","target":"{}"}}"#, "a".repeat(40)),
             1,
         ))
         .expect("seed 0 accepted");
         s.submit(Op::new(
             "ref.update",
-            vec!["user:gustavo".into()],
+            vec!["user:alice".into()],
             format!(r#"{{"ref":"{r}","target":"{}"}}"#, "b".repeat(40)),
             2,
         ))
@@ -735,7 +735,7 @@ mod tests {
         let s = two_update_serializer();
         let before = s.len().expect("not poisoned");
         let rec = s
-            .undo(1, vec!["user:gustavo".into()], 3)
+            .undo(1, vec!["user:alice".into()], 3)
             .expect("a human may undo through the serializer");
         assert_eq!(rec.kind, "ref.update", "the compensator is a ref.update");
         assert_eq!(

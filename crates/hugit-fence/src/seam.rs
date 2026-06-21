@@ -2,7 +2,7 @@
 //!
 //! The execution core (lease lifecycle · isolation · teardown · fence
 //! materialization/enforcement) TRANSFERRED to `corelink-runners`
-//! (campaign #1) on 2026-06-10. The broker — which stays repo-side, since it
+//! on 2026-06-10. The broker — which stays repo-side, since it
 //! alone holds secrets the forge owns — no longer links the runner crate; it
 //! drives **this minimal seam** instead:
 //!

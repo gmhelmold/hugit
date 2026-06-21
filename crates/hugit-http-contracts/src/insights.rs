@@ -1,6 +1,6 @@
 //! `GET /v1/repos/{repo}/insights` → `InsightsVm` and all nested types for
 //! the Insights + Ledger screen. Transcribed BYTE-FOR-FIELD from the canonical
-//! `../githugr/crates/githugr-vm/src/provider.rs`; derives copied verbatim.
+//! companion web frontend's view-model definitions; derives copied verbatim.
 
 use serde::{Deserialize, Serialize};
 
@@ -252,7 +252,7 @@ mod tests {
             trajectory_summary: "planejou a wave auth em 3 PRs".to_string(),
             compact_transcript_ref: "cas:e22a… · 87 KB".to_string(),
             raw_transcript_ref: "cas:f31d… · 5.4 MB".to_string(),
-            snapshot_files: vec!["docs/plan/wave-auth.md".to_string()],
+            snapshot_files: vec!["notes/wave-auth.md".to_string()],
             context_json: "{}".to_string(),
             context_json_fn: "auth-hardening.context.json".to_string(),
             compact_json_note: "6 KB".to_string(),

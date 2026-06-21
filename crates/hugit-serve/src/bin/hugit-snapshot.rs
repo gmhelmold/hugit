@@ -3,7 +3,7 @@
 //! Reads a local canonical event-log file, **chain-verifies it through the engine's
 //! PS-13 verified loader** (`hugit_cli::checks::load_event_log_from_bytes` →
 //! `rehydrate_and_verify` → `verify_chain`), and only THEN PUTs the raw bytes to
-//! `<tenant_id>/<repo>.json` in the R2 `corelink-githugr-engine` bucket. A corrupt
+//! `<tenant_id>/<repo>.json` in the R2 `<your-r2-bucket>` bucket. A corrupt
 //! or tampered log is REFUSED before any upload — the snapshot the read path will
 //! later serve is proven trustworthy at write time, not just read time.
 //!

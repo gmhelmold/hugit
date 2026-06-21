@@ -1,5 +1,5 @@
 //! Write-verb REQUEST bodies (backend-API-v1 §3). Transcribed byte-for-field from
-//! the `Actions` trait in `../githugr/crates/githugr-vm/src/actions.rs` — one struct
+//! the `Actions` trait in the companion web frontend — one struct
 //! per POST verb, the JSON body the window sends. The success body is
 //! [`crate::actions::Accepted`]; the error body is `{code, reason}` (`EngineErr`).
 //!

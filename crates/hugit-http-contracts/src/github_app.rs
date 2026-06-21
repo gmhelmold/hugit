@@ -123,7 +123,7 @@ mod tests {
             culprit_note: "acme / storefront · união vermelha → bisect → culpado #412".into(),
             comment_green: AppCommentVm {
                 green: true,
-                url: "github.com/humangr/corelink-server/pull/205".into(),
+                url: "github.com/acme/myrepo/pull/205".into(),
                 verdict_line: "hugit / memoized-ci — verde".into(),
                 verdict_note: "provado por $0.02 · 14s".into(),
                 body: "9 de 11 checks provados pela cache.".into(),
@@ -132,7 +132,7 @@ mod tests {
             },
             comment_red: AppCommentVm {
                 green: false,
-                url: "github.com/humangr/corelink-server/pull/412".into(),
+                url: "github.com/acme/myrepo/pull/412".into(),
                 verdict_line: "hugit / memoized-ci — vermelho".into(),
                 verdict_note: "culpado isolado pelo bisect · $0.01".into(),
                 body: "1 de 9 falhou — bisect isolou o culpado.".into(),

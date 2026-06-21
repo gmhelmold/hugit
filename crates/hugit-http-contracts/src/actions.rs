@@ -1,5 +1,5 @@
 //! Write-path wire shapes (backend-API-v1 §3). Transcribed byte-for-field from
-//! `../githugr/crates/githugr-vm/src/actions.rs`.
+//! the companion web frontend's action definitions.
 //!
 //! [`Accepted`] is the success body every mutating verb returns. The engine also
 //! emits a top-level `"accepted": true` alongside these fields (spec §3 common

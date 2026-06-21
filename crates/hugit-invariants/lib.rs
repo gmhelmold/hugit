@@ -1,4 +1,4 @@
-//! hugit-invariants — Squad-X cross-cutting invariant test crate.
+//! hugit-invariants — platform invariants: a cross-cutting invariant test crate.
 //!
 //! Root library entry point. Each WP owns a subtree; this file wires them
 //! together additively. No subtree is modified when a new WP is added.

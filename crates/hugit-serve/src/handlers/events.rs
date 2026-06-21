@@ -1,7 +1,6 @@
 //! `GET /v1/repos/{repo}/events?since=<seq>` → SSE replay-then-close (spec §2).
 //!
-//! **Replay-then-close** (the chosen design; see
-//! `docs/plan/2026-06-14-serve-production-seams-design.md` Seam A): the retained
+//! **Replay-then-close** (the chosen design): the retained
 //! history since `since` is written as a `text/event-stream` body, followed by a
 //! single heartbeat comment, then the connection closes. The sync `tiny_http`
 //! serve loop processes responses serially — it cannot safely hold a long-lived
@@ -9,8 +8,8 @@
 //! client reconnects from its advanced `since` cursor. True live-tail is the
 //! documented P2 seam.
 //!
-//! **Wire seq is 1-based** (the frozen client contract, `../githugr/crates/
-//! githugr-live/tests/events.rs`: `since==0 ⇒ seqs 1,2,3`). The engine's internal
+//! **Wire seq is 1-based** (the frozen client contract:
+//! `since==0 ⇒ seqs 1,2,3`). The engine's internal
 //! `EventLog` seq is 0-based, so the wire seq is `record.seq + 1`. This makes the
 //! client's first connect (`since=0`) deliver EVERY event — `seq > since` with a
 //! 0-based internal seq would have silently dropped the first record.

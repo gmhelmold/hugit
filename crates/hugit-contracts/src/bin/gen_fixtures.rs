@@ -471,7 +471,7 @@ fn envelope_pr() -> ContextEnvelope {
         },
         snapshot: Snapshot {
             files_read: vec![FileRead {
-                path: "docs/plan/wave-1.md".into(),
+                path: "notes/wave-1.md".into(),
                 hash: "sha256:77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa"
                     .into(),
             }],
@@ -638,7 +638,7 @@ fn envelope_session() -> ContextEnvelope {
         },
         snapshot: Snapshot {
             files_read: vec![FileRead {
-                path: "docs/plan/wave-1.md".into(),
+                path: "notes/wave-1.md".into(),
                 hash: "sha256:77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa"
                     .into(),
             }],

@@ -5,7 +5,7 @@
 //! since the runner-transfer campaign (WP-R4, 2026-06-10) the enforcement
 //! half that *implements* that physical fence (`materialize` — sparse hydrate
 //! by path-set — and `enforce` — the ENOENT classifier/probe, WP-C5a) lives
-//! with the execution core in **corelink-runners** (campaign #1), together
+//! with the execution core in **corelink-runners**, together
 //! with the container-escape red-team harness whose load-bearing vector
 //! drives the real classifier. Relocated, not weakened: every C5a proof and
 //! red-team assertion runs unmodified against the same production code in its

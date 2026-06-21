@@ -15,8 +15,8 @@
 //! testable, no HTTP) from the server plumbing, so both build in parallel against
 //! this frozen signature. Handlers serve REAL data where the engine has it and the
 //! documented honest default (`""`/`null`/`0`/`[]`) elsewhere — NEVER a faked value
-//! (the fail-honest contract). The per-field REAL/PRESENTATION/STUB source map is
-//! `docs/plan/2026-06-13-hugit-serve-wave1-master-plan.md` §0/§5.
+//! (the fail-honest contract). Each handler documents its per-field
+//! REAL/PRESENTATION/STUB source inline.
 
 pub mod auth;
 pub mod authz;

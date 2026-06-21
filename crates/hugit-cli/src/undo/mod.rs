@@ -201,13 +201,13 @@ mod tests {
         let r = "refs/heads/main";
         el.append_for_test(
             "ref.update",
-            vec!["user:gustavo".into()],
+            vec!["user:alice".into()],
             ref_update(r, &"a".repeat(40)),
             1,
         );
         el.append_for_test(
             "ref.update",
-            vec!["user:gustavo".into()],
+            vec!["user:alice".into()],
             ref_update(r, &"b".repeat(40)),
             2,
         );
@@ -229,7 +229,7 @@ mod tests {
         let result = do_run(UndoArgs {
             log: log.clone(),
             seq: 1,
-            actor: Some("user:gustavo".to_string()),
+            actor: Some("user:alice".to_string()),
         })
         .expect("a human may undo");
 
@@ -298,7 +298,7 @@ mod tests {
         let err = do_run(UndoArgs {
             log: log.clone(),
             seq: 99,
-            actor: Some("user:gustavo".to_string()),
+            actor: Some("user:alice".to_string()),
         })
         .expect_err("out-of-range seq must fail");
 
@@ -321,7 +321,7 @@ mod tests {
         let err = do_run(UndoArgs {
             log: absent,
             seq: 0,
-            actor: Some("user:gustavo".to_string()),
+            actor: Some("user:alice".to_string()),
         })
         .expect_err("missing log must fail");
 

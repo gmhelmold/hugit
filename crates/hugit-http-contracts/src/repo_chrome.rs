@@ -34,7 +34,7 @@ mod tests {
             forks: "84".into(),
             visibility: "private".into(), // MACHINE value on the wire (display is window-side)
             description_html_free: "Content-addressed cache + compute da CoreLink.".into(),
-            clone_cmd: "hugit clone humangr/corelink-server".into(),
+            clone_cmd: "hugit clone acme/myrepo".into(),
         };
         let json = serde_json::to_string(&vm).unwrap();
         let reparsed: RepoChromeVm = serde_json::from_str(&json).unwrap();

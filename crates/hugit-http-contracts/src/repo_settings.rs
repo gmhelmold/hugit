@@ -1,7 +1,7 @@
 //! `GET /v1/repos/{repo}/settings` → `RepoSettingsVm` and its module-local types.
 //! All fields are `String`/`bool`/`Vec`/`Option`/tuple — no `f64` → full `Eq`.
 //! Transcribed BYTE-FOR-FIELD from the canonical
-//! `../githugr/crates/githugr-vm/src/provider.rs`; derives copied verbatim.
+//! companion web frontend's view-model definitions; derives copied verbatim.
 
 use serde::{Deserialize, Serialize};
 
@@ -84,7 +84,7 @@ mod tests {
     #[test]
     fn repo_settings_vm_round_trips() {
         let vm = RepoSettingsVm {
-            repo: "humangr/corelink-server".into(),
+            repo: "acme/myrepo".into(),
             nav: vec![("Webhooks".into(), true), ("Integrações".into(), false)],
             policy_intro: "Estas regras decidem quando um intent pode pousar na main.".into(),
             policy_title: "Hoje, para pousar na main, um intent precisa de:".into(),
@@ -124,7 +124,7 @@ mod tests {
                 },
             ],
             sync: SyncGithubVm {
-                mirror_repo: "humangr/corelink-server".into(),
+                mirror_repo: "acme/myrepo".into(),
                 connection_note: "Conectado · GitHub App #488201".into(),
                 direction: "Bidirecional seamless".into(),
                 direction_note: "githugr → GitHub · GitHub → githugr".into(),

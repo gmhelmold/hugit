@@ -100,8 +100,8 @@ pub const HUGIT_VERBS: &[&str] = &[
     "check",   // hugit check --def --log [--store] — memoized CI check (W-CHECK)
     "verdict", // hugit verdict …                   — adversarial verdict (W-VERDICT)
     // Issue lifecycle (roadmap W2) — graduated from RESERVED. `issue transition`
-    // appends an `issue.transition` record (CLI parity with the serve verb,
-    // ADR-0006). LIVE the moment main.rs routes it; the no-drift oracle requires
+    // appends an `issue.transition` record (CLI parity with the serve verb —
+    // no web-only verb). LIVE the moment main.rs routes it; the no-drift oracle requires
     // it here, not in HUGIT_RESERVED_VERBS.
     "issue", // hugit issue transition --log --n --to [--priority]
     // Stakeholder verbs (roadmap W3) — graduated from RESERVED with REAL wiring

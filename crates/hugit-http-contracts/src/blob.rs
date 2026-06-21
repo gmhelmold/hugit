@@ -1,6 +1,6 @@
 //! `GET /v1/repos/{repo}/blob/{*path}` → `BlobVm` and its blob-specific nested
 //! types. Transcribed BYTE-FOR-FIELD from the canonical
-//! `../githugr/crates/githugr-vm/src/provider.rs`.
+//! companion web frontend's view-model definitions.
 
 use serde::{Deserialize, Serialize};
 
@@ -97,7 +97,7 @@ mod tests {
     #[test]
     fn blob_vm_round_trips() {
         let vm = BlobVm {
-            repo: "humangr/corelink-server".into(),
+            repo: "acme/myrepo".into(),
             path: "crates/auth/src/token.rs".into(),
             size: "2.1 KB".into(),
             lang: Some("rust".into()),
@@ -128,7 +128,7 @@ mod tests {
                 line_end: 3,
                 intent_id: "a31".into(),
                 charter: "o refresh deve reemitir um TTL completo — rotate-on-use".into(),
-                href: "/r/humangr/corelink-server/intent/a31".into(),
+                href: "/r/acme/myrepo/intent/a31".into(),
                 principal: "você → orquestrador opus-4.8 → implementer opus-4.8".into(),
                 cost: "18.4k tokens · $0.21 · 2m 12s".into(),
                 verdict: "✓ correctness · ✓ security · ✓ repro".into(),

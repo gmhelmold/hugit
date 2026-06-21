@@ -1,6 +1,6 @@
 //! `GET /v1/repos/{repo}/prs/{n}/review` → `ReviewVm` and its nested types.
 //! Transcribed BYTE-FOR-FIELD from the canonical
-//! `../githugr/crates/githugr-vm/src/provider.rs`.
+//! companion web frontend's view-model definitions.
 
 use serde::{Deserialize, Serialize};
 
@@ -131,7 +131,7 @@ mod tests {
             ],
         };
         let vm = ReviewVm {
-            repo: "humangr/corelink-server".to_string(),
+            repo: "acme/myrepo".to_string(),
             number: 128,
             title: "fix: sessão expira cedo no refresh".to_string(),
             state_label: "na fila de landing".to_string(),
