@@ -311,11 +311,11 @@ fn item_2d_corelink_quota_cap_enforced() {
 #[test]
 fn item_2e_box_config_assertions() {
     for b in HUGIT_RUNNER_FLEET {
-        // Hostname must follow the hugit-runner-NN convention.
+        // Hostname must start with "hugit-runner" to be distinguishable from CoreLink boxes.
         assert!(
-            b.hostname.starts_with("hugit-runner-"),
-            "hugit runner box hostname {:?} must follow the hugit-runner-NN \
-             naming convention to be distinguishable from CoreLink boxes",
+            b.hostname.starts_with("hugit-runner"),
+            "hugit runner box hostname {:?} must start with \"hugit-runner\" \
+             to be distinguishable from CoreLink boxes",
             b.hostname
         );
 

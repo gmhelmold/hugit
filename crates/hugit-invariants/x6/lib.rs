@@ -68,10 +68,10 @@ pub const HUGIT_RUNNER_IPV4: &str = match option_env!("HUGIT_RUNNER_IPV4") {
 };
 
 pub const HUGIT_RUNNER_FLEET: &[HugitRunnerBox] = &[HugitRunnerBox {
-    hostname: "hugit-runner-01",
+    hostname: "hugit-runner",
     ipv4: HUGIT_RUNNER_IPV4,
     hetzner_project: "hugit",
-    ssh_key_name: "hugit-runner-01",
+    ssh_key_name: "hugit-runner",
     box_type: "Hetzner Cloud CPX32",
 }];
 
@@ -86,7 +86,7 @@ pub const CORELINK_HETZNER_PROJECTS: &[&str] = &["corelink", "corelink-prod", "c
 /// The hugit-side SSH key name. This key MUST be unique to hugit and MUST NOT
 /// be shared with CoreLink runners (key-sharing implies credential sharing, a
 /// deeper isolation violation).
-pub const HUGIT_SSH_KEY_NAME: &str = "hugit-runner-01";
+pub const HUGIT_SSH_KEY_NAME: &str = "hugit-runner";
 
 /// Assert that no box in the given fleet shares a Hetzner project with CoreLink.
 ///
@@ -133,7 +133,7 @@ pub fn assert_fleet_project_isolation() -> Result<(), String> {
 
 /// Assert that the hugit SSH key name is not shared with any CoreLink key.
 ///
-/// The key name convention `hugit-runner-01` is hugit-exclusive. CoreLink uses
+/// The key name convention `hugit-runner` is hugit-exclusive. CoreLink uses
 /// different key names in its own fleet. Sharing an SSH key between hugit and
 /// CoreLink boxes is a credential-isolation violation.
 pub fn assert_ssh_key_isolation() -> Result<(), String> {

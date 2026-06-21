@@ -21,7 +21,7 @@
 //!      scan clean).
 //!
 //! **Box-dependent**: item ⑥ drives the live runner box pinned by
-//! `HUGIT_RUNNER_HOST` (the suite exports `91.99.11.196`). When the box is
+//! `HUGIT_RUNNER_HOST` (the suite exports `203.0.113.10`). When the box is
 //! unreachable it **FAILS** (not skip) — per contract. It skips only when
 //! `HUGIT_RUNNER_HOST` is unset (the bare cargo gate lane). Items ②③④ are
 //! deterministic and never touch the box. The box lane's transport is a
@@ -72,13 +72,13 @@ struct SshSeam {
 
 impl SshSeam {
     /// Construct from `HUGIT_RUNNER_HOST`, defaulting the user to `root` and
-    /// the identity to `~/.ssh/hugit-runner-01` when that file exists.
+    /// the identity to `~/.ssh/hugit-runner` when that file exists.
     fn from_env() -> Option<Self> {
         let host = std::env::var("HUGIT_RUNNER_HOST")
             .ok()
             .filter(|h| !h.trim().is_empty())?;
         let identity = std::env::var("HOME").ok().and_then(|home| {
-            let p = format!("{home}/.ssh/hugit-runner-01");
+            let p = format!("{home}/.ssh/hugit-runner");
             std::path::Path::new(&p).exists().then_some(p)
         });
         Some(Self {

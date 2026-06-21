@@ -15,7 +15,7 @@
 #     item_3_raw_push_external_change_with_attribution
 #     item_4_flag_off_unless_self_hosted_alpha
 #     item_5_no_synthetic_intent_for_raw_push
-# Box env: HUGIT_RUNNER_HOST=91.99.11.196 (box-dependent tests FAIL when env
+# Box env: HUGIT_RUNNER_HOST=203.0.113.10 (box-dependent tests FAIL when env
 #   set but box unreachable; skip only when HUGIT_RUNNER_HOST entirely unset).
 # RED on current tree (crate paths not yet built).
 
@@ -23,7 +23,7 @@ SUITE_ID="wp-d3b"
 export SUITE_ID
 source "$(dirname "$0")/../lib.sh"
 
-export HUGIT_RUNNER_HOST=91.99.11.196
+export HUGIT_RUNNER_HOST=203.0.113.10
 
 CRATE_ROOT="crates/hugit-proto"
 CRATE_NAME="hugit-proto"

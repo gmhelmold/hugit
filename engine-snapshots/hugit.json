@@ -29,7 +29,7 @@
     "principal_chain": [
       "user:humangr"
     ],
-    "payload": "{\"owner_tenant\":\"ee30f7ba-fc25-4d71-939e-ebe130b4c6a3\",\"visibility\":\"private\"}",
+    "payload": "{\"owner_tenant\":\"00000000-0000-0000-0000-000000000001\",\"visibility\":\"private\"}",
     "recorded_at": 0
   },
   {

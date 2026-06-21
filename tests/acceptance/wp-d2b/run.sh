@@ -22,7 +22,7 @@
 #     item_5_degradation_kill_test
 #     item_6_scale_ceilings_bounded_behavior
 #     item_7_jj_stack_roundtrip_change_ids_stable
-# Box env: HUGIT_RUNNER_HOST=91.99.11.196 (box-dependent tests FAIL when env
+# Box env: HUGIT_RUNNER_HOST=203.0.113.10 (box-dependent tests FAIL when env
 #   set but box unreachable; skip only when HUGIT_RUNNER_HOST entirely unset).
 # jj/git clients: shelled to local binaries if available; FAIL if unavailable
 #   (FAIL-not-skip per contract).
@@ -32,7 +32,7 @@ SUITE_ID="wp-d2b"
 export SUITE_ID
 source "$(dirname "$0")/../lib.sh"
 
-export HUGIT_RUNNER_HOST=91.99.11.196
+export HUGIT_RUNNER_HOST=203.0.113.10
 
 CRATE_ROOT="crates/hugit-proto"
 CRATE_NAME="hugit-proto"
