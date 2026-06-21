@@ -35,7 +35,7 @@ pub mod write;
 pub use read::negotiate::{Capabilities, NegotiationError, RefAdvertisement, RefView, WantHave};
 pub use read::pack::{
     CasObjectSource, GitObject, ObjectKind, ObjectSource, PackAssembly, PackError,
-    resolve_blob_at_path,
+    TreeEntry as ProtoTreeEntry, list_tree_at_dir, resolve_blob_at_path,
 };
 pub use read::serve::{ServeError, serve_clone, serve_fetch};
 // WP-D2b — read-path edges: client matrix + jj stacks, CPU/chunked fallback,

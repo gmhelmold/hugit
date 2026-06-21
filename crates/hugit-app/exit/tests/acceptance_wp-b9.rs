@@ -365,7 +365,7 @@ fn item_6_money_gate_blocks_billing_until_pass() {
     );
 
     let event_result =
-        gate.try_enable_billing(&pass_report, "gustavo@humangr.com", &"0".repeat(64), 1);
+        gate.try_enable_billing(&pass_report, "owner@example.com", &"0".repeat(64), 1);
     assert!(
         event_result.is_ok(),
         "PASS report must produce audited event; got {:?}",
@@ -400,7 +400,7 @@ fn item_6_money_gate_blocks_billing_until_pass() {
     );
     // ...and a genesis-slot copy MUST verify against the canonical verifier.
     let genesis_event = gate
-        .try_enable_billing(&pass_report, "gustavo@humangr.com", &"0".repeat(64), 0)
+        .try_enable_billing(&pass_report, "owner@example.com", &"0".repeat(64), 0)
         .expect("genesis-seq enable-billing event must build");
     let mut log = hugit_refstore::EventLog::new();
     log.push_record(genesis_event)
@@ -422,7 +422,7 @@ fn item_6_money_gate_blocks_billing_until_pass() {
     let decision = gate.evaluate(&fail_report);
     assert!(!decision.is_allow(), "FAIL report must Block billing");
 
-    let err = gate.try_enable_billing(&fail_report, "gustavo@humangr.com", &"0".repeat(64), 2);
+    let err = gate.try_enable_billing(&fail_report, "owner@example.com", &"0".repeat(64), 2);
     assert!(err.is_err(), "FAIL report must not enable billing");
 
     // (c) InsufficientOrOutOfWindow report → gate blocks billing.
@@ -450,7 +450,7 @@ fn item_6_money_gate_blocks_billing_until_pass() {
         "insufficient report must Block billing"
     );
 
-    let err = gate.try_enable_billing(&insuff_report, "gustavo@humangr.com", &"0".repeat(64), 3);
+    let err = gate.try_enable_billing(&insuff_report, "owner@example.com", &"0".repeat(64), 3);
     assert!(err.is_err(), "insufficient report must not enable billing");
 
     // (d) DEGRADED gate evaluator → fails CLOSED (cannot enable) regardless of report.
@@ -463,7 +463,7 @@ fn item_6_money_gate_blocks_billing_until_pass() {
     );
 
     let err =
-        degraded_gate.try_enable_billing(&pass_report, "gustavo@humangr.com", &"0".repeat(64), 4);
+        degraded_gate.try_enable_billing(&pass_report, "owner@example.com", &"0".repeat(64), 4);
     assert!(
         err.is_err(),
         "DEGRADED gate must not enable billing even on PASS report"

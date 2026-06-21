@@ -1038,7 +1038,7 @@ mod tests {
         assert!(is_safe_identifier_shape("pr-9f8e7d6c"));
         assert!(is_safe_identifier_shape("run-0011-2233"));
         assert!(is_safe_identifier_shape("42")); // pure integer
-        assert!(is_safe_identifier_shape("gustavo@humangr.com")); // email
+        assert!(is_safe_identifier_shape("owner@example.com")); // email
         assert!(is_safe_identifier_shape("sk-256")); // short non-key sk- id
         // Blobs / credentials REDACT (false).
         assert!(!is_safe_identifier_shape(

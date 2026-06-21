@@ -47,7 +47,7 @@ mod tests {
             bio: "fundador · HuGR".into(),
             company: "HuGR".into(),
             user_lock_note: "fixo — identidade HuGR".into(),
-            email: "gustavo@humangr.com".into(),
+            email: "owner@example.com".into(),
             email_verified: true,
             email_help: "É o e-mail da conta HuGR.".into(),
             language: "Português (Brasil)".into(),

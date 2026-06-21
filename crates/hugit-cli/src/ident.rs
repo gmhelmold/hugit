@@ -271,7 +271,7 @@ mod tests {
     #[test]
     fn human_readable_slug_is_valid() {
         validate_identifier("auth-hardening", "--campaign").expect("slug must be valid");
-        validate_identifier("gustavo@humangr.com", "--owner").expect("email must be valid");
+        validate_identifier("owner@example.com", "--owner").expect("email must be valid");
         validate_identifier("PR-1", "--pr").expect("PR id must be valid");
         validate_identifier("intent-abc123def", "--id").expect("intent id must be valid");
     }

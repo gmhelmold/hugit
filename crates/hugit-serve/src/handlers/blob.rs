@@ -12,12 +12,13 @@
 //!   scrubbed), `size` (byte count → human string), `lang` (extension → name),
 //!   `outline` (W6 — the symbol outline parsed from the blob bytes via
 //!   [`hugit_symbols::outline_blob`], symbol names scrubbed at the read boundary;
-//!   empty for an unsupported language, never fabricated).
+//!   empty for an unsupported language, never fabricated), `tree` (the sidebar
+//!   file-tree: direct children of the directory containing `path`, symlinks and
+//!   gitlinks excluded, fail-closed on any missing object).
 //! - **HONEST-DEFAULT** (no local engine seam this wave — NOT faked, documented
 //!   here): `blame: []` (the deep why-blame is the intent-graph seam),
-//!   `tree: []` (no sidebar file-tree projection), `via_intent`/`via_model:
-//!   None` (no last-writer-intent attribution seam). `actions` mirrors the
-//!   sibling pt-BR locale.
+//!   `via_intent`/`via_model: None` (no last-writer-intent attribution seam).
+//!   `actions` mirrors the sibling pt-BR locale.
 //!
 //! When the git content seam is not wired (`src`/`root_tree` are `None`), or the
 //! path does not resolve to a blob, the handler returns `None` → the caller maps
@@ -27,7 +28,7 @@
 use std::sync::Arc;
 
 use gix_hash::ObjectId;
-use hugit_http_contracts::blob::BlobVm;
+use hugit_http_contracts::blob::{BlobTreeRowVm, BlobVm};
 use hugit_refstore::EventLog;
 
 use crate::fmt::scrub;
@@ -90,9 +91,45 @@ pub fn build_blob(
         // hugit-symbols. Empty for an unsupported language (honest, not faked).
         outline: compute_outline(path, &bytes),
         actions: blob_actions(),
-        // HONEST-DEFAULT: no sidebar file-tree projection this wave.
-        tree: vec![],
+        // REAL: the sidebar file tree — entries in the same directory as
+        // `path`. Symlinks + gitlinks are excluded (see `list_tree_at_dir`).
+        // Fail-closed: any missing object or malformed tree yields an empty
+        // sidebar rather than a 404.
+        tree: build_tree_sidebar(src.as_ref(), root_tree, path),
     })
+}
+
+/// Build the sidebar file-tree: entries in the same directory as `path`.
+///
+/// Delegates to [`hugit_proto::list_tree_at_dir`] which walks the git tree to
+/// the parent directory and returns its direct children (blobs + subtrees;
+/// symlinks and gitlinks excluded). The result is mapped to [`BlobTreeRowVm`]:
+/// - `depth` is always 0 — the sidebar shows one directory level (no nesting
+///   in this wave).
+/// - `current` is `true` for the entry whose name matches the leaf of `path`.
+/// - Entry names are **not** secret-scrubbed: they are filenames, not file
+///   content; a filename that looks like a secret is not a leakage risk because
+///   it is visible in the git tree / directory listing by design.
+///
+/// Fail-closed: errors or a missing source return an empty `Vec` — the handler
+/// never returns a 500 because the sidebar could not be populated.
+fn build_tree_sidebar(
+    src: &dyn hugit_proto::ObjectSource,
+    root_tree: &ObjectId,
+    path: &str,
+) -> Vec<BlobTreeRowVm> {
+    // The leaf name of the current file (e.g. "lib.rs" for "src/lib.rs").
+    let current_leaf = path.rsplit('/').next().unwrap_or(path);
+
+    hugit_proto::list_tree_at_dir(src, root_tree, path)
+        .into_iter()
+        .map(|e| BlobTreeRowVm {
+            current: e.name == current_leaf,
+            name: e.name,
+            depth: 0,
+            is_dir: e.is_dir,
+        })
+        .collect()
 }
 
 /// Compute the symbol outline for `path`'s content via `hugit-symbols` (W6).
@@ -274,8 +311,15 @@ mod tests {
         assert_eq!(vm.outline[0].line, 1);
         // Honest defaults (still absent this wave).
         assert!(vm.blame.is_empty());
-        assert!(vm.tree.is_empty());
         assert!(vm.via_intent.is_none());
+        // REAL: the sidebar tree lists the one file in the root dir.
+        assert_eq!(vm.tree.len(), 1, "tree: {:?}", vm.tree);
+        assert_eq!(vm.tree[0].name, "main.rs");
+        assert!(
+            vm.tree[0].current,
+            "the requested file must be marked current"
+        );
+        assert!(!vm.tree[0].is_dir);
     }
 
     #[test]
@@ -475,5 +519,191 @@ mod tests {
             build_blob(&log(), "r", "exact.bin", Some(&src2), Some(&root2)).is_some(),
             "a blob exactly at the cap must still be served"
         );
+    }
+
+    // ── blob.tree (sidebar file-tree) tests ──────────────────────────────────
+
+    /// A root-level file: `tree` lists all siblings in the root directory.
+    /// The requested file must have `current: true`; all others `current: false`.
+    #[test]
+    fn tree_root_level_lists_siblings() {
+        let mut src = CasObjectSource::new();
+        let a = src.insert_raw(ObjectKind::Blob, b"a".to_vec());
+        let b = src.insert_raw(ObjectKind::Blob, b"b".to_vec());
+        let sub = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_BLOB,
+                name: "inner.rs",
+                oid: a,
+            }],
+        );
+        let root = insert_tree(
+            &mut src,
+            vec![
+                TreeEntry {
+                    mode: MODE_BLOB,
+                    name: "lib.rs",
+                    oid: a,
+                },
+                TreeEntry {
+                    mode: MODE_BLOB,
+                    name: "main.rs",
+                    oid: b,
+                },
+                TreeEntry {
+                    mode: MODE_TREE,
+                    name: "src",
+                    oid: sub,
+                },
+            ],
+        );
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
+
+        let vm = build_blob(&log(), "r", "lib.rs", Some(&src), Some(&root))
+            .expect("root-level file resolves");
+
+        // Three entries: lib.rs, main.rs, src (dir) — all in the root tree.
+        assert_eq!(vm.tree.len(), 3, "tree entries: {:?}", vm.tree);
+
+        // lib.rs is the requested file → current: true.
+        let lib = vm
+            .tree
+            .iter()
+            .find(|e| e.name == "lib.rs")
+            .expect("lib.rs in tree");
+        assert!(lib.current, "requested file must be marked current");
+        assert!(!lib.is_dir);
+
+        // main.rs is a sibling → current: false.
+        let main = vm
+            .tree
+            .iter()
+            .find(|e| e.name == "main.rs")
+            .expect("main.rs in tree");
+        assert!(!main.current);
+        assert!(!main.is_dir);
+
+        // src is a subdirectory.
+        let src_row = vm
+            .tree
+            .iter()
+            .find(|e| e.name == "src")
+            .expect("src in tree");
+        assert!(!src_row.current);
+        assert!(src_row.is_dir);
+
+        // depth is always 0 (one-level sidebar).
+        assert!(vm.tree.iter().all(|e| e.depth == 0));
+    }
+
+    /// A nested file: `tree` lists siblings in the *same* directory, not the root.
+    #[test]
+    fn tree_nested_file_lists_parent_dir_siblings() {
+        let mut src = CasObjectSource::new();
+        let a = src.insert_raw(ObjectKind::Blob, b"a".to_vec());
+        let b_blob = src.insert_raw(ObjectKind::Blob, b"b".to_vec());
+        let inner_sub = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_BLOB,
+                name: "handlers.rs",
+                oid: a,
+            }],
+        );
+        let sub = insert_tree(
+            &mut src,
+            vec![
+                TreeEntry {
+                    mode: MODE_BLOB,
+                    name: "lib.rs",
+                    oid: a,
+                },
+                TreeEntry {
+                    mode: MODE_BLOB,
+                    name: "util.rs",
+                    oid: b_blob,
+                },
+                TreeEntry {
+                    mode: MODE_TREE,
+                    name: "handlers",
+                    oid: inner_sub,
+                },
+            ],
+        );
+        let root = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_TREE,
+                name: "src",
+                oid: sub,
+            }],
+        );
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
+
+        // Requesting "src/util.rs" → tree = entries of the "src/" directory.
+        let vm = build_blob(&log(), "r", "src/util.rs", Some(&src), Some(&root))
+            .expect("nested file resolves");
+
+        assert_eq!(vm.tree.len(), 3, "tree entries: {:?}", vm.tree);
+
+        let util = vm
+            .tree
+            .iter()
+            .find(|e| e.name == "util.rs")
+            .expect("util.rs in tree");
+        assert!(util.current, "requested file must be marked current");
+        assert!(!util.is_dir);
+
+        let lib_row = vm
+            .tree
+            .iter()
+            .find(|e| e.name == "lib.rs")
+            .expect("lib.rs in tree");
+        assert!(!lib_row.current);
+
+        let handlers_row = vm
+            .tree
+            .iter()
+            .find(|e| e.name == "handlers")
+            .expect("handlers in tree");
+        assert!(handlers_row.is_dir);
+        assert!(!handlers_row.current);
+    }
+
+    /// Symlinks in the parent directory must NOT appear in `tree`.
+    #[test]
+    fn tree_excludes_symlinks() {
+        let mut src = CasObjectSource::new();
+        let real = src.insert_raw(ObjectKind::Blob, b"real".to_vec());
+        let link_target = src.insert_raw(ObjectKind::Blob, b"other/real.rs".to_vec());
+        let root = insert_tree(
+            &mut src,
+            vec![
+                TreeEntry {
+                    mode: MODE_BLOB,
+                    name: "real.rs",
+                    oid: real,
+                },
+                TreeEntry {
+                    mode: "120000", // symlink
+                    name: "link.rs",
+                    oid: link_target,
+                },
+            ],
+        );
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
+
+        let vm = build_blob(&log(), "r", "real.rs", Some(&src), Some(&root))
+            .expect("real file resolves");
+
+        // Only real.rs should appear; link.rs is excluded.
+        assert_eq!(
+            vm.tree.len(),
+            1,
+            "tree should exclude symlinks: {:?}",
+            vm.tree
+        );
+        assert_eq!(vm.tree[0].name, "real.rs");
     }
 }

@@ -530,7 +530,7 @@ mod tests {
         assert!(is_safe_identifier_shape("auth-hardening"));
         assert!(is_safe_identifier_shape("feature/login"));
         assert!(is_safe_identifier_shape("42"));
-        assert!(is_safe_identifier_shape("gustavo@humangr.com"));
+        assert!(is_safe_identifier_shape("owner@example.com"));
         assert!(is_safe_identifier_shape("sk-256"));
         assert!(is_safe_identifier_shape(
             "550e8400-e29b-41d4-a716-446655440000"

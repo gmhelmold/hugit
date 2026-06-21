@@ -102,6 +102,49 @@ fn verdict_json(v: Option<UnionVerdict>) -> Value {
     }
 }
 
+/// Disclosure attached to every `queue show`: the entry `state` projects the
+/// idempotent landing state machine ([`hugit_queue::core::EntryState`]) AS FAR AS
+/// the canonical log records it. A `pr.landed` event settles an entry to the
+/// terminal `Landed` (it then leaves the active queue — observed by its absence);
+/// but the OTHER terminal — `UnionFail` (the bisected failing-pair exclusion) — and
+/// the bisection itself are computed IN-CORE by the queue engine and are **not yet
+/// emitted as log events**. So a reject-verdict entry surfaces `state:"union_fail"`
+/// projected from the SAME ledger reject the verdict uses (real), while the
+/// minimal failing PAIR is `null`/`n/a` until a `queue.union_fail` recorder lands.
+const STATE_MACHINE_NOTE: &str = "entry `state` projects hugit_queue's landing state machine \
+                                  (queued/landable/blocked/union_fail) from the log + ledger; a \
+                                  terminal `landed` entry leaves the active queue (absent here); \
+                                  the bisected minimal failing-pair is computed in-core and is not \
+                                  yet recorded as a log event (failing_pair is null until a \
+                                  queue.union_fail recorder lands) — never faked";
+
+/// Project an active queue entry's landing-state-machine state from its resolved
+/// union verdict (the ledger's reject-sticky / proven fold — the SAME source the
+/// `verdict` field uses, so the two never disagree). Honest vocabulary mapped to
+/// [`hugit_queue::core::EntryState`]:
+///
+/// - `"union_fail"` — the entry's union verdict is `reject` (a member intent has an
+///   outstanding sticky reject): it is destined for the `UnionFail` terminal
+///   (excluded from the batch). REAL — projected from the recorded verdict.
+/// - `"landable"` — the entry's union verdict is `approve` (every member intent
+///   proven): it can transition to `Landed` once its predecessors settle. The
+///   predecessor-settled gate + the actual `Landed` settlement are the queue
+///   engine's job (a `pr.landed` event), so this is "proven, eligible", not "landed".
+/// - `"queued"` — the entry has no covering verdict yet (the verdict is `null`): it
+///   sits in the queue awaiting its batch's union test. Honest unknown.
+///
+/// The terminal `landed` state is NEVER produced here — a landed PR has left the
+/// active queue (`all_pr_queued` filters it), so it is observed by absence, not by
+/// a state string. This keeps the projection honest: we never claim a settlement
+/// the log did not record.
+fn entry_state(verdict: Option<UnionVerdict>) -> Value {
+    match verdict {
+        Some(UnionVerdict::Reject) => Value::String("union_fail".to_string()),
+        Some(UnionVerdict::Approve) => Value::String("landable".to_string()),
+        None => Value::String("queued".to_string()),
+    }
+}
+
 /// `hugit queue <subcommand>` — landing-queue visibility (WP-WB2).
 #[derive(clap::Args, Debug)]
 pub struct QueueArgs {
@@ -223,6 +266,12 @@ fn show(args: &ShowArgs) -> Result<Value, PorcelainError> {
             "item_id": q.item_id,
             "campaign": campaign,
             "verdict": verdict_json(entry_verdict),
+            // The entry's position in the idempotent landing STATE MACHINE
+            // (hugit_queue::core::EntryState), projected from what the log records.
+            // Every entry here is in the ACTIVE queue (`all_pr_queued` excludes a
+            // `pr.landed`-settled PR), so the terminal `landed` state is observed by
+            // its ABSENCE from this list — see the top-level `state_machine_note`.
+            "state": entry_state(entry_verdict),
         }));
     }
 
@@ -257,7 +306,19 @@ fn show(args: &ShowArgs) -> Result<Value, PorcelainError> {
                 "members": members,
                 "member_count": members.len(),
                 "verdict": verdict_json(verdict),
+                // The batch's landing-state-machine state, from its union verdict
+                // (the same ledger fold). A union batch with an outstanding member
+                // reject is heading for `union_fail`.
+                "state": entry_state(verdict),
                 "implicated_pr": implicated_pr,
+                // The MINIMAL FAILING PAIR from the bisect (hugit_queue's reason to
+                // exist: "exclude the failing pair, the rest proceeds"). On a
+                // union-fail the log records WHICH member is implicated (the ledger
+                // reject → `implicated_pr`), but the bisected PAIR is computed
+                // in-core and is NOT yet emitted as a log event — so it is honest
+                // `null`/`n/a` here, never a fabricated pair. Lights up the instant a
+                // `queue.union_fail` recorder lands (tracked).
+                "failing_pair": Value::Null,
             })
         })
         .collect();
@@ -269,5 +330,152 @@ fn show(args: &ShowArgs) -> Result<Value, PorcelainError> {
         "entries": entries,
         "batches": batches,
         "verdict_note": VERDICT_NOTE,
+        "state_machine_note": STATE_MACHINE_NOTE,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hugit_refstore::EventLog;
+
+    /// `entry_state` maps the resolved union verdict to the landing state-machine
+    /// vocabulary — the ONE place the state names are projected. Pure + total.
+    #[test]
+    fn entry_state_maps_verdict_to_landing_state_machine() {
+        assert_eq!(entry_state(Some(UnionVerdict::Reject)), json!("union_fail"));
+        assert_eq!(entry_state(Some(UnionVerdict::Approve)), json!("landable"));
+        // No covering verdict ⇒ honest "queued" (awaiting the union test), never
+        // a guessed landable/fail.
+        assert_eq!(entry_state(None), json!("queued"));
+    }
+
+    /// Append a record onto a synthetic log via the `test-support` raw shim — the
+    /// canonical fixture path (the production raw door is `pub(crate)`).
+    fn push(log: &mut EventLog, kind: &str, payload: Value) {
+        log.append_for_test(
+            kind,
+            vec!["orchestrator:hugit".to_string()],
+            payload.to_string(),
+            0,
+        );
+    }
+
+    /// Persist a seeded log to a unique temp path and run `queue show` over it.
+    fn show_over(log: &EventLog, tag: &str, campaign: Option<&str>) -> Value {
+        let dir =
+            std::env::temp_dir().join(format!("hugit-queue-show-{}-{tag}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("queue-seed.json");
+        std::fs::write(&path, serde_json::to_vec_pretty(log.records()).unwrap()).unwrap();
+        show(&ShowArgs {
+            log: path,
+            campaign: campaign.map(str::to_string),
+        })
+        .unwrap()
+    }
+
+    /// A clean queue (PRs opened + queued, no verdict) projects each entry in
+    /// `order_index` order, grouped into one union batch per campaign, with the
+    /// entry/batch state `queued` and the failing-pair honestly null + disclosed.
+    #[test]
+    fn show_projects_union_batch_composition_and_queued_state() {
+        let mut log = EventLog::new();
+        // Two PRs in the same campaign — the union-batch composition under test.
+        push(
+            &mut log,
+            "pr.opened",
+            json!({"pr_id": "PR-1", "campaign": "camp-a", "intent_ids": ["I-1"],
+                   "author_kind": "orchestrator", "principal": null, "run_id": null}),
+        );
+        push(
+            &mut log,
+            "pr.opened",
+            json!({"pr_id": "PR-2", "campaign": "camp-a", "intent_ids": ["I-2"],
+                   "author_kind": "orchestrator", "principal": null, "run_id": null}),
+        );
+        push(
+            &mut log,
+            "pr.queued",
+            json!({"pr_id": "PR-1", "item_id": "PR-1#0", "order_index": 0, "mode": "union"}),
+        );
+        push(
+            &mut log,
+            "pr.queued",
+            json!({"pr_id": "PR-2", "item_id": "PR-2#1", "order_index": 1, "mode": "union"}),
+        );
+
+        let out = show_over(&log, "clean", None);
+
+        assert_eq!(out["queue_depth"], 2);
+        let entries = out["entries"].as_array().unwrap();
+        assert_eq!(entries[0]["pr_id"], "PR-1");
+        assert_eq!(entries[0]["position"], 0);
+        assert_eq!(entries[0]["state"], "queued");
+        assert_eq!(entries[1]["pr_id"], "PR-2");
+
+        // One union batch per campaign, composed of both member PRs.
+        let batches = out["batches"].as_array().unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0]["campaign"], "camp-a");
+        assert_eq!(batches[0]["mode"], "union");
+        assert_eq!(batches[0]["members"], json!(["PR-1", "PR-2"]));
+        assert_eq!(batches[0]["member_count"], 2);
+        // The bisected failing pair is not log-recorded → honest null + disclosed.
+        assert!(batches[0]["failing_pair"].is_null());
+        assert!(
+            out["state_machine_note"]
+                .as_str()
+                .unwrap()
+                .contains("failing_pair")
+        );
+    }
+
+    /// A union batch with an outstanding member REJECT surfaces `state:"union_fail"`
+    /// and blames the implicated PR — projected from the SAME ledger reject the
+    /// `verdict` uses, so the queue view and the verdict agree by construction.
+    #[test]
+    fn show_surfaces_union_fail_state_and_implicated_pr_on_a_reject() {
+        let mut log = EventLog::new();
+        // The ledger builds an entry from `intent.landed`, then attaches verdicts.
+        push(
+            &mut log,
+            "intent.landed",
+            json!({"intent_id": "I-9", "campaign": "camp-b"}),
+        );
+        push(
+            &mut log,
+            "pr.opened",
+            json!({"pr_id": "PR-9", "campaign": "camp-b", "intent_ids": ["I-9"],
+                   "author_kind": "orchestrator", "principal": null, "run_id": null}),
+        );
+        push(
+            &mut log,
+            "pr.queued",
+            json!({"pr_id": "PR-9", "item_id": "PR-9#0", "order_index": 0, "mode": "union"}),
+        );
+        // A recorded reject on I-9's review lens — the ledger resolves it sticky.
+        push(
+            &mut log,
+            "verdict.recorded",
+            json!({
+                "intent": "I-9", "tree_hash": "th", "lens": "sec", "model": "m",
+                "prompt_digest": "pd", "verdict": "reject",
+                "claims_checked": ["sec:reject"], "evidence_refs": [],
+            }),
+        );
+
+        let out = show_over(&log, "reject", None);
+
+        let entries = out["entries"].as_array().unwrap();
+        assert_eq!(entries[0]["verdict"], "reject");
+        assert_eq!(entries[0]["state"], "union_fail");
+
+        let batches = out["batches"].as_array().unwrap();
+        assert_eq!(batches[0]["verdict"], "reject");
+        assert_eq!(batches[0]["state"], "union_fail");
+        // Blame names the implicated member PR (real); the bisected PAIR is null.
+        assert_eq!(batches[0]["implicated_pr"], "PR-9");
+        assert!(batches[0]["failing_pair"].is_null());
+    }
 }

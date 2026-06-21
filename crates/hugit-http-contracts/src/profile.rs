@@ -74,7 +74,7 @@ mod tests {
             bio: "fundador · HuGR".into(),
             company: "HuGR".into(),
             location: "São Paulo".into(),
-            email: "gustavo@humangr.com".into(),
+            email: "owner@example.com".into(),
             orgs: vec!["humangr".into()],
             pinned: vec![PinnedRepoVm {
                 name: "corelink-server".into(),

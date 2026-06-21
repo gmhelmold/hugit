@@ -84,7 +84,7 @@ fn campaign_opened() -> Ev {
         json!({
             "campaign": CAMPAIGN,
             "charter": "harden the auth border",
-            "owner": "gustavo@humangr.com",
+            "owner": "owner@example.com",
         }),
     )
 }
@@ -192,7 +192,7 @@ fn envelope(
                 "born_at": born,
                 "died_at": died,
             },
-            "operator": "gustavo@humangr.com",
+            "operator": "owner@example.com",
         },
         "charter": format!("harden auth — {id}"),
         "campaign": CAMPAIGN,
@@ -338,7 +338,7 @@ fn write_world(dir: &std::path::Path, events: &[Ev]) -> PathBuf {
         log.append_for_test(
             e.kind.to_string(),
             vec![
-                "user:gustavo@humangr.com".to_string(),
+                "user:owner@example.com".to_string(),
                 "orchestrator:opus".to_string(),
             ],
             payload,
@@ -379,13 +379,13 @@ fn open_records_campaign_opened_with_charter_and_human_owner() {
         "--charter",
         "harden the auth border",
         "--owner",
-        "gustavo@humangr.com",
+        "owner@example.com",
     ]);
     assert!(ok, "open exits 0");
     assert_eq!(v["campaign"], CAMPAIGN);
     assert_eq!(v["opened"], true);
     assert_eq!(v["already_exists"], false);
-    assert_eq!(v["owner"], "gustavo@humangr.com");
+    assert_eq!(v["owner"], "owner@example.com");
     assert_eq!(
         count_kind(&world, "campaign.opened"),
         1,
@@ -407,7 +407,7 @@ fn open_is_idempotent_no_duplicate_record() {
         "--charter",
         "c",
         "--owner",
-        "gustavo@humangr.com",
+        "owner@example.com",
     ];
 
     let (ok1, v1) = run(&args);

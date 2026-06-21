@@ -243,6 +243,24 @@ struct CheckRow {
     memo_key: Option<String>,
     /// PR id this check was recorded for, when the recorder scoped it.
     pr_id: Option<String>,
+    /// Memo axis 1 — the workspace Merkle tree-root hash the check was keyed on
+    /// (`CheckResult::tree_hash`). REAL on a `check --store` row.
+    tree_hash: Option<String>,
+    /// Memo axis 2 — the `CheckDef` body digest (`CheckResult::def_digest`).
+    def_digest: Option<String>,
+    /// Memo axis 3 — the content-addressed toolchain digest
+    /// (`CheckResult::toolchain_digest`). REAL on a `check --store` row.
+    toolchain_digest: Option<String>,
+    /// Content-addressed ref to the cached `runner` that produced the result
+    /// (`CheckResult::runner_ref`). On a HIT this is the cached proof's runner;
+    /// **not yet on the `check.recorded` payload** → honest `None`/`n/a`.
+    runner_ref: Option<String>,
+    /// Content-addressed ref to the cached stdout blob (`CheckResult::stdout_ref`).
+    /// **Not yet recorded** by the porcelain seam → honest `None`/`n/a`.
+    stdout_ref: Option<String>,
+    /// Content-addressed ref to the cached stderr blob (`CheckResult::stderr_ref`).
+    /// **Not yet recorded** by the porcelain seam → honest `None`/`n/a`.
+    stderr_ref: Option<String>,
 }
 
 impl CheckRow {
@@ -258,20 +276,87 @@ impl CheckRow {
             cache_hit: v.get("cache_hit").and_then(Value::as_bool),
             memo_key: str_field(v, "memo_key"),
             pr_id: str_field(v, "pr_id"),
+            // The three memo axes ARE on the `check --store` payload (run.rs builds
+            // them from the CheckResult), so an agent can see WHY a key resolved
+            // the way it did. A pre-axis row (e.g. a hand-seeded fixture) that omits
+            // them surfaces honest `null`, never a fabricated digest.
+            tree_hash: str_field(v, "tree_hash"),
+            def_digest: str_field(v, "def_digest"),
+            toolchain_digest: str_field(v, "toolchain_digest"),
+            // The cached PROOF refs (runner/stdout/stderr) are CheckResult fields
+            // that the current `check --store` payload does NOT yet carry (run.rs
+            // records the identity axes + cache_hit + duration, not the blob refs).
+            // We read them honestly so the field lights up the instant the recorder
+            // adds it — until then it is `null`/`n/a`, never invented.
+            runner_ref: str_field(v, "runner_ref").filter(|s| !s.is_empty()),
+            stdout_ref: str_field(v, "stdout_ref").filter(|s| !s.is_empty()),
+            stderr_ref: str_field(v, "stderr_ref").filter(|s| !s.is_empty()),
         }
     }
 
+    /// The scannable HIT/MISS verdict for this row, derived from `cache_hit`:
+    /// `"HIT"` (served from cache, zero local execution — the wedge firing),
+    /// `"MISS"` (executed for real), or `null` when `cache_hit` was never recorded
+    /// (honest unknown, never assumed a miss).
+    fn cache_verdict(&self) -> Value {
+        match self.cache_hit {
+            Some(true) => json!("HIT"),
+            Some(false) => json!("MISS"),
+            None => Value::Null,
+        }
+    }
+
+    /// The three-axis memo decomposition (`tree ‖ def ‖ toolchain`) the key was
+    /// computed from — so an agent sees WHY this check hit or missed. Each axis is
+    /// honest `null` if the row never recorded it (a pre-axis fixture).
+    fn axes_json(&self) -> Value {
+        json!({
+            "tree_hash": self.tree_hash,
+            "def_digest": self.def_digest,
+            "toolchain_digest": self.toolchain_digest,
+        })
+    }
+
+    /// The cached PROOF on a HIT — the content-addressed refs to the memoized
+    /// runner / stdout / stderr. On a MISS this is `null` (no proof was served —
+    /// the check just ran). On a HIT, each ref is the cached value when recorded,
+    /// else honest `null`/`n/a` (the `check --store` payload does not yet carry the
+    /// blob refs — a tracked recorder follow-up). `recorded:false` discloses that
+    /// the proof-ref fields are not on today's payload, so an agent never mistakes
+    /// an absent ref for "no proof exists".
+    fn proof_json(&self) -> Value {
+        // A proof is only meaningful on a served HIT; a MISS executed for real.
+        if self.cache_hit != Some(true) {
+            return Value::Null;
+        }
+        let recorded =
+            self.runner_ref.is_some() || self.stdout_ref.is_some() || self.stderr_ref.is_some();
+        json!({
+            "runner_ref": self.runner_ref,
+            "stdout_ref": self.stdout_ref,
+            "stderr_ref": self.stderr_ref,
+            // false ⇒ the cached-proof refs are not yet on the `check.recorded`
+            // payload (a tracked recorder follow-up); the HIT itself is real.
+            "recorded": recorded,
+        })
+    }
+
     /// Render the row as stable JSON. `memo_key_short` is a 12-char prefix for
-    /// scannability; `memo_key` is the full key. Honestly-absent fields render
-    /// as JSON `null` so the shape is stable for an agent parsing rows.
+    /// scannability; `memo_key` is the full key. `cache_verdict` is the
+    /// HIT/MISS label; `axes` is the three-axis memo decomposition; `proof` is the
+    /// cached proof ref on a HIT. Honestly-absent fields render as JSON `null` so
+    /// the shape is stable for an agent parsing rows.
     fn to_json(&self) -> Value {
         json!({
             "name": self.name,
             "ok": self.ok,
             "duration_ms": self.duration_ms,
             "cache_hit": self.cache_hit,
+            "cache_verdict": self.cache_verdict(),
             "memo_key": self.memo_key,
             "memo_key_short": self.memo_key.as_deref().map(truncate_key),
+            "axes": self.axes_json(),
+            "proof": self.proof_json(),
             "pr_id": self.pr_id,
         })
     }
@@ -304,12 +389,27 @@ fn show(args: &ShowArgs) -> Result<Value, PorcelainError> {
     let kpis = aggregate_kpis(&rows);
     let row_json: Vec<Value> = rows.iter().map(CheckRow::to_json).collect();
 
+    // Whether ANY hit row carried a cached proof ref — disclosed at the top level
+    // so an agent knows, without scanning every row, that the proof-ref fields are
+    // honest-`null` on today's payload (a tracked recorder follow-up) rather than
+    // "no proof exists". `true` the instant the recorder starts capturing them.
+    let proof_refs_recorded = rows.iter().any(|r| {
+        r.cache_hit == Some(true)
+            && (r.runner_ref.is_some() || r.stdout_ref.is_some() || r.stderr_ref.is_some())
+    });
+
     let mut out = json!({
         "log": args.log.display().to_string(),
         "pr": args.pr,
         "check_count": rows.len(),
         "checks": row_json,
         "kpis": kpis,
+        // The memoization story, made legible: each row carries the three memo
+        // axes (tree ‖ def ‖ toolchain), a HIT/MISS `cache_verdict`, and — on a HIT
+        // — the cached `proof` ref block. `proof_refs_recorded` discloses whether
+        // those refs are on today's payload (currently the recorder captures the
+        // identity axes + cache verdict but not the blob refs — honest n/a).
+        "proof_refs_recorded": proof_refs_recorded,
     });
     if rows.is_empty()
         && let Some(obj) = out.as_object_mut()
@@ -563,5 +663,129 @@ mod tests {
         assert!(bare["ok"].is_null());
         assert!(bare["cache_hit"].is_null());
         assert!(bare["memo_key_short"].is_null());
+    }
+
+    #[test]
+    fn row_surfaces_three_memo_axes_from_a_check_store_payload() {
+        // A real `check --store` payload (the shape run.rs builds) carries the
+        // three memo axes — the row must surface them verbatim, so an agent sees
+        // WHY a key resolved the way it did.
+        let row = CheckRow::from_payload(&json!({
+            "name": "clippy",
+            "exit": 0,
+            "cache_hit": true,
+            "memo_key": "aaaabbbbccccdddd",
+            "tree_hash": "treehash00",
+            "def_digest": "defdigest00",
+            "toolchain_digest": "tcdigest00",
+        }))
+        .to_json();
+        assert_eq!(row["axes"]["tree_hash"], "treehash00");
+        assert_eq!(row["axes"]["def_digest"], "defdigest00");
+        assert_eq!(row["axes"]["toolchain_digest"], "tcdigest00");
+        // A payload that never recorded the axes (a pre-axis fixture) surfaces
+        // honest null axes, never a fabricated digest.
+        let bare = CheckRow::from_payload(&json!({"cache_hit": false})).to_json();
+        assert!(bare["axes"]["tree_hash"].is_null());
+        assert!(bare["axes"]["def_digest"].is_null());
+        assert!(bare["axes"]["toolchain_digest"].is_null());
+    }
+
+    #[test]
+    fn cache_verdict_is_hit_miss_or_honest_null() {
+        let hit = CheckRow::from_payload(&json!({"cache_hit": true})).to_json();
+        assert_eq!(hit["cache_verdict"], "HIT");
+        let miss = CheckRow::from_payload(&json!({"cache_hit": false})).to_json();
+        assert_eq!(miss["cache_verdict"], "MISS");
+        // cache_hit unknown ⇒ verdict null (never assumed a MISS).
+        let unknown = CheckRow::from_payload(&json!({})).to_json();
+        assert!(unknown["cache_verdict"].is_null());
+    }
+
+    #[test]
+    fn proof_is_null_on_a_miss_and_honest_na_on_a_hit_without_refs() {
+        // A MISS executed for real — there is no cached proof to serve.
+        let miss = CheckRow::from_payload(&json!({"cache_hit": false})).to_json();
+        assert!(miss["proof"].is_null());
+
+        // A HIT today carries NO blob refs (the recorder does not yet capture
+        // them), so the proof block is present with honest-null refs and discloses
+        // `recorded: false` — never an invented ref, never "no proof".
+        let hit = CheckRow::from_payload(&json!({"cache_hit": true})).to_json();
+        assert!(hit["proof"]["runner_ref"].is_null());
+        assert!(hit["proof"]["stdout_ref"].is_null());
+        assert!(hit["proof"]["stderr_ref"].is_null());
+        assert_eq!(hit["proof"]["recorded"], false);
+
+        // The instant a future recorder DOES capture a runner_ref, the field
+        // lights up and `recorded` flips to true with zero code change here.
+        let hit_with_ref = CheckRow::from_payload(&json!({
+            "cache_hit": true,
+            "runner_ref": "cas:runner:abc",
+        }))
+        .to_json();
+        assert_eq!(hit_with_ref["proof"]["runner_ref"], "cas:runner:abc");
+        assert_eq!(hit_with_ref["proof"]["recorded"], true);
+        // An empty-string ref is treated as honest-absent (run.rs records "" for
+        // the not-yet-captured CheckResult refs), not a real proof.
+        let hit_empty = CheckRow::from_payload(&json!({
+            "cache_hit": true,
+            "runner_ref": "",
+        }))
+        .to_json();
+        assert!(hit_empty["proof"]["runner_ref"].is_null());
+        assert_eq!(hit_empty["proof"]["recorded"], false);
+    }
+
+    #[test]
+    fn show_seeded_log_projects_axes_verdict_and_discloses_proof_gap() {
+        // Seed a real chain-verified log carrying two `check.recorded` rows (a HIT
+        // and a MISS) and assert `checks show` projects the memoization story. The
+        // log is built through the `test-support` raw-append shim (the canonical
+        // synthetic-log fixture path) so the chain hashes verify on read.
+        let mut log = EventLog::new();
+        for payload in [
+            json!({
+                "name": "fmt", "exit": 0, "cache_hit": false, "duration_ms": 120,
+                "memo_key": "key_miss_0000", "tree_hash": "th0", "def_digest": "dd0",
+                "toolchain_digest": "tc0",
+            }),
+            json!({
+                "name": "fmt", "exit": 0, "cache_hit": true, "duration_ms": 120,
+                "memo_key": "key_hit_1111", "tree_hash": "th1", "def_digest": "dd1",
+                "toolchain_digest": "tc1",
+            }),
+        ] {
+            log.append_for_test(
+                CHECK_RECORDED_KIND,
+                vec!["orchestrator:hugit".to_string()],
+                payload.to_string(),
+                0,
+            );
+        }
+        let dir = std::env::temp_dir().join(format!("hugit-checks-show-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log_path = dir.join("checks-seed.json");
+        std::fs::write(&log_path, serde_json::to_vec_pretty(log.records()).unwrap()).unwrap();
+
+        let out = show(&ShowArgs {
+            log: log_path,
+            pr: None,
+        })
+        .unwrap();
+
+        assert_eq!(out["check_count"], 2);
+        // Hit-rate over the two known cache_hit rows: 1 hit / (1+1) = 50%.
+        assert_eq!(out["kpis"]["hit_rate_pct"], json!(50.0));
+        // The three axes are surfaced on each row.
+        let checks = out["checks"].as_array().unwrap();
+        assert_eq!(checks[0]["cache_verdict"], "MISS");
+        assert_eq!(checks[0]["axes"]["tree_hash"], "th0");
+        assert_eq!(checks[1]["cache_verdict"], "HIT");
+        assert_eq!(checks[1]["axes"]["toolchain_digest"], "tc1");
+        // The HIT row carries a proof block with honest-null refs (not recorded).
+        assert_eq!(checks[1]["proof"]["recorded"], false);
+        // Top-level disclosure: no proof refs were recorded on this log.
+        assert_eq!(out["proof_refs_recorded"], false);
     }
 }
