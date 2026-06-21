@@ -702,8 +702,8 @@ mod tests {
         );
         let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
 
-        let vm = build_blob(&log(), "r", "real.rs", Some(&src), Some(&root))
-            .expect("real.rs resolves");
+        let vm =
+            build_blob(&log(), "r", "real.rs", Some(&src), Some(&root)).expect("real.rs resolves");
 
         // The secret-shaped filename must not appear verbatim in the sidebar.
         let names: Vec<&str> = vm.tree.iter().map(|e| e.name.as_str()).collect();
@@ -713,7 +713,7 @@ mod tests {
         );
         // The REDACTED sentinel must be present for the scrubbed entry.
         assert!(
-            names.iter().any(|n| *n == REDACTED),
+            names.contains(&REDACTED),
             "REDACTED sentinel must appear for the secret-named entry: {names:?}"
         );
         // real.rs is still present and marked current.

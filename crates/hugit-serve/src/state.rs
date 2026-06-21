@@ -648,7 +648,10 @@ impl R2Config {
         match resp {
             Ok(r) if (200..300).contains(&r.status()) => Ok(format!("r2://{}/{key}", self.bucket)),
             Ok(r) => {
-                eprintln!("[hugit-serve] R2 PUT (object) unexpected status {}", r.status());
+                eprintln!(
+                    "[hugit-serve] R2 PUT (object) unexpected status {}",
+                    r.status()
+                );
                 Err(EngineErr::unavailable("engine storage write unavailable"))
             }
             Err(ureq::Error::Status(403, r)) => {
