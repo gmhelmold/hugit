@@ -15,9 +15,9 @@ concurrency:
 
 jobs:
   dco:
-    # GitHub-hosted (2026-06-19: org Actions billing unblocked — owner). Pure
-    # git/shell job, fully portable; off the contention-flaky self-hosted Mac.
-    runs-on: ubuntu-latest
+    # Self-hosted Mac (2026-06-21: hosted Actions minutes capped — owner: run
+    # self-hosted, no billing for now). Pure git/shell job, fully portable.
+    runs-on: [self-hosted, macOS]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
