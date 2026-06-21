@@ -22,7 +22,7 @@ use hugit_checks::client::ac::{
     corelink_ac_from_env,
 };
 
-const BASE: &str = "https://api.corelink.humangr.com";
+const BASE: &str = "https://corelink-api.example.com";
 /// A guaranteed-unreachable base URL: port 0 is never bound, so any TCP connect
 /// attempt fails immediately with a transport error. Used to prove the configured
 /// client GENUINELY attempts the network — `Ok(_)` from this URL would mean the

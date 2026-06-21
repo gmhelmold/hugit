@@ -77,6 +77,10 @@ pub fn humanize_age(unix_ms: u64) -> String {
 
 /// Map an author string to the mock's avatar CSS class: "opus" / "sonnet" /
 /// the first whitespace token (a human handle). Presentation-only.
+///
+/// The fallback token (first whitespace-delimited word from a raw author string)
+/// is derived BEFORE the caller scrubs `author`, so it is scrubbed HERE before
+/// being serialised — `ghp_… name` must not leak the token into `avatar_class`.
 #[must_use]
 pub fn classify_avatar(author: &str) -> String {
     let a = author.to_ascii_lowercase();
@@ -85,7 +89,10 @@ pub fn classify_avatar(author: &str) -> String {
     } else if a.contains("sonnet") {
         "sonnet".to_string()
     } else {
-        author.split_whitespace().next().unwrap_or("").to_string()
+        // Scrub the first whitespace token so a secret-shaped author prefix
+        // (e.g. `ghp_… Name`) does not survive into the avatar_class field.
+        let token = author.split_whitespace().next().unwrap_or("");
+        scrub(token)
     }
 }
 
@@ -107,4 +114,44 @@ pub fn str_field(v: &Value, key: &str) -> Option<String> {
 #[must_use]
 pub fn pct_u8(ratio_times_100: f64) -> u8 {
     ratio_times_100.round().clamp(0.0, 100.0) as u8
+}
+
+#[cfg(test)]
+mod tests {
+    use hugit_ledger::redact::REDACTED;
+
+    use super::*;
+
+    // ── classify_avatar: secret-shaped author must not leak via avatar_class ──
+
+    #[test]
+    fn avatar_class_scrubs_secret_shaped_first_token() {
+        // An author whose first whitespace-delimited token is a GitHub PAT must
+        // NOT appear verbatim in avatar_class — it must be redacted.
+        let author = "ghp_16C7e42F292c6912E7710c838347Ae178B4a Some Name";
+        let class = classify_avatar(author);
+        assert_ne!(
+            class, "ghp_16C7e42F292c6912E7710c838347Ae178B4a",
+            "a secret-shaped first token must be scrubbed in avatar_class"
+        );
+        assert_eq!(
+            class, REDACTED,
+            "the REDACTED sentinel must replace a secret-shaped avatar_class token"
+        );
+    }
+
+    #[test]
+    fn avatar_class_opus_is_unchanged() {
+        // The "opus" / "sonnet" fast-paths do not go through the scrub; confirm
+        // they still work correctly (no regression on the happy path).
+        assert_eq!(classify_avatar("Claude Opus 4.8"), "opus");
+        assert_eq!(classify_avatar("claude-sonnet-4-6"), "sonnet");
+    }
+
+    #[test]
+    fn avatar_class_normal_handle_survives() {
+        // A plain human handle (no secret shape) passes through unchanged.
+        assert_eq!(classify_avatar("alice"), "alice");
+        assert_eq!(classify_avatar("alice bob"), "alice");
+    }
 }

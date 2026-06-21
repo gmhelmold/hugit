@@ -54,7 +54,7 @@ mod tests {
                 last_activity: "há 8 min".into(),
             }],
             people: vec![OrgPersonVm {
-                name: "Gustavo Schneiter".into(),
+                name: "Test User".into(),
                 handle: "@gustavo".into(),
                 role: "Owner".into(),
                 is_owner: true,

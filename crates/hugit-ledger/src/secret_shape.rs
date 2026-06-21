@@ -78,6 +78,7 @@ pub const KNOWN_PREFIXES: &[&str] = &[
     "xoxs-",
     "clp_",
     "dop_v1_", // DigitalOcean personal access token
+    "glpat-",  // GitLab personal access token
     // NOTE: "Bearer" is intentionally NOT here — Bearer matching requires a
     // trailing whitespace check (space OR tab) handled by `has_bearer_token`.
     "eyJ", // JWT header (base64 of `{"`)
@@ -151,15 +152,24 @@ pub fn has_sk_key(s: &str) -> bool {
     false
 }
 
-/// True iff `s` contains a `Bearer` token — `Bearer` immediately followed by
+/// True iff `s` contains a `Bearer` token (case-insensitive) — the word
+/// `bearer` (any case: `Bearer`, `BEARER`, `bearer`) immediately followed by
 /// one or more ASCII whitespace characters (space OR tab). This covers both
 /// `Bearer <token>` and `Bearer\t<token>` (and multiple spaces), while NOT
 /// firing on bare prose use of the word "Bearer" with no whitespace after it.
+///
+/// The match is case-insensitive so `bearer <token>` / `BEARER <token>` do
+/// not bypass the detector (they did before this fix).
+///
 /// The `Bearer` prefix is separated from `KNOWN_PREFIXES` precisely because
 /// the whitespace-following check cannot be expressed as a plain `contains`.
 pub fn has_bearer_token(s: &str) -> bool {
-    let needle = "Bearer";
-    let mut search = s;
+    // Case-fold the input once; all scanning runs on the lowercase copy.
+    // The whitespace byte check is still correct because ASCII whitespace is
+    // unchanged by lowercasing.
+    let lower = s.to_ascii_lowercase();
+    let needle = "bearer";
+    let mut search = lower.as_str();
     while let Some(pos) = search.find(needle) {
         let after_bearer = pos + needle.len();
         if search
@@ -644,5 +654,48 @@ mod tests {
         // "Bearer" immediately followed by a non-whitespace char does NOT fire.
         assert!(!has_bearer_token("BearerScheme"));
         assert!(!has_bearer_token("Bearer:nospace"));
+    }
+
+    // ── Fix: Bearer case-sensitivity ────────────────────────────────────────
+
+    #[test]
+    fn bearer_lowercase_is_caught() {
+        // `bearer <token>` (all-lowercase) must be detected — was a bypass before
+        // the case-fold fix.
+        assert!(
+            has_bearer_token("authorization: bearer abc123def456ghi789jkl"),
+            "lowercase 'bearer' followed by space must be detected"
+        );
+        assert!(is_structural_secret(
+            "authorization: bearer abc123def456ghi789jkl"
+        ));
+    }
+
+    #[test]
+    fn bearer_uppercase_is_caught() {
+        // `BEARER <token>` (all-uppercase) must be detected — was a bypass before.
+        assert!(
+            has_bearer_token("AUTHORIZATION: BEARER abc123def456ghi789jkl"),
+            "uppercase 'BEARER' followed by space must be detected"
+        );
+        assert!(is_structural_secret(
+            "AUTHORIZATION: BEARER abc123def456ghi789jkl"
+        ));
+    }
+
+    // ── Fix: glpat- GitLab PAT prefix ────────────────────────────────────────
+
+    #[test]
+    fn glpat_token_is_structural_secret() {
+        // A realistic GitLab personal access token (glpat- + alphanumeric suffix).
+        let token = "glpat-abcdefghijklmnopqrst";
+        assert!(
+            is_structural_secret(token),
+            "glpat- prefix must be a structural secret"
+        );
+        assert!(
+            KNOWN_PREFIXES.contains(&"glpat-"),
+            "glpat- must be in KNOWN_PREFIXES"
+        );
     }
 }

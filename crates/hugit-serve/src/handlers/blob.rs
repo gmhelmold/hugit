@@ -107,9 +107,9 @@ pub fn build_blob(
 /// - `depth` is always 0 — the sidebar shows one directory level (no nesting
 ///   in this wave).
 /// - `current` is `true` for the entry whose name matches the leaf of `path`.
-/// - Entry names are **not** secret-scrubbed: they are filenames, not file
-///   content; a filename that looks like a secret is not a leakage risk because
-///   it is visible in the git tree / directory listing by design.
+/// - Entry names are scrubbed at the read boundary: a file literally named
+///   `ghp_….key` would otherwise appear verbatim in the sidebar and leak the
+///   credential-shaped name to the browser.
 ///
 /// Fail-closed: errors or a missing source return an empty `Vec` — the handler
 /// never returns a 500 because the sidebar could not be populated.
@@ -124,8 +124,12 @@ fn build_tree_sidebar(
     hugit_proto::list_tree_at_dir(src, root_tree, path)
         .into_iter()
         .map(|e| BlobTreeRowVm {
+            // `current` is matched against the RAW name before scrubbing so
+            // the comparison is not broken by the REDACTED sentinel.
             current: e.name == current_leaf,
-            name: e.name,
+            // Scrub the displayed name: a git entry called `ghp_….key` must not
+            // appear verbatim in the sidebar view-model.
+            name: scrub(&e.name),
             depth: 0,
             is_dir: e.is_dir,
         })
@@ -669,6 +673,53 @@ mod tests {
             .expect("handlers in tree");
         assert!(handlers_row.is_dir);
         assert!(!handlers_row.current);
+    }
+
+    /// A tree entry whose filename is secret-shaped must be scrubbed in `tree`.
+    #[test]
+    fn tree_entry_name_with_secret_is_scrubbed() {
+        use hugit_ledger::redact::REDACTED;
+
+        let mut src = CasObjectSource::new();
+        let secret_named = src.insert_raw(ObjectKind::Blob, b"content".to_vec());
+        let normal = src.insert_raw(ObjectKind::Blob, b"normal".to_vec());
+        // A file literally named with a secret-shaped prefix (e.g. `ghp_….key`).
+        let secret_filename = "ghp_16C7e42F292c6912E7710c838347Ae178B4a.key";
+        let root = insert_tree(
+            &mut src,
+            vec![
+                TreeEntry {
+                    mode: MODE_BLOB,
+                    name: "real.rs",
+                    oid: normal,
+                },
+                TreeEntry {
+                    mode: MODE_BLOB,
+                    name: secret_filename,
+                    oid: secret_named,
+                },
+            ],
+        );
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
+
+        let vm =
+            build_blob(&log(), "r", "real.rs", Some(&src), Some(&root)).expect("real.rs resolves");
+
+        // The secret-shaped filename must not appear verbatim in the sidebar.
+        let names: Vec<&str> = vm.tree.iter().map(|e| e.name.as_str()).collect();
+        assert!(
+            !names.iter().any(|n| n.contains("ghp_")),
+            "secret-shaped tree entry name must be scrubbed: {names:?}"
+        );
+        // The REDACTED sentinel must be present for the scrubbed entry.
+        assert!(
+            names.contains(&REDACTED),
+            "REDACTED sentinel must appear for the secret-named entry: {names:?}"
+        );
+        // real.rs is still present and marked current.
+        let real = vm.tree.iter().find(|e| e.name == "real.rs");
+        assert!(real.is_some(), "real.rs must still appear in the sidebar");
+        assert!(real.unwrap().current);
     }
 
     /// Symlinks in the parent directory must NOT appear in `tree`.

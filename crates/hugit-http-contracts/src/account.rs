@@ -40,7 +40,7 @@ mod tests {
     #[test]
     fn account_vm_round_trips() {
         let vm = AccountVm {
-            name: "Gustavo Schneiter".into(),
+            name: "Test User".into(),
             user: "gustavo".into(),
             subtitle: "Sua conta HuGR — uma conta pra família toda".into(),
             org: "humangr".into(),

@@ -21,7 +21,7 @@ use hugit_mirror::import::prissue::{
 // ── Fixture helpers ────────────────────────────────────────────────────────────
 
 fn fixture_pr() -> ImportedPrIssue {
-    let url = "https://github.com/humangr-labs/hugit/pull/1";
+    let url = "https://github.com/example-org/example-repo/pull/1";
     ImportedPrIssue {
         kind: SourceKind::PullRequest,
         source_id: 1,
@@ -60,7 +60,7 @@ fn fixture_pr() -> ImportedPrIssue {
             CrossRef::resolved(
                 "#2",
                 ElementProvenance::new(url, "crossref/#2"),
-                "https://github.com/humangr-labs/hugit/pull/2",
+                "https://github.com/example-org/example-repo/pull/2",
             ),
             CrossRef::dangling("#999", ElementProvenance::new(url, "crossref/#999")),
         ],
@@ -68,7 +68,7 @@ fn fixture_pr() -> ImportedPrIssue {
 }
 
 fn fixture_issue() -> ImportedPrIssue {
-    let url = "https://github.com/humangr-labs/hugit/issues/42";
+    let url = "https://github.com/example-org/example-repo/issues/42";
     ImportedPrIssue {
         kind: SourceKind::Issue,
         source_id: 42,
@@ -88,7 +88,7 @@ fn fixture_issue() -> ImportedPrIssue {
         cross_refs: vec![CrossRef::resolved(
             "#1",
             ElementProvenance::new(url, "crossref/#1"),
-            "https://github.com/humangr-labs/hugit/pull/1",
+            "https://github.com/example-org/example-repo/pull/1",
         )],
     }
 }
@@ -104,13 +104,13 @@ fn item_2_proposed_intents_with_provenance() {
 
     // Stable intent_id: derived from source URL.
     assert_eq!(
-        intent.sidecar.intent_id, "proposed::https://github.com/humangr-labs/hugit/pull/1",
+        intent.sidecar.intent_id, "proposed::https://github.com/example-org/example-repo/pull/1",
         "intent_id must be derived from source_url"
     );
 
     // context_ref carries source URL → provenance preserved end-to-end.
     assert_eq!(
-        intent.sidecar.context_ref, "https://github.com/humangr-labs/hugit/pull/1",
+        intent.sidecar.context_ref, "https://github.com/example-org/example-repo/pull/1",
         "context_ref must be the source URL"
     );
 
@@ -121,13 +121,13 @@ fn item_2_proposed_intents_with_provenance() {
     );
     assert_eq!(
         intent.element_provenance.body_provenance.source_url,
-        "https://github.com/humangr-labs/hugit/pull/1"
+        "https://github.com/example-org/example-repo/pull/1"
     );
 
     // source_url on the ProposedIntent itself.
     assert_eq!(
         intent.source_url,
-        "https://github.com/humangr-labs/hugit/pull/1"
+        "https://github.com/example-org/example-repo/pull/1"
     );
 
     // Issue fixture also projects correctly.
@@ -137,7 +137,7 @@ fn item_2_proposed_intents_with_provenance() {
         issue_intent
             .sidecar
             .intent_id
-            .starts_with("proposed::https://github.com/humangr-labs/hugit/issues/"),
+            .starts_with("proposed::https://github.com/example-org/example-repo/issues/"),
         "issue intent_id must be derived from source_url"
     );
 }
@@ -187,7 +187,7 @@ fn item_6_fidelity_body_preserved() {
     assert_eq!(body_prov.element_origin, "body");
     assert_eq!(
         body_prov.source_url,
-        "https://github.com/humangr-labs/hugit/pull/1"
+        "https://github.com/example-org/example-repo/pull/1"
     );
 
     // Issue body also has provenance.
@@ -254,7 +254,7 @@ fn item_6_fidelity_state_preserved() {
     assert_eq!(state_prov.element_origin, "state");
     assert_eq!(
         state_prov.source_url,
-        "https://github.com/humangr-labs/hugit/pull/1"
+        "https://github.com/example-org/example-repo/pull/1"
     );
 
     // Closed state also preserved correctly.
@@ -343,7 +343,7 @@ fn item_6_fidelity_crossrefs_preserved() {
     );
     assert_eq!(
         resolved.resolved_to.as_deref(),
-        Some("https://github.com/humangr-labs/hugit/pull/2")
+        Some("https://github.com/example-org/example-repo/pull/2")
     );
 
     let dangling = intent
@@ -484,7 +484,7 @@ fn item_2_idempotency_same_source_same_id() {
 
     // Distinct PRs are not collapsed.
     let mut other = fixture_pr();
-    other.source_url = "https://github.com/humangr-labs/hugit/pull/2".to_string();
+    other.source_url = "https://github.com/example-org/example-repo/pull/2".to_string();
     let two = import_prissue_batch(&[fixture_pr(), other]);
     assert_eq!(two.len(), 2, "distinct PRs must remain distinct intents");
 }

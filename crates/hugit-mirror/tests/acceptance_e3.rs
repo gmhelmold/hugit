@@ -7,7 +7,7 @@
 //!   ③ `item_3_api_429_retry_backoff`
 //!   ③ `item_3_no_stuck_pending_observable`
 //!
-//! Live-GitHub items: env HUGIT_GH_TEST_REPO=humangr-labs/hugit-fleet-syn-1 is
+//! Live-GitHub items: env HUGIT_GH_TEST_REPO=example-org/example-repo is
 //! always set by run.sh. Items that require live App-JWT are run when the env
 //! is set; they produce PARTIAL/blocked output (not fake) when the installation
 //! is unreachable.
@@ -45,7 +45,7 @@ fn dummy_result(memo_key: &str, exit: i32) -> CheckResult {
 
 fn dummy_write_request() -> hugit_contracts::ChecksWriteRequest {
     hugit_contracts::ChecksWriteRequest {
-        repo: "humangr-labs/hugit-fleet-syn-1".to_string(),
+        repo: "example-org/example-repo".to_string(),
         head_sha: "a".repeat(40),
         check_name: "hugit/test-check".to_string(),
         status: "completed".to_string(),
@@ -59,14 +59,14 @@ fn dummy_write_request() -> hugit_contracts::ChecksWriteRequest {
 #[test]
 fn item_1_checks_appear_as_github_statuses() {
     // A CheckResult with exit=0 must produce a "success" completed check run.
-    let emitter = StatusEmitter::new_local("humangr-labs/hugit-fleet-syn-1");
+    let emitter = StatusEmitter::new_local("example-org/example-repo");
     let result_ok = dummy_result("ci/build", 0);
 
     let payload = emitter
         .project(&result_ok, Some(&"a".repeat(40)))
         .expect("project must succeed for valid CheckResult");
 
-    assert_eq!(payload.request.repo, "humangr-labs/hugit-fleet-syn-1");
+    assert_eq!(payload.request.repo, "example-org/example-repo");
     assert_eq!(payload.request.check_name, "ci/build");
     assert_eq!(payload.request.status, "completed");
     assert_eq!(payload.request.conclusion.as_deref(), Some("success"));

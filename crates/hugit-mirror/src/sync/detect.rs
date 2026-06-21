@@ -69,7 +69,7 @@ mod tests {
         // We cannot safely mutate process env in a multi-threaded test harness
         // here; assert the structural property of the not-wired outcome instead.
         let configured = GitHubDetectOutcome::NotWired {
-            repo: "humangr-labs/hugit-fleet-syn-1".into(),
+            repo: "example-org/example-repo".into(),
         };
         assert!(configured.is_configured());
         assert!(!configured.is_wired());

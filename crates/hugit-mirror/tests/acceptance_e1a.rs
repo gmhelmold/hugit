@@ -11,7 +11,7 @@
 //!         `item_10_queue_capacity_bound_stated`
 //!         `item_10_queue_overflow_backpressure_not_drop`
 //!
-//! Live-GitHub item ①: env `HUGIT_GH_TEST_REPO=humangr-labs/hugit-fleet-syn-1`
+//! Live-GitHub item ①: env `HUGIT_GH_TEST_REPO=example-org/example-repo`
 //! is set by run.sh. The live round-trip is attempted via the GitHub App auth
 //! client; when the installation does not cover the repo (or creds/network are
 //! unavailable) the live attempt is **PARTIAL — never faked**. The local

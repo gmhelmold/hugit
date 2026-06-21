@@ -278,4 +278,30 @@ mod tests {
         assert_eq!(redact_field("loc", REDACTED_TOKEN, &mut m), REDACTED_TOKEN);
         assert!(m.is_empty(), "the sentinel trips no detector");
     }
+
+    // ── Fix: secret-shaped ref name must be scrubbed via redact_field ────────
+
+    #[test]
+    fn secret_shaped_ref_name_is_scrubbed_by_export_redaction() {
+        // A branch named `refs/heads/ghp_…` must be scrubbed when passed through
+        // the export redaction path — this validates that `mod.rs` routing
+        // `RefEntry.name` through `hugit_ledger::redact::apply` works end-to-end
+        // (redact::apply is what redact_field wraps for a full-field scrub).
+        let secret_ref = "refs/heads/ghp_16C7e42F292c6912E7710c838347Ae178B4a";
+        // redact_field covers the whole text — the ref name is a whole-field value.
+        let mut manifest = RedactionManifest::new();
+        let out = redact_field("refs/secret-branch", secret_ref, &mut manifest);
+        assert_eq!(
+            out, REDACTED_TOKEN,
+            "a secret-shaped ref name must be wholly redacted"
+        );
+        assert!(
+            !out.contains("ghp_"),
+            "the raw secret token must not survive in the redacted ref name"
+        );
+        assert!(
+            !manifest.is_empty(),
+            "the scrubbed ref name must be manifested"
+        );
+    }
 }

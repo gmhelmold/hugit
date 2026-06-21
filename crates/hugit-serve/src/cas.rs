@@ -301,7 +301,7 @@ pub trait CasTransport {
 /// never logged, never in `Debug`/`Display`/errors.
 #[derive(Clone)]
 pub struct CasConfig {
-    /// CoreLink CAS base URL (e.g. `https://corelink-api.humangr.com`).
+    /// CoreLink CAS base URL (e.g. `https://<your-corelink-url>`).
     base_url: String,
     /// The tenant id — first CAS path segment.
     tenant: String,
@@ -917,7 +917,7 @@ impl CasClient<UreqCasTransport> {
     }
 
     /// Build a CONFIGURED client from the env (the deploy plug-and-play path):
-    /// - `HUGIT_SERVE_CAS_URL` — the CAS base URL (= `https://corelink-api.humangr.com`),
+    /// - `HUGIT_SERVE_CAS_URL` — the CAS base URL (= `https://<your-corelink-url>`),
     /// - `HUGIT_SERVE_CAS_TENANT_ID` — the tenant id (first CAS path segment),
     /// - the PAT from `HUGIT_SERVE_CAS_PAT_FILE` (preferred; default
     ///   `~/.hugit/secrets/corelink/pat`, trailing newline trimmed), falling back
@@ -2045,12 +2045,12 @@ mod tests {
 
     #[test]
     fn endpoint_route_and_auth_are_the_confirmed_contract() {
-        let cfg = CasConfig::new("https://corelink-api.humangr.com/", "ee30f7ba", "p").unwrap();
+        let cfg = CasConfig::new("https://cas.example/", "test-tenant-1", "p").unwrap();
         let key = "a".repeat(64);
         let url = cfg.endpoint(&key).unwrap();
         assert_eq!(
             url,
-            format!("https://corelink-api.humangr.com/v1/cas/ee30f7ba/{key}")
+            format!("https://cas.example/v1/cas/test-tenant-1/{key}")
         );
         assert_eq!(cfg.bearer(), "Bearer p");
     }

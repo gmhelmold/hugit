@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(security): **convergence-audit fixes before open-source.** A 10-agent re-audit closed two go-public showstoppers + redaction leaks:
+  - **fix(serve): admin/audit control-plane is operator-only** (not repo-visibility) — making the repo public no longer exposes `/v1/.../audit|erasure|admin` to anonymous callers (404, no oracle).
+  - **ci: fork-guard the self-hosted gate** — forked PRs no longer run on our self-hosted runner (`head.repo.fork == false`).
+  - **fix(redact): scrub avatar/branch/tree/ref names + case-fold `Bearer` + add `glpat-`** (secrets could ride out via those fields).
+  - **chore: public-set cleanup** — personal name/tenant/host placeholders in test fixtures, `.gitleaks.toml` allowlist, SECURITY.md reporting channel, README license badge + quick-start, generic client-facing R2 error.
+
 - chore: **comprehensive infra-recon sanitize** (pre-open-source) — runner IP/hostname, Clerk dev host, GitHub App id, and tenant UUIDs scrubbed from source/tests/scripts + the engine-snapshot seed (placeholders; tests green).
 
 - feat(cli): **make the wedge visible — `hugit checks` + `hugit queue show`.** The product thesis (union

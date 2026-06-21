@@ -680,7 +680,7 @@ mod tests {
                 born_at: 1,
                 died_at: 2,
             },
-            operator: "test@humangr.com".to_string(),
+            operator: "test@example.com".to_string(),
         }
     }
 
