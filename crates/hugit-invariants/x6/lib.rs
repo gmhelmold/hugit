@@ -1,4 +1,4 @@
-//! hugit-invariants — Squad-X resource non-interference invariant (WP-X6).
+//! hugit-invariants — resource non-interference invariant (WP-X6).
 //!
 //! Proves that hugit's infra is **resource-isolated from CoreLink** — separate
 //! boxes/quotas, no shared runner substrate — and models the structural

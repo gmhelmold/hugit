@@ -1,5 +1,5 @@
 //! WP-X8 acceptance oracle — self-release attestation. Contract:
-//! `docs/plan/wp-contracts/WP-X8.md`. Items encoded VERBATIM, one `#[test]`
+//! `the work-package contract`. Items encoded VERBATIM, one `#[test]`
 //! `item_<n>_<slug>` each, RED on a tree without the x8 surface.
 //!
 //! Owned items (verbatim from the contract):

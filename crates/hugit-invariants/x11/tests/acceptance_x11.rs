@@ -1,5 +1,5 @@
 //! WP-X11 acceptance oracle — degradation composition.
-//! Contract: `docs/plan/wp-contracts/WP-X11.md`.
+//! Contract: `the work-package contract`.
 //!
 //! Proves the invariants COMPOSE under a PARTIAL degradation injected
 //! MID-operation (a degradation window, not a steady-state outage). One

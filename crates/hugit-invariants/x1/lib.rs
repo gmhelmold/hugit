@@ -1,4 +1,4 @@
-//! hugit-invariants — Squad-X tenant-isolation red-team invariant (WP-X1).
+//! hugit-invariants — tenant-isolation red-team invariant (WP-X1).
 //!
 //! This module proves the CoreLink-inherited **tenant boundary** holds for
 //! hugit, without owning any production path. It consumes the canonical

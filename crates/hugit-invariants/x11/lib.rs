@@ -1,4 +1,4 @@
-//! hugit-invariants — Squad-X degradation-composition invariant (WP-X11).
+//! hugit-invariants — degradation-composition invariant (WP-X11).
 //!
 //! Proves the platform invariants **compose under PARTIAL degradation injected
 //! MID-operation** — not merely under a steady-state outage. The smart layer

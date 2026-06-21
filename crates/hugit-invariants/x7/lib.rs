@@ -1,4 +1,4 @@
-//! hugit-invariants — Squad-X right-to-erasure CASCADE invariant (WP-X7).
+//! hugit-invariants — right-to-erasure CASCADE invariant (WP-X7).
 //!
 //! This module proves a data subject's personal data is **provably erased across
 //! EVERY store** — CAS, provenance/ledger, context, the GitHub mirror, and the

@@ -1,5 +1,5 @@
 //! WP-B9 acceptance tests — exit telemetry + the money gate.
-//! Contract: docs/plan/wp-contracts/WP-B9.md
+//! Contract: the work-package contract
 //!
 //! Tests:
 //!   item_1_week3_retention_computable_vs_40pct

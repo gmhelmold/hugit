@@ -1,4 +1,4 @@
-//! hugit-invariants — Squad-X namespace-law invariant (WP-X5).
+//! hugit-invariants — namespace-law invariant (WP-X5).
 //!
 //! This module proves the two namespace laws hold as standing, falsifiable
 //! invariants — without owning any production path. It consumes the CLI verb

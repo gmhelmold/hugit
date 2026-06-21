@@ -1,5 +1,5 @@
 //! WP-X7 acceptance oracle — the right-to-erasure CASCADE.
-//! Contract: `docs/plan/wp-contracts/WP-X7.md`.
+//! Contract: `the work-package contract`.
 //!
 //! Owned items (VERBATIM from the contract; one `#[test] item_<n>_…` each, plus
 //! adversarial guards proving each oracle goes RED on the gamed/broken case):

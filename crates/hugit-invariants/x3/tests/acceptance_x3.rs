@@ -1,5 +1,5 @@
 //! WP-X3 acceptance oracle — context privacy. Contract:
-//! `docs/plan/wp-contracts/WP-X3.md`.
+//! `the work-package contract`.
 //!
 //! Owned items (one `#[test] item_<n>_<slug>` each):
 //!   ① `item_1_tenant_scope_cross_fetch_denied` — context/journals are

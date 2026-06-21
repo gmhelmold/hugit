@@ -1,4 +1,4 @@
-//! hugit-invariants — Squad-X deep-link referential integrity (lifecycle) invariant (WP-X14).
+//! hugit-invariants — deep-link referential integrity (lifecycle) invariant (WP-X14).
 //!
 //! This module proves **deep-link referential integrity across the FULL object
 //! lifecycle** — after compaction/cold-tier to R2, after mirror round-trip, after

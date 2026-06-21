@@ -1,4 +1,4 @@
-//! hugit-invariants — Squad-X self-release attestation invariant (WP-X8).
+//! hugit-invariants — self-release attestation invariant (WP-X8).
 //!
 //! This module proves hugit attests its OWN releases — without owning any
 //! production path. It consumes the frozen

@@ -1,5 +1,5 @@
 //! WP-X12 acceptance oracle — erasure × provenance × mirror.
-//! Contract: `docs/plan/wp-contracts/WP-X12.md`.
+//! Contract: `the work-package contract`.
 //!
 //! Owned items (VERBATIM from the contract; one `#[test] item_<n>_…` each, plus
 //! adversarial guards proving each oracle goes RED on the gamed/broken case):

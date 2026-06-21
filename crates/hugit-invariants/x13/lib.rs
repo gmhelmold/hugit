@@ -1,4 +1,4 @@
-//! hugit-invariants — Squad-X legibility × degradation/erasure invariant (WP-X13).
+//! hugit-invariants — legibility × degradation/erasure invariant (WP-X13).
 //!
 //! This module proves the **legibility intersection** holds as a standing,
 //! falsifiable invariant: the HUMAN can ALWAYS follow, in every substrate state.
