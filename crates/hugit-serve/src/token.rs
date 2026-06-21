@@ -142,10 +142,58 @@ pub struct ClerkPrincipal {
 
 /// Config for the CoreLink session exchange, read from env. Absent ⇒ dev-token
 /// only (the `/v1/token` route 404s — its presence is not disclosed).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SessionExchangeConfig {
     /// Full URL of `POST /v1/session/exchange` (`HUGIT_SESSION_EXCHANGE_URL`).
     pub endpoint: String,
+}
+
+/// Trusted host suffixes for `HUGIT_SESSION_EXCHANGE_URL`.
+///
+/// SSRF defence: the exchange URL is POSTed to by ureq; without an allowlist any
+/// operator-controlled env var could redirect the Clerk JWT to an arbitrary host.
+/// Only hosts matching one of these suffixes (or equal to a bare suffix for
+/// short names like `localhost`) are accepted at config parse time (fail-closed).
+///
+/// `.humangr.com` covers `corelink-api.humangr.com` and any future subdomain.
+/// `localhost` / `127.0.0.1` / `[::1]` are allowed for integration tests.
+const EXCHANGE_URL_TRUSTED_SUFFIXES: &[&str] = &[
+    ".humangr.com",
+    "localhost",
+    "127.0.0.1",
+    "[::1]",
+];
+
+/// Extract the host (without port) from a URL string (`scheme://host[:port]/path`).
+fn extract_host(url: &str) -> Option<&str> {
+    // Strip scheme.
+    let after_scheme = url.split_once("://")?.1;
+    // Strip path (everything from first `/`).
+    let host_port = match after_scheme.split_once('/') {
+        Some((hp, _)) => hp,
+        None => after_scheme,
+    };
+    // Strip port — but only the numeric suffix (IPv6 `[::1]:port` vs bare `[::1]`).
+    if host_port.starts_with('[') {
+        // IPv6 bracket notation: `[::1]` or `[::1]:8080`.
+        let close = host_port.find(']')?;
+        Some(&host_port[..=close])
+    } else {
+        // IPv4 / hostname: `host` or `host:port`.
+        Some(match host_port.rsplit_once(':') {
+            // rsplit_once(':') can split on `host:port` or even on a bare IPv6
+            // address; only strip the suffix when it's purely numeric (port).
+            Some((h, port)) if port.chars().all(|c| c.is_ascii_digit()) => h,
+            _ => host_port,
+        })
+    }
+}
+
+/// Return `true` when `host` is allowlisted for the exchange URL.
+fn is_trusted_exchange_host(host: &str) -> bool {
+    EXCHANGE_URL_TRUSTED_SUFFIXES
+        .iter()
+        .any(|suffix| host == *suffix || host.ends_with(suffix))
 }
 
 impl SessionExchangeConfig {
@@ -163,6 +211,20 @@ impl SessionExchangeConfig {
         if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
             return Err(format!(
                 "HUGIT_SESSION_EXCHANGE_URL must start with http(s)://; got: {endpoint}"
+            ));
+        }
+        // SECURITY: SSRF allowlist — the exchange URL is POSTed to by ureq with
+        // the user's Clerk JWT. Reject any host that isn't on the trusted list so a
+        // misconfigured or malicious env var can't redirect the JWT to an arbitrary
+        // host. Fail-closed (Err) on an untrusted host.
+        let host = extract_host(&endpoint).ok_or_else(|| {
+            format!("HUGIT_SESSION_EXCHANGE_URL: cannot parse host from `{endpoint}`")
+        })?;
+        if !is_trusted_exchange_host(host) {
+            return Err(format!(
+                "HUGIT_SESSION_EXCHANGE_URL host `{host}` is not on the trusted allowlist \
+                 (trusted suffixes: {EXCHANGE_URL_TRUSTED_SUFFIXES:?}); \
+                 set it to a *.humangr.com endpoint"
             ));
         }
         Ok(Some(SessionExchangeConfig { endpoint }))
@@ -959,6 +1021,103 @@ mod tests {
         assert!(
             !guard.contains_key(&first_hash),
             "sweep must remove expired first token"
+        );
+    }
+
+    // ── SSRF allowlist / SessionExchangeConfig ────────────────────────────────
+
+    /// Helper: temporarily set an env var for the duration of the closure.
+    /// NOT thread-safe (env is process-global); only use in single-threaded
+    /// tests or with a Mutex.
+    fn with_env<F: FnOnce()>(key: &str, val: &str, f: F) {
+        // Safety: tests that touch env vars must not run concurrently.
+        unsafe { std::env::set_var(key, val) };
+        f();
+        unsafe { std::env::remove_var(key) };
+    }
+
+    #[test]
+    fn exchange_url_trusted_humangr_com_accepted() {
+        with_env(
+            "HUGIT_SESSION_EXCHANGE_URL",
+            "https://corelink-api.humangr.com/v1/session/exchange",
+            || {
+                let cfg = SessionExchangeConfig::from_env();
+                assert!(cfg.is_ok(), "humangr.com endpoint must be accepted");
+                assert!(cfg.unwrap().is_some());
+            },
+        );
+    }
+
+    #[test]
+    fn exchange_url_localhost_accepted() {
+        with_env(
+            "HUGIT_SESSION_EXCHANGE_URL",
+            "http://localhost:9000/v1/session/exchange",
+            || {
+                let cfg = SessionExchangeConfig::from_env();
+                assert!(cfg.is_ok(), "localhost endpoint must be accepted for tests");
+                assert!(cfg.unwrap().is_some());
+            },
+        );
+    }
+
+    #[test]
+    fn exchange_url_127_0_0_1_accepted() {
+        with_env(
+            "HUGIT_SESSION_EXCHANGE_URL",
+            "http://127.0.0.1:8080/v1/session/exchange",
+            || {
+                let cfg = SessionExchangeConfig::from_env();
+                assert!(cfg.is_ok(), "127.0.0.1 endpoint must be accepted for tests");
+                assert!(cfg.unwrap().is_some());
+            },
+        );
+    }
+
+    #[test]
+    fn exchange_url_untrusted_host_rejected() {
+        for bad in [
+            "https://evil.example.com/v1/session/exchange",
+            "https://humangr.com.evil.com/steal",
+            "http://attacker.io/v1/session/exchange",
+        ] {
+            with_env("HUGIT_SESSION_EXCHANGE_URL", bad, || {
+                let result = SessionExchangeConfig::from_env();
+                assert!(
+                    result.is_err(),
+                    "untrusted host `{bad}` must be rejected, got Ok"
+                );
+                let err = result.unwrap_err();
+                assert!(
+                    err.contains("not on the trusted allowlist"),
+                    "error must explain the allowlist rejection, got: {err}"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn extract_host_parses_common_forms() {
+        assert_eq!(
+            extract_host("https://corelink-api.humangr.com/v1/session/exchange"),
+            Some("corelink-api.humangr.com")
+        );
+        assert_eq!(
+            extract_host("http://localhost:9000/path"),
+            Some("localhost")
+        );
+        assert_eq!(
+            extract_host("http://127.0.0.1:8080/"),
+            Some("127.0.0.1")
+        );
+        assert_eq!(
+            extract_host("http://[::1]:3000/path"),
+            Some("[::1]")
+        );
+        assert_eq!(
+            extract_host("https://example.com"),
+            Some("example.com")
         );
     }
 }

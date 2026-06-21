@@ -322,6 +322,11 @@ fn list_tree_at_dir_inner(
     // "src"; for "README.md" (no '/') the parent is the root tree itself.
     let parent_segments: Vec<&str> = {
         let segments: Vec<&str> = path.split('/').collect();
+        // SECURITY: reject over-deep paths before doing any I/O — each segment
+        // costs one CAS/disk get, so an unbounded path is a per-request DoS.
+        if segments.len() > MAX_PATH_DEPTH {
+            return None;
+        }
         // All segments except the final (the file leaf).  May be empty for
         // root-level files.
         segments[..segments.len().saturating_sub(1)].to_vec()
@@ -365,8 +370,14 @@ fn list_tree_at_dir_inner(
         .entries()
         .ok()?;
 
-    let mut result = Vec::with_capacity(raw_entries.len());
+    // SECURITY: cap the result to MAX_TREE_ENTRIES. A git tree in a pathological
+    // repo could contain millions of entries; the sidebar only needs a bounded
+    // listing, and an unbounded collect is an OOM/DoS vector.
+    let mut result = Vec::with_capacity(raw_entries.len().min(MAX_TREE_ENTRIES));
     for e in raw_entries {
+        if result.len() >= MAX_TREE_ENTRIES {
+            break;
+        }
         let mode = e.mode;
         // Exclude symlinks (is_link) and gitlinks/commits (is_commit). Only
         // blobs and subtrees are useful sidebar entries.
@@ -384,6 +395,23 @@ fn list_tree_at_dir_inner(
     Some(result)
 }
 
+/// Maximum number of path segments (`/`-separated) accepted by
+/// [`resolve_blob_at_path`] and [`list_tree_at_dir`].
+///
+/// A depth-N walk issues N+1 CAS gets. Limiting depth bounds the per-request
+/// CAS budget and prevents an attacker from chaining thousands of sub-tree
+/// fetches via a crafted path (path-depth DoS). Real file trees are rarely
+/// deeper than ~15 levels; 64 is generous and still safe.
+pub const MAX_PATH_DEPTH: usize = 64;
+
+/// Maximum number of entries returned by [`list_tree_at_dir`].
+///
+/// A git tree in a pathological repo could contain millions of entries.
+/// The sidebar only needs a bounded listing; stopping at 2 000 entries is
+/// safe for the UI and prevents an OOM from a large tree. Entries beyond the
+/// cap are silently dropped (the sidebar is informational, not authoritative).
+pub const MAX_TREE_ENTRIES: usize = 2_000;
+
 /// Walk a git tree to resolve a repo-relative path to its blob (oid + raw bytes).
 ///
 /// Splits `path` on '/', descends subtree-by-subtree from `root_tree`, and on the
@@ -395,6 +423,10 @@ fn list_tree_at_dir_inner(
 /// walk can never escape the tree. (Git trees can't contain these names anyway,
 /// but reject explicitly as defence-in-depth.)
 ///
+/// SECURITY: paths deeper than [`MAX_PATH_DEPTH`] segments are rejected
+/// (return Ok(None)) — each segment requires a CAS fetch, so an unbounded
+/// path depth is a per-request CAS-budget DoS.
+///
 /// The tree object parse reuses `gix_object::TreeRefIter` — the same libgit2-class
 /// decoder the closure walk in [`crate::read::serve`] uses — so the byte-level git
 /// tree format is never reimplemented here, only walked.
@@ -404,6 +436,10 @@ pub fn resolve_blob_at_path(
     path: &str,
 ) -> Result<Option<(ObjectId, Vec<u8>)>, PackError> {
     let segments: Vec<&str> = path.split('/').collect();
+    // SECURITY: reject paths with too many segments before doing any CAS I/O.
+    if segments.len() > MAX_PATH_DEPTH {
+        return Ok(None);
+    }
     // An empty `path` splits to a single empty segment; the loop's reject below
     // catches it. Defence-in-depth: reject any traversal-unsafe segment up front.
     let last = segments.len().saturating_sub(1);
@@ -969,5 +1005,62 @@ mod list_tree_tests {
                 "traversal-unsafe path {bad:?} must return empty, got {entries:?}"
             );
         }
+    }
+
+    /// A path deeper than MAX_PATH_DEPTH is rejected before doing any I/O.
+    #[test]
+    fn over_depth_path_returns_empty() {
+        let src = CasObjectSource::new();
+        let fake_root = parse_oid("0000000000000000000000000000000000000001").unwrap();
+        // Build a path with MAX_PATH_DEPTH + 1 segments.
+        let deep: String = (0..=MAX_PATH_DEPTH).map(|i| format!("dir{i}")).collect::<Vec<_>>().join("/");
+        let entries = list_tree_at_dir(&src, &fake_root, &deep);
+        assert!(
+            entries.is_empty(),
+            "path deeper than MAX_PATH_DEPTH must return empty (got {entries:?})"
+        );
+    }
+
+    /// A tree with more than MAX_TREE_ENTRIES entries is capped at MAX_TREE_ENTRIES.
+    #[test]
+    fn over_cap_tree_entry_list_is_bounded() {
+        let mut src = CasObjectSource::new();
+        let blob = src.insert_raw(ObjectKind::Blob, b"x".to_vec());
+        // Build MAX_TREE_ENTRIES + 10 entries.
+        let n = MAX_TREE_ENTRIES + 10;
+        let raw_entries: Vec<TreeEntry<'_>> = (0..n)
+            .map(|i| TreeEntry {
+                mode: MODE_BLOB,
+                // We can't use temporary strings directly, so box them.
+                name: Box::leak(format!("file{i:05}.rs").into_boxed_str()),
+                oid: blob,
+            })
+            .collect();
+        let root = insert_tree(&mut src, raw_entries);
+        // list against any filename at the root level.
+        let entries = list_tree_at_dir(&src, &root, "file00000.rs");
+        assert_eq!(
+            entries.len(),
+            MAX_TREE_ENTRIES,
+            "result must be capped at MAX_TREE_ENTRIES ({MAX_TREE_ENTRIES}), got {}",
+            entries.len()
+        );
+    }
+}
+
+#[cfg(test)]
+mod resolve_depth_tests {
+    use super::*;
+
+    /// A path deeper than MAX_PATH_DEPTH is rejected (returns Ok(None)).
+    #[test]
+    fn resolve_blob_over_depth_returns_none() {
+        let src = CasObjectSource::new();
+        let fake_root = parse_oid("0000000000000000000000000000000000000002").unwrap();
+        // Build a path with MAX_PATH_DEPTH + 1 segments.
+        let deep: String = (0..=MAX_PATH_DEPTH).map(|i| format!("d{i}")).collect::<Vec<_>>().join("/");
+        let result = resolve_blob_at_path(&src, &fake_root, &deep)
+            .expect("must not error on over-depth path");
+        assert!(result.is_none(), "over-depth path must resolve to None");
     }
 }
