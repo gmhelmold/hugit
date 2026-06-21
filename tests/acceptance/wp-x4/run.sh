@@ -8,7 +8,7 @@
 # Claims: crates/hugit-invariants/x4/
 # Oracle: crates/hugit-invariants/x4/tests/acceptance_x4.rs
 #   one #[test] item_<n>_<slug> per owned item.
-# Box env: HUGIT_RUNNER_HOST=91.99.11.196 (exported before cargo invocations;
+# Box env: HUGIT_RUNNER_HOST=203.0.113.10 (exported before cargo invocations;
 #   box-dependent tests FAIL — not skip — when env set but box unreachable).
 #   Tests may skip only when HUGIT_RUNNER_HOST is entirely unset.
 # RED on current tree (crate paths not yet built).
@@ -20,7 +20,7 @@ export SUITE_ID
 # shellcheck source=../lib.sh
 source "$(dirname "$0")/../lib.sh"
 
-export HUGIT_RUNNER_HOST=91.99.11.196
+export HUGIT_RUNNER_HOST=203.0.113.10
 
 CRATE_ROOT="crates/hugit-invariants"
 CRATE_NAME="hugit-invariants"

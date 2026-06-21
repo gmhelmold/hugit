@@ -343,7 +343,7 @@ fn live_seam_mid_op_fault_on_box() {
         });
     let mut cmd = std::process::Command::new("ssh");
     if let Ok(home) = std::env::var("HOME") {
-        let id = format!("{home}/.ssh/hugit-runner-01");
+        let id = format!("{home}/.ssh/hugit-runner");
         if std::path::Path::new(&id).exists() {
             cmd.arg("-i").arg(id);
         }

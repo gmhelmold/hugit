@@ -14,7 +14,7 @@
 # Claims: crates/hugit-fence/broker/
 # Oracle: crates/hugit-fence/tests/acceptance_c5b.rs
 #   one #[test] item_<n>_<slug> per owned item.
-# Box env: HUGIT_RUNNER_HOST=91.99.11.196 (exported before cargo invocations;
+# Box env: HUGIT_RUNNER_HOST=203.0.113.10 (exported before cargo invocations;
 #   box-dependent tests FAIL — not skip — when env set but box unreachable).
 #   Tests may skip only when HUGIT_RUNNER_HOST is entirely unset.
 # Red-team containers namespaced hugit-c5b-*.
@@ -24,7 +24,7 @@ SUITE_ID="wp-c5b"
 export SUITE_ID
 source "$(dirname "$0")/../lib.sh"
 
-export HUGIT_RUNNER_HOST=91.99.11.196
+export HUGIT_RUNNER_HOST=203.0.113.10
 
 CRATE_ROOT="crates/hugit-fence"
 CRATE_NAME="hugit-fence"
