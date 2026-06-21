@@ -126,7 +126,7 @@ mod tests {
         // Ensure a repo is set so we exercise the auth branch.
         // SAFETY: single-threaded test; no concurrent access to this env var.
         unsafe {
-            std::env::set_var("HUGIT_GH_TEST_REPO", "humangr-labs/hugit-fleet-syn-1");
+            std::env::set_var("HUGIT_GH_TEST_REPO", "example-org/example-repo");
         }
         let outcome = live_landing_attempt(&auth);
         assert!(outcome.is_partial());

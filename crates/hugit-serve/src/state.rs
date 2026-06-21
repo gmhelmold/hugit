@@ -592,21 +592,28 @@ impl R2Config {
         let resp = req.send_bytes(body);
         match resp {
             Ok(r) if (200..300).contains(&r.status()) => Ok(format!("r2://{}/{key}", self.bucket)),
-            Ok(r) => Err(EngineErr::unavailable(format!(
-                "R2 PUT unexpected status {}",
-                r.status()
-            ))),
+            Ok(r) => {
+                eprintln!("[hugit-serve] R2 PUT unexpected status {}", r.status());
+                Err(EngineErr::unavailable("engine storage write unavailable"))
+            }
             // The precondition failed: a concurrent writer moved the head. This is
             // the CAS-conflict retry signal, NOT a hard failure.
             Err(ureq::Error::Status(412, _)) => Err(EngineErr::cas_conflict()),
-            Err(ureq::Error::Status(403, _)) => Err(EngineErr::unavailable(
-                "R2 PUT 403 — the credential is not write-scoped (need the one-shot RW grant)"
-                    .to_string(),
-            )),
-            Err(ureq::Error::Status(s, _)) => {
-                Err(EngineErr::unavailable(format!("R2 PUT status {s}")))
+            Err(ureq::Error::Status(403, r)) => {
+                eprintln!(
+                    "[hugit-serve] R2 PUT 403 — credential is not write-scoped: {:?}",
+                    r.status()
+                );
+                Err(EngineErr::unavailable("engine storage write unavailable"))
             }
-            Err(e) => Err(EngineErr::unavailable(format!("R2 PUT transport: {e}"))),
+            Err(ureq::Error::Status(s, _)) => {
+                eprintln!("[hugit-serve] R2 PUT status {s}");
+                Err(EngineErr::unavailable("engine storage write unavailable"))
+            }
+            Err(e) => {
+                eprintln!("[hugit-serve] R2 PUT transport error: {e}");
+                Err(EngineErr::unavailable("engine storage write unavailable"))
+            }
         }
     }
 
@@ -640,18 +647,25 @@ impl R2Config {
             .send_bytes(body);
         match resp {
             Ok(r) if (200..300).contains(&r.status()) => Ok(format!("r2://{}/{key}", self.bucket)),
-            Ok(r) => Err(EngineErr::unavailable(format!(
-                "R2 PUT unexpected status {}",
-                r.status()
-            ))),
-            Err(ureq::Error::Status(403, _)) => Err(EngineErr::unavailable(
-                "R2 PUT 403 — the credential is not write-scoped (need the one-shot RW grant)"
-                    .to_string(),
-            )),
-            Err(ureq::Error::Status(s, _)) => {
-                Err(EngineErr::unavailable(format!("R2 PUT status {s}")))
+            Ok(r) => {
+                eprintln!("[hugit-serve] R2 PUT (object) unexpected status {}", r.status());
+                Err(EngineErr::unavailable("engine storage write unavailable"))
             }
-            Err(e) => Err(EngineErr::unavailable(format!("R2 PUT transport: {e}"))),
+            Err(ureq::Error::Status(403, r)) => {
+                eprintln!(
+                    "[hugit-serve] R2 PUT (object) 403 — credential is not write-scoped: {:?}",
+                    r.status()
+                );
+                Err(EngineErr::unavailable("engine storage write unavailable"))
+            }
+            Err(ureq::Error::Status(s, _)) => {
+                eprintln!("[hugit-serve] R2 PUT (object) status {s}");
+                Err(EngineErr::unavailable("engine storage write unavailable"))
+            }
+            Err(e) => {
+                eprintln!("[hugit-serve] R2 PUT (object) transport error: {e}");
+                Err(EngineErr::unavailable("engine storage write unavailable"))
+            }
         }
     }
 }
@@ -956,12 +970,12 @@ mod tests {
             ("HUGIT_SERVE_R2_BUCKET", "corelink-githugr-engine"),
             ("HUGIT_SERVE_R2_KEY_ID", "k"),
             ("HUGIT_SERVE_R2_SECRET", "s"),
-            ("HUGIT_SERVE_R2_TENANT_ID", "ee30f7ba"),
+            ("HUGIT_SERVE_R2_TENANT_ID", "test-tenant-1"),
         ]))
         .expect("native names");
         assert_eq!(c.host, "acct123.r2.cloudflarestorage.com");
         assert_eq!(c.endpoint, "https://acct123.r2.cloudflarestorage.com");
-        assert_eq!(c.tenant_id, "ee30f7ba");
+        assert_eq!(c.tenant_id, "test-tenant-1");
         assert_eq!(c.region, "auto"); // default
     }
 
@@ -977,7 +991,7 @@ mod tests {
             ("HUGIT_SERVE_R2_SECRET_ACCESS_KEY", "s"),
             ("HUGIT_SERVE_R2_BUCKET", "corelink-githugr-engine"),
             ("HUGIT_SERVE_R2_REGION", "auto"),
-            ("HUGIT_SERVE_R2_TENANT_ID", "ee30f7ba"),
+            ("HUGIT_SERVE_R2_TENANT_ID", "test-tenant-1"),
         ]))
         .expect("S3-standard names");
         assert_eq!(c.host, "acct123.r2.cloudflarestorage.com");
@@ -997,7 +1011,7 @@ mod tests {
             ("HUGIT_SERVE_R2_BUCKET", "corelink-githugr-engine"),
             ("HUGIT_SERVE_R2_KEY_ID", "k"),
             ("HUGIT_SERVE_R2_SECRET", "s"),
-            ("HUGIT_SERVE_R2_TENANT_ID", "ee30f7ba"),
+            ("HUGIT_SERVE_R2_TENANT_ID", "test-tenant-1"),
         ]))
         .expect("config");
         let source = LogSource::R2(Box::new(cfg));

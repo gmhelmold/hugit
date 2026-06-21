@@ -1,0 +1,26 @@
+# .gitleaks.toml — allowlist for hugit redaction/scrubbing TEST VECTORS.
+#
+# These are INTENTIONAL fake secrets used as test fixtures for the secret-
+# scrubbing engine (hugit-ledger/src/redact.rs, secret_shape.rs, etc.).
+# They do NOT appear in production code or config; they exist ONLY to prove
+# the scrubber fires on realistic-looking tokens.  GitHub secret-scanning and
+# gitleaks should not fire on them.
+
+[allowlist]
+description = "Redaction test-vector fixtures (fake, never real credentials)"
+paths = [
+    "crates/hugit-ledger/src/redact.rs",
+    "crates/hugit-ledger/src/secret_shape.rs",
+    "crates/hugit-ledger/src/envelope/mod.rs",
+    "crates/hugit-ledger/tests/acceptance_f2.rs",
+    "crates/hugit-ledger/tests/proptest_scrubber.rs",
+    "crates/hugit-policy/tests/acceptance_n4_secret_parity.rs",
+]
+regexes = [
+    # Fake GitHub PAT used as a redaction test vector.
+    "ghp_16C7e42F292c6912E7710c838347Ae178B4a",
+    # AWS example access key (the canonical public example from AWS docs).
+    "AKIAIOSFODNN7EXAMPLE",
+    # Slack token prefixes used in fixture strings.
+    "xox[baps]-[0-9a-zA-Z-]+",
+]

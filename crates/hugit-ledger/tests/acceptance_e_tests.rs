@@ -93,7 +93,7 @@ fn intent_env(id: &str, run_id: &str, parent: &str, tokens: u64, cost_micros: u6
                 born_at: T0 + 1_000,
                 died_at: T0 + 5_000,
             },
-            operator: "test@humangr.com".to_string(),
+            operator: "test@example.com".to_string(),
         },
         charter: format!("close {id}"),
         campaign: Some("test-campaign".to_string()),
@@ -125,7 +125,7 @@ fn pr_env(pr_id: &str, run_id: &str, tokens: u64, cost_micros: u64) -> CE {
                 born_at: T0,
                 died_at: T0 + 10_000,
             },
-            operator: "test@humangr.com".to_string(),
+            operator: "test@example.com".to_string(),
         },
         charter: format!("orchestrate {pr_id}"),
         campaign: Some("test-campaign".to_string()),
@@ -157,7 +157,7 @@ fn campaign_env(key: &str) -> CE {
                 born_at: T0,
                 died_at: T0 + 50_000,
             },
-            operator: "test@humangr.com".to_string(),
+            operator: "test@example.com".to_string(),
         },
         charter: format!("campaign {key}"),
         campaign: Some(key.to_string()),
@@ -199,7 +199,7 @@ fn authorship_for_draft(run_id: &str, parent: Option<&str>, agent_type: &str) ->
             born_at: T0,
             died_at: T0 + 1_000,
         },
-        operator: "test@humangr.com".to_string(),
+        operator: "test@example.com".to_string(),
     }
 }
 

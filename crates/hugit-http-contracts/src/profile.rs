@@ -70,7 +70,7 @@ mod tests {
     fn profile_vm_round_trips() {
         let vm = ProfileVm {
             user: "gustavo".into(),
-            name: "Gustavo Schneiter".into(),
+            name: "Test User".into(),
             bio: "fundador · HuGR".into(),
             company: "HuGR".into(),
             location: "São Paulo".into(),

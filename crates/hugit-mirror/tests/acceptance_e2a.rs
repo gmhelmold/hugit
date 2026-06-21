@@ -21,7 +21,7 @@
 //! - `hugit_mirror::import::auth::InstallationAuthClient`
 //!
 //! # Live-repo items
-//! HUGIT_GH_TEST_REPO is always set by run.sh to "humangr-labs/hugit-fleet-syn-1".
+//! HUGIT_GH_TEST_REPO is always set by run.sh to "example-org/example-repo".
 //! Items needing HUGIT_GH_INSTALL_TOKEN FAIL — not skip — when absent.
 
 use hugit_contracts::EventRecord;

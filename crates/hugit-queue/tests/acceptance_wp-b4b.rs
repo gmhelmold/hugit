@@ -336,7 +336,7 @@ fn item_6_satisfied_protection_does_not_hold() {
 // ════════════════════════════════════════════════════════════════════════════
 
 // SECRETS_DIR is resolved at runtime from HUGIT_SECRETS_DIR env var (no hardcoded path).
-const TEST_REPO_OWNER: &str = "humangr-labs";
+const TEST_REPO_OWNER: &str = "example-org";
 
 /// Live AppJwt implementation: RS256-signs with jsonwebtoken and calls GitHub
 /// with ureq. The private key is read from disk via std::fs and NEVER printed.
