@@ -16,11 +16,21 @@
 //! - [`resolve_ref_root_tree`] — resolve a ref name (or any revspec) to the root
 //!   tree oid of the commit it points to.
 
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use gix_hash::ObjectId;
 use hugit_proto::{GitObject, ObjectKind, ObjectSource, PackError};
+
+/// Maximum blob size the CLI will buffer from `git cat-file`.
+///
+/// Matches the serve-path cap (`MAX_BLOB_BYTES` in `hugit-serve/src/blob.rs`).
+/// An attacker who controls a ref (e.g. via a crafted repo) could otherwise
+/// trigger an OOM by pointing `--ref` at a commit whose tree contains a
+/// multi-gigabyte blob. Reads beyond this cap produce a [`PackError::Source`]
+/// rather than buffering the whole blob.
+pub const MAX_BLOB_BYTES: usize = 10 * 1024 * 1024; // 10 MiB
 
 /// A lazy, git-subprocess-backed [`ObjectSource`].
 ///
@@ -79,21 +89,46 @@ impl ObjectSource for GitCatFileSource {
             }
         };
 
-        // Fetch the raw body bytes.
-        let body_out = Command::new("git")
+        // Fetch the raw body bytes — capped at MAX_BLOB_BYTES to prevent OOM.
+        //
+        // We spawn with piped stdout and use `Read::take(MAX_BLOB_BYTES + 1)` so
+        // we can detect an over-cap object (read == MAX_BLOB_BYTES + 1 means there
+        // is at least one more byte) without buffering the whole blob.  Any object
+        // larger than the cap is rejected with a clear error; this matches the
+        // serve-path blob cap.
+        let mut child = Command::new("git")
             .arg("-C")
             .arg(&self.git_dir)
             .args(["cat-file", kind_str, &oid_hex])
-            .output()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
             .map_err(|e| PackError::Source(format!("git cat-file {kind_str} {oid_hex}: {e}")))?;
 
-        if !body_out.status.success() {
+        let mut buf = Vec::new();
+        if let Some(stdout) = child.stdout.take() {
+            stdout
+                .take((MAX_BLOB_BYTES as u64) + 1)
+                .read_to_end(&mut buf)
+                .map_err(|e| PackError::Source(format!("git cat-file read {oid_hex}: {e}")))?;
+        }
+        // Wait for the child so it doesn't become a zombie.
+        let status = child
+            .wait()
+            .map_err(|e| PackError::Source(format!("git cat-file wait {oid_hex}: {e}")))?;
+
+        if !status.success() {
             // Object disappeared between the -t and the body fetch (very unlikely,
             // but handle it cleanly).
             return Ok(None);
         }
+        if buf.len() > MAX_BLOB_BYTES {
+            return Err(PackError::Source(format!(
+                "object {oid_hex} exceeds MAX_BLOB_BYTES ({MAX_BLOB_BYTES} bytes) — refusing to buffer"
+            )));
+        }
 
-        Ok(Some(GitObject::new(kind, body_out.stdout)))
+        Ok(Some(GitObject::new(kind, buf)))
     }
 }
 
@@ -125,7 +160,24 @@ pub fn open_git_dir(start: &Path) -> Result<PathBuf, String> {
 ///
 /// Returns the parsed [`ObjectId`] on success, or an error string if the ref
 /// is absent, ambiguous, or the output cannot be parsed.
+///
+/// SECURITY: `git rev-parse` uses `--` to delimit revisions from pathspecs
+/// (not to stop flag parsing the way most git sub-commands do) — so inserting
+/// `--` before the revspec would print `--` as a literal line and break the
+/// output parse. Instead, the refspec is validated up-front: any refspec that
+/// begins with `-` is rejected before spawning any subprocess. In legitimate
+/// usage a refspec is always a SHA-1 hex, a branch name, a tag, or a keyword
+/// like `HEAD` / `FETCH_HEAD` — none of these start with `-`.
 pub fn resolve_ref_root_tree(git_dir: &Path, refspec: &str) -> Result<ObjectId, String> {
+    // SECURITY: reject any refspec that looks like a flag. A leading `-` is
+    // never valid in a refspec; refusing it up-front prevents argument injection
+    // even on git versions that do not honour `--` in this position.
+    if refspec.starts_with('-') {
+        return Err(format!(
+            "invalid refspec `{refspec}`: revspecs must not start with `-`"
+        ));
+    }
+
     let tree_spec = format!("{refspec}^{{tree}}");
     let out = Command::new("git")
         .arg("-C")
@@ -194,6 +246,26 @@ mod tests {
         let root = open_git_dir(&cwd).expect("find repo");
         let result = resolve_ref_root_tree(&root, "refs/heads/this-branch-does-not-exist-ever");
         assert!(result.is_err(), "expected error for unknown ref");
+    }
+
+    /// A refspec starting with `-` is rejected before spawning any subprocess
+    /// (argument-injection guard).
+    #[test]
+    fn resolve_ref_leading_dash_is_rejected() {
+        let cwd = env::current_dir().expect("cwd");
+        let root = open_git_dir(&cwd).expect("find repo");
+        for bad in ["--format=bad", "-exec", "--upload-pack=evil"] {
+            let result = resolve_ref_root_tree(&root, bad);
+            assert!(
+                result.is_err(),
+                "refspec starting with `-` must be rejected, got Ok for `{bad}`"
+            );
+            let err_msg = result.unwrap_err();
+            assert!(
+                err_msg.contains("must not start with `-`"),
+                "error message should explain the rejection, got: {err_msg}"
+            );
+        }
     }
 
     /// `GitCatFileSource::get` can fetch a known object (the HEAD tree). This proves

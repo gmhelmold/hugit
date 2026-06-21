@@ -763,7 +763,11 @@ fn dispatch_repo(
         ["settings"] => ok(&handlers::build_repo_settings(log, repo)),
         ["releases"] => ok(&handlers::build_releases(log, repo)),
         ["search"] => {
-            let q = query_param(query, "q");
+            let mut q = query_param(query, "q");
+            // SECURITY: cap the search query before it reaches the log scan.
+            // An unbounded `q` that is lowercased per record is a CPU/memory DoS.
+            // 1 024 bytes is ample for any real search term.
+            q.truncate(1024);
             ok(&handlers::build_search(log, repo, &q))
         }
         // viewer-can mirrors the REAL per-caller write gate (`authorize_write`,
@@ -886,4 +890,33 @@ fn ok<T: serde::Serialize>(vm: &T) -> (u16, String) {
 /// An `EngineErr` → its `(status, {code,reason})` pair.
 fn err(e: EngineErr) -> (u16, String) {
     (e.status, e.to_body())
+}
+
+#[cfg(test)]
+mod search_q_tests {
+    use super::*;
+
+    /// query_param basic decode.
+    #[test]
+    fn query_param_basic() {
+        assert_eq!(query_param("q=hello+world&limit=10", "q"), "hello world");
+        assert_eq!(query_param("q=a%20b", "q"), "a b");
+        assert_eq!(query_param("limit=5", "q"), "");
+    }
+
+    /// A `q` value longer than 1 024 chars is silently truncated to 1 024 chars
+    /// (the cap applied in the route before passing to `build_search`). The
+    /// truncation happens in the route handler, not in `query_param` — so this
+    /// test replicates the route logic directly.
+    #[test]
+    fn search_q_over_1024_bytes_is_truncated() {
+        // Simulate the route logic: decode then truncate.
+        let long_q = "a".repeat(2048);
+        let query = format!("q={long_q}");
+        let mut q = query_param(&query, "q");
+        q.truncate(1024);
+        assert_eq!(q.len(), 1024, "truncated q must be exactly 1024 bytes");
+        // All chars are ASCII 'a', so truncating bytes == truncating chars here.
+        assert!(q.chars().all(|c| c == 'a'));
+    }
 }

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(security): **HTTP/git-wire DoS + SSRF hardening** (convergence-audit wave 2) — cap `list_tree_at_dir` (2000 entries) + path depth (64); cap `symbol --ref` blob read (10 MiB) + reject leading-dash refspec; SSRF-allowlist `HUGIT_SESSION_EXCHANGE_URL` (trusted host suffixes, fail-closed); cap the CAS error-body read (64 KiB) and `search` `q` (1024 B). (upload-pack pack-size accounting deferred — needs protocol flow-control.)
+
 - fix(security): **convergence-audit fixes before open-source.** A 10-agent re-audit closed two go-public showstoppers + redaction leaks:
   - **fix(serve): admin/audit control-plane is operator-only** (not repo-visibility) — making the repo public no longer exposes `/v1/.../audit|erasure|admin` to anonymous callers (404, no oracle).
   - **ci: fork-guard the self-hosted gate** — forked PRs no longer run on our self-hosted runner (`head.repo.fork == false`).

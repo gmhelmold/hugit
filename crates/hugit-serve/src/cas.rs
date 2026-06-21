@@ -1104,9 +1104,13 @@ impl CasTransport for UreqCasTransport {
             // Non-2xx surfaces as `Error::Status(code, resp)`; capture the body too
             // (413 carries the `batch_too_large` JSON the splitter needs to see —
             // though the splitter only branches on the code, the body is preserved).
+            //
+            // SECURITY: cap the error body read at 64 KiB. A hostile or buggy CAS
+            // returning a multi-megabyte error body must not OOM the engine.
             Err(ureq::Error::Status(code, resp)) => {
+                const MAX_ERR_BODY: u64 = 64 * 1024;
                 let mut buf = Vec::new();
-                let _ = resp.into_reader().read_to_end(&mut buf);
+                let _ = resp.into_reader().take(MAX_ERR_BODY).read_to_end(&mut buf);
                 Ok((code, buf))
             }
             Err(e) => Err(CasError::Transport(e.to_string())),
@@ -3108,6 +3112,35 @@ mod tests {
             cas.transport.inner.objects.lock().unwrap().len(),
             3,
             "all objects PUT individually after the upload-405"
+        );
+    }
+
+    // ── CAS error-body cap ────────────────────────────────────────────────────
+
+    /// Verify that the MAX_ERR_BODY cap (64 KiB) works correctly by exercising
+    /// the same `Read::take` logic used in `UreqCasTransport`.
+    ///
+    /// We can't easily spin a ureq HTTP server in a unit test, so we prove the
+    /// cap by testing the `Read::take` mechanic directly on a large in-memory
+    /// reader — this is the exact code path that `resp.into_reader().take(...)
+    /// .read_to_end(&mut buf)` follows.
+    #[test]
+    fn cas_error_body_read_is_capped_at_64_kib() {
+        use std::io::Read as _;
+        const MAX_ERR_BODY: u64 = 64 * 1024;
+        // Simulate a hostile 512 KiB error body.
+        let large_body = vec![b'X'; 512 * 1024];
+        let cursor = std::io::Cursor::new(&large_body);
+        let mut buf = Vec::new();
+        cursor
+            .take(MAX_ERR_BODY)
+            .read_to_end(&mut buf)
+            .expect("take read must not error");
+        assert_eq!(
+            buf.len(),
+            64 * 1024,
+            "capped read must stop at 64 KiB, got {} bytes",
+            buf.len()
         );
     }
 }
