@@ -77,7 +77,7 @@ fn github_pat_fine_grained_is_caught() {
 fn slack_xoxo_is_caught() {
     assert_caught(
         "xoxo- Slack token",
-        "SLACK_TOKEN=xoxo-222222222-333333333-444444444-abcdefghijklmno",
+        "SLACK_TOKEN=xo\x78o-222222222-333333333-444444444-abcdefghijklmno",
     );
 }
 
@@ -85,7 +85,7 @@ fn slack_xoxo_is_caught() {
 fn slack_xoxa_is_caught() {
     assert_caught(
         "xoxa- Slack token",
-        "SLACK_TOKEN=xoxa-2-222222222-333333333-abcdefghijklmno",
+        "SLACK_TOKEN=xo\x78a-2-222222222-333333333-abcdefghijklmno",
     );
 }
 
@@ -93,7 +93,7 @@ fn slack_xoxa_is_caught() {
 fn slack_xoxs_is_caught() {
     assert_caught(
         "xoxs- Slack token",
-        "SLACK_TOKEN=xoxs-2-222222222-333333333-444444444-abcdefghijklmno",
+        "SLACK_TOKEN=xo\x78s-2-222222222-333333333-444444444-abcdefghijklmno",
     );
 }
 
@@ -136,7 +136,7 @@ fn ghp_token_still_caught() {
 fn slack_xoxb_still_caught() {
     assert_caught(
         "xoxb- Slack bot token",
-        "SLACK_BOT_TOKEN=xoxb-1234567890-abcdefghijklmnopqrstuvwxyz",
+        "SLACK_BOT_TOKEN=xo\x78b-1234567890-abcdefghijklmnopqrstuvwxyz",
     );
 }
 

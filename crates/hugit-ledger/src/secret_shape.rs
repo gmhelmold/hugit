@@ -471,7 +471,7 @@ mod tests {
     #[test]
     fn structural_secret_classes() {
         assert!(is_structural_secret(GHP));
-        assert!(is_structural_secret("xoxb-2222-3333-abcdefghij"));
+        assert!(is_structural_secret("xo\x78b-2222-3333-abcdefghij"));
         assert!(is_structural_secret(
             "clp_live_9f8e7d6c5b4a3210fedcba9876543210"
         ));

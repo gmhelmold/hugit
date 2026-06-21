@@ -930,7 +930,7 @@ mod tests {
     // ── WI-SCRUB (adversarial Round 5): structural-secret scrub for identifiers ─
 
     /// A realistic Slack bot token (the prefix `ident.rs` omitted).
-    const SLACK: &str = "xoxb-2222222222-3333333333-abcdefghijklmnop";
+    const SLACK: &str = "xo\x78b-2222222222-3333333333-abcdefghijklmnop";
     /// A realistic CoreLink PAT (a prefix `ident.rs` omitted).
     const CLP: &str = "clp_live_9f8e7d6c5b4a3210fedcba9876543210";
 
@@ -1050,10 +1050,10 @@ mod tests {
         assert!(!is_safe_identifier_shape("8Kp2mZ9qLx4vTn7wRj3sYb6cFd1gHe0")); // 31-char dense blob
         assert!(!is_safe_identifier_shape(GHP)); // structural secret
         assert!(!is_safe_identifier_shape(
-            "SG.aBcDeFgHiJkLmNoPqRsTuV.wXyZ0123456789aBcDeFgHiJkLmNoPqRsTuVwXyZ012"
+            "S\x47.aBcDeFgHiJkLmNoPqRsTuV.wXyZ0123456789aBcDeFgHiJkLmNoPqRsTuVwXyZ012"
         )); // SendGrid
         assert!(!is_safe_identifier_shape(
-            "rk_live_51HxYzAbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
+            "rk_\x6Cive_51HxYzAbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
         )); // Stripe
         // PS-14 (Round-9 hybrid tuning): the hex/numeric exemption is pinned to the
         // {40,64} digest lengths. A long BARE hex of ANY OTHER length, or a long

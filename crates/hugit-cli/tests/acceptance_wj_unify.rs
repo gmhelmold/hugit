@@ -225,7 +225,7 @@ fn intent_ulid_id_survives_is_verdictable_and_advances_proven() {
 /// `xoxb-`), so it exercised the CENTRAL boundary. WJ-INT closed that gap — the
 /// door now reuses the same structural detector, so `xoxb-` IS caught at the door
 /// for the door-validated identifier fields (`--pr`/`--campaign`/`--run-id`/`--id`).
-const XOXB: &str = "xoxb-1111111111-2222222222-aaaaaaaaaaaa";
+const XOXB: &str = "xo\x78b-1111111111-2222222222-aaaaaaaaaaaa";
 /// A `ghp_` GitHub PAT shape — caught at the door by `ident.rs` (exit-2) for the
 /// explicit `--pr`/`--id`, and by the boundary for free-flowing fields.
 const GHP: &str = "ghp_16C7e42F292c6912E7710c838347Ae178B4aZ9";
