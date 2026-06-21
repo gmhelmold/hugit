@@ -15,16 +15,17 @@ cargo build --release
 ```
 
 **Status (2026-06-20):** A **19-package** Rust workspace. The integrity spine
-(Ed25519/SHA-256 crypto, policy engine, Squad-X platform invariants) is
-hermetic, SOTA-audit-hardened (13 adversarial rounds), and genuinely solid.
-The engine `/v1` read+write API is **LIVE** for the hugit repo: 11/20 reads
-serve chain-verified R2 data; all 9 POST verbs are CAS-persisted and
-`authz`-gated; `git clone`/fetch logic is built and CI-proven (lazy
-git-from-CAS, boots ~5 s). **Not yet live:** anonymous git clone (repo is
-auth-gated on the deployed surface), CoreLink P2 hot CAS+AC, runner fabric,
-GitHub App mirror, multi-tenant, `git push`. `main` is gated by fmt + clippy
-`--workspace --all-targets --locked -D warnings` + test + deny. See
-**[CLAUDE.md](CLAUDE.md)** for the canonical live-vs-hermetic-vs-absent state.
+(Ed25519/SHA-256 crypto, policy engine, platform safety invariants) is
+hermetic, hardened across 13 rounds of adversarial security review, and
+genuinely solid. The engine `/v1` read+write API is **LIVE** for the hugit
+repo: 11/20 reads serve chain-verified R2 data; all 9 POST verbs are
+CAS-persisted and `authz`-gated; `git clone`/fetch logic is built and
+CI-proven (lazy git-from-CAS, boots ~5 s). **Not yet live:** anonymous git
+clone (repo is auth-gated on the deployed surface), CoreLink's live CAS+AC
+(hot-path tenant), runner fabric, GitHub App mirror, multi-tenant, `git push`.
+`main` is gated by fmt + clippy `--workspace --all-targets --locked -D
+warnings` + test + deny. See the [whitepaper](docs/whitepaper/hugit-v1.md)
+for design detail and the honest live-vs-hermetic-vs-absent status.
 
 ## What hugit is
 
@@ -57,15 +58,15 @@ primitive CoreLink already runs in production); git's *workflow* is rebuilt:
 
 ## Founding documents
 
-- [`docs/strategy/campaign-3-llm-native-forge.md`](docs/strategy/campaign-3-llm-native-forge.md)
-  — the founding brief (thesis, pillars, competitive map, economics, caveats).
-- [`docs/research/`](docs/research/) — the 2026-06-05 four-lane evidence sweep
-  (git core pains, GitHub platform pains, multi-agent workflow pains,
-  competitive landscape).
+- [`docs/whitepaper/hugit-v1.md`](docs/whitepaper/hugit-v1.md) — full product
+  design: thesis, object model, algorithms, architecture, economics, risks, and
+  the phased route (§12).
+- [`docs/adr/`](docs/adr/) — architecture decision records (context envelope,
+  identity model).
 
 ## Relationship to CoreLink
 
-hugit is expansion campaign #3 of the CoreLink product family — the namespace,
-merge, and policy layer over the same content-addressed primitive stack:
-cache (launch) → compute (campaign #1, CI runners) → workspace (campaign #2,
-snapshots) → **forge (campaign #3, this repo)**.
+hugit is built on the CoreLink product family — the namespace, merge, and
+policy layer over the same content-addressed primitive stack: CoreLink's CAS
+(cache), runners (CI compute), and workspaces (snapshots) → **hugit (forge,
+this repo)**.

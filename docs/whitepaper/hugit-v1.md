@@ -1,12 +1,9 @@
 # hugit — Intent-Based Version Control and the LLM-Native Forge
 
 **Whitepaper v1 · formal product design**
-Gustavo Schneiter · humangr-labs · 2026-06-05 · status: v1 DRAFT (supersedes
-the absorption map, command catalog and dream v0.3 as the integrating document;
-those remain as detail appendices)
+Gustavo Schneiter · HumanGuardrail · 2026-06-05 · status: v1 DRAFT
 
-**Status 2026-06-08:** all L4+L5 hugit WPs are built; the layer table below
-reflects the original v1 draft — see CLAUDE.md for current state.
+Implementation status: see [README](../../README.md) for the live-vs-hermetic-vs-absent scope.
 
 ---
 
@@ -67,7 +64,7 @@ zero-rated by construction.** GitHub bills the waste; CoreLink deletes it.
    10-second fire-and-forget webhooks, prose-thread reviews, 257 incidents in
    12 months. GitHub's own primitives are overwhelmed by its own agent push.
 
-(All figures sourced in `docs/research/`, 4-lane evidence sweep, 2026-06-05.)
+(All figures sourced in a 4-lane evidence sweep, 2026-06-05: git core pains, GitHub platform pains, multi-agent workflow pains, competitive landscape.)
 
 ---
 
@@ -164,7 +161,7 @@ per layer is stated honestly:
 | **L0** | **CoreLink CAS** — R2-backed, multi-region, chunked (SplitBlob/SpliceBlob), Merkle manifests, HMAC-derived tenant prefixes, fail-CLOSED audit | **in production** |
 | **L1** | **CoreLink AC** — memoized computation results; surfaces already live: Bazel REAPI v2, Turborepo, sccache | **in production** |
 | **L2** | **CoreLink Workspaces (`clw`)** — `snapshot / hydrate / status / run (AC-memoized) / ls` against the live API | **built, phase 1 shipped** |
-| **L3** | **CoreLink Runners** — ephemeral Firecracker-class compute on commodity metal, cache-warm boot | in flight (campaign #1) |
+| **L3** | **CoreLink Runners** — ephemeral Firecracker-class compute on commodity metal, cache-warm boot | in flight |
 | **L4** | **hugit core** — intent store, claims planner, landing engine, policy engine, event-log refs (one Durable Object per repo), semantic index | to build (this paper) |
 | **L5** | **Surfaces** — git wire protocol (projection), hugit CLI/API, guaranteed event stream, Ledger & Mission Control, GitHub mirror | to build |
 
@@ -332,9 +329,9 @@ this under whose instruction at what cost.*
 
 ---
 
-## 10. Compatibility & absorption (the war plan, summarized)
+## 10. Compatibility & absorption
 
-Full map in `docs/strategy/absorption-map.md`. The doctrine in three lines:
+The doctrine in three lines:
 
 - **Absorb and exceed (🟢):** CI→memoized checks, Codespaces→workspaces,
   LFS→native blobs, Dependabot→silent pre-tested landings, code search→
@@ -378,7 +375,7 @@ immediately, dogfooded on our own fleet, while runners mature in parallel.
 |---|---|---|
 | **A — now** | CoreLink launches (cache + governance; untouched route). `clw` dogfood on our own repos | L0–L2 live |
 | **B — hugit Dev Kit (first SKU)** | claim-fenced workspaces (`clw`+claims) + checks-as-code memoized in the AC + **the landing layer riding GitHub** (union testing, regen rebase, structured verdicts via API/mirror). Zero migration ask; our own fleet is design partner #0, then 10 external design partners | L0–L2 + GitHub's hosting |
-| **C — the fabric** | CoreLink runners (campaign #1) take over check execution + agent sandboxes; flake intelligence + auto-culprit ship (they need the fabric's volume) | L3 |
+| **C — the fabric** | CoreLink Runners take over check execution + agent sandboxes; flake intelligence + auto-culprit ship (they need the fabric's volume) | L3 |
 | **D — the forge** | git wire protocol over the CAS; intents native; Ledger + Mission Control; jj first-class (change-ids); one-command GitHub import; one-way mirror | L4–L5 |
 | **E — head-on** | bidirectional mirror (forge-authoritative) → authoritative hosting; parity push per the absorption map (Actions shim, packages, environments); the long-game social absorption by pull | full stack |
 
@@ -408,7 +405,7 @@ our own repositories for months.
 6. **Two mental models** (git view ↔ intent view) — role-correct defaults;
    both views derive from one store and cannot disagree.
 7. **Operating untrusted compute** is a heavier ops discipline than storage —
-   inherited deliberately by campaign #1, reused (never reinvented) by hugit.
+   inherited deliberately by CoreLink Runners, reused (never reinvented) by hugit.
 
 ---
 
@@ -429,11 +426,7 @@ of LLM-driven development — with humans in command.**
 
 ---
 
-## Appendices (companion documents)
+## Appendices
 
-- A. `docs/product/dream-product.md` — the five Inversions, full narrative (v0.3)
-- B. `docs/product/command-catalog.md` — complete command surface, tradeoffs, safety locks
-- C. `docs/strategy/absorption-map.md` — capability-by-capability war plan
-- D. `docs/strategy/campaign-3-llm-native-forge.md` — founding strategic brief
-- E. `docs/research/` — the 4-lane evidence sweep (all figures sourced)
-- F. `pitch/` — the four-chair investor pitch · the simple visual explainer
+- A. [`docs/adr/0001-intent-context-envelope.md`](../adr/0001-intent-context-envelope.md) — formal schema for the Intent Context Envelope
+- B. [`docs/adr/0002-hugr-identity.md`](../adr/0002-hugr-identity.md) — identity model: one HuGR account on CoreLink machinery
