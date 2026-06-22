@@ -1086,12 +1086,13 @@ macro_rules! with_throttle_retry {
 
 impl CasTransport for UreqCasTransport {
     fn get(&self, url: &str, bearer: &str) -> Result<(u16, Vec<u8>), CasError> {
-        let resp = with_throttle_retry!(self
-            .agent
-            .get(url)
-            .set("Authorization", bearer)
-            .set(SCOPE_HEADER, SCOPE_READ)
-            .call());
+        let resp = with_throttle_retry!(
+            self.agent
+                .get(url)
+                .set("Authorization", bearer)
+                .set(SCOPE_HEADER, SCOPE_READ)
+                .call()
+        );
         match resp {
             Ok(r) => {
                 let status = r.status();
@@ -1109,13 +1110,14 @@ impl CasTransport for UreqCasTransport {
     }
 
     fn put(&self, url: &str, bearer: &str, body: &[u8]) -> Result<u16, CasError> {
-        let resp = with_throttle_retry!(self
-            .agent
-            .put(url)
-            .set("Authorization", bearer)
-            .set(SCOPE_HEADER, SCOPE_READ_WRITE)
-            .set("Content-Type", "application/octet-stream")
-            .send_bytes(body));
+        let resp = with_throttle_retry!(
+            self.agent
+                .put(url)
+                .set("Authorization", bearer)
+                .set(SCOPE_HEADER, SCOPE_READ_WRITE)
+                .set("Content-Type", "application/octet-stream")
+                .send_bytes(body)
+        );
         match resp {
             Ok(r) => Ok(r.status()),
             Err(ureq::Error::Status(code, _resp)) => Ok(code),
@@ -1131,13 +1133,14 @@ impl CasTransport for UreqCasTransport {
         content_type: &str,
         body: &[u8],
     ) -> Result<(u16, Vec<u8>), CasError> {
-        let resp = with_throttle_retry!(self
-            .agent
-            .post(url)
-            .set("Authorization", bearer)
-            .set(SCOPE_HEADER, scope)
-            .set("Content-Type", content_type)
-            .send_bytes(body));
+        let resp = with_throttle_retry!(
+            self.agent
+                .post(url)
+                .set("Authorization", bearer)
+                .set(SCOPE_HEADER, scope)
+                .set("Content-Type", content_type)
+                .send_bytes(body)
+        );
         match resp {
             Ok(r) => {
                 let status = r.status();
