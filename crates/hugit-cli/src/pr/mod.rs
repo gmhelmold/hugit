@@ -38,9 +38,11 @@
 //!   fields are honestly absent/null when the envelope/metrics data was never
 //!   captured (sub-`full` capture, or no PR-altitude envelope on the log).
 
+pub mod capture;
 mod cli;
 pub mod filelock;
 
+pub use capture::{EnvelopeMetricsArgs, capture_on_land};
 pub use cli::{PrArgs, PrCommand, run};
 
 use std::collections::BTreeSet;
@@ -834,12 +836,17 @@ pub fn land(log: &mut EventLog, args: &LandArgs) -> Result<Value, PrError> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Inputs to `hugit pr land --settle`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SettleArgs {
     /// PR id to settle as landed (`--pr <n>`).
     pub pr_id: String,
     /// Unix ms to stamp the appended event with.
     pub recorded_at: u64,
+    /// The real run metrics the orchestrator carries into the captured
+    /// context envelope (WP-F2). Every field is optional — an omitted flag is
+    /// honest-zero, never a fabricated figure (the dogfood / explicit-metrics
+    /// path). Defaults to all-zero (a HUMAN-authored, honest-zero capture).
+    pub envelope_metrics: EnvelopeMetricsArgs,
 }
 
 /// `hugit pr land --settle` — settle a queued PR as **landed** (appends
@@ -875,12 +882,14 @@ pub fn settle(log: &mut EventLog, args: &SettleArgs) -> Result<Value, PrError> {
     let args = &SettleArgs {
         pr_id: crate::porcelain::structural_secret_scrub(&args.pr_id),
         recorded_at: args.recorded_at,
+        envelope_metrics: args.envelope_metrics.clone(),
     };
     let opened = find_pr_opened(log, &args.pr_id).ok_or_else(|| PrError::UnknownPr {
         pr_id: args.pr_id.clone(),
     })?;
 
-    // Idempotency: already landed → no-op, report the settled state.
+    // Idempotency: already landed → no-op, report the settled state. No second
+    // envelope is captured (capture fires once, on the first settlement).
     if pr_is_landed(log, &args.pr_id) {
         return Ok(settle_json(&args.pr_id, &opened.campaign, true));
     }
@@ -916,18 +925,45 @@ pub fn settle(log: &mut EventLog, args: &SettleArgs) -> Result<Value, PrError> {
         reason: denied.reason.code().to_string(),
     })?;
 
-    Ok(settle_json(&args.pr_id, &opened.campaign, false))
+    // WP-F2: capture the context envelope(s) on land. AFTER the terminal
+    // `pr.landed` is on the log — the settlement is the trigger, the envelope
+    // is the legibility record that rides alongside it. Appends one
+    // `intent.envelope` per bundled intent + one top-level `pr.envelope`
+    // (the F3 rollup / serve cost surfaces read these). Honest-zero when no
+    // `--tokens`/`--cost-usd-micros`/… flags were supplied; real figures when
+    // the orchestrator passes them (the dogfood path). Best-effort wrt the
+    // already-completed land: a capture failure leaves the cost block honestly
+    // absent, never unwinds the land.
+    let captured = capture::capture_on_land(log, &opened, &args.envelope_metrics, args.recorded_at);
+
+    Ok(settle_json_captured(
+        &args.pr_id,
+        &opened.campaign,
+        false,
+        captured,
+    ))
 }
 
 /// The stable `settle` success shape — the SAME key-set on first-run and the
-/// idempotent re-run (`already_landed` carries the difference).
+/// idempotent re-run (`already_landed` carries the difference). The idempotent
+/// re-settle captures no new envelope, so `envelopes_captured` is 0.
 fn settle_json(pr_id: &str, campaign: &str, already: bool) -> Value {
+    settle_json_captured(pr_id, campaign, already, 0)
+}
+
+/// Like [`settle_json`], carrying the WP-F2 count of context-envelope records
+/// captured on this settlement (the `intent.envelope` + `pr.envelope` records
+/// appended alongside the terminal `pr.landed`). Zero on the idempotent
+/// re-settle (capture fires once) and on a best-effort capture that appended
+/// nothing.
+fn settle_json_captured(pr_id: &str, campaign: &str, already: bool, captured: u64) -> Value {
     json!({
         "pr_id": pr_id,
         "campaign": campaign,
         "landed": true,
         "already_landed": already,
         "state": "landed",
+        "envelopes_captured": captured,
     })
 }
 
@@ -1396,7 +1432,9 @@ fn open_json(opened: &OpenedPr, already_exists: bool) -> Value {
 /// if a non-author class were ever asserted — a worker/model — which the matrix
 /// rejects and audits. This is defense-in-depth on the mutation primitive behind
 /// the door-level [`AuthorKind::parse`] check.
-fn author_authz(kind: AuthorKind) -> (hugit_refstore::PrincipalClass, hugit_refstore::Endpoint) {
+pub(super) fn author_authz(
+    kind: AuthorKind,
+) -> (hugit_refstore::PrincipalClass, hugit_refstore::Endpoint) {
     use hugit_refstore::{Endpoint, PrincipalClass};
     match kind {
         AuthorKind::Orchestrator => (PrincipalClass::Orchestrator, Endpoint::Land),
@@ -1616,6 +1654,7 @@ mod tests {
             &SettleArgs {
                 pr_id: "7".to_string(),
                 recorded_at: 3000,
+                ..Default::default()
             },
         )
         .unwrap();

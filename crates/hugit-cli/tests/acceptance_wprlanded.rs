@@ -542,12 +542,17 @@ fn pr_open_validates_intent_existence_on_a_log_with_intents() {
 /// terminal-state probe (post-terminal corruption shows up as a trailing
 /// `pr.queued` after the `pr.landed`).
 fn last_pr_kind(path: &Path) -> Option<String> {
+    // Only the LIFECYCLE pr.* kinds count — the additive WP-F2 legibility
+    // record `pr.envelope` (captured ALONGSIDE the terminal `pr.landed`) is
+    // cost/metrics metadata, not a lifecycle state transition, so it must not
+    // shadow the terminal lifecycle kind this helper reports.
+    const LIFECYCLE: &[&str] = &["pr.opened", "pr.queued", "pr.landed", "pr.abandoned"];
     let v: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
     v.as_array()
         .unwrap()
         .iter()
         .filter_map(|e| e["kind"].as_str())
-        .rfind(|k| k.starts_with("pr."))
+        .rfind(|k| LIFECYCLE.contains(k))
         .map(str::to_string)
 }
 

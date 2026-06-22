@@ -37,8 +37,8 @@ use serde_json::Value;
 
 use super::filelock::{self, FileLock, LockError};
 use super::{
-    AbandonArgs, AuthorKind, LandArgs, ListArgs, OpenArgs, PrError, SettleArgs, ShowArgs, abandon,
-    land, list, open, settle, show,
+    AbandonArgs, AuthorKind, EnvelopeMetricsArgs, LandArgs, ListArgs, OpenArgs, PrError,
+    SettleArgs, ShowArgs, abandon, land, list, open, settle, show,
 };
 
 /// `hugit pr <subcommand>` — the pull-request lifecycle (WP-PC3).
@@ -130,6 +130,40 @@ pub struct LandCliArgs {
     /// Unix-ms timestamp to stamp the appended `pr.landed` event with.
     #[arg(long = "recorded-at", default_value_t = 0)]
     recorded_at: u64,
+
+    // ── WP-F2: capture the context envelope on land (cost/metrics legibility).
+    // Every flag is OPTIONAL — an omitted flag is honest-zero / None, never a
+    // fabricated figure. The orchestrator passes the figures it measured (the
+    // dogfood path → real cost surfaces); absent → the envelope still captures
+    // the REAL structure (which PR, which intents, the campaign), honest-zero.
+    /// Total tokens spent on the run (WP-F2 capture metric).
+    #[arg(long = "tokens", default_value_t = 0)]
+    tokens: u64,
+    /// Derived COGS in integer micro-USD (`1 USD = 1_000_000`) — shown for
+    /// trust, never a usage meter (WP-F2 capture metric).
+    #[arg(long = "cost-usd-micros", default_value_t = 0)]
+    cost_usd_micros: u64,
+    /// Total tool calls (WP-F2 capture metric).
+    #[arg(long = "tool-calls", default_value_t = 0)]
+    tool_calls: u64,
+    /// Model + tool busy time, ms (WP-F2 capture metric).
+    #[arg(long = "active-ms", default_value_t = 0)]
+    active_ms: u64,
+    /// Number of model turns (WP-F2 capture metric).
+    #[arg(long = "model-turns", default_value_t = 0)]
+    model_turns: u64,
+    /// Model identifier (WP-F2). Empty ⇒ a HUMAN-authored PR (the rollup rule).
+    #[arg(long = "model")]
+    model: Option<String>,
+    /// `cas:` ref to the captured context blob, when available (WP-F2).
+    #[arg(long = "context-cas")]
+    context_cas: Option<String>,
+    /// `cas:` ref to the compacted transcript, when available (WP-F2).
+    #[arg(long = "compact-transcript-ref")]
+    compact_transcript_ref: Option<String>,
+    /// `cas:` ref to the adversarial-panel verdicts, when available (WP-F2).
+    #[arg(long = "verdicts-ref")]
+    verdicts_ref: Option<String>,
 }
 
 /// `hugit pr show` flags.
@@ -344,6 +378,19 @@ fn run_land(a: LandCliArgs) -> ExitCode {
         &SettleArgs {
             pr_id: a.pr_id,
             recorded_at: a.recorded_at,
+            // WP-F2: the (optional) real run metrics → the captured envelope.
+            // An omitted flag is honest-zero / None, never fabricated.
+            envelope_metrics: EnvelopeMetricsArgs {
+                tokens: a.tokens,
+                cost_usd_micros: a.cost_usd_micros,
+                tool_calls: a.tool_calls,
+                active_ms: a.active_ms,
+                model_turns: a.model_turns,
+                model: a.model,
+                context_cas: a.context_cas,
+                compact_transcript_ref: a.compact_transcript_ref,
+                verdicts_ref: a.verdicts_ref,
+            },
         },
     );
     match result {
