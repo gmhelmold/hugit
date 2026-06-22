@@ -65,12 +65,13 @@ fn readyz_is_unauthenticated_200() {
 
 #[test]
 fn readyz_git_serving_false_when_no_git_source() {
-    // A state with no git_source (no HUGIT_SERVE_GIT_DIR wired) must report
-    // git_serving:false in the readyz response — visible in monitoring.
+    // A state with no git seam loaded (no HUGIT_SERVE_GIT_DIR wired) must report
+    // git_serving:false + git_repos:0 in the readyz response — visible in monitoring.
     let (state, _d) = state_with_repo("hugit", "[]");
-    assert!(
-        state.git_source.is_none(),
-        "AppState::new() must have no git_source (test precondition)"
+    assert_eq!(
+        state.git_serving_count(),
+        0,
+        "AppState::new() must have no git seam (test precondition)"
     );
     let (status, body) = route(&state, &Method::Get, "/readyz", &[]);
     assert_eq!(status, 200);
@@ -80,21 +81,31 @@ fn readyz_git_serving_false_when_no_git_source() {
         v["git_serving"], false,
         "git_serving must be false when no git dir is wired, body={body}"
     );
+    assert_eq!(v["git_repos"], 0, "git_repos must be 0, body={body}");
 }
 
 #[test]
 fn readyz_git_serving_true_when_git_source_wired() {
-    // A state with a git_source set must report git_serving:true.
+    // A state with a repo's git seam set must report git_serving:true + the count.
     use hugit_proto::CasObjectSource;
     use std::sync::Arc;
     let (mut state, _d) = state_with_repo("hugit", "[]");
-    state.git_source = Some(Arc::new(CasObjectSource::new()));
+    state.set_repo_git(
+        "hugit",
+        Arc::new(CasObjectSource::new()),
+        gix_hash::ObjectId::empty_tree(gix_hash::Kind::Sha1),
+        std::collections::BTreeMap::new(),
+    );
     let (status, body) = route(&state, &Method::Get, "/readyz", &[]);
     assert_eq!(status, 200);
     let v: serde_json::Value = serde_json::from_str(&body).expect("readyz body is JSON");
     assert_eq!(
         v["git_serving"], true,
-        "git_serving must be true when git_source is wired, body={body}"
+        "git_serving must be true when a git seam is wired, body={body}"
+    );
+    assert_eq!(
+        v["git_repos"], 1,
+        "git_repos must count the loaded repos, body={body}"
     );
 }
 
