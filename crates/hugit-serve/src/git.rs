@@ -33,12 +33,14 @@
 //!
 //! ## Refs come from the SAME git dir as the objects
 //!
-//! The [`hugit_proto::RefView`] for the advertisement is the `git_refs` map on
-//! [`AppState`](crate::state::AppState) — populated by `for-each-ref` over the
-//! exact `HUGIT_SERVE_GIT_DIR` the objects were enumerated from. Refs and objects
-//! must be consistent; reading refs from the event log (a different projection)
-//! could advertise a tip whose closure is not in the CAS → a clone that 404s
-//! mid-stream. They are co-loaded, fail-closed, at boot.
+//! The [`hugit_proto::RefView`] for the advertisement is the requested repo's
+//! `git_refs` map — resolved PER-REPO from
+//! [`AppState::repo_state`](crate::state::AppState::repo_state) (the engine serves
+//! many repos). It is populated by `for-each-ref` over the exact git source the
+//! objects were enumerated from. Refs and objects must be consistent; reading refs
+//! from the event log (a different projection) could advertise a tip whose closure
+//! is not in the CAS → a clone that 404s mid-stream. They are co-loaded,
+//! fail-closed, at boot.
 //!
 //! ## Auth
 //!
@@ -46,8 +48,10 @@
 //! visibility** — the SAME `authz::authorize_read` predicate every `/v1` read
 //! uses, against an unauthenticated principal. Only a **publicly readable** repo
 //! is served; anything else is a 404 (no existence oracle — never reveal a
-//! private/absent repo). When no git dir is wired (`git_source`/`git_refs`
-//! empty) every git route is a 404 (git serving is not live — honest, no fake).
+//! private/absent repo). When the requested repo has no git seam loaded (not in
+//! the [`AppState`](crate::state::AppState) repo map) every git route is a 404
+//! (git serving is not live for it — honest, no fake; no oracle for which repos
+//! are git-served).
 
 use std::collections::BTreeMap;
 
@@ -207,7 +211,7 @@ fn pick_default_branch(refs: &BTreeMap<String, String>) -> Option<String> {
 /// same not-live / unsafe / not-public / malformed conditions as the advertisement.
 fn upload_pack(state: &AppState, repo: &str, body: &[u8]) -> Option<Vec<u8>> {
     let refs = git_refs_for(state, repo)?;
-    let source = state.git_source.as_ref()?;
+    let source = &state.repo_state(repo)?.git_source;
 
     // Real git appends a capability list to the FIRST `want` line of a v1/v0
     // upload-pack request (`want <oid> multi_ack side-band-64k …`). The proto's
@@ -245,11 +249,14 @@ fn upload_pack(state: &AppState, repo: &str, body: &[u8]) -> Option<Vec<u8>> {
 /// non-empty ref set. Every failure is `None` (the caller maps it to a uniform
 /// 404 — no existence oracle, identical for absent/private/not-live).
 fn git_refs_for(state: &AppState, repo: &str) -> Option<BTreeMap<String, String>> {
-    // git serving is not live unless a git dir was loaded at boot.
-    if state.git_source.is_none() || state.git_refs.is_empty() {
+    if !crate::state::is_safe_repo_slug(repo) {
         return None;
     }
-    if !crate::state::is_safe_repo_slug(repo) {
+    // git serving is not live for this repo unless its git seam was loaded at boot.
+    // A repo with no `RepoState` (un-loaded, or a different repo's content) → None
+    // → a uniform 404 (no oracle for which repos are git-served).
+    let repo_state = state.repo_state(repo)?;
+    if repo_state.git_refs.is_empty() {
         return None;
     }
     // READ-visibility gate, identical predicate to the `/v1` reads, against an
@@ -262,10 +269,8 @@ fn git_refs_for(state: &AppState, repo: &str) -> Option<BTreeMap<String, String>
     if !crate::authz::authorize_read(&[], &meta) {
         return None;
     }
-    // The git dir is single-repo (one `HUGIT_SERVE_GIT_DIR`); `git_refs` are its
-    // refs. Serve them for the gated repo. (A multi-repo git dir map is a later
-    // seam — see the honest-delivery audit; today one dir backs the launch repo.)
-    Some(state.git_refs.clone())
+    // This repo's OWN refs (the multi-repo forge resolves `{repo}` → its RepoState).
+    Some(repo_state.git_refs.clone())
 }
 
 /// Re-frame an upload-pack request body, trimming each `want`/`have` pkt-line to

@@ -126,11 +126,16 @@ fn state_with_git(repo: &str, visibility: &str) -> (AppState, PathBuf, Seed) {
     std::fs::write(dir.join(format!("{repo}.json")), log_json).unwrap();
 
     let mut state = AppState::new(dir.clone(), TOKEN.to_string());
-    // Re-seed the git source + refs (the `new()` ctor leaves them empty). The state
-    // owns the seeded CAS; the returned `Seed` carries the refs + tip oids the
-    // assertions read. root tree isn't exercised by the git wire; leave None.
-    state.git_source = Some(Arc::new(cas));
-    state.git_refs = seed.refs.clone();
+    // Wire this repo's git seam (the `new()` ctor leaves the repo map empty). The
+    // state owns the seeded CAS; the returned `Seed` carries the refs + tip oids the
+    // assertions read. The root tree isn't exercised by the git wire; seed the
+    // empty-tree oid as a placeholder.
+    state.set_repo_git(
+        repo,
+        Arc::new(cas),
+        ObjectId::empty_tree(gix_hash::Kind::Sha1),
+        seed.refs.clone(),
+    );
     (state, dir, seed)
 }
 

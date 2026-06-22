@@ -57,10 +57,39 @@ pub struct R2Config {
     pub agent: ureq::Agent,
 }
 
+/// The per-repo git content seam — one entry per repo whose git dir / CAS
+/// manifests were loaded at boot. The forge serves MANY repos from ONE engine;
+/// each repo's git objects, HEAD root-tree, and refs are independent. A repo with
+/// no `RepoState` (not in the [`AppState::repos`] map) has no git content seam →
+/// its `blob`/`edit` reads + git-wire clone/fetch 404 honestly (not a fake-empty).
+#[derive(Clone)]
+pub struct RepoState {
+    /// The git object source for this repo's file-content reads (`blob`/`edit`)
+    /// and the clone/fetch wire. Always `Some` for a loaded repo (an entry only
+    /// exists when the content seam wired); paired with `git_root_tree`.
+    pub git_source: Arc<dyn hugit_proto::ObjectSource + Send + Sync>,
+    /// The oid of HEAD's root tree in `git_source`, resolved once at boot.
+    pub git_root_tree: gix_hash::ObjectId,
+    /// This repo's git refs (`ref name → tip oid hex`) for the smart-HTTP wire
+    /// serving (`git clone`/`git fetch`). Read from the SAME source the objects
+    /// were enumerated from — refs and objects MUST be consistent (advertising a
+    /// tip whose closure is not in the source would 404 mid-clone). Never empty
+    /// for a loaded repo. This map IS the `hugit_proto::RefView` for the clone
+    /// advertisement.
+    pub git_refs: std::collections::BTreeMap<String, String>,
+}
+
 /// Immutable server configuration.
+///
+/// MULTI-REPO: one engine instance serves many repos (the forge model). The
+/// event-log source is shared (it keys by `<repo>.json` already); the per-repo
+/// git content seam lives in [`repos`](Self::repos), resolved per request by the
+/// `{repo}` URL slug. An unknown slug has no entry → a uniform 404 (no oracle).
 #[derive(Clone)]
 pub struct AppState {
-    /// Where event logs are read from (local dir | R2).
+    /// Where event logs are read from (local dir | R2). SHARED across repos — it
+    /// already keys by `<repo>.json` / `<tenant>/<repo>.json`, so the one source
+    /// serves every repo's log; the `{repo}` slug selects the object.
     pub source: LogSource,
     /// The Wave-1 dev Bearer token (the P2-Clerk stub). Fail-closed: required.
     pub dev_token: String,
@@ -72,21 +101,14 @@ pub struct AppState {
     /// uniformly; stays empty until a Clerk exchange mints a token. Single-host
     /// (the multi-instance shared store is the same P2 seam as the idem ledger).
     pub token_store: Arc<TokenStore>,
-    /// The git object source for the file-content reads (`blob`/`edit`). `None` =
-    /// the content seam is not wired (no `HUGIT_SERVE_GIT_DIR`) → those reads 404
-    /// honestly (NOT a fake blank file). When `Some`, paired with `git_root_tree`.
-    pub git_source: Option<Arc<dyn hugit_proto::ObjectSource + Send + Sync>>,
-    /// The oid of HEAD's root tree in `git_source`, resolved once at boot. `None`
-    /// in lock-step with `git_source` (both present or both absent).
-    pub git_root_tree: Option<gix_hash::ObjectId>,
-    /// The git refs (`ref name → tip oid hex`) for the smart-HTTP wire serving
-    /// (`git clone`/`git fetch`). Populated from `for-each-ref` over the SAME
-    /// `HUGIT_SERVE_GIT_DIR` the objects were enumerated from — refs and objects
-    /// MUST be consistent (reading refs from a different projection could advertise
-    /// a tip whose closure is not in the CAS). Empty when no git dir is wired → the
-    /// git wire routes 404 honestly (git serving not live). This map IS the
-    /// `hugit_proto::RefView` source for the clone advertisement.
-    pub git_refs: std::collections::BTreeMap<String, String>,
+    /// The per-repo git content seam: `repo slug → RepoState`. Loaded once at boot
+    /// (one entry per `HUGIT_SERVE_GIT_DIR` / `HUGIT_SERVE_CAS_REPO` list member).
+    /// Empty when no content seam is wired → every repo's `blob`/`edit` + git wire
+    /// 404 honestly. A `{repo}` not in the map is served with NO git seam (the same
+    /// honest 404 as a not-wired engine), independent of whether the repo's LOG
+    /// exists — the read API still works from `source`, only the git content is
+    /// absent for un-loaded repos.
+    pub repos: std::collections::HashMap<String, RepoState>,
 }
 
 impl AppState {
@@ -118,46 +140,118 @@ impl AppState {
         let exchange = SessionExchangeConfig::from_env()?.map(|cfg| Arc::new(cfg.into_client()));
         let token_store = Arc::new(TokenStore::new());
 
-        // The git content seam (`blob`/`edit` reads + the clone/fetch wire).
+        // The per-repo git content seam (`blob`/`edit` reads + the clone/fetch
+        // wire), one entry per loaded repo. MULTI-REPO: both source vars accept a
+        // comma-separated SET of repos (one entry = single-repo, unchanged).
         // Source precedence (F): `HUGIT_SERVE_CAS_URL` set → the live CoreLink CAS
         // (mutable refs/oid-index manifests from hugit's R2, immutable objects from
-        // the CAS); else `HUGIT_SERVE_GIT_DIR` → a local git dir; else none → the
-        // content reads 404 honestly (NOT a fake blank file). Loaded once at boot.
-        let (git_source, git_root_tree, git_refs) = if std::env::var("HUGIT_SERVE_CAS_URL")
-            .map(|v| !v.trim().is_empty())
-            .unwrap_or(false)
-        {
-            let (cas, root, refs) = load_from_cas_env()?;
-            let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(cas);
-            (Some(src), Some(root), refs)
-        } else {
-            match std::env::var("HUGIT_SERVE_GIT_DIR") {
-                Ok(dir) if !dir.trim().is_empty() => {
-                    let (cas, root, refs) = load_git_dir(&dir)?;
-                    let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(cas);
-                    (Some(src), Some(root), refs)
-                }
-                _ => (None, None, std::collections::BTreeMap::new()),
-            }
-        };
+        // the CAS), one `HUGIT_SERVE_CAS_REPO` slug per list member; else
+        // `HUGIT_SERVE_GIT_DIR` → one local git dir per list member; else no content
+        // seam → the content reads 404 honestly (NOT a fake blank file). Loaded once
+        // at boot. Fail-closed: a content seam configured but loading NO repo is a
+        // fatal boot error (a misconfigured seam refuses to start); an UN-configured
+        // seam (neither var set) is the honest no-git default (empty map).
+        let repos = Self::load_repos_from_env()?;
 
         Ok(Self {
             source,
             dev_token,
             exchange,
             token_store,
-            git_source,
-            git_root_tree,
-            git_refs,
+            repos,
         })
+    }
+
+    /// Load the per-repo git content seam set from env. Returns an empty map when
+    /// no content seam is configured (the honest no-git default). Fail-closed: a
+    /// CONFIGURED seam (either var set, non-empty) that loads no repo, or any
+    /// per-repo load error, is a fatal boot error.
+    fn load_repos_from_env() -> Result<std::collections::HashMap<String, RepoState>, String> {
+        let mut repos = std::collections::HashMap::new();
+
+        let cas_repos = std::env::var("HUGIT_SERVE_CAS_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .and(
+                std::env::var("HUGIT_SERVE_CAS_REPO")
+                    .ok()
+                    .filter(|v| !v.trim().is_empty()),
+            );
+        if let Some(list) = cas_repos {
+            // CAS mode: one `HUGIT_SERVE_CAS_REPO` slug per list member, all over
+            // the SAME CAS client + R2 manifest store.
+            let cas = crate::cas::CasClient::from_env()
+                .map_err(|e| format!("HUGIT_SERVE_CAS_*: CAS client not configured: {e}"))?;
+            let tenant = std::env::var("HUGIT_SERVE_CAS_TENANT_ID").map_err(|_| {
+                "HUGIT_SERVE_CAS_TENANT_ID is not set (CAS source selected)".to_string()
+            })?;
+            let r2 = R2Config::from_env()
+                .map_err(|e| format!("CAS source needs the R2 manifest store: {e}"))?;
+            for repo in split_repo_list(&list) {
+                if !is_safe_repo_slug(repo) {
+                    return Err(format!(
+                        "HUGIT_SERVE_CAS_REPO contains an unsafe repo slug: {repo:?}"
+                    ));
+                }
+                // LAZY boot: read only the manifests + resolve HEAD's tree; objects
+                // are fetched from the CAS on demand at serve time.
+                let (cas_src, root, refs) =
+                    crate::cas::load_manifests_from_cas(cas.clone(), &r2, &tenant, repo)?;
+                let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(cas_src);
+                repos.insert(
+                    repo.to_string(),
+                    RepoState {
+                        git_source: src,
+                        git_root_tree: root,
+                        git_refs: refs,
+                    },
+                );
+            }
+            if repos.is_empty() {
+                return Err("HUGIT_SERVE_CAS_REPO is empty (CAS source selected)".to_string());
+            }
+            return Ok(repos);
+        }
+
+        match std::env::var("HUGIT_SERVE_GIT_DIR") {
+            Ok(list) if !list.trim().is_empty() => {
+                // Local git-dir mode: one dir per comma-separated list member. Each
+                // member is either a bare `path` (the served slug is the dir's
+                // basename, e.g. `/srv/git/hugit` → `hugit`) or an explicit
+                // `slug=path` (so a checkout dir whose name is not the repo slug can
+                // still be served under the right name). A single bare dir = the
+                // unchanged single-repo config.
+                for member in split_repo_list(&list) {
+                    let (slug, dir) = parse_git_dir_member(member)?;
+                    let (cas, root, refs) = load_git_dir(dir)?;
+                    let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(cas);
+                    repos.insert(
+                        slug,
+                        RepoState {
+                            git_source: src,
+                            git_root_tree: root,
+                            git_refs: refs,
+                        },
+                    );
+                }
+                if repos.is_empty() {
+                    return Err("HUGIT_SERVE_GIT_DIR is empty".to_string());
+                }
+                Ok(repos)
+            }
+            // No content seam configured → the honest no-git default.
+            _ => Ok(repos),
+        }
     }
 
     fn r2_from_env() -> Result<LogSource, String> {
         Ok(LogSource::R2(Box::new(R2Config::from_env()?)))
     }
 
-    /// Explicit Local constructor (tests). No git content seam (both `None`) —
-    /// blob/edit reads 404 honestly until a deploy sets `HUGIT_SERVE_GIT_DIR`.
+    /// Explicit Local constructor (tests). No git content seam (empty `repos`) —
+    /// blob/edit reads + git wire 404 honestly until a repo's git seam is wired
+    /// (a deploy `HUGIT_SERVE_GIT_DIR`, or [`set_repo_git`](Self::set_repo_git) in
+    /// a test).
     #[must_use]
     pub fn new(log_dir: PathBuf, dev_token: String) -> Self {
         Self {
@@ -165,10 +259,43 @@ impl AppState {
             dev_token,
             exchange: None,
             token_store: Arc::new(TokenStore::new()),
-            git_source: None,
-            git_root_tree: None,
-            git_refs: std::collections::BTreeMap::new(),
+            repos: std::collections::HashMap::new(),
         }
+    }
+
+    /// Look up the per-repo git content seam for `repo`, or `None` when this repo
+    /// has no git seam loaded (not in the map). Callers map `None` to the SAME
+    /// honest 404/empty as a not-wired engine — never a 500, never an oracle.
+    #[must_use]
+    pub fn repo_state(&self, repo: &str) -> Option<&RepoState> {
+        self.repos.get(repo)
+    }
+
+    /// The number of repos whose git content seam is loaded (the `/readyz`
+    /// capability count). Zero = git serving not live for any repo.
+    #[must_use]
+    pub fn git_serving_count(&self) -> usize {
+        self.repos.len()
+    }
+
+    /// Wire (or replace) a repo's git content seam — the test/seed entrypoint. The
+    /// live boot path populates `repos` from env; tests use this to seed a repo's
+    /// git source + refs without an on-disk git dir.
+    pub fn set_repo_git(
+        &mut self,
+        repo: impl Into<String>,
+        git_source: Arc<dyn hugit_proto::ObjectSource + Send + Sync>,
+        git_root_tree: gix_hash::ObjectId,
+        git_refs: std::collections::BTreeMap<String, String>,
+    ) {
+        self.repos.insert(
+            repo.into(),
+            RepoState {
+                git_source,
+                git_root_tree,
+                git_refs,
+            },
+        );
     }
 
     /// A short label of the active source (for the boot log; no secrets).
@@ -691,34 +818,47 @@ impl crate::cas::R2Put for R2Config {
     }
 }
 
-/// Build the git content seam from the live CoreLink CAS (the F-switch target):
-/// `HUGIT_SERVE_CAS_*` → a configured [`crate::cas::CasClient`]; the mutable
-/// `refs.json`/`oid-index.json` manifests from hugit's R2 (the same
-/// `HUGIT_SERVE_R2_*` config the log source uses); the single launch repo slug
-/// from `HUGIT_SERVE_CAS_REPO`. Fail-closed (→ a fatal boot error) on any missing
-/// piece or integrity violation. Tenant for the R2 manifest keys is
-/// `HUGIT_SERVE_CAS_TENANT_ID` (the CAS path tenant). Not exercised by the
-/// hermetic handler tests (those call [`crate::cas::load_from_cas`] with doubles).
-fn load_from_cas_env() -> Result<crate::cas::LazyCasLoad, String> {
-    let cas = crate::cas::CasClient::from_env()
-        .map_err(|e| format!("HUGIT_SERVE_CAS_*: CAS client not configured: {e}"))?;
-    let tenant = std::env::var("HUGIT_SERVE_CAS_TENANT_ID")
-        .map_err(|_| "HUGIT_SERVE_CAS_TENANT_ID is not set (CAS source selected)".to_string())?;
-    let repo = std::env::var("HUGIT_SERVE_CAS_REPO")
-        .map_err(|_| "HUGIT_SERVE_CAS_REPO is not set (CAS source selected)".to_string())?;
-    if !is_safe_repo_slug(&repo) {
+/// Split a comma-separated repo/dir list into trimmed, non-empty members. One
+/// member = the unchanged single-repo config; many = the multi-repo forge set.
+fn split_repo_list(list: &str) -> Vec<&str> {
+    list.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Parse one `HUGIT_SERVE_GIT_DIR` list member into `(served slug, git dir)`.
+/// Two forms:
+/// - `slug=path` — an explicit slug (the part before the FIRST `=`), so a checkout
+///   dir whose name differs from the repo slug serves under the right name.
+/// - `path` — the served slug is the dir's basename (final path component).
+///
+/// Fail-closed (→ a fatal boot error) on an empty path or a slug that is not a
+/// safe slug — a misconfigured seam refuses to start rather than serving under an
+/// ambiguous/unsafe name.
+fn parse_git_dir_member(member: &str) -> Result<(String, &str), String> {
+    let (slug, dir): (String, &str) = match member.split_once('=') {
+        Some((slug, dir)) => (slug.trim().to_string(), dir.trim()),
+        None => {
+            let dir = member.trim();
+            let base = Path::new(dir)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .ok_or_else(|| format!("HUGIT_SERVE_GIT_DIR has no repo basename: {dir:?}"))?;
+            (base.to_string(), dir)
+        }
+    };
+    if dir.is_empty() {
         return Err(format!(
-            "HUGIT_SERVE_CAS_REPO is not a safe repo slug: {repo:?}"
+            "HUGIT_SERVE_GIT_DIR member has an empty path: {member:?}"
         ));
     }
-    // The mutable manifests live in hugit's R2 (the same dedicated bucket the log
-    // source reads). The CAS source requires the R2 cred to be present too.
-    let r2 =
-        R2Config::from_env().map_err(|e| format!("CAS source needs the R2 manifest store: {e}"))?;
-    // LAZY boot: read only the manifests + resolve HEAD's tree; objects are
-    // fetched from the CAS on demand at serve time (the eager full-closure load
-    // doesn't fit the container start window — 2026-06-20 incident).
-    crate::cas::load_manifests_from_cas(cas, &r2, &tenant, &repo)
+    if !is_safe_repo_slug(&slug) {
+        return Err(format!(
+            "HUGIT_SERVE_GIT_DIR slug is not a safe repo slug: {slug:?} (from {member:?})"
+        ));
+    }
+    Ok((slug, dir))
 }
 
 /// Load a git directory into a [`CasObjectSource`] and resolve HEAD's root-tree
@@ -1086,5 +1226,53 @@ mod tests {
     fn source_label_reflects_local() {
         let st = AppState::new(PathBuf::from("/tmp/logs"), "tok".to_string());
         assert!(st.source_label().starts_with("local:"));
+    }
+
+    #[test]
+    fn new_state_has_no_repos_loaded() {
+        let st = AppState::new(PathBuf::from("/tmp/logs"), "tok".to_string());
+        assert_eq!(st.git_serving_count(), 0);
+        assert!(st.repo_state("hugit").is_none());
+    }
+
+    #[test]
+    fn split_repo_list_single_is_unchanged() {
+        // One member = the single-repo config (backward-compatible).
+        assert_eq!(split_repo_list("hugit"), vec!["hugit"]);
+        assert_eq!(split_repo_list("/srv/git/hugit"), vec!["/srv/git/hugit"]);
+    }
+
+    #[test]
+    fn split_repo_list_many_trims_and_drops_empty() {
+        assert_eq!(
+            split_repo_list(" hugit , acme ,, beta "),
+            vec!["hugit", "acme", "beta"]
+        );
+    }
+
+    #[test]
+    fn git_dir_member_bare_path_uses_basename_slug() {
+        let (slug, dir) = parse_git_dir_member("/srv/git/hugit").expect("bare path");
+        assert_eq!(slug, "hugit");
+        assert_eq!(dir, "/srv/git/hugit");
+    }
+
+    #[test]
+    fn git_dir_member_explicit_slug_overrides_basename() {
+        // `slug=path` serves a checkout dir under an explicit name.
+        let (slug, dir) =
+            parse_git_dir_member("hugit=/var/checkouts/launch-repo").expect("explicit slug");
+        assert_eq!(slug, "hugit");
+        assert_eq!(dir, "/var/checkouts/launch-repo");
+    }
+
+    #[test]
+    fn git_dir_member_unsafe_slug_is_rejected() {
+        // A traversal slug (explicit) is fail-closed.
+        assert!(parse_git_dir_member("../etc=/srv/git/x").is_err());
+        // A bare path whose basename is unsafe (`..`) is fail-closed.
+        assert!(parse_git_dir_member("/srv/git/..").is_err());
+        // An empty path is fail-closed.
+        assert!(parse_git_dir_member("hugit=").is_err());
     }
 }

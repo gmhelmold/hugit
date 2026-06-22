@@ -207,8 +207,13 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
     // is wired at boot — a missing true here means clone/fetch are not live.
     // No repo content is leaked; it is a capability flag only.
     if method == &Method::Get && segs == ["readyz"] {
-        let git_serving = state.git_source.is_some();
-        let body = format!(r#"{{"ready":true,"git_serving":{git_serving}}}"#);
+        // `git_repos` = how many repos have a git content seam loaded (the forge
+        // serves many); `git_serving` stays for backward-compat (true iff ≥1). No
+        // repo content/names are leaked — capability counts only.
+        let git_repos = state.git_serving_count();
+        let git_serving = git_repos > 0;
+        let body =
+            format!(r#"{{"ready":true,"git_serving":{git_serving},"git_repos":{git_repos}}}"#);
         return (200, body);
     }
 
@@ -252,16 +257,18 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
                 return err(EngineErr::not_found());
             }
             // The query (stripped above) is re-passed for the param-driven reads.
-            // The git content seam (`blob`/`edit`) is threaded from state; `None`
-            // when no `HUGIT_SERVE_GIT_DIR` is wired → those reads 404 honestly.
+            // The git content seam (`blob`/`edit`) is resolved PER-REPO from the
+            // map; a repo with no git seam loaded → `None` → those reads 404
+            // honestly (identical to a not-wired engine, no oracle).
+            let repo_git = state.repo_state(repo);
             dispatch_repo(
                 repo,
                 tail,
                 url.split('?').nth(1).unwrap_or(""),
                 &log,
                 &principal,
-                state.git_source.as_ref(),
-                state.git_root_tree.as_ref(),
+                repo_git.map(|r| &r.git_source),
+                repo_git.map(|r| &r.git_root_tree),
             )
         }
         // Identity-scoped reads (/v1/me/*): no {repo} path param — they bind the
