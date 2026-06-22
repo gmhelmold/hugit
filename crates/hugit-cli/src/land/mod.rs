@@ -44,7 +44,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Subcommand;
-use hugit_checks::client::ac::ActionCache;
+use hugit_checks::client::ac::{ActionCache, HttpAcClient};
 use hugit_checks::client::executor::{CheckRunner, ExecError, run_memoized};
 use hugit_checks::client::memo_key::{FileContent, compute_def_digest};
 use hugit_contracts::{CheckDef, CheckResult, LandableEntry, MinimalFailingPair};
@@ -146,8 +146,16 @@ fn run_queue_land(a: QueueLandArgs) -> ExitCode {
         Err(e) => return emit(Err(e)),
     };
 
-    let ac = FileAc::new(ac_path);
-    let result = batch_land(&mut log, &ac, a.campaign.as_deref(), a.recorded_at);
+    // Prefer the live CoreLink AC when its runtime config is fully present (and no
+    // explicit `--ac` override); else the file-backed local AC. Same selection law
+    // as `check run` so both warm the SAME wedge state — live or local.
+    let result = match (a.ac.is_none(), HttpAcClient::from_runtime()) {
+        (true, Ok(live)) => batch_land(&mut log, &live, a.campaign.as_deref(), a.recorded_at),
+        _ => {
+            let ac = FileAc::new(ac_path);
+            batch_land(&mut log, &ac, a.campaign.as_deref(), a.recorded_at)
+        }
+    };
     match result {
         Ok(value) => match crate::pr::filelock::atomic_write(
             &log_path,
