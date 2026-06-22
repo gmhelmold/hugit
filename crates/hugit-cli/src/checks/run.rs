@@ -50,7 +50,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use hugit_checks::client::ac::ActionCache;
+use hugit_checks::client::ac::{ActionCache, HttpAcClient};
 use hugit_checks::client::executor::{self, CheckRunner, ExecError};
 use hugit_checks::client::memo_key::{FileContent, frame_file_with_mode};
 use hugit_contracts::{CheckDef, CheckResult};
@@ -1263,17 +1263,24 @@ enum AcBackend {
     /// File-backed local AC (default) — persists across binary invocations so a
     /// warm re-run is a real cross-process HIT.
     Local(FileAc),
+    /// Live CoreLink AC over HTTP — the hot, shared, content-addressed cache.
+    /// Selected only when the CoreLink runtime config is fully present (explicit
+    /// opt-in via `HUGIT_CORELINK_AC_URL` + `HUGIT_CORELINK_TENANT` + the PAT
+    /// file); never a silent network call on an unconfigured box.
+    Live(HttpAcClient),
 }
 
 impl ActionCache for AcBackend {
     fn lookup(&self, key: &str) -> Result<Option<CheckResult>, hugit_checks::client::ac::AcError> {
         match self {
             AcBackend::Local(ac) => ac.lookup(key),
+            AcBackend::Live(ac) => ac.lookup(key),
         }
     }
     fn store(&self, result: &CheckResult) -> Result<(), hugit_checks::client::ac::AcError> {
         match self {
             AcBackend::Local(ac) => ac.store(result),
+            AcBackend::Live(ac) => ac.store(result),
         }
     }
 }
@@ -1294,6 +1301,17 @@ impl ActionCache for AcBackend {
 /// double-exec records at most ONE `check.recorded`. A live AC over HTTP needs no
 /// local lock — that arm would not take one.
 fn select_ac(args: &CheckRunArgs) -> Result<AcBackend, PorcelainError> {
+    // Prefer the live CoreLink AC when its runtime config is fully present
+    // (HUGIT_CORELINK_AC_URL + HUGIT_CORELINK_TENANT + the PAT file). This is an
+    // explicit opt-in — `from_runtime()` returns NotConfigured on an unset box, in
+    // which case we fall back silently to the file-backed local AC (so the wedge
+    // still works without P2 and the verb never makes a network call unconfigured).
+    // An explicit `--ac <path>` forces the local file AC (operator override).
+    if args.ac.is_none()
+        && let Ok(live) = HttpAcClient::from_runtime()
+    {
+        return Ok(AcBackend::Live(live));
+    }
     let store = args
         .ac
         .clone()
