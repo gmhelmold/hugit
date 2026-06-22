@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(cli): **live CoreLink AC wired into `check run` + `land queue`** — memoized checks now hit the hot, shared, content-addressed CoreLink action-cache when the runtime config is present (`HUGIT_CORELINK_AC_URL` + `HUGIT_CORELINK_TENANT` + the PAT file), falling back to the file-backed local AC otherwise (no silent network on an unconfigured box; `--ac` forces local). Smoke-verified live against the provisioned P2 tenant: MISS→remote-HIT, no local `.ac` — the memoization economic core is live.
 - feat(wedge): **`hugit land queue` — the union-test + bisect + memoize engine is now invocable.** Batch-land the queued PRs of a campaign: runs `evaluate_union` over their union with memoized, AC-backed checks (re-run = cache HIT, zero re-execution), and on a red union runs `bisect_failure` to isolate the minimal failing pair — landing the green remainder, excluding the culprit, recording a `queue.union_fail` (so `queue show`'s `conflict_pair` lights up). `land` graduated reserved→real. Real for a single-tenant LOCAL operator today (file-backed AC); the distributed runner fabric swaps in behind the same `MemoCheck` trait.
 
 - feat(legibility): **Phase-2 — the killer-data levers** (WP-F2 + review legibility).
