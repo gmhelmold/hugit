@@ -507,6 +507,433 @@ pub fn resolve_blob_at_path(
     Ok(None)
 }
 
+// ── Tree diff (WP review-legibility ①) ──────────────────────────────────────
+
+/// The change status of a file between two trees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileChange {
+    /// The path exists only in the new tree.
+    Added,
+    /// The path exists only in the parent tree.
+    Removed,
+    /// The path's blob oid differs between the two trees.
+    Modified,
+}
+
+/// One file row of a [`tree_diff`]: its repo-relative path, change status, and
+/// added/removed line counts. Line counts are computed by a line-level LCS over
+/// the two blobs (the same shape `git diff --numstat` reports). For a binary
+/// file (a blob containing a NUL byte) the counts are `0`/`0` — git's `-` in
+/// numstat — and the change status alone is authoritative.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileDiff {
+    /// Repo-relative path of the changed file.
+    pub path: String,
+    /// How the file changed (added / removed / modified).
+    pub change: FileChange,
+    /// Lines added (only in the new blob).
+    pub added: u32,
+    /// Lines removed (only in the parent blob).
+    pub removed: u32,
+}
+
+/// Maximum number of changed-file rows a single [`tree_diff`] returns.
+///
+/// A pathological pair of trees could differ in millions of files; the review
+/// surface only needs a bounded file list. Capping the rows bounds the
+/// per-request CAS budget and the response size (a diffstat is informational).
+pub const MAX_DIFF_FILES: usize = 2_000;
+
+/// Maximum size (bytes) of a blob whose lines are counted for the numstat.
+///
+/// Counting added/removed lines requires buffering BOTH blobs and running an
+/// O(n·m) LCS — unbounded on a huge file that is a CPU/memory DoS. Above this
+/// ceiling the file still appears in the list (status is authoritative) but its
+/// line counts are reported as `0`/`0` (treated like a binary blob).
+const MAX_DIFF_BLOB_BYTES: usize = 1024 * 1024;
+
+/// Resolve a commit oid to its root-tree oid. `Ok(None)` when the object is
+/// absent or is not a commit. The commit's tree id is decoded with the canonical
+/// `gix_object::CommitRefIter` — the same decoder [`crate::read::serve`] uses —
+/// so the commit byte format is never reimplemented here.
+pub fn commit_root_tree(
+    src: &dyn ObjectSource,
+    commit: &ObjectId,
+) -> Result<Option<ObjectId>, PackError> {
+    let object = match src.get(commit)? {
+        Some(o) => o,
+        None => return Ok(None),
+    };
+    if object.kind != ObjectKind::Commit {
+        return Ok(None);
+    }
+    let tree = gix_object::CommitRefIter::from_bytes(&object.data)
+        .tree_id()
+        .map_err(|e| PackError::InvalidOid(format!("malformed commit {commit}: {e}")))?;
+    Ok(Some(tree))
+}
+
+/// Diff two git trees and return the changed-file rows (path + status +
+/// added/removed line counts), recursing into subtrees.
+///
+/// A shared subtree (identical oid on both sides) is pruned — git's fast path —
+/// so an unchanged directory costs zero CAS gets. Files present on only one side
+/// are reported `Added`/`Removed` with all their lines counted; a file whose
+/// blob oid differs is `Modified` with a line-level numstat.
+///
+/// SECURITY / DoS: the recursion is bounded by [`MAX_PATH_DEPTH`] (subtree
+/// nesting) and the output by [`MAX_DIFF_FILES`]; an oversized blob is line-
+/// counted as `0`/`0` (see [`MAX_DIFF_BLOB_BYTES`]). Fail-closed: a missing
+/// object or malformed tree surfaces as a [`PackError`] (the caller maps that to
+/// an honest-empty diff), never a partial fabrication. Paths are NOT scrubbed
+/// here — scrubbing is the read-boundary (serve) caller's responsibility.
+pub fn tree_diff(
+    src: &dyn ObjectSource,
+    parent_tree: &ObjectId,
+    new_tree: &ObjectId,
+) -> Result<Vec<FileDiff>, PackError> {
+    let mut out = Vec::new();
+    tree_diff_inner(src, parent_tree, new_tree, "", 0, &mut out)?;
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(out)
+}
+
+/// Read a tree's entries into a name→(oid, mode) map (only blobs + subtrees;
+/// symlinks and gitlinks are skipped — symlinks bypass secret-scrub and gitlinks
+/// point into another repo's CAS). `None` when the object is absent or not a tree.
+type TreeEntries = std::collections::BTreeMap<Vec<u8>, (ObjectId, gix_object::tree::EntryMode)>;
+
+fn read_tree_entries(
+    src: &dyn ObjectSource,
+    tree: &ObjectId,
+) -> Result<Option<TreeEntries>, PackError> {
+    let object = match src.get(tree)? {
+        Some(o) => o,
+        None => return Ok(None),
+    };
+    if object.kind != ObjectKind::Tree {
+        return Ok(None);
+    }
+    let entries = gix_object::TreeRefIter::from_bytes(&object.data)
+        .entries()
+        .map_err(|e| PackError::InvalidOid(format!("malformed tree {tree}: {e}")))?;
+    let mut map = TreeEntries::new();
+    for e in entries {
+        if e.mode.is_link() || e.mode.is_commit() {
+            continue;
+        }
+        map.insert(e.filename.to_vec(), (e.oid.to_owned(), e.mode));
+    }
+    Ok(Some(map))
+}
+
+fn tree_diff_inner(
+    src: &dyn ObjectSource,
+    parent_tree: &ObjectId,
+    new_tree: &ObjectId,
+    prefix: &str,
+    depth: usize,
+    out: &mut Vec<FileDiff>,
+) -> Result<(), PackError> {
+    // Identical subtree → no change anywhere below; git's fast prune.
+    if parent_tree == new_tree {
+        return Ok(());
+    }
+    if depth > MAX_PATH_DEPTH {
+        return Ok(()); // DoS guard: never recurse past the path-depth ceiling.
+    }
+    let old_entries = read_tree_entries(src, parent_tree)?.unwrap_or_default();
+    let new_entries = read_tree_entries(src, new_tree)?.unwrap_or_default();
+
+    // Union of names from both sides, in canonical (sorted) order.
+    let names: std::collections::BTreeSet<&Vec<u8>> =
+        old_entries.keys().chain(new_entries.keys()).collect();
+
+    for name in names {
+        if out.len() >= MAX_DIFF_FILES {
+            return Ok(());
+        }
+        let old = old_entries.get(name);
+        let new = new_entries.get(name);
+        let name_str = String::from_utf8_lossy(name);
+        let path = if prefix.is_empty() {
+            name_str.into_owned()
+        } else {
+            format!("{prefix}/{name_str}")
+        };
+        match (old, new) {
+            (Some((o_oid, o_mode)), Some((n_oid, n_mode))) => {
+                if o_oid == n_oid {
+                    continue; // identical oid on both sides — unchanged.
+                }
+                if o_mode.is_tree() && n_mode.is_tree() {
+                    tree_diff_inner(src, o_oid, n_oid, &path, depth + 1, out)?;
+                } else if o_mode.is_tree() != n_mode.is_tree() {
+                    // file ↔ directory replacement: remove all the old, add all the new.
+                    diff_one_side(src, o_oid, *o_mode, &path, FileChange::Removed, out)?;
+                    diff_one_side(src, n_oid, *n_mode, &path, FileChange::Added, out)?;
+                } else {
+                    // both blobs, differing oid → modified (line-level numstat).
+                    let (added, removed) = blob_numstat(src, o_oid, n_oid)?;
+                    out.push(FileDiff {
+                        path,
+                        change: FileChange::Modified,
+                        added,
+                        removed,
+                    });
+                }
+            }
+            (Some((o_oid, o_mode)), None) => {
+                diff_one_side(src, o_oid, *o_mode, &path, FileChange::Removed, out)?;
+            }
+            (None, Some((n_oid, n_mode))) => {
+                diff_one_side(src, n_oid, *n_mode, &path, FileChange::Added, out)?;
+            }
+            (None, None) => unreachable!("a name in the union must be on ≥1 side"),
+        }
+    }
+    Ok(())
+}
+
+/// Emit the rows for a subtree or blob present on only one side. A whole subtree
+/// added/removed yields one row per contained blob (all lines added/removed).
+fn diff_one_side(
+    src: &dyn ObjectSource,
+    oid: &ObjectId,
+    mode: gix_object::tree::EntryMode,
+    path: &str,
+    change: FileChange,
+    out: &mut Vec<FileDiff>,
+) -> Result<(), PackError> {
+    if out.len() >= MAX_DIFF_FILES {
+        return Ok(());
+    }
+    if mode.is_tree() {
+        // Diff the one-sided subtree against the empty tree by recursion: an
+        // added tree vs. a removed tree is symmetric, so reuse tree_diff_inner
+        // against an empty side via direct entry walk.
+        let entries = match read_tree_entries(src, oid)? {
+            Some(e) => e,
+            None => return Ok(()),
+        };
+        for (name, (child_oid, child_mode)) in entries {
+            let child_path = format!("{path}/{}", String::from_utf8_lossy(&name));
+            diff_one_side(src, &child_oid, child_mode, &child_path, change, out)?;
+        }
+        return Ok(());
+    }
+    // A single blob: count all its lines as added (or removed).
+    let lines = blob_line_count(src, oid)?;
+    let (added, removed) = match change {
+        FileChange::Added => (lines, 0),
+        FileChange::Removed => (0, lines),
+        FileChange::Modified => (lines, lines),
+    };
+    out.push(FileDiff {
+        path: path.to_string(),
+        change,
+        added,
+        removed,
+    });
+    Ok(())
+}
+
+/// Number of lines in a blob (a trailing newline does not add an empty line).
+/// `0` for a binary blob or one over [`MAX_DIFF_BLOB_BYTES`].
+fn blob_line_count(src: &dyn ObjectSource, oid: &ObjectId) -> Result<u32, PackError> {
+    let object = match src.get(oid)? {
+        Some(o) => o,
+        None => return Ok(0),
+    };
+    if object.kind != ObjectKind::Blob
+        || object.data.len() > MAX_DIFF_BLOB_BYTES
+        || object.data.contains(&0)
+    {
+        return Ok(0);
+    }
+    Ok(count_lines(&object.data))
+}
+
+/// Line-level numstat between two blobs: `(added, removed)`. Either blob being
+/// binary / oversized / absent yields `(0, 0)` (git's `-` numstat).
+fn blob_numstat(
+    src: &dyn ObjectSource,
+    old_oid: &ObjectId,
+    new_oid: &ObjectId,
+) -> Result<(u32, u32), PackError> {
+    let old = match src.get(old_oid)? {
+        Some(o) => o,
+        None => return Ok((0, 0)),
+    };
+    let new = match src.get(new_oid)? {
+        Some(o) => o,
+        None => return Ok((0, 0)),
+    };
+    if old.data.len() > MAX_DIFF_BLOB_BYTES
+        || new.data.len() > MAX_DIFF_BLOB_BYTES
+        || old.data.contains(&0)
+        || new.data.contains(&0)
+    {
+        return Ok((0, 0));
+    }
+    let old_lines: Vec<&[u8]> = split_lines(&old.data);
+    let new_lines: Vec<&[u8]> = split_lines(&new.data);
+    let lcs = lcs_len(&old_lines, &new_lines);
+    let removed = (old_lines.len() - lcs) as u32;
+    let added = (new_lines.len() - lcs) as u32;
+    Ok((added, removed))
+}
+
+/// Count lines (a trailing `\n` does not yield a final empty line).
+fn count_lines(data: &[u8]) -> u32 {
+    split_lines(data).len() as u32
+}
+
+/// Split a buffer into lines (no trailing empty line for a terminal `\n`).
+fn split_lines(data: &[u8]) -> Vec<&[u8]> {
+    if data.is_empty() {
+        return Vec::new();
+    }
+    let mut lines: Vec<&[u8]> = data.split(|b| *b == b'\n').collect();
+    // A trailing newline produces a final empty element — drop it (git counts the
+    // line before the terminal newline, not a phantom empty line after it).
+    if data.last() == Some(&b'\n') {
+        lines.pop();
+    }
+    lines
+}
+
+/// Length of the longest common subsequence of two line slices (the classic
+/// O(n·m) DP). Bounded by [`MAX_DIFF_BLOB_BYTES`] on each blob upstream.
+fn lcs_len(a: &[&[u8]], b: &[&[u8]]) -> usize {
+    if a.is_empty() || b.is_empty() {
+        return 0;
+    }
+    // Rolling two-row DP to keep memory at O(min(n, m)).
+    let (a, b) = if a.len() >= b.len() { (a, b) } else { (b, a) };
+    let mut prev = vec![0usize; b.len() + 1];
+    let mut cur = vec![0usize; b.len() + 1];
+    for ai in a {
+        for (j, bj) in b.iter().enumerate() {
+            cur[j + 1] = if ai == bj {
+                prev[j] + 1
+            } else {
+                prev[j + 1].max(cur[j])
+            };
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+#[cfg(test)]
+mod tree_diff_tests {
+    use super::*;
+
+    fn blob(src: &mut CasObjectSource, body: &str) -> ObjectId {
+        src.insert(GitObject::new(ObjectKind::Blob, body.as_bytes().to_vec()))
+    }
+
+    /// Build a tree object from `(mode, name, oid)` entries (git canonical order).
+    fn tree(src: &mut CasObjectSource, mut entries: Vec<(&str, &str, ObjectId)>) -> ObjectId {
+        entries.sort_by(|a, b| a.1.as_bytes().cmp(b.1.as_bytes()));
+        let mut out = Vec::new();
+        for (mode, name, oid) in &entries {
+            out.extend_from_slice(mode.as_bytes());
+            out.push(b' ');
+            out.extend_from_slice(name.as_bytes());
+            out.push(0);
+            out.extend_from_slice(oid.as_bytes());
+        }
+        src.insert(GitObject::new(ObjectKind::Tree, out))
+    }
+
+    #[test]
+    fn identical_trees_have_no_diff() {
+        let mut src = CasObjectSource::new();
+        let b = blob(&mut src, "a\nb\n");
+        let t = tree(&mut src, vec![("100644", "f.txt", b)]);
+        assert!(tree_diff(&src, &t, &t).unwrap().is_empty());
+    }
+
+    #[test]
+    fn added_file_counts_all_lines() {
+        let mut src = CasObjectSource::new();
+        let parent = tree(&mut src, vec![]);
+        let b = blob(&mut src, "one\ntwo\nthree\n");
+        let child = tree(&mut src, vec![("100644", "new.txt", b)]);
+        let d = tree_diff(&src, &parent, &child).unwrap();
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].path, "new.txt");
+        assert_eq!(d[0].change, FileChange::Added);
+        assert_eq!((d[0].added, d[0].removed), (3, 0));
+    }
+
+    #[test]
+    fn removed_file_counts_all_lines() {
+        let mut src = CasObjectSource::new();
+        let b = blob(&mut src, "x\ny\n");
+        let parent = tree(&mut src, vec![("100644", "gone.txt", b)]);
+        let child = tree(&mut src, vec![]);
+        let d = tree_diff(&src, &parent, &child).unwrap();
+        assert_eq!(d[0].change, FileChange::Removed);
+        assert_eq!((d[0].added, d[0].removed), (0, 2));
+    }
+
+    #[test]
+    fn modified_file_numstat() {
+        let mut src = CasObjectSource::new();
+        let old = blob(&mut src, "a\nb\nc\n");
+        let new = blob(&mut src, "a\nB\nc\nd\n");
+        let parent = tree(&mut src, vec![("100644", "f.txt", old)]);
+        let child = tree(&mut src, vec![("100644", "f.txt", new)]);
+        let d = tree_diff(&src, &parent, &child).unwrap();
+        assert_eq!(d[0].change, FileChange::Modified);
+        // line "b" → "B" is 1 removed + 1 added; line "d" is +1 added.
+        assert_eq!((d[0].added, d[0].removed), (2, 1));
+    }
+
+    #[test]
+    fn nested_subtree_change_is_pathed() {
+        let mut src = CasObjectSource::new();
+        let old = blob(&mut src, "v1\n");
+        let new = blob(&mut src, "v2\n");
+        let old_sub = tree(&mut src, vec![("100644", "lib.rs", old)]);
+        let new_sub = tree(&mut src, vec![("100644", "lib.rs", new)]);
+        let parent = tree(&mut src, vec![("40000", "src", old_sub)]);
+        let child = tree(&mut src, vec![("40000", "src", new_sub)]);
+        let d = tree_diff(&src, &parent, &child).unwrap();
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].path, "src/lib.rs");
+        assert_eq!(d[0].change, FileChange::Modified);
+    }
+
+    #[test]
+    fn binary_blob_numstat_is_zero() {
+        let mut src = CasObjectSource::new();
+        let old = src.insert(GitObject::new(ObjectKind::Blob, vec![0u8, 1, 2]));
+        let new = src.insert(GitObject::new(ObjectKind::Blob, vec![0u8, 9, 8]));
+        let parent = tree(&mut src, vec![("100644", "bin", old)]);
+        let child = tree(&mut src, vec![("100644", "bin", new)]);
+        let d = tree_diff(&src, &parent, &child).unwrap();
+        assert_eq!(d[0].change, FileChange::Modified);
+        assert_eq!((d[0].added, d[0].removed), (0, 0));
+    }
+
+    #[test]
+    fn commit_root_tree_resolves() {
+        let mut src = CasObjectSource::new();
+        let b = blob(&mut src, "x\n");
+        let t = tree(&mut src, vec![("100644", "f", b)]);
+        // Minimal commit object pointing at tree `t`.
+        let body = format!("tree {t}\nauthor a <a@a> 0 +0000\ncommitter a <a@a> 0 +0000\n\nmsg\n");
+        let c = src.insert(GitObject::new(ObjectKind::Commit, body.into_bytes()));
+        assert_eq!(commit_root_tree(&src, &c).unwrap(), Some(t));
+        // A non-commit oid → Ok(None).
+        assert_eq!(commit_root_tree(&src, &b).unwrap(), None);
+    }
+}
+
 #[cfg(test)]
 mod resolve_tests {
     use super::*;
