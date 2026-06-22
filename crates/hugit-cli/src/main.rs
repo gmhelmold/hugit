@@ -31,6 +31,7 @@ use hugit_cli::fleet::{self, FleetArgs};
 use hugit_cli::impact::{ImpactQuery, compute_impact};
 use hugit_cli::intent::{self, IntentArgs};
 use hugit_cli::issue::{self, IssueArgs};
+use hugit_cli::land::{self, LandArgs};
 use hugit_cli::ledger::{self, LedgerArgs};
 use hugit_cli::meta::{self, MetaArgs};
 use hugit_cli::note::{self, NoteArgs};
@@ -81,6 +82,8 @@ enum Command {
     Issue(IssueArgs),
     /// Pull-request lifecycle: open / queue / land / show / list / abandon.
     Pr(PrArgs),
+    /// Batch land: run the real union-test + bisect + memoize engine over the queue.
+    Land(LandArgs),
     /// Repo metadata: `meta set` records visibility + owning tenant.
     Meta(MetaArgs),
     /// Landing-queue state: show the union-batch queue.
@@ -552,6 +555,7 @@ fn main() -> ExitCode {
         Command::Intent(a) => return intent::run(a),
         Command::Issue(a) => return issue::run(a),
         Command::Pr(a) => return pr::run(a),
+        Command::Land(a) => return land::run(a),
         Command::Meta(a) => return meta::run(a),
         Command::Queue(a) => return queue::run(a),
         // `check` and `verdict` own their own exit code (the WB0 one-exit law)

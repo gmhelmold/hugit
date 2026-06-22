@@ -1301,6 +1301,14 @@ fn select_ac(args: &CheckRunArgs) -> Result<AcBackend, PorcelainError> {
     Ok(AcBackend::Local(FileAc::new(store)))
 }
 
+/// The default file-backed Action-Cache path for a `--log`: `<log>.ac`. The ONE
+/// place the local AC path is derived, shared by `check run` and `land --queue`
+/// so both warm the SAME on-disk wedge state (a `check run --store` primes a hit
+/// the batch land reads, and vice versa).
+pub fn default_ac_path(log_path: &Path) -> PathBuf {
+    with_extension(log_path, "ac")
+}
+
 /// Append `.<ext>` to a path's existing file name (so `log.json` → `log.json.ac`,
 /// never clobbering an unrelated `log.ac`).
 fn with_extension(path: &Path, ext: &str) -> PathBuf {
@@ -1371,7 +1379,7 @@ fn entry_self_hash(result: &CheckResult) -> String {
 /// inflation. Writes go through [`atomic_write`](crate::pr::filelock::atomic_write)
 /// so on-disk state is crash-consistent. Every entry is tamper-evident
 /// ([`CachedEntry`]).
-struct FileAc {
+pub struct FileAc {
     path: PathBuf,
 }
 
@@ -1380,7 +1388,7 @@ impl FileAc {
     /// itself — each `lookup`/`store` op takes the lock only for its own short
     /// critical section (the lock-poison fix), so the execute between them runs
     /// UNLOCKED.
-    fn new(path: PathBuf) -> Self {
+    pub fn new(path: PathBuf) -> Self {
         FileAc { path }
     }
 

@@ -114,9 +114,30 @@ fn verdict_json(v: Option<UnionVerdict>) -> Value {
 const STATE_MACHINE_NOTE: &str = "entry `state` projects hugit_queue's landing state machine \
                                   (queued/landable/blocked/union_fail) from the log + ledger; a \
                                   terminal `landed` entry leaves the active queue (absent here); \
-                                  the bisected minimal failing-pair is computed in-core and is not \
-                                  yet recorded as a log event (failing_pair is null until a \
-                                  queue.union_fail recorder lands) — never faked";
+                                  the bisected minimal failing-pair is recorded by `hugit land queue` \
+                                  as a queue.union_fail event (failing_pair is null until a batch \
+                                  land has localised a failure for the campaign) — never faked";
+
+/// Project the most recent bisected minimal failing pair from the log's
+/// `queue.union_fail` records (the recorder is the `hugit land queue` batch
+/// land). Scoped to `campaign` when given. Returns `{item_a,item_b}` for a
+/// genuine pair locus, `null` otherwise (no batch land yet, a single-item or
+/// unlocalised locus — never a fabricated pair).
+fn failing_pair_for(log: &hugit_refstore::EventLog, campaign: Option<&str>) -> Value {
+    log.records()
+        .iter()
+        .filter(|r| r.kind == crate::land::QUEUE_UNION_FAIL_KIND)
+        .filter_map(|r| serde_json::from_str::<Value>(&r.payload).ok())
+        .filter(|v| campaign.is_none_or(|c| v.get("campaign").and_then(Value::as_str) == Some(c)))
+        .rfind(|v| v.get("locus").and_then(Value::as_str) == Some("pair"))
+        .map(|v| {
+            json!({
+                "item_a": v.get("item_a").cloned().unwrap_or(Value::Null),
+                "item_b": v.get("item_b").cloned().unwrap_or(Value::Null),
+            })
+        })
+        .unwrap_or(Value::Null)
+}
 
 /// Project an active queue entry's landing-state-machine state from its resolved
 /// union verdict (the ledger's reject-sticky / proven fold — the SAME source the
@@ -313,13 +334,12 @@ fn show(args: &ShowArgs) -> Result<Value, PorcelainError> {
                 "state": entry_state(verdict),
                 "implicated_pr": implicated_pr,
                 // The MINIMAL FAILING PAIR from the bisect (hugit_queue's reason to
-                // exist: "exclude the failing pair, the rest proceeds"). On a
-                // union-fail the log records WHICH member is implicated (the ledger
-                // reject → `implicated_pr`), but the bisected PAIR is computed
-                // in-core and is NOT yet emitted as a log event — so it is honest
-                // `null`/`n/a` here, never a fabricated pair. Lights up the instant a
-                // `queue.union_fail` recorder lands (tracked).
-                "failing_pair": Value::Null,
+                // exist: "exclude the failing pair, the rest proceeds"). REAL the
+                // moment a `hugit land queue` batch land records a `queue.union_fail`
+                // event carrying the bisected pair (the `land` module is the
+                // recorder); `null` until a batch land has localised a failure for
+                // this campaign — honest unknown, never a fabricated pair.
+                "failing_pair": failing_pair_for(&log, Some(&campaign)),
             })
         })
         .collect();
