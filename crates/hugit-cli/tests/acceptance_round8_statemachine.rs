@@ -163,6 +163,7 @@ fn within_record_conflicting_duplicate_lens_is_refused() {
         &bin,
         &[
             "verdict",
+            "record",
             "--intent",
             "i1",
             "--log",
@@ -205,6 +206,7 @@ fn reject_is_sticky_then_clearable_cross_record() {
         &bin,
         &[
             "verdict",
+            "record",
             "--intent",
             "i1",
             "--log",
@@ -225,6 +227,7 @@ fn reject_is_sticky_then_clearable_cross_record() {
         &bin,
         &[
             "verdict",
+            "record",
             "--intent",
             "i1",
             "--log",
@@ -259,6 +262,7 @@ fn compound_rejected_campaign_refuses_clean_seal() {
         &bin,
         &[
             "verdict",
+            "record",
             "--intent",
             "i1",
             "--log",
@@ -414,15 +418,8 @@ fn sealed_campaign_is_terminal_for_pr_land_and_abandon() {
         .0,
         0
     );
+    assert_eq!(run(&bin, &["pr", "queue", "--pr", "p", "--log", logs]).0, 0);
     assert_eq!(run(&bin, &["pr", "land", "--pr", "p", "--log", logs]).0, 0);
-    assert_eq!(
-        run(
-            &bin,
-            &["pr", "land", "--pr", "p", "--settle", "--log", logs]
-        )
-        .0,
-        0
-    );
     assert_eq!(
         run(
             &bin,
@@ -433,7 +430,7 @@ fn sealed_campaign_is_terminal_for_pr_land_and_abandon() {
     );
 
     // land (re-queue) into sealed → refused.
-    let (c, out) = run(&bin, &["pr", "land", "--pr", "p", "--log", logs]);
+    let (c, out) = run(&bin, &["pr", "queue", "--pr", "p", "--log", logs]);
     assert_eq!(c, 2, "post-seal pr land must refuse: {out}");
     assert!(out.contains("campaign_sealed"), "{out}");
 

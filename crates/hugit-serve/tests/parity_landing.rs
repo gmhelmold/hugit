@@ -19,14 +19,15 @@ fn push(log: &mut EventLog, kind: &str, payload: serde_json::Value, at: u64) {
     log.append_for_test(kind, vec!["test".to_string()], payload.to_string(), at);
 }
 
-/// Collect every lone `PrCardVm` across all columns of a `LandingVm`.
+/// Collect every `PrCardVm` across all columns of a `LandingVm` — both lone
+/// cards AND cards bundled under a campaign.
 fn all_cards(vm: &LandingVm) -> Vec<&PrCardVm> {
     vm.columns
         .iter()
         .flat_map(|c| c.items.iter())
-        .filter_map(|item| match item {
-            LandingItemVm::Card(c) => Some(c.as_ref()),
-            _ => None,
+        .flat_map(|item| match item {
+            LandingItemVm::Card(c) => vec![c.as_ref()],
+            LandingItemVm::Bundle { cards, .. } => cards.iter().collect(),
         })
         .collect()
 }
@@ -217,6 +218,8 @@ fn landing_item_card_round_trips_externally_tagged() {
             conflict_note: None,
             summary_diff: None,
         },
+        queue_position: Some(2),
+        eta_seconds: None,
     };
     let item = LandingItemVm::Card(Box::new(card));
 
@@ -236,4 +239,67 @@ fn landing_item_card_round_trips_externally_tagged() {
         files: vec![],
         hunks: vec![],
     };
+}
+
+// ── F5: queue_position and eta_seconds ────────────────────────────────────────
+
+/// F5: empty log → no PR cards at all (so no per-PR `queue_position`).
+#[test]
+fn empty_log_has_no_cards_so_no_queue_position() {
+    let log = EventLog::new();
+    let vm = build_landing(&log, "hugit");
+    assert!(
+        all_cards(&vm).is_empty(),
+        "an empty log projects no PR cards"
+    );
+}
+
+/// F5: a PR that is queued via `pr.queued` → `queue_position` is `Some(1)` (the
+/// head of the active queue). `eta_seconds` stays `None` (honest).
+#[test]
+fn queued_pr_makes_queue_position_some() {
+    let mut log = EventLog::new();
+
+    // Open a PR (mirror the projected-card payload shape).
+    push(
+        &mut log,
+        "pr.opened",
+        serde_json::json!({
+            "pr_id": "42",
+            "campaign": "wave-f5",
+            "author_kind": "orchestrator",
+            "intent_ids": ["i-1"],
+            "principal": serde_json::Value::Null,
+            "run_id": "r-1",
+        }),
+        1_000,
+    );
+
+    // Queue the PR (pr.queued — the `all_pr_queued` seam reads this record kind).
+    push(
+        &mut log,
+        "pr.queued",
+        serde_json::json!({
+            "pr_id": "42",
+            "item_id": "42#0",
+            "order_index": 0,
+            "mode": "union"
+        }),
+        2_000,
+    );
+
+    let vm = build_landing(&log, "hugit");
+    let card = all_cards(&vm)
+        .into_iter()
+        .find(|c| c.number == 42)
+        .expect("the queued PR projects a card");
+    assert_eq!(
+        card.queue_position,
+        Some(1),
+        "the queued PR's card carries its 1-based queue_position"
+    );
+    assert_eq!(
+        card.eta_seconds, None,
+        "eta_seconds stays None (no estimator)"
+    );
 }

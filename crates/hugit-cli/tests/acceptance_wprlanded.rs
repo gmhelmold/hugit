@@ -142,7 +142,7 @@ fn full_path_open_intent_pr_land_settle_then_campaign_close_via_landed() {
     let log_s = log.to_str().unwrap();
 
     // pr land → enqueue (pr.queued), still in-flight.
-    let (code, v) = run(&["pr", "land", "--log", log_s, "--pr", &pr_id]);
+    let (code, v) = run(&["pr", "queue", "--log", log_s, "--pr", &pr_id]);
     assert_eq!(code, Some(0), "pr land enqueues: {v}");
     assert_eq!(v["queued"], true, "{v}");
     assert_eq!(v["already_queued"], false, "{v}");
@@ -163,7 +163,7 @@ fn full_path_open_intent_pr_land_settle_then_campaign_close_via_landed() {
     );
 
     // pr land --settle → settle the queued PR as landed (pr.landed).
-    let (code, v) = run(&["pr", "land", "--log", log_s, "--pr", &pr_id, "--settle"]);
+    let (code, v) = run(&["pr", "land", "--log", log_s, "--pr", &pr_id]);
     assert_eq!(code, Some(0), "pr land --settle settles: {v}");
     assert_eq!(v["landed"], true, "{v}");
     assert_eq!(v["already_landed"], false, "{v}");
@@ -226,12 +226,12 @@ fn settle_is_idempotent() {
     let (log, _campaign, pr_id, _intent) = seed_campaign_with_open_pr(&dir);
     let log_s = log.to_str().unwrap();
 
-    run(&["pr", "land", "--log", log_s, "--pr", &pr_id]);
-    let (code, v) = run(&["pr", "land", "--log", log_s, "--pr", &pr_id, "--settle"]);
+    run(&["pr", "queue", "--log", log_s, "--pr", &pr_id]);
+    let (code, v) = run(&["pr", "land", "--log", log_s, "--pr", &pr_id]);
     assert_eq!(code, Some(0), "first settle: {v}");
     assert_eq!(v["already_landed"], false, "{v}");
 
-    let (code, v) = run(&["pr", "land", "--log", log_s, "--pr", &pr_id, "--settle"]);
+    let (code, v) = run(&["pr", "land", "--log", log_s, "--pr", &pr_id]);
     assert_eq!(code, Some(0), "re-settle is exit 0 (idempotent): {v}");
     assert_eq!(
         v["already_landed"], true,
@@ -255,7 +255,7 @@ fn settle_refuses_a_pr_not_yet_queued() {
     let (log, _campaign, pr_id, _intent) = seed_campaign_with_open_pr(&dir);
     let log_s = log.to_str().unwrap();
 
-    let (code, v) = run(&["pr", "land", "--log", log_s, "--pr", &pr_id, "--settle"]);
+    let (code, v) = run(&["pr", "land", "--log", log_s, "--pr", &pr_id]);
     assert_eq!(
         code,
         Some(2),
@@ -276,7 +276,7 @@ fn settle_refuses_an_unknown_pr() {
     let (log, _campaign, _pr_id, _intent) = seed_campaign_with_open_pr(&dir);
     let log_s = log.to_str().unwrap();
 
-    let (code, v) = run(&["pr", "land", "--log", log_s, "--pr", "999", "--settle"]);
+    let (code, v) = run(&["pr", "land", "--log", log_s, "--pr", "999"]);
     assert_eq!(
         code,
         Some(2),
@@ -298,8 +298,8 @@ fn abandon_refuses_a_landed_pr() {
     let (log, _campaign, pr_id, _intent) = seed_campaign_with_open_pr(&dir);
     let log_s = log.to_str().unwrap();
 
+    run(&["pr", "queue", "--log", log_s, "--pr", &pr_id]);
     run(&["pr", "land", "--log", log_s, "--pr", &pr_id]);
-    run(&["pr", "land", "--log", log_s, "--pr", &pr_id, "--settle"]);
 
     let (code, v) = run(&[
         "pr", "abandon", "--log", log_s, "--pr", &pr_id, "--reason", "too late",
@@ -332,7 +332,7 @@ fn settled_pr_leaves_queue_projection() {
     let log_s = log.to_str().unwrap();
 
     // Land → queued: queue_depth should be 1.
-    let (code, v) = run(&["pr", "land", "--log", log_s, "--pr", &pr_id]);
+    let (code, v) = run(&["pr", "queue", "--log", log_s, "--pr", &pr_id]);
     assert_eq!(code, Some(0), "pr land enqueues: {v}");
     assert_eq!(v["queued"], true, "{v}");
 
@@ -345,7 +345,7 @@ fn settled_pr_leaves_queue_projection() {
     assert_eq!(entries[0]["pr_id"], pr_id, "{v}");
 
     // Settle → pr.landed.
-    let (code, v) = run(&["pr", "land", "--log", log_s, "--pr", &pr_id, "--settle"]);
+    let (code, v) = run(&["pr", "land", "--log", log_s, "--pr", &pr_id]);
     assert_eq!(code, Some(0), "pr land --settle settles: {v}");
     assert_eq!(v["landed"], true, "{v}");
     assert_eq!(v["state"], "landed", "{v}");
@@ -383,8 +383,8 @@ fn pr_show_queue_queued_false_after_settle() {
     let (log, _campaign, pr_id, _intent) = seed_campaign_with_open_pr(&dir);
     let log_s = log.to_str().unwrap();
 
+    run(&["pr", "queue", "--log", log_s, "--pr", &pr_id]);
     run(&["pr", "land", "--log", log_s, "--pr", &pr_id]);
-    run(&["pr", "land", "--log", log_s, "--pr", &pr_id, "--settle"]);
 
     let (code, v) = run(&["pr", "show", "--log", log_s, "--pr", &pr_id]);
     assert_eq!(code, Some(0), "pr show: {v}");
@@ -416,9 +416,9 @@ fn land_is_idempotent_on_a_terminal_landed_pr() {
     let log_s = log.to_str().unwrap();
 
     // open → land (queued) → settle (landed).
-    let (code, _) = run(&["pr", "land", "--log", log_s, "--pr", &pr_id]);
+    let (code, _) = run(&["pr", "queue", "--log", log_s, "--pr", &pr_id]);
     assert_eq!(code, Some(0), "pr land enqueues");
-    let (code, v) = run(&["pr", "land", "--log", log_s, "--pr", &pr_id, "--settle"]);
+    let (code, v) = run(&["pr", "land", "--log", log_s, "--pr", &pr_id]);
     assert_eq!(code, Some(0), "pr land --settle settles: {v}");
     assert_eq!(v["landed"], true, "{v}");
     assert_eq!(
@@ -436,7 +436,7 @@ fn land_is_idempotent_on_a_terminal_landed_pr() {
     );
 
     // pr land AGAIN on the landed PR — the canonical retry-on-land pattern.
-    let (code, v) = run(&["pr", "land", "--log", log_s, "--pr", &pr_id]);
+    let (code, v) = run(&["pr", "queue", "--log", log_s, "--pr", &pr_id]);
     assert_eq!(
         code,
         Some(0),

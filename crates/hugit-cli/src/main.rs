@@ -23,7 +23,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 use hugit_cli::campaign::{self, CampaignArgs};
-use hugit_cli::checks::{self, CheckArgs, ChecksArgs};
+use hugit_cli::checks::{self, CheckArgs};
 use hugit_cli::ctx::{self, CtxArgs};
 use hugit_cli::diag::{self, DiagArgs};
 use hugit_cli::export::{self, AccountState, Corpus};
@@ -31,9 +31,9 @@ use hugit_cli::fleet::{self, FleetArgs};
 use hugit_cli::impact::{ImpactQuery, compute_impact};
 use hugit_cli::intent::{self, IntentArgs};
 use hugit_cli::issue::{self, IssueArgs};
-use hugit_cli::journal::{self, JournalArgs};
 use hugit_cli::ledger::{self, LedgerArgs};
 use hugit_cli::meta::{self, MetaArgs};
+use hugit_cli::note::{self, NoteArgs};
 use hugit_cli::policy::{self, PolicyArgs};
 use hugit_cli::porcelain::PorcelainError;
 use hugit_cli::pr::{self, PrArgs};
@@ -42,7 +42,7 @@ use hugit_cli::review::{self, ReviewArgs};
 use hugit_cli::symbol::{self, SymbolArgs};
 use hugit_cli::tournament::{MAX_N_POLICY, produce_candidates};
 use hugit_cli::undo::{self, UndoArgs};
-use hugit_cli::verdict::{self, DecisionArgs, VerdictArgs};
+use hugit_cli::verdict::{self, VerdictArgs};
 use hugit_cli::watch::{self, WatchArgs};
 use hugit_cli::why::resolver::LogEntry;
 use hugit_cli::why::{WhyQuery, resolve_why};
@@ -73,48 +73,41 @@ enum Command {
     Tournament(TournamentArgs),
     /// Dump a git artifact + JSON envelope (anti-lock-in exit proof).
     Export(ExportArgs),
-    /// Campaign lifecycle: open / close (seal) / show (WP-PC1).
+    /// Campaign lifecycle: open / close (seal) / show.
     Campaign(CampaignArgs),
-    /// Intent ceremony: new / show (WP-PC2).
+    /// Intent ceremony: new / show / list.
     Intent(IntentArgs),
-    /// Issue lifecycle: transition — move an issue's state (roadmap W2).
+    /// Issue lifecycle: transition — move an issue's state.
     Issue(IssueArgs),
-    /// Pull-request lifecycle: open / land / show (WP-PC3).
+    /// Pull-request lifecycle: open / queue / land / show / list / abandon.
     Pr(PrArgs),
-    /// Repo authz metadata: `meta set` records `repo.meta` (visibility + owner_tenant).
-    /// Named `meta` (not `repo`): git 2.54's `git repo` builtin would collide (WP-X5).
+    /// Repo metadata: `meta set` records visibility + owning tenant.
     Meta(MetaArgs),
-    /// Memoized-CI checks: show / key — make the CI wedge visible (WP-WB2 stub).
-    Checks(ChecksArgs),
-    /// Landing-queue state: show — make the union-batch wedge visible (WP-WB2 stub).
+    /// Landing-queue state: show the union-batch queue.
     Queue(QueueArgs),
-    /// Run a memoized CI check for real (W-CHECK stub — the wedge EXECUTE path).
+    /// Memoized CI checks: run a check, show the hit-rate, or predict its memo key.
     Check(CheckArgs),
-    /// Convene an adversarial verdict panel (W-VERDICT stub — EXECUTE path).
+    /// Adversarial verdict: convene a review panel, or record an approve/reject.
     Verdict(VerdictArgs),
-    /// Undo an operation as a compensating event (Human-only — roadmap W3).
+    /// Undo an operation as a compensating event (human-only).
     Undo(UndoArgs),
-    /// Declarative gate management: test — preview the house gates (roadmap W3).
+    /// Declarative gate management: preview the house gates against a context.
     Policy(PolicyArgs),
-    /// Record a single-lens APPROVE verdict for an intent (roadmap W3).
-    Approve(DecisionArgs),
-    /// Record a single-lens REJECT verdict for an intent (roadmap W3).
-    Reject(DecisionArgs),
-    /// Append a session note onto the canonical log (roadmap W3).
-    Journal(JournalArgs),
+    /// Append a session note onto the canonical log.
+    Note(NoteArgs),
     /// Bisect a red check history into a structured diagnosis (read-only).
     Diag(DiagArgs),
-    /// The default forge history view: asked→done→proven per campaign (Phase D).
+    /// The default forge history view: asked → done → proven per campaign.
     Ledger(LedgerArgs),
-    /// Machine-readable fleet state: workspaces + agents, versioned schema (Phase D).
+    /// Machine-readable fleet state: workspaces + agents, versioned schema.
     Fleet(FleetArgs),
-    /// Replay the classified, redacted forge event stream (Phase D; live tail is serve).
+    /// Replay the classified, redacted forge event stream.
     Watch(WatchArgs),
-    /// Outline a local source file's symbols (W6 semantic index; serve serves it on /v1 blob).
+    /// Outline a local source file's symbols (semantic index).
     Symbol(SymbolArgs),
-    /// Short-horizon session resume (D11): `ctx resume` reconstructs from journal.note records.
+    /// Short-horizon session resume: `ctx resume` reconstructs from session notes.
     Ctx(CtxArgs),
-    /// Grounded-evidence Q&A over the log (D7): cite real check/verdict evidence or refuse.
+    /// Grounded-evidence Q&A over the log: cite real check/verdict evidence or refuse.
     Review(ReviewArgs),
 }
 
@@ -493,27 +486,41 @@ fn main() -> ExitCode {
     // structured `{"error":{"kind":"invalid_argument",…}}` envelope on stdout +
     // exit 2 as every other user/domain error.
     //
-    // NOTE (N-6): `DisplayHelpOnMissingArgumentOrSubcommand` is intentionally NOT
-    // in the exit-0 branch below. `hugit` with no subcommand is a botched dispatch
-    // from an orchestrating agent — the agent MUST receive the structured envelope
-    // + exit 2 so it can detect the error. Only `--help`/`-h` (explicitly requested
-    // help) and `--version` are real successes that stay exit 0.
+    // NOTE (N-6 + TTY ergo): `hugit` with no subcommand is context-sensitive.
+    // For a HUMAN at an interactive terminal it should be friendly — print the
+    // help and exit 0, like `git` with no args. For a MACHINE (piped/redirected
+    // stdout — an orchestrating agent's botched dispatch) the structured
+    // `{"error":{"kind":"invalid_argument",…}}` envelope + exit 2 is preserved so
+    // the agent can detect the error. We branch on `stdout().is_terminal()`.
+    // `--help`/`-h` and `--version` are always real successes (exit 0).
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {
             use clap::error::ErrorKind;
+            use std::io::IsTerminal;
             // `--help` / `--version` explicitly requested: clap renders the text
             // into the error. These are the SUCCESS path — print verbatim to stdout
-            // and exit 0.  `DisplayHelpOnMissingArgumentOrSubcommand` (no-args /
-            // missing subcommand) is NOT here — that's a usage error → exit 2.
+            // and exit 0.
             if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
                 print!("{e}");
                 return ExitCode::SUCCESS;
             }
-            // Every other clap error (missing subcommand, bad flag, bad value, …):
-            // render the canonical envelope on STDOUT + exit 2 (the one error law).
-            // `kind:"invalid_argument"` — the same stable spelling as domain
-            // validation errors (singular, unified — N-6 F-1).
+            // No subcommand at an interactive TTY: a human just typed `hugit`.
+            // Print the human help (clap renders it into the error string) and
+            // exit 0 — never spit a JSON error at a person. Only when stdout is a
+            // TTY: a piped/redirected stream is a machine and keeps the envelope.
+            if matches!(
+                e.kind(),
+                ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+            ) && std::io::stdout().is_terminal()
+            {
+                print!("{e}");
+                return ExitCode::SUCCESS;
+            }
+            // Every other clap error (missing subcommand when piped, bad flag, bad
+            // value, …): render the canonical envelope on STDOUT + exit 2 (the one
+            // error law). `kind:"invalid_argument"` — the same stable spelling as
+            // domain validation errors (singular, unified — N-6 F-1).
             let message = e
                 .to_string()
                 .trim_end_matches('\n')
@@ -546,19 +553,16 @@ fn main() -> ExitCode {
         Command::Issue(a) => return issue::run(a),
         Command::Pr(a) => return pr::run(a),
         Command::Meta(a) => return meta::run(a),
-        Command::Checks(a) => return checks::run(a),
         Command::Queue(a) => return queue::run(a),
-        // Wedge EXECUTE verbs (W0 scaffold): thin → the owning module's runner,
-        // which returns the honest NOT-IMPLEMENTED stub until W-CHECK/W-VERDICT
-        // land the bodies. They own their own exit code (the WB0 one-exit law).
-        Command::Check(a) => return checks::run_check(a),
+        // `check` and `verdict` own their own exit code (the WB0 one-exit law)
+        // and dispatch their subcommands internally (check run|show|key,
+        // verdict record|approve|reject).
+        Command::Check(a) => return checks::run(a),
         Command::Verdict(a) => return verdict::run(a),
         // Stakeholder verbs (W3) — REAL-wired, own their exit code (the one law).
         Command::Undo(a) => return undo::run(a),
         Command::Policy(a) => return policy::run(a),
-        Command::Approve(a) => return verdict::run_approve(a),
-        Command::Reject(a) => return verdict::run_reject(a),
-        Command::Journal(a) => return journal::run(a),
+        Command::Note(a) => return note::run(a),
         Command::Diag(a) => return diag::run(a),
         Command::Ledger(a) => return ledger::run(a),
         Command::Fleet(a) => return fleet::run(a),

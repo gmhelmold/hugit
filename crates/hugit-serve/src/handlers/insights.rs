@@ -262,6 +262,13 @@ fn build_cost_xray(log: &EventLog, chips: &[CampaignChipVm]) -> XrayOut {
             cache_saved: String::new(), // honest — no cache-$ seam (only %); never conflated
             first_pass: String::new(), // honest — cross-PR yield not soundly aggregable at row level
             drill_rows,
+            // F4a — raw integer fields (REAL — same source as the string fields above).
+            tokens_count: total_tokens,
+            cost_total_micros: total_micros,
+            waste_micros,
+            cache_saved_micros: 0,      // HONEST-ZERO — no cache-$ seam yet
+            spend_proof: None, // HONEST-None — pr_envelope_ref not threaded through here yet
+            cache_efficiency_pct: None, // HONEST-None — no CI-cost/cache seam yet
         });
         tokens_by_campaign.push((chip.clone(), total_tokens, cost_total));
         g_tokens += total_tokens;
@@ -281,6 +288,11 @@ fn build_cost_xray(log: &EventLog, chips: &[CampaignChipVm]) -> XrayOut {
             waste: format!("${:.2}", g_waste as f64 / 1_000_000.0),
             cache_saved: String::new(), // honest
             first_pass: String::new(),  // honest
+            // F4a — raw integer totals (REAL — same source as the string fields above).
+            tokens_count: g_tokens,
+            cost_micros: g_micros,
+            waste_micros: g_waste,
+            cache_saved_micros: 0, // HONEST-ZERO — no cache-$ seam yet
         })
     };
     XrayOut {
@@ -328,6 +340,14 @@ fn ledger_row_from_entry(entry: &LedgerEntry) -> LedgerRowVm {
         proof_note: String::new(),
         cost: String::new(),
         savings: String::new(),
+        // F4a — raw integer cost fields.
+        // HONEST-ZERO: the ledger view (`intent.landed` / `verdict.recorded`)
+        // carries no cost figures — cost lives in the PR-altitude envelope, not
+        // the per-intent ledger entry. Populate with zeroes rather than invent.
+        cost_micros: 0,
+        savings_micros: 0,
+        tokens_count: 0,
+        spend_proof: None, // HONEST-None — no intent-altitude envelope ref on the ledger entry
     }
 }
 

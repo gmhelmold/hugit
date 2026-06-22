@@ -69,7 +69,7 @@ fn write_log(path: &std::path::Path, events: &[(&str, Value)]) {
 #[test]
 fn checks_key_matches_the_engine_memo_key_primitive() {
     let (code, v) = run(&[
-        "checks",
+        "check",
         "key",
         "--tree",
         "deadbeef",
@@ -119,7 +119,7 @@ fn checks_show_aggregates_hit_rate_on_a_crafted_log() {
         ],
     );
 
-    let (code, v) = run(&["checks", "show", "--log", log.to_str().unwrap()]);
+    let (code, v) = run(&["check", "show", "--log", log.to_str().unwrap()]);
     assert_eq!(code, 0, "checks show exits 0: {v}");
     assert_eq!(v["check_count"], 4);
     assert_eq!(v["kpis"]["hits"], 3);
@@ -148,7 +148,7 @@ fn checks_show_is_honest_null_on_a_log_with_no_checks() {
     // A real log with a non-check event — checks projection must be honest-empty.
     write_log(&log, &[("pr.opened", json!({"pr_id":"1"}))]);
 
-    let (code, v) = run(&["checks", "show", "--log", log.to_str().unwrap()]);
+    let (code, v) = run(&["check", "show", "--log", log.to_str().unwrap()]);
     assert_eq!(code, 0, "checks show exits 0 on a checkless log: {v}");
     assert_eq!(v["check_count"], 0);
     assert!(v["checks"].as_array().unwrap().is_empty());
@@ -184,14 +184,7 @@ fn checks_show_scopes_to_pr_and_skips_unknown_cache_hits() {
         ],
     );
 
-    let (code, v) = run(&[
-        "checks",
-        "show",
-        "--log",
-        log.to_str().unwrap(),
-        "--pr",
-        "7",
-    ]);
+    let (code, v) = run(&["check", "show", "--log", log.to_str().unwrap(), "--pr", "7"]);
     assert_eq!(code, 0, "{v}");
     assert_eq!(v["check_count"], 2, "only PR-7 rows");
     // 1 known hit, 0 known executed (the second row's cache_hit is unknown).
@@ -230,7 +223,7 @@ fn queue_show_orders_and_groups_by_campaign() {
             &format!("i{pr}"),
         ]);
         assert_eq!(code, 0, "pr open {pr}: {v}");
-        let (code, v) = run(&["pr", "land", "--log", log_s, "--pr", pr]);
+        let (code, v) = run(&["pr", "queue", "--log", log_s, "--pr", pr]);
         assert_eq!(code, 0, "pr land {pr}: {v}");
     }
 
@@ -441,7 +434,7 @@ fn queue_show_scopes_to_one_campaign() {
             "--intent",
             &format!("i{pr}"),
         ]);
-        run(&["pr", "land", "--log", log_s, "--pr", pr]);
+        run(&["pr", "queue", "--log", log_s, "--pr", pr]);
     }
     let (code, v) = run(&["queue", "show", "--log", log_s, "--campaign", "billing"]);
     assert_eq!(code, 0, "{v}");
@@ -457,7 +450,7 @@ fn queue_show_scopes_to_one_campaign() {
 #[test]
 fn missing_log_is_the_canonical_log_not_found_envelope_exit_two() {
     for verb in [
-        vec!["checks", "show", "--log", "/no/such/log.json"],
+        vec!["check", "show", "--log", "/no/such/log.json"],
         vec!["queue", "show", "--log", "/no/such/log.json"],
     ] {
         let (code, v) = run(&verb);
@@ -478,7 +471,7 @@ fn malformed_log_is_the_canonical_parse_log_envelope_exit_two() {
     let log_s = log.to_str().unwrap();
 
     for verb in [
-        vec!["checks", "show", "--log", log_s],
+        vec!["check", "show", "--log", log_s],
         vec!["queue", "show", "--log", log_s],
     ] {
         let (code, v) = run(&verb);
@@ -527,7 +520,7 @@ fn tampered_chain_is_chain_broken_exit_two_on_checks_and_queue() {
     let log_s = log.to_str().unwrap();
 
     for verb in [
-        vec!["checks", "show", "--log", log_s],
+        vec!["check", "show", "--log", log_s],
         vec!["queue", "show", "--log", log_s],
     ] {
         let (code, v) = run(&verb);

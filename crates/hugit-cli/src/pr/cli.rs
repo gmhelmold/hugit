@@ -48,12 +48,15 @@ pub struct PrArgs {
     pub command: PrCommand,
 }
 
-/// The pr subcommand surface — `open` / `land` / `show` / `list` / `abandon`.
+/// The pr subcommand surface — `open` / `queue` / `land` / `show` / `list` /
+/// `abandon`.
 #[derive(Subcommand, Debug)]
 pub enum PrCommand {
-    /// Open a PR: bundle intents → PROPOSED (D14 author authz at the door).
+    /// Open a PR: bundle intents → PROPOSED (author authz at the door).
     Open(OpenCliArgs),
-    /// Land a PR: enter the union-testing landing queue, report position.
+    /// Queue a PR: enter the union-testing landing queue, report position.
+    Queue(QueueCliArgs),
+    /// Land a PR: settle a queued PR as terminal-LANDED (appends pr.landed).
     Land(LandCliArgs),
     /// Show a PR: intents + queue state + the F3 `pr_record` cost rollup.
     Show(ShowCliArgs),
@@ -68,16 +71,16 @@ pub enum PrCommand {
 pub struct OpenCliArgs {
     /// Path to the JSON event log (a `[EventRecord, …]` array). Created on
     /// first `open` if absent; the appended `pr.opened` is persisted back.
-    #[arg(long)]
-    log: PathBuf,
+    #[arg(long, help = crate::log_resolve::LOG_FLAG_HELP)]
+    log: Option<PathBuf>,
     /// PR id (`--pr <id>`).
     #[arg(long = "pr")]
     pr_id: String,
     /// Campaign key the PR belongs to.
     #[arg(long)]
     campaign: String,
-    /// Author kind (D14 at the door): `orchestrator` or `human`. `subagent` is
-    /// rejected — a PR author is never a subagent.
+    /// Author kind: `orchestrator` or `human`. `subagent` is rejected — a PR
+    /// author is never a subagent.
     #[arg(long = "author-kind")]
     author_kind: AuthorKindArg,
     /// Orchestrator run id (with `--author-kind orchestrator`).
@@ -94,22 +97,37 @@ pub struct OpenCliArgs {
     recorded_at: u64,
 }
 
-/// `hugit pr land` flags.
+/// `hugit pr queue` flags — enqueue a PROPOSED PR into the landing queue
+/// (appends `pr.queued`).
+#[derive(clap::Args, Debug)]
+pub struct QueueCliArgs {
+    /// Path to the JSON event log (a `[EventRecord, …]` array).
+    #[arg(long, help = crate::log_resolve::LOG_FLAG_HELP)]
+    log: Option<PathBuf>,
+    /// PR id to queue.
+    #[arg(long = "pr")]
+    pr_id: String,
+    /// Unix-ms timestamp to stamp the appended `pr.queued` event with.
+    #[arg(long = "recorded-at", default_value_t = 0)]
+    recorded_at: u64,
+}
+
+/// `hugit pr land` flags — settle an (already-queued) PR as terminal-LANDED
+/// (appends `pr.landed`, W-PRLANDED).
+///
+/// Git-proximity cleanup: this is the dedicated land-confirm step. Enqueuing is
+/// now its own verb (`pr queue`); `pr land` always settles. No boolean flag that
+/// silently changes the verb's meaning. Does NOT run the P2 union-test verdict —
+/// it is the operator/orchestrator confirmation.
 #[derive(clap::Args, Debug)]
 pub struct LandCliArgs {
     /// Path to the JSON event log (a `[EventRecord, …]` array).
-    #[arg(long)]
-    log: PathBuf,
+    #[arg(long, help = crate::log_resolve::LOG_FLAG_HELP)]
+    log: Option<PathBuf>,
     /// PR id to land.
     #[arg(long = "pr")]
     pr_id: String,
-    /// Settle the (already-queued) PR as LANDED — the explicit land-confirm
-    /// step that appends `pr.landed` (W-PRLANDED). Without it, `land` enqueues
-    /// (`pr.queued`); with it, a queued PR settles terminal-landed. Does NOT run
-    /// the P2 union-test verdict — it is the operator/orchestrator confirmation.
-    #[arg(long = "settle", default_value_t = false)]
-    settle: bool,
-    /// Unix-ms timestamp to stamp the appended `pr.queued`/`pr.landed` event with.
+    /// Unix-ms timestamp to stamp the appended `pr.landed` event with.
     #[arg(long = "recorded-at", default_value_t = 0)]
     recorded_at: u64,
 }
@@ -118,8 +136,8 @@ pub struct LandCliArgs {
 #[derive(clap::Args, Debug)]
 pub struct ShowCliArgs {
     /// Path to the JSON event log (a `[EventRecord, …]` array).
-    #[arg(long)]
-    log: PathBuf,
+    #[arg(long, help = crate::log_resolve::LOG_FLAG_HELP)]
+    log: Option<PathBuf>,
     /// PR id to show.
     #[arg(long = "pr")]
     pr_id: String,
@@ -129,8 +147,8 @@ pub struct ShowCliArgs {
 #[derive(clap::Args, Debug)]
 pub struct ListCliArgs {
     /// Path to the JSON event log (a `[EventRecord, …]` array).
-    #[arg(long)]
-    log: PathBuf,
+    #[arg(long, help = crate::log_resolve::LOG_FLAG_HELP)]
+    log: Option<PathBuf>,
     /// Only PRs of this campaign (`--campaign <key>`).
     #[arg(long)]
     campaign: Option<String>,
@@ -143,8 +161,8 @@ pub struct ListCliArgs {
 #[derive(clap::Args, Debug)]
 pub struct AbandonCliArgs {
     /// Path to the JSON event log (a `[EventRecord, …]` array).
-    #[arg(long)]
-    log: PathBuf,
+    #[arg(long, help = crate::log_resolve::LOG_FLAG_HELP)]
+    log: Option<PathBuf>,
     /// PR id to abandon.
     #[arg(long = "pr")]
     pr_id: String,
@@ -179,6 +197,7 @@ impl std::str::FromStr for AuthorKindArg {
 pub fn run(args: PrArgs) -> ExitCode {
     match args.command {
         PrCommand::Open(a) => run_open(a),
+        PrCommand::Queue(a) => run_queue(a),
         PrCommand::Land(a) => run_land(a),
         PrCommand::Show(a) => run_show(a),
         PrCommand::List(a) => run_list(a),
@@ -187,6 +206,7 @@ pub fn run(args: PrArgs) -> ExitCode {
 }
 
 fn run_open(a: OpenCliArgs) -> ExitCode {
+    let log_path = crate::log_resolve::resolve_log(a.log.clone());
     // WH-IDENT: validate identifier fields at entry — before they reach the
     // hash-chained forever-log.  Rejects empty and known-credential-prefix shapes.
     // Bare 40/64-hex keys are legitimate addresses and are allowed.
@@ -223,13 +243,13 @@ fn run_open(a: OpenCliArgs) -> ExitCode {
     // Hold the advisory exclusive lock across the whole load→mutate→persist
     // (WP-WC1): two concurrent `pr` verbs on one `--log` serialize or fail
     // `log_busy`, never clobber (TOCTOU dead). The guard drops on return.
-    let _lock = match acquire_lock(&a.log) {
+    let _lock = match acquire_lock(&log_path) {
         Ok(lock) => lock,
         Err(code) => return code,
     };
 
     // `open` is the one verb that may start from an absent log (it creates it).
-    let mut log = match load_log_or_empty(&a.log) {
+    let mut log = match load_log_or_empty(&log_path) {
         Ok(log) => log,
         Err(code) => return code,
     };
@@ -252,7 +272,45 @@ fn run_open(a: OpenCliArgs) -> ExitCode {
     };
 
     match open(&mut log, &open_args) {
-        Ok(value) => match persist_log(&a.log, &log) {
+        Ok(value) => match persist_log(&log_path, &log) {
+            Ok(()) => emit_ok(&value),
+            Err(code) => code,
+        },
+        Err(e) => emit_error(&e),
+    }
+}
+
+fn run_queue(a: QueueCliArgs) -> ExitCode {
+    let log_path = crate::log_resolve::resolve_log(a.log.clone());
+    let _lock = match acquire_lock(&log_path) {
+        Ok(lock) => lock,
+        Err(code) => return code,
+    };
+    let mut log = match load_log(&log_path) {
+        Ok(log) => log,
+        Err(code) => return code,
+    };
+    // Terminal-seal precondition (C5-F2): a PR may not be queued into a sealed
+    // campaign. Resolve the PR's campaign from its `pr.opened` record and route
+    // through the shared chokepoint. An unknown PR (no `pr.opened`) is left to
+    // the land path's own `UnknownPr` error — the seal guard is a no-op when the
+    // campaign can't be resolved.
+    if let Some(opened) = super::find_pr_opened(&log, &a.pr_id)
+        && let Err(code) = guard_campaign_not_sealed(&log, &opened.campaign)
+    {
+        return code;
+    }
+    // `pr queue` enqueues a PROPOSED PR (appends `pr.queued`) — the enqueue half
+    // of the old `pr land`. Runs the SAME guarded append + atomic-lock + persist.
+    let result = land(
+        &mut log,
+        &LandArgs {
+            pr_id: a.pr_id,
+            recorded_at: a.recorded_at,
+        },
+    );
+    match result {
+        Ok(value) => match persist_log(&log_path, &log) {
             Ok(()) => emit_ok(&value),
             Err(code) => code,
         },
@@ -261,46 +319,35 @@ fn run_open(a: OpenCliArgs) -> ExitCode {
 }
 
 fn run_land(a: LandCliArgs) -> ExitCode {
-    let _lock = match acquire_lock(&a.log) {
+    let log_path = crate::log_resolve::resolve_log(a.log.clone());
+    let _lock = match acquire_lock(&log_path) {
         Ok(lock) => lock,
         Err(code) => return code,
     };
-    let mut log = match load_log(&a.log) {
+    let mut log = match load_log(&log_path) {
         Ok(log) => log,
         Err(code) => return code,
     };
-    // Terminal-seal precondition (C5-F2): a PR may not be landed/settled into a
-    // sealed campaign. Resolve the PR's campaign from its `pr.opened` record and
-    // route through the shared chokepoint. An unknown PR (no `pr.opened`) is left
-    // to the land/settle path's own `UnknownPr` error — the seal guard is a
-    // no-op when the campaign can't be resolved.
+    // Terminal-seal precondition (C5-F2): a PR may not be settled into a sealed
+    // campaign. Resolve the PR's campaign from its `pr.opened` record and route
+    // through the shared chokepoint.
     if let Some(opened) = super::find_pr_opened(&log, &a.pr_id)
         && let Err(code) = guard_campaign_not_sealed(&log, &opened.campaign)
     {
         return code;
     }
-    // `--settle` is the land-confirm settlement step (appends `pr.landed`);
-    // without it, `land` enqueues (`pr.queued`). Both run through the SAME
-    // guarded append + atomic-lock + persist seam.
-    let result = if a.settle {
-        settle(
-            &mut log,
-            &SettleArgs {
-                pr_id: a.pr_id,
-                recorded_at: a.recorded_at,
-            },
-        )
-    } else {
-        land(
-            &mut log,
-            &LandArgs {
-                pr_id: a.pr_id,
-                recorded_at: a.recorded_at,
-            },
-        )
-    };
+    // `pr land` is now the dedicated land-confirm settlement step (appends
+    // `pr.landed`) — the settle half of the old `pr land --settle`. Runs through
+    // the SAME guarded append + atomic-lock + persist seam.
+    let result = settle(
+        &mut log,
+        &SettleArgs {
+            pr_id: a.pr_id,
+            recorded_at: a.recorded_at,
+        },
+    );
     match result {
-        Ok(value) => match persist_log(&a.log, &log) {
+        Ok(value) => match persist_log(&log_path, &log) {
             Ok(()) => emit_ok(&value),
             Err(code) => code,
         },
@@ -309,7 +356,8 @@ fn run_land(a: LandCliArgs) -> ExitCode {
 }
 
 fn run_show(a: ShowCliArgs) -> ExitCode {
-    let log = match load_log(&a.log) {
+    let log_path = crate::log_resolve::resolve_log(a.log.clone());
+    let log = match load_log(&log_path) {
         Ok(log) => log,
         Err(code) => return code,
     };
@@ -320,7 +368,8 @@ fn run_show(a: ShowCliArgs) -> ExitCode {
 }
 
 fn run_list(a: ListCliArgs) -> ExitCode {
-    let log = match load_log(&a.log) {
+    let log_path = crate::log_resolve::resolve_log(a.log.clone());
+    let log = match load_log(&log_path) {
         Ok(log) => log,
         Err(code) => return code,
     };
@@ -335,11 +384,12 @@ fn run_list(a: ListCliArgs) -> ExitCode {
 }
 
 fn run_abandon(a: AbandonCliArgs) -> ExitCode {
-    let _lock = match acquire_lock(&a.log) {
+    let log_path = crate::log_resolve::resolve_log(a.log.clone());
+    let _lock = match acquire_lock(&log_path) {
         Ok(lock) => lock,
         Err(code) => return code,
     };
-    let mut log = match load_log(&a.log) {
+    let mut log = match load_log(&log_path) {
         Ok(log) => log,
         Err(code) => return code,
     };
@@ -357,7 +407,7 @@ fn run_abandon(a: AbandonCliArgs) -> ExitCode {
         recorded_at: a.recorded_at,
     };
     match abandon(&mut log, &abandon_args) {
-        Ok(value) => match persist_log(&a.log, &log) {
+        Ok(value) => match persist_log(&log_path, &log) {
             Ok(()) => emit_ok(&value),
             Err(code) => code,
         },

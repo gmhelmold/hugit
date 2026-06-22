@@ -162,10 +162,10 @@ pub enum QueueCommand {
 /// `hugit queue show` flags.
 #[derive(clap::Args, Debug)]
 pub struct ShowArgs {
-    /// Path to the canonical JSON event log (`[EventRecord, …]`) — the one
-    /// `--log` seam every porcelain verb shares.
-    #[arg(long)]
-    pub log: PathBuf,
+    /// Path to the canonical JSON event log. Defaults to $HUGIT_LOG, else
+    /// .hugit/log.json.
+    #[arg(long, help = crate::log_resolve::LOG_FLAG_HELP)]
+    pub log: Option<PathBuf>,
     /// Optional campaign key: scope the projection to one campaign's batch.
     #[arg(long)]
     pub campaign: Option<String>,
@@ -199,7 +199,8 @@ pub fn run(args: QueueArgs) -> ExitCode {
 /// `implicated_pr` are projected from the `verdict.recorded` events via the
 /// shared [`Ledger`] (PS-6) — `null` only until a verdict covers the batch.
 fn show(args: &ShowArgs) -> Result<Value, PorcelainError> {
-    let log = load_event_log(&args.log)?;
+    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+    let log = load_event_log(&log_path)?;
 
     // The queue's own ordered projection — `pr.queued` in queue order. Sorting
     // by order_index makes the displayed order the queue's authority even if the
@@ -324,7 +325,7 @@ fn show(args: &ShowArgs) -> Result<Value, PorcelainError> {
         .collect();
 
     Ok(json!({
-        "log": args.log.display().to_string(),
+        "log": log_path.display().to_string(),
         "campaign": args.campaign,
         "queue_depth": entries.len(),
         "entries": entries,
@@ -369,7 +370,7 @@ mod tests {
         let path = dir.join("queue-seed.json");
         std::fs::write(&path, serde_json::to_vec_pretty(log.records()).unwrap()).unwrap();
         show(&ShowArgs {
-            log: path,
+            log: Some(path),
             campaign: campaign.map(str::to_string),
         })
         .unwrap()

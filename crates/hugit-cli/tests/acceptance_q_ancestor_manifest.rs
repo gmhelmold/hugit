@@ -81,6 +81,7 @@ fn key_for(def: &str, root: &Path, log: &Path, ac: &Path) -> String {
     let out = std::process::Command::new(hugit_bin())
         .args([
             "check",
+            "run",
             "--def",
             def,
             "--cmd",

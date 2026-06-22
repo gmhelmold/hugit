@@ -121,6 +121,7 @@ fn check_pr_secret_redacts_in_the_pr_id_field_no_verbatim() {
     // The Slack token is routed RAW into `--pr`, which becomes `pr_id`.
     let out = run(&[
         "check",
+        "run",
         "--def",
         "green",
         "--cmd",
@@ -294,6 +295,7 @@ fn real_digest_fields_still_survive_alongside_the_structural_scrub() {
     // A clean check computes REAL memo_key / tree_hash 64-hex content addresses.
     let out = run(&[
         "check",
+        "run",
         "--def",
         "green",
         "--cmd",

@@ -12,11 +12,15 @@
 //!   - `export/`     — `hugit export` + the exit proof (WP-E5)
 //!   - `porcelain`   — THE one error/exit law + shared JSON-on-stdout conventions
 //!     for every verb (flow + legacy) (WP-PC0 scaffold; WP-WB0 one-law convergence)
-//!   - `campaign/`   — `hugit campaign open/close/show` (WP-PC1; scaffold WP-PC0)
-//!   - `intent/`     — `hugit intent new/show` (WP-PC2; scaffold WP-PC0)
-//!   - `pr/`         — `hugit pr open/land/show` (WP-PC3; scaffold WP-PC0)
-//!   - `checks/`     — `hugit checks show/key` (WP-WB2; honest stub WP-WB0)
-//!   - `queue/`      — `hugit queue show` (WP-WB2; honest stub WP-WB0)
+//!   - `campaign/`   — `hugit campaign open/close/show/list/abandon` (WP-PC1)
+//!   - `intent/`     — `hugit intent new/show/list` (WP-PC2)
+//!   - `pr/`         — `hugit pr open/queue/land/show/list/abandon` (WP-PC3)
+//!   - `checks/`     — `hugit check run/show/key` (WP-WB2 + W-CHECK)
+//!   - `queue/`      — `hugit queue show` (WP-WB2)
+//!   - `verdict/`    — `hugit verdict record/approve/reject` (WP-D7 + W-VERDICT)
+//!   - `note/`       — `hugit note` (session note; was `journal note`)
+//!   - `init/`       — `hugit init` (logic ready; pending an X5 namespace amendment)
+//!   - `log_resolve` — the ONE shared default-`--log` resolver
 
 pub mod campaign;
 pub mod checks;
@@ -26,11 +30,14 @@ pub mod export;
 pub mod fleet;
 pub mod ident;
 pub mod impact;
+pub mod init;
 pub mod intent;
 pub mod issue;
 pub mod journal;
 pub mod ledger;
+pub mod log_resolve;
 pub mod meta;
+pub mod note;
 pub mod policy;
 pub mod porcelain;
 pub mod pr;
@@ -85,20 +92,19 @@ pub const HUGIT_VERBS: &[&str] = &[
     //            Named `meta`, not `repo`: git 2.54 added a `git repo` builtin and
     //            the WP-X5 namespace law forbids shadowing a git command, so the verb
     //            yields the name to git. The on-wire event kind stays `repo.meta`.
-    // Wedge-visibility verbs (SOTA-fix Wave B) — dispatched as honest
-    // NOT-IMPLEMENTED stubs at WB0 (clap skeletons); WB2 fills the projection.
-    // LIVE the moment main.rs routes them (the no-drift oracle asserts
-    // dispatched == registry), so they belong here, not in RESERVED.
-    "checks", // hugit checks show/key          — memoized-CI visibility (WB2)
-    "queue",  // hugit queue show               — landing-queue visibility (WB2)
-    // Wedge EXECUTE verbs (PS-1 wedge wave) — graduated from RESERVED at W0.
-    // `check` runs a memoized check for real and (with --store) records it;
-    // `verdict` records an adversarial verdict. W0 lands the VERBS into the
-    // registry + dispatch as honest NOT-IMPLEMENTED stubs (the EXECUTE bodies
-    // land per W-CHECK / W-VERDICT); LIVE the moment main.rs routes them, so the
-    // no-drift oracle requires them here, not in HUGIT_RESERVED_VERBS.
-    "check",   // hugit check --def --log [--store] — memoized CI check (W-CHECK)
-    "verdict", // hugit verdict …                   — adversarial verdict (W-VERDICT)
+    // Landing-queue visibility (SOTA-fix Wave B) — dispatched read verb.
+    "queue", // hugit queue show               — landing-queue visibility (WB2)
+    // Wedge verbs (PS-1 wedge wave). `check` is ONE verb with three subcommands
+    // (git-proximate cleanup — the old split between a top-level `check` EXECUTE
+    // and a plural `checks show|key` READ collapsed): `check run` executes a
+    // memoized check (and with --store records it), `check show` projects the
+    // hit-rate, `check key` predicts the memo key. `verdict` likewise gathers the
+    // multi-lens panel (`verdict record`) AND the single-lens stakeholder
+    // decisions (`verdict approve` / `verdict reject`) — the old top-level
+    // `approve`/`reject` verbs moved UNDER it. LIVE the moment main.rs routes
+    // them, so the no-drift oracle requires them here.
+    "check",   // hugit check run|show|key          — memoized CI check (W-CHECK)
+    "verdict", // hugit verdict record|approve|reject — adversarial verdict (W-VERDICT)
     // Issue lifecycle (roadmap W2) — graduated from RESERVED. `issue transition`
     // appends an `issue.transition` record (CLI parity with the serve verb —
     // no web-only verb). LIVE the moment main.rs routes it; the no-drift oracle requires
@@ -112,14 +118,13 @@ pub const HUGIT_VERBS: &[&str] = &[
     // them here, not in HUGIT_RESERVED_VERBS.
     "undo",   // hugit undo --log --seq [--actor]   — event-sourced compensating undo
     "policy", // hugit policy test --context        — local≡forge gate preview
-    // Stakeholder + session verbs (roadmap W3) — graduated from RESERVED, REAL.
-    // `approve`/`reject` record a single-lens `verdict.recorded` via the SAME
-    // path `hugit verdict` uses (parity with the serve POST /prs/{n}/verdict);
-    // `journal note` appends a `journal.note` record onto the canonical log. LIVE
-    // the moment main.rs routes them; the no-drift oracle requires them here.
-    "approve", // hugit approve --intent --log       — record a single-lens approve
-    "reject",  // hugit reject --intent --log        — record a single-lens reject
-    "journal", // hugit journal note --log --note     — append a session note
+    // Session note (roadmap W3) — graduated from RESERVED, REAL. `note` appends a
+    // `journal.note` record onto the canonical log (git-proximate cleanup: this
+    // was `journal note`; a session note is a single frequent action, so it is a
+    // top-level verb — the on-wire `journal.note` kind is unchanged). LIVE the
+    // moment main.rs routes it; the no-drift oracle requires it here. (The
+    // single-lens approve/reject decisions moved under `verdict` — see above.)
+    "note", // hugit note --log --note            — append a session note
     // Diagnosis verb (roadmap W) — graduated from RESERVED, REAL. `diag` drives
     // the hugit-diag bisect engine over a log-backed CheckOracle projected from
     // `check.recorded` events — read-only structured diagnosis. LIVE the moment

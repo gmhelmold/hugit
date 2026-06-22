@@ -61,6 +61,7 @@ fn run_check(root: &Path, log: &Path, ac: &Path) -> (i32, Value) {
     let out = Command::new(hugit_bin())
         .args([
             "check",
+            "run",
             "--def",
             "adhoc-n1",
             "--cmd",

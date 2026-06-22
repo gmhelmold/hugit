@@ -35,13 +35,14 @@ use super::show::{pr_list, progress_counts};
 use super::world::{KIND_CAMPAIGN_CLOSED, World, append_authorized_and_persist};
 
 pub fn run(args: CloseArgs) -> Result<String, CampaignError> {
+    let log_path = crate::log_resolve::resolve_log(args.log.clone());
     // Lock BEFORE the load and hold it across the whole load→mutate→persist
     // (WF-CLI2 bug 2). `close` is a read-must-exist mutation: a missing `--log`
     // is `log_not_found`/exit-2, never a bootstrapped empty world that would let
     // a `campaign.closed` ghost-record be created from nothing for a campaign
     // that never had a `campaign.opened` (WF-CLI2 bug 1) — so it loads with
     // `bootstrap = false`.
-    let (lock, world) = World::lock_and_load(&args.log, false)?;
+    let (lock, world) = World::lock_and_load(&log_path, false)?;
     let key = &args.campaign;
 
     let phases = world.pr_phases(key);
@@ -204,7 +205,7 @@ pub fn run(args: CloseArgs) -> Result<String, CampaignError> {
     append_authorized_and_persist(
         &lock,
         &world,
-        &args.log,
+        &log_path,
         KIND_CAMPAIGN_CLOSED,
         &owner,
         payload,

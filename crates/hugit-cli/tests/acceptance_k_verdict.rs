@@ -91,7 +91,7 @@ fn record_verdict_lens(
 ) -> (i32, serde_json::Value) {
     let out = Command::new(hugit_bin())
         .args([
-            "verdict", "--log", log_s, "--store", "--intent", intent_id, "--lens", lens,
+            "verdict", "record", "--log", log_s, "--store", "--intent", intent_id, "--lens", lens,
             "--result", result,
         ])
         .output()

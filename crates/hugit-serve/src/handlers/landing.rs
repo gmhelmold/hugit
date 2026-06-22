@@ -277,6 +277,10 @@ fn build_card(
             conflict_note: None,                     // STUB
             summary_diff: None,                      // STUB
         },
+        // F5: this PR's 1-based queue position (REAL from pr.queued order_index;
+        // None when not actively queued). Matches the `list_badge` "na fila #N".
+        queue_position: pos.map(|p| (p + 1) as u32),
+        eta_seconds: None, // HONEST-None — no timing estimator seam yet
     }
 }
 

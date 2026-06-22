@@ -43,7 +43,7 @@ use crate::porcelain::PorcelainError;
 /// provenance the executor carries: `name`, `cache_hit` (bool), `pr_id`.
 ///
 /// **Producer (frozen at W0): `hugit check --store` — the W-CHECK EXECUTE
-/// path** ([`run_check`]). Until W-CHECK lands the recorder body, no porcelain
+/// path** (`check run`). Until W-CHECK lands the recorder body, no porcelain
 /// verb appends this kind — the local executor (`hugit_checks::run_memoized`)
 /// returns its `CheckOutcome` in-process. This read is therefore honest-empty on
 /// today's logs and live the instant `check --store` records onto the log.
@@ -51,16 +51,25 @@ use crate::porcelain::PorcelainError;
 /// is the forward contract the recorder targets.
 pub const CHECK_RECORDED_KIND: &str = "check.recorded";
 
-/// `hugit checks <subcommand>` — memoized-CI visibility (WP-WB2).
+/// `hugit check <subcommand>` — the memoized-CI verb: `run` (execute), `show`
+/// (project hit-rate), `key` (predict the memo key).
+///
+/// Git-proximate cleanup: the old split between a top-level `check` (execute) and
+/// a separate plural `checks show|key` (read) was two verbs for one concept. They
+/// are now ONE verb with three subcommands — `run` is the EXECUTE path, `show`
+/// and `key` are the reads. (`hugit check` with no subcommand is a usage error,
+/// like `git remote` with no subcommand.)
 #[derive(clap::Args, Debug)]
-pub struct ChecksArgs {
+pub struct CheckArgs {
     #[command(subcommand)]
-    pub command: ChecksCommand,
+    pub command: CheckCommand,
 }
 
-/// The checks subcommand surface — `show` / `key`.
+/// The check subcommand surface — `run` (execute) / `show` / `key`.
 #[derive(Subcommand, Debug)]
-pub enum ChecksCommand {
+pub enum CheckCommand {
+    /// Run a memoized CI check for real; with --store, record it onto the log.
+    Run(CheckRunArgs),
     /// Show the memoized-CI hit-rate + per-check rows for a log/target.
     Show(ShowArgs),
     /// Compute the content memo key a check resolves to (predict cache behavior).
@@ -70,10 +79,10 @@ pub enum ChecksCommand {
 /// `hugit checks show` flags.
 #[derive(clap::Args, Debug)]
 pub struct ShowArgs {
-    /// Path to the canonical JSON event log (`[EventRecord, …]`) — the one
-    /// `--log` seam every porcelain verb shares.
-    #[arg(long)]
-    pub log: PathBuf,
+    /// Path to the canonical JSON event log. Defaults to $HUGIT_LOG, else
+    /// .hugit/log.json.
+    #[arg(long, help = crate::log_resolve::LOG_FLAG_HELP)]
+    pub log: Option<PathBuf>,
     /// Optional PR id: scope the projection to checks recorded for one PR.
     #[arg(long)]
     pub pr: Option<String>,
@@ -95,39 +104,40 @@ pub struct KeyArgs {
     pub toolchain: String,
 }
 
-/// Dispatch a `checks` subcommand, emitting stable JSON on stdout and returning
+/// Dispatch a `check` subcommand, emitting stable JSON on stdout and returning
 /// the process exit code under the WB0 one-exit-code law.
-pub fn run(args: ChecksArgs) -> ExitCode {
-    let result = match args.command {
-        ChecksCommand::Show(a) => show(&a),
-        ChecksCommand::Key(a) => Ok(key(&a)),
-    };
-    emit(result)
+pub fn run(args: CheckArgs) -> ExitCode {
+    match args.command {
+        CheckCommand::Run(a) => emit(run::run(&a)),
+        CheckCommand::Show(a) => emit(show(&a)),
+        CheckCommand::Key(a) => emit(Ok(key(&a))),
+    }
 }
 
-/// `hugit check` flags — the wedge EXECUTE path (W-CHECK).
+/// `hugit check run` flags — the wedge EXECUTE path (W-CHECK).
 ///
-/// This is the top-level `check` verb (distinct from the `checks show/key` READ
-/// subcommands above). It runs a single memoized check for real: resolve the
+/// This is the `check run` subcommand (distinct from the `check show`/`check key`
+/// READ subcommands above). It runs a single memoized check for real: resolve the
 /// three-axis memo key, look up the AC, execute on a miss, and — with `--store`
 /// — record a [`CHECK_RECORDED_KIND`] event onto the canonical `--log` so the
-/// `checks show` read can project it.
+/// `check show` read can project it.
 ///
 /// W0 froze the seam `--def --log [--store]`; W-INT ports the W-CHECK executor
 /// body in behind it and adds the *additive* run-shaping flags (`--cmd`,
 /// `--root`, `--toolchain`, `--pr`, `--principal`, `--ac`) — all optional, so
 /// the frozen `--def --log [--store]` contract is unchanged.
 #[derive(clap::Args, Debug)]
-pub struct CheckArgs {
+pub struct CheckRunArgs {
     /// Check-definition name to run. A built-in (`fmt` / `clippy` / `test`)
     /// resolves to its frozen gate command; any other name is an ad-hoc check
     /// that REQUIRES `--cmd`.
     #[arg(long)]
     pub def: String,
-    /// Path to the canonical JSON event log — the shared `--log` seam. The
-    /// run's memo lookup/result is read from / (with `--store`) recorded to it.
-    #[arg(long)]
-    pub log: PathBuf,
+    /// Path to the canonical JSON event log. Defaults to $HUGIT_LOG, else
+    /// .hugit/log.json. The run's memo lookup/result is read from / (with
+    /// `--store`) recorded to it.
+    #[arg(long, help = crate::log_resolve::LOG_FLAG_HELP)]
+    pub log: Option<PathBuf>,
     /// Record the [`hugit_contracts::CheckResult`] onto the log as a
     /// `check.recorded` event (the recorder seam `checks show` projects from).
     /// Omit to run without persisting (a dry memoized check).
@@ -151,7 +161,7 @@ pub struct CheckArgs {
     #[arg(long)]
     pub pr: Option<String>,
     /// The principal recording the check (default `orchestrator:hugit` — fleet/CI
-    /// provenance). Routed through the D14 guard at `Endpoint::Push`.
+    /// provenance). Routed through the append authorization guard.
     #[arg(long)]
     pub principal: Option<String>,
     /// The local file-backed Action Cache path. Defaults to `<log>.ac` so a warm
@@ -166,7 +176,7 @@ pub struct CheckArgs {
     #[arg(long)]
     pub timeout_secs: Option<u64>,
     /// Declare a custom environment variable this check legitimately depends on
-    /// (PS-11, repeatable). The hermetic spawn CLEARS every ambient var not on the
+    /// (repeatable). The hermetic spawn CLEARS every ambient var not on the
     /// built-in result-affecting allowlist (RUSTFLAGS, CARGO_*, …), so an ad-hoc
     /// `--cmd` check that reads a CUSTOM var (e.g. `MY_GATE_MODE`) would otherwise
     /// see it UNSET. Naming it with `--env-axis MY_GATE_MODE` (a) folds it into the
@@ -178,17 +188,12 @@ pub struct CheckArgs {
     pub env_axis: Vec<String>,
 }
 
-/// `hugit check` — run a memoized CI check for real (W-CHECK EXECUTE path).
-///
-/// Resolves the def, snapshots the tree subtree, runs it through the engine's
-/// own [`hugit_checks::client::executor::run_memoized`] over a file-backed local
-/// Action Cache (cross-process so a warm re-run is a real HIT), and — with
-/// `--store` — appends a [`CHECK_RECORDED_KIND`] event onto the canonical `--log`
-/// through the same guarded/atomic seam every porcelain verb shares. The result
-/// (cache verdict + memo key + the wedge's local/saved wall-clock split) is
-/// stable JSON on stdout; any fault is the canonical `{"error":{…}}` envelope.
-pub fn run_check(args: CheckArgs) -> ExitCode {
-    emit(run::run(&args))
+impl CheckRunArgs {
+    /// The resolved `--log` path: the explicit flag, else `$HUGIT_LOG`, else the
+    /// conventional `.hugit/log.json` (the ONE shared resolver).
+    pub fn log_path(&self) -> PathBuf {
+        crate::log_resolve::resolve_log(self.log.clone())
+    }
 }
 
 /// Emit a `Result<Value, PorcelainError>` as stable JSON on stdout under the one
@@ -370,7 +375,8 @@ impl CheckRow {
 /// When no checks were ever recorded, the rows are `[]` and the KPIs are honest
 /// nulls with a disclosing `note` — never a fabricated hit-rate.
 fn show(args: &ShowArgs) -> Result<Value, PorcelainError> {
-    let log = load_event_log(&args.log)?;
+    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+    let log = load_event_log(&log_path)?;
 
     let rows: Vec<CheckRow> = log
         .records()
@@ -399,7 +405,7 @@ fn show(args: &ShowArgs) -> Result<Value, PorcelainError> {
     });
 
     let mut out = json!({
-        "log": args.log.display().to_string(),
+        "log": log_path.display().to_string(),
         "pr": args.pr,
         "check_count": rows.len(),
         "checks": row_json,
@@ -551,6 +557,14 @@ pub fn load_event_log(path: &Path) -> Result<EventLog, PorcelainError> {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Git-proximate auto-init: a fresh repo has no `.hugit/log.json` yet.
+            // When the path is the conventional default, treat an absent log as
+            // an EMPTY log (honest "nothing recorded yet") rather than erroring —
+            // no `init` ceremony to start using hugit. An explicit, non-default
+            // `--log <path>` that's missing is still a hard error (likely a typo).
+            if path == std::path::Path::new(crate::log_resolve::DEFAULT_LOG_PATH) {
+                return Ok(EventLog::new());
+            }
             return Err(PorcelainError::log_not_found(path));
         }
         Err(e) => return Err(PorcelainError::io("read log", path, &e)),
@@ -611,6 +625,26 @@ mod tests {
         assert_eq!(v["axes"]["tree_hash"], "aa");
         assert_eq!(v["axes"]["def_digest"], "bb");
         assert_eq!(v["axes"]["toolchain_digest"], "cc");
+    }
+
+    #[test]
+    fn absent_default_log_is_an_empty_log_not_an_error() {
+        // Git-proximate auto-init: the conventional default path, when absent,
+        // loads as an empty log (no `init` ceremony). An explicit missing path
+        // is still a hard error (likely a typo).
+        let default = std::path::Path::new(crate::log_resolve::DEFAULT_LOG_PATH);
+        assert!(
+            !default.exists(),
+            "test precondition: no .hugit/log.json in cwd"
+        );
+        let log = load_event_log(default).expect("absent default → empty, not error");
+        assert_eq!(log.records().len(), 0);
+
+        let explicit = std::path::Path::new("does/not/exist/zzz-explicit.json");
+        assert!(
+            load_event_log(explicit).is_err(),
+            "an explicit, missing, non-default path must still error"
+        );
     }
 
     #[test]
@@ -769,7 +803,7 @@ mod tests {
         std::fs::write(&log_path, serde_json::to_vec_pretty(log.records()).unwrap()).unwrap();
 
         let out = show(&ShowArgs {
-            log: log_path,
+            log: Some(log_path),
             pr: None,
         })
         .unwrap();

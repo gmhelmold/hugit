@@ -38,10 +38,10 @@ pub const JOURNAL_NOTE_KIND: &str = "journal.note";
 /// Arguments for `hugit journal note`.
 #[derive(clap::Args, Debug)]
 pub struct NoteArgs {
-    /// Path to the JSON event log (`[EventRecord, …]`). Read, then rewritten with
-    /// the appended `journal.note` record.
-    #[arg(long)]
-    pub log: PathBuf,
+    /// Path to the JSON event log. Defaults to $HUGIT_LOG, else .hugit/log.json.
+    /// Read, then rewritten with the appended `journal.note` record.
+    #[arg(long, help = crate::log_resolve::LOG_FLAG_HELP)]
+    pub log: Option<PathBuf>,
 
     /// The note text (free text — scrubbed before persisting).
     #[arg(long)]
@@ -51,11 +51,11 @@ pub struct NoteArgs {
     #[arg(long)]
     pub principal: Option<String>,
 
-    /// Optional workspace id binding (D11 `JournalKey.workspace_id`).
+    /// Optional workspace id this note is bound to.
     #[arg(long)]
     pub workspace: Option<String>,
 
-    /// Optional intent id binding (D11 `JournalKey.intent_id`).
+    /// Optional intent id this note is bound to.
     #[arg(long)]
     pub intent: Option<String>,
 }
@@ -101,10 +101,13 @@ fn do_run(args: NoteArgs) -> Result<String, CampaignError> {
     let workspace = args.workspace.as_deref().map(crate::redaction::scrub);
     let intent = args.intent.as_deref().map(crate::redaction::scrub);
 
+    // Resolve the default --log ($HUGIT_LOG → .hugit/log.json) once.
+    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+
     // ── Lock BEFORE load (WC1) — bootstrap=false: a note requires an existing log
     // (a missing --log is `log_not_found`/exit-2, never a ghost record). `_lock`
     // is held across append→persist until scope end.
-    let (_lock, world) = World::lock_and_load(&args.log, false)?;
+    let (_lock, world) = World::lock_and_load(&log_path, false)?;
 
     // ── Build + scrub payload (the WG/WH-SCRUB structural seam) ──────────────
     // Mirror the D11 JournalEntry/JournalKey semantic fields; omit absent
@@ -143,7 +146,7 @@ fn do_run(args: NoteArgs) -> Result<String, CampaignError> {
         })?;
 
     // ── Atomic persist (WC1) ──────────────────────────────────────────────────
-    persist_log(&args.log, &log)?;
+    persist_log(&log_path, &log)?;
 
     // ── Stable JSON success envelope (echo the SCRUBBED values) ───────────────
     let mut out = json!({ "kind": JOURNAL_NOTE_KIND, "seq": record.seq, "principal": principal });
@@ -191,7 +194,7 @@ mod tests {
         let before = records(&log).len();
 
         let result = do_run(NoteArgs {
-            log: log.clone(),
+            log: Some(log.clone()),
             note: "read 3 files, drafted the plan".to_string(),
             principal: None,
             workspace: None,
@@ -217,7 +220,7 @@ mod tests {
     fn optional_bindings_round_trip() {
         let log = scratch("bindings");
         let result = do_run(NoteArgs {
-            log: log.clone(),
+            log: Some(log.clone()),
             note: "started session".to_string(),
             principal: Some("agent:worker-1".to_string()),
             workspace: Some("ws-7".to_string()),
@@ -241,7 +244,7 @@ mod tests {
         let log = scratch("empty");
         let before = records(&log).len();
         let err = do_run(NoteArgs {
-            log: log.clone(),
+            log: Some(log.clone()),
             note: "   ".to_string(),
             principal: None,
             workspace: None,
@@ -264,7 +267,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let absent = dir.join("no-such.json");
         let err = do_run(NoteArgs {
-            log: absent,
+            log: Some(absent),
             note: "note".to_string(),
             principal: None,
             workspace: None,
@@ -280,7 +283,7 @@ mod tests {
         let log = scratch("redact");
         let pat = "ghp_16C7e42F292c6912E7710c838347Ae178B4a";
         let result = do_run(NoteArgs {
-            log: log.clone(),
+            log: Some(log.clone()),
             note: format!("token is {pat}"),
             principal: None,
             workspace: None,

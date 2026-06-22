@@ -121,6 +121,17 @@ pub struct PrCardVm {
     #[serde(default)]
     pub landed_ago: String,
     pub drawer: PrDrawerVm,
+
+    // F5 — per-PR queue wedge fields (additive; serde-default so old clients ignore them).
+    /// This PR's 1-based position in the active landing queue (matches the
+    /// `list_badge` "na fila #N"). REAL from the `pr.queued` order_index; `None`
+    /// when this PR is not actively queued.
+    #[serde(default)]
+    pub queue_position: Option<u32>,
+    /// Estimated seconds until this PR lands. Honest-`None` until a real estimator
+    /// seam exists (no timing seam yet).
+    #[serde(default)]
+    pub eta_seconds: Option<u64>,
 }
 
 /// A column item: a lone PR card or a campaign bundle of cards. Externally
@@ -233,5 +244,15 @@ mod tests {
         let reparsed: LandingVm =
             serde_json::from_str(&serde_json::to_string(&vm).unwrap()).unwrap();
         assert_eq!(vm, reparsed, "LandingVm round-trip is lossless");
+        // F5: canonical JSON has no per-PR queue_position/eta_seconds — they
+        // default to None on the PR card.
+        assert_eq!(
+            card.queue_position, None,
+            "PrCardVm.queue_position defaults to None when absent from JSON"
+        );
+        assert_eq!(
+            card.eta_seconds, None,
+            "PrCardVm.eta_seconds defaults to None when absent from JSON"
+        );
     }
 }

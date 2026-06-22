@@ -44,6 +44,20 @@ pub struct ChecksHeroVm {
     pub cached_label: String,
 }
 
+/// The bisected conflicting intent/PR pair.
+///
+/// F5 additive field on [`ChecksCulpritVm`]: the two intent or PR ids whose
+/// combination caused the conflict, identified by `hugit land --queue`'s
+/// minimal-failing-pair bisect. Honest-`None` until `hugit land --queue`
+/// records it (a later wave).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConflictPairVm {
+    /// Id of the first conflicting intent/PR.
+    pub a: String,
+    /// Id of the second conflicting intent/PR.
+    pub b: String,
+}
+
 /// The culprit card (checks v2 red state).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChecksCulpritVm {
@@ -57,6 +71,12 @@ pub struct ChecksCulpritVm {
     pub culprit_file: String,
     pub culprit_hunk: HunkVm,
     pub bisect: BisectVm,
+
+    // F5 — conflict pair (additive; serde-default so old clients ignore it).
+    /// The bisected conflicting intent/PR pair; `None` until `hugit land --queue`
+    /// records the minimal-failing pair (a later wave).
+    #[serde(default)]
+    pub conflict_pair: Option<ConflictPairVm>,
 }
 
 /// One cache-hit pill (checks v2 cpills strip).
@@ -137,5 +157,68 @@ mod tests {
         let reparsed: ChecksVm =
             serde_json::from_str(&serde_json::to_string(&vm).unwrap()).unwrap();
         assert_eq!(vm, reparsed, "ChecksVm round-trip is lossless");
+    }
+
+    /// F5: `ChecksCulpritVm.conflict_pair` is `None` when absent from JSON (honest-null
+    /// path). Existing JSON without the new field must still deserialize cleanly (backward
+    /// compat for the live githugr window).
+    #[test]
+    fn checks_culprit_conflict_pair_defaults_to_none() {
+        // Minimal culprit JSON without conflict_pair (old-client shape).
+        let old_json = r#"{
+            "check_name": "cargo test -p q",
+            "failed_note": "exit 1",
+            "bisect_badge": "bisect: 3/7",
+            "log_lines": ["FAILED"],
+            "suspect_intent": "a31",
+            "suspect_charter": "add rate limit",
+            "suspect_meta": "",
+            "culprit_file": "src/lib.rs",
+            "culprit_hunk": { "file": "src/lib.rs", "header": "@@ -1 +1 @@", "lines": [] },
+            "bisect": { "culprit": "a31", "probes": 3, "max_probes": 7, "steps": [] }
+        }"#;
+        let culprit: ChecksCulpritVm =
+            serde_json::from_str(old_json).expect("old culprit JSON parses");
+        assert_eq!(
+            culprit.conflict_pair, None,
+            "conflict_pair defaults to None when absent"
+        );
+    }
+
+    /// F5: `ChecksCulpritVm.conflict_pair` round-trips when explicitly set.
+    /// This is the "real-populated" path (once `hugit land --queue` records it).
+    #[test]
+    fn checks_culprit_conflict_pair_some_round_trips() {
+        let culprit = ChecksCulpritVm {
+            check_name: "cargo test".to_string(),
+            failed_note: "exit 1".to_string(),
+            bisect_badge: "3/7".to_string(),
+            log_lines: vec![],
+            suspect_intent: "a31".to_string(),
+            suspect_charter: "add rl".to_string(),
+            suspect_meta: String::new(),
+            culprit_file: "src/lib.rs".to_string(),
+            culprit_hunk: crate::common::HunkVm {
+                file: "src/lib.rs".to_string(),
+                header: "@@ -1 +1 @@".to_string(),
+                lines: vec![],
+            },
+            bisect: BisectVm {
+                culprit: "a31".to_string(),
+                probes: 3,
+                max_probes: 7,
+                steps: vec![],
+            },
+            // real-populated (future: set by `hugit land --queue`):
+            conflict_pair: Some(ConflictPairVm {
+                a: "pr-128".to_string(),
+                b: "pr-129".to_string(),
+            }),
+        };
+        let json = serde_json::to_string(&culprit).expect("serializes");
+        let back: ChecksCulpritVm = serde_json::from_str(&json).expect("deserializes");
+        let pair = back.conflict_pair.as_ref().expect("conflict_pair Some");
+        assert_eq!(pair.a, "pr-128");
+        assert_eq!(pair.b, "pr-129");
     }
 }

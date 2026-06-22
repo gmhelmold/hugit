@@ -79,6 +79,7 @@ impl<'a> Run<'a> {
         let mut c = Command::new(hugit_bin());
         c.args([
             "check",
+            "run",
             "--def",
             "adhoc-r8",
             "--cmd",
@@ -335,6 +336,7 @@ fn stdin_is_nulled_not_inherited() {
     let mut c = Command::new(hugit_bin());
     c.args([
         "check",
+        "run",
         "--def",
         "adhoc-r8",
         "--cmd",

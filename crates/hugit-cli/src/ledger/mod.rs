@@ -42,10 +42,10 @@ const EMPTY_NOTE: &str = "no intent.landed event covers this view yet — the hi
 /// `hugit ledger` — the default forge history view (Phase D).
 #[derive(clap::Args, Debug)]
 pub struct LedgerArgs {
-    /// Path to the canonical JSON event log (`[EventRecord, …]`) — the one
-    /// `--log` seam every porcelain verb shares.
-    #[arg(long)]
-    pub log: PathBuf,
+    /// Path to the canonical JSON event log. Defaults to $HUGIT_LOG, else
+    /// .hugit/log.json.
+    #[arg(long, help = crate::log_resolve::LOG_FLAG_HELP)]
+    pub log: Option<PathBuf>,
     /// Optional campaign key: scope the projection to one campaign's history.
     #[arg(long)]
     pub campaign: Option<String>,
@@ -73,7 +73,8 @@ pub fn run(args: LedgerArgs) -> ExitCode {
 /// straight from [`Ledger`]'s own folds — so this verb is a pure presentation of
 /// the engine's authority, with no second source of truth.
 fn project(args: &LedgerArgs) -> Result<Value, PorcelainError> {
-    let log = load_event_log(&args.log)?;
+    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+    let log = load_event_log(&log_path)?;
     let ledger = Ledger::from_records(log.records());
 
     // Entries, optionally scoped to one campaign. The projection already

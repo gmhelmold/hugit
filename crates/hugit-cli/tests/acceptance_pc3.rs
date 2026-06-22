@@ -485,7 +485,7 @@ fn e2e_open_land_show_over_the_real_binary() {
     assert!(log.is_file(), "open persisted the event log");
 
     // land — enters the real queue, position 0, exit 0.
-    let (ok, landed, err) = run_pr(&["land", "--log", log_s, "--pr", "7"]);
+    let (ok, landed, err) = run_pr(&["queue", "--log", log_s, "--pr", "7"]);
     assert!(ok, "pr land must exit 0; stderr: {err}");
     assert_eq!(landed["queued"], json!(true));
     assert_eq!(landed["already_queued"], json!(false));
@@ -593,7 +593,7 @@ fn e2e_land_unknown_pr_is_structured_error_exit_two() {
     let log = dir.join("log.json");
     // An empty (but present) log: landing an unopened PR → structured unknown_pr.
     std::fs::write(&log, "[]").unwrap();
-    let (ok, j, _err) = run_pr(&["land", "--log", log.to_str().unwrap(), "--pr", "404"]);
+    let (ok, j, _err) = run_pr(&["queue", "--log", log.to_str().unwrap(), "--pr", "404"]);
     assert!(!ok, "landing an unknown PR MUST be refused");
     assert_eq!(j["error"]["kind"], json!("unknown_pr"));
 }

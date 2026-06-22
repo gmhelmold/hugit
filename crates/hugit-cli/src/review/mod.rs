@@ -43,8 +43,8 @@ use crate::verdict::qa::{Answer, EvidenceObject, EvidenceStore, QaError, answer_
 #[derive(clap::Args, Debug)]
 pub struct ReviewArgs {
     /// Path to the canonical JSON event log (`[EventRecord, …]`).
-    #[arg(long)]
-    pub log: PathBuf,
+    #[arg(long, help = crate::log_resolve::LOG_FLAG_HELP)]
+    pub log: Option<PathBuf>,
     /// The human-review question to answer by grounded retrieval.
     #[arg(long)]
     pub question: String,
@@ -70,7 +70,8 @@ pub fn run(args: ReviewArgs) -> ExitCode {
 
 /// Build the evidence store from the log and answer the question.
 fn project(args: &ReviewArgs) -> Result<Value, PorcelainError> {
-    let log = load_event_log(&args.log)?;
+    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+    let log = load_event_log(&log_path)?;
     let want_intent = args.intent.as_deref().map(scrub);
 
     let mut store = EvidenceStore::new();

@@ -50,8 +50,8 @@ const VALID_STATES: &[&str] = &["backlog", "open", "closed", "dispatch"];
 pub struct TransitionArgs {
     /// Path to the JSON event log (`[EventRecord, …]`). Read, then rewritten
     /// with the appended `issue.transition` record.
-    #[arg(long)]
-    pub log: PathBuf,
+    #[arg(long, help = crate::log_resolve::LOG_FLAG_HELP)]
+    pub log: Option<PathBuf>,
 
     /// The issue number to transition.
     #[arg(long)]
@@ -113,7 +113,8 @@ fn do_run(args: TransitionArgs) -> Result<String, CampaignError> {
     // `_lock` is held (its Drop releases) until the end of this fn scope — the
     // append→persist critical section. Underscore-prefixed so it is not read but
     // still dropped at scope end (NOT a bare `_`, which would drop immediately).
-    let (_lock, world) = World::lock_and_load(&args.log, false)?;
+    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+    let (_lock, world) = World::lock_and_load(&log_path, false)?;
 
     // ── Build + scrub payload (WG/WH-SCRUB structural seam) ──────────────────
     // `issue_id` is a numeric u32 — not a string identifier, so no identifier
@@ -158,7 +159,7 @@ fn do_run(args: TransitionArgs) -> Result<String, CampaignError> {
 
     // ── Atomic persist (WC1 — truncation-proof) ───────────────────────────────
     // `_lock` (bound above) stays held across append→persist until scope end.
-    persist_log(&args.log, &log)?;
+    persist_log(&log_path, &log)?;
 
     // ── Stable JSON success envelope ──────────────────────────────────────────
     // Use the SCRUBBED `priority` local (not raw `args.priority`) so a
@@ -236,7 +237,7 @@ mod tests {
         let before = records(&log).len();
 
         let result = do_run(TransitionArgs {
-            log: log.clone(),
+            log: Some(log.clone()),
             n: 42,
             to: "open".to_string(),
             priority: None,
@@ -265,7 +266,7 @@ mod tests {
         let log = scratch("priority");
 
         let result = do_run(TransitionArgs {
-            log: log.clone(),
+            log: Some(log.clone()),
             n: 7,
             to: "dispatch".to_string(),
             priority: Some("high".to_string()),
@@ -290,7 +291,7 @@ mod tests {
         let pat = "ghp_16C7e42F292c6912E7710c838347Ae178B4a";
 
         let result = do_run(TransitionArgs {
-            log: log.clone(),
+            log: Some(log.clone()),
             n: 1,
             to: "closed".to_string(),
             priority: Some(pat.to_string()),
@@ -321,7 +322,7 @@ mod tests {
         let before = records(&log).len();
 
         let err = do_run(TransitionArgs {
-            log: log.clone(),
+            log: Some(log.clone()),
             n: 5,
             to: "in_review".to_string(),
             priority: None,
@@ -346,7 +347,7 @@ mod tests {
         for state in VALID_STATES {
             let log = scratch(&format!("state-{state}"));
             do_run(TransitionArgs {
-                log,
+                log: Some(log),
                 n: 1,
                 to: state.to_string(),
                 priority: None,
@@ -369,7 +370,7 @@ mod tests {
         let absent = dir.join("no-such.json");
 
         let err = do_run(TransitionArgs {
-            log: absent,
+            log: Some(absent),
             n: 1,
             to: "open".to_string(),
             priority: None,
@@ -389,7 +390,7 @@ mod tests {
         let pat = "ghp_16C7e42F292c6912E7710c838347Ae178B4a";
 
         let err = do_run(TransitionArgs {
-            log,
+            log: Some(log),
             n: 1,
             to: pat.to_string(),
             priority: None,

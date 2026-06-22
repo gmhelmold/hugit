@@ -489,8 +489,8 @@ fn pr_distinct_40hex_addresses_survive_and_do_not_collapse() {
 
 fn record_verdict(log: &str, intent: &str, lens: &str) -> Output {
     run(&[
-        "verdict", "--intent", intent, "--log", log, "--store", "--lens", lens, "--result",
-        "approve",
+        "verdict", "record", "--intent", intent, "--log", log, "--store", "--lens", lens,
+        "--result", "approve",
     ])
 }
 
@@ -565,6 +565,7 @@ fn verdict_intent_and_lens_are_free_text_not_addresses() {
 fn record_verdict_tree_hash(log: &str, intent: &str, tree_hash: &str) -> Output {
     run(&[
         "verdict",
+        "record",
         "--intent",
         intent,
         "--log",
@@ -673,6 +674,7 @@ fn run_check(
 ) -> Output {
     run(&[
         "check",
+        "run",
         "--def",
         def,
         "--log",

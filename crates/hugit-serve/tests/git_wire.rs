@@ -225,12 +225,22 @@ fn info_refs_advertisement_is_well_formed() {
 
 #[test]
 fn info_refs_wrong_service_is_404() {
-    // receive-pack (push) is out of scope — never advertised.
+    // An unknown service (not upload-pack, not receive-pack) is a 404.
     let (state, _d, _s) = state_with_git("acme", "public");
     let addr = spawn(state);
-    let resp = http_get_raw(&addr, "/acme/info/refs?service=git-receive-pack");
+    let resp = http_get_raw(&addr, "/acme/info/refs?service=git-unknown-service");
     let (status, _h, _b) = split_response(&resp);
-    assert!(status.starts_with("HTTP/1.1 404"), "status: {status}");
+    assert!(
+        status.starts_with("HTTP/1.1 404"),
+        "unknown service → 404: {status}"
+    );
+    // No service param at all is also 404.
+    let resp = http_get_raw(&addr, "/acme/info/refs");
+    let (status, _h, _b) = split_response(&resp);
+    assert!(
+        status.starts_with("HTTP/1.1 404"),
+        "no service → 404: {status}"
+    );
 }
 
 // ── UNIT: upload-pack result framing ─────────────────────────────────────────
@@ -327,26 +337,67 @@ fn non_public_repo_is_404_over_git_wire() {
 }
 
 #[test]
-fn receive_pack_is_404_push_out_of_scope() {
+fn receive_pack_post_is_403_with_human_message() {
+    // Push (git-receive-pack POST) → 403 with a clear human-readable body,
+    // NOT a silent 404. The message tells the developer to use `hugit land`.
     let (state, _d, _s) = state_with_git("acme", "public");
     let addr = spawn(state);
-    // Even on a public repo, push (git-receive-pack) is not served.
     let resp = http_post_raw(
         &addr,
         "/acme/git-receive-pack",
         "application/x-git-receive-pack-request",
         b"0000",
     );
-    let (status, _h, _b) = split_response(&resp);
+    let (status, _h, body) = split_response(&resp);
     assert!(
-        status.starts_with("HTTP/1.1 404"),
-        "receive-pack (push) out of scope → 404: {status}"
+        status.starts_with("HTTP/1.1 403"),
+        "receive-pack POST → 403, got: {status}"
     );
-    let resp = http_get_raw(&addr, "/acme/info/refs?service=git-receive-pack");
-    let (status, _h, _b) = split_response(&resp);
+    let body_str = String::from_utf8_lossy(&body);
     assert!(
-        status.starts_with("HTTP/1.1 404"),
-        "receive-pack advert → 404"
+        body_str.contains("git push is not yet supported"),
+        "body must explain push is unsupported: {body_str}"
+    );
+    assert!(
+        body_str.contains("hugit land"),
+        "body must mention 'hugit land': {body_str}"
+    );
+}
+
+#[test]
+fn receive_pack_info_refs_is_403_with_human_message() {
+    // GET info/refs?service=git-receive-pack (push discovery) → 403.
+    // Previously this was a 404; now it returns a clear 403 + message.
+    let (state, _d, _s) = state_with_git("acme", "public");
+    let addr = spawn(state);
+    let resp = http_get_raw(&addr, "/acme/info/refs?service=git-receive-pack");
+    let (status, _h, body) = split_response(&resp);
+    assert!(
+        status.starts_with("HTTP/1.1 403"),
+        "receive-pack advert → 403, got: {status}"
+    );
+    let body_str = String::from_utf8_lossy(&body);
+    assert!(
+        body_str.contains("git push is not yet supported"),
+        "body must explain push is unsupported: {body_str}"
+    );
+}
+
+#[test]
+fn upload_pack_clone_still_works_after_push_403_change() {
+    // Regression: the push→403 routing change must not break clone/fetch.
+    let (state, _d, seed) = state_with_git("acme", "public");
+    let addr = spawn(state);
+    let resp = http_get_raw(&addr, "/acme/info/refs?service=git-upload-pack");
+    let (status, _h, body) = split_response(&resp);
+    assert!(
+        status.starts_with("HTTP/1.1 200"),
+        "clone still works: {status}"
+    );
+    let text = String::from_utf8_lossy(&body);
+    assert!(
+        text.contains(&seed.c2.to_string()),
+        "main tip still advertised after push-403 change"
     );
 }
 

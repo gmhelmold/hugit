@@ -245,7 +245,7 @@ fn export_missing_log_is_log_not_found() {
 #[test]
 fn checks_show_is_live_under_the_one_error_law() {
     let out = Command::new(hugit_bin())
-        .args(["checks", "show", "--log", "/tmp/wb0-no-such.json"])
+        .args(["check", "show", "--log", "/tmp/wb0-no-such.json"])
         .output()
         .expect("hugit runs");
     assert_exit_two(&out);
@@ -257,7 +257,7 @@ fn checks_show_is_live_under_the_one_error_law() {
 fn checks_key_is_live_and_computes_the_engine_memo_key() {
     let out = Command::new(hugit_bin())
         .args([
-            "checks",
+            "check",
             "key",
             "--tree",
             "aa",

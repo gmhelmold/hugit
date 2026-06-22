@@ -286,7 +286,7 @@ fn pr_show_list_land_abandon_missing_log_emit_log_not_found_exit_two() {
     );
     assert_pr_error_law(&run(&["pr", "list", "--log", a]), "log_not_found");
     assert_pr_error_law(
-        &run(&["pr", "land", "--log", a, "--pr", "1"]),
+        &run(&["pr", "queue", "--log", a, "--pr", "1"]),
         "log_not_found",
     );
     assert_pr_error_law(

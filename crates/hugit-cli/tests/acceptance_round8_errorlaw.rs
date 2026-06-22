@@ -38,7 +38,7 @@ fn run(args: &[&str]) -> (i32, String, Value, String) {
 /// An unknown flag on a real verb → the structured envelope on STDOUT, exit 2.
 #[test]
 fn unknown_flag_emits_invalid_arguments_envelope_on_stdout_exit_2() {
-    let (code, _stdout, v, _stderr) = run(&["verdict", "--bogusflag"]);
+    let (code, _stdout, v, _stderr) = run(&["verdict", "record", "--bogusflag"]);
     assert_eq!(
         code, 2,
         "clap arg error exits 2 (the user/domain error law)"

@@ -12,6 +12,7 @@ use super::output::CampaignError;
 use super::world::{KIND_CAMPAIGN_OPENED, World, append_authorized_and_persist};
 
 pub fn run(args: OpenArgs) -> Result<String, CampaignError> {
+    let log_path = crate::log_resolve::resolve_log(args.log.clone());
     // WH-IDENT: validate identifier fields at entry — BEFORE they reach the
     // hash-chained forever-log.  Identifiers are addresses, not free text;
     // WH-SCRUB exempts them from the scrub engine, so the safety MUST live here.
@@ -27,7 +28,7 @@ pub fn run(args: OpenArgs) -> Result<String, CampaignError> {
     // (WF-CLI2 bug 2: the load→lock inversion). `open` bootstraps a missing
     // `--log` (an absent log is a legitimate fresh empty world), so it loads
     // with `bootstrap = true`.
-    let (lock, world) = World::lock_and_load(&args.log, true)?;
+    let (lock, world) = World::lock_and_load(&log_path, true)?;
 
     // Redaction parity (Wave E, P-REDACT-SURFACE): scrub the user-supplied
     // free-text fields through the hardened engine BEFORE they reach the
@@ -80,7 +81,7 @@ pub fn run(args: OpenArgs) -> Result<String, CampaignError> {
     append_authorized_and_persist(
         &lock,
         &world,
-        &args.log,
+        &log_path,
         KIND_CAMPAIGN_OPENED,
         &owner,
         payload,

@@ -2,71 +2,203 @@
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-> **hug it** — the git-compatible, LLM-native forge. Embrace the community,
-> fix the workflow.
+> **hug it** — the git-compatible, LLM-native forge.
 
-## Quick start
+---
+
+## The problem it solves
+
+**Your agent fleet ships branches that are green alone and red together.**
+hugit lands them on a `main` that is always green and re-runs zero CI it has
+already paid for — on your existing GitHub repos, migrating nothing.
+
+---
+
+## First: try it now (no server needed)
+
+`hugit symbol` works standalone against any source file. Build the CLI and
+run it on itself:
 
 ```sh
 git clone https://github.com/HumanGuardrail/hugit.git
 cd hugit
 cargo build --release
-./target/release/hugit --help
+./target/release/hugit symbol --file crates/hugit-symbols/src/lib.rs
 ```
 
-**Status (2026-06-20):** A **19-package** Rust workspace. The integrity spine
-(Ed25519/SHA-256 crypto, policy engine, platform safety invariants) is
-hermetic, hardened across 13 rounds of adversarial security review, and
-genuinely solid. The engine `/v1` read+write API is **LIVE** for the hugit
-repo: 11/20 reads serve chain-verified R2 data; all 9 POST verbs are
-CAS-persisted and `authz`-gated; `git clone`/fetch logic is built and
-CI-proven (lazy git-from-CAS, boots ~5 s). **Not yet live:** anonymous git
-clone (repo is auth-gated on the deployed surface), CoreLink's live CAS+AC
-(hot-path tenant), runner fabric, GitHub App mirror, multi-tenant, `git push`.
-`main` is gated by fmt + clippy `--workspace --all-targets --locked -D
-warnings` + test + deny. See the [whitepaper](docs/whitepaper/hugit-v1.md)
-for design detail and the honest live-vs-hermetic-vs-absent status.
+You get a structured symbol outline — functions, types, impls — extracted by
+tree-sitter. Supported languages: TypeScript, JavaScript, Python, Go, Java, C,
+C++, Ruby.
 
-## What hugit is
+---
 
-A version-control + merge + CI platform designed for the way software is built
-in 2026: **orchestrated fleets of AI agents with a human in command.** Git's
-data model is kept (it is a content-addressable store with refs — exactly the
-primitive CoreLink already runs in production); git's *workflow* is rebuilt:
+## Where hugit is today
 
-- **Worktrees = workspace snapshots** — N agents = N disposable cursors over one
-  durable, content-addressed object.
-- **Conflicts are first-class objects** (the jj model, server-side) — stored,
-  never blocking.
-- **Continuous speculative merge** — conflicts surface at write time, not merge
-  time; the orchestrator's DAG is a forge primitive.
-- **Memoized checks** — a CI check is a function of the tree hash; merging N
-  green branches whose union was already tested re-runs nothing.
-- **Semantic merge** — lockfile-aware ("regenerate, don't text-merge"),
-  AST-aware, LLM-arbitrated behind a confidence gate.
-- **PRs are structured machine verdicts**, not prose threads; policy-as-code
-  gates are native.
+The integrity spine (Ed25519/SHA-256 crypto, policy engine, platform safety
+invariants) is hermetic and hardened. The `/v1` read+write API is live for
+the hugit repo itself. The rest is honest about where it stands:
 
-## What hugit is not
+| Capability | Status | What you get today |
+|---|---|---|
+| `hugit symbol` — symbol outline | **LIVE** | `hugit symbol --file <path>` against any TS/JS/Python/Go/Java/C/C++/Ruby file |
+| `hugit export` — exit guarantee | **LIVE** | full git + JSON snapshot; run `hugit export` from any repo; zero dependencies |
+| `hugit import` — bring your repo | **LIVE** | `hugit import` pulls a GitHub repo into the forge without leaving GitHub |
+| `/v1` read+write API | **LIVE (1 repo)** | 11/20 reads serve chain-verified data; 9 POST verbs CAS-persisted + authz-gated; SSE replay |
+| `hugit check` / `hugit verdict` | **LIVE** | real policy-engine EXECUTE paths; `hugit policy test` runs local≡forge |
+| `hugit verdict approve` / `hugit verdict reject` | **LIVE** | single-lens wrappers over the canonical verdict record |
+| `hugit undo` | **LIVE** | event-sourced compensating undo; force-push data-loss is unexpressible |
+| `hugit note` | **LIVE** | appends a signed record to the canonical log |
+| `hugit fleet` / `hugit ledger` / `hugit watch` | **LIVE** | real log-backed commands |
+| `hugit diag` | **LIVE** | log-backed bisect |
+| `hugit policy edit` | **LIVE** | append-only policy changes over the house baseline |
+| `git clone` / `git fetch` wire protocol | **BUILT, deploy-gated** | logic CI-proven; live once `HUGIT_SERVE_GIT_DIR` is set on a fresh deploy |
+| File-content reads (`blob` / `edit`) | **BUILT, deploy-gated** | path→blob traversal, secret-scrubbed on read; live with the same deploy |
+| `git push` (receive-pack) | **ROADMAP** | intentionally deferred; returns 404 today |
+| Union-tested landing queue | **ROADMAP** | the core landing algorithm is designed + hermetically tested; EXECUTE needs the runner fabric |
+| Memoized checks (CI dedup) | **ROADMAP** | algorithm built; requires the live runner + AC substrate |
+| Runner fabric | **ROADMAP** | spec'd and in flight in a sibling repo; hugit is anchor tenant |
+| GitHub App mirror | **ROADMAP** | bidirectional mirror design done; needs the App provisioned |
+| Multi-tenant | **ROADMAP** | single-tenant today (the hugit repo); tenancy machinery built, not provisioned |
 
-- Not a frontal attack on GitHub's social network. The compat ladder: git wire
-  protocol → ride on GitHub (the agent landing layer) → bounded bidirectional
-  mirror → authoritative forge.
-- Not a new paradigm to learn. The naming principle is the product principle:
-  **don't deviate from git** — every deviation costs human adoption and LLM
-  affinity (models are trained deeply on git).
+---
+
+## What hugit does (once fully live)
+
+For the **fleet operator** — an engineer or orchestrator running 10–50 agents
+in parallel — today's pain is: every agent ships a branch that passes its own
+CI, and they collide on merge. You spend evenings reconciling work that
+machines produced in minutes.
+
+hugit's answer is three properties working together:
+
+1. **Union-tested landing queue.** Branches enter a queue and are tested as a
+   batch *before* touching `main`. If the batch is green, they all land
+   atomically. If it's red, a log₂-depth bisect over memoized checks finds the
+   minimal failing pair in seconds; the rest of the batch lands anyway.
+   `main` is always green — by construction, not by convention.
+
+2. **Memoized checks.** A CI check is a pure function of
+   `(tree-hash, check-def, toolchain)`. The second time that exact tree is
+   checked — regardless of which branch or which agent produced it — the result
+   is a cache lookup. Zero re-execution. The structural economics: GitHub bills
+   the waste; hugit deletes it.
+
+3. **Intent + context versioning.** Every commit carries the charter that
+   produced it, the model and cost that executed it, and the claims that
+   bounded its blast radius. `git log` shows you the diff; `hugit log` shows
+   you the intent. Same store, two altitudes, always consistent.
+
+---
+
+## Safety and provenance (built, under-sold)
+
+These are real today, not roadmap:
+
+- **Event-sourced refs** — every ref mutation is an append-only log event.
+  `hugit undo` walks it backwards with a compensating event. Refs cannot be
+  force-pushed to oblivion. Data loss is structurally unexpressible.
+- **Claim fences** — a workspace materializes only the paths the intent
+  declared. Writing outside the claim is physically impossible (the file is not
+  present), not merely forbidden by policy.
+- **Model-level attestation** — every commit records which model authored it,
+  under whose instruction, at what cost. SLSA-class provenance including the
+  model layer; no forge today can express this.
+- **Policy as code** — `hugit policy edit` (append-only) + `hugit policy test`
+  (local = forge). The event log is the gate-set store; no external DB.
+- **Adversarial hardened** — 13 rounds of adversarial security review on the
+  integrity spine (Ed25519/SHA-256 crypto). Redaction at the read boundary.
+  Fail-closed boot.
+
+---
+
+## The exit guarantee
+
+```sh
+hugit export
+```
+
+Produces a full git bundle + JSON proof of every intent, verdict, and claim.
+Restore to a bare git repo on any hosting provider. No proprietary lock-in —
+the exit proof is also the disaster-recovery plan.
+
+---
+
+## Bring your existing repo
+
+```sh
+hugit import <github-org>/<repo>
+```
+
+Your GitHub repo stays where it is. hugit attaches without migration. The
+compat ladder: git wire protocol → landing layer riding on GitHub → bounded
+bidirectional mirror → authoritative forge. You climb it at your pace; a
+broken bridge kills trust, so every rung is reversible.
+
+---
+
+## How it works / Why it's cheap
+
+hugit is not a greenfield stack. It is the forge layer of **CoreLink** — a
+content-addressed storage and computation platform already in production:
+
+| Layer | What it is | Status |
+|---|---|---|
+| **CAS** | R2-backed global object store; tenant-isolated; Merkle-verified | in production |
+| **Action Cache** | memoized check results; surfaces: Bazel REAPI v2, Turborepo, sccache | in production |
+| **Workspaces** | snapshot / hydrate / run (AC-memoized) against the live API | phase 1 shipped |
+| **Runners** | ephemeral Firecracker-class compute; cache-warm boot | in flight |
+| **hugit** | intent store, landing engine, policy engine, event-log refs | this repo — see status table above |
+
+The cost physics fall out of the substrate: **zero egress (R2), global
+content-addressed dedup, memoized verification.** GitHub's revenue model bills
+the waste (per-minute CI, usage-billed AI). CoreLink's margin model deletes it.
+For GitHub to match hugit's economics it must destroy its own P&L.
+
+---
+
+## Quick CLI reference
+
+```sh
+# Inspect any file's symbol structure (works right now, no server)
+hugit symbol --file src/main.rs
+
+# Export the repo as a portable proof bundle
+hugit export
+
+# Show the intent log (forge-connected)
+hugit log
+
+# Run local policy check (forge-identical)
+hugit policy test
+
+# Undo the last event-sourced operation
+hugit undo
+```
+
+See `hugit --help` and [`docs/product/command-catalog.md`](docs/product/command-catalog.md)
+for the full verb surface.
+
+---
 
 ## Founding documents
 
-- [`docs/whitepaper/hugit-v1.md`](docs/whitepaper/hugit-v1.md) — full product
-  design: thesis, object model, algorithms, architecture, economics, risks, and
-  the phased route (§12).
+- [`docs/whitepaper/hugit-v1.md`](docs/whitepaper/hugit-v1.md) — full design:
+  thesis, object model, algorithms, architecture, economics, risks, phased route.
+- [`docs/product/product.md`](docs/product/product.md) — ICP, positioning,
+  pricing posture.
 - [`docs/adr/`](docs/adr/) — architecture decision records (context envelope,
   identity model).
 
-## Relationship to CoreLink
+---
 
-hugit is built on the CoreLink product family — the namespace, merge, and
-policy layer over the same content-addressed primitive stack: CoreLink's CAS
-(cache), runners (CI compute), and workspaces (snapshots) → **hugit (forge,
-this repo)**.
+## Gate
+
+`main` is gated by `cargo fmt --check` + `cargo clippy --workspace
+--all-targets --locked -D warnings` + `cargo test --workspace --locked` +
+`cargo deny`. CI runs on GitHub-hosted ubuntu. Docs-only pushes skip CI.
+
+---
+
+## License
+
+Apache 2.0 — see [LICENSE](LICENSE).

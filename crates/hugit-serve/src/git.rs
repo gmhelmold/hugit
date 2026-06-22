@@ -66,16 +66,18 @@ const UPLOAD_PACK: &str = "git-upload-pack";
 const ADVERTISED_CAPS: &str = "object-format=sha1 agent=hugit-serve";
 
 /// Whether `url`'s path is a git smart-HTTP route this module owns
-/// (`/<repo>/info/refs` or `/<repo>/git-upload-pack`). The main loop uses this
-/// as a pre-route short-circuit (like the SSE path) because a packfile is binary
-/// and cannot ride the `(status, String)` path.
+/// (`/<repo>/info/refs`, `/<repo>/git-upload-pack`, OR `/<repo>/git-receive-pack`).
+/// The main loop uses this as a pre-route short-circuit (like the SSE path)
+/// because a packfile is binary and cannot ride the `(status, String)` path.
+/// `git-receive-pack` (push) is included here so it receives the clear 403
+/// message instead of being swallowed by the generic 404 routing.
 #[must_use]
 pub fn is_git_path(url: &str) -> bool {
     let path = url.split('?').next().unwrap_or("");
     let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     matches!(
         segs.as_slice(),
-        [_repo, "info", "refs"] | [_repo, UPLOAD_PACK]
+        [_repo, "info", "refs"] | [_repo, UPLOAD_PACK] | [_repo, "git-receive-pack"]
     )
 }
 
@@ -92,9 +94,14 @@ pub fn respond_git(state: &AppState, method: &Method, url: &str, body: &[u8], re
     match (method, segs.as_slice()) {
         (Method::Get, [repo, "info", "refs"]) => {
             // Only the upload-pack (read) service is served. A receive-pack probe
-            // (push) — or any other/absent service — is a 404 (push is out of scope;
-            // never advertise a service we don't serve).
-            if query_param(query, "service") != Some(UPLOAD_PACK) {
+            // (push) is a 403 with a clear human message (not a silent 404) — the
+            // caller explicitly probed a service we have categorically declined.
+            // Any other/absent service is a 404 (no oracle for unknown services).
+            let svc = query_param(query, "service");
+            if svc == Some("git-receive-pack") {
+                return respond_push_forbidden(request);
+            }
+            if svc != Some(UPLOAD_PACK) {
                 return respond_not_found(request);
             }
             match advertise_refs(state, repo) {
@@ -116,8 +123,11 @@ pub fn respond_git(state: &AppState, method: &Method, url: &str, body: &[u8], re
             }
             None => respond_not_found(request),
         },
-        // Any other method/shape on a git-looking path (e.g. POST git-receive-pack
-        // — push, out of scope) → 404, no oracle.
+        // POST git-receive-pack (push) → 403 with a clear human message. Not a
+        // silent 404: the client explicitly asked to push and deserves to know why
+        // it is refused, rather than seeing a cryptic "repository not found" error.
+        (_, [_repo, "git-receive-pack"]) => respond_push_forbidden(request),
+        // Any other method/shape on a git-looking path → 404, no oracle.
         _ => respond_not_found(request),
     }
 }
@@ -352,6 +362,26 @@ fn pkt_flush(out: &mut Vec<u8>) {
 fn git_content_type(value: &str) -> Header {
     Header::from_bytes(&b"Content-Type"[..], value.as_bytes())
         .expect("static git content-type header is valid")
+}
+
+/// The human-readable body returned for push attempts. Plain text so `git`
+/// surfaces it verbatim in the terminal ("remote: …") — the most useful UX.
+const PUSH_FORBIDDEN_BODY: &str =
+    "git push is not yet supported by this engine; land changes with 'hugit land'";
+
+/// Respond 403 when a client attempts `git push` (git-receive-pack). The body
+/// is plain text because `git` echoes the remote body in the terminal, giving
+/// the developer an actionable message instead of a cryptic connection error.
+fn respond_push_forbidden(request: Request) {
+    send(
+        request,
+        Response::from_data(PUSH_FORBIDDEN_BODY.as_bytes().to_vec())
+            .with_status_code(403)
+            .with_header(
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..])
+                    .expect("static content-type"),
+            ),
+    );
 }
 
 /// Respond 404 with no body — the uniform "git serving not live / not found"

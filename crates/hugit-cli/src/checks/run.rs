@@ -58,7 +58,7 @@ use hugit_refstore::{Endpoint, EventLog, PrincipalClass};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use super::{CHECK_RECORDED_KIND, CheckArgs, load_event_log};
+use super::{CHECK_RECORDED_KIND, CheckRunArgs, load_event_log};
 use crate::porcelain::PorcelainError;
 use crate::pr::filelock::{self, FileLock, LockError};
 
@@ -463,7 +463,7 @@ fn env_manifest_axis(captured: &[(String, String)]) -> String {
 /// the memo key. (WG-CACHE: the prior `local-toolchain` CONSTANT made axis 3 fake,
 /// so a green cached under Rust A wrongly HIT under Rust B.) If `rustc` cannot be
 /// run, fall back to a distinct marker rather than fabricating a digest.
-fn resolve_toolchain_digest(args: &CheckArgs) -> String {
+fn resolve_toolchain_digest(args: &CheckRunArgs) -> String {
     if let Some(tc) = args.toolchain.clone().filter(|t| !t.trim().is_empty()) {
         return tc;
     }
@@ -509,7 +509,7 @@ fn default_toolchain_digest() -> String {
 /// `ancestor:<digest>` line; for an ad-hoc def it is empty (the `**/*` glob already
 /// makes any in-tree edit a MISS and the ancestor-config class is built-in-only).
 fn resolve_def(
-    args: &CheckArgs,
+    args: &CheckRunArgs,
     env_manifest: String,
     ancestor_config_digest: String,
 ) -> Result<CheckDef, PorcelainError> {
@@ -1293,11 +1293,11 @@ impl ActionCache for AcBackend {
 /// own lock, and `check --store`'s memo_key dedup keeps the log idempotent so a
 /// double-exec records at most ONE `check.recorded`. A live AC over HTTP needs no
 /// local lock — that arm would not take one.
-fn select_ac(args: &CheckArgs) -> Result<AcBackend, PorcelainError> {
+fn select_ac(args: &CheckRunArgs) -> Result<AcBackend, PorcelainError> {
     let store = args
         .ac
         .clone()
-        .unwrap_or_else(|| with_extension(&args.log, "ac"));
+        .unwrap_or_else(|| with_extension(&args.log_path(), "ac"));
     Ok(AcBackend::Local(FileAc::new(store)))
 }
 
@@ -1516,7 +1516,7 @@ fn validate_axis(value: &str, field_name: &str) -> Result<(), PorcelainError> {
 /// store), then — when `--store` is set — append a `check.recorded` event to the
 /// canonical log through the guarded, lock-serialized, atomic seam. Returns the
 /// stable-JSON outcome (the recorded row + the cache verdict) for the agent.
-pub fn run(args: &CheckArgs) -> Result<Value, PorcelainError> {
+pub fn run(args: &CheckRunArgs) -> Result<Value, PorcelainError> {
     // DOOR (WK-AC, primary): `--toolchain` and `--def` are memo AXES, not free
     // text — a structurally-secret value cannot be SCRUBBED at rest (it is the
     // content-address `verify_hit` recomputes the memo key from; scrubbing it
@@ -1580,8 +1580,8 @@ pub fn run(args: &CheckArgs) -> Result<Value, PorcelainError> {
     // explicit `log_not_found`/exit-2 error REGARDLESS of `--store` — a check
     // against a typo'd log is an error, never a silent dry green. (`--store` later
     // re-loads it under the lock; this is the early, store-independent guard.)
-    if !args.log.exists() {
-        return Err(PorcelainError::log_not_found(&args.log));
+    if !args.log_path().exists() {
+        return Err(PorcelainError::log_not_found(&args.log_path()));
     }
 
     // Exclude hugit's OWN wedge-state files from the tree axis (WH-CHECK
@@ -1593,8 +1593,8 @@ pub fn run(args: &CheckArgs) -> Result<Value, PorcelainError> {
     let ac_path = args
         .ac
         .clone()
-        .unwrap_or_else(|| with_extension(&args.log, "ac"));
-    let excluded = state_file_exclusions(&[&args.log, &ac_path]);
+        .unwrap_or_else(|| with_extension(&args.log_path(), "ac"));
+    let excluded = state_file_exclusions(&[&args.log_path(), &ac_path]);
     let files = snapshot_tree(&root, &def.glob_set, &excluded);
     let ac = select_ac(args)?;
     let runner = ProcessRunner {
@@ -1704,7 +1704,7 @@ pub fn run(args: &CheckArgs) -> Result<Value, PorcelainError> {
         // True when a built-in `--def` ignored a supplied `--cmd` (honest signal).
         "cmd_ignored": cmd_ignored,
         "recorded_kind": CHECK_RECORDED_KIND,
-        "log": args.log.display().to_string(),
+        "log": args.log_path().display().to_string(),
     }))
 }
 
@@ -1723,8 +1723,9 @@ pub fn run(args: &CheckArgs) -> Result<Value, PorcelainError> {
 /// when this `memo_key` was already on the log so NOTHING was appended (the
 /// idempotency dedup — WH-CHECK). Both are exit-0 successes; the difference is
 /// surfaced as `already_recorded` to the agent.
-fn record_on_log(args: &CheckArgs, payload: &serde_json::Value) -> Result<bool, PorcelainError> {
-    let path = &args.log;
+fn record_on_log(args: &CheckRunArgs, payload: &serde_json::Value) -> Result<bool, PorcelainError> {
+    let path = args.log_path();
+    let path = &path;
     // Hold the advisory exclusive lock across the whole read-modify-write so a
     // concurrent verb on the same --log gets `log_busy`, never a clobber. Holding
     // it across the dedup SCAN too makes the check-then-append atomic: two
@@ -1901,10 +1902,10 @@ fn map_exec_error(e: ExecError) -> PorcelainError {
 mod tests {
     use super::*;
 
-    fn args_for(def: &str, cmd: Option<&str>) -> CheckArgs {
-        CheckArgs {
+    fn args_for(def: &str, cmd: Option<&str>) -> CheckRunArgs {
+        CheckRunArgs {
             def: def.to_string(),
-            log: PathBuf::from("x"),
+            log: Some(PathBuf::from("x")),
             store: false,
             cmd: cmd.map(str::to_string),
             root: None,

@@ -40,7 +40,6 @@ fn empty_log(path: &Path) {
 /// Append a journal.note via the REAL writer verb.
 fn note(log: &str, note: &str, ws: &str, intent: &str) {
     let (code, v) = run(&[
-        "journal",
         "note",
         "--log",
         log,

@@ -33,8 +33,8 @@ use crate::porcelain::PorcelainError;
 pub struct FleetArgs {
     /// Path to the canonical JSON event log (`[EventRecord, …]`) — the one
     /// `--log` seam every porcelain verb shares.
-    #[arg(long)]
-    pub log: PathBuf,
+    #[arg(long, help = crate::log_resolve::LOG_FLAG_HELP)]
+    pub log: Option<PathBuf>,
 }
 
 /// Dispatch `hugit fleet`, emitting stable JSON on stdout and returning the
@@ -54,7 +54,8 @@ pub fn run(args: FleetArgs) -> ExitCode {
 
 /// Project the fleet state from the canonical log.
 fn project(args: &FleetArgs) -> Result<Value, PorcelainError> {
-    let log = load_event_log(&args.log)?;
+    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+    let log = load_event_log(&log_path)?;
     let state = FleetState::from_records(log.records());
     // Honour the schema doc-claim ("validated on every emission") at the verb
     // boundary — a validation failure is an internal fault (exit 1), never a
