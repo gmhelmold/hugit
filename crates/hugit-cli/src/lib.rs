@@ -34,6 +34,7 @@ pub mod init;
 pub mod intent;
 pub mod issue;
 pub mod journal;
+pub mod land;
 pub mod ledger;
 pub mod log_resolve;
 pub mod meta;
@@ -166,6 +167,17 @@ pub const HUGIT_VERBS: &[&str] = &[
     // when nothing grounds it, never a fabricated answer. Does NOT shadow a git
     // command (X5). LIVE the moment main.rs routes it.
     "review", // hugit review --log --question [--intent] — grounded-evidence Q&A
+    // The wedge front door (Phase B) — graduated from RESERVED with REAL wiring.
+    // `land queue` runs the REAL union-test + bisect + memoize engine over the
+    // queued PRs: it folds them into a `hugit_queue::core::Batch`, runs
+    // `evaluate_union` over a real `MemoCheck` oracle backed by
+    // `hugit_checks::run_memoized` + a file-backed AC, lands the green set, and on
+    // a red union bisects to the minimal failing pair (recording `queue.union_fail`
+    // so `queue show`'s failing_pair lights up). Single-tenant local today; the
+    // distributed runner fabric (F7) swaps in behind the same MemoCheck trait.
+    // Does NOT shadow a git command (git has no `land`; X5-checked). LIVE the
+    // moment main.rs routes it; the no-drift oracle requires it here.
+    "land", // hugit land queue --log [--campaign] — batch land via the union engine
 ];
 
 /// Planned hugit verb tokens that are RESERVED but NOT yet dispatched.
@@ -180,7 +192,10 @@ pub const HUGIT_VERBS: &[&str] = &[
 /// graduated in the PC wave — dispatched as honest stubs at PC0.)
 pub const HUGIT_RESERVED_VERBS: &[&str] = &[
     // Phase B — Orchestrator / Worker (planned)
-    "land", // hugit land [--queue]        — union-testing landing queue
+    // (`land` graduated to HUGIT_VERBS — `land queue` runs the REAL union-test +
+    // bisect + memoize engine over the queue, file-backed-AC + local-memoized at
+    // single-tenant altitude; the distributed runner fabric swaps in behind the
+    // same MemoCheck trait.)
     // (`check` + `verdict` graduated to HUGIT_VERBS at W0 — wedge EXECUTE wave;
     // `diag` graduated at the diagnosis wave — log-backed bisect.)
     // Phase C — Workspace + context (planned)

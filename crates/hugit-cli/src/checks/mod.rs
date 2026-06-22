@@ -26,7 +26,7 @@
 //! ([`crate::porcelain`]): `log_not_found` / `parse_log` are the canonical
 //! `{"error":{…}}` envelopes, exit `2`.
 
-mod run;
+pub mod run;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
