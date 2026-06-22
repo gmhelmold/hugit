@@ -40,7 +40,7 @@ fn found_returns_real_fields() {
         "fix: refresh TTL",
         "aaaaaa0000000000000000000000000000000000",
     );
-    let vm = build_intent_detail(&log, "hugit", "a31").expect("present → Some");
+    let vm = build_intent_detail(&log, "hugit", "a31", None).expect("present → Some");
     assert_eq!(vm.id, "a31");
     assert_eq!(vm.repo, "hugit");
     assert_eq!(vm.charter, "fix: refresh TTL");
@@ -59,7 +59,7 @@ fn found_returns_real_fields() {
 fn unknown_id_is_none_404() {
     let log = EventLog::new();
     assert!(
-        build_intent_detail(&log, "hugit", "nope").is_none(),
+        build_intent_detail(&log, "hugit", "nope", None).is_none(),
         "absent → None (404, no leak)"
     );
 }
@@ -73,7 +73,8 @@ fn secret_in_charter_redacts() {
         &format!("auth via {PAT}"),
         "bbbbbb0000000000000000000000000000000000",
     );
-    let vm = build_intent_detail(&log, "hugit", "a-sec").expect("Some — scrubbed, not dropped");
+    let vm =
+        build_intent_detail(&log, "hugit", "a-sec", None).expect("Some — scrubbed, not dropped");
     let json = serde_json::to_string(&vm).unwrap();
     assert!(!json.contains(PAT), "raw PAT must NEVER reach the VM JSON");
     assert_eq!(vm.charter, "[REDACTED]");

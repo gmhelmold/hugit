@@ -823,14 +823,27 @@ fn dispatch_repo(
         },
         // Wave-3 by-PR read: the review panel (write-backed: verdict.recorded + pr.comment).
         ["prs", n, "review"] => match n.parse::<u32>() {
-            Ok(num) => match handlers::build_review(log, repo, num) {
+            Ok(num) => match handlers::build_review(log, repo, num, git_source) {
                 Some(vm) => ok(&vm),
                 None => err(EngineErr::not_found()),
             },
             Err(_) => err(EngineErr::not_found()),
         },
+        // Grounded human-review Q&A over the broadened evidence corpus (checks +
+        // verdicts + journal notes + intent charter/acceptance). 404 when the PR
+        // is absent (no existence oracle); else an honest cited/refused answer.
+        ["prs", n, "review", "qa"] => match n.parse::<u32>() {
+            Ok(num) if handlers::build_review(log, repo, num, git_source).is_some() => {
+                let mut q = query_param(query, "q");
+                // SECURITY: cap the question before it reaches the log scan (an
+                // unbounded `q` tokenized per record is a CPU/memory DoS).
+                q.truncate(1024);
+                ok(&handlers::build_review_qa(log, &q))
+            }
+            _ => err(EngineErr::not_found()),
+        },
         // Phase-2 by-id reads — absent resource → 404, no existence leak.
-        ["intents", id] => match handlers::build_intent_detail(log, repo, id) {
+        ["intents", id] => match handlers::build_intent_detail(log, repo, id, git_source) {
             Some(vm) => ok(&vm),
             None => err(EngineErr::not_found()),
         },
