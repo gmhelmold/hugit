@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(wedge): **`hugit land queue` — the union-test + bisect + memoize engine is now invocable.** Batch-land the queued PRs of a campaign: runs `evaluate_union` over their union with memoized, AC-backed checks (re-run = cache HIT, zero re-execution), and on a red union runs `bisect_failure` to isolate the minimal failing pair — landing the green remainder, excluding the culprit, recording a `queue.union_fail` (so `queue show`'s `conflict_pair` lights up). `land` graduated reserved→real. Real for a single-tenant LOCAL operator today (file-backed AC); the distributed runner fabric swaps in behind the same `MemoCheck` trait.
+
 - feat(legibility): **Phase-2 — the killer-data levers** (WP-F2 + review legibility).
   - **WP-F2 capture-on-land:** landing an intent/PR now captures the ADR-0001 context envelope (cost/tokens/model/refs) onto the canonical log via optional orchestrator-metrics flags — the cost/insights surfaces stop reading honest-zero the moment metrics are passed (real on the dogfood path; honest-zero otherwise, never faked).
   - **Review legibility (serve):** real git tree-diff (file + hunk counts, `HUGIT_SERVE_GIT_DIR`-gated) in the review/intent surfaces; `VerdictVm.reviewer` = the verdict's model; transcript blob-fetch from the CAS refs; the attention feed triage-sorted by blast radius; the review evidence store broadened to `journal.note` + envelope charter. Honest-default where no git/CAS source.
