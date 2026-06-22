@@ -494,13 +494,34 @@ impl<T: CasTransport> CasClient<T> {
             return Ok(());
         }
         let body = build_upload_body(chunk);
-        let (status, resp) = self.transport.post(
+        let (status, resp) = match self.transport.post(
             &self.config.batch_endpoint(),
             &self.config.bearer(),
             SCOPE_READ_WRITE,
             BATCH_CONTENT_TYPE,
             &body,
-        )?;
+        ) {
+            Ok(pair) => pair,
+            // A transport error — typically the server taking longer than the read
+            // timeout to process a large batch (write N objects to R2), amplified
+            // under local CPU contention. Split like a 413 so the batch adaptively
+            // shrinks to fit the timeout window; CAS upload is idempotent
+            // (content-addressed), so re-sending a half is safe. A singleton that
+            // still fails surfaces as that object's per-object error.
+            Err(CasError::Transport(msg)) => {
+                if chunk.len() == 1 {
+                    out.push((
+                        chunk[0].0.clone(),
+                        UploadStatus::Error(format!("transport: {msg}")),
+                    ));
+                    return Ok(());
+                }
+                let mid = chunk.len() / 2;
+                self.batch_upload_chunk(&chunk[..mid], out)?;
+                return self.batch_upload_chunk(&chunk[mid..], out);
+            }
+            Err(e) => return Err(e),
+        };
         match status {
             200 => {
                 let parsed = parse_upload_response(&resp, chunk)?;
@@ -1038,14 +1059,39 @@ impl UreqCasTransport {
     }
 }
 
+/// Retry a ureq call expression on a throttle status (`429`/`503`) with exponential
+/// backoff (200ms · 2^n, capped; up to 6 attempts ≈ ~13s). The CAS rate-limits a
+/// burst — e.g. a `git-ingest` dedup/upload of thousands of objects — so every CAS
+/// call backs off instead of failing the whole operation on the first 429. Written
+/// as a macro (not a fn) so the large `ureq::Error` is never exposed in a signature
+/// (clippy::result_large_err); the result lands in a local binding. ureq surfaces
+/// non-2xx as `Err(Status(code, _))`, so a throttle lands in the retry arm.
+macro_rules! with_throttle_retry {
+    ($call:expr) => {{
+        let mut attempt: u32 = 0;
+        loop {
+            match $call {
+                Err(ureq::Error::Status(code, resp))
+                    if (code == 429 || code == 503) && attempt < 6 =>
+                {
+                    let _ = resp; // drop the throttle response (Retry-After not surfaced here)
+                    std::thread::sleep(Duration::from_millis(200u64 * (1u64 << attempt.min(5))));
+                    attempt += 1;
+                }
+                other => break other,
+            }
+        }
+    }};
+}
+
 impl CasTransport for UreqCasTransport {
     fn get(&self, url: &str, bearer: &str) -> Result<(u16, Vec<u8>), CasError> {
-        let resp = self
+        let resp = with_throttle_retry!(self
             .agent
             .get(url)
             .set("Authorization", bearer)
             .set(SCOPE_HEADER, SCOPE_READ)
-            .call();
+            .call());
         match resp {
             Ok(r) => {
                 let status = r.status();
@@ -1063,13 +1109,13 @@ impl CasTransport for UreqCasTransport {
     }
 
     fn put(&self, url: &str, bearer: &str, body: &[u8]) -> Result<u16, CasError> {
-        let resp = self
+        let resp = with_throttle_retry!(self
             .agent
             .put(url)
             .set("Authorization", bearer)
             .set(SCOPE_HEADER, SCOPE_READ_WRITE)
             .set("Content-Type", "application/octet-stream")
-            .send_bytes(body);
+            .send_bytes(body));
         match resp {
             Ok(r) => Ok(r.status()),
             Err(ureq::Error::Status(code, _resp)) => Ok(code),
@@ -1085,13 +1131,13 @@ impl CasTransport for UreqCasTransport {
         content_type: &str,
         body: &[u8],
     ) -> Result<(u16, Vec<u8>), CasError> {
-        let resp = self
+        let resp = with_throttle_retry!(self
             .agent
             .post(url)
             .set("Authorization", bearer)
             .set(SCOPE_HEADER, scope)
             .set("Content-Type", content_type)
-            .send_bytes(body);
+            .send_bytes(body));
         match resp {
             Ok(r) => {
                 let status = r.status();
