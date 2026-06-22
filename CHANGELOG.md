@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(deps): bump `memmap2` 0.9.10 → 0.9.11 (RUSTSEC-2026-0186 — unsound unchecked pointer offset; transitive via gix-pack). Root fix, no audit ignore.
 - feat(cas): harden the git-ingest / CAS path — stream one `git cat-file --batch` (was ~2 git spawns/object), back off+retry on `429`/`503`, and split a batch-upload on a transport timeout (idempotent). Makes ingesting a repo's full closure converge under load, and hardens the live engine's git-from-CAS reads against rate limits.
 - feat(serve): **multi-repo engine** — `AppState` serves many repos (a `repo → RepoState` map); `/v1/repos/{repo}/…` + the git wire resolve the requested slug per-request, unknown repo → uniform 404 (no oracle). `HUGIT_SERVE_CAS_REPO`/`HUGIT_SERVE_GIT_DIR` now accept a comma-separated set (one member = the old single-repo behavior, unchanged). The foundation for serving a 2nd live repo (F6a) — one forge, many repos.
 - feat(cli): **live CoreLink AC wired into `check run` + `land queue`** — memoized checks now hit the hot, shared, content-addressed CoreLink action-cache when the runtime config is present (`HUGIT_CORELINK_AC_URL` + `HUGIT_CORELINK_TENANT` + the PAT file), falling back to the file-backed local AC otherwise (no silent network on an unconfigured box; `--ac` forces local). Smoke-verified live against the provisioned P2 tenant: MISS→remote-HIT, no local `.ac` — the memoization economic core is live.
