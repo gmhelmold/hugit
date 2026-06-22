@@ -72,7 +72,34 @@ pub fn build_attention(log: &EventLog, repo: &str) -> AttentionVm {
         }
         decisions.push(build_decision(log, repo, &opened, state));
     }
+    // TRIAGE SORT (review-legibility ④): re-order by severity/blast derived from
+    // the ALREADY-built VMs — no fabricated score. The sort is STABLE, so within a
+    // tier the chain (open-seq) order is preserved.
+    decisions.sort_by_key(triage_rank);
     AttentionVm { decisions }
+}
+
+/// The triage rank of a decision (lower = more urgent), derived solely from the
+/// already-computed VM fields (`signal_class` from real verdicts, `kind` from
+/// real state). No fabricated blast score — the rank IS the severity ladder:
+///
+/// 0. REJECT — a recorded reject blocks landing (signal_class `err`).
+/// 1. FIX-FIRST — a recorded fix-first needs work before land (signal_class `warn`).
+/// 2. APPROVE-ready — a `land` kind with a green verdict (ready to land).
+/// 3. pending-verdict — a `verdict` kind (awaiting the panel).
+/// 4. land-without-verdict — queued for land, no verdict signal yet.
+/// 5. abandoned — terminal, lowest urgency.
+fn triage_rank(d: &AttentionDecisionVm) -> u8 {
+    match d.signal_class.as_str() {
+        "err" => 0,  // any REJECT verdict
+        "warn" => 1, // any FIX-FIRST verdict
+        "g" => 2,    // all-APPROVE → ready to land
+        _ => match d.kind.as_str() {
+            "abandoned" => 5,
+            "verdict" => 3, // proposed, no verdict yet → awaiting the panel
+            _ => 4,         // land kind with no verdict signal (queued)
+        },
+    }
 }
 
 /// The distinct `pr.opened` ids in chain (seq) order, first-seen wins.
@@ -197,16 +224,26 @@ fn verdict_pair(vo: &VerdictObject) -> (VerdictVm, String) {
         Verdict::Reject => "REJECT",
     };
     let lens = scrub(&vo.lens);
+    // REAL (review-legibility ②): reviewer = the verdict's model (scrubbed).
+    let reviewer = scrub(&vo.model);
     let evidence_mono_terms: Vec<String> = vo.claims_checked.iter().map(|c| scrub(c)).collect();
     let evidence_prose = if evidence_mono_terms.is_empty() {
         String::new()
     } else {
         scrub(&evidence_mono_terms.join(" · "))
     };
+    let summary = if evidence_mono_terms.is_empty() {
+        format!("{lens} · {outcome_str}")
+    } else {
+        format!(
+            "{lens} · {outcome_str} · {} claim(s) checked",
+            evidence_mono_terms.len()
+        )
+    };
     let vm = VerdictVm {
         verdict: outcome_str.to_string(),
-        reviewer: String::new(),
-        summary: format!("{lens}: {outcome_str}"),
+        reviewer,
+        summary,
         // Invariant (not a fabricated per-verdict signal): every verdict.recorded
         // VerdictObject in hugit is produced by the adversarial review panel.
         adversarial: true,
@@ -547,5 +584,66 @@ mod tests {
         let vm = build_attention(&log, "humangr/hugit");
         let j = serde_json::to_string(&vm).unwrap();
         assert_eq!(vm, serde_json::from_str::<AttentionVm>(&j).unwrap());
+    }
+
+    // ── review-legibility ④ : triage-sort by severity/blast ──────────────────
+    #[test]
+    fn feed_is_ordered_by_severity_not_chain() {
+        let mut log = EventLog::new();
+        // PR 1 (oldest in chain): proposed, no verdict → pending-verdict tier.
+        open_pr(&mut log, "1", "", &["i1"], 1000);
+        // PR 2: REJECT verdict → most urgent (tier 0).
+        open_pr(&mut log, "2", "", &["i2"], 1001);
+        append(
+            &mut log,
+            VERDICT_RECORDED_KIND,
+            verdict("2", "correctness", "reject", serde_json::json!(["bad"])),
+            1002,
+        );
+        // PR 3: FIX-FIRST verdict → tier 1.
+        open_pr(&mut log, "3", "", &["i3"], 1003);
+        append(
+            &mut log,
+            VERDICT_RECORDED_KIND,
+            verdict("3", "correctness", "fix_first", serde_json::json!(["meh"])),
+            1004,
+        );
+        // PR 4: APPROVE verdict → ready to land, tier 2.
+        open_pr(&mut log, "4", "", &["i4"], 1005);
+        append(
+            &mut log,
+            VERDICT_RECORDED_KIND,
+            verdict("4", "correctness", "approve", serde_json::json!(["ok"])),
+            1006,
+        );
+        // PR 5: abandoned → least urgent, tier 5.
+        open_pr(&mut log, "5", "", &[], 1007);
+        append(
+            &mut log,
+            PR_ABANDONED_KIND,
+            serde_json::json!({"pr_id":"5","reason":"superseded"}),
+            1008,
+        );
+
+        let vm = build_attention(&log, "hugit");
+        let order: Vec<&str> = vm
+            .decisions
+            .iter()
+            .map(|d| d.title.split_whitespace().nth(0).unwrap())
+            .collect();
+        // Severity order: REJECT(2) → FIX-FIRST(3) → APPROVE(4) → pending(1) → abandoned(5).
+        // (titles begin "PR #N …"; compare the signal classes directly.)
+        let classes: Vec<&str> = vm
+            .decisions
+            .iter()
+            .map(|d| d.signal_class.as_str())
+            .collect();
+        assert_eq!(classes[0], "err", "REJECT first");
+        assert_eq!(classes[1], "warn", "FIX-FIRST second");
+        assert_eq!(classes[2], "g", "APPROVE-ready third");
+        // The pending-verdict (info) precedes the abandoned tail.
+        let kinds: Vec<&str> = vm.decisions.iter().map(|d| d.kind.as_str()).collect();
+        assert_eq!(kinds.last().copied(), Some("abandoned"), "abandoned last");
+        assert!(order.iter().all(|t| t.starts_with("PR")));
     }
 }

@@ -6,19 +6,39 @@
 //! lifecycle. Every other field is an honest default — the diff/thread/qa/reviewer
 //! seams are P2. Every echoed free-text field passes `crate::fmt::scrub`.
 
+use std::sync::Arc;
+
 use crate::fmt::{humanize_age, scrub};
 use hugit_cli::pr::{PR_ABANDONED_KIND, PR_LANDED_KIND, PR_QUEUED_KIND, find_pr_opened};
 use hugit_cli::verdict::VERDICT_RECORDED_KIND;
 use hugit_contracts::VerdictObject;
-use hugit_http_contracts::common::{CampaignChipVm, DiffLineKind, DiffLineVm, HunkVm, VerdictVm};
+use hugit_http_contracts::common::{
+    CampaignChipVm, DiffLineKind, DiffLineVm, FileRowVm, HunkVm, VerdictVm,
+};
 use hugit_http_contracts::review::{ReviewEventVm, ReviewReplyVm, ReviewThreadVm, ReviewVm};
 use hugit_refstore::EventLog;
+use hugit_refstore::intent::intents_from_log;
 use serde_json::Value;
+
+use super::diff::diff_vm;
 
 const PR_COMMENT_KIND: &str = "pr.comment";
 
+/// The git object source threaded in for the PR diff seam. `None` =
+/// no `HUGIT_SERVE_GIT_DIR` → an honest `file_count: 0` diffstat.
+type GitSrc<'a> = Option<&'a Arc<dyn hugit_proto::ObjectSource + Send + Sync>>;
+
 /// Build the review view-model for PR `pr_number`. `None` → 404 (no existence leak).
-pub fn build_review(log: &EventLog, repo: &str, pr_number: u32) -> Option<ReviewVm> {
+///
+/// `src` is the deploy-gated git object source; when present the `file_count` /
+/// `added` / `removed` diffstat is REAL (the union of the PR's intents' commits
+/// vs. their parents). `None` → the honest `0` diffstat.
+pub fn build_review(
+    log: &EventLog,
+    repo: &str,
+    pr_number: u32,
+    src: GitSrc<'_>,
+) -> Option<ReviewVm> {
     let pr_id = pr_number.to_string();
     let opened = find_pr_opened(log, &pr_id)?;
     let state_label = pr_state_label(log, &pr_id).to_string();
@@ -48,6 +68,11 @@ pub fn build_review(log: &EventLog, repo: &str, pr_number: u32) -> Option<Review
     let timeline = build_timeline(log, &pr_id);
     let conversation_count = count_comments(log, &pr_id);
 
+    // REAL (review-legibility ①): the PR diffstat — the union of its intents'
+    // commits vs. their parents, walked over the git source. Honest `(0,0,0)`
+    // when there is no git source / no resolvable commit (matches `file_count: 0`).
+    let (file_count, added, removed) = pr_diffstat(log, &opened.intent_ids, src);
+
     Some(ReviewVm {
         repo: repo.to_string(),
         number: pr_number,
@@ -57,9 +82,9 @@ pub fn build_review(log: &EventLog, repo: &str, pr_number: u32) -> Option<Review
         source_branch: String::new(),
         target_branch: String::new(),
         intent_count,
-        file_count: 0,
-        added: 0,
-        removed: 0,
+        file_count,
+        added,
+        removed,
         conversation_count,
         qa: vec![],
         qa_note: String::new(),
@@ -80,6 +105,77 @@ pub fn build_review(log: &EventLog, repo: &str, pr_number: u32) -> Option<Review
         milestone_progress: None,
         campaign,
     })
+}
+
+/// The PR's aggregate diffstat: `(file_count, added, removed)` over the union of
+/// its intents' commits vs. their parents. Honest `(0, 0, 0)` when there is no
+/// git source or no intent commit resolves. A path touched by ≥2 intents is
+/// counted once (union by path) — `file_count` is the distinct changed-file set.
+fn pr_diffstat(log: &EventLog, intent_ids: &[String], src: GitSrc<'_>) -> (usize, u32, u32) {
+    let Some(src) = src else {
+        return (0, 0, 0);
+    };
+    let Ok(intent_log) = intents_from_log(log) else {
+        return (0, 0, 0);
+    };
+    // Union the per-intent file rows by path; sum added/removed per path.
+    let mut by_path: std::collections::BTreeMap<String, (u32, u32)> =
+        std::collections::BTreeMap::new();
+    for id in intent_ids {
+        let Some(intent) = intent_log.by_id(id) else {
+            continue;
+        };
+        let diff = intent_commit_diff(src, &intent.target);
+        for FileRowVm {
+            path,
+            added,
+            removed,
+        } in diff.files
+        {
+            let e = by_path.entry(path).or_insert((0, 0));
+            e.0 += added;
+            e.1 += removed;
+        }
+    }
+    let file_count = by_path.len();
+    let added = by_path.values().map(|(a, _)| *a).sum();
+    let removed = by_path.values().map(|(_, r)| *r).sum();
+    (file_count, added, removed)
+}
+
+/// The diff for one intent commit vs. its first parent (the review.rs-local twin
+/// of `intent_detail::intent_diff`; kept here to avoid a cross-handler dep).
+fn intent_commit_diff(
+    src: &Arc<dyn hugit_proto::ObjectSource + Send + Sync>,
+    target_hex: &str,
+) -> hugit_http_contracts::common::DiffVm {
+    use super::diff::empty_diff;
+    let Ok(commit) = gix_hash::ObjectId::from_hex(target_hex.as_bytes()) else {
+        return empty_diff();
+    };
+    let new_tree = match hugit_proto::commit_root_tree(src.as_ref(), &commit) {
+        Ok(Some(t)) => t,
+        _ => return empty_diff(),
+    };
+    let parent_tree = src
+        .get(&commit)
+        .ok()
+        .flatten()
+        .filter(|o| o.kind == hugit_proto::ObjectKind::Commit)
+        .and_then(|o| {
+            gix_object::CommitRefIter::from_bytes(&o.data)
+                .parent_ids()
+                .next()
+        })
+        .and_then(|p| {
+            hugit_proto::commit_root_tree(src.as_ref(), &p)
+                .ok()
+                .flatten()
+        });
+    let Some(parent_tree) = parent_tree else {
+        return empty_diff();
+    };
+    diff_vm(Some(src), Some(&parent_tree), Some(&new_tree))
 }
 
 fn pr_state_label(log: &EventLog, pr_id: &str) -> &'static str {
@@ -141,16 +237,31 @@ fn verdict_pair(vo: &VerdictObject) -> (VerdictVm, String) {
         Verdict::Reject => "REJECT",
     };
     let lens = scrub(&vo.lens);
+    // REAL (review-legibility ②): the reviewer IS the model that produced the
+    // verdict (the VerdictObject's `model` field). Scrubbed — a model id is an
+    // identifier but a smuggled secret-shaped value must not echo raw.
+    let reviewer = scrub(&vo.model);
     let evidence_mono_terms: Vec<String> = vo.claims_checked.iter().map(|c| scrub(c)).collect();
     let evidence_prose = if evidence_mono_terms.is_empty() {
         String::new()
     } else {
         scrub(&evidence_mono_terms.join(" · "))
     };
+    // REAL (review-legibility ②): a 1-line summary derived from the claims
+    // checked — "<lens> · <outcome> · N claim(s) checked". No fabricated prose;
+    // every term is a real verdict field.
+    let summary = if evidence_mono_terms.is_empty() {
+        format!("{lens} · {outcome_str}")
+    } else {
+        format!(
+            "{lens} · {outcome_str} · {} claim(s) checked",
+            evidence_mono_terms.len()
+        )
+    };
     let vm = VerdictVm {
         verdict: outcome_str.to_string(),
-        reviewer: String::new(),
-        summary: format!("{lens}: {outcome_str}"),
+        reviewer,
+        summary,
         // Invariant (not a fabricated per-verdict signal): every `verdict.recorded`
         // VerdictObject in hugit is produced by the adversarial review panel — that
         // is the forge's review model, and the VerdictObject carries no contrary
@@ -277,14 +388,14 @@ mod tests {
 
     #[test]
     fn absent_pr_returns_none() {
-        assert!(build_review(&EventLog::new(), "hugit", 99).is_none());
+        assert!(build_review(&EventLog::new(), "hugit", 99, None).is_none());
     }
 
     #[test]
     fn empty_pr_is_honest_and_round_trips() {
         let mut log = EventLog::new();
         open_pr(&mut log, "1", "wave-test", &["i-1"]);
-        let vm = build_review(&log, "hugit", 1).expect("present");
+        let vm = build_review(&log, "hugit", 1, None).expect("present");
         assert!(vm.verdicts.is_empty() && vm.timeline.is_empty());
         let j = serde_json::to_string(&vm).unwrap();
         assert_eq!(vm, serde_json::from_str::<ReviewVm>(&j).unwrap());
@@ -305,7 +416,7 @@ mod tests {
             ),
             2,
         );
-        let vm = build_review(&log, "hugit", 7).expect("present");
+        let vm = build_review(&log, "hugit", 7, None).expect("present");
         assert_eq!(vm.verdicts.len(), 1);
         assert_eq!(vm.verdicts[0].0.verdict, "APPROVE");
     }
@@ -321,7 +432,12 @@ mod tests {
             verdict("2", "x", "reject", serde_json::json!([])),
             2,
         );
-        assert!(build_review(&log, "hugit", 1).unwrap().verdicts.is_empty());
+        assert!(
+            build_review(&log, "hugit", 1, None)
+                .unwrap()
+                .verdicts
+                .is_empty()
+        );
     }
 
     #[test]
@@ -334,7 +450,7 @@ mod tests {
             serde_json::json!({"body":"lgtm","pr_id":5u64}),
             2,
         );
-        let vm = build_review(&log, "hugit", 5).expect("present");
+        let vm = build_review(&log, "hugit", 5, None).expect("present");
         assert_eq!(vm.conversation_count, 1);
         assert_eq!(vm.timeline[0].class, "comment");
     }
@@ -354,7 +470,7 @@ mod tests {
             ),
             2,
         );
-        let j = serde_json::to_string(&build_review(&log, "hugit", 42).unwrap()).unwrap();
+        let j = serde_json::to_string(&build_review(&log, "hugit", 42, None).unwrap()).unwrap();
         assert!(!j.contains(PAT) && j.contains("[REDACTED]"));
     }
 
@@ -368,7 +484,101 @@ mod tests {
             serde_json::json!({"body":PAT,"pr_id":11u64}),
             2,
         );
-        let j = serde_json::to_string(&build_review(&log, "hugit", 11).unwrap()).unwrap();
+        let j = serde_json::to_string(&build_review(&log, "hugit", 11, None).unwrap()).unwrap();
         assert!(!j.contains(PAT) && j.contains("[REDACTED]"));
+    }
+
+    // ── review-legibility ② : reviewer == the verdict model ──────────────────
+    #[test]
+    fn reviewer_is_the_verdict_model() {
+        let mut log = EventLog::new();
+        open_pr(&mut log, "7", "c", &["i-1"]);
+        // A verdict whose model is "opus-4.8".
+        push(
+            &mut log,
+            VERDICT_RECORDED_KIND,
+            serde_json::json!({"intent":"7","tree_hash":"","lens":"correctness","model":"opus-4.8","prompt_digest":"0".repeat(64),"verdict":"approve","claims_checked":["iat ok","exp ok"],"evidence_refs":[]}),
+            2,
+        );
+        let vm = build_review(&log, "hugit", 7, None).expect("present");
+        let (v, _prose) = &vm.verdicts[0];
+        assert_eq!(v.reviewer, "opus-4.8", "reviewer is the verdict model");
+        assert!(v.adversarial, "panel-sourced verdict");
+        assert!(v.summary.contains("correctness") && v.summary.contains("2 claim"));
+    }
+
+    // ── review-legibility ① : a populated git source projects a REAL diffstat ─
+    use hugit_proto::{CasObjectSource, GitObject, ObjectKind, ObjectSource};
+    use hugit_refstore::intent::INTENT_LANDED_KIND;
+    use std::sync::Arc;
+
+    fn blob(src: &mut CasObjectSource, body: &str) -> gix_hash::ObjectId {
+        src.insert(GitObject::new(ObjectKind::Blob, body.as_bytes().to_vec()))
+    }
+    fn tree(
+        src: &mut CasObjectSource,
+        mut entries: Vec<(&str, &str, gix_hash::ObjectId)>,
+    ) -> gix_hash::ObjectId {
+        entries.sort_by(|a, b| a.1.as_bytes().cmp(b.1.as_bytes()));
+        let mut out = Vec::new();
+        for (mode, name, oid) in &entries {
+            out.extend_from_slice(mode.as_bytes());
+            out.push(b' ');
+            out.extend_from_slice(name.as_bytes());
+            out.push(0);
+            out.extend_from_slice(oid.as_bytes());
+        }
+        src.insert(GitObject::new(ObjectKind::Tree, out))
+    }
+    fn commit(
+        src: &mut CasObjectSource,
+        tree_oid: gix_hash::ObjectId,
+        parent: Option<gix_hash::ObjectId>,
+    ) -> gix_hash::ObjectId {
+        let parent_line = parent.map(|p| format!("parent {p}\n")).unwrap_or_default();
+        let body = format!(
+            "tree {tree_oid}\n{parent_line}author a <a@a> 0 +0000\ncommitter a <a@a> 0 +0000\n\nm\n"
+        );
+        src.insert(GitObject::new(ObjectKind::Commit, body.into_bytes()))
+    }
+
+    #[test]
+    fn populated_git_source_projects_real_diffstat() {
+        let mut src = CasObjectSource::new();
+        // parent commit: f.txt = "a\nb\n"; child commit: f.txt = "a\nb\nc\n".
+        let old = blob(&mut src, "a\nb\n");
+        let new = blob(&mut src, "a\nb\nc\n");
+        let parent_tree = tree(&mut src, vec![("100644", "f.txt", old)]);
+        let child_tree = tree(&mut src, vec![("100644", "f.txt", new)]);
+        let parent_commit = commit(&mut src, parent_tree, None);
+        let child_commit = commit(&mut src, child_tree, Some(parent_commit));
+        let target = child_commit.to_string();
+
+        let mut log = EventLog::new();
+        open_pr(&mut log, "9", "c", &["i-1"]);
+        push(
+            &mut log,
+            INTENT_LANDED_KIND,
+            serde_json::json!({"intent_id":"i-1","ref":"refs/heads/x","target":target,"charter":"add c"}),
+            2,
+        );
+        let arc: Arc<dyn ObjectSource + Send + Sync> = Arc::new(src);
+        let vm = build_review(&log, "hugit", 9, Some(&arc)).expect("present");
+        assert_eq!(vm.file_count, 1, "one changed file");
+        assert_eq!((vm.added, vm.removed), (1, 0), "+1 line, -0");
+    }
+
+    #[test]
+    fn no_git_source_is_honest_zero_diffstat() {
+        let mut log = EventLog::new();
+        open_pr(&mut log, "9", "c", &["i-1"]);
+        push(
+            &mut log,
+            INTENT_LANDED_KIND,
+            serde_json::json!({"intent_id":"i-1","ref":"r","target":"0".repeat(40),"charter":"x"}),
+            2,
+        );
+        let vm = build_review(&log, "hugit", 9, None).expect("present");
+        assert_eq!((vm.file_count, vm.added, vm.removed), (0, 0, 0));
     }
 }
