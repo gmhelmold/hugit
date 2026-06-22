@@ -629,7 +629,7 @@ mod tests {
         let order: Vec<&str> = vm
             .decisions
             .iter()
-            .map(|d| d.title.split_whitespace().nth(0).unwrap())
+            .map(|d| d.title.split_whitespace().next().unwrap())
             .collect();
         // Severity order: REJECT(2) → FIX-FIRST(3) → APPROVE(4) → pending(1) → abandoned(5).
         // (titles begin "PR #N …"; compare the signal classes directly.)

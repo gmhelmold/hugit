@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(legibility): **Phase-2 — the killer-data levers** (WP-F2 + review legibility).
+  - **WP-F2 capture-on-land:** landing an intent/PR now captures the ADR-0001 context envelope (cost/tokens/model/refs) onto the canonical log via optional orchestrator-metrics flags — the cost/insights surfaces stop reading honest-zero the moment metrics are passed (real on the dogfood path; honest-zero otherwise, never faked).
+  - **Review legibility (serve):** real git tree-diff (file + hunk counts, `HUGIT_SERVE_GIT_DIR`-gated) in the review/intent surfaces; `VerdictVm.reviewer` = the verdict's model; transcript blob-fetch from the CAS refs; the attention feed triage-sorted by blast radius; the review evidence store broadened to `journal.note` + envelope charter. Honest-default where no git/CAS source.
+
 - feat(product): **Wave-1 product refinement** (the "fit like a glove" pass).
   - **CLI git-proximity:** `--log` now defaults to `$HUGIT_LOG` else `.hugit/log.json` (no more passing it every time); a fresh repo auto-inits (absent default log = empty, no ceremony); `check run|show|key` (merged `check`+`checks`); `verdict approve|reject` (folded the top-level `approve`/`reject`); `pr queue` + `pr land` (replaced `pr land --settle`); top-level `note` (was `journal note`); bare `hugit` prints help on a TTY; internal jargon stripped from `--help`.
   - **serve:** `git push` returns a clear 403 message (not a silent 404); `/readyz` exposes `git_serving`; interim real code search over the git tree; `GET /v1/orgs/{name}` (thin real `OrgVm`).
