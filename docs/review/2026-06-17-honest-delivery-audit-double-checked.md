@@ -1,5 +1,15 @@
 # Honest delivery audit (double-checked) — hugit vs the whitepaper, 2026-06-17
 
+> **PARTIALLY SUPERSEDED 2026-06-22** — several "NOT live" gaps below have since shipped:
+> the engine is now MULTI-REPO and deployed serving `hugit` + `githugr` (`/readyz git_repos:2`,
+> F6a); the CoreLink **AC memoization is LIVE** (#182); the product-refinement (Phase 1+2, #179–181)
+> and git-ingest/CAS hardening (#184) merged. `ctx resume`/`review`/`land queue` are REAL. STILL
+> open: git `push`/receive-pack (404, next wave), anonymous-clone public-flag, runner fabric,
+> multi-tenant, and the killer-data **render** is verified only to "route serves (401)" from here —
+> the githugr TL's authed www smoke is pending. See CLAUDE.md's **Update 2026-06-22** block for the
+> current honest state; the per-capability analysis below remains the deep reference for everything
+> not touched this round.
+
 > Grounded in the whitepaper (`docs/whitepaper/hugit-v1.md`), the 67-WP
 > decomposition (`docs/plan/decomposition.md`), and a 2-fleet code sweep
 > (44 read-only agents: scoping + per-area completeness double-check). This

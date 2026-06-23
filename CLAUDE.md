@@ -28,27 +28,31 @@ are real, hermetically tested (real Ed25519/SHA-256 crypto), and have held every
 adversarial round (1–13) + a SOTA sweep. The integrity spine is genuinely solid.
 
 **What is NOT delivered ("built" ≠ "live" — the honest gap):**
-- **Git wire serving: clone/fetch BUILT (2026-06-18), push NOT.** `hugit-serve` now speaks the
-  git smart-HTTP upload-pack wire over `hugit-proto`'s clone/fetch logic — a REAL `git clone`
-  succeeds (CI-proven e2e). LIVE-gated on the deploy setting `HUGIT_SERVE_GIT_DIR` + a public repo;
-  until then `git clone` against the *deployed* engine still 404s (the image is stale). `git push`
-  (receive-pack) is deliberately **404** — a later wave.
-- **Substrate P2-gated / transferred.** CoreLink hot CAS + AC = a real `ureq` client
-  with no live tenant; the runner fabric → `corelink-runners`; cold-store
-  (`UnwiredColdStore`) persists no transcript blobs; **merge-as-re-execution records
+- **Git wire serving: clone/fetch BUILT + the engine boots git-from-CAS, push NOT.** `hugit-serve`
+  speaks the git smart-HTTP upload-pack wire over `hugit-proto`'s clone/fetch logic (CI-proven e2e).
+  The DEPLOYED engine boots git-from-CAS and loads both repos (`/readyz git_serving:true,git_repos:2`,
+  2026-06-22). ANONYMOUS `git clone` of either repo is still `404` — gated on a per-repo public-flag
+  (a deferred feature), not the wire. `git push` (receive-pack) is deliberately **404** — the next
+  wave (in progress).
+- **Substrate — AC LIVE (2026-06-22), runner still transferred.** The CoreLink AC
+  (memoization) is now LIVE: `check run` + `land queue` prefer `HttpAcClient::from_runtime`
+  (#182), smoke-proven MISS→remote-HIT against tenant `3560e213`; the hot-CAS git tenant
+  `d863fafb` serves the engine's repos. STILL deferred: the runner fabric → `corelink-runners`;
+  cold-store (`UnwiredColdStore`) persists no transcript blobs; **merge-as-re-execution records
   the demand but never dispatches an agent** (intentional P2 deferral).
-- **One deployed network surface:** `hugit-serve` (`/v1` + `/readyz`). NO git endpoint,
-  NO runner endpoint.
+- **Deployed network surface:** `hugit-serve` (`/v1` + `/readyz` + git-from-CAS upload-pack),
+  MULTI-REPO serving `hugit` + `githugr` (2026-06-22). NO runner endpoint; receive-pack (push)
+  not yet.
 - **Identity = dev-token stub** live; the Clerk→engine-token exchange is code-complete
   (the CoreLink exchange endpoint is live), gated on the deploy env (`HUGIT_SESSION_EXCHANGE_URL`)
   + a stale deployed image + `hugit-prod-d1`.
 - **Symbol outline IS wired** (W6, #161 + follow-up): `hugit_symbols::outline_blob`
   is called from `blob.rs:80` (`compute_outline`) and the `hugit symbol --file` CLI
   verb is real. The `hugit-symbols` tree-sitter crate supports TS/JS/Python/Go/Java/C/C++/Ruby.
-- **Still reserved-unimplemented CLI verbs:** `ws`/`ctx`/`dispatch`/`land`/`review`.
-  Of these, `ctx resume` + `review` (grounded Q&A) are buildable-now over the log
-  (tracked PR-D); `ws`/`dispatch`/`land` are P2/transferred-gated (workspace exec
-  core → `corelink-runners`; land EXECUTE needs the runner+AC fabric).
+- **Still reserved-unimplemented CLI verbs:** `ws`/`dispatch` only — P2/transferred
+  (workspace exec core → `corelink-runners`; need the runner fabric). `ctx resume` +
+  `review` (grounded Q&A) graduated to REAL (PR-D) and `land queue` is REAL (batch land
+  via the union engine, #181).
   (`fleet`/`ledger`/`watch` graduated to REAL — #157/#158; `diag` graduated —
   log-backed bisect; `policy edit` graduated — guarded `policy.change` over the
   house baseline, the append-only log IS the gate-set store.)
@@ -65,24 +69,37 @@ on read, 404-no-oracle, fail-closed boot loader (#148). **All hermetically teste
 live-serving needs `HUGIT_SERVE_GIT_DIR` set on a fresh deploy. `symbol` (W6) is wired —
 `blob.rs` calls `compute_outline` → `hugit_symbols::outline_blob`; `hugit symbol --file` is real.**
 
+**Update 2026-06-22 (multi-repo engine + killer-data + AC LIVE; F6a delivered):** the
+prod engine (`engine.githugr.com`) was redeployed (staged: code, then 2nd repo; health-verified)
+to hugit `main`'s **multi-repo** build — `/readyz {"git_serving":true,"git_repos":2}`, serving
+both `hugit` and **`githugr`** (F6a — githugr's git closure ingested into CAS tenant `d863fafb`).
+Shipped + merged this round: the **product-refinement** (Phase 1 CLI git-proximity + serve honesty
++ additive raw-int cost contract; Phase 2 capture-on-land + review legibility + `land queue`,
+#179–181), the **live CoreLink AC** (memoization, #182), the **multi-repo** `AppState` (#183), and
+**git-ingest/CAS hardening** (streaming `cat-file --batch` + 429-backoff + adaptive split, + the
+`memmap2`→0.9.11 RUSTSEC-2026-0186 root fix, #184). **CAUTION — verified to "route serves" only:**
+the killer-data reads (code-search, real diff-counts, attested cost) return `401` unauthed (auth-gate,
+route present) on the deployed engine; that they RENDER real data with a session token is the githugr
+TL's pending smoke (they hold the engine dev-token + run the www), NOT yet proven from here.
+
 **What IS genuinely live (don't under-claim it either):** the `/v1` read+write API
-against the ONE `hugit` launch repo — 11/20 reads serve real chain-verified R2 data;
+against `hugit` (+ now `githugr`) — 11/20 reads serve real chain-verified R2 data;
 the 9 POST verbs are code-complete + R2-CAS-persisted (proven against prod R2),
 `authz`-gated (the one deployed security boundary, 404-no-oracle); `hugit check`/
 `verdict` are real EXECUTE paths; `hugit export` is a real zero-dependency exit-proof;
 SSE replay-then-close. The engine is **lazy git-from-CAS** (boots from the CoreLink
-CAS, ~5 s cold-start). **Magnitude: ~15–20% live for the `/v1` API on the hugit repo;
-single-digit % for a full multi-tenant end-to-end forge.**
+CAS, ~5 s cold-start) and is now MULTI-REPO. **Magnitude: ~20–25% live for the `/v1` API
+across 2 repos with the AC memoization wired; still single-digit % for a full multi-tenant
+end-to-end forge (no push/receive-pack, no runner fabric, single-tenant, killer-data render
+unverified-from-here).**
 
-**Critical path to a usable single-tenant forge (biggest → smallest):** deploy the
-current `main` image (+ set `HUGIT_SESSION_EXCHANGE_URL` = the live
-`corelink-api.humangr.com/v1/session/exchange`) + set `HUGIT_SERVE_GIT_DIR` so the now-real
-blob/edit reads serve live (W5 logic landed 2026-06-18) → CoreLink P2 tenant (hot CAS+AC) →
-live git wire serving (clone/fetch BUILT 2026-06-18 — just set `HUGIT_SERVE_GIT_DIR`; push still
-a wave away) → runner fabric live → GitHub App + live
-mirror → multi-tenant Clerk + `hugit-prod-d1`.
-Most are owner/infra-gated, not "a few PRs". Per-capability status table + tracked
-seams: the audit doc above.
+**Critical path to a usable single-tenant forge (biggest → smallest) — updated 2026-06-22:**
+~~deploy current `main`~~ DONE (multi-repo + killer-data + AC live) → githugr TL render-verifies
+the killer-data with a token + runs the www → **git `push`/receive-pack** (the next code wave —
+write-side git wire + write-authz + CAS persist) → anonymous-clone public-flag → identity Clerk
+exchange (still gated on `HUGIT_SESSION_EXCHANGE_URL` + `hugit-prod-d1`) → runner fabric live →
+GitHub App + live mirror → multi-tenant. The non-code ones are owner/infra-gated. Per-capability
+status table + tracked seams: the audit doc above.
 
 **Gate + CI:** `main` green by the local gate (fmt + clippy `--workspace --all-targets
 --locked -D warnings` + test `--workspace --locked` + `cargo deny`) AND runner-verified
