@@ -201,6 +201,57 @@ pub fn parse_receive_pack_body(body: &[u8]) -> Result<ReceiveRequestWire, RecvPa
     })
 }
 
+/// One ref's outcome in the receive-pack **report-status** response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefOutcome {
+    /// The ref update was applied — emits `ok <ref>`.
+    Ok(String),
+    /// The ref update was rejected — emits `ng <ref> <reason>`. The reason is a
+    /// short token git surfaces to the user (e.g. `non-fast-forward`, `failed`).
+    Ng { ref_name: String, reason: String },
+}
+
+/// Append one pkt-line: a 4-hex big-endian length prefix (length INCLUDES the 4
+/// prefix bytes) followed by `data`. Mirrors `git.rs::pkt_line` — the receive-pack
+/// wire module owns both directions of its own framing.
+fn put_pkt(out: &mut Vec<u8>, data: &[u8]) {
+    let len = data.len() + 4;
+    debug_assert!(
+        len <= 0xffff,
+        "pkt-line payload exceeds the 65516-byte limit"
+    );
+    out.extend_from_slice(format!("{len:04x}").as_bytes());
+    out.extend_from_slice(data);
+}
+
+/// Build the smart-HTTP **v1** receive-pack `report-status` response body (no
+/// side-band): the unpack line, then one status line per ref, then a flush.
+///
+/// * `unpack`: `Ok(())` → `unpack ok`; `Err(reason)` → `unpack <reason>` (a global
+///   pack failure — git then treats every ref as failed).
+/// * `refs`: one `ok <ref>` / `ng <ref> <reason>` line per command, in wire order.
+///
+/// The body is what a `git push` client reads off
+/// `application/x-git-receive-pack-result`.
+#[must_use]
+pub fn build_report_status(unpack: Result<(), &str>, refs: &[RefOutcome]) -> Vec<u8> {
+    let mut out = Vec::new();
+    match unpack {
+        Ok(()) => put_pkt(&mut out, b"unpack ok\n"),
+        Err(reason) => put_pkt(&mut out, format!("unpack {reason}\n").as_bytes()),
+    }
+    for r in refs {
+        match r {
+            RefOutcome::Ok(ref_name) => put_pkt(&mut out, format!("ok {ref_name}\n").as_bytes()),
+            RefOutcome::Ng { ref_name, reason } => {
+                put_pkt(&mut out, format!("ng {ref_name} {reason}\n").as_bytes());
+            }
+        }
+    }
+    out.extend_from_slice(b"0000"); // flush
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,6 +421,80 @@ mod tests {
         assert_eq!(
             parse_receive_pack_body(&body),
             Err(RecvParseError::Truncated)
+        );
+    }
+
+    /// Decode a pkt-line stream back into `(payloads, saw_flush)` so a test can
+    /// assert the report-status framing without hand-counting hex lengths.
+    fn decode_pkts(mut b: &[u8]) -> (Vec<String>, bool) {
+        let mut lines = Vec::new();
+        let mut flushed = false;
+        while b.len() >= 4 {
+            let len = usize::from_str_radix(std::str::from_utf8(&b[..4]).unwrap(), 16).unwrap();
+            if len == 0 {
+                flushed = true;
+                b = &b[4..];
+                continue;
+            }
+            let payload = &b[4..len];
+            lines.push(String::from_utf8_lossy(payload).into_owned());
+            b = &b[len..];
+        }
+        (lines, flushed)
+    }
+
+    #[test]
+    fn report_status_ok_is_unpack_ok_then_ref_ok_then_flush() {
+        let body = build_report_status(Ok(()), &[RefOutcome::Ok("refs/heads/main".into())]);
+        let (lines, flushed) = decode_pkts(&body);
+        assert_eq!(lines, vec!["unpack ok\n", "ok refs/heads/main\n"]);
+        assert!(flushed, "report ends with a flush");
+    }
+
+    #[test]
+    fn report_status_ng_carries_the_reason() {
+        let body = build_report_status(
+            Ok(()),
+            &[RefOutcome::Ng {
+                ref_name: "refs/heads/main".into(),
+                reason: "non-fast-forward".into(),
+            }],
+        );
+        let (lines, _) = decode_pkts(&body);
+        assert_eq!(
+            lines,
+            vec!["unpack ok\n", "ng refs/heads/main non-fast-forward\n"]
+        );
+    }
+
+    #[test]
+    fn report_status_unpack_error_surfaces() {
+        let body = build_report_status(Err("index-pack failed"), &[]);
+        let (lines, flushed) = decode_pkts(&body);
+        assert_eq!(lines, vec!["unpack index-pack failed\n"]);
+        assert!(flushed);
+    }
+
+    #[test]
+    fn report_status_multi_ref_preserves_order() {
+        let body = build_report_status(
+            Ok(()),
+            &[
+                RefOutcome::Ok("refs/heads/main".into()),
+                RefOutcome::Ng {
+                    ref_name: "refs/heads/feature".into(),
+                    reason: "failed".into(),
+                },
+            ],
+        );
+        let (lines, _) = decode_pkts(&body);
+        assert_eq!(
+            lines,
+            vec![
+                "unpack ok\n",
+                "ok refs/heads/main\n",
+                "ng refs/heads/feature failed\n",
+            ]
         );
     }
 }
