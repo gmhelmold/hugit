@@ -524,7 +524,10 @@ fn route_write(state: &AppState, url: &str, headers: &[Header], body: &[u8]) -> 
 ///            `(dev principal, fresh_auth=false)`.
 /// An in-store-but-EXPIRED engine token is `TOKEN_EXPIRED` (client renews + retries);
 /// anything else is `TOKEN_INVALID`. Returns `(principal_chain, fresh_auth)`.
-fn two_tier_auth(state: &AppState, headers: &[Header]) -> Result<(Vec<String>, bool), EngineErr> {
+pub(crate) fn two_tier_auth(
+    state: &AppState,
+    headers: &[Header],
+) -> Result<(Vec<String>, bool), EngineErr> {
     let raw = header_val(headers, "Authorization")
         .and_then(|v| v.strip_prefix("Bearer ").map(str::to_string));
     let raw = match raw {
