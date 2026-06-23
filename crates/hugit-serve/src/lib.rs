@@ -25,6 +25,7 @@ pub mod error;
 pub mod fmt;
 pub mod git;
 pub mod handlers;
+pub mod receive_wire;
 pub mod server;
 pub mod sigv4;
 pub mod state;
