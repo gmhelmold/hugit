@@ -168,6 +168,64 @@ pub fn raw_push_payload(ref_name: &str, target_oid: &str) -> String {
     )
 }
 
+/// A [`Cas`] backed by a real git object directory (`<git-dir>/objects/<xx>/<rest>`).
+///
+/// `CasObject.bytes` are git's verbatim on-disk loose-object bytes — the SAME
+/// representation `ScratchOdb` reads back after `git unpack-objects` — so a `put`
+/// just writes them to `objects/<first-2>/<rest>` and a `get` reads that file.
+/// This is the write-side analogue of the read path's git-dir object source: a
+/// push lands loose objects exactly where a git-dir read serves them. Used by the
+/// receive-pack serve wiring in `HUGIT_SERVE_GIT_DIR` mode and the hermetic push
+/// test; the live CoreLink-CAS (blake3 + `oid-index`) adapter is a later piece.
+pub struct GitDirCas {
+    objects_dir: std::path::PathBuf,
+}
+
+impl GitDirCas {
+    /// Wrap `<git_dir>/objects`. Errors if that directory does not exist — a push
+    /// into a non-git dir must fail closed, not silently create a broken store.
+    pub fn new(git_dir: impl AsRef<std::path::Path>) -> Result<Self, String> {
+        let objects_dir = git_dir.as_ref().join("objects");
+        if !objects_dir.is_dir() {
+            return Err(format!("not a git object dir: {}", objects_dir.display()));
+        }
+        Ok(Self { objects_dir })
+    }
+
+    /// The `objects/<xx>/<rest>` path for an oid, or `None` for a too-short oid.
+    fn object_path(&self, oid: &str) -> Option<std::path::PathBuf> {
+        if oid.len() < 3 {
+            return None;
+        }
+        let (dir, rest) = oid.split_at(2);
+        Some(self.objects_dir.join(dir).join(rest))
+    }
+}
+
+impl Cas for GitDirCas {
+    fn put(&mut self, obj: &CasObject) {
+        // Content-addressed ⇒ idempotent: an already-present loose object is
+        // byte-identical, so a re-put is skipped. A short/garbage oid is dropped
+        // (the unpack step only ever yields full oids). The `Cas` trait's `put`
+        // is infallible by contract; the live W3 adapter will need fallible
+        // storage (a transport can fail) — tracked in the receive-pack design.
+        let Some(path) = self.object_path(&obj.oid) else {
+            return;
+        };
+        if path.exists() {
+            return;
+        }
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&path, &obj.bytes);
+    }
+
+    fn get(&self, oid: &str) -> Option<Vec<u8>> {
+        std::fs::read(self.object_path(oid)?).ok()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use hugit_refstore::intent::{INTENT_LANDED_KIND, RAW_PUSH_KINDS};
@@ -211,5 +269,78 @@ mod tests {
         let p = raw_push_payload("refs/heads/main", "deadbeef");
         assert_eq!(p, r#"{"ref":"refs/heads/main","target":"deadbeef"}"#);
         assert!(!p.contains("intent"));
+    }
+
+    /// A unique scratch git-object dir (`<tmp>/<unique>/objects`) for the
+    /// `GitDirCas` tests. Returns the git-dir root (parent of `objects`).
+    fn scratch_git_dir(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!("gitdircas-{tag}-{nanos}"));
+        std::fs::create_dir_all(root.join("objects")).expect("mk objects dir");
+        root
+    }
+
+    #[test]
+    fn git_dir_cas_round_trips_a_loose_object() {
+        let root = scratch_git_dir("rt");
+        let mut cas = GitDirCas::new(&root).expect("git dir exists");
+        // A full 40-hex oid; bytes stand in for the verbatim loose-object content.
+        let oid = "fe8f5f1e013d57d0629ff3999a71986ffc2b05fb";
+        let obj = CasObject {
+            oid: oid.into(),
+            bytes: vec![0x78, 0x01, 9, 9, 9], // looks like a zlib loose blob
+        };
+        assert!(!cas.contains(oid));
+        cas.put(&obj);
+        assert!(cas.contains(oid), "present after put");
+        assert_eq!(
+            cas.get(oid),
+            Some(obj.bytes.clone()),
+            "byte-identical read-back"
+        );
+        // It landed at objects/<xx>/<rest> — the exact path a git-dir read serves.
+        assert!(
+            root.join("objects/fe/8f5f1e013d57d0629ff3999a71986ffc2b05fb")
+                .exists()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn git_dir_cas_put_is_idempotent() {
+        let root = scratch_git_dir("idem");
+        let mut cas = GitDirCas::new(&root).expect("git dir");
+        let oid = "1111111111111111111111111111111111111111";
+        let obj = CasObject {
+            oid: oid.into(),
+            bytes: vec![1, 2, 3],
+        };
+        cas.put(&obj);
+        cas.put(&obj); // a re-put is a no-op (content-addressed) — must not error/change
+        assert_eq!(cas.get(oid), Some(vec![1, 2, 3]));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn git_dir_cas_missing_object_is_none() {
+        let root = scratch_git_dir("miss");
+        let cas = GitDirCas::new(&root).expect("git dir");
+        assert_eq!(cas.get("2222222222222222222222222222222222222222"), None);
+        assert!(!cas.contains("2222222222222222222222222222222222222222"));
+        assert_eq!(cas.get("x"), None, "too-short oid is None, not a panic");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn git_dir_cas_refuses_a_non_git_dir() {
+        let bogus = std::env::temp_dir().join("gitdircas-nonexistent-xyzzy-dir");
+        let _ = std::fs::remove_dir_all(&bogus);
+        assert!(
+            GitDirCas::new(&bogus).is_err(),
+            "no objects/ dir → fail closed"
+        );
     }
 }
