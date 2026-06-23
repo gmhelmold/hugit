@@ -77,6 +77,22 @@ pub struct RepoState {
     /// for a loaded repo. This map IS the `hugit_proto::RefView` for the clone
     /// advertisement.
     pub git_refs: std::collections::BTreeMap<String, String>,
+    /// The on-disk git dir (`GIT_DIR` mode only; `None` in CAS mode). When `Some`,
+    /// the receive-pack write path can persist a push's loose objects + ref to it
+    /// (via [`write_cas`](Self::write_cas)); CAS-mode repos have no local dir, so
+    /// the push path stays gated off (the live CAS-write adapter is a later piece).
+    pub git_dir: Option<PathBuf>,
+}
+
+impl RepoState {
+    /// A write-capable [`Cas`](hugit_proto::write::store::Cas) for this repo's push
+    /// path, or `None` when there is no on-disk git dir (CAS mode → push gated off).
+    #[must_use]
+    pub fn write_cas(&self) -> Option<hugit_proto::write::store::GitDirCas> {
+        self.git_dir
+            .as_ref()
+            .and_then(|d| hugit_proto::write::store::GitDirCas::new(d).ok())
+    }
 }
 
 /// Immutable server configuration.
@@ -109,9 +125,29 @@ pub struct AppState {
     /// exists — the read API still works from `source`, only the git content is
     /// absent for un-loaded repos.
     pub repos: std::collections::HashMap<String, RepoState>,
+    /// Whether the receive-pack (git `push`) write path is enabled — the
+    /// `self-hosted-alpha` deploy gate. Default **false** (push → 403), so a stock
+    /// deploy never accepts a write. Set by `HUGIT_SERVE_RECEIVE_PACK=1` at boot
+    /// (and only takes effect where a repo also has a `git_dir` write seam).
+    pub write_path_enabled: bool,
 }
 
 impl AppState {
+    /// The receive-pack flag gate for `hugit_proto::receive_pack` — `self-hosted-alpha`
+    /// ON iff [`write_path_enabled`](Self::write_path_enabled).
+    #[must_use]
+    pub fn receive_flag_gate(&self) -> hugit_proto::write::flag::FlagGate {
+        if self.write_path_enabled {
+            hugit_proto::write::flag::FlagGate::self_hosted_alpha()
+        } else {
+            hugit_proto::write::flag::FlagGate::new()
+        }
+    }
+
+    /// Enable the receive-pack write path (test seed / explicit opt-in).
+    pub fn enable_write_path(&mut self) {
+        self.write_path_enabled = true;
+    }
     /// Build from env. `HUGIT_ENGINE_DEV_TOKEN` is always required (fail-closed).
     /// If `HUGIT_SERVE_R2_ACCOUNT_ID` is set → the R2 source (all `R2_*` required);
     /// else the Local source (`HUGIT_SERVE_LOG_DIR` required).
@@ -153,12 +189,17 @@ impl AppState {
         // seam (neither var set) is the honest no-git default (empty map).
         let repos = Self::load_repos_from_env()?;
 
+        let write_path_enabled = std::env::var("HUGIT_SERVE_RECEIVE_PACK")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
         Ok(Self {
             source,
             dev_token,
             exchange,
             token_store,
             repos,
+            write_path_enabled,
         })
     }
 
@@ -204,6 +245,7 @@ impl AppState {
                         git_source: src,
                         git_root_tree: root,
                         git_refs: refs,
+                        git_dir: None, // CAS mode: no local dir → push gated off (W3)
                     },
                 );
             }
@@ -231,6 +273,7 @@ impl AppState {
                             git_source: src,
                             git_root_tree: root,
                             git_refs: refs,
+                            git_dir: Some(PathBuf::from(dir)), // push writes objects+ref here
                         },
                     );
                 }
@@ -260,6 +303,7 @@ impl AppState {
             exchange: None,
             token_store: Arc::new(TokenStore::new()),
             repos: std::collections::HashMap::new(),
+            write_path_enabled: false,
         }
     }
 
@@ -294,8 +338,32 @@ impl AppState {
                 git_source,
                 git_root_tree,
                 git_refs,
+                git_dir: None,
             },
         );
+    }
+
+    /// Wire a repo's git seam from an on-disk git dir — like the `HUGIT_SERVE_GIT_DIR`
+    /// boot path but for one repo (the push test + a single-repo seed). Unlike
+    /// [`set_repo_git`](Self::set_repo_git), this records the `git_dir`, so the
+    /// receive-pack write path is live for it ([`RepoState::write_cas`]).
+    pub fn set_repo_from_git_dir(
+        &mut self,
+        repo: impl Into<String>,
+        dir: &str,
+    ) -> Result<(), String> {
+        let (cas, root, refs) = load_git_dir(dir)?;
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(cas);
+        self.repos.insert(
+            repo.into(),
+            RepoState {
+                git_source: src,
+                git_root_tree: root,
+                git_refs: refs,
+                git_dir: Some(PathBuf::from(dir)),
+            },
+        );
+        Ok(())
     }
 
     /// A short label of the active source (for the boot log; no secrets).

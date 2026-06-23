@@ -15,8 +15,10 @@
 //! `# service` preamble + the tips; POST a want/have body → assert `NAK` + a `PACK`
 //! header. So the protocol is covered even where `git` is unavailable.
 //!
-//! Push (`git-receive-pack`) is OUT of scope — [`receive_pack_is_404`] asserts it
-//! is not served.
+//! Push (`git-receive-pack`) is served, GATED: with the write flag OFF it is the
+//! honest 403 (the existing forbidden-path tests); [`real_git_push_succeeds`] flips
+//! the flag on a git-dir-backed serve and proves a real `git push` lands + clones
+//! back from a fresh instance.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -488,6 +490,189 @@ fn real_git_clone_succeeds() {
     assert_eq!(head.trim(), seed.c2.to_string(), "HEAD is main@c2");
     let readme = std::fs::read_to_string(dst.join("README")).expect("README checked out");
     assert_eq!(readme, "hello hugit, again\n", "working tree content");
+}
+
+/// End-to-end `git push` (receive-pack): a real `git push` to a flag-enabled,
+/// git-dir-backed serve SUCCEEDS, and the pushed commit + ref clone back from a
+/// FRESH serve instance over the same git dir (proving durable persistence:
+/// objects in the dir, ref written, no same-process hot-swap relied on).
+#[test]
+fn real_git_push_succeeds() {
+    if !have_git() {
+        eprintln!("SKIP real_git_push_succeeds: `git` not on PATH");
+        return;
+    }
+    let git_cfg = |c: &mut Command| {
+        c.args([
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "-c",
+            "protocol.version=0",
+        ]);
+    };
+
+    // 1. Seed a bare "server" repo on disk with one commit on main (so the wire has
+    //    a ref to advertise + objects to clone).
+    let root = scratch_dir();
+    let work = root.join("work");
+    let bare = root.join("repo.git");
+    {
+        let mut c = Command::new("git");
+        git_cfg(&mut c);
+        c.args(["init", "-q", work.to_str().unwrap()])
+            .output()
+            .unwrap();
+        std::fs::write(work.join("README"), b"seed\n").unwrap();
+        for args in [
+            vec!["add", "."],
+            vec!["commit", "-q", "-m", "init"],
+            vec!["branch", "-M", "main"],
+        ] {
+            let mut c = Command::new("git");
+            git_cfg(&mut c);
+            c.arg("-C").arg(&work).args(&args).output().unwrap();
+        }
+        Command::new("git")
+            .args(["init", "-q", "--bare", bare.to_str().unwrap()])
+            .output()
+            .unwrap();
+        let mut c = Command::new("git");
+        git_cfg(&mut c);
+        let push = c
+            .arg("-C")
+            .arg(&work)
+            .args(["push", "-q", bare.to_str().unwrap(), "main"])
+            .output()
+            .unwrap();
+        assert!(push.status.success(), "seed push to bare failed");
+        // The bare's default HEAD may be `master` (init default) while we pushed
+        // `main` → point HEAD at main so the engine resolves HEAD's tree at load.
+        Command::new("git")
+            .arg("-C")
+            .arg(&bare)
+            .args(["symbolic-ref", "HEAD", "refs/heads/main"])
+            .output()
+            .unwrap();
+    }
+
+    // 2. Public-meta log (clone is anon-public; push authorizes via the dev-token →
+    //    operator). Serve instance A: git-dir seam + the receive-pack flag ON.
+    let log_dir = scratch_dir();
+    let mut log = EventLog::new();
+    log.append_for_test(
+        "repo.meta",
+        vec![],
+        serde_json::json!({"visibility": "public", "owner_tenant": "org-a"}).to_string(),
+        0,
+    );
+    std::fs::write(
+        log_dir.join("pushrepo.json"),
+        serde_json::to_string_pretty(log.records()).unwrap(),
+    )
+    .unwrap();
+    let build_state = || {
+        let mut s = AppState::new(log_dir.clone(), TOKEN.to_string());
+        s.set_repo_from_git_dir("pushrepo", bare.to_str().unwrap())
+            .expect("load bare git dir");
+        s.enable_write_path();
+        s
+    };
+    let addr_a = spawn(build_state());
+
+    // 3. Clone from A, make a new commit, PUSH it to a NEW branch (a create).
+    let clone_a = root.join("clone_a");
+    let mut c = Command::new("git");
+    git_cfg(&mut c);
+    let out = c
+        .args([
+            "clone",
+            "-q",
+            &format!("http://{addr_a}/pushrepo"),
+            clone_a.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "clone from A failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Build the new ref on an ORPHAN branch so the pushed pack is SELF-CONTAINED
+    // (no base objects already on the server). v0 receive_pack verifies the target
+    // is reachable within the delivered pack; incremental/thin-pack reachability
+    // (consulting the CAS for server-side bases) is the documented W3 follow-up.
+    let mut c = Command::new("git");
+    git_cfg(&mut c);
+    c.arg("-C")
+        .arg(&clone_a)
+        .args(["checkout", "-q", "--orphan", "pushed"])
+        .output()
+        .unwrap();
+    let mut c = Command::new("git");
+    git_cfg(&mut c);
+    c.arg("-C")
+        .arg(&clone_a)
+        .args(["rm", "-rfq", "."])
+        .output()
+        .ok();
+    std::fs::write(clone_a.join("NEWFILE"), b"pushed content\n").unwrap();
+    for args in [vec!["add", "."], vec!["commit", "-q", "-m", "push me"]] {
+        let mut c = Command::new("git");
+        git_cfg(&mut c);
+        c.arg("-C").arg(&clone_a).args(&args).output().unwrap();
+    }
+    let mut c = Command::new("git");
+    git_cfg(&mut c);
+    let push = c
+        .arg("-C")
+        .arg(&clone_a)
+        .arg("-c")
+        .arg(format!("http.extraHeader=Authorization: Bearer {TOKEN}"))
+        .args([
+            "push",
+            "-q",
+            &format!("http://{addr_a}/pushrepo"),
+            "HEAD:refs/heads/pushed",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        push.status.success(),
+        "git push (receive-pack) failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&push.stdout),
+        String::from_utf8_lossy(&push.stderr)
+    );
+
+    // 4. The push durably landed: a FRESH serve instance B over the same git dir
+    //    advertises + serves the new ref's commit (no same-process hot-swap used).
+    let addr_b = spawn(build_state());
+    let clone_b = root.join("clone_b");
+    let mut c = Command::new("git");
+    git_cfg(&mut c);
+    let out = c
+        .args([
+            "clone",
+            "-q",
+            "--branch",
+            "pushed",
+            &format!("http://{addr_b}/pushrepo"),
+            clone_b.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "clone of the pushed branch from a fresh serve failed:\nstderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let content = std::fs::read_to_string(clone_b.join("NEWFILE"))
+        .expect("pushed file present after clone-back");
+    assert_eq!(
+        content, "pushed content\n",
+        "pushed commit's content round-trips"
+    );
 }
 
 fn have_git() -> bool {

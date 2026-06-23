@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(serve): **git `push` (receive-pack) — BUILT**. Wires the smart-HTTP `git-receive-pack` advertisement + POST into `hugit_proto::receive_pack` (bound→unpack→verify→store→anchor→append) + `report-status`. Gated fail-closed: OFF unless `HUGIT_SERVE_RECEIVE_PACK=1` AND the repo has an on-disk write seam AND the pusher passes `authorize_write` (ownership, 404-no-oracle). A real `git push` succeeds end-to-end (hermetic test) + clones back. v0: single non-delete ref, self-contained pack (incremental/thin-pack CAS-aware reachability + same-process ref hot-swap are follow-ups).
 - feat(serve): receive-pack `report-status` response builder (`receive_wire::build_report_status` + `RefOutcome`) — emits the v1 `unpack ok|<err>` + per-ref `ok`/`ng <reason>` pkt-lines a `git push` client reads. WP2 building block; handler still 403.
 - feat(proto): `GitDirCas` — a git-dir-backed `Cas` write adapter for the receive-pack path (writes verbatim loose objects to `objects/<xx>/<rest>`, the write-side analogue of the git-dir read source). WP2 building block of git `push`; not yet wired to the serve handler (push still 403).
 - feat(serve): receive-pack wire parser (`receive_wire::parse_receive_pack_body`) — WP1 of git `push`. Pure, fail-closed pkt-line command decoder (`<old> <new> <ref>` + caps + packfile split); no handler behaviour change yet (push still 403). Design: `docs/plan/2026-06-22-receive-pack-wave-design.md`.

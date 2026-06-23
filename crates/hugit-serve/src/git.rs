@@ -1,9 +1,15 @@
-//! Git smart-HTTP wire serving (`git clone`/`git fetch` — `git-upload-pack`).
+//! Git smart-HTTP wire serving — `git clone`/`git fetch` (`git-upload-pack`, the
+//! READ side) AND `git push` (`git-receive-pack`, the WRITE side).
 //!
-//! This is the FIRST live git wire surface on `hugit-serve`. Scope: the READ
-//! side only — `git-upload-pack` (clone + fetch). `git-receive-pack` (push) is
-//! explicitly OUT of scope (a later piece): the POST `git-receive-pack` route is
-//! not served here.
+//! The READ side serves any repo whose git seam is loaded. The WRITE side
+//! (`git-receive-pack`) is gated, fail-closed: OFF unless `HUGIT_SERVE_RECEIVE_PACK=1`
+//! AND the repo has an on-disk `git_dir` write seam AND the pusher passes
+//! `authorize_write` (ownership). It wires the git client straight into
+//! [`hugit_proto::write::receive::receive_pack`] (bound→unpack→verify→store→anchor→
+//! append) and answers the `report-status`. v0 scope: a single non-delete ref per
+//! push, self-contained pack (incremental/thin-pack reachability that consults the
+//! CAS for server-side bases, and the live in-process ref hot-swap, are follow-ups
+//! — see `docs/plan/2026-06-22-receive-pack-wave-design.md`).
 //!
 //! ## Protocol: smart-HTTP **v1** (the dumb-free "smart" transport)
 //!
@@ -103,7 +109,7 @@ pub fn respond_git(state: &AppState, method: &Method, url: &str, body: &[u8], re
             // Any other/absent service is a 404 (no oracle for unknown services).
             let svc = query_param(query, "service");
             if svc == Some("git-receive-pack") {
-                return respond_push_forbidden(request);
+                return handle_receive_advertise(state, repo, request);
             }
             if svc != Some(UPLOAD_PACK) {
                 return respond_not_found(request);
@@ -127,9 +133,11 @@ pub fn respond_git(state: &AppState, method: &Method, url: &str, body: &[u8], re
             }
             None => respond_not_found(request),
         },
-        // POST git-receive-pack (push) → 403 with a clear human message. Not a
-        // silent 404: the client explicitly asked to push and deserves to know why
-        // it is refused, rather than seeing a cryptic "repository not found" error.
+        // POST git-receive-pack (push) → the write path (gated). Other methods on
+        // the receive-pack route → the clear 403 (not a silent 404).
+        (Method::Post, [repo, "git-receive-pack"]) => {
+            handle_receive_pack(state, repo, body, request)
+        }
         (_, [_repo, "git-receive-pack"]) => respond_push_forbidden(request),
         // Any other method/shape on a git-looking path → 404, no oracle.
         _ => respond_not_found(request),
@@ -377,6 +385,293 @@ const PUSH_FORBIDDEN_BODY: &str =
 /// Respond 403 when a client attempts `git push` (git-receive-pack). The body
 /// is plain text because `git` echoes the remote body in the terminal, giving
 /// the developer an actionable message instead of a cryptic connection error.
+/// The receive-pack (push) capabilities we advertise. `report-status` so the client
+/// reads our result report; `object-format=sha1` matches the proto's hash.
+const RECEIVE_CAPS: &str = "report-status object-format=sha1 agent=hugit-serve";
+
+/// Serve `GET /<repo>/info/refs?service=git-receive-pack` — the push advertisement.
+/// Gated identically to the push itself (flag + write seam + write-authz), so a
+/// caller who couldn't push never even sees the advertisement (403/401/404, no
+/// oracle). Disabled deploy → the honest 403 ("push not supported here").
+fn handle_receive_advertise(state: &AppState, repo: &str, request: Request) {
+    if !state.write_path_enabled {
+        return respond_push_forbidden(request);
+    }
+    let headers: Vec<tiny_http::Header> = request.headers().to_vec();
+    let principal = match crate::server::two_tier_auth(state, &headers) {
+        Ok((p, _)) => p,
+        Err(_) => return respond_push_unauth(request),
+    };
+    if !crate::state::is_safe_repo_slug(repo) {
+        return respond_not_found(request);
+    }
+    let Some(repo_state) = state.repo_state(repo) else {
+        return respond_not_found(request);
+    };
+    if repo_state.git_dir.is_none() {
+        return respond_not_found(request); // no write seam (CAS mode) → 404
+    }
+    let Ok(log) = state.load_verified(repo) else {
+        return respond_not_found(request);
+    };
+    let meta = crate::authz::project_repo_meta(&log);
+    if !crate::authz::authorize_write(&principal, &meta) {
+        return respond_not_found(request); // not the owner → 404, no oracle
+    }
+
+    let mut out = Vec::new();
+    pkt_line(&mut out, b"# service=git-receive-pack\n");
+    pkt_flush(&mut out);
+    let mut first = true;
+    if repo_state.git_refs.is_empty() {
+        // No refs yet: the zero-id capabilities line (so the client can still create).
+        let line = format!("{} capabilities^{{}}\0{RECEIVE_CAPS}\n", "0".repeat(40));
+        pkt_line(&mut out, line.as_bytes());
+    } else {
+        for (name, oid) in &repo_state.git_refs {
+            let mut line = format!("{oid} {name}");
+            if first {
+                line.push('\0');
+                line.push_str(RECEIVE_CAPS);
+                first = false;
+            }
+            line.push('\n');
+            pkt_line(&mut out, line.as_bytes());
+        }
+    }
+    pkt_flush(&mut out);
+    let resp = Response::from_data(out)
+        .with_status_code(200)
+        .with_header(git_content_type(
+            "application/x-git-receive-pack-advertisement",
+        ));
+    send(request, resp);
+}
+
+/// Handle a `POST /<repo>/git-receive-pack` (push). The WRITE side of the git wire.
+///
+/// Gated, fail-closed, and 404-no-oracle on any authz denial (never reveal a
+/// private/absent repo). Flow: authenticate the pusher → require the deploy flag +
+/// a write seam → **write-authz** (ownership, NOT the read predicate) → parse the
+/// wire → `hugit_proto::receive_pack` (bound/unpack/verify/store/anchor/append) into
+/// the repo's git dir → persist the mutated log (compare-and-swap) → update the
+/// git-dir ref so the wire advertises the new tip → emit the `report-status`.
+///
+/// v0 scope: a single non-delete ref per push (`docs/plan/2026-06-22-receive-pack-wave-design.md`).
+fn handle_receive_pack(state: &AppState, repo: &str, body: &[u8], request: Request) {
+    use crate::receive_wire::{RefOutcome, build_report_status, parse_receive_pack_body};
+    use crate::writes::LogSink; // brings AppState::persist (the compare-and-swap) into scope
+    use hugit_proto::write::receive::{ReceiveRequest, RecvLimits, RefUpdate, receive_pack};
+
+    // The deploy gate FIRST: receive-pack is OFF unless `HUGIT_SERVE_RECEIVE_PACK=1`.
+    // Off → the honest 403 ("push not supported here"), BEFORE auth, so a stock
+    // deploy answers the same clear message to any client (authed or not).
+    if !state.write_path_enabled {
+        return respond_push_forbidden(request);
+    }
+
+    // Authenticate — a push is a WRITE, so it MUST carry a valid bearer (unlike an
+    // anonymous clone). An invalid/absent token → 401.
+    let headers: Vec<tiny_http::Header> = request.headers().to_vec();
+    let principal = match crate::server::two_tier_auth(state, &headers) {
+        Ok((p, _)) => p,
+        Err(_) => return respond_push_unauth(request),
+    };
+
+    // A write seam is required (GIT_DIR mode). No seam (CAS mode / unknown repo) →
+    // 404, no oracle. Everything past here is gated behind a successful authz.
+    if !crate::state::is_safe_repo_slug(repo) {
+        return respond_not_found(request);
+    }
+    let Some(repo_state) = state.repo_state(repo) else {
+        return respond_not_found(request);
+    };
+    let (Some(mut cas), Some(git_dir)) = (repo_state.write_cas(), repo_state.git_dir.clone())
+    else {
+        return respond_not_found(request); // no on-disk write seam → 404
+    };
+
+    // Load the repo's log (the authz meta source + the append target), pinned to the
+    // head we compare-and-swap against.
+    let (mut log, token) = match state.load_verified_with_token(repo) {
+        Ok(lt) => lt,
+        Err(_) => return respond_not_found(request),
+    };
+
+    // WRITE-authz: OWNERSHIP, never the read-visibility predicate (a public repo
+    // opens reads, NEVER writes). Denial → 404 (no oracle).
+    let meta = crate::authz::project_repo_meta(&log);
+    if !crate::authz::authorize_write(&principal, &meta) {
+        return respond_not_found(request);
+    }
+
+    // Parse the wire. A framing/command error → 400 (a malformed push).
+    let wire = match parse_receive_pack_body(body) {
+        Ok(w) => w,
+        Err(e) => return respond_push_bad_request(request, &e.to_string()),
+    };
+    if let Err(e) = wire.require_pack() {
+        return respond_push_bad_request(request, &e.to_string());
+    }
+    if wire.commands.len() != 1 {
+        return respond_push_bad_request(request, "v0 accepts exactly one ref update per push");
+    }
+    let cmd = wire.commands[0].clone();
+    if cmd.is_delete() {
+        // delete-ref is out of v0 scope — a clean per-ref `ng`, not a hard error.
+        let report = build_report_status(
+            Ok(()),
+            &[RefOutcome::Ng {
+                ref_name: cmd.ref_name.clone(),
+                reason: "delete-not-supported".into(),
+            }],
+        );
+        return send_report(request, report);
+    }
+
+    let req = ReceiveRequest {
+        pack: wire.pack,
+        update: RefUpdate {
+            ref_name: cmd.ref_name.clone(),
+            expected: if cmd.is_create() {
+                None
+            } else {
+                Some(cmd.old_oid.clone())
+            },
+            new_oid: cmd.new_oid.clone(),
+        },
+        principal_chain: principal,
+        recorded_at: now_ms(),
+    };
+
+    let gate = state.receive_flag_gate();
+    match receive_pack(&gate, &req, &mut cas, &mut log, RecvLimits::default()) {
+        Ok(_receipt) => {
+            // Persist the appended ref.update event (compare-and-swap against the
+            // head we read). A conflict/transport fault → report it, store nothing
+            // half-applied (the objects are content-addressed + idempotent).
+            if let Err(e) = state.persist(repo, &log, &token) {
+                let report = build_report_status(
+                    Err("log-persist-failed"),
+                    &[RefOutcome::Ng {
+                        ref_name: cmd.ref_name.clone(),
+                        reason: format!("persist:{}", e.status),
+                    }],
+                );
+                return send_report(request, report);
+            }
+            // Update the git-dir ref so the upload-pack wire advertises the new tip
+            // (after the next load). Compare-and-swap against the expected old value
+            // (git's own ref CAS). In CAS-mode prod this path is unreachable (no
+            // git_dir); the live ref write-back is the W3 follow-up.
+            if let Err(reason) = update_git_ref(&git_dir, &cmd.ref_name, &cmd.new_oid, &cmd.old_oid)
+            {
+                let report = build_report_status(
+                    Ok(()),
+                    &[RefOutcome::Ng {
+                        ref_name: cmd.ref_name.clone(),
+                        reason,
+                    }],
+                );
+                return send_report(request, report);
+            }
+            let report = build_report_status(Ok(()), &[RefOutcome::Ok(cmd.ref_name.clone())]);
+            send_report(request, report)
+        }
+        Err(e) => {
+            // A rejected push (stale ref, tampered/unreachable target, oversized,
+            // gate off, …) → HTTP 200 with a per-ref `ng <reason>` (git surfaces it).
+            let report = build_report_status(
+                Ok(()),
+                &[RefOutcome::Ng {
+                    ref_name: cmd.ref_name.clone(),
+                    reason: receive_err_reason(&e),
+                }],
+            );
+            send_report(request, report)
+        }
+    }
+}
+
+/// Unix epoch milliseconds (the push receipt time). 0 on a clock error (the log
+/// records it verbatim; a 0 is honest, never a fabricated time).
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Write the pushed ref into the git dir via `git update-ref`, compare-and-swap on
+/// the expected old value (a create passes the all-zero oid, which git reads as
+/// "must not exist"). Returns a short `ng` reason on failure.
+fn update_git_ref(
+    git_dir: &std::path::Path,
+    ref_name: &str,
+    new_oid: &str,
+    old_oid: &str,
+) -> Result<(), String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(git_dir)
+        .args(["update-ref", ref_name, new_oid, old_oid])
+        .output()
+        .map_err(|e| format!("update-ref-spawn:{e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err("ref-update-failed".to_string())
+    }
+}
+
+/// Map a `ReceiveError` to a short git `ng` reason token (no internal detail leak).
+fn receive_err_reason(e: &hugit_proto::write::receive::ReceiveError) -> String {
+    use hugit_proto::write::receive::ReceiveError as E;
+    match e {
+        E::WritePathDisabled => "push-disabled",
+        E::MissingAttribution => "no-attribution",
+        E::OversizedPack { .. } | E::DecompressionBomb { .. } => "pack-too-large",
+        E::StaleRef { .. } => "non-fast-forward",
+        E::RefUpdateTampered { .. } | E::UnreachableTarget { .. } => "ref-target-invalid",
+        _ => "push-rejected",
+    }
+    .to_string()
+}
+
+/// Send a `report-status` body (HTTP 200, the git receive-pack result media type).
+fn send_report(request: Request, body: Vec<u8>) {
+    let resp = Response::from_data(body)
+        .with_status_code(200)
+        .with_header(git_content_type("application/x-git-receive-pack-result"));
+    send(request, resp);
+}
+
+/// 401 for a push with no/invalid bearer (a write must be authenticated).
+fn respond_push_unauth(request: Request) {
+    send(
+        request,
+        Response::from_data(b"git push requires authentication\n".to_vec())
+            .with_status_code(401)
+            .with_header(
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..])
+                    .expect("static content-type"),
+            ),
+    );
+}
+
+/// 400 for a malformed push body (bad pkt-line framing / command / missing pack).
+fn respond_push_bad_request(request: Request, detail: &str) {
+    send(
+        request,
+        Response::from_data(format!("malformed receive-pack request: {detail}\n").into_bytes())
+            .with_status_code(400)
+            .with_header(
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..])
+                    .expect("static content-type"),
+            ),
+    );
+}
+
 fn respond_push_forbidden(request: Request) {
     send(
         request,
