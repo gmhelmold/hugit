@@ -125,18 +125,37 @@ fn build_tree_sidebar(
 ) -> Vec<BlobTreeRowVm> {
     // The leaf name of the current file (e.g. "lib.rs" for "src/lib.rs").
     let current_leaf = path.rsplit('/').next().unwrap_or(path);
+    // The parent directory whose children are the sidebar entries — "" for a
+    // root-level file (e.g. "README.md"). Used to build each entry's
+    // repo-relative navigation path.
+    let parent_dir = path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
 
     hugit_proto::list_tree_at_dir(src, root_tree, path)
         .into_iter()
-        .map(|e| BlobTreeRowVm {
-            // `current` is matched against the RAW name before scrubbing so
-            // the comparison is not broken by the REDACTED sentinel.
-            current: e.name == current_leaf,
-            // Scrub the displayed name: a git entry called `ghp_….key` must not
-            // appear verbatim in the sidebar view-model.
-            name: scrub(&e.name),
-            depth: 0,
-            is_dir: e.is_dir,
+        .map(|e| {
+            // Repo-relative navigation path (the window builds `/r/{repo}/blob/{path}`
+            // from it — REQUIRED on the wire). Scrubbed at the read boundary like
+            // `name`; a directory carries a trailing slash per the contract.
+            let raw_path = if parent_dir.is_empty() {
+                e.name.clone()
+            } else {
+                format!("{parent_dir}/{}", e.name)
+            };
+            let mut entry_path = scrub(&raw_path);
+            if e.is_dir {
+                entry_path.push('/');
+            }
+            BlobTreeRowVm {
+                // `current` is matched against the RAW name before scrubbing so
+                // the comparison is not broken by the REDACTED sentinel.
+                current: e.name == current_leaf,
+                // Scrub the displayed name: a git entry called `ghp_….key` must not
+                // appear verbatim in the sidebar view-model.
+                name: scrub(&e.name),
+                path: entry_path,
+                depth: 0,
+                is_dir: e.is_dir,
+            }
         })
         .collect()
 }
@@ -454,6 +473,96 @@ mod tests {
         let vm = build_blob(&log(), "r", "a/c.txt", Some(&src), Some(&root)).expect("nested file");
         assert_eq!(vm.lines[0].text, "deep");
         assert_eq!(vm.lang, None); // .txt has no mapping
+    }
+
+    #[test]
+    fn tree_rows_carry_repo_relative_path() {
+        // REGRESSION (prod blob-503): the sidebar tree entries MUST carry a
+        // repo-relative `path` — the window deserializes it as a REQUIRED field
+        // and builds `/r/{repo}/blob/{path}` links from it. A missing `path` is
+        // a hard decode error window-side (was the live 503 after the outline
+        // panic was guarded). Cover root-level, nested, and a directory's
+        // trailing slash.
+        let mut src = CasObjectSource::new();
+        let cblob = src.insert_raw(ObjectKind::Blob, b"c".to_vec());
+        let dblob = src.insert_raw(ObjectKind::Blob, b"d".to_vec());
+        let deep = src.insert_raw(ObjectKind::Blob, b"deep".to_vec());
+        let nested = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_BLOB,
+                name: "deep.txt",
+                oid: deep,
+            }],
+        );
+        // dir "a" holds: c.txt, d.txt, and a subdir "nested/".
+        let a = insert_tree(
+            &mut src,
+            vec![
+                TreeEntry {
+                    mode: MODE_BLOB,
+                    name: "c.txt",
+                    oid: cblob,
+                },
+                TreeEntry {
+                    mode: MODE_BLOB,
+                    name: "d.txt",
+                    oid: dblob,
+                },
+                TreeEntry {
+                    mode: MODE_TREE,
+                    name: "nested",
+                    oid: nested,
+                },
+            ],
+        );
+        let topblob = src.insert_raw(ObjectKind::Blob, b"top".to_vec());
+        let root = insert_tree(
+            &mut src,
+            vec![
+                TreeEntry {
+                    mode: MODE_TREE,
+                    name: "a",
+                    oid: a,
+                },
+                TreeEntry {
+                    mode: MODE_BLOB,
+                    name: "top.txt",
+                    oid: topblob,
+                },
+            ],
+        );
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
+
+        // Viewing a NESTED file: the sidebar lists "a/"'s children, each with a
+        // path PREFIXED by the parent dir; the open file is `current`.
+        let vm = build_blob(&log(), "r", "a/c.txt", Some(&src), Some(&root)).expect("nested file");
+        let by_name = |n: &str| vm.tree.iter().find(|r| r.name == n).expect("row present");
+        assert_eq!(by_name("c.txt").path, "a/c.txt");
+        assert!(by_name("c.txt").current, "open file marked current");
+        assert_eq!(by_name("d.txt").path, "a/d.txt");
+        // A directory entry carries a TRAILING SLASH per the wire contract.
+        assert_eq!(by_name("nested").path, "a/nested/");
+        assert!(by_name("nested").is_dir);
+
+        // Viewing a ROOT-level file: entry path has no parent prefix.
+        let vm_root =
+            build_blob(&log(), "r", "top.txt", Some(&src), Some(&root)).expect("root file");
+        let top = vm_root
+            .tree
+            .iter()
+            .find(|r| r.name == "top.txt")
+            .expect("top row");
+        assert_eq!(top.path, "top.txt");
+        assert_eq!(
+            vm_root
+                .tree
+                .iter()
+                .find(|r| r.name == "a")
+                .expect("dir row")
+                .path,
+            "a/"
+        );
     }
 
     #[test]
