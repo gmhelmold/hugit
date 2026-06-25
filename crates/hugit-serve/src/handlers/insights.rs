@@ -18,6 +18,7 @@ use hugit_http_contracts::insights::{
     CostXrayRowVm, LedgerCampaignVm, LedgerRowVm, LedgerViewVm, XrayDrillRowVm, XrayTotalsVm,
 };
 use hugit_http_contracts::{CampaignChipVm, InsightsVm};
+use hugit_ledger::envelope::cold_ref_for;
 use hugit_ledger::rollup::{PrQueueInput, pr_record};
 use hugit_ledger::{Ledger, LedgerEntry};
 use serde_json::Value;
@@ -135,15 +136,18 @@ fn ordered_open_prs(log: &EventLog) -> Vec<OpenedPr> {
 fn envelopes_for_pr(
     log: &EventLog,
     opened: &OpenedPr,
-) -> Option<(ContextEnvelope, Vec<ContextEnvelope>)> {
+) -> Option<(ContextEnvelope, String, Vec<ContextEnvelope>)> {
     let bundle: std::collections::BTreeSet<&str> =
         opened.intent_ids.iter().map(String::as_str).collect();
-    let pr = log
+    let (pr, raw_payload) = log
         .records()
         .iter()
         .filter(|r| r.kind == PR_ENVELOPE_KIND)
-        .filter_map(|r| serde_json::from_str::<ContextEnvelope>(&r.payload).ok())
-        .rfind(|e| e.altitude == Altitude::Pr && e.intent_id == opened.pr_id)?;
+        .filter_map(|r| {
+            let env = serde_json::from_str::<ContextEnvelope>(&r.payload).ok()?;
+            Some((env, r.payload.clone()))
+        })
+        .rfind(|(e, _)| e.altitude == Altitude::Pr && e.intent_id == opened.pr_id)?;
     let intents = log
         .records()
         .iter()
@@ -151,7 +155,7 @@ fn envelopes_for_pr(
         .filter_map(|r| serde_json::from_str::<ContextEnvelope>(&r.payload).ok())
         .filter(|e| e.altitude == Altitude::Intent && bundle.contains(e.intent_id.as_str()))
         .collect();
-    Some((pr, intents))
+    Some((pr, raw_payload, intents))
 }
 
 fn zero_ci() -> CiCost {
@@ -209,12 +213,14 @@ fn build_cost_xray(log: &EventLog, chips: &[CampaignChipVm]) -> XrayOut {
         let mut drill_rows = Vec::new();
         let mut pr_count = 0usize;
         let mut intent_count = 0usize;
+        let mut spend_proof: Option<String> = None;
         for opened in prs_for {
             pr_count += 1;
             intent_count += opened.intent_ids.len();
-            let Some((pr_env, intent_envs)) = envelopes_for_pr(log, opened) else {
+            let Some((pr_env, raw_payload, intent_envs)) = envelopes_for_pr(log, opened) else {
                 continue;
             };
+            spend_proof = Some(cold_ref_for(raw_payload.as_bytes()));
             if let Ok(rec) = pr_record(
                 &pr_env,
                 "",
@@ -267,7 +273,7 @@ fn build_cost_xray(log: &EventLog, chips: &[CampaignChipVm]) -> XrayOut {
             cost_total_micros: total_micros,
             waste_micros,
             cache_saved_micros: 0,      // HONEST-ZERO — no cache-$ seam yet
-            spend_proof: None, // HONEST-None — pr_envelope_ref not threaded through here yet
+            spend_proof,                // REAL — cas: ref of the PR-altitude envelope raw payload
             cache_efficiency_pct: None, // HONEST-None — no CI-cost/cache seam yet
         });
         tokens_by_campaign.push((chip.clone(), total_tokens, cost_total));
@@ -304,7 +310,10 @@ fn build_cost_xray(log: &EventLog, chips: &[CampaignChipVm]) -> XrayOut {
 
 // ── ledger view ───────────────────────────────────────────────────────────────
 
-fn ledger_row_from_entry(entry: &LedgerEntry) -> LedgerRowVm {
+fn ledger_row_from_entry(
+    entry: &LedgerEntry,
+    intent_spend_map: &std::collections::HashMap<String, String>,
+) -> LedgerRowVm {
     let done_status = if entry.rejected {
         "rejected"
     } else {
@@ -347,11 +356,15 @@ fn ledger_row_from_entry(entry: &LedgerEntry) -> LedgerRowVm {
         cost_micros: 0,
         savings_micros: 0,
         tokens_count: 0,
-        spend_proof: None, // HONEST-None — no intent-altitude envelope ref on the ledger entry
+        spend_proof: intent_spend_map.get(&entry.intent_id).cloned(), // REAL — cas: ref from matching intent.envelope record
     }
 }
 
-fn build_ledger_view(ledger: &Ledger, chips: &[CampaignChipVm]) -> LedgerViewVm {
+fn build_ledger_view(
+    ledger: &Ledger,
+    chips: &[CampaignChipVm],
+    intent_spend_map: &std::collections::HashMap<String, String>,
+) -> LedgerViewVm {
     let chip_lookup: std::collections::HashMap<&str, &CampaignChipVm> =
         chips.iter().map(|c| (c.id.as_str(), c)).collect();
     let mut campaigns = Vec::new();
@@ -369,7 +382,7 @@ fn build_ledger_view(ledger: &Ledger, chips: &[CampaignChipVm]) -> LedgerViewVm 
             });
         let rows: Vec<LedgerRowVm> = ledger
             .by_campaign(&campaign_id)
-            .map(ledger_row_from_entry)
+            .map(|e| ledger_row_from_entry(e, intent_spend_map))
             .collect();
         campaigns.push(LedgerCampaignVm {
             campaign: chip,
@@ -443,6 +456,23 @@ pub fn build_insights(log: &EventLog, repo: &str) -> InsightsVm {
     let chips = campaign_chips(log);
     let xray = build_cost_xray(log, &chips);
 
+    // Build intent_id → cas: ref map from the log's INTENT_ENVELOPE records
+    // (altitude Intent) using the RAW stored payload bytes — avoids serde
+    // field-order drift that would break the proof if the envelope were re-serialized.
+    let intent_spend_map: std::collections::HashMap<String, String> = log
+        .records()
+        .iter()
+        .filter(|r| r.kind == INTENT_ENVELOPE_KIND)
+        .filter_map(|r| {
+            let env = serde_json::from_str::<ContextEnvelope>(&r.payload).ok()?;
+            if env.altitude == Altitude::Intent {
+                Some((env.intent_id.clone(), cold_ref_for(r.payload.as_bytes())))
+            } else {
+                None
+            }
+        })
+        .collect();
+
     InsightsVm {
         repo: repo.to_string(),
         kpis: build_kpis(&ledger),
@@ -456,6 +486,6 @@ pub fn build_insights(log: &EventLog, repo: &str) -> InsightsVm {
         contrib: vec![],               // HONEST-DEFAULT — no contributor seam
         landing_times: None,           // HONEST-DEFAULT — no timing seam
         ci_checks: None,               // HONEST-DEFAULT — no CI-card seam
-        ledger: build_ledger_view(&ledger, &chips),
+        ledger: build_ledger_view(&ledger, &chips, &intent_spend_map),
     }
 }

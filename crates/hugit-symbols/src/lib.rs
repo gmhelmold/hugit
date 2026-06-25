@@ -152,6 +152,19 @@ pub fn outline_blob(lang: Lang, source: &[u8]) -> Vec<SymbolItem> {
         return Vec::new();
     };
 
+    // Honor the totality contract (this fn's doc says "never panics"): the
+    // tree-sitter parse / query / classifier path can panic on a pathological
+    // input. Catch it and degrade to an empty outline (the honest default),
+    // never letting a parser panic escape to the caller.
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        outline_for_lang(lang, text)
+    }))
+    .unwrap_or_default()
+}
+
+/// Dispatch `text` to the per-language [`outline_with`] engine. Split out from
+/// [`outline_blob`] so the totality `catch_unwind` wraps exactly the parse path.
+fn outline_for_lang(lang: Lang, text: &str) -> Vec<SymbolItem> {
     match lang {
         Lang::Rust => outline_with(
             text,
@@ -836,5 +849,112 @@ mod tests {
     fn deterministic() {
         let src = b"fn a() {}\nstruct B;\nfn c() {}\n";
         assert_eq!(outline_blob(Lang::Rust, src), outline_blob(Lang::Rust, src));
+    }
+
+    /// Every [`Lang`] the outliner supports — keep in lock-step with the enum.
+    const ALL_LANGS: &[Lang] = &[
+        Lang::Rust,
+        Lang::TypeScript,
+        Lang::Tsx,
+        Lang::JavaScript,
+        Lang::Python,
+        Lang::Go,
+        Lang::Java,
+        Lang::C,
+        Lang::Cpp,
+        Lang::Ruby,
+    ];
+
+    /// A focused adversarial corpus — one representative per failure-mode class
+    /// the prod 503 could have come from. Kept compact ON PURPOSE: `outline_blob`
+    /// compiles its tree-sitter `Query` on every call (notably the large C++
+    /// grammar costs tens of ms per call), so totality is proven by HITTING each
+    /// parse path once per language, not by huge inputs or a huge corpus. Sizes
+    /// are bounded for the same reason: tree-sitter error recovery is super-linear
+    /// in the count of malformed tokens, so a large wrong-grammar blob is a
+    /// multi-second parse for no extra coverage.
+    fn adversarial_corpus() -> Vec<Vec<u8>> {
+        // The fixed leading cases use a `vec![]` initializer (idiomatic — avoids
+        // the clippy `vec_init_then_push` lint); the dynamically-built cases
+        // below stay as `push` since they need intermediate statements.
+        let mut c: Vec<Vec<u8>> = vec![
+            // Empty + whitespace-only.
+            Vec::new(),
+            b" \t\r\n".to_vec(),
+            // Non-UTF-8 / truncated-at-multibyte-boundary / lone-surrogate bytes.
+            // `outline_blob` rejects these up front, but they pin the early-return.
+            b"fn \xf0\x9f".to_vec(),      // truncated 4-byte emoji
+            b"\xc3".to_vec(),             // lone 2-byte lead
+            vec![0xed, 0xa0, 0x80],       // U+D800 surrogate as bytes (invalid)
+            vec![0xff, 0xfe, 0x00, 0x01], // never-valid UTF-8 + NUL
+            // A small valid source in one grammar (cross-parsed by all the others —
+            // i.e. mostly error-recovery for the other nine).
+            b"pub fn f(){}\nstruct S;\n".to_vec(),
+            // Deeply nested / unbalanced grouping tokens — recursive-descent + error
+            // recovery (depths in the low hundreds; see the fn-doc on why bounded).
+            b"{".repeat(300), // opener flood, no closers
+            b"}".repeat(300), // closer flood, no openers
+        ];
+        {
+            let mut nested = Vec::new();
+            nested.extend(b"fn f() ".iter());
+            nested.extend(b"{".repeat(200));
+            nested.extend(b"}".repeat(200));
+            c.push(nested);
+        }
+        // Nested generics / templates — the C++/TS template-argument recovery
+        // (the classic super-linear GLR case), bounded to a shallow depth.
+        c.push(b"Vec<".repeat(64));
+
+        // One giant token (a 64 KiB identifier — cheap: a single lexeme, not an
+        // error flood) and a short high-decl-count blob (wide, not deep).
+        c.push(vec![b'a'; 64 * 1024]);
+        c.push(b"fn a(){}\n".repeat(64));
+
+        // Valid-UTF-8 pseudo-random ASCII noise (the parse path actually runs).
+        let mut rng: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut noise = Vec::with_capacity(4_096);
+        for _ in 0..4_096 {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            noise.push((0x20 + (rng % 0x5f) as u8).min(0x7e)); // printable ASCII
+        }
+        c.push(noise);
+
+        // NUL bytes interleaved with source-shaped text, and a NUL block.
+        c.push(b"fn\0a\0(\0)\0{\0}".to_vec());
+        c.push(vec![0u8; 1_024]);
+
+        // Unterminated string / block-comment openers (lexer / error-recovery
+        // edge), bounded.
+        c.push(b"\"".repeat(128));
+        c.push(b"/*".repeat(128));
+
+        // Size-boundary: just under the cap (full parse — a single-token fill so
+        // it is cheap), exactly at the cap, and one over (early oversized return).
+        c.push(vec![b'a'; MAX_INPUT_BYTES - 1]);
+        c.push(vec![b'b'; MAX_INPUT_BYTES]);
+        c.push(vec![b'c'; MAX_INPUT_BYTES + 1]);
+
+        c
+    }
+
+    /// TOTALITY CONTRACT (the doc on `outline_blob` says "never panics"): feed the
+    /// adversarial corpus to EVERY language and assert the call NEVER panics — the
+    /// regression guard for the `/v1/.../blob` 503 (a parser panic on a prod blob
+    /// must degrade to an empty outline, never unwind).
+    #[test]
+    fn outline_blob_is_total_never_panics() {
+        let corpus = adversarial_corpus();
+        for lang in ALL_LANGS {
+            for input in &corpus {
+                // The assertion is simply that the call RETURNS — any panic would
+                // unwind out of the test and fail it. We do not constrain the
+                // OUTPUT (the contract is totality, not a specific outline). The
+                // catch_unwind inside `outline_blob` is what makes this hold.
+                let _ = outline_blob(*lang, input);
+            }
+        }
     }
 }
