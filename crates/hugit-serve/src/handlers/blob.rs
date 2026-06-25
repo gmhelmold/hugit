@@ -89,7 +89,12 @@ pub fn build_blob(
         blame: vec![],
         // REAL (W6): the symbol outline, parsed from the blob bytes via
         // hugit-symbols. Empty for an unsupported language (honest, not faked).
-        outline: compute_outline(path, &bytes),
+        // Fail-closed: an outline panic must not 503 the whole file read —
+        // degrade to an honest-empty outline (the unsupported-language default).
+        outline: std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            compute_outline(path, &bytes)
+        }))
+        .unwrap_or_default(),
         actions: blob_actions(),
         // REAL: the sidebar file tree — entries in the same directory as
         // `path`. Symlinks + gitlinks are excluded (see `list_tree_at_dir`).
@@ -324,6 +329,38 @@ mod tests {
             "the requested file must be marked current"
         );
         assert!(!vm.tree[0].is_dir);
+    }
+
+    #[test]
+    fn outline_panic_guard_is_transparent_on_the_happy_path() {
+        // The catch_unwind guard added to fail-close an outline panic (so a
+        // tree-sitter panic returns an empty outline instead of 503-ing the
+        // whole file read) must be TRANSPARENT on a normal blob: a healthy Rust
+        // file still yields its NON-empty outline through build_blob.
+        let mut src = CasObjectSource::new();
+        let content = "pub fn alpha() {}\npub struct Beta;\npub fn gamma() -> u8 { 0 }\n";
+        let blob = src.insert_raw(ObjectKind::Blob, content.as_bytes().to_vec());
+        let root = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_BLOB,
+                name: "k.rs",
+                oid: blob,
+            }],
+        );
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
+
+        let vm = build_blob(&log(), "r", "k.rs", Some(&src), Some(&root)).expect("rs resolves");
+        // The guard did NOT swallow the real outline — the file's symbols survive.
+        assert!(
+            !vm.outline.is_empty(),
+            "the panic guard must be transparent on a healthy blob: {:?}",
+            vm.outline
+        );
+        let names: Vec<&str> = vm.outline.iter().map(|o| o.name.as_str()).collect();
+        assert!(names.contains(&"alpha"), "outline: {names:?}");
+        assert!(names.contains(&"Beta"), "outline: {names:?}");
+        assert!(names.contains(&"gamma"), "outline: {names:?}");
     }
 
     #[test]

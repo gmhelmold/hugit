@@ -247,9 +247,109 @@ pub fn build_checks(log: &EventLog, repo: &str) -> ChecksVm {
         // cost summary — STUB
         executed_total_cost: String::new(),
         quarantine_count: 0,
-        // FLEET KPIs — P2 STUBs (honest zero/empty)
-        cache_hit_rate_pct: 0,
-        cache_saved_usd: String::new(),
-        cache_saved_runner_h: String::new(),
+        // FLEET KPIs — cache_hit_rate_pct is REAL-from-rows (hit_rate_pct computed
+        // above from check.recorded events); cache_saved_usd + cache_saved_runner_h
+        // stay HONEST-EMPTY — no per-check cost seam yet (needs the runner fabric, P2).
+        // Fabricating a $ figure repeats the reverted #113 demo-cost mistake.
+        cache_hit_rate_pct: hit_rate_pct.round() as u32,
+        cache_saved_usd: String::new(), // HONEST-EMPTY: no runner cost seam (P2)
+        cache_saved_runner_h: String::new(), // HONEST-EMPTY: no runner-hour seam (P2)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn check_payload(name: &str, exit: i64, cache_hit: bool, memo_key: &str) -> String {
+        serde_json::json!({
+            "name": name,
+            "exit": exit,
+            "duration_ms": 1000u64,
+            "cache_hit": cache_hit,
+            "memo_key": memo_key,
+        })
+        .to_string()
+    }
+
+    fn make_log(events: &[(&str, String)]) -> EventLog {
+        let mut log = EventLog::new();
+        for (kind, payload) in events {
+            log.append_for_test(
+                kind.to_string(),
+                vec!["test".to_string()],
+                payload.clone(),
+                0,
+            );
+        }
+        log
+    }
+
+    #[test]
+    fn zero_rows_gives_zero_hit_rate() {
+        let log = make_log(&[]);
+        let vm = build_checks(&log, "hugit");
+        assert_eq!(vm.cache_hit_rate_pct, 0);
+        assert_eq!(vm.cache_saved_usd, "");
+        assert_eq!(vm.cache_saved_runner_h, "");
+    }
+
+    #[test]
+    fn all_hits_gives_100_pct() {
+        // 3 hits, 0 executed → 100%
+        let log = make_log(&[
+            (CHECK_RECORDED_KIND, check_payload("a", 0, true, "k1")),
+            (CHECK_RECORDED_KIND, check_payload("b", 0, true, "k2")),
+            (CHECK_RECORDED_KIND, check_payload("c", 0, true, "k3")),
+        ]);
+        let vm = build_checks(&log, "hugit");
+        assert_eq!(vm.cache_hit_rate_pct, 100);
+        assert_eq!(vm.cache_saved_usd, "");
+        assert_eq!(vm.cache_saved_runner_h, "");
+    }
+
+    #[test]
+    fn mixed_hits_rounds_correctly() {
+        // 3 hits, 1 executed → 75.0% → rounds to 75
+        let log = make_log(&[
+            (CHECK_RECORDED_KIND, check_payload("a", 0, true, "k1")),
+            (CHECK_RECORDED_KIND, check_payload("b", 0, true, "k2")),
+            (CHECK_RECORDED_KIND, check_payload("c", 0, true, "k3")),
+            (CHECK_RECORDED_KIND, check_payload("d", 1, false, "")),
+        ]);
+        let vm = build_checks(&log, "hugit");
+        assert_eq!(vm.cache_hit_rate_pct, 75);
+        assert_eq!(vm.cache_saved_usd, "");
+        assert_eq!(vm.cache_saved_runner_h, "");
+    }
+
+    #[test]
+    fn no_hits_gives_zero_pct() {
+        // 0 hits, 2 executed → 0%
+        let log = make_log(&[
+            (CHECK_RECORDED_KIND, check_payload("a", 1, false, "")),
+            (CHECK_RECORDED_KIND, check_payload("b", 1, false, "")),
+        ]);
+        let vm = build_checks(&log, "hugit");
+        assert_eq!(vm.cache_hit_rate_pct, 0);
+        assert_eq!(vm.cache_saved_usd, "");
+        assert_eq!(vm.cache_saved_runner_h, "");
+    }
+
+    #[test]
+    fn real_hit_rate_matches_kpis_vm() {
+        // cache_hit_rate_pct must be consistent with kpis.hit_rate_pct.
+        // 1 hit, 1 executed → 50.0%; cache_hit_rate_pct == round(50.0) == 50.
+        let log = make_log(&[
+            (CHECK_RECORDED_KIND, check_payload("a", 0, true, "k1")),
+            (CHECK_RECORDED_KIND, check_payload("b", 0, false, "")),
+        ]);
+        let vm = build_checks(&log, "hugit");
+        assert_eq!(vm.kpis.hit_rate_pct, 50.0);
+        assert_eq!(vm.cache_hit_rate_pct, 50);
     }
 }
