@@ -67,6 +67,14 @@ pub struct BlobBlameVm {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlobTreeRowVm {
     pub name: String,
+    /// Repo-relative path for navigation, e.g. "crates/auth/src/token.rs". A
+    /// directory carries a trailing slash, e.g. "crates/auth/". The consumer
+    /// builds `/r/{repo}/blob/{path}` links from it, so it is REQUIRED on the
+    /// wire (a missing `path` is a hard decode error for the window). Scrubbed
+    /// at the read boundary like `name`. `#[serde(default)]` only covers older
+    /// pre-`path` fixtures on the producer side; the engine always populates it.
+    #[serde(default)]
+    pub path: String,
     pub depth: u32,
     pub is_dir: bool,
     pub current: bool,
@@ -180,12 +188,14 @@ mod tests {
             tree: vec![
                 BlobTreeRowVm {
                     name: "auth/".into(),
+                    path: "crates/auth/".into(),
                     depth: 0,
                     is_dir: true,
                     current: false,
                 },
                 BlobTreeRowVm {
                     name: "token.rs".into(),
+                    path: "crates/auth/token.rs".into(),
                     depth: 1,
                     is_dir: false,
                     current: true,
