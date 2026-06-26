@@ -111,6 +111,29 @@ pub fn store_objects(cas: &mut dyn Cas, objects: &[CasObject]) {
     }
 }
 
+/// Inflate a [`CasObject`]'s verbatim **zlib-compressed** loose bytes to git's
+/// **uncompressed loose framing** — `"<kind> <len>\0<body>"`.
+///
+/// A git loose object on disk is `zlib(<kind> <len>\0<body>)`; `receive_pack`
+/// captures exactly those compressed bytes ([`CasObject::bytes`]). The CoreLink
+/// CAS, however, stores the **uncompressed** framing (`hugit-serve`'s
+/// `encode_loose`) and content-addresses it with `blake3(framing)`. So a push
+/// landing into the CAS MUST inflate first: inflating the verbatim loose bytes
+/// yields *exactly* that pre-image (git's loose body IS the framing), so the
+/// pushed object is byte-identical to one the CAS read side would serve — the
+/// load-bearing correctness invariant of CAS-mode push.
+///
+/// Returns the inflated framing bytes; the caller computes `blake3` over them.
+/// `Err` (an `io::Error` from the zlib stream) surfaces a corrupt/non-zlib input
+/// so the adapter can fail the push closed rather than store garbage.
+pub fn inflate_loose_framing(obj: &CasObject) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+    let mut decoder = flate2::read::ZlibDecoder::new(obj.bytes.as_slice());
+    let mut framing = Vec::new();
+    decoder.read_to_end(&mut framing)?;
+    Ok(framing)
+}
+
 /// Record a raw-push ref *update* as an append-only D1 event and return the
 /// freshly-appended [`EventRecord`].
 ///
@@ -262,6 +285,55 @@ mod tests {
         assert_eq!(rec.kind, REF_UPDATE_KIND);
         assert!(!rec.payload.contains("intent_id"));
         assert!(!rec.payload.contains(INTENT_LANDED_KIND));
+    }
+
+    /// Build a verbatim git loose object: `zlib(<kind> <len>\0<body>)` — the EXACT
+    /// on-disk bytes `receive_pack` reads back via `read_loose`.
+    fn zlib_loose(kind: &str, body: &[u8]) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut framing = format!("{kind} {}\0", body.len()).into_bytes();
+        framing.extend_from_slice(body);
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(&framing).expect("deflate");
+        enc.finish().expect("finish")
+    }
+
+    #[test]
+    fn inflate_loose_framing_recovers_the_uncompressed_pre_image() {
+        let body = b"the file contents that git stored loose";
+        let compressed = zlib_loose("blob", body);
+        // The verbatim loose bytes are genuinely compressed (not the framing itself).
+        let want_framing = {
+            let mut f = format!("blob {}\0", body.len()).into_bytes();
+            f.extend_from_slice(body);
+            f
+        };
+        assert_ne!(
+            compressed, want_framing,
+            "input is zlib-compressed, not framing"
+        );
+
+        let obj = CasObject {
+            oid: "fe8f5f1e013d57d0629ff3999a71986ffc2b05fb".into(),
+            bytes: compressed,
+        };
+        let framing = inflate_loose_framing(&obj).expect("inflates");
+        // Inflating the verbatim loose bytes yields git's loose pre-image exactly —
+        // the byte string the CoreLink CAS stores + blake3-keys (the CAS-push invariant).
+        assert_eq!(framing, want_framing);
+        assert_eq!(&framing[..7], b"blob 39");
+    }
+
+    #[test]
+    fn inflate_loose_framing_rejects_non_zlib_bytes() {
+        let obj = CasObject {
+            oid: "1111111111111111111111111111111111111111".into(),
+            bytes: vec![0xde, 0xad, 0xbe, 0xef], // not a zlib stream
+        };
+        assert!(
+            inflate_loose_framing(&obj).is_err(),
+            "corrupt input fails closed"
+        );
     }
 
     #[test]

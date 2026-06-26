@@ -1748,6 +1748,192 @@ fn root_tree_of_commit(
         .map_err(|e| format!("HEAD commit {head} does not decode (no tree id): {e}"))
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// H. CasRw — the buffering receive→CAS write adapter (the CAS-mode push sink).
+// ─────────────────────────────────────────────────────────────────────────────
+
+use hugit_proto::write::store::{Cas, CasObject, inflate_loose_framing};
+use std::collections::HashMap;
+
+/// A buffering [`Cas`] adapter that turns `receive_pack`'s verbatim loose objects
+/// into CoreLink-CAS-shaped, content-addressed writes — the write-side analogue of
+/// [`LazyCasObjectSource`] and the foundation of CAS-mode `git push`.
+///
+/// # The load-bearing correctness invariant
+///
+/// `receive_pack` produces [`CasObject`]s whose `.bytes` are git's verbatim
+/// **zlib-compressed** loose bytes. The CoreLink CAS, however, stores the
+/// **uncompressed** `encode_loose` framing (`<kind> <len>\0<body>`) keyed by
+/// `blake3(framing)` — exactly what [`LazyCasObjectSource`] reads back. So
+/// [`Cas::put`] here **inflates** each object to its framing
+/// ([`inflate_loose_framing`]) and keys it with [`cas_key`] — the SAME helper the
+/// read side hashes with — BEFORE buffering. An object pushed through `CasRw` is
+/// therefore byte-identical to one the CAS read side would serve; storing the
+/// compressed bytes (or a mis-computed key) would make every pushed object
+/// un-cloneable.
+///
+/// # Buffer-then-flush
+///
+/// [`Cas::put`] is **infallible** (the trait contract) and does NO network: it
+/// inflates + buffers into `pending` (keyed by blake3, deduped) and records the
+/// `git_oid → blake3` mapping in `index_add`. [`Cas::contains`] / [`Cas::get`]
+/// consult the pending push and the repo's existing `oid → blake3` index FIRST,
+/// then fall through to the wrapped CAS read source — so the receive-pack anchor
+/// check (the pushed tip must be delivered OR already live) sees both the
+/// in-flight objects and the prior closure. The explicit, fallible [`flush`] is
+/// the ONLY network step: it uploads the buffered set (idempotent — content
+/// addressing means a re-flush re-PUTs the same bytes the server already holds).
+/// The receive-pack handler calls `flush` AFTER a successful `receive_pack`
+/// (PR2); a buffered object that failed to inflate fails the flush closed.
+///
+/// [`flush`]: CasRw::flush
+pub struct CasRw<T: CasTransport = UreqCasTransport> {
+    /// The wrapped CoreLink CAS client — the read fall-through AND the flush sink.
+    cas: CasClient<T>,
+    /// The repo's pre-push closure: `git_oid (40-hex) → blake3 (64-hex)` — the
+    /// same `oid-index.json` shape the loader reads. Authoritative for "does the
+    /// repo already hold this oid" (the anchor's already-live-in-CAS leg).
+    existing: OidIndex,
+    /// Buffered new objects: `blake3 → uncompressed loose framing`. Deduped by
+    /// content address (`or_insert`), so identical content is buffered once.
+    pending: HashMap<String, Vec<u8>>,
+    /// This push's new objects: `git_oid (40-hex) → blake3 (64-hex)`. The write
+    /// analogue of `existing`; consulted first by `contains`/`get`.
+    index_add: HashMap<String, String>,
+    /// Inflate failures deferred from the infallible `put`. A non-empty list fails
+    /// the explicit [`flush`](CasRw::flush) closed (a corrupt object must never be
+    /// silently dropped from the closure).
+    inflate_errors: Vec<String>,
+}
+
+impl<T: CasTransport> CasRw<T> {
+    /// Wrap a CAS client + the repo's existing `oid → blake3` index (its pre-push
+    /// closure). The buffer starts empty; objects accrue via [`Cas::put`].
+    #[must_use]
+    pub fn new(cas: CasClient<T>, existing: OidIndex) -> Self {
+        Self {
+            cas,
+            existing,
+            pending: HashMap::new(),
+            index_add: HashMap::new(),
+            inflate_errors: Vec::new(),
+        }
+    }
+
+    /// The number of DISTINCT objects buffered (deduped by blake3) — the set a
+    /// [`flush`](CasRw::flush) would upload.
+    #[must_use]
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Whether nothing is buffered (a [`flush`](CasRw::flush) would be a no-op).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+
+    /// The wrapped CAS client (read fall-through + flush sink).
+    #[must_use]
+    pub fn cas_client(&self) -> &CasClient<T> {
+        &self.cas
+    }
+
+    /// Upload the buffered objects to the CoreLink CAS — the ONLY network step.
+    ///
+    /// Fails closed if any buffered object could not be inflated (an unservable
+    /// closure must not be half-committed). An empty buffer is a no-op. Uploads
+    /// via the idempotent batch path ([`CasClient::batch_upload`] + a single
+    /// per-object error retry); if the bulk plane is absent (405/404 on the batch
+    /// route) it degrades to the always-live single-object PUT — exactly the
+    /// `ingest_repo` policy. Idempotent: content addressing makes a re-flush a
+    /// no-write 200-`exists` on every object.
+    pub fn flush(&mut self) -> Result<(), CasError> {
+        if !self.inflate_errors.is_empty() {
+            return Err(CasError::Transport(format!(
+                "CasRw: {} buffered object(s) could not be inflated for CAS storage \
+                 (the closure is unservable; refusing to flush) — e.g. {}",
+                self.inflate_errors.len(),
+                self.inflate_errors
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or("?"),
+            )));
+        }
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        // Deterministic order (BTreeMap iteration would; HashMap does not) so the
+        // batching is reproducible. The set, not the order, is what matters for
+        // correctness — but determinism keeps tests + logs stable.
+        let mut objects: Vec<(String, Vec<u8>)> = self
+            .pending
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        objects.sort_by(|a, b| a.0.cmp(&b.0));
+        match upload_with_retry(&self.cas, &objects) {
+            Ok(()) => Ok(()),
+            // The bulk plane is not deployed — degrade to the always-live per-object
+            // PUT path (the server dedups implicitly: 201 fresh / 200 exists).
+            Err(CasError::BulkUnsupported(code)) => {
+                eprintln!(
+                    "CasRw::flush: bulk CAS plane absent (HTTP {code}) on batch-upload — \
+                     falling back to per-object PUT of {} object(s)",
+                    objects.len()
+                );
+                put_objects_individually(&self.cas, &objects)
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
+impl<T: CasTransport> Cas for CasRw<T> {
+    /// INFALLIBLE per the trait: inflate the verbatim zlib loose bytes to the CAS
+    /// framing, key it with [`cas_key`], and buffer — NO network. A rare inflate
+    /// failure is deferred to [`flush`](CasRw::flush) (which fails closed) rather
+    /// than panicking or silently dropping the object.
+    fn put(&mut self, obj: &CasObject) {
+        match inflate_loose_framing(obj) {
+            Ok(framing) => {
+                let key = cas_key(&framing);
+                self.index_add.insert(obj.oid.clone(), key.clone());
+                // Content-addressed ⇒ idempotent: identical content buffers once.
+                self.pending.entry(key).or_insert(framing);
+            }
+            Err(e) => self
+                .inflate_errors
+                .push(format!("git oid {}: zlib inflate failed: {e}", obj.oid)),
+        }
+    }
+
+    /// The CAS framing for `oid`: the buffered push FIRST (returns the exact bytes
+    /// the read side would serve), then the repo's existing closure via the wrapped
+    /// CAS (`oid → blake3 → cas.get`). `None` if the oid is in neither.
+    fn get(&self, oid: &str) -> Option<Vec<u8>> {
+        if let Some(blake3) = self.index_add.get(oid)
+            && let Some(framing) = self.pending.get(blake3)
+        {
+            return Some(framing.clone());
+        }
+        if let Some(blake3) = self.existing.get(oid) {
+            // Fall through to the wrapped CAS read source. A transport error reads
+            // as absent here (the anchor's `contains` is the fail-closed gate).
+            return self.cas.get(blake3).ok().flatten();
+        }
+        None
+    }
+
+    /// Whether `oid` is in the in-flight push OR the repo's existing closure —
+    /// the anchor's "delivered now OR already live in CAS" gate. Consults the
+    /// indices only (no network): the `oid → blake3` index IS the authoritative
+    /// read-source answer for repo membership.
+    fn contains(&self, oid: &str) -> bool {
+        self.index_add.contains_key(oid) || self.existing.contains_key(oid)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3190,6 +3376,269 @@ mod tests {
             64 * 1024,
             "capped read must stop at 64 KiB, got {} bytes",
             buf.len()
+        );
+    }
+
+    // ── H. CasRw — the buffering receive→CAS write adapter ────────────────────
+
+    /// Build a git object's VERBATIM zlib-compressed loose bytes — the exact
+    /// `CasObject.bytes` shape `receive_pack` reads off disk: `zlib(<kind> <len>\0
+    /// <body>)`. The uncompressed pre-image is `encode_loose(kind, body)`.
+    fn verbatim_zlib_loose(kind: ObjectKind, body: &[u8]) -> Vec<u8> {
+        use std::io::Write as _;
+        let framing = encode_loose(kind, body);
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(&framing).expect("deflate");
+        enc.finish().expect("finish")
+    }
+
+    /// THE load-bearing test: an object PUT through `CasRw` (from its verbatim zlib
+    /// loose bytes) round-trips to the UNCOMPRESSED framing the CAS read side
+    /// serves, AND is keyed by exactly the read-side `blake3(encode_loose(...))`.
+    /// I.e. a pushed object is byte-identical to a served one — never the
+    /// compressed bytes, never a mis-computed key.
+    #[test]
+    fn casrw_put_inflates_to_the_read_side_framing_and_key() {
+        let body = b"fn main() { println!(\"a real pushed file\"); }";
+        // What the CAS read side stores + hashes (the truth we must match).
+        let read_side_framing = encode_loose(ObjectKind::Blob, body);
+        let read_side_key = cas_key(&read_side_framing);
+
+        // What receive_pack hands the adapter: the COMPRESSED loose bytes.
+        let compressed = verbatim_zlib_loose(ObjectKind::Blob, body);
+        assert_ne!(
+            compressed, read_side_framing,
+            "the adapter input is genuinely compressed, not the framing"
+        );
+
+        let oid = "fe8f5f1e013d57d0629ff3999a71986ffc2b05fb";
+        let mut casrw = CasRw::new(client_with(MapCasTransport::default()), OidIndex::new());
+        casrw.put(&CasObject {
+            oid: oid.into(),
+            bytes: compressed,
+        });
+
+        // get() returns the UNCOMPRESSED framing (what the read side would serve).
+        assert_eq!(
+            casrw.get(oid).as_deref(),
+            Some(read_side_framing.as_slice()),
+            "get() returns the inflated framing, byte-identical to the served form"
+        );
+        // …and it is buffered under the read side's blake3 key — NOT the zlib bytes'.
+        assert_eq!(
+            casrw.index_add.get(oid),
+            Some(&read_side_key),
+            "keyed by blake3(encode_loose), the SAME key the CAS read side computes"
+        );
+        assert!(casrw.contains(oid));
+        assert_eq!(casrw.pending_len(), 1);
+    }
+
+    #[test]
+    fn casrw_put_is_infallible_and_dedupes_identical_content() {
+        let body = b"identical content";
+        let mut casrw = CasRw::new(client_with(MapCasTransport::default()), OidIndex::new());
+        // Two distinct git oids carrying byte-identical content (e.g. the same blob
+        // referenced twice) → ONE buffered object (content-addressed dedup).
+        casrw.put(&CasObject {
+            oid: "a".repeat(40),
+            bytes: verbatim_zlib_loose(ObjectKind::Blob, body),
+        });
+        casrw.put(&CasObject {
+            oid: "b".repeat(40),
+            bytes: verbatim_zlib_loose(ObjectKind::Blob, body),
+        });
+        assert_eq!(casrw.pending_len(), 1, "identical content buffers once");
+        // Both oids resolve to the same framing.
+        let framing = encode_loose(ObjectKind::Blob, body);
+        assert_eq!(
+            casrw.get(&"a".repeat(40)).as_deref(),
+            Some(framing.as_slice())
+        );
+        assert_eq!(
+            casrw.get(&"b".repeat(40)).as_deref(),
+            Some(framing.as_slice())
+        );
+    }
+
+    #[test]
+    fn casrw_flush_uploads_exactly_the_buffered_set_byte_identical() {
+        let mut casrw = CasRw::new(client_with(MapCasTransport::default()), OidIndex::new());
+        // Buffer three distinct objects across kinds.
+        let inputs: [(ObjectKind, &[u8]); 3] = [
+            (ObjectKind::Blob, b"blob one"),
+            (ObjectKind::Blob, b"blob two - longer contents here"),
+            (ObjectKind::Tree, &[0u8, 1, 2, 3, 0, 255]),
+        ];
+        let mut want: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        for (i, (kind, body)) in inputs.iter().enumerate() {
+            let framing = encode_loose(*kind, body);
+            want.insert(cas_key(&framing), framing);
+            casrw.put(&CasObject {
+                oid: format!("{i:040x}"),
+                bytes: verbatim_zlib_loose(*kind, body),
+            });
+        }
+        assert_eq!(casrw.pending_len(), 3);
+
+        casrw.flush().expect("flush uploads the buffered set");
+
+        // The mock CAS now holds EXACTLY the buffered set, keyed by blake3, with the
+        // framing bytes (the mock's batch_upload verifies blake3(bytes)==hash, so a
+        // store at all proves byte-identity to the read side).
+        let stored = casrw.cas_client().transport.objects.lock().unwrap().clone();
+        assert_eq!(
+            stored.len(),
+            want.len(),
+            "exactly the buffered set, no more"
+        );
+        for (key, framing) in &want {
+            assert_eq!(
+                stored.get(key),
+                Some(framing),
+                "byte-identical under its key"
+            );
+        }
+    }
+
+    #[test]
+    fn casrw_flush_empty_buffer_is_a_no_op() {
+        let mut casrw = CasRw::new(client_with(MapCasTransport::default()), OidIndex::new());
+        assert!(casrw.is_empty());
+        casrw.flush().expect("empty flush is Ok");
+        assert!(
+            casrw
+                .cas_client()
+                .transport
+                .objects
+                .lock()
+                .unwrap()
+                .is_empty(),
+            "no objects uploaded"
+        );
+    }
+
+    #[test]
+    fn casrw_flush_is_idempotent() {
+        let mut casrw = CasRw::new(client_with(MapCasTransport::default()), OidIndex::new());
+        casrw.put(&CasObject {
+            oid: "c".repeat(40),
+            bytes: verbatim_zlib_loose(ObjectKind::Blob, b"once"),
+        });
+        casrw.flush().expect("first flush");
+        // A second flush re-PUTs the same content-addressed bytes (200 exists) — no
+        // error, the store unchanged in size.
+        casrw.flush().expect("re-flush is idempotent");
+        assert_eq!(
+            casrw.cas_client().transport.objects.lock().unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn casrw_reads_fall_through_to_the_existing_repo_closure() {
+        // An object NOT in this push but in the repo's pre-push closure: it lives in
+        // the CAS already, reachable via the existing oid→blake3 index.
+        let body = b"a prior-tip object already in CAS";
+        let framing = encode_loose(ObjectKind::Commit, body);
+        let blake3 = cas_key(&framing);
+        let prior_oid = "dd".repeat(20); // a 40-hex git oid
+
+        let transport = MapCasTransport::default();
+        transport
+            .objects
+            .lock()
+            .unwrap()
+            .insert(blake3.clone(), framing.clone());
+
+        let mut existing = OidIndex::new();
+        existing.insert(prior_oid.clone(), blake3);
+        let casrw = CasRw::new(client_with(transport), existing);
+
+        // contains() sees it (the anchor's already-live-in-CAS leg) with no buffer.
+        assert!(casrw.contains(&prior_oid));
+        // get() fetches it through the wrapped CAS read source.
+        assert_eq!(casrw.get(&prior_oid).as_deref(), Some(framing.as_slice()));
+        // An oid in neither the push nor the closure is cleanly absent.
+        assert!(!casrw.contains(&"ee".repeat(20)));
+        assert_eq!(casrw.get(&"ee".repeat(20)), None);
+    }
+
+    #[test]
+    fn casrw_put_buffers_over_an_existing_object_then_serves_the_push() {
+        // The pushed object's oid is also in the existing closure (a re-push): the
+        // in-flight buffer is consulted FIRST, so get() serves the freshly-inflated
+        // framing without a network read.
+        let body = b"re-pushed object";
+        let framing = encode_loose(ObjectKind::Blob, body);
+        let blake3 = cas_key(&framing);
+        let oid = "ab".repeat(20);
+
+        let mut existing = OidIndex::new();
+        existing.insert(oid.clone(), blake3);
+        // Note: the mock store is EMPTY — so a fall-through would return None. The
+        // buffer-first rule means get() still succeeds.
+        let mut casrw = CasRw::new(client_with(MapCasTransport::default()), existing);
+        casrw.put(&CasObject {
+            oid: oid.clone(),
+            bytes: verbatim_zlib_loose(ObjectKind::Blob, body),
+        });
+        assert_eq!(casrw.get(&oid).as_deref(), Some(framing.as_slice()));
+    }
+
+    #[test]
+    fn casrw_flush_fails_closed_on_a_non_inflatable_object() {
+        let mut casrw = CasRw::new(client_with(MapCasTransport::default()), OidIndex::new());
+        // A garbage (non-zlib) object: put() cannot inflate it. put() is infallible,
+        // so the error is deferred — and flush() then refuses (fail-closed: a
+        // corrupt object must never be silently dropped from the closure).
+        casrw.put(&CasObject {
+            oid: "f".repeat(40),
+            bytes: vec![0xde, 0xad, 0xbe, 0xef],
+        });
+        let err = casrw
+            .flush()
+            .expect_err("a non-inflatable object fails the flush");
+        assert!(matches!(err, CasError::Transport(_)), "{err:?}");
+        // Nothing was uploaded.
+        assert!(
+            casrw
+                .cas_client()
+                .transport
+                .objects
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn casrw_flush_degrades_to_per_object_when_bulk_plane_absent() {
+        // Bulk plane not deployed (batch route 405s) → flush degrades to per-object
+        // PUT, which is always live + idempotent. The object still lands.
+        let transport = MapCasTransport {
+            batch_absent_status: Some(405),
+            ..MapCasTransport::default()
+        };
+        let mut casrw = CasRw::new(client_with(transport), OidIndex::new());
+        let body = b"object via per-object fallback";
+        let framing = encode_loose(ObjectKind::Blob, body);
+        let key = cas_key(&framing);
+        casrw.put(&CasObject {
+            oid: "1".repeat(40),
+            bytes: verbatim_zlib_loose(ObjectKind::Blob, body),
+        });
+        casrw.flush().expect("flush degrades to per-object PUT");
+        assert_eq!(
+            casrw
+                .cas_client()
+                .transport
+                .objects
+                .lock()
+                .unwrap()
+                .get(&key),
+            Some(&framing),
+            "the object landed via the single-object PUT path"
         );
     }
 }
