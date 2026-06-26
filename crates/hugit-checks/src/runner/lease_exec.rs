@@ -28,6 +28,11 @@ use hugit_contracts::check_result::Artifact;
 use hugit_contracts::{CheckDef, CheckResult, RunnerLease, RunnerState};
 use sha2::{Digest, Sha256};
 
+use crate::runner::dispatch::exec_and_collect;
+use crate::runner::lease_client::{
+    ENV_RUNNER_HOST, LeaseClient, RunnerError, RunnerTransport, UreqRunnerTransport,
+};
+
 /// Errors from a runner-side execution.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RunnerExecError {
@@ -40,6 +45,12 @@ pub enum RunnerExecError {
     /// The live runner box (`HUGIT_RUNNER_HOST`) seam is not yet wired (P2).
     /// Carries the host it WILL drive so the deferral is self-documenting.
     BoxNotWired(String),
+    /// A failure from the underlying lease client (acquire / exec / poll /
+    /// close). Wraps the typed [`RunnerError`] so the caller can still see a
+    /// retryable `Busy` apart from a terminal `Status`, and so the wire-level
+    /// failure is not flattened into an opaque string. The inner error is
+    /// secret-free by construction (the PAT never appears in any `RunnerError`).
+    Lease(RunnerError),
 }
 
 impl std::fmt::Display for RunnerExecError {
@@ -52,6 +63,7 @@ impl std::fmt::Display for RunnerExecError {
             RunnerExecError::BoxNotWired(host) => {
                 write!(f, "live runner box seam not wired (P2): {host}")
             }
+            RunnerExecError::Lease(e) => write!(f, "runner lease client error: {e}"),
         }
     }
 }
@@ -219,25 +231,72 @@ impl<F: EntropySource> RunnerExecutor for InProcessRunnerExecutor<F> {
     }
 }
 
-/// The live runner-box executor — the P2 seam.
+/// The live runner-box executor — now WIRED (WP-Wave-E-PR3).
 ///
-/// In production this drives a real runner box (pinned by `HUGIT_RUNNER_HOST`)
-/// to execute the check inside a leased container and collect its artifacts. The
-/// transport is intentionally NOT wired in B2b: it requires the live runner box
-/// (a Phase-C / C2 deliverable) and is out of this WP's hermetic scope. The
+/// It drives a real runner box (pinned by `HUGIT_RUNNER_HOST`) through the
+/// [`LeaseClient`]: under the already-acquired lease it dispatches the check
+/// (`POST .../exec`), polls the result-envelope meta, and assembles the
+/// [`CheckResult`] (artifacts + digests) with the supplied memo key/axes stamped
+/// on — byte-identical to [`InProcessRunnerExecutor`] by construction. The
 /// surrounding byte-identity comparator, non-determinism tracker, and hit-rate
-/// meter are all proven against [`InProcessRunnerExecutor`]; only this body
-/// remains.
+/// meter are unchanged.
+///
+/// The transport is the same pluggable [`RunnerTransport`] seam the lease client
+/// uses: production is the real `ureq` transport ([`LiveBoxRunnerExecutor::from_runtime`]),
+/// and a fake transport proves the wiring hermetically. [`RunnerExecError::BoxNotWired`]
+/// is retained for the genuinely-unconfigured case ONLY — an executor built with
+/// [`LiveBoxRunnerExecutor::new`] (a host but no credentials), so the P2 deferral
+/// never silently rots to a fabricated pass.
 #[derive(Debug, Clone)]
-pub struct LiveBoxRunnerExecutor {
-    /// The runner box host (e.g. the value of `HUGIT_RUNNER_HOST`).
+pub struct LiveBoxRunnerExecutor<T: RunnerTransport = UreqRunnerTransport> {
+    /// The runner box host (e.g. the value of `HUGIT_RUNNER_HOST`). Held for
+    /// diagnostics / the `BoxNotWired` deferral message; the actual base URL the
+    /// client dials lives privately inside [`LeaseClient`]'s config.
     host: String,
+    /// The configured lease client, present once the box is wired (credentials
+    /// loaded). `None` ⇒ genuinely unconfigured ⇒ `BoxNotWired`.
+    client: Option<LeaseClient<T>>,
 }
 
-impl LiveBoxRunnerExecutor {
-    /// Construct an executor bound to a runner-box host.
+impl LiveBoxRunnerExecutor<UreqRunnerTransport> {
+    /// Construct an executor bound to a runner-box host but WITHOUT credentials.
+    /// Its [`RunnerExecutor::execute`] returns [`RunnerExecError::BoxNotWired`]
+    /// — the self-documenting deferral for "I know the host but I am not wired".
+    /// Use [`LiveBoxRunnerExecutor::from_runtime`] for the live, credentialled
+    /// path.
     pub fn new(host: impl Into<String>) -> Self {
-        Self { host: host.into() }
+        Self {
+            host: host.into(),
+            client: None,
+        }
+    }
+
+    /// Build a fully-wired live executor from the runtime environment: the
+    /// runner host (`HUGIT_RUNNER_HOST`) + the PAT (via [`LeaseClient::from_runtime`],
+    /// secret-file-preferred, env-fallback). Fail-closed: returns
+    /// [`RunnerError::NotConfigured`] naming the missing piece when the host or
+    /// PAT is unset, so an unconfigured deployment can never silently degrade.
+    /// No network call is made here (only config is built).
+    pub fn from_runtime() -> Result<Self, RunnerError> {
+        let client = LeaseClient::from_runtime()?;
+        // The host label for diagnostics; the client already validated it is set.
+        let host = std::env::var(ENV_RUNNER_HOST).unwrap_or_default();
+        Ok(Self {
+            host,
+            client: Some(client),
+        })
+    }
+}
+
+impl<T: RunnerTransport> LiveBoxRunnerExecutor<T> {
+    /// Construct a wired executor over an explicit transport + client. Used to
+    /// inject a fake transport in hermetic tests; in production `T =
+    /// UreqRunnerTransport` (built via [`LiveBoxRunnerExecutor::from_runtime`]).
+    pub fn with_client(host: impl Into<String>, client: LeaseClient<T>) -> Self {
+        Self {
+            host: host.into(),
+            client: Some(client),
+        }
     }
 
     /// The host this executor will drive (used by the acceptance suite's
@@ -247,18 +306,187 @@ impl LiveBoxRunnerExecutor {
     }
 }
 
-impl RunnerExecutor for LiveBoxRunnerExecutor {
+impl<T: RunnerTransport> RunnerExecutor for LiveBoxRunnerExecutor<T> {
     fn execute(
         &self,
-        _lease: &RunnerLease,
-        _def: &CheckDef,
-        _memo_key: &str,
-        _tree_root: &str,
-        _def_digest: &str,
-        _toolchain_digest: &str,
+        lease: &RunnerLease,
+        def: &CheckDef,
+        memo_key: &str,
+        tree_root: &str,
+        def_digest: &str,
+        toolchain_digest: &str,
     ) -> Result<CheckResult, RunnerExecError> {
-        // P2: drive `HUGIT_RUNNER_HOST` here — spawn a leased container, execute
-        // the check, collect artifacts + digests, return the CheckResult.
-        Err(RunnerExecError::BoxNotWired(self.host.clone()))
+        match &self.client {
+            // Wired: drive the box under the already-acquired lease and assemble
+            // the CheckResult (the lease's acquire/close lifecycle is owned by
+            // the caller — `execute_on_lease` / the dispatch orchestration).
+            Some(client) => exec_and_collect(
+                client,
+                lease,
+                def,
+                memo_key,
+                tree_root,
+                def_digest,
+                toolchain_digest,
+            )
+            .map(|outcome| outcome.result),
+            // Genuinely unconfigured: the P2 deferral, surfaced loudly.
+            None => Err(RunnerExecError::BoxNotWired(self.host.clone())),
+        }
+    }
+}
+
+#[cfg(test)]
+mod wired_tests {
+    use super::*;
+    use crate::runner::lease_client::{ENV_RUNNER_PAT, ENV_RUNNER_PAT_FILE, ExecAck, RunnerConfig};
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    /// Minimal in-memory transport: FIFO `(status, body)` responses, no socket.
+    #[derive(Debug, Default)]
+    struct FakeTransport {
+        responses: Mutex<VecDeque<(u16, Vec<u8>)>>,
+    }
+    impl FakeTransport {
+        fn with(responses: Vec<(u16, Vec<u8>)>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into()),
+            }
+        }
+        fn next(&self) -> Result<(u16, Vec<u8>), RunnerError> {
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| RunnerError::Transport("fake: no queued response".into()))
+        }
+    }
+    impl RunnerTransport for FakeTransport {
+        fn post(&self, _u: &str, _b: &str, _body: &[u8]) -> Result<(u16, Vec<u8>), RunnerError> {
+            self.next()
+        }
+        fn get(&self, _u: &str, _b: &str) -> Result<(u16, Vec<u8>), RunnerError> {
+            self.next()
+        }
+    }
+
+    fn held_lease() -> RunnerLease {
+        RunnerLease {
+            lease_id: "lease-live-1".to_string(),
+            principal_chain: vec!["agent:tester".to_string()],
+            path_set: vec!["/work".to_string()],
+            expiry: 1_000_000,
+            net_policy: "deny-all".to_string(),
+            tmp_root: "/tmp/runner".to_string(),
+            state: RunnerState::Held,
+        }
+    }
+
+    fn a_def() -> CheckDef {
+        CheckDef {
+            def_digest: "a".repeat(64),
+            command: "cargo test".to_string(),
+            inputs: vec![],
+            toolchain_ref: "rust-1.96".to_string(),
+            env_manifest: "blob:abc".to_string(),
+            glob_set: vec![],
+        }
+    }
+
+    /// The wired live executor drives exec + poll and assembles a CheckResult
+    /// with the supplied memo key/axes stamped on — hermetically (fake transport).
+    #[test]
+    fn wired_executor_collects_check_result() {
+        let ack = ExecAck {
+            lease_id: "lease-live-1".to_string(),
+            accepted: true,
+        };
+        let envelope = br#"{
+            "exit": 0,
+            "artifacts": [{"path": "check.out", "digest": "cafef00d"}],
+            "stdout_ref": "blob:o",
+            "stderr_ref": "blob:e",
+            "duration_ms": 11,
+            "runner_ref": "runner:box-live",
+            "metrics": {
+                "tokens": {"input": 1, "output": 2, "cache_read": 0, "cache_write": 0, "total": 3},
+                "wall_ms": 10,
+                "active_ms": 9,
+                "tool_calls": 0,
+                "tool_breakdown": [],
+                "model_turns": 1,
+                "cost_usd_micros": 7
+            }
+        }"#
+        .to_vec();
+        let transport = FakeTransport::with(vec![
+            (202, serde_json::to_vec(&ack).unwrap()), // exec
+            (200, envelope),                          // poll_meta
+        ]);
+        let config = RunnerConfig::new("https://runner.example", "pat-secret").unwrap();
+        let client = LeaseClient::with_transport(config, transport);
+        let live = LiveBoxRunnerExecutor::with_client("runner.example", client);
+
+        let result = execute_on_lease(
+            &live,
+            &held_lease(),
+            &a_def(),
+            &"d".repeat(64),
+            &"1".repeat(64),
+            &"2".repeat(64),
+            &"3".repeat(64),
+        )
+        .expect("wired execution succeeds");
+
+        assert_eq!(result.memo_key, "d".repeat(64));
+        assert_eq!(result.tree_hash, "1".repeat(64));
+        assert_eq!(result.def_digest, "2".repeat(64));
+        assert_eq!(result.toolchain_digest, "3".repeat(64));
+        assert_eq!(result.exit, 0);
+        assert_eq!(result.artifacts.len(), 1);
+        assert_eq!(result.artifacts[0].digest, "cafef00d");
+        assert_eq!(result.runner_ref, "runner:box-live");
+    }
+
+    /// An executor built with `new` (host but no credentials) is the genuinely
+    /// unconfigured case → `BoxNotWired`.
+    #[test]
+    fn new_without_credentials_is_box_not_wired() {
+        let live = LiveBoxRunnerExecutor::new("runner.example");
+        let err = live
+            .execute(
+                &held_lease(),
+                &a_def(),
+                &"d".repeat(64),
+                &"1".repeat(64),
+                &"2".repeat(64),
+                &"3".repeat(64),
+            )
+            .expect_err("unconfigured ⇒ BoxNotWired");
+        assert!(
+            matches!(err, RunnerExecError::BoxNotWired(_)),
+            "got {err:?}"
+        );
+    }
+
+    /// `from_runtime` is fail-closed: host/PAT unset ⇒ `NotConfigured` naming the
+    /// missing piece. (Env access is serialized within this single test.)
+    #[test]
+    fn from_runtime_not_configured_when_unset() {
+        unsafe {
+            std::env::remove_var(ENV_RUNNER_HOST);
+            std::env::remove_var(ENV_RUNNER_PAT);
+            std::env::set_var(ENV_RUNNER_PAT_FILE, "/nonexistent/hugit/runner/pat");
+        }
+        match LiveBoxRunnerExecutor::from_runtime() {
+            Err(RunnerError::NotConfigured(msg)) => {
+                assert!(msg.contains(ENV_RUNNER_HOST), "should name the host: {msg}");
+            }
+            other => panic!("expected NotConfigured, got {other:?}"),
+        }
+        unsafe {
+            std::env::remove_var(ENV_RUNNER_PAT_FILE);
+        }
     }
 }

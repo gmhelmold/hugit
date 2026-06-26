@@ -14,12 +14,13 @@
 //! ## Scope of THIS PR (PR1)
 //!
 //! This is the transport + config + DTOs + `from_runtime` loader + the hermetic
-//! tests ONLY. It is NOT wired into [`crate::runner::lease_exec::LiveBoxRunnerExecutor`]
-//! yet (that is PR3) and it NEVER makes a live network call here (the only code
-//! that opens a socket is [`UreqRunnerTransport`], which is exercised solely in
-//! production, never in a test). The §13.1 `IntentMetrics` DTO + its mapping are
-//! deliberately deferred to PR2 — `poll_meta` here returns a raw [`RawMeta`]
-//! (an un-interpreted JSON value), and `capture_on_land` is NOT wired.
+//! tests. It NEVER makes a live network call here (the only code that opens a
+//! socket is [`UreqRunnerTransport`], which is exercised solely in production,
+//! never in a test). `poll_meta` here returns a raw [`RawMeta`] (an
+//! un-interpreted JSON value); the typed §13.1 `IntentMetrics` mapping + the
+//! `LiveBoxRunnerExecutor` wiring + the acquire→exec→poll→close orchestration
+//! that consume it live in [`crate::runner::metrics`] +
+//! [`crate::runner::dispatch`] (WP-Wave-E-PR3).
 
 use std::path::{Path, PathBuf};
 
@@ -330,6 +331,15 @@ impl<T: RunnerTransport> LeaseClient<T> {
     /// inject a fake transport; in production `T = UreqRunnerTransport`.
     pub fn with_transport(config: RunnerConfig, transport: T) -> Self {
         Self { config, transport }
+    }
+
+    /// Borrow the underlying transport. Test-only inspection hook so the
+    /// orchestration tests in the sibling [`crate::runner::dispatch`] module can
+    /// assert which calls were made (this module's own tests reach the private
+    /// field directly).
+    #[cfg(test)]
+    pub(crate) fn transport(&self) -> &T {
+        &self.transport
     }
 
     /// Acquire a runner lease: `POST {host}/v1/leases`.
