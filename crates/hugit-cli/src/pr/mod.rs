@@ -40,6 +40,7 @@
 
 pub mod capture;
 mod cli;
+pub mod dispatch;
 pub mod filelock;
 
 pub use capture::{EnvelopeMetricsArgs, capture_on_land};
