@@ -38,7 +38,9 @@ external dependency:**
   doc still call it deferred → fix.
 - git clone/fetch wire serving is BUILT (`hugit-serve/src/git.rs` upload-pack);
   push is now LIVE too (#198, git-free unpack) — clone/fetch + push all served,
-  caveated (pushed ref serves post-reboot; clone-back gated on the public-flag).
+  caveated (a pushed ref is advertised immediately via the live ref hot-swap, #201,
+  no reboot; v0 = self-contained packs — incremental push on server-side history
+  rejected fail-closed; clone-back gated on the public-flag).
 
 ## 1. FROZEN CONTRACTS (agents transcribe, never redesign)
 

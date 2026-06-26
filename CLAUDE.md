@@ -74,7 +74,9 @@ wrappers over `verdict::record`, serve-parity — #146), `hugit journal note` (a
 reversed): `hugit_proto::resolve_blob_at_path` (path→blob git tree-walk, traversal-safe —
 #147) + `GET /v1/repos/{repo}/blob|edit/{*path}` serve actual file bytes, secret-scrubbed
 on read, 404-no-oracle, fail-closed boot loader (#148). **All hermetically tested; blob/edit
-live-serving needs `HUGIT_SERVE_GIT_DIR` set on a fresh deploy. `symbol` (W6) is wired —
+live-serving is now LIVE via the multi-repo git-from-CAS read path (the 2026-06-22 update
+below supersedes the original `HUGIT_SERVE_GIT_DIR` gate — the engine serves blob/edit from CAS,
+no baked git-dir). `symbol` (W6) is wired —
 `blob.rs` calls `compute_outline` → `hugit_symbols::outline_blob`; `hugit symbol --file` is real.**
 
 **Update 2026-06-22 (multi-repo engine + killer-data + AC LIVE; F6a delivered):** the
@@ -114,6 +116,24 @@ CAS-base reachability (incremental pushes on server-side history); an `If-Match`
 as a HARD pre-condition before ever running `max_instances>1` (today the unconditional refs.json PUT is
 safe ONLY by the single-instance + single-threaded invariant).
 
+**Update 2026-06-26b (write-path hardening — 4-agent adversarial audit + 5-fix wave):** a fresh
+4-auditor brutal sweep of the live write path returned **SOUND on the security axes that matter**
+(no unauthenticated write, no CAS poisoning, no `ok`-without-durability, no crash/panic DoS, the
+single-writer race genuinely closed) — but found real holes, now fixed at root in one wave
+(`fix/write-path-hardening-audit`, gate-green): **(1)** a **correctness defect** — the receive-pack
+compare-and-append stale-check derived the current ref view from `replay(log)`, but a CAS-ingested
+branch has NO `ref.update` event on the log, so **updating an existing ingested branch was
+false-rejected as non-fast-forward** (push worked LIVE only for *new* branches; the deployed prod
+engine still has this until this wave deploys) — fixed by passing the authoritative `git_refs`
+snapshot (the advertise projection) as the stale-check view; **(2)** an authenticated resolver
+**O(n²) DoS** on reverse-ordered REF_DELTAs (capped, fail-closed); **(3)** peak unpack memory lowered
+to container-safe; **(4)** lazy-CAS cache poison-parity; **(5)** a bounded decoded-object cache (was
+unbounded → OOM on a long-lived instance). #2(b) (a partial-manifest-commit ref wedge on a transient
+R2 fault) stays tracked under the existing pre-HA `If-Match` seam — not new debt. **Honest current
+state: until this wave deploys, prod `git push` creates new branches but false-rejects an update to an
+existing branch; after deploy, updating an existing branch works (verified by the new git-free tests,
+to be re-proven by a live prod push).**
+
 **What IS genuinely live (don't under-claim it either):** the `/v1` read+write API
 against `hugit` (+ now `githugr`) — 11/20 reads serve real chain-verified R2 data;
 the 9 POST verbs are code-complete + R2-CAS-persisted (proven against prod R2),
@@ -122,8 +142,10 @@ the 9 POST verbs are code-complete + R2-CAS-persisted (proven against prod R2),
 SSE replay-then-close. The engine is **lazy git-from-CAS** (boots from the CoreLink
 CAS, ~5 s cold-start) and is now MULTI-REPO. **Magnitude: the single-tenant forge is now read+WRITE
 live — the `/v1` API (~20–25% across 2 repos, AC-memoized) PLUS git `push` over the wire (live
-2026-06-26 with caveats: a pushed ref serves only after an engine reboot; clone-back is blocked by
-the private read-gate). Call it ~25–30% of a single-tenant forge. Still single-digit % for a full
+2026-06-26: a pushed ref is advertised immediately via the live ref hot-swap #201, no reboot;
+remaining caveats — until the hardening wave deploys, an update to an existing branch false-rejects
+(new-branch creation works); v0 = self-contained packs only; clone-back blocked by the private
+read-gate). Call it ~25–30% of a single-tenant forge. Still single-digit % for a full
 MULTI-TENANT end-to-end forge: no live runner exec (dispatch waits on the runners-TL fabricd spawn
 fix), no multi-tenant identity, no anonymous clone, killer-data render unverified-from-here.**
 

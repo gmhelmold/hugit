@@ -5,12 +5,17 @@
 > F6a); the CoreLink **AC memoization is LIVE** (#182); the product-refinement (Phase 1+2, #179–181)
 > and git-ingest/CAS hardening (#184) merged. `ctx resume`/`review`/`land queue` are REAL. **git
 > `push`/receive-pack is now LIVE** (#198, 2026-06-26 — git-free gix-pack unpack on the distroless
-> engine; caveats: accepts one push per ref per engine lifetime until a live ref hot-swap, and
-> clone-back is gated on the public-flag). STILL open: anonymous-clone public-flag, live runner exec,
+> engine). **Caveat (a) "one push per ref per engine lifetime" is now CLOSED** by the live ref
+> hot-swap (#201, deployed + verified — a pushed ref is advertised immediately, no reboot). Remaining
+> push caveats: v0 = self-contained packs (an *incremental* push on server-side history is rejected
+> fail-closed — thin-pack/CAS-base reachability is the tracked follow-up), and clone-back is gated on
+> the public-flag. STILL open: anonymous-clone public-flag, live runner exec,
 > multi-tenant, and the killer-data **render** is verified only to "route serves (401)" from here —
-> the githugr TL's authed www smoke is pending. See CLAUDE.md's **Update 2026-06-22** block for the
-> current honest state; the per-capability analysis below remains the deep reference for everything
-> not touched this round.
+> the githugr TL's authed www smoke is pending. **The "~15–20% live" figure in the body below is
+> superseded: with read+WRITE (git push) now live, CLAUDE.md's current estimate is ~25–30% of a
+> single-tenant forge (still single-digit % for a full multi-tenant forge).** See CLAUDE.md's
+> **Update 2026-06-22 / 2026-06-26** blocks for the current honest state; the per-capability analysis
+> below remains the deep reference for everything not touched this round.
 
 > Grounded in the whitepaper (`docs/whitepaper/hugit-v1.md`), the 67-WP
 > decomposition (`docs/plan/decomposition.md`), and a 2-fleet code sweep
