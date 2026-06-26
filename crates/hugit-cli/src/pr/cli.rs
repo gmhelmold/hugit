@@ -31,6 +31,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Subcommand;
+use hugit_checks::runner::LeaseClient;
 use hugit_contracts::event_record::EventRecord;
 use hugit_refstore::EventLog;
 use serde_json::Value;
@@ -130,6 +131,14 @@ pub struct LandCliArgs {
     /// Unix-ms timestamp to stamp the appended `pr.landed` event with.
     #[arg(long = "recorded-at", default_value_t = 0)]
     recorded_at: u64,
+
+    /// Run the PR's check on the CoreLink runner fabric and capture the REAL
+    /// §13.1 per-job metrics (cost + token cache-split) into the land envelope
+    /// (WP-Wave-E-PR5). Fail-closed: with an unwired runner this is a clear
+    /// error, NEVER a fabricated / honest-zero cost. Mutually exclusive with the
+    /// manual metric flags below (don't merge two metric sources).
+    #[arg(long = "dispatch", default_value_t = false)]
+    dispatch: bool,
 
     // ── WP-F2: capture the context envelope on land (cost/metrics legibility).
     // Every flag is OPTIONAL — an omitted flag is honest-zero / None, never a
@@ -354,6 +363,31 @@ fn run_queue(a: QueueCliArgs) -> ExitCode {
 
 fn run_land(a: LandCliArgs) -> ExitCode {
     let log_path = crate::log_resolve::resolve_log(a.log.clone());
+
+    // WP-F2: the (optional) manual run metrics → the captured envelope. An
+    // omitted flag is honest-zero / None, never fabricated.
+    let manual_metrics = EnvelopeMetricsArgs {
+        tokens: a.tokens,
+        cost_usd_micros: a.cost_usd_micros,
+        tool_calls: a.tool_calls,
+        active_ms: a.active_ms,
+        model_turns: a.model_turns,
+        model: a.model,
+        context_cas: a.context_cas,
+        compact_transcript_ref: a.compact_transcript_ref,
+        verdicts_ref: a.verdicts_ref,
+        // The flag path never sets `full_metrics` (no CLI flag for a raw metrics
+        // blob); the §13.1 cache-split carrier comes ONLY from `--dispatch`.
+        full_metrics: None,
+    };
+
+    // WP-Wave-E-PR5: `--dispatch` measures the real per-job cost on the runner
+    // fabric — it must NOT be combined with the manual metric flags (don't merge
+    // two metric sources). A usage error, checked BEFORE the lock/log are touched.
+    if a.dispatch && manual_metrics.any_supplied() {
+        return emit_porcelain(&super::dispatch::conflict_error());
+    }
+
     let _lock = match acquire_lock(&log_path) {
         Ok(lock) => lock,
         Err(code) => return code,
@@ -370,7 +404,29 @@ fn run_land(a: LandCliArgs) -> ExitCode {
     {
         return code;
     }
-    // `pr land` is now the dedicated land-confirm settlement step (appends
+
+    if a.dispatch {
+        // Real per-job cost from the runner fabric (WP-Wave-E-PR5). Build the live
+        // lease client fail-closed: an unwired runner is a CLEAR error, never a
+        // silent honest-zero fall-back (the PAT never reaches the error string).
+        let client = match LeaseClient::from_runtime() {
+            Ok(c) => c,
+            Err(e) => return emit_porcelain(&super::dispatch::unconfigured_error(&e)),
+        };
+        return match super::dispatch::land_with_dispatch(&mut log, &client, &a.pr_id, a.recorded_at)
+        {
+            Ok(value) => match persist_log(&log_path, &log) {
+                Ok(()) => emit_ok(&value),
+                Err(code) => code,
+            },
+            Err(super::dispatch::DispatchLandError::Pr(e)) => emit_error(&e),
+            Err(super::dispatch::DispatchLandError::Runner(e)) => {
+                emit_porcelain(&super::dispatch::runner_error(&e))
+            }
+        };
+    }
+
+    // `pr land` is the dedicated land-confirm settlement step (appends
     // `pr.landed`) — the settle half of the old `pr land --settle`. Runs through
     // the SAME guarded append + atomic-lock + persist seam.
     let result = settle(
@@ -378,23 +434,7 @@ fn run_land(a: LandCliArgs) -> ExitCode {
         &SettleArgs {
             pr_id: a.pr_id,
             recorded_at: a.recorded_at,
-            // WP-F2: the (optional) real run metrics → the captured envelope.
-            // An omitted flag is honest-zero / None, never fabricated.
-            envelope_metrics: EnvelopeMetricsArgs {
-                tokens: a.tokens,
-                cost_usd_micros: a.cost_usd_micros,
-                tool_calls: a.tool_calls,
-                active_ms: a.active_ms,
-                model_turns: a.model_turns,
-                model: a.model,
-                context_cas: a.context_cas,
-                compact_transcript_ref: a.compact_transcript_ref,
-                verdicts_ref: a.verdicts_ref,
-                // No CLI flag for a full metrics blob — the runner integration
-                // wires this in a later PR. The CLI always uses the flag-derived
-                // (honest-zero-split) path.
-                full_metrics: None,
-            },
+            envelope_metrics: manual_metrics,
         },
     );
     match result {
