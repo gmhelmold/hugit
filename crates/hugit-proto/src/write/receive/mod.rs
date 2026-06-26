@@ -51,7 +51,7 @@ use gix_pack::data::input::{BytesToEntriesIter, EntryDataMode, Mode};
 use hugit_contracts::event_record::EventRecord;
 use hugit_refstore::log::EventLog;
 use hugit_refstore::{RefState, replay};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Read as _;
 use std::path::Path;
 use std::sync::Mutex;
@@ -63,15 +63,36 @@ use std::sync::Mutex;
 pub const DEFAULT_MAX_PACK_BYTES: usize = 16 * 1024 * 1024;
 
 /// Default ceiling for the *inflated* (uncompressed) total of an accepted pack
-/// (64 MiB). A small, highly-compressible pack can inflate to many gigabytes (a
+/// (32 MiB). A small, highly-compressible pack can inflate to many gigabytes (a
 /// decompression bomb); this bound fails the ingest closed once the unpacked
 /// total exceeds it, independent of the compressed wire size.
-pub const DEFAULT_MAX_INFLATED_BYTES: u64 = 64 * 1024 * 1024;
+///
+/// Sized against the engine container's memory, NOT just the logical pack size:
+/// `unpack_pack` holds the inflated `raws` bodies, the `resolved` clones, the
+/// `by_oid` decoded graph, and the `objects` loose bytes simultaneously, so the
+/// transient aggregate peak is ~3–4× this ceiling. At 32 MiB the worst-case peak is
+/// ~96–128 MiB — comfortably inside the distroless engine's footprint — whereas the
+/// old 64 MiB ceiling put the peak at ~200–256 MiB, a tight-container OOM risk (the
+/// write-path-hardening audit's #3 finding). Lower this further if the runtime
+/// memory budget tightens; raise it only with a matching container-memory headroom.
+pub const DEFAULT_MAX_INFLATED_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Default ceiling on the number of objects a single pack may unpack to. A pack
 /// header can declare an enormous object count (an object-count bomb); this bound
 /// is checked against the pack header *before* any unpack work.
 pub const DEFAULT_MAX_OBJECTS: u64 = 1_000_000;
+
+/// Default ceiling on the number of delta-resolution *passes* the fixpoint loop may
+/// run. The loop resolves every delta whose base is now resolved each pass; a pack
+/// whose REF_DELTA entries are in **reverse dependency order** resolves at most one
+/// delta per pass, making the loop O(passes × remaining) = O(n²) on the object
+/// count — a ~200k-delta pack would freeze the single-threaded engine (an
+/// algorithmic-complexity DoS that stalls reads too). An honest pack resolves in a
+/// handful of passes (git caps a delta chain at `pack.depth`, default 50; even a
+/// poorly-ordered honest pack converges within a few hundred), so 1024 is generous
+/// for real packs yet rejects the adversarial reverse-ordered case long before the
+/// O(n²) blowup.
+pub const DEFAULT_MAX_DELTA_PASSES: u32 = 1024;
 
 /// Limits applied to one receive-pack ingest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +104,10 @@ pub struct RecvLimits {
     pub max_inflated_bytes: u64,
     /// Maximum number of objects the pack may carry (object-count bomb guard).
     pub max_objects: u64,
+    /// Maximum delta-resolution passes the fixpoint loop may run before failing
+    /// closed — the algorithmic-complexity (O(n²)) DoS guard for a pack of
+    /// reverse-ordered REF_DELTA entries.
+    pub max_delta_passes: u32,
 }
 
 impl Default for RecvLimits {
@@ -91,6 +116,7 @@ impl Default for RecvLimits {
             max_pack_bytes: DEFAULT_MAX_PACK_BYTES,
             max_inflated_bytes: DEFAULT_MAX_INFLATED_BYTES,
             max_objects: DEFAULT_MAX_OBJECTS,
+            max_delta_passes: DEFAULT_MAX_DELTA_PASSES,
         }
     }
 }
@@ -272,11 +298,21 @@ impl std::error::Error for ReceiveError {}
 /// `&mut` exclusive access to `cas` and `log`. For genuine concurrent pushes use
 /// [`SerializedReceiver`], which serializes the same core through a single-writer
 /// lock so two overlapping pushes on one ref cannot both win the stale check.
+///
+/// `current_refs` is the **authoritative** `ref name → tip oid` view the stale
+/// check compares against — the SAME projection the advertise is built from (the
+/// serve path passes its live `git_refs` snapshot; the in-memory
+/// [`SerializedReceiver`] passes `replay(log)`). It is NOT derived from `replay(log)`
+/// here: a CAS-ingested repo has NO `ref.update` events for its branches (those come
+/// only from application verbs, never from git ingest), so a log-derived view would
+/// show every ingested branch as absent and false-reject the normal "update an
+/// existing branch" push as stale. The log stays the APPEND target only (step 8).
 pub fn receive_pack(
     gate: &FlagGate,
     req: &ReceiveRequest,
     cas: &mut dyn Cas,
     log: &mut EventLog,
+    current_refs: &BTreeMap<String, String>,
     limits: RecvLimits,
 ) -> Result<Receipt, ReceiveError> {
     // 0. flag gate: the write path is OFF unless self-hosted-alpha. Refuse before
@@ -339,13 +375,14 @@ pub fn receive_pack(
         });
     }
 
-    // 6. compare-and-append: apply only if the current derived view still shows
-    //    the tip the pusher expected. A stale expectation is rejected with NO
-    //    write and NO append (the concurrent winner is preserved).
-    let state: RefState = replay(log).map_err(|e| ReceiveError::Io {
-        detail: format!("replay derived view: {e:?}"),
-    })?;
-    let actual = state.get(&req.update.ref_name).map(str::to_string);
+    // 6. compare-and-append: apply only if the AUTHORITATIVE current ref view
+    //    (`current_refs` — the advertise's projection, NOT `replay(log)`) still
+    //    shows the tip the pusher expected. A stale expectation is rejected with NO
+    //    write and NO append (the concurrent winner is preserved). Using the
+    //    advertise projection is load-bearing: a CAS-ingested branch has no
+    //    `ref.update` event on the log, so a log-derived view would wrongly show it
+    //    absent and false-reject every update of an existing ingested branch.
+    let actual = current_refs.get(&req.update.ref_name).cloned();
     if actual != req.update.expected {
         return Err(ReceiveError::StaleRef {
             ref_name: req.update.ref_name.clone(),
@@ -401,7 +438,19 @@ impl<C: Cas> SerializedReceiver<C> {
     pub fn receive(&self, req: &ReceiveRequest) -> Result<Receipt, ReceiveError> {
         let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let (cas, log) = &mut *guard;
-        receive_pack(&self.gate, req, cas, log, self.limits)
+        // The in-memory serialization point has no external advertise projection:
+        // its log IS the authoritative ref source, so a second push that updates a
+        // ref must observe the first push's `ref.update`. Derive the current view
+        // from `replay(log)` and pass it as the authoritative `current_refs` —
+        // preserving the original (log-driven) compare-and-append semantics.
+        let state: RefState = replay(log).map_err(|e| ReceiveError::Io {
+            detail: format!("replay derived view: {e:?}"),
+        })?;
+        let current_refs: BTreeMap<String, String> = state
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        receive_pack(&self.gate, req, cas, log, &current_refs, self.limits)
     }
 
     /// The current number of records on the log (also the next total-order seq).
@@ -667,8 +716,13 @@ fn unpack_pack(pack: &[u8], limits: RecvLimits) -> Result<UnpackedPack, ReceiveE
         // size, not its expansion, so a tiny `1 base + N deltas` pack could resolve
         // to many GB while the raw total stays under the ceiling. (The replaced
         // system-git path summed `cat-file %(objectsize)` = resolved sizes; this
-        // restores that parity. Per-object `apply_delta` capping at the REMAINING
-        // budget bounds peak allocation to `max_inflated`, never the sum.)
+        // restores that parity.) NOTE on PEAK memory: a single `apply_delta` is
+        // capped at the REMAINING budget, so no ONE allocation exceeds `max_inflated`
+        // — but the AGGREGATE live footprint of `unpack_pack` is NOT bounded to
+        // `max_inflated`. The inflated `raws`, the `resolved` clones, this `by_oid`
+        // copy, and the `objects` loose bytes coexist, so the transient peak is
+        // ~3–4× `max_inflated`. `DEFAULT_MAX_INFLATED_BYTES` is sized for THAT
+        // aggregate against the container memory (see its doc).
         *total_resolved = total_resolved.saturating_add(data.len() as u64);
         if *total_resolved > max_inflated {
             return Err(ReceiveError::DecompressionBomb {
@@ -712,7 +766,24 @@ fn unpack_pack(pack: &[u8], limits: RecvLimits) -> Result<UnpackedPack, ReceiveE
 
     // Fixpoint: resolve deltas whose base is now resolved, until none remain.
     let mut remaining: Vec<usize> = (0..raws.len()).filter(|&i| resolved[i].is_none()).collect();
+    // Bound the pass count — the algorithmic-complexity DoS guard. A pack of
+    // reverse-ordered REF_DELTAs resolves ≤1 delta/pass (O(n²)); cap the passes so a
+    // pathological ordering fails closed instead of freezing the single-threaded
+    // engine. An honest pack converges in a few passes (chain depth ≪ the cap).
+    let mut passes: u32 = 0;
     while !remaining.is_empty() {
+        passes += 1;
+        if passes > limits.max_delta_passes {
+            return Err(ReceiveError::DecompressionBomb {
+                detail: format!(
+                    "delta resolution exceeded {} passes with {} entries still \
+                     unresolved — pathological (reverse-ordered) delta dependency \
+                     graph, rejected fail-closed (algorithmic-complexity DoS guard)",
+                    limits.max_delta_passes,
+                    remaining.len()
+                ),
+            });
+        }
         let mut progressed = false;
         let mut still_pending: Vec<usize> = Vec::new();
         for &i in &remaining {
@@ -764,8 +835,9 @@ fn unpack_pack(pack: &[u8], limits: RecvLimits) -> Result<UnpackedPack, ReceiveE
             };
 
             // Cap this delta's target at the REMAINING aggregate budget (not the
-            // full ceiling) so a single delta can't expand past what's left — peak
-            // allocation is bounded to `max_inflated`, not `max_inflated × deltas`.
+            // full ceiling) so a single delta can't expand past what's left — no ONE
+            // `apply_delta` allocation exceeds `max_inflated` (the aggregate live
+            // footprint is still ~3–4× it; see `finalize` + the const doc).
             let remaining = limits.max_inflated_bytes.saturating_sub(total_resolved);
             let resolved_data = apply_delta(&base_data, &raw.data, remaining)?;
             let oid = finalize(
@@ -1277,6 +1349,123 @@ mod tests {
     // and blobs are absent (an incomplete closure / stray tip).
     const INCOMPLETE_FIXTURE: &[u8] = include_bytes!("../../../tests/fixtures/incomplete.pack");
 
+    // ── FIX #2(a): ref-projection reconciliation (the compare-and-append now
+    //    compares against the AUTHORITATIVE advertise projection, not `replay(log)`).
+    //    A CAS-ingested branch has NO `ref.update` event on the log, so a log-derived
+    //    view would false-reject every UPDATE of an existing ingested branch. These
+    //    git-free oracles drive `receive_pack` over the committed self-contained pack
+    //    fixture (COMMIT_OID) against a crafted authoritative `current_refs`. ──
+
+    use crate::write::flag::FlagGate;
+    use crate::write::store::InMemoryCas;
+
+    /// Build a CREATE/UPDATE request that pushes the fixture's commit to
+    /// `refs/heads/main` with the given `expected` old tip.
+    fn fixture_req(expected: Option<&str>) -> ReceiveRequest {
+        ReceiveRequest {
+            pack: FIXTURE.to_vec(),
+            update: RefUpdate {
+                ref_name: "refs/heads/main".to_string(),
+                expected: expected.map(str::to_string),
+                new_oid: COMMIT_OID.to_string(),
+            },
+            principal_chain: vec!["user:gustavo".to_string()],
+            recorded_at: 1_717_000_000_000,
+        }
+    }
+
+    /// (FIX1-a) A CREATE (`expected = None`) against an EMPTY authoritative view
+    /// succeeds — nothing on the log, nothing advertised, the branch is born.
+    #[test]
+    fn create_against_absent_ref_succeeds() {
+        let gate = FlagGate::self_hosted_alpha();
+        let mut cas = InMemoryCas::new();
+        let mut log = EventLog::new();
+        let current_refs = BTreeMap::new();
+        let req = fixture_req(None);
+        let receipt = receive_pack(
+            &gate,
+            &req,
+            &mut cas,
+            &mut log,
+            &current_refs,
+            RecvLimits::default(),
+        )
+        .expect("a create against an absent ref succeeds");
+        assert!(receipt.stored_oids.contains(&COMMIT_OID.to_string()));
+        assert_eq!(log.len(), 1, "one ref.update event appended");
+    }
+
+    /// (FIX1-b) THE REGRESSION: UPDATE an EXISTING (CAS-ingested) branch with the
+    /// CORRECT current old tip succeeds — even though the log carries NO `ref.update`
+    /// for that branch (the bug false-rejected this as stale). The authoritative
+    /// `current_refs` (the advertise projection) shows the prior tip, matching the
+    /// pusher's `expected`.
+    #[test]
+    fn update_existing_branch_with_correct_old_oid_succeeds() {
+        let gate = FlagGate::self_hosted_alpha();
+        let mut cas = InMemoryCas::new();
+        let mut log = EventLog::new(); // EMPTY log: an ingested branch has no ref.update.
+        let prior = "1111111111111111111111111111111111111111";
+        let mut current_refs = BTreeMap::new();
+        current_refs.insert("refs/heads/main".to_string(), prior.to_string());
+        let req = fixture_req(Some(prior));
+        let receipt = receive_pack(
+            &gate,
+            &req,
+            &mut cas,
+            &mut log,
+            &current_refs,
+            RecvLimits::default(),
+        )
+        .expect("updating an existing ingested branch with the correct old tip succeeds");
+        assert!(receipt.stored_oids.contains(&COMMIT_OID.to_string()));
+        assert_eq!(log.len(), 1, "the ref move is appended");
+    }
+
+    /// (FIX1-c) UPDATE with a GENUINELY STALE old tip still fails `StaleRef` — the
+    /// authoritative view shows a different tip than the pusher expected (no lost
+    /// update). Compare-and-append still protects the concurrent winner.
+    #[test]
+    fn update_with_stale_old_oid_fails_staleref() {
+        let gate = FlagGate::self_hosted_alpha();
+        let mut cas = InMemoryCas::new();
+        let mut log = EventLog::new();
+        let actual_tip = "2222222222222222222222222222222222222222";
+        let mut current_refs = BTreeMap::new();
+        current_refs.insert("refs/heads/main".to_string(), actual_tip.to_string());
+        // The pusher expects a DIFFERENT (stale) old tip.
+        let stale = "3333333333333333333333333333333333333333";
+        let req = fixture_req(Some(stale));
+        let err = receive_pack(
+            &gate,
+            &req,
+            &mut cas,
+            &mut log,
+            &current_refs,
+            RecvLimits::default(),
+        )
+        .expect_err("a stale old tip must be rejected");
+        match err {
+            ReceiveError::StaleRef {
+                expected, actual, ..
+            } => {
+                assert_eq!(expected.as_deref(), Some(stale));
+                assert_eq!(actual.as_deref(), Some(actual_tip));
+            }
+            other => panic!("expected StaleRef, got {other:?}"),
+        }
+        assert!(
+            cas.is_empty(),
+            "fail-closed: no object committed on a stale push"
+        );
+        assert_eq!(
+            log.len(),
+            0,
+            "fail-closed: no event appended on a stale push"
+        );
+    }
+
     /// (8) The HEADLINE reachability security property: a tip whose closure is NOT
     /// wholly in the pushed set is UNREACHABLE — it can never be advertised (which
     /// would 404 mid-clone). Only an ABSENT oid was tested before; this proves a
@@ -1289,6 +1478,169 @@ mod tests {
         assert!(
             !up.target_reachable(DELTA_HEAD),
             "a commit whose tree/blob closure is absent must be UNREACHABLE (fail-closed)"
+        );
+    }
+
+    // ── FIX #3: the inflated ceiling was LOWERED to bound the ~3–4× aggregate
+    //    unpack peak within the engine container. ──
+
+    /// The inflated ceiling is the documented container-safe value, and an
+    /// over-budget pack fails closed. Proven CHEAPLY with a tiny explicit ceiling —
+    /// no need to allocate a 256 MiB pack to demonstrate the rejection.
+    #[test]
+    fn inflated_ceiling_is_container_safe_and_rejects_over_budget() {
+        assert_eq!(
+            DEFAULT_MAX_INFLATED_BYTES,
+            32 * 1024 * 1024,
+            "the inflated ceiling was lowered to bound the aggregate unpack peak"
+        );
+        let tight = RecvLimits {
+            max_inflated_bytes: 1,
+            ..RecvLimits::default()
+        };
+        let err = unpack_pack(FIXTURE, tight).expect_err("over-budget pack rejected");
+        assert!(
+            matches!(err, ReceiveError::DecompressionBomb { .. }),
+            "expected DecompressionBomb, got {err:?}"
+        );
+    }
+
+    // ── FIX #2: resolver algorithmic-complexity (O(n²)) DoS cap. A pack of
+    //    reverse-ordered REF_DELTAs resolves ≤1 delta/pass; the pass cap rejects it
+    //    fail-closed instead of freezing the single-threaded engine. The fixture is
+    //    built GIT-FREE from raw bytes — a base blob + a REF_DELTA chain in reverse
+    //    dependency order. ──
+
+    /// Encode a git pack entry type+size header (variable length, 7-bit groups):
+    /// first byte = `more<<7 | type<<4 | (size & 0xf)`, continuations carry 7 bits.
+    fn pack_entry_header(type_id: u8, size: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut byte = (type_id << 4) | (size & 0x0f) as u8;
+        let mut sz = size >> 4;
+        while sz != 0 {
+            out.push(byte | 0x80);
+            byte = (sz & 0x7f) as u8;
+            sz >>= 7;
+        }
+        out.push(byte);
+        out
+    }
+
+    /// Encode a git delta-header size as a LEB128 little-endian 7-bit varint.
+    fn encode_size_varint(out: &mut Vec<u8>, mut v: u64) {
+        loop {
+            let mut b = (v & 0x7f) as u8;
+            v >>= 7;
+            if v != 0 {
+                b |= 0x80;
+            }
+            out.push(b);
+            if v == 0 {
+                break;
+            }
+        }
+    }
+
+    /// A pure-INSERT git delta producing `target` from a base of `base_len` bytes.
+    fn delta_insert(base_len: u64, target: &[u8]) -> Vec<u8> {
+        assert!(
+            target.len() <= 127,
+            "single INSERT command fits the literal"
+        );
+        let mut d = Vec::new();
+        encode_size_varint(&mut d, base_len);
+        encode_size_varint(&mut d, target.len() as u64);
+        d.push(target.len() as u8); // INSERT command: literal length 1..=127
+        d.extend_from_slice(target);
+        d
+    }
+
+    fn zlib_raw(data: &[u8]) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(data).unwrap();
+        enc.finish().unwrap()
+    }
+
+    fn blob_oid_bytes(body: &[u8]) -> [u8; 20] {
+        let id = gix_object::compute_hash(HashKind::Sha1, GixKind::Blob, body).unwrap();
+        let mut a = [0u8; 20];
+        a.copy_from_slice(id.as_bytes());
+        a
+    }
+
+    /// Build a valid V2 pack: one base blob + `n` REF_DELTA blobs forming a chain
+    /// (delta-k deltas against link-(k-1)'s RESOLVED oid), laid out in REVERSE
+    /// dependency order so the resolver resolves exactly one delta per pass → `n`
+    /// passes (the O(n²) pathology, in miniature).
+    fn reverse_ordered_ref_delta_pack(n: usize) -> Vec<u8> {
+        const BL: usize = 16;
+        // Resolved bodies: link 0 = base blob, link k = delta-k's resolved target.
+        // Fixed length so every delta's declared base_size == BL — and the link
+        // number sits in the FIRST bytes (within BL) so every body is DISTINCT (a
+        // suffix index would be truncated away by the pad, collapsing the oids).
+        let bodies: Vec<Vec<u8>> = (0..=n)
+            .map(|k| {
+                let mut b = format!("lnk{k:03}-").into_bytes();
+                b.resize(BL, b'.');
+                b
+            })
+            .collect();
+        let oids: Vec<[u8; 20]> = bodies.iter().map(|b| blob_oid_bytes(b)).collect();
+
+        let base_entry = {
+            let mut e = pack_entry_header(3 /* blob */, BL as u64);
+            e.extend_from_slice(&zlib_raw(&bodies[0]));
+            e
+        };
+        let mut delta_entries: Vec<Vec<u8>> = Vec::new();
+        for k in 1..=n {
+            let delta = delta_insert(BL as u64, &bodies[k]);
+            let mut e = pack_entry_header(7 /* REF_DELTA */, delta.len() as u64);
+            e.extend_from_slice(&oids[k - 1]); // 20-byte base oid
+            e.extend_from_slice(&zlib_raw(&delta));
+            delta_entries.push(e);
+        }
+
+        let mut body = Vec::new();
+        body.extend_from_slice(b"PACK");
+        body.extend_from_slice(&2u32.to_be_bytes());
+        body.extend_from_slice(&(n as u32 + 1).to_be_bytes());
+        // Deltas in REVERSE (D_n … D_1), base LAST: each pass resolves one delta.
+        for e in delta_entries.iter().rev() {
+            body.extend_from_slice(e);
+        }
+        body.extend_from_slice(&base_entry);
+
+        // Trailer: raw SHA-1 over the pack body (Mode::Verify checks it).
+        let mut hasher = gix_hash::hasher(HashKind::Sha1);
+        hasher.update(&body);
+        let digest = hasher.try_finalize().unwrap();
+        body.extend_from_slice(digest.as_bytes());
+        body
+    }
+
+    /// (FIX2) A reverse-ordered REF_DELTA chain resolves fully under a generous pass
+    /// budget (the pack is valid) but is rejected FAIL-CLOSED under a tight pass cap
+    /// — the O(n²) resolver can never freeze the single-threaded engine. No hang.
+    #[test]
+    fn reverse_ordered_ref_delta_pack_hits_pass_cap_fail_closed() {
+        let pack = reverse_ordered_ref_delta_pack(6);
+        // Valid: with the default (generous) pass budget it resolves to base + 6.
+        let ok = unpack_pack(&pack, RecvLimits::default())
+            .expect("a valid reverse-ordered chain resolves under the default pass budget");
+        assert_eq!(ok.objects.len(), 7, "base blob + 6 delta-resolved targets");
+
+        // A 6-link chain needs 6 passes; cap at 3 → the pass guard trips fail-closed.
+        let capped = RecvLimits {
+            max_delta_passes: 3,
+            ..RecvLimits::default()
+        };
+        let err = unpack_pack(&pack, capped)
+            .expect_err("the pass cap must reject the reverse-ordered chain");
+        assert!(
+            matches!(err, ReceiveError::DecompressionBomb { .. }),
+            "expected DecompressionBomb (pass cap), got {err:?}"
         );
     }
 }

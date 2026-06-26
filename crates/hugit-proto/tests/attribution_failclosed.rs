@@ -153,7 +153,15 @@ fn receive_pack_with_empty_principal_chain_errs_and_records_nothing() {
         recorded_at: 1_717_000_000_000,
     };
 
-    let result = receive_pack(&gate, &req, &mut cas, &mut log, RecvLimits::default());
+    let current_refs = std::collections::BTreeMap::new();
+    let result = receive_pack(
+        &gate,
+        &req,
+        &mut cas,
+        &mut log,
+        &current_refs,
+        RecvLimits::default(),
+    );
     assert!(
         result.is_err(),
         "an unattributed receive-pack is refused (typed error)"

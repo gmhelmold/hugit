@@ -45,6 +45,14 @@ fn enabled_gate() -> FlagGate {
     FlagGate::self_hosted_alpha()
 }
 
+/// The authoritative current-ref view a CREATE push runs against — empty (the ref
+/// is absent). Every D3a oracle here pushes a CREATE (`expected: None`), so the
+/// empty authoritative view preserves the original (log-empty) semantics after the
+/// stale-check stopped deriving its view from `replay(log)`.
+fn no_refs() -> std::collections::BTreeMap<String, String> {
+    std::collections::BTreeMap::new()
+}
+
 /// ① push→clone round-trip identical.
 ///
 /// Build a real repo, pack its objects, ingest the push through the write path
@@ -78,6 +86,7 @@ fn item_1_push_clone_roundtrip_identical() {
         &req,
         &mut cas,
         &mut log,
+        &no_refs(),
         RecvLimits::default(),
     )
     .expect("ingest succeeds");
@@ -141,8 +150,15 @@ fn flag_off_real_ingest_refuses_push() {
 
     // Flag OFF (the production default): the real ingest must refuse fail-closed.
     let off = FlagGate::default();
-    let err = receive_pack(&off, &req, &mut cas, &mut log, RecvLimits::default())
-        .expect_err("flag-off push must be refused by the real ingest");
+    let err = receive_pack(
+        &off,
+        &req,
+        &mut cas,
+        &mut log,
+        &no_refs(),
+        RecvLimits::default(),
+    )
+    .expect_err("flag-off push must be refused by the real ingest");
     assert!(
         matches!(err, ReceiveError::WritePathDisabled),
         "expected WritePathDisabled, got {err:?}"
@@ -158,6 +174,7 @@ fn flag_off_real_ingest_refuses_push() {
         &req,
         &mut cas,
         &mut log,
+        &no_refs(),
         RecvLimits::default(),
     )
     .expect("flag-on push succeeds");
@@ -193,6 +210,7 @@ fn redteam_malformed_pack_rejected() {
         &req,
         &mut cas,
         &mut log,
+        &no_refs(),
         RecvLimits::default(),
     )
     .expect_err("malformed pack must be rejected");
@@ -227,7 +245,7 @@ fn redteam_oversized_pack_rejected() {
         max_pack_bytes: fx.pack.len().saturating_sub(1),
         ..RecvLimits::default()
     };
-    let err = receive_pack(&enabled_gate(), &req, &mut cas, &mut log, tiny)
+    let err = receive_pack(&enabled_gate(), &req, &mut cas, &mut log, &no_refs(), tiny)
         .expect_err("oversized pack must be rejected");
     assert!(
         matches!(err, ReceiveError::OversizedPack { .. }),
@@ -264,6 +282,7 @@ fn redteam_ref_update_tamper_rejected() {
         &req,
         &mut cas,
         &mut log,
+        &no_refs(),
         RecvLimits::default(),
     )
     .expect_err("tampered ref update must be rejected");
@@ -305,6 +324,7 @@ fn redteam_unreachable_target_rejected() {
         &req,
         &mut cas,
         &mut log,
+        &no_refs(),
         RecvLimits::default(),
     )
     .expect_err("unreachable (present-but-incomplete) target must be rejected");
@@ -352,8 +372,15 @@ fn redteam_decompression_bomb_rejected() {
         max_inflated_bytes: 1024 * 1024,
         ..RecvLimits::default()
     };
-    let err = receive_pack(&enabled_gate(), &req, &mut cas, &mut log, limits)
-        .expect_err("decompression bomb must be rejected");
+    let err = receive_pack(
+        &enabled_gate(),
+        &req,
+        &mut cas,
+        &mut log,
+        &no_refs(),
+        limits,
+    )
+    .expect_err("decompression bomb must be rejected");
     assert!(
         matches!(err, ReceiveError::DecompressionBomb { .. }),
         "expected DecompressionBomb, got {err:?}"

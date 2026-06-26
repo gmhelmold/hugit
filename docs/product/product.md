@@ -99,8 +99,8 @@ Status key: **LIVE** = serving real data today · **BUILT** = gate-green, deploy
 | **Provenance / attestation** | **LIVE** (object model) | SLSA-class chain **including the model layer**: which model, whose instruction, what cost | falls out of the object model; GitHub cannot express it |
 | **Bidirectional GitHub mirror** | **ROADMAP** | branches round-trip; `main` single-writer via the queue; incidents preserved as refs, never dropped | a broken bridge kills trust — ours is forge-arbitrated by design |
 | **Actions shim** | **ROADMAP** | imported repos keep `.github/workflows` running (supported subset, explicit) | absorption discipline: nothing absorbed worse |
-| **`git clone` / `git fetch`** | **BUILT, deploy-gated** | smart-HTTP upload-pack; `git clone` succeeds in CI | live once `HUGIT_SERVE_GIT_DIR` is set on deploy |
-| **`git push`** | **LIVE (caveated)** | receive-pack succeeds on prod (#198, git-free unpack); a pushed ref serves post-reboot, clone-back gated on the public-flag | now |
+| **`git clone` / `git fetch`** | **LIVE (anonymous-gated)** | smart-HTTP upload-pack deployed (git-from-CAS, `git_serving:true`) | anonymous clone gated on the per-repo public-flag (deferred) |
+| **`git push`** | **LIVE (caveated)** | receive-pack succeeds on prod (#198, git-free unpack); a pushed ref serves **immediately** (live ref hot-swap, #201, no reboot); v0 = self-contained packs (incremental push on server-side history rejected fail-closed), clone-back gated on the public-flag | now |
 
 ## 5. The killer features, ranked
 
