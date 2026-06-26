@@ -776,6 +776,21 @@ fn dispatch_repo_write(
                 |log, p, at| verbs::write_undo::write_undo(log, repo, &req, p, at),
             )
         }
+        ["repo", "meta"] => {
+            let req = parse!(wr::RepoMetaReq);
+            with_write(
+                sink,
+                repo,
+                "repo_meta",
+                &resource,
+                &idem,
+                body,
+                step_up,
+                p,
+                at,
+                |log, p, at| verbs::write_repo_meta::write_repo_meta(log, repo, &req, p, at),
+            )
+        }
         _ => Err(EngineErr::not_found()),
     };
     match result {

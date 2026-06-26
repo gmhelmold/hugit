@@ -19,6 +19,14 @@ gix-object = "0.55"
 gix-pack = "0.65"
 gix-packetline = { version = "0.21", features = ["blocking-io"] }
 thiserror = { workspace = true }
+# zlib inflate for the push WRITE path: a received git object's verbatim on-disk
+# loose bytes are zlib-compressed; the CoreLink CAS stores the UNCOMPRESSED
+# `<kind> <len>\0<body>` framing keyed by blake3, so the receive→CAS adapter must
+# inflate the loose bytes back to that pre-image (`inflate_loose_framing`). The
+# system `git` binary does the unpack; this crate does the one inflate. Pure-Rust
+# (miniz_oxide) backend; already in the lock transitively (via `ureq`), so no new
+# crate/version — `multiple-versions = "deny"` stays satisfied.
+flate2 = { workspace = true }
 
 [dev-dependencies]
 # Real libgit2 (the C library, via the git2 wrapper) — TEST-ONLY, never shipped

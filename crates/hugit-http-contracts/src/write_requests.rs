@@ -93,6 +93,21 @@ pub struct UndoReq {
     pub op_seq: u64,
 }
 
+/// `POST /v1/repos/{repo}/repo/meta` — set a repo's visibility. Operator/owner-only.
+///
+/// Sets the authz predicate the read gate projects from the log (`repo.meta` record).
+/// `visibility` MUST be `"public"` or `"private"` (fail-closed on any other value).
+/// `owner_tenant` assigns the owning org; omit to leave the current owner unchanged
+/// (the latest `repo.meta` record wins — each call is a full-replace of the projection).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoMetaReq {
+    /// `"public"` or `"private"`.
+    pub visibility: String,
+    /// The owning org (e.g. `"org-a"`). `None` leaves no owner assigned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_tenant: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

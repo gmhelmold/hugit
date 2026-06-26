@@ -1031,6 +1031,7 @@ dependencies = [
 name = "hugit-proto"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "git2",
  "gix-hash",
  "gix-object",
@@ -1069,6 +1070,7 @@ name = "hugit-serve"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "flate2",
  "gix-hash",
  "gix-object",
  "hex",

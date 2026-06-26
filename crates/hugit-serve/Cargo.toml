@@ -70,3 +70,8 @@ ureq       = { workspace = true }
 hugit-refstore = { path = "../hugit-refstore", features = ["test-support"] }
 tiny_http   = { version = "0.12.0", default-features = false }
 serde_json = { workspace = true }
+# TEST-ONLY: build a real git object's verbatim zlib-compressed loose bytes (the
+# `CasObject.bytes` `receive_pack` emits) so the `CasRw` round-trip test feeds the
+# adapter the SAME compressed shape git writes on disk. Same exact-pinned crate the
+# write path's `inflate_loose_framing` (hugit-proto) uses; already in the lock.
+flate2 = { workspace = true }

@@ -33,6 +33,14 @@ anyhow    = "=1.0.102"
 # HTTP
 ureq = "=2.12.1"
 
+# Compression — zlib inflate of git's verbatim loose-object bytes (the push
+# WRITE path: a received object's on-disk loose bytes are zlib(`<kind> <len>\0<body>`);
+# the CAS stores the UNCOMPRESSED framing, so the receive→CAS adapter must inflate).
+# Already resolved transitively (via `ureq`) at this exact version + pure-Rust
+# (`miniz_oxide`) backend, so naming it as a direct dep adds no new crate/version to
+# the lock and trips no `multiple-versions = "deny"` edge. No C zlib (rust_backend).
+flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backend"] }
+
 # Semantic index / symbol outline (hugit-symbols). tree-sitter + the Rust
 # grammar compile a vendored C grammar via `cc` (already a workspace build-dep
 # via blake3/libgit2-sys/libz-sys/ring) — C *grammar* source, not a new toolchain
