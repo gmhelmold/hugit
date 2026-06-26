@@ -31,7 +31,7 @@
 //! - refs manifest `<tenant>/<repo>/refs.json` = [`RefsManifest`];
 //! - oid→blake3 index `<tenant>/<repo>/oid-index.json` = a flat JSON map.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -1372,6 +1372,81 @@ pub fn load_from_cas<T: CasTransport, R: R2Get>(
 /// each) and blew past the container start window for a real repo (~200s for the
 /// 6862-object hugit closure → CF kills the container; 2026-06-20 incident). The
 /// distroless / no-git-binary invariant (#151) is preserved.
+/// Default byte budget for the decoded-object first-fetch cache (64 MiB of object
+/// BODIES). Chosen generous enough to retain a hot working set for serving a clone
+/// without re-decoding, yet small relative to the engine container's memory so the
+/// cache can never be the cause of an OOM on a long-lived single instance. Without
+/// a bound the cache retained every decoded body forever → unbounded RSS growth
+/// (the write-path-hardening audit's #5 finding); a miss-after-evict simply
+/// re-fetches from CAS (content-addressing keeps correctness intact).
+pub const DEFAULT_OBJECT_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+/// A byte-bounded, FIFO-eviction cache of decoded git objects for the lazy CAS
+/// read path.
+///
+/// Content-addressing makes a hit never stale — an oid maps to the same bytes
+/// forever — so eviction only ever costs a re-fetch, never correctness. The budget
+/// is on the summed object-body bytes (not entry count) so a handful of large
+/// blobs cannot blow RSS. Eviction is insertion-order (FIFO): a cheap
+/// approximate-LRU, sufficient because the accept loop is single-threaded so this
+/// cache is never contended.
+struct BoundedObjectCache {
+    /// oid → decoded object.
+    map: BTreeMap<gix_hash::ObjectId, GitObject>,
+    /// Insertion order, oldest at the front — the FIFO eviction queue.
+    order: VecDeque<gix_hash::ObjectId>,
+    /// Running sum of cached object body bytes (what the budget bounds).
+    bytes: usize,
+    /// The body-byte ceiling; an insertion past it evicts oldest entries first.
+    max_bytes: usize,
+}
+
+impl BoundedObjectCache {
+    /// A fresh cache bounded to `max_bytes` of object-body bytes.
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            map: BTreeMap::new(),
+            order: VecDeque::new(),
+            bytes: 0,
+            max_bytes,
+        }
+    }
+
+    /// A clone of the cached object for `oid`, if present.
+    fn get(&self, oid: &gix_hash::ObjectId) -> Option<GitObject> {
+        self.map.get(oid).cloned()
+    }
+
+    /// Insert `obj` under `oid`, then evict oldest entries until within the byte
+    /// budget. A duplicate oid (same bytes by content-addressing) is a no-op on the
+    /// accounting. If a single object exceeds the whole budget it is retained
+    /// transiently (the cache never drops the just-inserted entry, so it is never
+    /// empty mid-serve and the bound is best-effort — at most one oversized object
+    /// over).
+    fn insert(&mut self, oid: gix_hash::ObjectId, obj: GitObject) {
+        let sz = obj.data.len();
+        if self.map.insert(oid, obj).is_none() {
+            self.order.push_back(oid);
+            self.bytes = self.bytes.saturating_add(sz);
+        }
+        // Evict FIFO from the front (oldest) while over budget, but never the last
+        // entry — `order.len() > 1` keeps the just-inserted object resident.
+        while self.bytes > self.max_bytes && self.order.len() > 1 {
+            if let Some(old) = self.order.pop_front()
+                && let Some(removed) = self.map.remove(&old)
+            {
+                self.bytes = self.bytes.saturating_sub(removed.data.len());
+            }
+        }
+    }
+
+    /// The number of resident objects (test-visibility).
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.map.len()
+    }
+}
+
 pub struct LazyCasObjectSource<T: CasTransport = UreqCasTransport> {
     /// git oid → its blake3 CAS key (the whole `oid-index.json`, parsed once).
     /// INTERIOR-MUTABLE + shared: a successful CAS-mode `git push` merges the
@@ -1385,8 +1460,10 @@ pub struct LazyCasObjectSource<T: CasTransport = UreqCasTransport> {
     /// First-fetch cache: a served object is decoded + verified once, then reused.
     /// Content-addressing makes this safe across a hot-swap: an oid maps to the same
     /// bytes forever, so a cache hit is never stale and the new index entries simply
-    /// take the cold path on their first read.
-    cache: std::sync::Mutex<BTreeMap<gix_hash::ObjectId, GitObject>>,
+    /// take the cold path on their first read. BYTE-BOUNDED with FIFO eviction
+    /// ([`BoundedObjectCache`]) so a long-lived instance cannot grow RSS without
+    /// bound; a miss-after-evict re-fetches (content-addressing keeps it correct).
+    cache: std::sync::Mutex<BoundedObjectCache>,
 }
 
 impl<T: CasTransport> LazyCasObjectSource<T> {
@@ -1396,8 +1473,30 @@ impl<T: CasTransport> LazyCasObjectSource<T> {
         Self {
             index: LiveOidIndex::new(index),
             cas,
-            cache: std::sync::Mutex::new(BTreeMap::new()),
+            cache: std::sync::Mutex::new(BoundedObjectCache::new(DEFAULT_OBJECT_CACHE_BYTES)),
         }
+    }
+
+    /// Like [`Self::new`] but with an explicit decoded-object cache byte budget —
+    /// test-only, to exercise eviction without allocating 64 MiB of fixtures.
+    #[cfg(test)]
+    fn new_with_cache_budget(
+        index: BTreeMap<gix_hash::ObjectId, String>,
+        cas: CasClient<T>,
+        cache_max_bytes: usize,
+    ) -> Self {
+        Self {
+            index: LiveOidIndex::new(index),
+            cas,
+            cache: std::sync::Mutex::new(BoundedObjectCache::new(cache_max_bytes)),
+        }
+    }
+
+    /// The number of objects currently resident in the decoded-object cache
+    /// (test-visibility, for the eviction bound assertion).
+    #[cfg(test)]
+    fn cache_len(&self) -> usize {
+        self.cache.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// A shared handle to this source's live oid→blake3 index, so the push-finalize
@@ -1490,10 +1589,10 @@ impl<T: CasTransport + Send + Sync> hugit_proto::ObjectSource for LazyCasObjectS
         if let Some(obj) = self
             .cache
             .lock()
-            .expect("lazy CAS cache mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .get(oid)
         {
-            return Ok(Some(obj.clone()));
+            return Ok(Some(obj));
         }
         // Not in the LIVE index → a CLEAN absence (Ok(None)), exactly like the eager
         // store. The live read picks up oids merged by a just-completed CAS push.
@@ -1538,7 +1637,7 @@ impl<T: CasTransport + Send + Sync> hugit_proto::ObjectSource for LazyCasObjectS
         }
         self.cache
             .lock()
-            .expect("lazy CAS cache mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .insert(*oid, obj.clone());
         Ok(Some(obj))
     }
@@ -3452,6 +3551,93 @@ mod tests {
             oid,
             "resolved bytes re-derive to the asked git oid (byte-identical)"
         );
+    }
+
+    /// Write-path-hardening #5: the decoded-object cache is BYTE-BOUNDED and evicts
+    /// FIFO past its budget, and a miss-after-evict re-fetches byte-identically from
+    /// CAS (content-addressing → eviction is free correctness-wise). Without the
+    /// bound the cache grew unboundedly (RSS → OOM). git-free: all fixtures in-mem.
+    #[test]
+    fn lazy_cache_evicts_past_budget_and_refetches_correctly() {
+        use hugit_proto::ObjectSource as _;
+        // Build N distinct blobs, each ~1 KiB; seed the CAS + the index with all.
+        const N: usize = 8;
+        const BLOB_BYTES: usize = 1024;
+        let mut seeded: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        let mut index: BTreeMap<gix_hash::ObjectId, String> = BTreeMap::new();
+        let mut oids: Vec<gix_hash::ObjectId> = Vec::new();
+        for i in 0..N {
+            let body = vec![i as u8; BLOB_BYTES];
+            let framing = encode_loose(ObjectKind::Blob, &body);
+            let blake3 = cas_key(&framing);
+            let oid = git_oid(ObjectKind::Blob, &body);
+            seeded.insert(blake3.clone(), framing);
+            index.insert(oid, blake3);
+            oids.push(oid);
+        }
+        let transport = MapCasTransport {
+            objects: std::sync::Mutex::new(seeded),
+            ..MapCasTransport::default()
+        };
+        // Budget ≈ 2 blob bodies, so resident entries stay bounded ≤ 3 across N gets.
+        let budget = 2 * BLOB_BYTES + BLOB_BYTES / 2;
+        let source =
+            LazyCasObjectSource::new_with_cache_budget(index, client_with(transport), budget);
+
+        // Fetch every object once (each a cold fetch + cache insert).
+        for oid in &oids {
+            let got = source.get(oid).unwrap().expect("indexed object resolves");
+            assert_eq!(got.oid(), *oid, "fetched bytes re-derive to the asked oid");
+        }
+        // The cache is BOUNDED — it did not retain all N objects.
+        let resident = source.cache_len();
+        assert!(
+            resident <= 3,
+            "cache bounded by budget: {resident} resident of {N} (≈2-blob budget)"
+        );
+
+        // A miss-after-evict: the FIRST oid was evicted long ago, yet re-getting it
+        // re-fetches from CAS and serves byte-identically (correctness unaffected).
+        let again = source
+            .get(&oids[0])
+            .unwrap()
+            .expect("evicted object re-fetches from CAS");
+        assert_eq!(
+            again.oid(),
+            oids[0],
+            "miss-after-evict re-serves the exact bytes (byte-identical)"
+        );
+    }
+
+    /// Unit: [`BoundedObjectCache`] keeps its byte sum within budget and evicts the
+    /// OLDEST entry first (FIFO), but never drops the just-inserted entry even if it
+    /// alone exceeds the budget (best-effort bound, never empty mid-serve).
+    #[test]
+    fn bounded_object_cache_evicts_fifo_within_budget() {
+        let mk = |b: u8, n: usize| GitObject::new(ObjectKind::Blob, vec![b; n]);
+        let oid_of = |b: u8, n: usize| git_oid(ObjectKind::Blob, &vec![b; n]);
+        let mut cache = BoundedObjectCache::new(250);
+        let (o1, o2, o3) = (oid_of(1, 100), oid_of(2, 100), oid_of(3, 100));
+        cache.insert(o1, mk(1, 100));
+        cache.insert(o2, mk(2, 100));
+        // 200 ≤ 250: both resident.
+        assert_eq!(cache.len(), 2);
+        // Third pushes to 300 > 250 → evict the oldest (o1).
+        cache.insert(o3, mk(3, 100));
+        assert!(cache.bytes <= 250, "byte sum within budget after eviction");
+        assert!(cache.get(&o1).is_none(), "oldest (o1) was evicted FIFO");
+        assert!(cache.get(&o2).is_some(), "o2 still resident");
+        assert!(cache.get(&o3).is_some(), "just-inserted o3 resident");
+
+        // An object larger than the WHOLE budget is retained transiently (never
+        // dropped on its own insert → cache never empty mid-serve).
+        let big = oid_of(9, 1000);
+        cache.insert(big, mk(9, 1000));
+        assert!(
+            cache.get(&big).is_some(),
+            "oversized entry kept (best-effort)"
+        );
+        assert_eq!(cache.len(), 1, "everything else evicted to make room");
     }
 
     /// Double-integrity is STILL enforced on the per-object GET fallback path: a

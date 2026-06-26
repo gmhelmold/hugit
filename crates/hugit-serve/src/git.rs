@@ -574,13 +574,25 @@ fn handle_receive_pack(state: &AppState, repo: &str, body: &[u8], request: Reque
     };
 
     let gate = state.receive_flag_gate();
+    // The AUTHORITATIVE current ref view for the stale-check (compare-and-append):
+    // the SAME live `git_refs` projection the advertise is built from — NOT
+    // `replay(log)` (a CAS-ingested branch has no `ref.update` event on the log, so
+    // a log-derived view would false-reject every update of an existing branch).
+    let current_refs = repo_state.git_refs.snapshot();
     // bound→unpack→verify→store→anchor→append into the mode's object sink.
     let recv = {
         let cas: &mut dyn Cas = match &mut writer {
             RepoWriter::GitDir { cas, .. } => cas,
             RepoWriter::Cas { cas, .. } => cas,
         };
-        receive_pack(&gate, &req, cas, &mut log, RecvLimits::default())
+        receive_pack(
+            &gate,
+            &req,
+            cas,
+            &mut log,
+            &current_refs,
+            RecvLimits::default(),
+        )
     };
     match recv {
         Ok(_receipt) => match &mut writer {
