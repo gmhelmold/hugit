@@ -36,16 +36,20 @@ concurrency:
 
 jobs:
   gates:
-    # Self-hosted Mac builder (2026-06-21: org GitHub-hosted Actions minutes hit the
-    # cap mid-day → hosted jobs failed with 0 steps; owner: "vai rodando selfhosted,
-    # sem billing por hora"). The CARGO_HOME-isolation + per-step PATH-glob steps
-    # below are REQUIRED on this box (the rustup `cargo` proxy vanishes per-step) —
-    # they're the reason the steps already run on self-hosted unchanged. Trade-off:
-    # the box is contention-flaky (~37% infra fails); re-run a 0-step/CANCELLED fail.
-    # Fork-guard: skip the self-hosted runner for PRs from forks; only run for
-    # maintainer PRs (same repo) and push events. Fork PRs are trusted-source only.
+    # GitHub-hosted ubuntu (2026-06-26: owner re-enabled paid Actions credit —
+    # "pode rodar no github actions, tem credito la"). RE-MIGRATED off the self-hosted
+    # Mac, which shares ONE dev box with the local dev session + sibling repos' runners:
+    # local `cargo` (esp. full-workspace gates) and sibling CI starve the in-flight run
+    # (a PR sat `pending` >60 min on 2026-06-26). ubuntu-hosted runners are ephemeral +
+    # isolated → no cross-job contention, runs in parallel, ~8-min cycle.
+    # (The self-hosted billing-cap revert was 2026-06-21; the original ubuntu migration
+    # was #155. The CARGO_HOME-isolation + per-step PATH-glob steps below are now no-ops
+    # but harmless on ubuntu — the `1.96.0-*` glob resolves to the linux toolchain dir;
+    # left in place to keep this diff minimal, can be simplified later.)
+    # Fork-guard: only run for maintainer PRs (same repo) + push events; fork PRs are
+    # trusted-source only (kept as defense even on ephemeral hosted runners).
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false
-    runs-on: [self-hosted, macOS]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
