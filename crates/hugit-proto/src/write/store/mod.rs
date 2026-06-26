@@ -114,8 +114,8 @@ pub fn store_objects(cas: &mut dyn Cas, objects: &[CasObject]) {
 /// Inflate a [`CasObject`]'s verbatim **zlib-compressed** loose bytes to git's
 /// **uncompressed loose framing** — `"<kind> <len>\0<body>"`.
 ///
-/// A git loose object on disk is `zlib(<kind> <len>\0<body>)`; `receive_pack`
-/// captures exactly those compressed bytes ([`CasObject::bytes`]). The CoreLink
+/// A git loose object on disk is `zlib(<kind> <len>\0<body>)`; the pure-Rust
+/// unpacker captures exactly those compressed bytes ([`CasObject::bytes`]). The CoreLink
 /// CAS, however, stores the **uncompressed** framing (`hugit-serve`'s
 /// `encode_loose`) and content-addresses it with `blake3(framing)`. So a push
 /// landing into the CAS MUST inflate first: inflating the verbatim loose bytes
@@ -194,8 +194,9 @@ pub fn raw_push_payload(ref_name: &str, target_oid: &str) -> String {
 /// A [`Cas`] backed by a real git object directory (`<git-dir>/objects/<xx>/<rest>`).
 ///
 /// `CasObject.bytes` are git's verbatim on-disk loose-object bytes — the SAME
-/// representation `ScratchOdb` reads back after `git unpack-objects` — so a `put`
-/// just writes them to `objects/<first-2>/<rest>` and a `get` reads that file.
+/// representation the pure-Rust unpacker (`receive::unpack_pack`) emits as
+/// `zlib(<type> <len>\0<body>)` — so a `put` just writes them to
+/// `objects/<first-2>/<rest>` and a `get` reads that file.
 /// This is the write-side analogue of the read path's git-dir object source: a
 /// push lands loose objects exactly where a git-dir read serves them. Used by the
 /// receive-pack serve wiring in `HUGIT_SERVE_GIT_DIR` mode and the hermetic push
@@ -288,7 +289,7 @@ mod tests {
     }
 
     /// Build a verbatim git loose object: `zlib(<kind> <len>\0<body>)` — the EXACT
-    /// on-disk bytes `receive_pack` reads back via `read_loose`.
+    /// on-disk bytes the pure-Rust unpacker emits as `CasObject::bytes`.
     fn zlib_loose(kind: &str, body: &[u8]) -> Vec<u8> {
         use std::io::Write as _;
         let mut framing = format!("{kind} {}\0", body.len()).into_bytes();
