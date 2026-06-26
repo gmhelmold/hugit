@@ -32,8 +32,13 @@ adversarial round (1–13) + a SOTA sweep. The integrity spine is genuinely soli
   speaks the git smart-HTTP upload-pack wire over `hugit-proto`'s clone/fetch logic (CI-proven e2e).
   The DEPLOYED engine boots git-from-CAS and loads both repos (`/readyz git_serving:true,git_repos:2`,
   2026-06-22). ANONYMOUS `git clone` of either repo is still `404` — gated on a per-repo public-flag
-  (a deferred feature), not the wire. `git push` (receive-pack) is deliberately **404** — the next
-  wave (in progress).
+  (a deferred feature), not the wire. `git push` (receive-pack) is **LIVE** (2026-06-26, #198 —
+  git-free gix-pack unpack on the distroless engine; first real push returned `unpack ok` +
+  `ok refs/heads/_pushsmoke`). Caveats that MUST ride every "push live" claim: **(a)** the in-memory
+  snapshot is not live-refreshed, so the engine currently accepts **one push per ref per engine
+  lifetime** — a pushed ref serves, and a *second* push to that ref stops being wrongly rejected as
+  non-fast-forward, only after the next reboot (the live ref hot-swap is the priority follow-up); **(b)**
+  clone-back over the wire is still blocked by the private read-gate (public-flag deferred).
 - **Substrate — AC LIVE (2026-06-22), runner still transferred.** The CoreLink AC
   (memoization) is now LIVE: `check run` + `land queue` prefer `HttpAcClient::from_runtime`
   (#182), smoke-proven MISS→remote-HIT against tenant `3560e213`; the hot-CAS git tenant
@@ -42,7 +47,7 @@ adversarial round (1–13) + a SOTA sweep. The integrity spine is genuinely soli
   the demand but never dispatches an agent** (intentional P2 deferral).
 - **Deployed network surface:** `hugit-serve` (`/v1` + `/readyz` + git-from-CAS upload-pack),
   MULTI-REPO serving `hugit` + `githugr` (2026-06-22). NO runner endpoint; receive-pack (push)
-  not yet.
+  **now live** (flag-on + `cas:rw` PAT on prod, 2026-06-26 — caveats a+b above).
 - **Identity = dev-token stub** live; the Clerk→engine-token exchange is code-complete
   (the CoreLink exchange endpoint is live), gated on the deploy env (`HUGIT_SESSION_EXCHANGE_URL`)
   + a stale deployed image + `hugit-prod-d1`.
@@ -82,22 +87,39 @@ the killer-data reads (code-search, real diff-counts, attested cost) return `401
 route present) on the deployed engine; that they RENDER real data with a session token is the githugr
 TL's pending smoke (they hold the engine dev-token + run the www), NOT yet proven from here.
 
+**Update 2026-06-26 (git push LIVE — the forge is writable):** `git push` (receive-pack) went LIVE on
+the prod engine. Two waves: (1) the `cas:rw` grant + `HUGIT_SERVE_RECEIVE_PACK=1` + the CasRw write
+seam deployed, but the first push was **rejected** — the `receive_pack` core unpacked via `ScratchOdb`
+→ the SYSTEM `git` binary, which the `gcr.io/distroless/cc` runtime lacks (`ReceiveError::Io`); (2)
+**#198** replaced it with a **pure-Rust gix-pack unpack** (mirrors the git-free read path) — an
+adversarial review caught + we fixed a BLOCKER (aggregate delta-expansion bomb) before merge. Redeploy
+(image `7841611c`) → the first real `git push` returned `unpack ok` + `ok refs/heads/_pushsmoke`. The
+CAS handler emits `ok` only after the fail-closed `finalize_cas_push` (objects→CAS + D1 log +
+refs.json/oid-index.json rewrite), so `ok` ⇒ durable. **Honest caveats:** (a) a pushed ref serves only
+after the next engine reboot (in-memory snapshot not live-refreshed — a tracked follow-up); (b)
+clone-back over the wire is blocked by the private read-gate (public-flag deferred). v0 = self-contained
+packs only (thin-pack bases + incremental pushes on server-side ancestry rejected fail-closed). Reads
+stayed 200 throughout (no outage). Lesson: any distroless-runtime path MUST be git-binary-free.
+
 **What IS genuinely live (don't under-claim it either):** the `/v1` read+write API
 against `hugit` (+ now `githugr`) — 11/20 reads serve real chain-verified R2 data;
 the 9 POST verbs are code-complete + R2-CAS-persisted (proven against prod R2),
 `authz`-gated (the one deployed security boundary, 404-no-oracle); `hugit check`/
 `verdict` are real EXECUTE paths; `hugit export` is a real zero-dependency exit-proof;
 SSE replay-then-close. The engine is **lazy git-from-CAS** (boots from the CoreLink
-CAS, ~5 s cold-start) and is now MULTI-REPO. **Magnitude: ~20–25% live for the `/v1` API
-across 2 repos with the AC memoization wired; still single-digit % for a full multi-tenant
-end-to-end forge (no push/receive-pack, no runner fabric, single-tenant, killer-data render
-unverified-from-here).**
+CAS, ~5 s cold-start) and is now MULTI-REPO. **Magnitude: the single-tenant forge is now read+WRITE
+live — the `/v1` API (~20–25% across 2 repos, AC-memoized) PLUS git `push` over the wire (live
+2026-06-26 with caveats: a pushed ref serves only after an engine reboot; clone-back is blocked by
+the private read-gate). Call it ~25–30% of a single-tenant forge. Still single-digit % for a full
+MULTI-TENANT end-to-end forge: no live runner exec (dispatch waits on the runners-TL fabricd spawn
+fix), no multi-tenant identity, no anonymous clone, killer-data render unverified-from-here.**
 
 **Critical path to a usable single-tenant forge (biggest → smallest) — updated 2026-06-22:**
 ~~deploy current `main`~~ DONE (multi-repo + killer-data + AC live) → githugr TL render-verifies
-the killer-data with a token + runs the www → **git `push`/receive-pack** (the next code wave —
-write-side git wire + write-authz + CAS persist) → anonymous-clone public-flag → identity Clerk
-exchange (still gated on `HUGIT_SESSION_EXCHANGE_URL` + `hugit-prod-d1`) → runner fabric live →
+the killer-data with a token + runs the www → ~~git `push`/receive-pack~~ **DONE (#198, live
+2026-06-26 with caveats a+b)** → **live-snapshot refresh** (interior-mutability so a pushed ref
+serves without an engine reboot) + **anonymous-clone public-flag** (unblocks clone-back) → identity
+Clerk exchange (still gated on `HUGIT_SESSION_EXCHANGE_URL` + `hugit-prod-d1`) → runner fabric live →
 GitHub App + live mirror → multi-tenant. The non-code ones are owner/infra-gated. Per-capability
 status table + tracked seams: the audit doc above.
 
