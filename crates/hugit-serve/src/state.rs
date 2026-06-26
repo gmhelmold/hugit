@@ -78,20 +78,114 @@ pub struct RepoState {
     /// advertisement.
     pub git_refs: std::collections::BTreeMap<String, String>,
     /// The on-disk git dir (`GIT_DIR` mode only; `None` in CAS mode). When `Some`,
-    /// the receive-pack write path can persist a push's loose objects + ref to it
-    /// (via [`write_cas`](Self::write_cas)); CAS-mode repos have no local dir, so
-    /// the push path stays gated off (the live CAS-write adapter is a later piece).
+    /// the receive-pack write path persists a push's loose objects + ref to it
+    /// (via [`write_cas`](Self::write_cas)). A CAS-mode repo has no local dir — its
+    /// push sink is [`cas_write`](Self::cas_write) instead.
     pub git_dir: Option<PathBuf>,
+    /// The CAS-mode push write seam (`None` in GIT_DIR mode, and `None` for a
+    /// CAS-mode repo loaded with the receive-pack deploy flag OFF — the stock
+    /// default, so there is NO behavior change). When `Some`, a push buffers into a
+    /// [`CasRw`](crate::cas::CasRw), flushes the objects to the CoreLink CAS, and
+    /// advances the `refs.json` + `oid-index.json` manifests in hugit's R2.
+    pub cas_write: Option<CasWriteSeam>,
+}
+
+/// The write sink a push resolves to: GIT_DIR mode (loose objects + ref to a local
+/// dir) or CAS mode (buffer→flush to the CoreLink CAS, ref + index to R2 manifests).
+/// Returned by [`RepoState::open_writer`]; consumed by the receive-pack handler.
+pub enum RepoWriter {
+    /// GIT_DIR mode — the existing local-dir path (objects + `git update-ref`).
+    GitDir {
+        /// The write-capable git-dir CAS (loose-object sink).
+        cas: hugit_proto::write::store::GitDirCas,
+        /// The dir the pushed ref is `git update-ref`'d into.
+        git_dir: PathBuf,
+    },
+    /// CAS mode — the buffering adapter plus the seam needed to commit the push
+    /// (flush the objects + rewrite the R2 manifests).
+    Cas {
+        /// The buffering receive→CAS write adapter (objects flush on `finalize`).
+        cas: crate::cas::CasRw,
+        /// The CAS client + R2 manifest store + tenant/slug for the commit. Boxed
+        /// so the `Cas` variant doesn't dwarf `GitDir` (clippy `large_enum_variant`);
+        /// field access auto-derefs through the `Box`, so call sites are unchanged.
+        seam: Box<CasWriteSeam>,
+    },
+}
+
+/// The CAS-mode push write seam: the CoreLink CAS client (the pushed-object sink),
+/// hugit's R2 (the mutable `refs.json` + `oid-index.json` manifest store), and the
+/// tenant/slug those manifests key under. Present only for a CAS-mode repo loaded
+/// with the receive-pack deploy flag ON.
+#[derive(Clone)]
+pub struct CasWriteSeam {
+    /// The CoreLink CAS client — the [`CasRw`](crate::cas::CasRw) flush sink AND the
+    /// read fall-through for the repo's pre-push closure.
+    pub cas_client: crate::cas::CasClient,
+    /// The CAS tenant the repo's objects + manifests live under.
+    pub tenant: String,
+    /// The repo slug the `<tenant>/<repo>/{refs,oid-index}.json` manifests key on.
+    pub repo_slug: String,
+    /// hugit's R2 — the mutable-manifest store (refs.json + oid-index.json).
+    pub r2: R2Config,
+}
+
+impl CasWriteSeam {
+    /// Open a fresh [`CasRw`](crate::cas::CasRw) for a push: re-read the repo's
+    /// current `oid-index.json` from R2 so the receive-pack anchor's
+    /// "already-live-in-CAS" leg reflects the latest committed closure (not a
+    /// possibly-stale boot snapshot). Fail-closed on an R2 read/parse fault.
+    pub fn open_writer(&self) -> Result<crate::cas::CasRw, String> {
+        let key = crate::cas::oid_index_key(&self.tenant, &self.repo_slug);
+        let existing = match <R2Config as crate::cas::R2Get>::get_object(&self.r2, &key)? {
+            Some(bytes) => crate::cas::parse_oid_index(&bytes)?,
+            None => crate::cas::OidIndex::new(),
+        };
+        Ok(crate::cas::CasRw::new(self.cas_client.clone(), existing))
+    }
 }
 
 impl RepoState {
-    /// A write-capable [`Cas`](hugit_proto::write::store::Cas) for this repo's push
-    /// path, or `None` when there is no on-disk git dir (CAS mode → push gated off).
+    /// A write-capable [`Cas`](hugit_proto::write::store::Cas) for this repo's
+    /// GIT_DIR push path, or `None` when there is no on-disk git dir (CAS mode).
+    /// CAS-mode pushes use [`open_writer`](Self::open_writer) instead.
     #[must_use]
     pub fn write_cas(&self) -> Option<hugit_proto::write::store::GitDirCas> {
         self.git_dir
             .as_ref()
             .and_then(|d| hugit_proto::write::store::GitDirCas::new(d).ok())
+    }
+
+    /// Whether this repo has ANY push write seam (a local git dir OR a CAS write
+    /// seam). `false` → receive-pack 404s for it (no oracle). The deploy flag
+    /// ([`AppState::write_path_enabled`]) is a SEPARATE, earlier gate.
+    #[must_use]
+    pub fn has_write_seam(&self) -> bool {
+        self.git_dir.is_some() || self.cas_write.is_some()
+    }
+
+    /// Open the push write sink. `Ok(None)` → no write seam (the handler 404s).
+    /// `Ok(Some(w))` → the sink. `Err` → a seam exists but could not be opened
+    /// (e.g. an R2 read fault building the CAS writer) → the handler reports a
+    /// transient `ng`, never a fake success and never an oracle. GIT_DIR mode takes
+    /// precedence (a repo is one mode or the other).
+    pub fn open_writer(&self) -> Result<Option<RepoWriter>, String> {
+        if let Some(dir) = &self.git_dir {
+            let cas = hugit_proto::write::store::GitDirCas::new(dir)
+                .map_err(|e| format!("git-dir write seam: {e}"))?;
+            return Ok(Some(RepoWriter::GitDir {
+                cas,
+                git_dir: dir.clone(),
+            }));
+        }
+        if let Some(seam) = &self.cas_write {
+            let cas = seam.open_writer()?;
+            return Ok(Some(RepoWriter::Cas {
+                cas,
+                seam: Box::new(seam.clone()),
+            }));
+        }
+        Ok(None)
     }
 }
 
@@ -189,9 +283,7 @@ impl AppState {
         // seam (neither var set) is the honest no-git default (empty map).
         let repos = Self::load_repos_from_env()?;
 
-        let write_path_enabled = std::env::var("HUGIT_SERVE_RECEIVE_PACK")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+        let write_path_enabled = receive_pack_enabled();
 
         Ok(Self {
             source,
@@ -239,13 +331,29 @@ impl AppState {
                 let (cas_src, root, refs) =
                     crate::cas::load_manifests_from_cas(cas.clone(), &r2, &tenant, repo)?;
                 let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(cas_src);
+                // The CAS-mode push write seam — populated ONLY when the receive-pack
+                // deploy flag is on, so a stock deploy (flag unset/`0`) gets `None`:
+                // identical to the prior behavior (push gated off, no write seam). The
+                // flag (`write_path_enabled`) remains THE gate; this just gives an
+                // enabled deploy the objects sink + manifest store a CAS push needs.
+                let cas_write = if receive_pack_enabled() {
+                    Some(CasWriteSeam {
+                        cas_client: cas.clone(),
+                        tenant: tenant.clone(),
+                        repo_slug: repo.to_string(),
+                        r2: r2.clone(),
+                    })
+                } else {
+                    None
+                };
                 repos.insert(
                     repo.to_string(),
                     RepoState {
                         git_source: src,
                         git_root_tree: root,
                         git_refs: refs,
-                        git_dir: None, // CAS mode: no local dir → push gated off (W3)
+                        git_dir: None, // CAS mode: no local dir; push sink is cas_write
+                        cas_write,
                     },
                 );
             }
@@ -274,6 +382,7 @@ impl AppState {
                             git_root_tree: root,
                             git_refs: refs,
                             git_dir: Some(PathBuf::from(dir)), // push writes objects+ref here
+                            cas_write: None,                   // GIT_DIR mode: no CAS seam
                         },
                     );
                 }
@@ -339,6 +448,7 @@ impl AppState {
                 git_root_tree,
                 git_refs,
                 git_dir: None,
+                cas_write: None,
             },
         );
     }
@@ -361,6 +471,7 @@ impl AppState {
                 git_root_tree: root,
                 git_refs: refs,
                 git_dir: Some(PathBuf::from(dir)),
+                cas_write: None,
             },
         );
         Ok(())
@@ -884,6 +995,16 @@ impl crate::cas::R2Put for R2Config {
             .map(|_| ())
             .map_err(|e| format!("R2 put {key}: {}", e.reason))
     }
+}
+
+/// Whether `HUGIT_SERVE_RECEIVE_PACK` enables the git-push write path. The single
+/// source of truth for BOTH the [`AppState::write_path_enabled`] flag and whether a
+/// CAS-mode repo is loaded with a [`CasWriteSeam`] — so a stock deploy (the var
+/// unset or `0`) has NO write seam and NO behavior change.
+fn receive_pack_enabled() -> bool {
+    std::env::var("HUGIT_SERVE_RECEIVE_PACK")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 /// Split a comma-separated repo/dir list into trimmed, non-empty members. One

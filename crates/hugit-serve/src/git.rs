@@ -408,8 +408,8 @@ fn handle_receive_advertise(state: &AppState, repo: &str, request: Request) {
     let Some(repo_state) = state.repo_state(repo) else {
         return respond_not_found(request);
     };
-    if repo_state.git_dir.is_none() {
-        return respond_not_found(request); // no write seam (CAS mode) → 404
+    if !repo_state.has_write_seam() {
+        return respond_not_found(request); // no write seam (GIT_DIR or CAS) → 404
     }
     let Ok(log) = state.load_verified(repo) else {
         return respond_not_found(request);
@@ -460,8 +460,10 @@ fn handle_receive_advertise(state: &AppState, repo: &str, request: Request) {
 /// v0 scope: a single non-delete ref per push (`docs/plan/2026-06-22-receive-pack-wave-design.md`).
 fn handle_receive_pack(state: &AppState, repo: &str, body: &[u8], request: Request) {
     use crate::receive_wire::{RefOutcome, build_report_status, parse_receive_pack_body};
+    use crate::state::RepoWriter;
     use crate::writes::LogSink; // brings AppState::persist (the compare-and-swap) into scope
     use hugit_proto::write::receive::{ReceiveRequest, RecvLimits, RefUpdate, receive_pack};
+    use hugit_proto::write::store::Cas; // the &mut dyn Cas sink coercion
 
     // The deploy gate FIRST: receive-pack is OFF unless `HUGIT_SERVE_RECEIVE_PACK=1`.
     // Off → the honest 403 ("push not supported here"), BEFORE auth, so a stock
@@ -486,10 +488,12 @@ fn handle_receive_pack(state: &AppState, repo: &str, body: &[u8], request: Reque
     let Some(repo_state) = state.repo_state(repo) else {
         return respond_not_found(request);
     };
-    let (Some(mut cas), Some(git_dir)) = (repo_state.write_cas(), repo_state.git_dir.clone())
-    else {
-        return respond_not_found(request); // no on-disk write seam → 404
-    };
+    // A write seam is required (GIT_DIR or CAS mode). None → 404, no oracle. The
+    // sink itself is OPENED below (after authz + parse), so an open fault is a
+    // per-ref ng rather than a pre-auth 404.
+    if !repo_state.has_write_seam() {
+        return respond_not_found(request);
+    }
 
     // Load the repo's log (the authz meta source + the append target), pinned to the
     // head we compare-and-swap against.
@@ -544,40 +548,123 @@ fn handle_receive_pack(state: &AppState, repo: &str, body: &[u8], request: Reque
         recorded_at: now_ms(),
     };
 
-    let gate = state.receive_flag_gate();
-    match receive_pack(&gate, &req, &mut cas, &mut log, RecvLimits::default()) {
-        Ok(_receipt) => {
-            // Persist the appended ref.update event (compare-and-swap against the
-            // head we read). A conflict/transport fault → report it, store nothing
-            // half-applied (the objects are content-addressed + idempotent).
-            if let Err(e) = state.persist(repo, &log, &token) {
-                let report = build_report_status(
-                    Err("log-persist-failed"),
-                    &[RefOutcome::Ng {
-                        ref_name: cmd.ref_name.clone(),
-                        reason: format!("persist:{}", e.status),
-                    }],
-                );
-                return send_report(request, report);
-            }
-            // Update the git-dir ref so the upload-pack wire advertises the new tip
-            // (after the next load). Compare-and-swap against the expected old value
-            // (git's own ref CAS). In CAS-mode prod this path is unreachable (no
-            // git_dir); the live ref write-back is the W3 follow-up.
-            if let Err(reason) = update_git_ref(&git_dir, &cmd.ref_name, &cmd.new_oid, &cmd.old_oid)
-            {
-                let report = build_report_status(
-                    Ok(()),
-                    &[RefOutcome::Ng {
-                        ref_name: cmd.ref_name.clone(),
-                        reason,
-                    }],
-                );
-                return send_report(request, report);
-            }
-            let report = build_report_status(Ok(()), &[RefOutcome::Ok(cmd.ref_name.clone())]);
-            send_report(request, report)
+    // Open the push write sink (GIT_DIR: local dir; CAS: buffer→CAS + R2 manifests).
+    // A seam that fails to OPEN (e.g. an R2 read fault reading the current oid-index
+    // for the CAS writer) → a transient per-ref `ng`, never a fake success.
+    let mut writer = match repo_state.open_writer() {
+        Ok(Some(w)) => w,
+        Ok(None) => return respond_not_found(request),
+        Err(_) => {
+            let report = build_report_status(
+                Ok(()),
+                &[RefOutcome::Ng {
+                    ref_name: cmd.ref_name.clone(),
+                    reason: "write-seam-unavailable".into(),
+                }],
+            );
+            return send_report(request, report);
         }
+    };
+
+    let gate = state.receive_flag_gate();
+    // bound→unpack→verify→store→anchor→append into the mode's object sink.
+    let recv = {
+        let cas: &mut dyn Cas = match &mut writer {
+            RepoWriter::GitDir { cas, .. } => cas,
+            RepoWriter::Cas { cas, .. } => cas,
+        };
+        receive_pack(&gate, &req, cas, &mut log, RecvLimits::default())
+    };
+    match recv {
+        Ok(_receipt) => match &mut writer {
+            // GIT_DIR mode (UNCHANGED): persist the log (compare-and-swap) then move
+            // the on-disk ref so the upload-pack wire advertises the new tip.
+            RepoWriter::GitDir { git_dir, .. } => {
+                if let Err(e) = state.persist(repo, &log, &token) {
+                    let report = build_report_status(
+                        Err("log-persist-failed"),
+                        &[RefOutcome::Ng {
+                            ref_name: cmd.ref_name.clone(),
+                            reason: format!("persist:{}", e.status),
+                        }],
+                    );
+                    return send_report(request, report);
+                }
+                if let Err(reason) =
+                    update_git_ref(git_dir, &cmd.ref_name, &cmd.new_oid, &cmd.old_oid)
+                {
+                    let report = build_report_status(
+                        Ok(()),
+                        &[RefOutcome::Ng {
+                            ref_name: cmd.ref_name.clone(),
+                            reason,
+                        }],
+                    );
+                    return send_report(request, report);
+                }
+                let report = build_report_status(Ok(()), &[RefOutcome::Ok(cmd.ref_name.clone())]);
+                send_report(request, report)
+            }
+            // CAS mode: objects → log → manifests, each fail-closed. The ORDER is the
+            // invariant — a manifest never advertises a tip whose closure was not
+            // uploaded AND whose ref.update event was not recorded. `finalize_cas_push`
+            // owns the flush + manifest steps; the log persist stays our closure.
+            RepoWriter::Cas { cas, seam } => {
+                let res = crate::cas::finalize_cas_push(
+                    cas,
+                    &seam.r2,
+                    &seam.tenant,
+                    &seam.repo_slug,
+                    &cmd.ref_name,
+                    &cmd.new_oid,
+                    || {
+                        state
+                            .persist(repo, &log, &token)
+                            .map_err(|e| format!("persist:{}", e.status))
+                    },
+                );
+                match res {
+                    Ok(()) => {
+                        let report =
+                            build_report_status(Ok(()), &[RefOutcome::Ok(cmd.ref_name.clone())]);
+                        send_report(request, report)
+                    }
+                    Err(crate::cas::CasPushError::Persist(reason)) => {
+                        let report = build_report_status(
+                            Err("log-persist-failed"),
+                            &[RefOutcome::Ng {
+                                ref_name: cmd.ref_name.clone(),
+                                reason,
+                            }],
+                        );
+                        send_report(request, report)
+                    }
+                    // A flush (object upload) fault: nothing advertised, objects are
+                    // idempotent — the client retries. A manifest fault: closure +
+                    // event are durable, only the tip is not yet advertised.
+                    Err(crate::cas::CasPushError::Flush(_)) => {
+                        let report = build_report_status(
+                            Ok(()),
+                            &[RefOutcome::Ng {
+                                ref_name: cmd.ref_name.clone(),
+                                reason: "cas-upload-failed".into(),
+                            }],
+                        );
+                        send_report(request, report)
+                    }
+                    Err(crate::cas::CasPushError::Manifest(_)) => {
+                        let report = build_report_status(
+                            Ok(()),
+                            &[RefOutcome::Ng {
+                                ref_name: cmd.ref_name.clone(),
+                                reason: "manifest-write-failed".into(),
+                            }],
+                        );
+                        send_report(request, report)
+                    }
+                }
+            }
+        },
         Err(e) => {
             // A rejected push (stale ref, tampered/unreachable target, oversized,
             // gate off, …) → HTTP 200 with a per-ref `ng <reason>` (git surfaces it).

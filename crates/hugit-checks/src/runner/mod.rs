@@ -36,6 +36,7 @@ pub mod byte_identity;
 pub mod hit_rate;
 pub mod lease_client;
 pub mod lease_exec;
+pub mod metrics;
 pub mod nondeterminism;
 
 pub use byte_identity::{ArtifactDiff, ByteIdentityReport, compare_byte_identity};
@@ -48,4 +49,5 @@ pub use lease_exec::{
     InProcessRunnerExecutor, LiveBoxRunnerExecutor, RunnerExecError, RunnerExecutor,
     execute_on_lease,
 };
+pub use metrics::{RunnerJobMetrics, RunnerTokenCounts, RunnerToolCount};
 pub use nondeterminism::{DeterminismState, NonDeterminismTracker, RunObservation};
