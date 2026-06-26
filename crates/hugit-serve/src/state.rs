@@ -17,13 +17,15 @@
 //!   real Clerk auth (the P2 identity seam) the tenant is the configured
 //!   `HUGIT_SERVE_R2_TENANT_ID` (the single dev tenant) — disclosed, not faked.
 
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hugit_refstore::EventLog;
 
+use crate::cas::LiveOidIndex;
 use crate::error::EngineErr;
 use crate::sigv4;
 use crate::token::{SessionExchangeClient, SessionExchangeConfig, TokenStore};
@@ -74,9 +76,16 @@ pub struct RepoState {
     /// serving (`git clone`/`git fetch`). Read from the SAME source the objects
     /// were enumerated from — refs and objects MUST be consistent (advertising a
     /// tip whose closure is not in the source would 404 mid-clone). Never empty
-    /// for a loaded repo. This map IS the `hugit_proto::RefView` for the clone
-    /// advertisement.
-    pub git_refs: std::collections::BTreeMap<String, String>,
+    /// for a loaded repo. A snapshot of this map IS the `hugit_proto::RefView` for
+    /// the clone advertisement.
+    ///
+    /// INTERIOR-MUTABLE: a successful CAS-mode `git push` advances the pushed
+    /// `ref → new tip` in-process via [`apply_cas_push_inmemory`](Self::apply_cas_push_inmemory),
+    /// so the very next advertise shows the new tip with NO engine reboot. This is
+    /// what makes a SECOND push to the ref see the correct base (a stale advertise
+    /// would make the client send a stale `old`, which the durably-reloaded log
+    /// rejects as a false non-fast-forward).
+    pub git_refs: LiveRefs,
     /// The on-disk git dir (`GIT_DIR` mode only; `None` in CAS mode). When `Some`,
     /// the receive-pack write path persists a push's loose objects + ref to it
     /// (via [`write_cas`](Self::write_cas)). A CAS-mode repo has no local dir — its
@@ -88,6 +97,59 @@ pub struct RepoState {
     /// [`CasRw`](crate::cas::CasRw), flushes the objects to the CoreLink CAS, and
     /// advances the `refs.json` + `oid-index.json` manifests in hugit's R2.
     pub cas_write: Option<CasWriteSeam>,
+    /// CAS mode ONLY: a shared handle to the SAME `oid → blake3` index the
+    /// `git_source` ([`crate::cas::LazyCasObjectSource`]) reads. A successful CAS
+    /// push merges the just-pushed objects' `oid → blake3` entries here, so a clone
+    /// of the new tip resolves its closure from the CAS with NO reboot. `None` in
+    /// GitDir mode (no behavior change — its push path is unchanged) and for a
+    /// `set_repo_git` test seed. Paired with the [`git_refs`](Self::git_refs)
+    /// hot-swap and advanced BEFORE the ref tip (fail-closed: the tip is never
+    /// observable before its objects are resolvable in-memory).
+    pub live_oid_index: Option<LiveOidIndex>,
+}
+
+/// An interior-mutable, shared `ref name → tip oid hex` map — the live counterpart
+/// of the boot-loaded refs. Shared (via one `Arc`) between the git-wire read path
+/// (the advertise / clone) and the CAS-mode push finalize, so a pushed tip is
+/// advertised immediately, no reboot. The accept loop (`server::serve_on`) is
+/// single-threaded, so the `RwLock` is uncontended.
+#[derive(Clone)]
+pub struct LiveRefs(Arc<RwLock<BTreeMap<String, String>>>);
+
+impl LiveRefs {
+    /// Wrap a boot-loaded `ref → oid` map.
+    #[must_use]
+    pub fn new(refs: BTreeMap<String, String>) -> Self {
+        Self(Arc::new(RwLock::new(refs)))
+    }
+
+    /// An owned snapshot of the LIVE refs (the advertisement's `RefView` source).
+    /// Cheap: ref maps are small (a handful of branches), so a clone-per-advertise
+    /// is negligible and keeps the read sites working with an owned `BTreeMap`.
+    #[must_use]
+    pub fn snapshot(&self) -> BTreeMap<String, String> {
+        self.0.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Whether the LIVE ref set is empty (a not-loaded / refless repo).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.read().unwrap_or_else(|e| e.into_inner()).is_empty()
+    }
+
+    /// Atomically set `ref_name`'s tip to `oid` in the LIVE map (a push hot-swap).
+    pub fn set_ref(&self, ref_name: &str, oid: &str) {
+        self.0
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(ref_name.to_string(), oid.to_string());
+    }
+}
+
+impl From<BTreeMap<String, String>> for LiveRefs {
+    fn from(refs: BTreeMap<String, String>) -> Self {
+        Self::new(refs)
+    }
 }
 
 /// The write sink a push resolves to: GIT_DIR mode (loose objects + ref to a local
@@ -186,6 +248,70 @@ impl RepoState {
             }));
         }
         Ok(None)
+    }
+
+    /// The live in-process ref hot-swap (the frozen design's step 2): after a
+    /// SUCCESSFUL CAS-mode `finalize_cas_push` (durable CAS objects + R2 manifests
+    /// already committed), refresh THIS engine's in-memory view so the new tip
+    /// serves with NO reboot.
+    ///
+    /// `index_add` is the push's `git_oid → blake3` additions, reused VERBATIM from
+    /// the [`CasRw`](crate::cas::CasRw) that finalized the push — never re-read from
+    /// R2 (the in-memory state must never be ahead of the durable store; reusing the
+    /// already-committed additions keeps the two byte-identical).
+    ///
+    /// ## Ordering — fail-closed
+    ///
+    /// The oid-index is merged FIRST, the ref tip advanced LAST — the same order the
+    /// durable manifests use ([`crate::cas::commit_cas_push_manifests`]). So at no
+    /// observable moment does the advertise name a tip whose object closure is not
+    /// already resolvable in-memory. Every pushed oid is parsed BEFORE any mutation,
+    /// so a malformed oid aborts the refresh leaving the in-memory view wholly
+    /// consistent (stale, never inconsistent): the durable push still succeeded and
+    /// the correct tip loads on the next reboot.
+    ///
+    /// `Err` ⇒ the in-memory refresh was NOT applied (the ref was NOT advanced); the
+    /// caller keeps serving the prior tip (a read never regresses) and the durable
+    /// store remains the source of truth.
+    pub fn apply_cas_push_inmemory(
+        &self,
+        ref_name: &str,
+        new_oid: &str,
+        index_add: &std::collections::HashMap<String, String>,
+    ) -> Result<(), String> {
+        // Parse every pushed git oid BEFORE touching any in-memory state, so a
+        // malformed oid leaves the view unchanged (fail-closed, never half-applied).
+        let mut parsed: Vec<(gix_hash::ObjectId, String)> = Vec::with_capacity(index_add.len());
+        for (oid_hex, blake3) in index_add {
+            let oid = gix_hash::ObjectId::from_hex(oid_hex.as_bytes()).map_err(|e| {
+                format!("push hot-swap: pushed oid {oid_hex:?} is not a valid git oid: {e}")
+            })?;
+            parsed.push((oid, blake3.clone()));
+        }
+        // 1. oid-index FIRST — the new objects become resolvable before the tip moves.
+        match &self.live_oid_index {
+            Some(index) => index.merge(parsed),
+            // No live index but objects to record ⇒ we cannot guarantee the new tip's
+            // closure is resolvable in-memory. Refuse to advance the ref (fail-closed:
+            // never advertise an unresolvable tip). CAS-mode repos always carry a live
+            // index, so this is a defensive guard, not a reachable path.
+            None if !parsed.is_empty() => {
+                return Err(
+                    "push hot-swap: no live oid-index to record the pushed objects \
+                     (refusing to advertise an unresolvable tip)"
+                        .to_string(),
+                );
+            }
+            None => {}
+        }
+        // 2. ref tip LAST. Under v0 (self-contained packs) the pushed pack carries the
+        // tip AND its whole closure, so the additions merged above (∪ the boot index,
+        // which == R2's oid-index) always make the advertised tip resolvable. This holds
+        // by the self-contained invariant, NOT by a runtime check here — when thin-pack
+        // base resolution lands (the deferred follow-up, where a tip's base may live only
+        // in R2/CAS), this call site MUST re-assert tip resolvability before advancing.
+        self.git_refs.set_ref(ref_name, new_oid);
+        Ok(())
     }
 }
 
@@ -330,6 +456,9 @@ impl AppState {
                 // are fetched from the CAS on demand at serve time.
                 let (cas_src, root, refs) =
                     crate::cas::load_manifests_from_cas(cas.clone(), &r2, &tenant, repo)?;
+                // A shared handle to the lazy source's live oid→blake3 index, so a
+                // successful push can merge new entries into the SAME cell it reads.
+                let live_oid_index = cas_src.live_index_handle();
                 let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(cas_src);
                 // The CAS-mode push write seam — populated ONLY when the receive-pack
                 // deploy flag is on, so a stock deploy (flag unset/`0`) gets `None`:
@@ -351,9 +480,10 @@ impl AppState {
                     RepoState {
                         git_source: src,
                         git_root_tree: root,
-                        git_refs: refs,
+                        git_refs: LiveRefs::new(refs),
                         git_dir: None, // CAS mode: no local dir; push sink is cas_write
                         cas_write,
+                        live_oid_index: Some(live_oid_index),
                     },
                 );
             }
@@ -380,9 +510,12 @@ impl AppState {
                         RepoState {
                             git_source: src,
                             git_root_tree: root,
-                            git_refs: refs,
+                            git_refs: LiveRefs::new(refs),
                             git_dir: Some(PathBuf::from(dir)), // push writes objects+ref here
                             cas_write: None,                   // GIT_DIR mode: no CAS seam
+                            // GitDir push is unchanged (durable ref via `git update-ref`,
+                            // re-read on the next boot): no in-memory oid-index hot-swap.
+                            live_oid_index: None,
                         },
                     );
                 }
@@ -439,16 +572,17 @@ impl AppState {
         repo: impl Into<String>,
         git_source: Arc<dyn hugit_proto::ObjectSource + Send + Sync>,
         git_root_tree: gix_hash::ObjectId,
-        git_refs: std::collections::BTreeMap<String, String>,
+        git_refs: BTreeMap<String, String>,
     ) {
         self.repos.insert(
             repo.into(),
             RepoState {
                 git_source,
                 git_root_tree,
-                git_refs,
+                git_refs: LiveRefs::new(git_refs),
                 git_dir: None,
                 cas_write: None,
+                live_oid_index: None,
             },
         );
     }
@@ -469,9 +603,10 @@ impl AppState {
             RepoState {
                 git_source: src,
                 git_root_tree: root,
-                git_refs: refs,
+                git_refs: LiveRefs::new(refs),
                 git_dir: Some(PathBuf::from(dir)),
                 cas_write: None,
+                live_oid_index: None,
             },
         );
         Ok(())

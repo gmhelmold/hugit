@@ -34,6 +34,7 @@
 use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use hugit_proto::{CasObjectSource, GitObject, ObjectKind, PackError};
@@ -1373,10 +1374,18 @@ pub fn load_from_cas<T: CasTransport, R: R2Get>(
 /// distroless / no-git-binary invariant (#151) is preserved.
 pub struct LazyCasObjectSource<T: CasTransport = UreqCasTransport> {
     /// git oid → its blake3 CAS key (the whole `oid-index.json`, parsed once).
-    index: BTreeMap<gix_hash::ObjectId, String>,
+    /// INTERIOR-MUTABLE + shared: a successful CAS-mode `git push` merges the
+    /// just-pushed `oid → blake3` entries into this same cell via a [`LiveOidIndex`]
+    /// handle held by the repo's `RepoState`, so a freshly-pushed object resolves on
+    /// the read path with NO engine reboot. The accept loop is single-threaded, so
+    /// the `RwLock` is uncontended (the design's "contention-free either way").
+    index: LiveOidIndex,
     /// The CAS client used to fetch object bytes on demand.
     cas: CasClient<T>,
     /// First-fetch cache: a served object is decoded + verified once, then reused.
+    /// Content-addressing makes this safe across a hot-swap: an oid maps to the same
+    /// bytes forever, so a cache hit is never stale and the new index entries simply
+    /// take the cold path on their first read.
     cache: std::sync::Mutex<BTreeMap<gix_hash::ObjectId, GitObject>>,
 }
 
@@ -1385,10 +1394,18 @@ impl<T: CasTransport> LazyCasObjectSource<T> {
     #[must_use]
     pub fn new(index: BTreeMap<gix_hash::ObjectId, String>, cas: CasClient<T>) -> Self {
         Self {
-            index,
+            index: LiveOidIndex::new(index),
             cas,
             cache: std::sync::Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// A shared handle to this source's live oid→blake3 index, so the push-finalize
+    /// path can merge new entries into the SAME cell this source reads. Cloning the
+    /// handle shares the `Arc` — it does NOT copy the index.
+    #[must_use]
+    pub fn live_index_handle(&self) -> LiveOidIndex {
+        self.index.clone()
     }
 
     /// The number of objects the index references (the boot footprint — what the
@@ -1405,6 +1422,68 @@ impl<T: CasTransport> LazyCasObjectSource<T> {
     }
 }
 
+/// An interior-mutable, shared `git-oid → blake3` index — the live counterpart of
+/// the boot-loaded `oid-index.json`.
+///
+/// Threaded between the read path (a [`LazyCasObjectSource`] resolving an oid →
+/// blake3 → CAS bytes) and the CAS-mode push finalize (which merges the pushed
+/// objects' `oid → blake3` entries). The handle is `Clone` and shares one `Arc`,
+/// so an update through any clone is observed by every reader — no reboot. The
+/// accept loop is single-threaded (`server::serve_on`), so the `RwLock` is
+/// uncontended.
+#[derive(Clone)]
+pub struct LiveOidIndex(Arc<RwLock<BTreeMap<gix_hash::ObjectId, String>>>);
+
+impl LiveOidIndex {
+    /// Wrap a boot-loaded oid→blake3 map.
+    #[must_use]
+    pub fn new(index: BTreeMap<gix_hash::ObjectId, String>) -> Self {
+        Self(Arc::new(RwLock::new(index)))
+    }
+
+    /// The blake3 CAS key for `oid` in the LIVE index, or `None` if not indexed.
+    #[must_use]
+    pub fn get(&self, oid: &gix_hash::ObjectId) -> Option<String> {
+        self.0
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(oid)
+            .cloned()
+    }
+
+    /// Whether `oid` is in the LIVE index.
+    #[must_use]
+    pub fn contains(&self, oid: &gix_hash::ObjectId) -> bool {
+        self.0
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(oid)
+    }
+
+    /// The number of indexed oids in the LIVE index.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.read().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// Whether the LIVE index is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.read().unwrap_or_else(|e| e.into_inner()).is_empty()
+    }
+
+    /// Merge `additions` (`oid → blake3`) into the LIVE index. Idempotent: a
+    /// re-pushed oid simply re-asserts the same blake3 (content addressing). Called
+    /// AFTER the durable manifests committed, so the in-memory index is never ahead
+    /// of the durable `oid-index.json`.
+    pub fn merge(&self, additions: impl IntoIterator<Item = (gix_hash::ObjectId, String)>) {
+        let mut guard = self.0.write().unwrap_or_else(|e| e.into_inner());
+        for (oid, blake3) in additions {
+            guard.insert(oid, blake3);
+        }
+    }
+}
+
 impl<T: CasTransport + Send + Sync> hugit_proto::ObjectSource for LazyCasObjectSource<T> {
     fn get(&self, oid: &gix_hash::ObjectId) -> Result<Option<GitObject>, PackError> {
         // Served before? Return the decoded+verified object from the cache.
@@ -1416,10 +1495,12 @@ impl<T: CasTransport + Send + Sync> hugit_proto::ObjectSource for LazyCasObjectS
         {
             return Ok(Some(obj.clone()));
         }
-        // Not in the index → a CLEAN absence (Ok(None)), exactly like the eager store.
+        // Not in the LIVE index → a CLEAN absence (Ok(None)), exactly like the eager
+        // store. The live read picks up oids merged by a just-completed CAS push.
         let Some(blake3) = self.index.get(oid) else {
             return Ok(None);
         };
+        let blake3 = blake3.as_str();
         // Indexed → the object MUST be fetchable. A transport error or an absent
         // object is a broken seam, surfaced as PackError::Source (fail-closed) —
         // never a silent empty/partial serve.
@@ -1463,7 +1544,7 @@ impl<T: CasTransport + Send + Sync> hugit_proto::ObjectSource for LazyCasObjectS
     }
 
     fn contains(&self, oid: &gix_hash::ObjectId) -> bool {
-        self.index.contains_key(oid)
+        self.index.contains(oid)
     }
 }
 
@@ -3323,6 +3404,54 @@ mod tests {
         // Not in the index → clean absence, not an error.
         let other = git_oid(ObjectKind::Blob, b"not indexed\n");
         assert!(lazy.get(&other).unwrap().is_none());
+    }
+
+    /// Live ref hot-swap, READ leg (frozen design §3): an oid the BOOT index did
+    /// not know resolves through the SAME source — no new source, no reboot — once
+    /// its `oid → blake3` is merged via the shared [`LiveOidIndex`] handle (exactly
+    /// what `RepoState::apply_cas_push_inmemory` does after a push). Before the
+    /// merge it is a CLEAN absence (`Ok(None)`); after, it resolves byte-identically.
+    #[test]
+    fn lazy_source_resolves_oid_merged_after_boot() {
+        use hugit_proto::ObjectSource as _;
+        // A real pushed object: body → loose framing → blake3 key + git SHA-1 oid.
+        let body = b"freshly pushed blob\n";
+        let framing = encode_loose(ObjectKind::Blob, body);
+        let blake3 = cas_key(&framing);
+        let oid = git_oid(ObjectKind::Blob, body);
+        // The CAS already HOLDS the object (a push flushes objects BEFORE the
+        // manifests + the in-memory merge), but the boot index does not know its oid.
+        let mut seeded = BTreeMap::new();
+        seeded.insert(blake3.clone(), framing.clone());
+        let transport = MapCasTransport {
+            objects: std::sync::Mutex::new(seeded),
+            ..MapCasTransport::default()
+        };
+        let source = LazyCasObjectSource::new(BTreeMap::new(), client_with(transport));
+        let handle = source.live_index_handle();
+
+        // Before the merge: a clean absence (not in the index), never an error.
+        assert!(!source.contains(&oid), "unknown oid is absent pre-merge");
+        assert!(source.get(&oid).unwrap().is_none());
+
+        // Merge the pushed oid → blake3 (the object-source leg of the hot-swap).
+        handle.merge([(oid, blake3.clone())]);
+
+        // After the merge, with NO new source: the SAME source resolves the oid,
+        // double-integrity verified (re-derives to the asked oid).
+        assert!(
+            source.contains(&oid),
+            "merged oid resolvable with no reboot"
+        );
+        let obj = source
+            .get(&oid)
+            .unwrap()
+            .expect("oid resolves after the live merge");
+        assert_eq!(
+            obj.oid(),
+            oid,
+            "resolved bytes re-derive to the asked git oid (byte-identical)"
+        );
     }
 
     /// Double-integrity is STILL enforced on the per-object GET fallback path: a

@@ -6,10 +6,13 @@
 //! AND the repo has an on-disk `git_dir` write seam AND the pusher passes
 //! `authorize_write` (ownership). It wires the git client straight into
 //! [`hugit_proto::write::receive::receive_pack`] (bound→unpack→verify→store→anchor→
-//! append) and answers the `report-status`. v0 scope: a single non-delete ref per
-//! push, self-contained pack (incremental/thin-pack reachability that consults the
-//! CAS for server-side bases, and the live in-process ref hot-swap, are follow-ups
-//! — see `docs/plan/2026-06-22-receive-pack-wave-design.md`).
+//! append) and answers the `report-status`. A successful CAS-mode push then
+//! refreshes the in-memory view IN PROCESS (the **live ref hot-swap**:
+//! [`crate::state::RepoState::apply_cas_push_inmemory`]) so the new tip advertises +
+//! clone-resolves with no reboot. v0 scope: a single non-delete ref per push,
+//! self-contained pack (incremental/thin-pack reachability that consults the CAS for
+//! server-side bases is the remaining follow-up — see
+//! `docs/plan/2026-06-22-receive-pack-wave-design.md`).
 //!
 //! ## Protocol: smart-HTTP **v1** (the dumb-free "smart" transport)
 //!
@@ -278,7 +281,9 @@ fn git_refs_for(state: &AppState, repo: &str) -> Option<BTreeMap<String, String>
         return None;
     }
     // This repo's OWN refs (the multi-repo forge resolves `{repo}` → its RepoState).
-    Some(repo_state.git_refs.clone())
+    // A snapshot of the LIVE ref map: a just-completed CAS push has already advanced
+    // the pushed tip here, so the advertisement reflects it with no reboot.
+    Some(repo_state.git_refs.snapshot())
 }
 
 /// Re-frame an upload-pack request body, trimming each `want`/`have` pkt-line to
@@ -423,12 +428,14 @@ fn handle_receive_advertise(state: &AppState, repo: &str, request: Request) {
     pkt_line(&mut out, b"# service=git-receive-pack\n");
     pkt_flush(&mut out);
     let mut first = true;
-    if repo_state.git_refs.is_empty() {
+    // A snapshot of the LIVE refs (a prior CAS push in this lifetime is reflected).
+    let refs = repo_state.git_refs.snapshot();
+    if refs.is_empty() {
         // No refs yet: the zero-id capabilities line (so the client can still create).
         let line = format!("{} capabilities^{{}}\0{RECEIVE_CAPS}\n", "0".repeat(40));
         pkt_line(&mut out, line.as_bytes());
     } else {
-        for (name, oid) in &repo_state.git_refs {
+        for (name, oid) in &refs {
             let mut line = format!("{oid} {name}");
             if first {
                 line.push('\0');
@@ -625,6 +632,25 @@ fn handle_receive_pack(state: &AppState, repo: &str, body: &[u8], request: Reque
                 );
                 match res {
                     Ok(()) => {
+                        // The push is DURABLE (objects → log → manifests committed).
+                        // Live ref hot-swap: refresh this engine's in-memory view so
+                        // the new tip serves with NO reboot — merge the pushed
+                        // `oid → blake3` (reused verbatim from the CasRw, never re-read
+                        // from R2) into the live oid-index, then advance the ref tip.
+                        // On the (defensive) failure path the push stays durable + is
+                        // reported `ok`; the prior tip keeps serving and the new tip
+                        // loads on the next reboot (a read never regresses, and an
+                        // unresolvable tip is never advertised).
+                        if let Err(e) = repo_state.apply_cas_push_inmemory(
+                            &cmd.ref_name,
+                            &cmd.new_oid,
+                            cas.index_additions(),
+                        ) {
+                            eprintln!(
+                                "hugit-serve: CAS push durable but in-memory ref hot-swap \
+                                 skipped (serves after next reboot): {e}"
+                            );
+                        }
                         let report =
                             build_report_status(Ok(()), &[RefOutcome::Ok(cmd.ref_name.clone())]);
                         send_report(request, report)
@@ -787,5 +813,184 @@ fn send<R: std::io::Read>(request: Request, response: Response<R>) {
         && e.kind() != std::io::ErrorKind::BrokenPipe
     {
         eprintln!("hugit-serve: git respond error: {e}");
+    }
+}
+
+#[cfg(test)]
+mod live_refs_tests {
+    use super::*;
+    use crate::cas::LiveOidIndex;
+    use crate::state::{AppState, LiveRefs, RepoState};
+    use hugit_refstore::EventLog;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    const TOKEN: &str = "test-dev-token";
+
+    /// A unique scratch dir (no external tempfile dep — mirrors the integration tests).
+    fn scratch_dir() -> std::path::PathBuf {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let p = std::env::temp_dir().join(format!(
+            "hugit-serve-liverefs-{}-{}-{}",
+            std::process::id(),
+            nanos,
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&p).expect("scratch dir");
+        p
+    }
+
+    /// Seed a `<repo>.json` PUBLIC-meta event log on disk (so the anon clone-read
+    /// authz gate `git_refs_for` applies passes) and return its dir.
+    fn seed_public_log(repo: &str) -> std::path::PathBuf {
+        let dir = scratch_dir();
+        let mut log = EventLog::new();
+        log.append_for_test(
+            "repo.meta",
+            vec![],
+            serde_json::json!({"visibility": "public", "owner_tenant": "org-a"}).to_string(),
+            0,
+        );
+        std::fs::write(
+            dir.join(format!("{repo}.json")),
+            serde_json::to_string_pretty(log.records()).unwrap(),
+        )
+        .unwrap();
+        dir
+    }
+
+    /// A CAS-mode-shaped `RepoState`: a live ref map + a live oid-index handle. The
+    /// object source is a trivial empty store (this test exercises the REF advertise
+    /// path, which never reads objects — the object-source leg is proven in `cas.rs`).
+    fn cas_mode_repo_state(refs: std::collections::BTreeMap<String, String>) -> RepoState {
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> =
+            Arc::new(hugit_proto::CasObjectSource::new());
+        RepoState {
+            git_source: src,
+            git_root_tree: gix_hash::ObjectId::from_hex(&[b'0'; 40]).unwrap(),
+            git_refs: LiveRefs::new(refs),
+            git_dir: None,
+            cas_write: None,
+            live_oid_index: Some(LiveOidIndex::new(std::collections::BTreeMap::new())),
+        }
+    }
+
+    /// Frozen design §3: after `apply_cas_push_inmemory`, the advertise/`git_refs_for`
+    /// view IMMEDIATELY shows the new tip — same process, no reload. This is the leg
+    /// that makes a SECOND push see the correct base: the git client derives `old`
+    /// from this advertise, so a fresh tip here ≡ the durably-reloaded log's tip,
+    /// and the push is NOT falsely rejected as a non-fast-forward.
+    #[test]
+    fn advertise_reflects_pushed_tip_with_no_reboot() {
+        let repo = "hugit";
+        let old_tip = "a".repeat(40);
+        let new_tip = "b".repeat(40);
+
+        let dir = seed_public_log(repo);
+        let mut state = AppState::new(dir, TOKEN.to_string());
+        let mut refs = std::collections::BTreeMap::new();
+        refs.insert("refs/heads/main".to_string(), old_tip.clone());
+        state
+            .repos
+            .insert(repo.to_string(), cas_mode_repo_state(refs));
+
+        // Before the push: the advertise shows the old tip.
+        let before = git_refs_for(&state, repo).expect("public repo advertises");
+        assert_eq!(before.get("refs/heads/main"), Some(&old_tip));
+
+        // Simulate a successful CAS push finalize → in-memory hot-swap.
+        state
+            .repo_state(repo)
+            .unwrap()
+            .apply_cas_push_inmemory("refs/heads/main", &new_tip, &HashMap::new())
+            .expect("hot-swap applies");
+
+        // After the push: the SAME state (no reload) advertises the NEW tip.
+        let after = git_refs_for(&state, repo).expect("still advertises");
+        assert_eq!(
+            after.get("refs/heads/main"),
+            Some(&new_tip),
+            "advertise reflects the just-pushed tip with no reboot"
+        );
+        // And the raw advertisement bytes carry the new oid, not the old one.
+        let body = advertise_refs(&state, repo).expect("advertisement body");
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains(&new_tip), "advertisement lists the new tip");
+        assert!(
+            !text.contains(&old_tip),
+            "advertisement no longer lists the stale tip"
+        );
+    }
+
+    /// A brand-new ref created by a push (a create) is advertised immediately too.
+    #[test]
+    fn advertise_includes_newly_created_ref_after_push() {
+        let repo = "hugit";
+        let main_tip = "a".repeat(40);
+        let created_tip = "c".repeat(40);
+
+        let dir = seed_public_log(repo);
+        let mut state = AppState::new(dir, TOKEN.to_string());
+        let mut refs = std::collections::BTreeMap::new();
+        refs.insert("refs/heads/main".to_string(), main_tip.clone());
+        state
+            .repos
+            .insert(repo.to_string(), cas_mode_repo_state(refs));
+
+        state
+            .repo_state(repo)
+            .unwrap()
+            .apply_cas_push_inmemory("refs/heads/feature", &created_tip, &HashMap::new())
+            .expect("hot-swap applies");
+
+        let after = git_refs_for(&state, repo).expect("advertises");
+        assert_eq!(after.get("refs/heads/main"), Some(&main_tip), "main intact");
+        assert_eq!(
+            after.get("refs/heads/feature"),
+            Some(&created_tip),
+            "the just-created ref is advertised with no reboot"
+        );
+    }
+
+    /// Fail-closed: a malformed pushed oid in the additions aborts the in-memory
+    /// refresh WITHOUT advancing the ref — the prior tip keeps serving (a read never
+    /// regresses; an unresolvable tip is never advertised).
+    #[test]
+    fn malformed_oid_addition_does_not_advance_ref() {
+        let repo = "hugit";
+        let old_tip = "a".repeat(40);
+        let new_tip = "b".repeat(40);
+
+        let dir = seed_public_log(repo);
+        let mut state = AppState::new(dir, TOKEN.to_string());
+        let mut refs = std::collections::BTreeMap::new();
+        refs.insert("refs/heads/main".to_string(), old_tip.clone());
+        state
+            .repos
+            .insert(repo.to_string(), cas_mode_repo_state(refs));
+
+        let mut bad = HashMap::new();
+        bad.insert("not-a-valid-oid".to_string(), "f".repeat(64));
+        let err = state
+            .repo_state(repo)
+            .unwrap()
+            .apply_cas_push_inmemory("refs/heads/main", &new_tip, &bad)
+            .expect_err("a malformed oid must abort the refresh");
+        assert!(
+            err.contains("not a valid git oid"),
+            "names the fault: {err}"
+        );
+
+        let after = git_refs_for(&state, repo).expect("still advertises");
+        assert_eq!(
+            after.get("refs/heads/main"),
+            Some(&old_tip),
+            "the ref was NOT advanced (prior tip still served, fail-closed)"
+        );
     }
 }
