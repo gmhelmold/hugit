@@ -1839,6 +1839,14 @@ impl<T: CasTransport> CasRw<T> {
         &self.cas
     }
 
+    /// This push's new `git_oid → blake3` additions — the entries
+    /// [`commit_cas_push_manifests`] merges into `oid-index.json` after the objects
+    /// flush. Empty until objects are buffered via [`Cas::put`].
+    #[must_use]
+    pub fn index_additions(&self) -> &HashMap<String, String> {
+        &self.index_add
+    }
+
     /// Upload the buffered objects to the CoreLink CAS — the ONLY network step.
     ///
     /// Fails closed if any buffered object could not be inflated (an unservable
@@ -1932,6 +1940,145 @@ impl<T: CasTransport> Cas for CasRw<T> {
     fn contains(&self, oid: &str) -> bool {
         self.index_add.contains_key(oid) || self.existing.contains_key(oid)
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// I. CAS-mode push finalize — objects → log → manifests (the fail-closed order).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A CAS-mode push finalize fault, tagged by WHICH ordered step failed so the
+/// receive-pack handler maps it to the right `report-status` `ng`. The order the
+/// steps run — objects → log → manifests — is the load-bearing invariant: a later
+/// step never runs if an earlier one failed, so a manifest never advertises a tip
+/// whose object closure was not uploaded AND whose `ref.update` event was not
+/// durably recorded. `Display` is hand-written (no `thiserror` dep here).
+#[derive(Debug)]
+pub enum CasPushError {
+    /// [`CasRw::flush`] failed — the pushed object closure is NOT fully in the CAS.
+    /// Aborts BEFORE the log + manifests (no tip advertised without its closure).
+    Flush(CasError),
+    /// The caller's log-persist (the compare-and-swap append of the `ref.update`
+    /// event) failed — a CAS conflict or a transport fault. Objects DID upload
+    /// (idempotent), but the manifests are NOT advanced (the tip must not advertise
+    /// without the recorded event). Carries the caller's short reason.
+    Persist(String),
+    /// The manifest rewrite (oid-index then refs) failed AFTER objects + log
+    /// committed. The closure + event are durable; the tip is simply not yet
+    /// advertised — the client sees an `ng` and retries (idempotent).
+    Manifest(String),
+}
+
+impl std::fmt::Display for CasPushError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CasPushError::Flush(e) => write!(f, "CAS push: object flush failed: {e}"),
+            CasPushError::Persist(r) => write!(f, "CAS push: log persist failed: {r}"),
+            CasPushError::Manifest(r) => write!(f, "CAS push: manifest rewrite failed: {r}"),
+        }
+    }
+}
+
+impl std::error::Error for CasPushError {}
+
+/// Finalize a CAS-mode push after `receive_pack` accepted it. Runs the three
+/// durable steps IN ORDER, each fail-closed:
+///
+/// 1. **objects** — [`CasRw::flush`] uploads the buffered closure to the CoreLink
+///    CAS (idempotent). A failure aborts here, before any tip is advertised.
+/// 2. **log** — `persist_log` (the caller's compare-and-swap append of the
+///    `ref.update` event). Runs ONLY after the objects are durably in the CAS.
+/// 3. **manifests** — [`commit_cas_push_manifests`]: merge the push's
+///    `git_oid → blake3` additions into `oid-index.json`, THEN set
+///    `refs[ref_name] = new_oid` in `refs.json`, PUTting both to hugit's R2. The
+///    oid-index advances BEFORE the ref tip, so refs never names a tip whose
+///    objects are unindexed.
+///
+/// The order is the invariant: only when the full object closure is uploaded AND
+/// the event is recorded does any manifest advertise the new tip. (The handler
+/// supplies `persist_log` so the log's compare-and-swap stays its responsibility;
+/// this fn owns only the CAS-specific object + manifest steps + the ordering.)
+pub fn finalize_cas_push<T, R, P>(
+    cas: &mut CasRw<T>,
+    r2: &R,
+    tenant: &str,
+    repo: &str,
+    ref_name: &str,
+    new_oid: &str,
+    persist_log: P,
+) -> Result<(), CasPushError>
+where
+    T: CasTransport,
+    R: R2Get + R2Put,
+    P: FnOnce() -> Result<(), String>,
+{
+    // 1. objects FIRST — fail-closed before the log or any manifest.
+    cas.flush().map_err(CasPushError::Flush)?;
+    // 2. log — the compare-and-swap append; only after the closure is durable.
+    persist_log().map_err(CasPushError::Persist)?;
+    // 3. manifests LAST — oid-index then the ref tip.
+    commit_cas_push_manifests(r2, tenant, repo, ref_name, new_oid, cas.index_additions())
+        .map_err(CasPushError::Manifest)
+}
+
+/// Read-merge-write the mutable manifests for a CAS-mode push: merge `index_add`
+/// (`git_oid → blake3`, the push's new objects) into `<tenant>/<repo>/oid-index.json`
+/// and set `refs[ref_name] = new_oid` in `<tenant>/<repo>/refs.json`, then PUT both
+/// back to hugit's R2 — **oid-index FIRST, the ref tip LAST**.
+///
+/// ## Concurrency — SINGLE-WRITER assumption (documented deviation)
+///
+/// hugit's R2 surface ([`R2Put`]) exposes only an UNCONDITIONAL `put_object` for an
+/// arbitrary key; a true `If-Match` conditional PUT for the manifest keys is not in
+/// the surface ([`R2Get::get_object`] does not surface the ETag). Per the WP spec's
+/// fallback, this is the **read-modify-CAS** variant: it RE-READS each manifest
+/// immediately before merging, so a concurrent push whose write already landed is
+/// preserved. Two pushes racing INSIDE the read→PUT gap can still lose a ref tip —
+/// acceptable under the `self-hosted-alpha` deploy (single-tenant, single-writer,
+/// `HUGIT_SERVE_RECEIVE_PACK`-gated). No OBJECT closure is ever lost (the CAS is
+/// content-addressed + idempotent); at worst a ref tip regresses, surfaced as a
+/// non-fast-forward on the next push. Wiring a signed conditional PUT (the true
+/// store-side CAS) is the tracked follow-up.
+pub fn commit_cas_push_manifests<R: R2Get + R2Put>(
+    r2: &R,
+    tenant: &str,
+    repo: &str,
+    ref_name: &str,
+    new_oid: &str,
+    index_add: &HashMap<String, String>,
+) -> Result<(), String> {
+    // 1. oid-index.json FIRST: read-merge-write the new objects' oid→blake3 map, so
+    //    the index always covers every object the ref tip (written next) can name.
+    let index_key = oid_index_key(tenant, repo);
+    let mut index: OidIndex = match r2.get_object(&index_key)? {
+        Some(bytes) => parse_oid_index(&bytes)?,
+        None => OidIndex::new(),
+    };
+    for (oid, blake3) in index_add {
+        index.insert(oid.clone(), blake3.clone());
+    }
+    let index_bytes =
+        serde_json::to_vec(&index).map_err(|e| format!("push: oid-index.json serialize: {e}"))?;
+    r2.put_object(&index_key, &index_bytes)?;
+
+    // 2. refs.json LAST: read-merge-write the new tip. Writing it AFTER the index
+    //    guarantees the advertised tip's objects are already indexed (+ uploaded).
+    let refs_key = refs_manifest_key(tenant, repo);
+    let mut manifest = match r2.get_object(&refs_key)? {
+        Some(bytes) => parse_refs_manifest(&bytes)?,
+        // A repo with no refs.json yet: seed it with this ref as HEAD (defensive —
+        // CAS-mode repos are seeded at ingest, so this is the empty-repo edge).
+        None => RefsManifest {
+            head: ref_name.to_string(),
+            refs: BTreeMap::new(),
+        },
+    };
+    manifest
+        .refs
+        .insert(ref_name.to_string(), new_oid.to_string());
+    let refs_bytes =
+        serde_json::to_vec(&manifest).map_err(|e| format!("push: refs.json serialize: {e}"))?;
+    r2.put_object(&refs_key, &refs_bytes)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -3640,5 +3787,257 @@ mod tests {
             Some(&framing),
             "the object landed via the single-object PUT path"
         );
+    }
+
+    // ── I. CAS-mode push finalize (objects → log → manifests, fail-closed) ─────
+
+    /// Seed a `MapR2` with a repo's pre-push manifests: `refs.json`
+    /// (HEAD = `refs/heads/main` at `old_tip`) + an `oid-index.json` holding
+    /// `existing` (the pre-push `git_oid → blake3` closure).
+    fn seed_manifests(r2: &MapR2, tenant: &str, repo: &str, old_tip: &str, existing: &OidIndex) {
+        let mut refs = BTreeMap::new();
+        refs.insert("refs/heads/main".to_string(), old_tip.to_string());
+        let manifest = RefsManifest {
+            head: "refs/heads/main".to_string(),
+            refs,
+        };
+        r2.put_object(
+            &refs_manifest_key(tenant, repo),
+            &serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        r2.put_object(
+            &oid_index_key(tenant, repo),
+            &serde_json::to_vec(existing).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn finalize_cas_push_uploads_objects_then_rewrites_manifests() {
+        let (tenant, repo) = ("t", "hugit");
+        let r2 = MapR2::default();
+        // Pre-push closure: one prior object already indexed under the old tip.
+        let old_tip = "aa".repeat(20);
+        let mut existing = OidIndex::new();
+        existing.insert(
+            old_tip.clone(),
+            cas_key(&encode_loose(ObjectKind::Commit, b"old tip body")),
+        );
+        seed_manifests(&r2, tenant, repo, &old_tip, &existing);
+
+        let mut casrw = CasRw::new(client_with(MapCasTransport::default()), existing);
+        // The push delivers two NEW objects (a blob + the new tip commit).
+        let blob = b"the newly pushed file body";
+        let new_tip = "bb".repeat(20);
+        let blob_oid = "cc".repeat(20);
+        casrw.put(&CasObject {
+            oid: blob_oid.clone(),
+            bytes: verbatim_zlib_loose(ObjectKind::Blob, blob),
+        });
+        casrw.put(&CasObject {
+            oid: new_tip.clone(),
+            bytes: verbatim_zlib_loose(ObjectKind::Commit, b"new tip commit body"),
+        });
+        let want_keys: Vec<String> = casrw.index_additions().values().cloned().collect();
+
+        let mut persisted = false;
+        finalize_cas_push(
+            &mut casrw,
+            &r2,
+            tenant,
+            repo,
+            "refs/heads/pushed",
+            &new_tip,
+            || {
+                persisted = true;
+                Ok(())
+            },
+        )
+        .expect("finalize succeeds");
+
+        assert!(
+            persisted,
+            "the log-persist step ran (objects → LOG → manifests)"
+        );
+
+        // 1. Objects uploaded to the CAS (byte-identical framing under blake3).
+        {
+            let stored = casrw.cas_client().transport.objects.lock().unwrap();
+            assert_eq!(stored.len(), want_keys.len(), "exactly the pushed set");
+            for key in &want_keys {
+                assert!(stored.contains_key(key), "pushed object {key} uploaded");
+            }
+        }
+        // 2. oid-index.json merged: prior entry PRESERVED + new oids added.
+        let idx_bytes = r2
+            .get_object(&oid_index_key(tenant, repo))
+            .unwrap()
+            .unwrap();
+        let idx = parse_oid_index(&idx_bytes).unwrap();
+        assert!(idx.contains_key(&old_tip), "prior closure entry preserved");
+        assert!(idx.contains_key(&blob_oid), "new blob oid indexed");
+        assert!(idx.contains_key(&new_tip), "new tip oid indexed");
+        // 3. refs.json: the new tip is advertised; the untouched ref is preserved.
+        let refs_bytes = r2
+            .get_object(&refs_manifest_key(tenant, repo))
+            .unwrap()
+            .unwrap();
+        let m = parse_refs_manifest(&refs_bytes).unwrap();
+        assert_eq!(m.refs.get("refs/heads/pushed"), Some(&new_tip));
+        assert_eq!(
+            m.refs.get("refs/heads/main"),
+            Some(&old_tip),
+            "an untouched ref is preserved by the read-merge-write"
+        );
+    }
+
+    #[test]
+    fn finalize_cas_push_flush_failure_aborts_before_log_and_manifests() {
+        // THE fail-closed invariant: a flush/upload error aborts BEFORE the log AND
+        // the manifests — the tip is never advertised without its uploaded closure.
+        let (tenant, repo) = ("t", "hugit");
+        let r2 = MapR2::default();
+        let old_tip = "aa".repeat(20);
+        let mut existing = OidIndex::new();
+        existing.insert(
+            old_tip.clone(),
+            cas_key(&encode_loose(ObjectKind::Commit, b"old")),
+        );
+        seed_manifests(&r2, tenant, repo, &old_tip, &existing);
+
+        let mut casrw = CasRw::new(client_with(MapCasTransport::default()), existing);
+        // A non-inflatable (garbage) object: put() defers an inflate error; flush()
+        // then FAILS closed → finalize must abort at step 1 (objects).
+        casrw.put(&CasObject {
+            oid: "ff".repeat(20),
+            bytes: vec![0xde, 0xad, 0xbe, 0xef],
+        });
+
+        let mut persisted = false;
+        let err = finalize_cas_push(
+            &mut casrw,
+            &r2,
+            tenant,
+            repo,
+            "refs/heads/pushed",
+            &"bb".repeat(20),
+            || {
+                persisted = true;
+                Ok(())
+            },
+        )
+        .expect_err("a flush failure fails the finalize");
+        assert!(matches!(err, CasPushError::Flush(_)), "{err:?}");
+        assert!(
+            !persisted,
+            "the log-persist step NEVER ran (aborted at objects)"
+        );
+
+        // Nothing uploaded.
+        assert!(
+            casrw
+                .cas_client()
+                .transport
+                .objects
+                .lock()
+                .unwrap()
+                .is_empty(),
+            "no objects reached the CAS"
+        );
+        // The manifests are UNTOUCHED — the tip was never advertised.
+        let refs_bytes = r2
+            .get_object(&refs_manifest_key(tenant, repo))
+            .unwrap()
+            .unwrap();
+        let m = parse_refs_manifest(&refs_bytes).unwrap();
+        assert_eq!(m.refs.get("refs/heads/main"), Some(&old_tip));
+        assert!(
+            !m.refs.contains_key("refs/heads/pushed"),
+            "no new tip advertised on a failed push"
+        );
+        let idx = parse_oid_index(
+            &r2.get_object(&oid_index_key(tenant, repo))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(idx.len(), 1, "oid-index unchanged (only the prior entry)");
+    }
+
+    #[test]
+    fn finalize_cas_push_persist_failure_does_not_advance_manifests() {
+        // Objects flushed, but the LOG persist (compare-and-swap) failed → the ref
+        // tip must NOT advance (the manifest must not advertise a tip whose
+        // ref.update event was never recorded). Objects are durable + idempotent.
+        let (tenant, repo) = ("t", "hugit");
+        let r2 = MapR2::default();
+        let old_tip = "aa".repeat(20);
+        seed_manifests(&r2, tenant, repo, &old_tip, &OidIndex::new());
+
+        let mut casrw = CasRw::new(client_with(MapCasTransport::default()), OidIndex::new());
+        let new_tip = "bb".repeat(20);
+        casrw.put(&CasObject {
+            oid: new_tip.clone(),
+            bytes: verbatim_zlib_loose(ObjectKind::Commit, b"tip body"),
+        });
+
+        let err = finalize_cas_push(
+            &mut casrw,
+            &r2,
+            tenant,
+            repo,
+            "refs/heads/pushed",
+            &new_tip,
+            || Err("cas-conflict".to_string()),
+        )
+        .expect_err("a persist failure fails the finalize");
+        assert!(matches!(err, CasPushError::Persist(_)), "{err:?}");
+
+        // Objects DID upload (idempotent), but the tip did NOT advance.
+        assert!(
+            !casrw
+                .cas_client()
+                .transport
+                .objects
+                .lock()
+                .unwrap()
+                .is_empty(),
+            "objects uploaded before the persist step"
+        );
+        let m = parse_refs_manifest(
+            &r2.get_object(&refs_manifest_key(tenant, repo))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !m.refs.contains_key("refs/heads/pushed"),
+            "tip not advertised without the recorded event"
+        );
+    }
+
+    #[test]
+    fn cas_push_write_authz_rejects_non_owner_without_a_read_predicate_leak() {
+        // The receive-pack handler gates a CAS push on `authorize_write` (OWNERSHIP),
+        // NEVER the read-visibility predicate. Assert that gate directly: a PUBLIC
+        // repo opens READS to any tenant, but a non-owner is DENIED the push.
+        use crate::authz::{RepoMeta, Visibility, authorize_read, authorize_write};
+        let meta = RepoMeta {
+            visibility: Visibility::Public,
+            owner_tenant: Some("org-a".to_string()),
+        };
+        let non_owner = vec!["clerk:org-b:user-9".to_string()];
+        assert!(
+            authorize_read(&non_owner, &meta),
+            "public opens the clone (read) to any tenant"
+        );
+        assert!(
+            !authorize_write(&non_owner, &meta),
+            "but a non-owner is denied the push — write is ownership, not the read predicate"
+        );
+        // The owning tenant + the operator may push.
+        assert!(authorize_write(&["clerk:org-a:user-1".to_string()], &meta));
+        assert!(authorize_write(&["orchestrator:hugit".to_string()], &meta));
     }
 }
