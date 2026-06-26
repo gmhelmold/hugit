@@ -31,13 +31,14 @@ external dependency:**
   lock-step with the githugr TL. (The outline-on-`BlobVm` path needs no new VM — build that.)
 - serve `org`/`profile` screens — NEW `/v1/orgs/*`,`/v1/users/*` path families; path
   strings need githugr-TL confirmation first.
-- git push (receive-pack), live CAS/AC/runner/GitHub-App/mirror/Clerk — infra/owner.
+- ~~git push (receive-pack)~~ **LIVE 2026-06-26 (#198)**; live CAS/AC/runner/GitHub-App/mirror/Clerk — infra/owner.
 
 **Honesty corrections surfaced by the study (the code, not the docs, is truth):**
 - `policy edit` is ALREADY REAL + wired (`policy/edit.rs`); CLAUDE.md + the audit
   doc still call it deferred → fix.
 - git clone/fetch wire serving is BUILT (`hugit-serve/src/git.rs` upload-pack);
-  only push is deliberately 404.
+  push is now LIVE too (#198, git-free unpack) — clone/fetch + push all served,
+  caveated (pushed ref serves post-reboot; clone-back gated on the public-flag).
 
 ## 1. FROZEN CONTRACTS (agents transcribe, never redesign)
 

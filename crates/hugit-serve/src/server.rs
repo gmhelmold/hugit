@@ -48,18 +48,35 @@ pub fn serve_on(state: AppState, server: Server) -> std::io::Result<()> {
         // SSE replay: GET /v1/repos/{repo}/events?since=<seq>. Handled BEFORE the
         // standard (status, String) path because it needs a different Content-Type
         // and a Vec<u8> body. `respond_sse` consumes `request` in every branch.
+        // PANIC ISOLATION: wrapped like `route_with_body` below — a panic here must
+        // drop only THIS request, never unwind the single-threaded accept loop (one
+        // panic would otherwise crash the whole engine; on `max_instances:1` that is
+        // a full outage / crash-loop). On panic `request` is already consumed, so the
+        // client just gets no response; the server survives.
         if method == Method::Get && is_events_path(&url) {
-            respond_sse(&state, &url, &headers, request);
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                respond_sse(&state, &url, &headers, request);
+            }))
+            .is_err()
+            {
+                eprintln!("hugit-serve: SSE handler panicked — request dropped, server survives");
+            }
             continue;
         }
-        // Git smart-HTTP (clone/fetch). Handled BEFORE the standard (status,String)
-        // path because a packfile is a BINARY Vec<u8> body with a git-specific
-        // Content-Type — it cannot ride `route_with_body`. The POST body was already
-        // read above (capped); it is threaded in (the upload-pack want/have lines are
-        // tiny, well under the cap). `respond_git` consumes `request` in every branch.
-        // Push (git-receive-pack) is intentionally out of scope and 404s here.
+        // Git smart-HTTP (clone/fetch AND push/receive-pack). Handled BEFORE the
+        // standard (status,String) path because a packfile is a BINARY Vec<u8> body
+        // with a git-specific Content-Type — it cannot ride `route_with_body`. The
+        // POST body was already read above (capped). `respond_git` consumes `request`
+        // in every branch. Same panic isolation as above (the receive-pack path
+        // processes attacker-controlled pack bytes — a panic must not crash the loop).
         if crate::git::is_git_path(&url) {
-            crate::git::respond_git(&state, &method, &url, &body, request);
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::git::respond_git(&state, &method, &url, &body, request);
+            }))
+            .is_err()
+            {
+                eprintln!("hugit-serve: git handler panicked — request dropped, server survives");
+            }
             continue;
         }
         // PANIC ISOLATION: a panic inside a handler must degrade to a 503 for THAT

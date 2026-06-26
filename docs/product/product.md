@@ -100,7 +100,7 @@ Status key: **LIVE** = serving real data today · **BUILT** = gate-green, deploy
 | **Bidirectional GitHub mirror** | **ROADMAP** | branches round-trip; `main` single-writer via the queue; incidents preserved as refs, never dropped | a broken bridge kills trust — ours is forge-arbitrated by design |
 | **Actions shim** | **ROADMAP** | imported repos keep `.github/workflows` running (supported subset, explicit) | absorption discipline: nothing absorbed worse |
 | **`git clone` / `git fetch`** | **BUILT, deploy-gated** | smart-HTTP upload-pack; `git clone` succeeds in CI | live once `HUGIT_SERVE_GIT_DIR` is set on deploy |
-| **`git push`** | **ROADMAP** | receive-pack; returns 404 today | later wave |
+| **`git push`** | **LIVE (caveated)** | receive-pack succeeds on prod (#198, git-free unpack); a pushed ref serves post-reboot, clone-back gated on the public-flag | now |
 
 ## 5. The killer features, ranked
 

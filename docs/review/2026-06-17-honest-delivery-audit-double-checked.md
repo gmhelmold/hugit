@@ -3,8 +3,10 @@
 > **PARTIALLY SUPERSEDED 2026-06-22** — several "NOT live" gaps below have since shipped:
 > the engine is now MULTI-REPO and deployed serving `hugit` + `githugr` (`/readyz git_repos:2`,
 > F6a); the CoreLink **AC memoization is LIVE** (#182); the product-refinement (Phase 1+2, #179–181)
-> and git-ingest/CAS hardening (#184) merged. `ctx resume`/`review`/`land queue` are REAL. STILL
-> open: git `push`/receive-pack (404, next wave), anonymous-clone public-flag, runner fabric,
+> and git-ingest/CAS hardening (#184) merged. `ctx resume`/`review`/`land queue` are REAL. **git
+> `push`/receive-pack is now LIVE** (#198, 2026-06-26 — git-free gix-pack unpack on the distroless
+> engine; caveats: accepts one push per ref per engine lifetime until a live ref hot-swap, and
+> clone-back is gated on the public-flag). STILL open: anonymous-clone public-flag, live runner exec,
 > multi-tenant, and the killer-data **render** is verified only to "route serves (401)" from here —
 > the githugr TL's authed www smoke is pending. See CLAUDE.md's **Update 2026-06-22** block for the
 > current honest state; the per-capability analysis below remains the deep reference for everything

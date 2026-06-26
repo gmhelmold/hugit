@@ -43,7 +43,7 @@ the hugit repo itself. The rest is honest about where it stands:
 | `hugit symbol` — symbol outline | **LIVE** | `hugit symbol --file <path>` against any TS/JS/Python/Go/Java/C/C++/Ruby file |
 | `hugit export` — exit guarantee | **LIVE** | full git + JSON snapshot; run `hugit export` from any repo; zero dependencies |
 | `hugit import` — bring your repo | **LIVE** | `hugit import` pulls a GitHub repo into the forge without leaving GitHub |
-| `/v1` read+write API | **LIVE (1 repo)** | 11/20 reads serve chain-verified data; 9 POST verbs CAS-persisted + authz-gated; SSE replay |
+| `/v1` read+write API | **LIVE (2 repos)** | multi-repo (`hugit` + `githugr`); 11/20 reads serve chain-verified data; 9 POST verbs CAS-persisted + authz-gated; SSE replay |
 | `hugit check` / `hugit verdict` | **LIVE** | real policy-engine EXECUTE paths; `hugit policy test` runs local≡forge |
 | `hugit verdict approve` / `hugit verdict reject` | **LIVE** | single-lens wrappers over the canonical verdict record |
 | `hugit undo` | **LIVE** | event-sourced compensating undo; force-push data-loss is unexpressible |
@@ -53,7 +53,7 @@ the hugit repo itself. The rest is honest about where it stands:
 | `hugit policy edit` | **LIVE** | append-only policy changes over the house baseline |
 | `git clone` / `git fetch` wire protocol | **BUILT, deploy-gated** | logic CI-proven; live once `HUGIT_SERVE_GIT_DIR` is set on a fresh deploy |
 | File-content reads (`blob` / `edit`) | **BUILT, deploy-gated** | path→blob traversal, secret-scrubbed on read; live with the same deploy |
-| `git push` (receive-pack) | **ROADMAP** | intentionally deferred; returns 404 today |
+| `git push` (receive-pack) | **LIVE\*** | real push to the prod engine succeeds (#198, git-free gix-pack unpack on the distroless engine); _\*a pushed ref serves after the next engine reboot, and clone-back needs the per-repo public-flag (deferred)_ |
 | Union-tested landing queue | **ROADMAP** | the core landing algorithm is designed + hermetically tested; EXECUTE needs the runner fabric |
 | Memoized checks (CI dedup) | **ROADMAP** | algorithm built; requires the live runner + AC substrate |
 | Runner fabric | **ROADMAP** | spec'd and in flight in a sibling repo; hugit is anchor tenant |
