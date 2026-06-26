@@ -58,11 +58,12 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// vector (contract v1.2.0), and the §7.1 `result_binding_v2` vector (contract
 /// v1.4.0 — the full-outcome attestation signature; fabric-generated, mirrored
 /// byte-identical here under the same drift tripwire).
-const VECTORS: [&str; 4] = [
+const VECTORS: [&str; 5] = [
     "RunnerLease.json",
     "FenceManifest.json",
     "IntentMetrics.json",
     "result_binding_v2.json",
+    "attestation_keyset_selection.json",
 ];
 
 // ── ① the manifest pins every vector byte-exactly ────────────────────────────

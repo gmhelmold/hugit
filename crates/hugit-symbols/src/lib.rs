@@ -927,6 +927,37 @@ mod tests {
         c.push(b"\"".repeat(128));
         c.push(b"/*".repeat(128));
 
+        // ── Classifier-refinement shapes (added after the WP-#4 prod-blob sweep:
+        // 655 real hugit+githugr HEAD blobs panicked NONE, so the 503 culprit was
+        // not in the served closure — these pin the per-language refinement
+        // closures, which the generic garbage above never reaches, with BOTH
+        // well-formed and truncated/malformed variants so tree-sitter error
+        // recovery drives the same node-navigation under an unexpected shape).
+        for s in [
+            // Rust impl_name on degenerate impls (no `type:` / no `trait:` field).
+            "impl {}\nimpl Trait for {}\nimpl<T> for\nimpl Foo for",
+            // C++ refine_cpp_callable: free fn / method / ctor / dtor / out-of-line
+            // ctor / pointer-return method / qualified destructor, then truncated.
+            "struct S { S(); ~S(); int m(); };\nPoint::Point() {}\nint* A::g() {}\nvoid A::B::f() {}\nS::~S() {}",
+            "struct S{ ~\nPoint::Point\nint* A::\nvoid A::B::",
+            // Python: class/method/nested-def + const at module/class/local scope,
+            // SCREAMING vs not, then truncated def/assignment.
+            "X=1\nclass C:\n    K=2\n    def m(self):\n        L=3\n        def inner(): pass\nNOT_screaming=4",
+            "class C:\n    def\nDEF =\ndef self.",
+            // JavaScript binding_is_function: arrow / fn-expr / plain / no-value,
+            // const-vs-let, method named constructor, then truncated.
+            "const f = () => {};\nlet g = function(){};\nvar h;\nconst K = 1;\nclass C { constructor(){} m(){} }",
+            "const f = () =>\nclass C { constructor\nvar",
+            // Go classify_go: struct / interface / alias type_spec + func, truncated.
+            "type T struct{}\ntype I interface{}\ntype A = B\nfunc f() {}\nfunc (r R) m() {}",
+            "type T struct{\ntype A =\nfunc (",
+            // Ruby: class/module/method/singleton_method (self. and Recv.), no-name.
+            "class C\n  def i; end\n  def self.s; end\nend\nmodule M; def Recv.x; end; end",
+            "class C\n  def self.\n  def\nmodule",
+        ] {
+            c.push(s.as_bytes().to_vec());
+        }
+
         // Size-boundary: just under the cap (full parse — a single-token fill so
         // it is cheap), exactly at the cap, and one over (early oversized return).
         c.push(vec![b'a'; MAX_INPUT_BYTES - 1]);
