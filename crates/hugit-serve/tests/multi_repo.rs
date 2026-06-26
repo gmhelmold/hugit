@@ -204,4 +204,13 @@ fn readyz_reflects_the_loaded_repo_set() {
         "git_repos must count the loaded set: {b2}"
     );
     assert_eq!(v2["git_serving"], true);
+
+    // The version marker (the deploy tag via `HUGIT_SERVE_VERSION`, "dev" when
+    // unset) — present + a string so a consumer self-confirms a cutover reached
+    // the serving instance. The `from_str` above also proves the body stays
+    // valid JSON with the field appended.
+    assert!(
+        v2["version"].is_string(),
+        "readyz must carry a string version marker: {b2}"
+    );
 }

@@ -212,8 +212,21 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
         // repo content/names are leaked — capability counts only.
         let git_repos = state.git_serving_count();
         let git_serving = git_repos > 0;
-        let body =
-            format!(r#"{{"ready":true,"git_serving":{git_serving},"git_repos":{git_repos}}}"#);
+        // The deployed engine version (the deploy tag, set as `HUGIT_SERVE_VERSION`
+        // in the container env). Lets a consumer self-confirm a cutover reached the
+        // serving instance without pinging the operator — `/readyz` was otherwise
+        // version-blind, which masked a stale-instance/decode mismatch during a
+        // rollout. "dev" when unset (local/test). Sanitized to a JSON-safe charset
+        // (a controlled tag, but never trust an env value into a hand-built JSON).
+        let version: String = std::env::var("HUGIT_SERVE_VERSION")
+            .unwrap_or_else(|_| "dev".to_string())
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | ':'))
+            .take(128)
+            .collect();
+        let body = format!(
+            r#"{{"ready":true,"git_serving":{git_serving},"git_repos":{git_repos},"version":"{version}"}}"#
+        );
         return (200, body);
     }
 

@@ -165,61 +165,63 @@ pub fn outline_blob(lang: Lang, source: &[u8]) -> Vec<SymbolItem> {
 /// Dispatch `text` to the per-language [`outline_with`] engine. Split out from
 /// [`outline_blob`] so the totality `catch_unwind` wraps exactly the parse path.
 fn outline_for_lang(lang: Lang, text: &str) -> Vec<SymbolItem> {
+    // Compile each grammar's tree-sitter `Query` ONCE per process and reuse it.
+    // `Query::new` is expensive (tens of ms — worst for the large C++ grammar) and
+    // was previously recompiled on EVERY call: a real `/v1/repos/.../blob` hot-path
+    // cost (a `.rs` blob measured ~6s vs ~0.5s for an unparsed file). A per-language
+    // `OnceLock` caches the compiled query. The grammar `Language` is cheap to
+    // reconstruct per call (it wraps a static), and a `Query` compiled against one
+    // instance is valid for parsing with any instance of the SAME grammar — so the
+    // cached query pairs correctly with the freshly-built `language`. A query that
+    // fails to compile caches `None` (degrade to empty — the totality contract).
+    macro_rules! cached {
+        ($lang:expr, $query:expr, $classify:expr) => {{
+            static Q: std::sync::OnceLock<Option<Query>> = std::sync::OnceLock::new();
+            let language: tree_sitter::Language = $lang;
+            match Q.get_or_init(|| Query::new(&language, $query).ok()) {
+                Some(q) => outline_with(text, language, q, $classify),
+                None => Vec::new(),
+            }
+        }};
+    }
     match lang {
-        Lang::Rust => outline_with(
-            text,
+        Lang::Rust => cached!(
             tree_sitter_rust::LANGUAGE.into(),
             RUST_QUERY,
-            &classify_rust,
+            &classify_rust
         ),
-        Lang::TypeScript => outline_with(
-            text,
+        Lang::TypeScript => cached!(
             tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             TYPESCRIPT_QUERY,
-            &classify_simple,
+            &classify_simple
         ),
-        Lang::Tsx => outline_with(
-            text,
+        Lang::Tsx => cached!(
             tree_sitter_typescript::LANGUAGE_TSX.into(),
             TYPESCRIPT_QUERY,
-            &classify_simple,
+            &classify_simple
         ),
-        Lang::JavaScript => outline_with(
-            text,
+        Lang::JavaScript => cached!(
             tree_sitter_javascript::LANGUAGE.into(),
             JAVASCRIPT_QUERY,
-            &classify_javascript,
+            &classify_javascript
         ),
-        Lang::Python => outline_with(
-            text,
+        Lang::Python => cached!(
             tree_sitter_python::LANGUAGE.into(),
             PYTHON_QUERY,
-            &classify_python,
+            &classify_python
         ),
-        Lang::Go => outline_with(
-            text,
-            tree_sitter_go::LANGUAGE.into(),
-            GO_QUERY,
-            &classify_go,
-        ),
-        Lang::Java => outline_with(
-            text,
+        Lang::Go => cached!(tree_sitter_go::LANGUAGE.into(), GO_QUERY, &classify_go),
+        Lang::Java => cached!(
             tree_sitter_java::LANGUAGE.into(),
             JAVA_QUERY,
-            &classify_simple,
+            &classify_simple
         ),
-        Lang::C => outline_with(text, tree_sitter_c::LANGUAGE.into(), C_QUERY, &classify_c),
-        Lang::Cpp => outline_with(
-            text,
-            tree_sitter_cpp::LANGUAGE.into(),
-            CPP_QUERY,
-            &classify_cpp,
-        ),
-        Lang::Ruby => outline_with(
-            text,
+        Lang::C => cached!(tree_sitter_c::LANGUAGE.into(), C_QUERY, &classify_c),
+        Lang::Cpp => cached!(tree_sitter_cpp::LANGUAGE.into(), CPP_QUERY, &classify_cpp),
+        Lang::Ruby => cached!(
             tree_sitter_ruby::LANGUAGE.into(),
             RUBY_QUERY,
-            &classify_ruby,
+            &classify_ruby
         ),
     }
 }
@@ -233,7 +235,7 @@ fn outline_for_lang(lang: Lang, text: &str) -> Vec<SymbolItem> {
 fn outline_with(
     text: &str,
     language: tree_sitter::Language,
-    query_src: &str,
+    query: &Query,
     classify: &Classifier<'_>,
 ) -> Vec<SymbolItem> {
     let mut parser = Parser::new();
@@ -244,12 +246,6 @@ fn outline_with(
         return Vec::new();
     };
 
-    let Ok(query) = Query::new(&language, query_src) else {
-        // A malformed query is a build-time bug, not a runtime input fault; still
-        // degrade rather than panic to honor the totality contract.
-        return Vec::new();
-    };
-
     let capture_names = query.capture_names();
     let name_capture = capture_names.iter().position(|n| *n == "name");
 
@@ -257,7 +253,7 @@ fn outline_with(
     let mut items: Vec<(usize, SymbolItem)> = Vec::new();
 
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&query, tree.root_node(), src);
+    let mut matches = cursor.matches(query, tree.root_node(), src);
     while let Some(m) = matches.next() {
         // The `@decl.<tag>` capture pins both the raw kind tag and the
         // declaration's start byte; the optional `@name` capture pins the
