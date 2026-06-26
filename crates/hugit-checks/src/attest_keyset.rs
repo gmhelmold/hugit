@@ -218,4 +218,42 @@ mod tests {
             }
         }
     }
+
+    /// SECURITY REGRESSION (CoreLink Runners TL hardening, 2026-06-26): an absent /
+    /// empty / malformed `result_binding_sig_v2` MUST verify as FALSE — NEVER a silent
+    /// fallback to v1 (v1 does not bind `exit`/`artifacts`, so a v1-only result is
+    /// forgeable on the pass/fail verdict). `verify_with_keyset` is pure-v2 (no v1
+    /// branch exists by construction); this PINS it: a SELECTED, in-window key with an
+    /// empty/garbage sig is a hard reject — `Ok(false)`, never `Ok(true)`, never a
+    /// panic. The downgrade-by-stripping-v2 vector therefore cannot succeed in the
+    /// keyset enforce path. Pinned against the dev key from
+    /// `conformance/attestation_keyset_selection.json` (the prod key flips on at enforce).
+    #[test]
+    fn empty_or_malformed_v2_sig_is_a_hard_reject_never_v1_fallback() {
+        // A real, in-set key so SELECTION succeeds — the rejection is then the SIGNATURE
+        // check (the enforce path), not a key-select miss.
+        let keys = [KeyEntry {
+            key_id: "2d16e9ef2102df2a".into(),
+            pubkey_b64: "+X0vGNFOSY5t9jo7OTlJNZsoLZOxE172jw/QURNEYw4=".into(),
+            expires_ms: None,
+        }];
+        let artifacts: &[(String, String)] = &[];
+        for stripped in ["", "AAAA", "not-valid-base64-$$$"] {
+            assert_eq!(
+                verify_with_keyset(
+                    &keys,
+                    "2d16e9ef2102df2a",
+                    1_000,
+                    "memo",
+                    "blob:o",
+                    "blob:e",
+                    0,
+                    artifacts,
+                    stripped,
+                ),
+                Ok(false),
+                "an absent/empty/malformed v2 sig must be a hard reject (sig={stripped:?})"
+            );
+        }
+    }
 }
