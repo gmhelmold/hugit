@@ -64,6 +64,13 @@ const TOP_LEVEL_AGENT_TYPE: &str = "main";
 /// (the dogfood / explicit-metrics path). Every field is OPTIONAL — an omitted
 /// flag is honest-zero (the ref / model is `None` / empty), never a fabricated
 /// figure. Plumbed from the `hugit pr land` CLI flags.
+///
+/// When a runner can supply a complete [`IntentMetrics`] (the §13.1 cache-split
+/// path), set [`EnvelopeMetricsArgs::full_metrics`] instead of the individual
+/// flag fields. [`build_metrics`] passes it through verbatim — preserving
+/// `input / output / cache_read / cache_write / total` exactly as the runner
+/// measured them. The flag-derived fields are still used when `full_metrics` is
+/// `None` (honest-zero defaults for the manual CLI path).
 #[derive(Debug, Clone, Default)]
 pub struct EnvelopeMetricsArgs {
     /// Total tokens spent on the run (`--tokens`).
@@ -89,6 +96,14 @@ pub struct EnvelopeMetricsArgs {
     pub compact_transcript_ref: Option<String>,
     /// `cas:` ref to the adversarial-panel verdicts (`--verdicts-ref`).
     pub verdicts_ref: Option<String>,
+    /// A complete [`IntentMetrics`] supplied by the runner (the §13.1
+    /// cache-split carrier). When `Some`, [`build_metrics`] passes it through
+    /// verbatim — `input / output / cache_read / cache_write / total` all
+    /// survive unchanged. When `None`, the flag-derived path is used instead
+    /// (honest-zero split, `total` from `self.tokens`). The CLI never sets
+    /// this field (no CLI flag exists for a full metrics blob); it is wired
+    /// by the runner integration in a later PR.
+    pub full_metrics: Option<IntentMetrics>,
 }
 
 impl EnvelopeMetricsArgs {
@@ -105,14 +120,29 @@ impl EnvelopeMetricsArgs {
             || self.context_cas.is_some()
             || self.compact_transcript_ref.is_some()
             || self.verdicts_ref.is_some()
+            || self.full_metrics.is_some()
     }
 }
 
-/// Build the [`IntentMetrics`] from the supplied flags. An omitted flag is
-/// honest-zero — never a fabricated figure. `tool_breakdown` stays empty (the
-/// porcelain has no per-tool seam; the aggregate `tool_calls` is the honest
-/// figure the orchestrator passes).
+/// Build the [`IntentMetrics`] from the supplied args.
+///
+/// Two paths:
+/// - **Full-metrics path** (`m.full_metrics` is `Some`): the caller supplied a
+///   complete [`IntentMetrics`] (e.g. the §13.1 runner carrier). It is passed
+///   through **verbatim** — `input / output / cache_read / cache_write / total`
+///   all survive unchanged. This is the cache-split-preserving path.
+/// - **Flag-derived path** (`m.full_metrics` is `None`): the orchestrator
+///   supplied individual flags (or none). Tokens arrive as a single aggregate
+///   (`--tokens`); the cache split is not a porcelain seam, so `total` carries
+///   it and the split fields are honest-zero. An omitted flag is honest-zero —
+///   never a fabricated figure. `tool_breakdown` stays empty (the porcelain has
+///   no per-tool seam; the aggregate `tool_calls` is the honest figure).
 fn build_metrics(m: &EnvelopeMetricsArgs) -> IntentMetrics {
+    // Full-metrics path: pass through verbatim, preserving the cache split.
+    if let Some(ref full) = m.full_metrics {
+        return full.clone();
+    }
+    // Flag-derived path: honest-zero for the cache split, total from --tokens.
     IntentMetrics {
         // Tokens arrive as a single aggregate (`--tokens`); the cache split is
         // not a porcelain seam, so `total` carries it and the split is zero
@@ -609,5 +639,95 @@ mod tests {
             .filter(|r| r.kind == PR_ENVELOPE_KIND)
             .count();
         assert_eq!(n_pr_before, n_pr_after, "re-settle appends no pr.envelope");
+    }
+
+    /// (e) build_metrics with a full IntentMetrics preserves the cache split
+    /// (input / output / cache_read / cache_write / total all survive verbatim,
+    /// not zeroed). This is the §13.1 runner-carrier path — the whole point of
+    /// this WP.
+    #[test]
+    fn build_metrics_full_metrics_preserves_cache_split() {
+        let full = IntentMetrics {
+            tokens: TokenCounts {
+                input: 1_000,
+                output: 2_000,
+                cache_read: 3_000,
+                cache_write: 4_000,
+                total: 10_000,
+            },
+            wall_ms: 500,
+            active_ms: 300,
+            tool_calls: 5,
+            tool_breakdown: vec![],
+            model_turns: 3,
+            cost_usd_micros: 9_876_543,
+        };
+        let args = EnvelopeMetricsArgs {
+            // Flag-derived fields are set but must be IGNORED when full_metrics
+            // is Some — the full metrics path is the authoritative one.
+            tokens: 99_999,
+            cost_usd_micros: 1,
+            tool_calls: 1,
+            active_ms: 1,
+            model_turns: 1,
+            full_metrics: Some(full.clone()),
+            ..Default::default()
+        };
+        let built = build_metrics(&args);
+
+        // All cache-split fields must survive verbatim.
+        assert_eq!(built.tokens.input, 1_000, "input preserved");
+        assert_eq!(built.tokens.output, 2_000, "output preserved");
+        assert_eq!(built.tokens.cache_read, 3_000, "cache_read preserved");
+        assert_eq!(built.tokens.cache_write, 4_000, "cache_write preserved");
+        assert_eq!(built.tokens.total, 10_000, "total preserved");
+        assert_eq!(
+            built.cost_usd_micros, 9_876_543,
+            "cost_usd_micros preserved"
+        );
+        assert_eq!(built.active_ms, 300, "active_ms preserved");
+        assert_eq!(built.tool_calls, 5, "tool_calls preserved");
+        assert_eq!(built.model_turns, 3, "model_turns preserved");
+        assert_eq!(built.wall_ms, 500, "wall_ms preserved");
+    }
+
+    /// (f) The existing flag-only path still yields the same honest-zero result
+    /// for cache split fields (input / output / cache_read / cache_write = 0)
+    /// when `full_metrics` is `None` — regression guard.
+    #[test]
+    fn build_metrics_flag_only_path_still_zeroes_cache_split() {
+        let args = EnvelopeMetricsArgs {
+            tokens: 50_000,
+            cost_usd_micros: 3_000_000,
+            tool_calls: 7,
+            active_ms: 1_500,
+            model_turns: 4,
+            model: Some("claude-sonnet-4-6".to_string()),
+            full_metrics: None,
+            ..Default::default()
+        };
+        let built = build_metrics(&args);
+
+        // Cache split must be honest-zero (not fabricated).
+        assert_eq!(built.tokens.input, 0, "input is honest-zero on flag path");
+        assert_eq!(built.tokens.output, 0, "output is honest-zero on flag path");
+        assert_eq!(
+            built.tokens.cache_read, 0,
+            "cache_read is honest-zero on flag path"
+        );
+        assert_eq!(
+            built.tokens.cache_write, 0,
+            "cache_write is honest-zero on flag path"
+        );
+        // But the aggregate total IS the supplied value.
+        assert_eq!(built.tokens.total, 50_000, "total from --tokens flag");
+        assert_eq!(
+            built.cost_usd_micros, 3_000_000,
+            "cost_usd_micros from flag"
+        );
+        assert_eq!(built.tool_calls, 7, "tool_calls from flag");
+        assert_eq!(built.active_ms, 1_500, "active_ms from flag");
+        assert_eq!(built.model_turns, 4, "model_turns from flag");
+        assert_eq!(built.wall_ms, 0, "wall_ms honest-zero on flag path");
     }
 }

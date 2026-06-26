@@ -390,6 +390,10 @@ fn run_land(a: LandCliArgs) -> ExitCode {
                 context_cas: a.context_cas,
                 compact_transcript_ref: a.compact_transcript_ref,
                 verdicts_ref: a.verdicts_ref,
+                // No CLI flag for a full metrics blob — the runner integration
+                // wires this in a later PR. The CLI always uses the flag-derived
+                // (honest-zero-split) path.
+                full_metrics: None,
             },
         },
     );

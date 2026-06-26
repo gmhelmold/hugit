@@ -33,6 +33,7 @@
 //! `memo_key` derivation) and never modifies it.
 
 pub mod byte_identity;
+pub mod dispatch;
 pub mod hit_rate;
 pub mod lease_client;
 pub mod lease_exec;
@@ -40,6 +41,7 @@ pub mod metrics;
 pub mod nondeterminism;
 
 pub use byte_identity::{ArtifactDiff, ByteIdentityReport, compare_byte_identity};
+pub use dispatch::{DispatchOutcome, dispatch_check, exec_and_collect};
 pub use hit_rate::{HitRateMeter, HitRateReport};
 pub use lease_client::{
     AcquireLeaseRequest, ExecAck, LeaseClient, RawEvents, RawMeta, RunnerConfig, RunnerError,
