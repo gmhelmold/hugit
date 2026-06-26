@@ -1,0 +1,57 @@
+{
+  "description": "Cross-repo conformance vector for the ATTESTATION KEY-SET SELECTION layer (rotation). The producer (corelink-runners fabric) serves GET /v1/attestation/key as a key set; the consumer (hugit v2 verifier) must SELECT the entry whose key_id matches the attestation and reject unknown/expired keys BEFORE the existing single-key crypto verify. This pins the selection DECISIONS so both repos agree byte-for-byte (transcribe-not-design). Companion to attestation_key_set.json, which pins the RESPONSE SHAPE + the DEV key_id derivation. Selection matches key_id by string equality; the pubkey_b64 is opaque to selection. Reference selector: corelink_fabric_api::select_attestation_key.",
+  "keys": [
+    {
+      "key_id": "2d16e9ef2102df2a",
+      "pubkey_b64": "+X0vGNFOSY5t9jo7OTlJNZsoLZOxE172jw/QURNEYw4=",
+      "expires_ms": null
+    },
+    {
+      "key_id": "b0b0b0b0b0b0b0b0",
+      "pubkey_b64": "sLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLA=",
+      "expires_ms": 1750000000000
+    }
+  ],
+  "cases": [
+    {
+      "name": "active_no_expiry_accept",
+      "attestation_key_id": "2d16e9ef2102df2a",
+      "now_ms": 1760000000000,
+      "expect": "accept",
+      "expected_key_id": "2d16e9ef2102df2a",
+      "expected_reason": null
+    },
+    {
+      "name": "retiring_before_expiry_accept",
+      "attestation_key_id": "b0b0b0b0b0b0b0b0",
+      "now_ms": 1740000000000,
+      "expect": "accept",
+      "expected_key_id": "b0b0b0b0b0b0b0b0",
+      "expected_reason": null
+    },
+    {
+      "name": "expired_after_cutover_reject",
+      "attestation_key_id": "b0b0b0b0b0b0b0b0",
+      "now_ms": 1760000000000,
+      "expect": "reject",
+      "expected_key_id": null,
+      "expected_reason": "expired"
+    },
+    {
+      "name": "exact_expiry_instant_reject",
+      "attestation_key_id": "b0b0b0b0b0b0b0b0",
+      "now_ms": 1750000000000,
+      "expect": "reject",
+      "expected_key_id": null,
+      "expected_reason": "expired"
+    },
+    {
+      "name": "unknown_key_id_reject",
+      "attestation_key_id": "deadbeefdeadbeef",
+      "now_ms": 1760000000000,
+      "expect": "reject",
+      "expected_key_id": null,
+      "expected_reason": "unknown_key_id"
+    }
+  ]
+}

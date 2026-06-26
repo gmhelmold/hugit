@@ -21,3 +21,5 @@ pub mod regen;
 pub mod shadow;
 
 pub mod attest_v2;
+
+pub mod attest_keyset;
