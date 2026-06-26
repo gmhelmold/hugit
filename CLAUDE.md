@@ -34,10 +34,13 @@ adversarial round (1–13) + a SOTA sweep. The integrity spine is genuinely soli
   2026-06-22). ANONYMOUS `git clone` of either repo is still `404` — gated on a per-repo public-flag
   (a deferred feature), not the wire. `git push` (receive-pack) is **LIVE** (2026-06-26, #198 —
   git-free gix-pack unpack on the distroless engine; first real push returned `unpack ok` +
-  `ok refs/heads/_pushsmoke`). Caveats that MUST ride every "push live" claim: **(a)** the in-memory
-  snapshot is not live-refreshed, so the engine currently accepts **one push per ref per engine
-  lifetime** — a pushed ref serves, and a *second* push to that ref stops being wrongly rejected as
-  non-fast-forward, only after the next reboot (the live ref hot-swap is the priority follow-up); **(b)**
+  `ok refs/heads/_pushsmoke`). The **live ref hot-swap is DONE** (#201, deployed 2026-06-26 —
+  verified: a ref pushed post-deploy appears in the receive-pack advertise immediately, same engine
+  lifetime, no reboot), so the stale-advertise / false-non-fast-forward gap is CLOSED. Remaining caveats:
+  **(a)** an *incremental* push that builds on server-side history still hits the v0 self-contained-pack
+  limit (the pushed pack omits the existing-ancestor base → thin-pack / CAS-base reachability is the
+  tracked follow-up; a fresh-closure push is fine); **(b)** clone-back over the wire is still blocked by
+  the private read-gate (public-flag deferred).
   clone-back over the wire is still blocked by the private read-gate (public-flag deferred).
 - **Substrate — AC LIVE (2026-06-22), runner still transferred.** The CoreLink AC
   (memoization) is now LIVE: `check run` + `land queue` prefer `HttpAcClient::from_runtime`
@@ -100,6 +103,16 @@ after the next engine reboot (in-memory snapshot not live-refreshed — a tracke
 clone-back over the wire is blocked by the private read-gate (public-flag deferred). v0 = self-contained
 packs only (thin-pack bases + incremental pushes on server-side ancestry rejected fail-closed). Reads
 stayed 200 throughout (no outage). Lesson: any distroless-runtime path MUST be git-binary-free.
+Follow-ups shipped the same day: **#199** panic-isolated the git/SSE handlers (a handler panic no longer
+crashes the single-threaded engine) + corrected every doc that still said push was 404; **#200** wired
+`hugit pr land --dispatch` (real per-PR cost from the runner fabric, fail-closed/honest — live exec waits
+on the runners-TL fabricd spawn fix); **#201** the **live ref hot-swap** (a pushed ref reflects in the
+advertise immediately, no reboot — deployed + verified live, image `…hotswap-29ea6e5`). Two adversarial
+audits of the live write path returned: **security SOUND (no unauthorized write / CAS poisoning / known
+crash)**, honesty corrected. Remaining write-path follow-ups (tracked, none a live hole): thin-pack /
+CAS-base reachability (incremental pushes on server-side history); an `If-Match` conditional manifest PUT
+as a HARD pre-condition before ever running `max_instances>1` (today the unconditional refs.json PUT is
+safe ONLY by the single-instance + single-threaded invariant).
 
 **What IS genuinely live (don't under-claim it either):** the `/v1` read+write API
 against `hugit` (+ now `githugr`) — 11/20 reads serve real chain-verified R2 data;
@@ -117,8 +130,9 @@ fix), no multi-tenant identity, no anonymous clone, killer-data render unverifie
 **Critical path to a usable single-tenant forge (biggest → smallest) — updated 2026-06-22:**
 ~~deploy current `main`~~ DONE (multi-repo + killer-data + AC live) → githugr TL render-verifies
 the killer-data with a token + runs the www → ~~git `push`/receive-pack~~ **DONE (#198, live
-2026-06-26 with caveats a+b)** → **live-snapshot refresh** (interior-mutability so a pushed ref
-serves without an engine reboot) + **anonymous-clone public-flag** (unblocks clone-back) → identity
+2026-06-26 with caveats a+b)** → ~~live-snapshot refresh~~ **DONE (#201, live ref hot-swap — a pushed
+ref reflects in the advertise immediately, no reboot)** → **thin-pack / CAS-base reachability** (so an
+incremental push on server-side history works) + **anonymous-clone public-flag** (unblocks clone-back) → identity
 Clerk exchange (still gated on `HUGIT_SESSION_EXCHANGE_URL` + `hugit-prod-d1`) → runner fabric live →
 GitHub App + live mirror → multi-tenant. The non-code ones are owner/infra-gated. Per-capability
 status table + tracked seams: the audit doc above.
