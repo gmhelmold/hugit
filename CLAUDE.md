@@ -129,10 +129,15 @@ snapshot (the advertise projection) as the stale-check view; **(2)** an authenti
 **O(n²) DoS** on reverse-ordered REF_DELTAs (capped, fail-closed); **(3)** peak unpack memory lowered
 to container-safe; **(4)** lazy-CAS cache poison-parity; **(5)** a bounded decoded-object cache (was
 unbounded → OOM on a long-lived instance). #2(b) (a partial-manifest-commit ref wedge on a transient
-R2 fault) stays tracked under the existing pre-HA `If-Match` seam — not new debt. **Honest current
-state: until this wave deploys, prod `git push` creates new branches but false-rejects an update to an
-existing branch; after deploy, updating an existing branch works (verified by the new git-free tests,
-to be re-proven by a live prod push).**
+R2 fault) stays tracked under the existing pre-HA `If-Match` seam — not new debt. **DEPLOYED + verified
+live 2026-06-26 (engine `/readyz version 2026-06-26-write-path-hardening-9de574b`): a real force-push
+UPDATED an existing branch on prod (`_pushsmoke` `75b5715`→`f40aeb1`, `ok`) — the #2a defect is CLOSED
+live (previously a false `StaleRef`); the hot-swap advertised the new tip immediately; reads stayed 200
+(engine + public www blob) through the cutover, no outage.** The deploy also reconciled a config-drift:
+the receive-pack enablement (`HUGIT_SERVE_RECEIVE_PACK` + engine-worker forwarding + `HUGIT_SERVE_VERSION`)
+was previously set via UNCOMMITTED deploy-time edits — now committed in `../githugr/engine.wrangler.jsonc`
++ `engine-worker/index.js` so the live push config is reproducible and a redeploy never silently regresses
+push to 403.
 
 **What IS genuinely live (don't under-claim it either):** the `/v1` read+write API
 against `hugit` (+ now `githugr`) — 11/20 reads serve real chain-verified R2 data;
@@ -142,10 +147,11 @@ the 9 POST verbs are code-complete + R2-CAS-persisted (proven against prod R2),
 SSE replay-then-close. The engine is **lazy git-from-CAS** (boots from the CoreLink
 CAS, ~5 s cold-start) and is now MULTI-REPO. **Magnitude: the single-tenant forge is now read+WRITE
 live — the `/v1` API (~20–25% across 2 repos, AC-memoized) PLUS git `push` over the wire (live
-2026-06-26: a pushed ref is advertised immediately via the live ref hot-swap #201, no reboot;
-remaining caveats — until the hardening wave deploys, an update to an existing branch false-rejects
-(new-branch creation works); v0 = self-contained packs only; clone-back blocked by the private
-read-gate). Call it ~25–30% of a single-tenant forge. Still single-digit % for a full
+2026-06-26: a pushed ref is advertised immediately via the live ref hot-swap #201, no reboot; CREATE
+*and* UPDATE of an existing branch both work live (the #2a update-false-reject was fixed + deployed +
+prod-verified 2026-06-26); remaining caveats — v0 = self-contained packs only (an incremental push on
+server-side history is rejected fail-closed); clone-back blocked by the private read-gate). Call it
+~25–30% of a single-tenant forge. Still single-digit % for a full
 MULTI-TENANT end-to-end forge: no live runner exec (dispatch waits on the runners-TL fabricd spawn
 fix), no multi-tenant identity, no anonymous clone, killer-data render unverified-from-here.**
 
