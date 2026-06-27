@@ -1,0 +1,22 @@
+{
+  "lease": {
+    "lease_id": "lease-0001-held",
+    "principal_chain": [
+      "agent:runner-dispatch-01",
+      "user:gustavo"
+    ],
+    "path_set": [
+      "/tmp/hugit/run/abc123",
+      "/cache/hugit/toolchains"
+    ],
+    "expiry": 1717003600000,
+    "net_policy": "egress-deny-all",
+    "tmp_root": "/tmp/hugit/run/abc123",
+    "state": "held"
+  },
+  "exec_endpoint": "/v1/leases/lease-0001-held/exec",
+  "envelope_ingest": {
+    "ingest_path": "/v1/leases/lease-0001-held/envelope/ingest",
+    "credential": "scoped-write-only-ingest-token-do-not-leak"
+  }
+}

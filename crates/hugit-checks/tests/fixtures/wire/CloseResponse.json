@@ -1,0 +1,47 @@
+{
+  "lease_id": "lease-0001-held",
+  "released": true,
+  "capture_incomplete": false,
+  "metrics": {
+    "tokens": {
+      "input": 48211,
+      "output": 9143,
+      "cache_read": 120557,
+      "cache_write": 3361,
+      "total": 181272
+    },
+    "wall_ms": 754000,
+    "active_ms": 612450,
+    "tool_calls": 41,
+    "tool_breakdown": [
+      {
+        "tool": "Bash",
+        "count": 17
+      },
+      {
+        "tool": "Edit",
+        "count": 13
+      },
+      {
+        "tool": "Read",
+        "count": 11
+      }
+    ],
+    "model_turns": 58,
+    "cost_usd_micros": 1834290
+  },
+  "check_result": null,
+  "attestation": {
+    "tree": "blob:tree-snapshot-ref",
+    "def": "blob:def-digest-ref",
+    "runner": "runner:fabric-box-7",
+    "model": "claude-opus",
+    "principal": [
+      "tenant:3560e213"
+    ],
+    "sig": "ZmFrZS1lZDI1NTE5LXNpZ25hdHVyZS1ieXRlcw=="
+  },
+  "result_binding_sig": "ZmFrZS12MS1iaW5kaW5n",
+  "result_binding_sig_v2": "ZmFrZS12Mi1iaW5kaW5n",
+  "fabric_key_id": "0011223344556677"
+}

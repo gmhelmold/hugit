@@ -27,6 +27,8 @@ use std::path::{Path, PathBuf};
 use hugit_contracts::{CheckDef, RunnerLease};
 use serde::{Deserialize, Serialize};
 
+use crate::runner::metrics::RunnerJobMetrics;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Errors — fail-closed, secret-free (mirrors `AcError`).
 // ─────────────────────────────────────────────────────────────────────────────
@@ -250,6 +252,75 @@ pub struct RawMeta(pub serde_json::Value);
 /// document), so PR1 does not impose a decode that PR2 may need to change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawEvents(pub Vec<u8>);
+
+/// Terminal job status a caller may claim on close — the `status` body the
+/// fabric's `POST /v1/leases/{lease_id}/close` REQUIRES (transcribed from
+/// `corelink-fabric-api::dto::CloseRequest`). The fabric accepts EXACTLY
+/// `"succeeded"` | `"failed"` (lowercase); `killed` is the fabric's own
+/// abnormal-path verdict and is NEVER caller-supplied. Anything else is a 400
+/// `invalid` server-side, so we never emit it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseStatus {
+    /// The job finished cleanly.
+    Succeeded,
+    /// The job ran but its verdict was a failure.
+    Failed,
+}
+
+impl CloseStatus {
+    /// The exact lowercase wire token the fabric's `status` field accepts.
+    fn as_wire(self) -> &'static str {
+        match self {
+            CloseStatus::Succeeded => "succeeded",
+            CloseStatus::Failed => "failed",
+        }
+    }
+}
+
+/// Request body for `POST /v1/leases/{lease_id}/close`. Mirrors the fabric DTO
+/// `corelink-fabric-api::dto::CloseRequest` — the REQUIRED terminal `status`
+/// (the prior empty-body close was a latent wire bug: the fabric `400`s a
+/// status-less close). The fabric's `check_result: Option<CheckResult>` field
+/// is OMITTED here: hugit's A-path delivers no `CheckResult` on close (the
+/// off-box result is the fabric's signed envelope), and serde treats a missing
+/// `Option` field as `None`, so `{"status":"..."}` is accepted by the fabric's
+/// `deny_unknown_fields` body verbatim.
+#[derive(Debug, Clone, Serialize)]
+pub struct CloseRequest {
+    /// `"succeeded"` | `"failed"` — the only two the caller may claim.
+    pub status: String,
+}
+
+/// Response body for `POST /v1/leases/{lease_id}/close` — the §13.1 finalized
+/// per-job metrics delivered ATOMICALLY with the close. Transcribed from the
+/// fabric DTO `corelink-fabric-api::dto::CloseResponse`.
+///
+/// hugit is LIBERAL in what it accepts (NO `deny_unknown_fields`): the fabric
+/// also carries `attestation`, `result_binding_sig`, `result_binding_sig_v2`,
+/// `fabric_key_id`, and an echoed `check_result` — none of which the A-mode cost
+/// path consumes here, so they are tolerated-and-ignored rather than modelled
+/// (keeping hugit forward-compatible with additive fabric fields, the §13.4
+/// drift posture). `metrics` is the ONE load-bearing field: it is the fabric's
+/// signed, finalized §13.1 figure — the attested per-job cost source of truth.
+/// It is intentionally NOT defaulted (a metrics-less close is a contract
+/// violation — §13.1 "never optional when the job succeeded" — so an absent
+/// `metrics` is a decode error, never a fabricated zero).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct CloseResponse {
+    /// The closed lease id (echoed).
+    pub lease_id: String,
+    /// Whether the lease reached `Released` as a result of this call.
+    #[serde(default)]
+    pub released: bool,
+    /// `true` iff transcript capture was lossy/unconfirmed — honest, never
+    /// silent. Carried through so the forge can record capture honesty.
+    #[serde(default)]
+    pub capture_incomplete: bool,
+    /// The finalized §13.1 per-job metrics (the fabric's signed figure). Maps to
+    /// the frozen `IntentMetrics` via [`RunnerJobMetrics::into_intent_metrics`],
+    /// preserving the FULL token cache-split (never flattened to `total`).
+    pub metrics: RunnerJobMetrics,
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Config — the PAT is private, never rendered (mirrors `AcConfig`).
@@ -558,15 +629,33 @@ impl<T: RunnerTransport> LeaseClient<T> {
     }
 
     /// Close (release) a lease: `POST {host}/v1/leases/{lease_id}/close`.
-    pub fn close(&self, lease_id: &str) -> Result<(), RunnerError> {
+    ///
+    /// POSTs the REQUIRED [`CloseRequest`] `status` body (`succeeded`/`failed`)
+    /// and PARSES the fabric's [`CloseResponse`], returning the finalized §13.1
+    /// metrics. The prior version POSTed an EMPTY body and returned `()` — a
+    /// latent wire bug (the fake transport never enforced the body, the live
+    /// PAT-gated path was never run): the real fabric `400`s a status-less close
+    /// AND delivers the attested metrics on this same atomic call.
+    ///
+    /// Fail-closed: ONLY a `200` with a parseable [`CloseResponse`] succeeds. A
+    /// `204`/empty body cannot carry the §13.1-required `metrics`, so it is NOT
+    /// accepted as success (it would mean a metrics-less close — a contract
+    /// violation; surfaced as [`RunnerError::Status`]). The metrics are never
+    /// fabricated: a close error surfaces, it is never papered over with a zero.
+    pub fn close(&self, lease_id: &str, status: CloseStatus) -> Result<CloseResponse, RunnerError> {
         validate_lease_id(lease_id)?;
         let url = format!("{}/v1/leases/{}/close", self.config.base(), lease_id);
-        let (status, _resp) = self.transport.post(&url, &self.config.bearer(), &[])?;
-        match status {
-            // 200 (closed) | 204 (no content) both succeed.
-            200 | 204 => Ok(()),
+        let req = CloseRequest {
+            status: status.as_wire().to_string(),
+        };
+        let body = serde_json::to_vec(&req).map_err(|e| RunnerError::Decode(e.to_string()))?;
+        let (code, resp) = self.transport.post(&url, &self.config.bearer(), &body)?;
+        match code {
+            // The fabric returns 200 + the atomic CloseResponse body (metrics +
+            // the honest capture_incomplete flag).
+            200 => serde_json::from_slice(&resp).map_err(|e| RunnerError::Decode(e.to_string())),
             429 | 503 => Err(RunnerError::Busy {
-                detail: format!("close returned HTTP {status}"),
+                detail: format!("close returned HTTP {code}"),
             }),
             other => Err(RunnerError::Status(other)),
         }
@@ -817,7 +906,7 @@ mod tests {
             (202, serde_json::to_vec(&ack).unwrap()),
             (200, br#"{"status":"running","cost_usd_micros":0}"#.to_vec()),
             (200, b"event: started\nevent: done\n".to_vec()),
-            (204, Vec::new()),
+            (200, sample_close_response_body()),
         ]);
         let config = RunnerConfig::new("https://runner.example/", SENTINEL_PAT).unwrap();
         let client = LeaseClient::with_transport(config, transport);
@@ -849,8 +938,12 @@ mod tests {
         let events = client.poll_events(lease_id).unwrap();
         assert!(events.0.starts_with(b"event: started"));
 
-        // close
-        client.close(lease_id).unwrap();
+        // close — POSTs the required status body and parses CloseResponse.
+        let closed = client.close(lease_id, CloseStatus::Succeeded).unwrap();
+        assert_eq!(
+            closed.metrics.cost_usd_micros, 1834290,
+            "close returns the finalized §13.1 metrics"
+        );
 
         // Verify the URLs were strung correctly (trailing slash trimmed) and the
         // bearer carried the PAT on every call.
@@ -880,10 +973,40 @@ mod tests {
             assert_eq!(c.bearer, format!("Bearer {SENTINEL_PAT}"));
         }
 
-        // The acquire body is the serialized request; the close body is empty.
+        // The acquire body is the serialized request; the close body carries the
+        // required `status` field (never empty — the fixed wire contract).
         let sent_req: AcquireLeaseRequest = serde_json::from_slice(&calls[0].body).unwrap();
         assert_eq!(sent_req, req);
-        assert!(calls[4].body.is_empty());
+        let close_req: serde_json::Value = serde_json::from_slice(&calls[4].body).unwrap();
+        assert_eq!(close_req["status"], "succeeded");
+    }
+
+    /// A representative fabric `CloseResponse` body — the §13.1 metrics PLUS the
+    /// fabric extras (`attestation`, the result-binding sigs, `fabric_key_id`,
+    /// echoed `check_result`) hugit deliberately tolerates-and-ignores (liberal,
+    /// no `deny_unknown_fields`). The metrics mirror the pinned `IntentMetrics`
+    /// vector so the cost asserts read a known value.
+    fn sample_close_response_body() -> Vec<u8> {
+        br#"{
+            "lease_id": "lease-abc123",
+            "released": true,
+            "capture_incomplete": false,
+            "metrics": {
+                "tokens": {"input": 48211, "output": 9143, "cache_read": 120557, "cache_write": 3361, "total": 181272},
+                "wall_ms": 754000,
+                "active_ms": 612450,
+                "tool_calls": 41,
+                "tool_breakdown": [{"tool": "Bash", "count": 17}],
+                "model_turns": 58,
+                "cost_usd_micros": 1834290
+            },
+            "check_result": null,
+            "attestation": {"tree": "", "def": "", "runner": "", "model": "", "principal": ["tenant:t-1"], "sig": "ZmFrZXNpZw=="},
+            "result_binding_sig": "ZmFrZQ==",
+            "result_binding_sig_v2": "ZmFrZTI=",
+            "fabric_key_id": "0011223344556677"
+        }"#
+        .to_vec()
     }
 
     #[test]
@@ -1155,5 +1278,54 @@ mod tests {
             !rdbg.contains(SCOPED),
             "AcquireResponse Debug leaked the credential: {rdbg}"
         );
+    }
+
+    /// `close` POSTs the REQUIRED `status` body and PARSES the fabric's
+    /// `CloseResponse`, returning the finalized §13.1 metrics — the fixed wire
+    /// contract (the prior empty-body, `()`-returning close was the latent bug).
+    #[test]
+    fn close_posts_status_body_and_parses_close_response() {
+        let transport = FakeTransport::with_responses(vec![(200, sample_close_response_body())]);
+        let config = RunnerConfig::new("https://runner.example/", SENTINEL_PAT).unwrap();
+        let client = LeaseClient::with_transport(config, transport);
+
+        let resp = client
+            .close("lease-abc123", CloseStatus::Succeeded)
+            .unwrap();
+        // The response carries the finalized metrics (full cache-split preserved).
+        assert_eq!(resp.lease_id, "lease-abc123");
+        assert!(resp.released);
+        assert!(!resp.capture_incomplete);
+        assert_eq!(resp.metrics.cost_usd_micros, 1834290);
+        assert_eq!(resp.metrics.tokens.cache_read, 120557);
+        assert_eq!(resp.metrics.tokens.cache_write, 3361);
+
+        // The request carried the REQUIRED `status` field (never an empty body).
+        let calls = client.transport.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, "POST");
+        assert_eq!(
+            calls[0].url,
+            "https://runner.example/v1/leases/lease-abc123/close"
+        );
+        let body: serde_json::Value = serde_json::from_slice(&calls[0].body).unwrap();
+        assert_eq!(body["status"], "succeeded");
+        // A `failed` close maps to the other wire token.
+        assert_eq!(CloseStatus::Failed.as_wire(), "failed");
+    }
+
+    /// `close` authenticates with the tenant PAT (NEVER a scoped ingest
+    /// credential — that is only for the §13.2 ingest submit). A sentinel PAT
+    /// proves the PAT is the Bearer on the close call.
+    #[test]
+    fn close_uses_pat_not_scoped_credential() {
+        let transport = FakeTransport::with_responses(vec![(200, sample_close_response_body())]);
+        let config = RunnerConfig::new("https://runner.example", SENTINEL_PAT).unwrap();
+        let client = LeaseClient::with_transport(config, transport);
+        client
+            .close("lease-abc123", CloseStatus::Succeeded)
+            .unwrap();
+        let calls = client.transport.calls();
+        assert_eq!(calls[0].bearer, format!("Bearer {SENTINEL_PAT}"));
     }
 }
