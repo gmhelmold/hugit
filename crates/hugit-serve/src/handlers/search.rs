@@ -35,6 +35,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use gix_hash::ObjectId;
 use hugit_cli::pr::{
@@ -68,8 +69,20 @@ const INDEX_NOTE: &str = "índice do log de eventos";
 
 /// Maximum number of tree files visited per code search (depth-first, BFS order).
 /// Mirrors the existing `MAX_RECORDS_TO_SCAN` discipline: a single search must
-/// never stall the single-threaded server. 2000 files bounds the CAS budget.
+/// never stall the single-threaded server. 2000 files bounds the CAS budget on a
+/// WARM cache (in-memory grep); on a COLD cache every `src.get` is a synchronous
+/// R2 fetch, so the file cap alone is a RESULT bound, not a LATENCY bound — the
+/// wall-clock [`CODE_SCAN_BUDGET`] is what actually keeps a search from blocking
+/// the single-threaded accept loop (the 2026-06-27 code-search wedge: a cold-cache
+/// scan of thousands of sequential R2 fetches stalled `/readyz` for minutes).
 const CODE_FILE_CAP: usize = 2_000;
+/// Hard wall-clock ceiling on a single code search. On the single-threaded engine
+/// the whole accept loop is blocked for the duration of a search, so this MUST be
+/// small: a cold-cache scan stops here (after ~a dozen R2 fetches) with partial
+/// results rather than wedging the engine; a warm-cache scan finishes well under it.
+/// Partial-ness is acceptable under the F4c-interim disclaimer (the real fix is a
+/// pre-built index). Checked between every tree/blob fetch.
+const CODE_SCAN_BUDGET: Duration = Duration::from_millis(2_000);
 /// Maximum number of line hits emitted in `code` before the result cap kicks in.
 /// `code_total` continues counting (the caller can page). Mirrors `RESULT_CAP`.
 const CODE_MATCH_CAP: usize = 200;
@@ -317,10 +330,17 @@ fn search_code(
     src: &dyn ObjectSource,
     root_tree: &ObjectId,
     q_lower: &str,
+    budget: Duration,
 ) -> (Vec<SearchCodeVm>, usize) {
     let mut hits: Vec<SearchCodeVm> = Vec::new();
     let mut code_total: usize = 0;
     let mut files_visited: usize = 0;
+
+    // Wall-clock guard: the single-threaded accept loop is blocked for the whole
+    // duration of this walk, and every `src.get` may be a synchronous R2 fetch, so
+    // we STOP at `budget` with whatever partial results we have rather than wedge
+    // the engine. Checked between every tree pop + every blob fetch.
+    let start = Instant::now();
 
     // DFS stack: start at the root tree.
     let mut stack: Vec<TreeFrame> = vec![TreeFrame {
@@ -329,7 +349,7 @@ fn search_code(
     }];
 
     while let Some(frame) = stack.pop() {
-        if files_visited >= CODE_FILE_CAP {
+        if files_visited >= CODE_FILE_CAP || start.elapsed() >= budget {
             break;
         }
         // Fetch the tree object; skip on error (fail-closed, not abort).
@@ -342,7 +362,7 @@ fn search_code(
             Err(_) => continue,
         };
         for entry in entries {
-            if files_visited >= CODE_FILE_CAP {
+            if files_visited >= CODE_FILE_CAP || start.elapsed() >= budget {
                 break;
             }
             // Skip symlinks and gitlinks (mirrors list_tree_at_dir).
@@ -429,7 +449,7 @@ pub fn build_search(
         && let Some(src) = git_source
         && let Some(root) = root_tree
     {
-        search_code(src.as_ref(), root, &q_lower)
+        search_code(src.as_ref(), root, &q_lower, CODE_SCAN_BUDGET)
     } else {
         (vec![], 0)
     };
@@ -772,6 +792,23 @@ mod tests {
             vm.code[0].lines[0].1
         );
         assert!(vm.code_total >= 1, "code_total must be at least 1");
+    }
+
+    #[test]
+    fn code_search_zero_budget_stops_immediately_no_wedge() {
+        // The wall-clock budget is the real DoS guard on the SINGLE-THREADED engine
+        // (the 2026-06-27 wedge: a cold-cache scan of thousands of sequential R2
+        // fetches stalled /readyz for minutes). With a ZERO budget the walk must
+        // stop on the first iteration — NO tree/blob fetched — proving a search can
+        // never block the accept loop past its budget.
+        let (src, root) = make_git_src_with_file("lib.rs", b"fn frobnicate() {}\n");
+        let (hits, total) = search_code(src.as_ref(), &root, "frobnicate", Duration::ZERO);
+        assert!(hits.is_empty(), "zero budget must stop before any fetch");
+        assert_eq!(total, 0, "zero budget scans nothing");
+        // The guard bounds LATENCY, it does not break search: the same source finds
+        // the hit under a real budget.
+        let (hits2, _) = search_code(src.as_ref(), &root, "frobnicate", CODE_SCAN_BUDGET);
+        assert!(!hits2.is_empty(), "a real budget still finds the hit");
     }
 
     #[test]
