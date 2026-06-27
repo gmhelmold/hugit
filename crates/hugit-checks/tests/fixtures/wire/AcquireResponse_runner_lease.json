@@ -1,0 +1,16 @@
+{
+  "lease": {
+    "lease_id": "lease-0002-held",
+    "principal_chain": [
+      "agent:runner-dispatch-02"
+    ],
+    "path_set": [
+      "/tmp/hugit/run/def456"
+    ],
+    "expiry": 1717003600000,
+    "net_policy": "egress-deny-all",
+    "tmp_root": "/tmp/hugit/run/def456",
+    "state": "held"
+  },
+  "exec_endpoint": "/v1/leases/lease-0002-held/exec"
+}

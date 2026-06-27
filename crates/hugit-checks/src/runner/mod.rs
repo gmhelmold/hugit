@@ -47,9 +47,9 @@ pub use dispatch::{
 };
 pub use hit_rate::{HitRateMeter, HitRateReport};
 pub use lease_client::{
-    AcquireLeaseRequest, AcquireResponse, EnvelopeIngest, ExecAck, IngestEvent, IngestUsage,
-    LeaseClient, RawEvents, RawMeta, RunnerConfig, RunnerError, RunnerTransport,
-    UreqRunnerTransport, runner_from_env,
+    AcquireLeaseRequest, AcquireResponse, CloseRequest, CloseResponse, CloseStatus, EnvelopeIngest,
+    ExecAck, IngestEvent, IngestUsage, LeaseClient, RawEvents, RawMeta, RunnerConfig, RunnerError,
+    RunnerTransport, UreqRunnerTransport, runner_from_env,
 };
 pub use lease_exec::{
     InProcessRunnerExecutor, LiveBoxRunnerExecutor, RunnerExecError, RunnerExecutor,

@@ -355,8 +355,10 @@ mod tests {
         }
     }
 
-    /// A result-envelope meta body carrying a DISTINCTIVE §13.1 cache split (with
-    /// a runner-only extra to prove the permissive decode tolerates it).
+    /// A result-envelope meta body for the poll step. The A-path reads the
+    /// CheckResult FIELDS from here (exit/refs/…), but the ATTESTED metrics come
+    /// from the CLOSE response — so these poll metrics are a deliberate PLACEHOLDER
+    /// (distinct from [`close_body`]'s distinctive figure) to prove close wins.
     fn envelope_body() -> Vec<u8> {
         br#"{
             "exit": 0,
@@ -366,15 +368,41 @@ mod tests {
             "duration_ms": 4242,
             "runner_ref": "runner:box-land",
             "metrics": {
+                "tokens": {"input": 1, "output": 1, "cache_read": 1, "cache_write": 1, "total": 4},
+                "wall_ms": 1,
+                "active_ms": 1,
+                "tool_calls": 1,
+                "tool_breakdown": [{"tool": "Read", "count": 1}],
+                "model_turns": 1,
+                "cost_usd_micros": 1,
+                "cpu_ms": 4321
+            }
+        }"#
+        .to_vec()
+    }
+
+    /// The fabric `CloseResponse` carrying the DISTINCTIVE finalized §13.1 metrics
+    /// — the attested figure the land envelope must capture — plus the fabric
+    /// extras (attestation/sigs/key_id/echoed result) hugit liberally ignores.
+    fn close_body() -> Vec<u8> {
+        br#"{
+            "lease_id": "lease-land-1",
+            "released": true,
+            "capture_incomplete": false,
+            "metrics": {
                 "tokens": {"input": 111, "output": 222, "cache_read": 333, "cache_write": 444, "total": 1110},
                 "wall_ms": 9100,
                 "active_ms": 7600,
                 "tool_calls": 6,
                 "tool_breakdown": [{"tool": "Bash", "count": 6}],
                 "model_turns": 2,
-                "cost_usd_micros": 5555555,
-                "cpu_ms": 4321
-            }
+                "cost_usd_micros": 5555555
+            },
+            "check_result": null,
+            "attestation": {"tree":"","def":"","runner":"","model":"","principal":["tenant:t"],"sig":"c2ln"},
+            "result_binding_sig": "c2ln",
+            "result_binding_sig_v2": "c2lnMg==",
+            "fabric_key_id": "0011223344556677"
         }"#
         .to_vec()
     }
@@ -392,8 +420,9 @@ mod tests {
         }
     }
 
-    /// A full A-path acquire→submit→poll→close FIFO that returns the distinctive
-    /// metrics on the poll (the fabric's signed envelope readback).
+    /// A full A-path acquire→submit→poll→close FIFO. The poll carries placeholder
+    /// metrics; the CLOSE carries the distinctive finalized figure — the attested
+    /// per-job cost the land envelope captures (close is the source of truth).
     fn happy_responses() -> Vec<(u16, Vec<u8>)> {
         vec![
             (
@@ -401,8 +430,8 @@ mod tests {
                 serde_json::to_vec(&acquire_resp_with_ingest()).unwrap(),
             ), // acquire (wrapper)
             (200, Vec::new()),      // submit_envelope (§13.2 ingest)
-            (200, envelope_body()), // poll_meta (fabric signed envelope)
-            (204, Vec::new()),      // close
+            (200, envelope_body()), // poll_meta (CheckResult fields, placeholder metrics)
+            (200, close_body()),    // close — the finalized §13.1 attested metrics
         ]
     }
 

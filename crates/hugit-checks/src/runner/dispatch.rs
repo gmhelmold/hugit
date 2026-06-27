@@ -34,7 +34,8 @@ use hugit_contracts::{CheckDef, CheckResult, IntentMetrics, RunnerLease, RunnerS
 use serde::Deserialize;
 
 use crate::runner::lease_client::{
-    AcquireLeaseRequest, AcquireResponse, IngestEvent, IngestUsage, LeaseClient, RunnerTransport,
+    AcquireLeaseRequest, AcquireResponse, CloseStatus, IngestEvent, IngestUsage, LeaseClient,
+    RunnerTransport,
 };
 use crate::runner::lease_exec::RunnerExecError;
 use crate::runner::metrics::RunnerJobMetrics;
@@ -185,12 +186,28 @@ pub fn dispatch_check<T: RunnerTransport>(
         toolchain_digest,
     );
 
+    // The close status is the run's honest verdict (exit 0 ⇒ succeeded). On a
+    // collect error we still close, claiming `failed` (the box ran but produced
+    // no usable result) — never `succeeded`.
+    let status = match &outcome {
+        Ok(o) if o.result.exit == 0 => CloseStatus::Succeeded,
+        _ => CloseStatus::Failed,
+    };
+
     // ALWAYS close — even when the run errored. Explicit (not a Drop guard) so
-    // the close call is observable in the hermetic transport assertions.
-    let close = client.close(&lease_id).map_err(RunnerExecError::Lease);
+    // the close call is observable in the hermetic transport assertions. The
+    // B-path KEEPS the box-measured `poll_meta` metrics (the `outcome`): a
+    // box-exec lease has no §13.2 capture hook, so its close returns the fabric's
+    // honest-ZERO projection — preferring it would WIPE the figure the box
+    // actually measured. (Contrast the A-path, where the lease carries a §13.2
+    // hook and the close metrics ARE the finalized source of truth.)
+    let close = client
+        .close(&lease_id, status)
+        .map_err(RunnerExecError::Lease);
 
     match outcome {
         Ok(o) => {
+            // Surface a close error; otherwise the box-measured outcome wins.
             close?;
             Ok(o)
         }
@@ -265,10 +282,13 @@ pub fn project_intent_metrics(m: &IntentMetrics) -> Vec<IngestEvent> {
 
 /// Drive the full OFF-BOX §13 attest lifecycle for one lease: acquire → SUBMIT
 /// the off-box trajectory to the §13.2 ingest endpoint (scoped credential) →
-/// poll the signed envelope (PAT) → close (PAT). The `measured` metrics are the
-/// off-box agent loop's §13.1 figures; they are projected into the §13.2 event
-/// batch and submitted, and the returned [`DispatchOutcome`] carries the metrics
-/// read back from the fabric's signed envelope.
+/// poll the signed envelope (PAT, for the `CheckResult` fields) → close (PAT).
+/// The `measured` metrics are the off-box agent loop's §13.1 figures; they are
+/// projected into the §13.2 event batch and submitted. The returned
+/// [`DispatchOutcome`] carries the metrics from the fabric's FINALIZED **close**
+/// response (`CloseResponse.metrics`) — the signed source of truth — NOT the
+/// modeled `poll_meta` figure (this lease carries a §13.2 capture hook, so its
+/// close yields the real finalized metrics; if both exist, close wins).
 ///
 /// FAIL-CLOSED (the load-bearing rules):
 /// - if the acquire response has NO `envelope_ingest` (a runner lease, or §13
@@ -290,7 +310,7 @@ pub fn dispatch_attest_offbox<T: RunnerTransport>(
     let acquired = client.acquire(acquire).map_err(RunnerExecError::Lease)?;
     let lease_id = acquired.lease.lease_id.clone();
 
-    let outcome = attest_and_collect(
+    let collected = attest_and_collect(
         client,
         &acquired,
         measured,
@@ -300,14 +320,36 @@ pub fn dispatch_attest_offbox<T: RunnerTransport>(
         toolchain_digest,
     );
 
+    // The close status is the run's honest verdict; on a collect error we still
+    // close, claiming `failed`.
+    let status = match &collected {
+        Ok(o) if o.result.exit == 0 => CloseStatus::Succeeded,
+        _ => CloseStatus::Failed,
+    };
+
     // ALWAYS close — even when the attest step errored (incl. a missing ingest
     // credential). Explicit so the close is observable in the transport asserts.
-    let close = client.close(&lease_id).map_err(RunnerExecError::Lease);
+    let close = client
+        .close(&lease_id, status)
+        .map_err(RunnerExecError::Lease);
 
-    match outcome {
+    match collected {
         Ok(o) => {
-            close?;
-            Ok(o)
+            // A-MODE ATTESTED FIGURE: the per-job cost is the fabric's FINALIZED
+            // §13.1 metrics delivered on the CLOSE response — the signed source of
+            // truth — NOT the modeled `poll_meta` figure collected above. The
+            // off-box lease carries a §13.2 capture hook, so its close yields the
+            // real finalized metrics (the hook-less B-path would get the zero
+            // projection — exactly why B keeps poll_meta and A prefers close). If
+            // both exist we PREFER close: it is the finalized number the fabric
+            // signs and the forge attests. Honesty law preserved — the figure is
+            // the fabric's, never a hugit hand-stamp: an honest-zero close yields
+            // an honest-zero captured cost.
+            let close_resp = close?;
+            Ok(DispatchOutcome {
+                result: o.result,
+                metrics: close_resp.metrics.into_intent_metrics(),
+            })
         }
         Err(e) => Err(e),
     }
@@ -346,9 +388,11 @@ fn attest_and_collect<T: RunnerTransport>(
         .submit_envelope(&ingest.ingest_path, &ingest.credential, &events)
         .map_err(RunnerExecError::Lease)?;
 
-    // Read the fabric's signed envelope back (PAT-gated poll). The returned
-    // metrics are the fabric's attestation over the submitted trajectory — the
-    // attested figure, not hugit's own claim.
+    // Read the fabric's signed envelope back (PAT-gated poll) for the CheckResult
+    // FIELDS (exit/artifacts/refs/duration/runner_ref/produced_at). The metrics
+    // parsed here are a fallback only: `dispatch_attest_offbox` SUPERSEDES them
+    // with the finalized §13.1 metrics from the CLOSE response (the signed source
+    // of truth) — see that function for why close wins over this poll readback.
     let meta = client
         .poll_meta(&acquired.lease.lease_id)
         .map_err(RunnerExecError::Lease)?;
@@ -530,6 +574,58 @@ mod tests {
         .to_vec()
     }
 
+    /// A fabric `CloseResponse` body carrying the §13.1 finalized metrics PLUS
+    /// the fabric extras hugit tolerates-and-ignores (attestation, sigs,
+    /// fabric_key_id, echoed check_result) — proving the liberal decode. The
+    /// `cost_usd_micros` + `cache_read` are parameterised so a test can give the
+    /// CLOSE a figure DISTINCT from the poll envelope and prove close wins.
+    fn close_body(lease_id: &str, cost_usd_micros: u64, cache_read: u64) -> Vec<u8> {
+        format!(
+            r#"{{
+                "lease_id": "{lease_id}",
+                "released": true,
+                "capture_incomplete": false,
+                "metrics": {{
+                    "tokens": {{"input": 1000, "output": 200, "cache_read": {cache_read}, "cache_write": 25, "total": 1275}},
+                    "wall_ms": 9000,
+                    "active_ms": 7500,
+                    "tool_calls": 3,
+                    "tool_breakdown": [{{"tool": "Bash", "count": 3}}],
+                    "model_turns": 2,
+                    "cost_usd_micros": {cost_usd_micros}
+                }},
+                "check_result": null,
+                "attestation": {{"tree":"","def":"","runner":"","model":"","principal":["tenant:t"],"sig":"c2ln"}},
+                "result_binding_sig": "c2ln",
+                "result_binding_sig_v2": "c2lnMg==",
+                "fabric_key_id": "0011223344556677"
+            }}"#
+        )
+        .into_bytes()
+    }
+
+    /// A fabric `CloseResponse` whose finalized metrics are the HONEST ZERO the
+    /// fabric reports when nothing was observed — every meter reads 0.
+    fn close_body_zero(lease_id: &str) -> Vec<u8> {
+        format!(
+            r#"{{
+                "lease_id": "{lease_id}",
+                "released": true,
+                "capture_incomplete": false,
+                "metrics": {{
+                    "tokens": {{"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "total": 0}},
+                    "wall_ms": 0,
+                    "active_ms": 0,
+                    "tool_calls": 0,
+                    "tool_breakdown": [],
+                    "model_turns": 0,
+                    "cost_usd_micros": 0
+                }}
+            }}"#
+        )
+        .into_bytes()
+    }
+
     fn client(transport: FakeTransport) -> LeaseClient<FakeTransport> {
         let config = RunnerConfig::new("https://runner.example/", SENTINEL_PAT).unwrap();
         LeaseClient::with_transport(config, transport)
@@ -544,8 +640,10 @@ mod tests {
         let transport = FakeTransport::with_responses(vec![
             (201, acquire_wrapper("lease-abc123", None)), // acquire (wrapper)
             (202, serde_json::to_vec(&ack).unwrap()),     // exec
-            (200, envelope_body()),                       // poll_meta
-            (204, Vec::new()),                            // close
+            (200, envelope_body()),                       // poll_meta (box-measured)
+            // close — the B-path KEEPS the poll_meta metrics; the close body here
+            // is parsed (200 + required metrics) but its figure is discarded.
+            (200, close_body("lease-abc123", 999, 999)),
         ]);
         let client = client(transport);
 
@@ -756,8 +854,9 @@ mod tests {
                 ),
             ), // acquire
             (200, Vec::new()),      // submit_envelope
-            (200, envelope_body()), // poll_meta (the fabric's signed envelope)
-            (204, Vec::new()),      // close
+            (200, envelope_body()), // poll_meta (CheckResult fields)
+            // close — carries the FINALIZED §13.1 metrics (the attested figure).
+            (200, close_body("lease-attest-1", 4281900, 50)),
         ]);
         let client = client(transport);
 
@@ -772,7 +871,7 @@ mod tests {
         )
         .expect("A-path lifecycle succeeds");
 
-        // The returned metrics are the fabric's signed-envelope readback.
+        // The returned metrics are the fabric's finalized CLOSE metrics.
         assert_eq!(out.metrics.cost_usd_micros, 4281900);
         assert_eq!(out.metrics.tokens.cache_read, 50);
 
@@ -886,5 +985,95 @@ mod tests {
         assert_eq!(model_turns[0].busy_ms, 7600);
         // Subsequent turns carry no usage (the aggregate is on turn 0).
         assert!(model_turns[1].usage.is_none());
+    }
+
+    /// (A-4) The A-mode ATTESTED figure comes from the CLOSE response, NOT the
+    /// modeled `poll_meta`: the poll envelope carries one cost (`4281900`) and the
+    /// close carries a DISTINCT finalized figure (`7000001`, cache_read `4242`) —
+    /// the returned metrics are the CLOSE figure, full cache-split preserved.
+    #[test]
+    fn attest_offbox_attested_figure_comes_from_close_metrics() {
+        const SCOPED: &str = "scoped-ingest-cred-A4";
+        let transport = FakeTransport::with_responses(vec![
+            (
+                201,
+                acquire_wrapper(
+                    "lease-attest-4",
+                    Some(("/v1/leases/lease-attest-4/envelope/ingest", SCOPED)),
+                ),
+            ),
+            (200, Vec::new()),      // submit_envelope
+            (200, envelope_body()), // poll_meta — cost 4281900 (the MODELED figure)
+            // close — the FINALIZED, signed figure, distinct from the poll.
+            (200, close_body("lease-attest-4", 7_000_001, 4242)),
+        ]);
+        let client = client(transport);
+
+        let out = dispatch_attest_offbox(
+            &client,
+            &acquire_req(),
+            &measured_metrics(),
+            "f".repeat(64).as_str(),
+            "1".repeat(64).as_str(),
+            "2".repeat(64).as_str(),
+            "3".repeat(64).as_str(),
+        )
+        .expect("A-path lifecycle succeeds");
+
+        // The attested figure is the CLOSE figure — NOT the modeled poll_meta one.
+        assert_eq!(
+            out.metrics.cost_usd_micros, 7_000_001,
+            "the attested cost is the fabric's finalized close figure"
+        );
+        assert_ne!(
+            out.metrics.cost_usd_micros, 4_281_900,
+            "the modeled poll_meta figure must NOT be the attested one"
+        );
+        // The full cache-split is preserved from the close metrics (never flattened).
+        assert_eq!(out.metrics.tokens.cache_read, 4242);
+        assert_eq!(out.metrics.tokens.cache_write, 25);
+        assert_eq!(out.metrics.tokens.total, 1275);
+    }
+
+    /// (A-5) HONEST ZERO: when the fabric's close reports zero metrics (nothing
+    /// observed), the attested figure is zero — even though the poll envelope
+    /// carries a nonzero cost. The figure is the fabric's, never a hugit stand-in.
+    #[test]
+    fn attest_offbox_honest_zero_when_fabric_reports_zero() {
+        const SCOPED: &str = "scoped-ingest-cred-A5";
+        let transport = FakeTransport::with_responses(vec![
+            (
+                201,
+                acquire_wrapper(
+                    "lease-attest-5",
+                    Some(("/v1/leases/lease-attest-5/envelope/ingest", SCOPED)),
+                ),
+            ),
+            (200, Vec::new()),      // submit_envelope
+            (200, envelope_body()), // poll_meta — NONZERO cost 4281900
+            // close — the fabric honestly reports ZERO.
+            (200, close_body_zero("lease-attest-5")),
+        ]);
+        let client = client(transport);
+
+        let out = dispatch_attest_offbox(
+            &client,
+            &acquire_req(),
+            &measured_metrics(),
+            "f".repeat(64).as_str(),
+            "1".repeat(64).as_str(),
+            "2".repeat(64).as_str(),
+            "3".repeat(64).as_str(),
+        )
+        .expect("A-path lifecycle succeeds");
+
+        // Honest zero — the fabric reported zero, so the attested figure is zero
+        // (never the nonzero poll figure, never a fabricated number).
+        assert_eq!(out.metrics.cost_usd_micros, 0);
+        assert_eq!(out.metrics.tokens.total, 0);
+        assert_eq!(out.metrics.tokens.cache_read, 0);
+        assert_eq!(out.metrics.tool_calls, 0);
+        assert_eq!(out.metrics.model_turns, 0);
+        assert!(out.metrics.tool_breakdown.is_empty());
     }
 }
