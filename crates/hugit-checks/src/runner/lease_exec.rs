@@ -45,6 +45,11 @@ pub enum RunnerExecError {
     /// The live runner box (`HUGIT_RUNNER_HOST`) seam is not yet wired (P2).
     /// Carries the host it WILL drive so the deferral is self-documenting.
     BoxNotWired(String),
+    /// Cost-killer path "A" fail-closed: the acquire response for a check lease
+    /// carried NO `envelope_ingest` (§13 off-box ingest not wired for this lease).
+    /// The off-box attest path REFUSES to fall back to the exec+poll B-path or
+    /// fabricate a cost — absence of the §13.2 ingest credential is an error.
+    NoEnvelopeIngest(String),
     /// A failure from the underlying lease client (acquire / exec / poll /
     /// close). Wraps the typed [`RunnerError`] so the caller can still see a
     /// retryable `Busy` apart from a terminal `Status`, and so the wire-level
@@ -62,6 +67,9 @@ impl std::fmt::Display for RunnerExecError {
             RunnerExecError::Run(e) => write!(f, "runner execution failed: {e}"),
             RunnerExecError::BoxNotWired(host) => {
                 write!(f, "live runner box seam not wired (P2): {host}")
+            }
+            RunnerExecError::NoEnvelopeIngest(what) => {
+                write!(f, "off-box §13 ingest not wired for this lease: {what}")
             }
             RunnerExecError::Lease(e) => write!(f, "runner lease client error: {e}"),
         }

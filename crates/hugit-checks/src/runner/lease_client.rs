@@ -126,6 +126,102 @@ pub struct AcquireLeaseRequest {
     pub ttl_ms: u64,
 }
 
+/// §13.2 OFF-BOX ingest credential surfaced on the acquire response — the
+/// cost-killer path "A". Transcribed from the authoritative fabric DTO
+/// (`corelink-fabric-api::dto::EnvelopeIngest`, frozen). Present for
+/// non-runner/check leases when §13 is wired; ABSENT (skipped on the wire) for
+/// runner leases. hugit is deliberately LIBERAL in what it accepts here (no
+/// `deny_unknown_fields`) — the producer's frozen shape is the authority.
+///
+/// `credential` is the scoped, write-only, lease-folded ingest token — held like
+/// the PAT: `Debug` is hand-written below so it can NEVER leak through `{:?}`,
+/// and it never appears in any `Display`/error (the transport receives it as a
+/// per-call bearer, never stored).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvelopeIngest {
+    /// Lease-scoped §13.2 ingest path — `POST` trajectory events here. Relative
+    /// to the runner base (e.g. `/v1/leases/{lease_id}/envelope/ingest`).
+    pub ingest_path: String,
+    /// The scoped, WRITE-ONLY, lease-folded ingest credential (the Bearer for
+    /// `ingest_path`). NOT a tenant PAT. SECRET — see the type docs.
+    pub credential: String,
+}
+
+// `Debug` is hand-written so the scoped ingest credential can NEVER leak through
+// `{:?}` — the same discipline the PAT gets in `RunnerConfig`.
+impl std::fmt::Debug for EnvelopeIngest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnvelopeIngest")
+            .field("ingest_path", &self.ingest_path)
+            .field("credential", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Response body for `POST /v1/leases` — the granted lease WRAPPER. Transcribed
+/// from the authoritative fabric DTO (`corelink-fabric-api::dto::AcquireResponse`).
+///
+/// The real fabric returns this WRAPPER (`{lease, exec_endpoint, envelope_ingest?}`),
+/// NOT a flat [`RunnerLease`]. hugit is LIBERAL in what it accepts: only `lease`
+/// is required; `exec_endpoint` and `envelope_ingest` default (an absent
+/// `envelope_ingest` — a runner lease — is fine, not an error). `RunnerLease`
+/// stays the inner type (its `conformance/RunnerLease.json` vector is the oracle).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AcquireResponse {
+    /// The granted lease, wire-conformant to the frozen [`RunnerLease`] type.
+    pub lease: RunnerLease,
+    /// The exec endpoint for this lease (the fabric always sends it; defaulted so
+    /// hugit stays liberal if a future/minimal producer omits it).
+    #[serde(default)]
+    pub exec_endpoint: String,
+    /// §13.2 off-box ingest credential — present for non-runner/check leases when
+    /// §13 is wired; `None` for runner leases (or when §13 is off). `#[serde(default)]`
+    /// so an absent field deserializes to `None` (runner-lease responses parse
+    /// byte-identically to before this field existed).
+    #[serde(default)]
+    pub envelope_ingest: Option<EnvelopeIngest>,
+}
+
+/// §13.2 per-turn usage — the four token classes (NO `total`; the fabric derives
+/// totals at finalize, never supplied). Transcribed from the fabric ingest
+/// handler's `IngestUsage`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IngestUsage {
+    /// Input (non-cached) tokens.
+    pub input: u64,
+    /// Output tokens.
+    pub output: u64,
+    /// Tokens read from prompt cache.
+    pub cache_read: u64,
+    /// Tokens written to prompt cache.
+    pub cache_write: u64,
+}
+
+/// One §13.2 trajectory event the OFF-BOX agent loop POSTs to `ingest_path`
+/// (cost-killer path "A"). Transcribed from the fabric ingest handler's
+/// `IngestEvent`. The fabric accepts ONE event, a JSON array, OR NDJSON; hugit
+/// submits the JSON-array form. `bytes_b64` is the raw transcript bytes
+/// (standard base64), forwarded VERBATIM (the runner never scrubs/persists —
+/// §13.3); the forge owns redaction on its write path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IngestEvent {
+    /// Event discriminator: `model_turn` | `tool_call` | `tool_result` | `prompt`.
+    pub kind: String,
+    /// Raw transcript bytes, standard-alphabet base64.
+    pub bytes_b64: String,
+    /// Tool name — REQUIRED by the fabric for `tool_call`/`tool_result`; omitted
+    /// on the wire when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    /// Per-turn usage — only meaningful for `model_turn`; omitted on the wire
+    /// when absent (the fabric accumulates nothing, never a fabricated zero).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<IngestUsage>,
+    /// Model/tool busy span in ms (`model_turn`/`tool_call`); defaults to 0.
+    #[serde(default)]
+    pub busy_ms: u64,
+}
+
 /// Acknowledgement returned by `POST /v1/leases/{lease_id}/exec` — the runner
 /// accepted the [`CheckDef`] for execution. The result itself is fetched later
 /// via [`LeaseClient::poll_meta`] / [`LeaseClient::poll_events`].
@@ -343,17 +439,56 @@ impl<T: RunnerTransport> LeaseClient<T> {
     }
 
     /// Acquire a runner lease: `POST {host}/v1/leases`.
-    pub fn acquire(&self, req: &AcquireLeaseRequest) -> Result<RunnerLease, RunnerError> {
+    ///
+    /// Parses the fabric's [`AcquireResponse`] WRAPPER (`{lease, exec_endpoint,
+    /// envelope_ingest?}`), NOT a flat [`RunnerLease`] — the wrapper is the real
+    /// wire shape (the prior flat parse was a latent bug masked by hermetic fakes
+    /// that fed flat JSON; the live PAT-gated path was never run). Callers that
+    /// only need the lease extract `.lease`.
+    pub fn acquire(&self, req: &AcquireLeaseRequest) -> Result<AcquireResponse, RunnerError> {
         let url = format!("{}/v1/leases", self.config.base());
         let body = serde_json::to_vec(req).map_err(|e| RunnerError::Decode(e.to_string()))?;
         let (status, resp) = self.transport.post(&url, &self.config.bearer(), &body)?;
         match status {
-            // 200 (returned existing) | 201 (fresh) both carry the lease body.
+            // 200 (returned existing) | 201 (fresh) both carry the wrapper body.
             200 | 201 => {
                 serde_json::from_slice(&resp).map_err(|e| RunnerError::Decode(e.to_string()))
             }
             429 | 503 => Err(RunnerError::Busy {
                 detail: format!("acquire returned HTTP {status}"),
+            }),
+            other => Err(RunnerError::Status(other)),
+        }
+    }
+
+    /// Submit a §13.2 trajectory-event batch to the lease's OFF-BOX ingest
+    /// endpoint (cost-killer path "A"): `POST {host}{ingest_path}` with
+    /// `Authorization: Bearer {credential}`.
+    ///
+    /// `credential` is the SCOPED, write-only ingest token from
+    /// [`AcquireResponse::envelope_ingest`] — NEVER the tenant PAT (two
+    /// credentials by trust boundary: the scoped cred for ingest, the PAT for
+    /// acquire/poll/close). It is taken as a per-call bearer and NEVER stored,
+    /// logged, or rendered in any error (errors carry only the HTTP status).
+    ///
+    /// `ingest_path` is the server-supplied path from the acquire response; it is
+    /// concatenated onto the configured base, so the credential can only ever be
+    /// sent to the configured host (a producer cannot redirect it elsewhere).
+    pub fn submit_envelope(
+        &self,
+        ingest_path: &str,
+        credential: &str,
+        events: &[IngestEvent],
+    ) -> Result<(), RunnerError> {
+        let url = format!("{}{}", self.config.base(), ingest_path);
+        let bearer = format!("Bearer {credential}");
+        let body = serde_json::to_vec(events).map_err(|e| RunnerError::Decode(e.to_string()))?;
+        let (status, _resp) = self.transport.post(&url, &bearer, &body)?;
+        match status {
+            // 200 | 201 | 202 | 204 all ack the ingest (the fabric returns 200).
+            200 | 201 | 202 | 204 => Ok(()),
+            429 | 503 => Err(RunnerError::Busy {
+                detail: format!("submit_envelope returned HTTP {status}"),
             }),
             other => Err(RunnerError::Status(other)),
         }
@@ -664,12 +799,21 @@ mod tests {
     fn happy_path_acquire_exec_poll_close() {
         let lease_id = "lease-abc123";
         let lease = sample_lease(lease_id);
+        // The real fabric returns the AcquireResponse WRAPPER (not a flat lease).
+        let acquire_resp = AcquireResponse {
+            lease: lease.clone(),
+            exec_endpoint: format!("/v1/leases/{lease_id}/exec"),
+            envelope_ingest: Some(EnvelopeIngest {
+                ingest_path: format!("/v1/leases/{lease_id}/envelope/ingest"),
+                credential: "scoped-ingest-token-xyz".to_string(),
+            }),
+        };
         let ack = ExecAck {
             lease_id: lease_id.to_string(),
             accepted: true,
         };
         let transport = FakeTransport::with_responses(vec![
-            (201, serde_json::to_vec(&lease).unwrap()),
+            (201, serde_json::to_vec(&acquire_resp).unwrap()),
             (202, serde_json::to_vec(&ack).unwrap()),
             (200, br#"{"status":"running","cost_usd_micros":0}"#.to_vec()),
             (200, b"event: started\nevent: done\n".to_vec()),
@@ -678,7 +822,7 @@ mod tests {
         let config = RunnerConfig::new("https://runner.example/", SENTINEL_PAT).unwrap();
         let client = LeaseClient::with_transport(config, transport);
 
-        // acquire
+        // acquire — the wrapper parses; the inner lease is byte-identical.
         let req = AcquireLeaseRequest {
             principal_chain: vec!["agent:tester".to_string()],
             path_set: vec!["/work".to_string()],
@@ -686,7 +830,11 @@ mod tests {
             ttl_ms: 60_000,
         };
         let got = client.acquire(&req).unwrap();
-        assert_eq!(got, lease);
+        assert_eq!(got.lease, lease);
+        assert_eq!(
+            got.envelope_ingest.as_ref().unwrap().ingest_path,
+            format!("/v1/leases/{lease_id}/envelope/ingest")
+        );
 
         // exec
         let got_ack = client.exec(lease_id, &sample_def()).unwrap();
@@ -850,5 +998,162 @@ mod tests {
         // The NotConfigured path likewise never echoes a value.
         let nc = RunnerConfig::new("https://h", "").unwrap_err();
         assert!(!format!("{nc}").contains(SENTINEL_PAT));
+    }
+
+    /// The fabric returns the `AcquireResponse` WRAPPER for a check lease — the
+    /// `envelope_ingest` field is PRESENT. Proves the wrapper parses (the
+    /// flat-parse bug is fixed) and the scoped ingest credential is surfaced.
+    #[test]
+    fn acquire_parses_wrapper_with_envelope_ingest() {
+        let lease = sample_lease("lease-check-1");
+        let wrapper = format!(
+            r#"{{"lease":{lease},"exec_endpoint":"/v1/leases/lease-check-1/exec","envelope_ingest":{{"ingest_path":"/v1/leases/lease-check-1/envelope/ingest","credential":"scoped-tok"}}}}"#,
+            lease = serde_json::to_string(&lease).unwrap()
+        );
+        let transport = FakeTransport::with_responses(vec![(200, wrapper.into_bytes())]);
+        let config = RunnerConfig::new("https://runner.example", SENTINEL_PAT).unwrap();
+        let client = LeaseClient::with_transport(config, transport);
+        let req = AcquireLeaseRequest {
+            principal_chain: vec![],
+            path_set: vec![],
+            net_policy: "deny-all".to_string(),
+            ttl_ms: 1,
+        };
+        let got = client.acquire(&req).unwrap();
+        assert_eq!(got.lease, lease);
+        assert_eq!(got.exec_endpoint, "/v1/leases/lease-check-1/exec");
+        let ingest = got
+            .envelope_ingest
+            .expect("check lease carries envelope_ingest");
+        assert_eq!(
+            ingest.ingest_path,
+            "/v1/leases/lease-check-1/envelope/ingest"
+        );
+        assert_eq!(ingest.credential, "scoped-tok");
+    }
+
+    /// A RUNNER lease acquire response omits `envelope_ingest` (byte-identical to
+    /// before the field existed). It must STILL parse — `envelope_ingest` defaults
+    /// to `None`, never a decode error (hugit is liberal in what it accepts).
+    #[test]
+    fn acquire_runner_lease_absent_envelope_ingest_parses_none() {
+        let lease = sample_lease("lease-runner-1");
+        let wrapper = format!(
+            r#"{{"lease":{lease},"exec_endpoint":"/v1/leases/lease-runner-1/exec"}}"#,
+            lease = serde_json::to_string(&lease).unwrap()
+        );
+        let transport = FakeTransport::with_responses(vec![(201, wrapper.into_bytes())]);
+        let config = RunnerConfig::new("https://runner.example", SENTINEL_PAT).unwrap();
+        let client = LeaseClient::with_transport(config, transport);
+        let req = AcquireLeaseRequest {
+            principal_chain: vec![],
+            path_set: vec![],
+            net_policy: "deny-all".to_string(),
+            ttl_ms: 1,
+        };
+        let got = client.acquire(&req).unwrap();
+        assert_eq!(got.lease, lease);
+        assert!(
+            got.envelope_ingest.is_none(),
+            "a runner lease has no §13 ingest credential"
+        );
+    }
+
+    /// `submit_envelope` POSTs to `{base}{ingest_path}` with the SCOPED credential
+    /// as the Bearer — NEVER the tenant PAT. A sentinel PAT proves the PAT never
+    /// reaches the ingest endpoint.
+    #[test]
+    fn submit_envelope_uses_scoped_credential_not_pat() {
+        const SCOPED: &str = "scoped-write-only-ingest-tok-44ab";
+        let transport = FakeTransport::with_responses(vec![(200, Vec::new())]);
+        let config = RunnerConfig::new("https://runner.example/", SENTINEL_PAT).unwrap();
+        let client = LeaseClient::with_transport(config, transport);
+
+        let events = vec![IngestEvent {
+            kind: "model_turn".to_string(),
+            bytes_b64: String::new(),
+            tool: None,
+            usage: Some(IngestUsage {
+                input: 10,
+                output: 20,
+                cache_read: 30,
+                cache_write: 40,
+            }),
+            busy_ms: 99,
+        }];
+        client
+            .submit_envelope("/v1/leases/lease-z/envelope/ingest", SCOPED, &events)
+            .unwrap();
+
+        let calls = client.transport.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, "POST");
+        assert_eq!(
+            calls[0].url,
+            "https://runner.example/v1/leases/lease-z/envelope/ingest"
+        );
+        // The Bearer is the SCOPED credential, NOT the tenant PAT.
+        assert_eq!(calls[0].bearer, format!("Bearer {SCOPED}"));
+        assert_ne!(calls[0].bearer, format!("Bearer {SENTINEL_PAT}"));
+        assert!(
+            !calls[0].bearer.contains(SENTINEL_PAT),
+            "the tenant PAT must never reach the ingest endpoint"
+        );
+        // The body is the serialized event array.
+        let sent: Vec<IngestEvent> = serde_json::from_slice(&calls[0].body).unwrap();
+        assert_eq!(sent, events);
+    }
+
+    /// `submit_envelope` maps a retryable status to `Busy` and a terminal status
+    /// to `Status`, and the scoped credential never leaks in either error.
+    #[test]
+    fn submit_envelope_status_mapping_and_no_credential_leak() {
+        const SCOPED: &str = "scoped-do-not-leak-77cd";
+        let transport = FakeTransport::with_responses(vec![(503, Vec::new()), (401, Vec::new())]);
+        let config = RunnerConfig::new("https://runner.example", SENTINEL_PAT).unwrap();
+        let client = LeaseClient::with_transport(config, transport);
+        let events = [IngestEvent {
+            kind: "prompt".to_string(),
+            bytes_b64: String::new(),
+            tool: None,
+            usage: None,
+            busy_ms: 0,
+        }];
+        let busy = client
+            .submit_envelope("/v1/leases/l/envelope/ingest", SCOPED, &events)
+            .unwrap_err();
+        assert!(matches!(busy, RunnerError::Busy { .. }));
+        let term = client
+            .submit_envelope("/v1/leases/l/envelope/ingest", SCOPED, &events)
+            .unwrap_err();
+        assert_eq!(term, RunnerError::Status(401));
+        assert!(!format!("{busy:?}").contains(SCOPED));
+        assert!(!format!("{term}").contains(SCOPED));
+    }
+
+    /// The scoped ingest credential is REDACTED in `Debug` (held like the PAT) —
+    /// it must never leak through `{:?}` of `EnvelopeIngest` or `AcquireResponse`.
+    #[test]
+    fn envelope_ingest_credential_redacted_in_debug() {
+        const SCOPED: &str = "scoped-SECRET-do-not-debug-9911";
+        let ingest = EnvelopeIngest {
+            ingest_path: "/v1/leases/l/envelope/ingest".to_string(),
+            credential: SCOPED.to_string(),
+        };
+        let dbg = format!("{ingest:?}");
+        assert!(!dbg.contains(SCOPED), "EnvelopeIngest Debug leaked: {dbg}");
+        assert!(dbg.contains("<redacted>"));
+        assert!(dbg.contains("/v1/leases/l/envelope/ingest"));
+
+        let resp = AcquireResponse {
+            lease: sample_lease("lease-dbg"),
+            exec_endpoint: "/v1/leases/lease-dbg/exec".to_string(),
+            envelope_ingest: Some(ingest),
+        };
+        let rdbg = format!("{resp:?}");
+        assert!(
+            !rdbg.contains(SCOPED),
+            "AcquireResponse Debug leaked the credential: {rdbg}"
+        );
     }
 }

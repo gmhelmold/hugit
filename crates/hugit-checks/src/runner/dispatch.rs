@@ -33,7 +33,9 @@ use hugit_contracts::check_result::Artifact;
 use hugit_contracts::{CheckDef, CheckResult, IntentMetrics, RunnerLease, RunnerState};
 use serde::Deserialize;
 
-use crate::runner::lease_client::{AcquireLeaseRequest, LeaseClient, RunnerTransport};
+use crate::runner::lease_client::{
+    AcquireLeaseRequest, AcquireResponse, IngestEvent, IngestUsage, LeaseClient, RunnerTransport,
+};
 use crate::runner::lease_exec::RunnerExecError;
 use crate::runner::metrics::RunnerJobMetrics;
 
@@ -165,7 +167,12 @@ pub fn dispatch_check<T: RunnerTransport>(
     def_digest: &str,
     toolchain_digest: &str,
 ) -> Result<DispatchOutcome, RunnerExecError> {
-    let lease = client.acquire(acquire).map_err(RunnerExecError::Lease)?;
+    // The fabric returns the AcquireResponse WRAPPER; the B-path needs only the
+    // inner lease (the exec endpoint + any §13 ingest credential are ignored here).
+    let lease = client
+        .acquire(acquire)
+        .map_err(RunnerExecError::Lease)?
+        .lease;
     let lease_id = lease.lease_id.clone();
 
     let outcome = exec_and_collect(
@@ -192,10 +199,200 @@ pub fn dispatch_check<T: RunnerTransport>(
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Cost-killer path "A" — the OFF-BOX §13 attest dispatch.
+//
+// Where the B-path (`dispatch_check`) drives `exec` on a fabric BOX (the box
+// measures + returns the §13.1 metrics on poll_meta), the A-path is for an
+// agent loop that ran OFF-BOX (hugit's own dispatch client): it SUBMITS its
+// trajectory to the lease's §13.2 ingest endpoint with the SCOPED ingest
+// credential the acquire response now carries, then reads the fabric's signed
+// envelope back via poll (PAT) and closes (PAT). The fabric hosts + signs the
+// attestation over what hugit submits.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Project an off-box-measured §13.1 [`IntentMetrics`] into the §13.2
+/// trajectory-event batch the ingest endpoint accepts (the body
+/// [`LeaseClient::submit_envelope`] POSTs).
+///
+/// The measured AGGREGATE is carried faithfully: a `tool_call` event per
+/// `tool_breakdown` count (reproducing `tool_calls` + the per-tool split), and a
+/// `model_turn` event per `model_turns` (≥1) with the FULL token cache-split
+/// usage + the `active_ms` busy span on the FIRST turn. `bytes_b64` is empty —
+/// hugit submits METRICS at this seam, not transcript CONTENT (the forge owns
+/// transcript capture/redaction). The aggregate-only `wall_ms` and
+/// `cost_usd_micros` are fabric-derived at finalize (cost = submitted tokens ×
+/// the fabric price card) and are NOT representable as a per-turn event — which
+/// is exactly why the attested figure is the fabric's to compute, not hugit's.
+pub fn project_intent_metrics(m: &IntentMetrics) -> Vec<IngestEvent> {
+    let mut events = Vec::new();
+    for tc in &m.tool_breakdown {
+        for _ in 0..tc.count {
+            events.push(IngestEvent {
+                kind: "tool_call".to_string(),
+                bytes_b64: String::new(),
+                tool: Some(tc.tool.clone()),
+                usage: None,
+                busy_ms: 0,
+            });
+        }
+    }
+    let turns = m.model_turns.max(1);
+    for i in 0..turns {
+        let (usage, busy_ms) = if i == 0 {
+            (
+                Some(IngestUsage {
+                    input: m.tokens.input,
+                    output: m.tokens.output,
+                    cache_read: m.tokens.cache_read,
+                    cache_write: m.tokens.cache_write,
+                }),
+                m.active_ms,
+            )
+        } else {
+            (None, 0)
+        };
+        events.push(IngestEvent {
+            kind: "model_turn".to_string(),
+            bytes_b64: String::new(),
+            tool: None,
+            usage,
+            busy_ms,
+        });
+    }
+    events
+}
+
+/// Drive the full OFF-BOX §13 attest lifecycle for one lease: acquire → SUBMIT
+/// the off-box trajectory to the §13.2 ingest endpoint (scoped credential) →
+/// poll the signed envelope (PAT) → close (PAT). The `measured` metrics are the
+/// off-box agent loop's §13.1 figures; they are projected into the §13.2 event
+/// batch and submitted, and the returned [`DispatchOutcome`] carries the metrics
+/// read back from the fabric's signed envelope.
+///
+/// FAIL-CLOSED (the load-bearing rules):
+/// - if the acquire response has NO `envelope_ingest` (a runner lease, or §13
+///   off), this returns [`RunnerExecError::NoEnvelopeIngest`] — it NEVER silently
+///   falls back to the exec+poll B-path or fabricates an envelope;
+/// - the lease is ALWAYS closed (even on a submit / poll / no-ingest error), so
+///   a lease never leaks runner capacity;
+/// - the SCOPED credential is used ONLY for the ingest submit; acquire / poll /
+///   close use the tenant PAT (held privately in the [`LeaseClient`]).
+pub fn dispatch_attest_offbox<T: RunnerTransport>(
+    client: &LeaseClient<T>,
+    acquire: &AcquireLeaseRequest,
+    measured: &IntentMetrics,
+    memo_key: &str,
+    tree_root: &str,
+    def_digest: &str,
+    toolchain_digest: &str,
+) -> Result<DispatchOutcome, RunnerExecError> {
+    let acquired = client.acquire(acquire).map_err(RunnerExecError::Lease)?;
+    let lease_id = acquired.lease.lease_id.clone();
+
+    let outcome = attest_and_collect(
+        client,
+        &acquired,
+        measured,
+        memo_key,
+        tree_root,
+        def_digest,
+        toolchain_digest,
+    );
+
+    // ALWAYS close — even when the attest step errored (incl. a missing ingest
+    // credential). Explicit so the close is observable in the transport asserts.
+    let close = client.close(&lease_id).map_err(RunnerExecError::Lease);
+
+    match outcome {
+        Ok(o) => {
+            close?;
+            Ok(o)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Submit the off-box trajectory under an ALREADY-ACQUIRED lease and collect the
+/// fabric's signed envelope. Does NOT acquire or close — that lifecycle is
+/// [`dispatch_attest_offbox`]'s. Fail-closed: refuses a non-`Held` lease and a
+/// lease with no §13.2 ingest credential.
+fn attest_and_collect<T: RunnerTransport>(
+    client: &LeaseClient<T>,
+    acquired: &AcquireResponse,
+    measured: &IntentMetrics,
+    memo_key: &str,
+    tree_root: &str,
+    def_digest: &str,
+    toolchain_digest: &str,
+) -> Result<DispatchOutcome, RunnerExecError> {
+    if acquired.lease.state != RunnerState::Held {
+        return Err(RunnerExecError::LeaseNotHeld(acquired.lease.state.clone()));
+    }
+
+    // Fail-closed: a check lease MUST carry the §13.2 ingest credential for the
+    // A-path. Absent → a clear error, never a silent B-path fall-back.
+    let ingest = acquired.envelope_ingest.as_ref().ok_or_else(|| {
+        RunnerExecError::NoEnvelopeIngest(
+            "acquire response carried no envelope_ingest (runner lease, or §13 off)".to_string(),
+        )
+    })?;
+
+    // Submit the off-box trajectory to the §13.2 ingest endpoint with the SCOPED
+    // credential (NEVER the tenant PAT — the lease client uses the PAT for the
+    // acquire/poll/close calls only).
+    let events = project_intent_metrics(measured);
+    client
+        .submit_envelope(&ingest.ingest_path, &ingest.credential, &events)
+        .map_err(RunnerExecError::Lease)?;
+
+    // Read the fabric's signed envelope back (PAT-gated poll). The returned
+    // metrics are the fabric's attestation over the submitted trajectory — the
+    // attested figure, not hugit's own claim.
+    let meta = client
+        .poll_meta(&acquired.lease.lease_id)
+        .map_err(RunnerExecError::Lease)?;
+    let envelope: RunnerResultEnvelope = serde_json::from_value(meta.0)
+        .map_err(|e| RunnerExecError::Run(format!("result-envelope meta decode failed: {e}")))?;
+
+    let RunnerResultEnvelope {
+        exit,
+        artifacts,
+        stdout_ref,
+        stderr_ref,
+        duration_ms,
+        runner_ref,
+        produced_at,
+        metrics,
+    } = envelope;
+
+    let result = CheckResult {
+        memo_key: memo_key.to_string(),
+        tree_hash: tree_root.to_string(),
+        def_digest: def_digest.to_string(),
+        toolchain_digest: toolchain_digest.to_string(),
+        exit,
+        artifacts,
+        stdout_ref,
+        stderr_ref,
+        duration_ms,
+        runner_ref,
+        produced_at,
+    };
+
+    Ok(DispatchOutcome {
+        result,
+        metrics: metrics.into_intent_metrics(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runner::lease_client::{ExecAck, RunnerConfig, RunnerError};
+    use crate::runner::lease_client::{
+        AcquireResponse, EnvelopeIngest, ExecAck, RunnerConfig, RunnerError,
+    };
+    use hugit_contracts::context_envelope::{TokenCounts, ToolCount};
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
@@ -205,10 +402,12 @@ mod tests {
     struct FakeCall {
         method: &'static str,
         url: String,
+        bearer: String,
     }
 
     /// In-memory transport: FIFO queued `(status, body)` responses, records every
-    /// call. NEVER opens a socket (mirrors the lease-client fake).
+    /// call (incl. the bearer, so the A-path scoped-cred-vs-PAT split is provable).
+    /// NEVER opens a socket (mirrors the lease-client fake).
     #[derive(Debug, Default)]
     struct FakeTransport {
         responses: Mutex<VecDeque<(u16, Vec<u8>)>>,
@@ -238,22 +437,39 @@ mod tests {
         fn post(
             &self,
             url: &str,
-            _bearer: &str,
+            bearer: &str,
             _body: &[u8],
         ) -> Result<(u16, Vec<u8>), RunnerError> {
             self.calls.lock().unwrap().push(FakeCall {
                 method: "POST",
                 url: url.to_string(),
+                bearer: bearer.to_string(),
             });
             self.next()
         }
-        fn get(&self, url: &str, _bearer: &str) -> Result<(u16, Vec<u8>), RunnerError> {
+        fn get(&self, url: &str, bearer: &str) -> Result<(u16, Vec<u8>), RunnerError> {
             self.calls.lock().unwrap().push(FakeCall {
                 method: "GET",
                 url: url.to_string(),
+                bearer: bearer.to_string(),
             });
             self.next()
         }
+    }
+
+    /// Build the acquire-response WRAPPER bytes for a held lease, optionally
+    /// carrying the §13.2 ingest credential (the A-path needs it; a runner-lease
+    /// response omits it).
+    fn acquire_wrapper(lease_id: &str, ingest: Option<(&str, &str)>) -> Vec<u8> {
+        let resp = AcquireResponse {
+            lease: sample_lease(lease_id, RunnerState::Held),
+            exec_endpoint: format!("/v1/leases/{lease_id}/exec"),
+            envelope_ingest: ingest.map(|(path, cred)| EnvelopeIngest {
+                ingest_path: path.to_string(),
+                credential: cred.to_string(),
+            }),
+        };
+        serde_json::to_vec(&resp).unwrap()
     }
 
     fn sample_lease(lease_id: &str, state: RunnerState) -> RunnerLease {
@@ -321,16 +537,15 @@ mod tests {
 
     #[test]
     fn full_acquire_exec_poll_close_returns_result_and_metrics() {
-        let lease = sample_lease("lease-abc123", RunnerState::Held);
         let ack = ExecAck {
             lease_id: "lease-abc123".to_string(),
             accepted: true,
         };
         let transport = FakeTransport::with_responses(vec![
-            (201, serde_json::to_vec(&lease).unwrap()), // acquire
-            (202, serde_json::to_vec(&ack).unwrap()),   // exec
-            (200, envelope_body()),                     // poll_meta
-            (204, Vec::new()),                          // close
+            (201, acquire_wrapper("lease-abc123", None)), // acquire (wrapper)
+            (202, serde_json::to_vec(&ack).unwrap()),     // exec
+            (200, envelope_body()),                       // poll_meta
+            (204, Vec::new()),                            // close
         ]);
         let client = client(transport);
 
@@ -385,11 +600,10 @@ mod tests {
 
     #[test]
     fn lease_is_always_closed_even_when_exec_errors() {
-        let lease = sample_lease("lease-err", RunnerState::Held);
         let transport = FakeTransport::with_responses(vec![
-            (201, serde_json::to_vec(&lease).unwrap()), // acquire
-            (500, Vec::new()),                          // exec → terminal Status(500)
-            (204, Vec::new()),                          // close MUST still be attempted
+            (201, acquire_wrapper("lease-err", None)), // acquire (wrapper)
+            (500, Vec::new()),                         // exec → terminal Status(500)
+            (204, Vec::new()),                         // close MUST still be attempted
         ]);
         let client = client(transport);
 
@@ -443,13 +657,12 @@ mod tests {
     #[test]
     fn refused_exec_is_not_fabricated() {
         // accepted=false MUST NOT be turned into a phantom CheckResult.
-        let lease = sample_lease("lease-r", RunnerState::Held);
         let ack = ExecAck {
             lease_id: "lease-r".to_string(),
             accepted: false,
         };
         let transport = FakeTransport::with_responses(vec![
-            (201, serde_json::to_vec(&lease).unwrap()),
+            (201, acquire_wrapper("lease-r", None)),
             (200, serde_json::to_vec(&ack).unwrap()),
             (204, Vec::new()), // close still happens
         ]);
@@ -477,9 +690,8 @@ mod tests {
 
     #[test]
     fn no_pat_in_dispatch_error_rendering() {
-        let lease = sample_lease("lease-s", RunnerState::Held);
         let transport = FakeTransport::with_responses(vec![
-            (201, serde_json::to_vec(&lease).unwrap()),
+            (201, acquire_wrapper("lease-s", None)),
             (401, Vec::new()), // exec rejected
             (204, Vec::new()),
         ]);
@@ -496,5 +708,183 @@ mod tests {
         .unwrap_err();
         assert!(!format!("{err:?}").contains(SENTINEL_PAT));
         assert!(!format!("{err}").contains(SENTINEL_PAT));
+    }
+
+    // ── Cost-killer path "A" — the OFF-BOX §13 attest dispatch. ──────────────
+
+    /// A §13.1 IntentMetrics with a distinctive cache split + tool breakdown, the
+    /// off-box-measured input to the A-path.
+    fn measured_metrics() -> IntentMetrics {
+        IntentMetrics {
+            tokens: TokenCounts {
+                input: 111,
+                output: 222,
+                cache_read: 333,
+                cache_write: 444,
+                total: 1110,
+            },
+            wall_ms: 9100,
+            active_ms: 7600,
+            tool_calls: 5,
+            tool_breakdown: vec![
+                ToolCount {
+                    tool: "Bash".to_string(),
+                    count: 3,
+                },
+                ToolCount {
+                    tool: "Edit".to_string(),
+                    count: 2,
+                },
+            ],
+            model_turns: 2,
+            cost_usd_micros: 5_555_555,
+        }
+    }
+
+    /// (A-1) The full A-path lifecycle: acquire → submit (SCOPED cred) → poll
+    /// (PAT) → close (PAT). The scoped ingest credential is used ONLY on the
+    /// ingest submit; acquire/poll/close use the tenant PAT. The lease is closed.
+    #[test]
+    fn attest_offbox_lifecycle_scoped_cred_for_ingest_pat_for_rest() {
+        const SCOPED: &str = "scoped-ingest-cred-A1";
+        let transport = FakeTransport::with_responses(vec![
+            (
+                201,
+                acquire_wrapper(
+                    "lease-attest-1",
+                    Some(("/v1/leases/lease-attest-1/envelope/ingest", SCOPED)),
+                ),
+            ), // acquire
+            (200, Vec::new()),      // submit_envelope
+            (200, envelope_body()), // poll_meta (the fabric's signed envelope)
+            (204, Vec::new()),      // close
+        ]);
+        let client = client(transport);
+
+        let out = dispatch_attest_offbox(
+            &client,
+            &acquire_req(),
+            &measured_metrics(),
+            "f".repeat(64).as_str(),
+            "1".repeat(64).as_str(),
+            "2".repeat(64).as_str(),
+            "3".repeat(64).as_str(),
+        )
+        .expect("A-path lifecycle succeeds");
+
+        // The returned metrics are the fabric's signed-envelope readback.
+        assert_eq!(out.metrics.cost_usd_micros, 4281900);
+        assert_eq!(out.metrics.tokens.cache_read, 50);
+
+        let calls = client.transport().calls();
+        assert_eq!(calls.len(), 4, "acquire → submit → poll → close");
+        // acquire — PAT.
+        assert_eq!(calls[0].url, "https://runner.example/v1/leases");
+        assert_eq!(calls[0].bearer, format!("Bearer {SENTINEL_PAT}"));
+        // submit — the SCOPED credential, to the §13.2 ingest path.
+        assert_eq!(
+            calls[1].url,
+            "https://runner.example/v1/leases/lease-attest-1/envelope/ingest"
+        );
+        assert_eq!(calls[1].method, "POST");
+        assert_eq!(calls[1].bearer, format!("Bearer {SCOPED}"));
+        assert!(
+            !calls[1].bearer.contains(SENTINEL_PAT),
+            "the tenant PAT must NEVER reach the ingest endpoint"
+        );
+        // poll — PAT.
+        assert_eq!(
+            calls[2].url,
+            "https://runner.example/v1/leases/lease-attest-1/envelope/meta"
+        );
+        assert_eq!(calls[2].bearer, format!("Bearer {SENTINEL_PAT}"));
+        // close — PAT.
+        assert_eq!(
+            calls[3].url,
+            "https://runner.example/v1/leases/lease-attest-1/close"
+        );
+        assert_eq!(calls[3].bearer, format!("Bearer {SENTINEL_PAT}"));
+    }
+
+    /// (A-2) FAIL-CLOSED: a check lease whose acquire response carries NO
+    /// `envelope_ingest` (a runner lease, or §13 off) errors with
+    /// `NoEnvelopeIngest` — never a silent B-path fall-back — and the lease is
+    /// STILL closed (no leaked capacity).
+    #[test]
+    fn attest_offbox_fail_closed_when_no_envelope_ingest() {
+        let transport = FakeTransport::with_responses(vec![
+            (201, acquire_wrapper("lease-no-ingest", None)), // acquire, NO ingest cred
+            (204, Vec::new()),                               // close MUST still happen
+        ]);
+        let client = client(transport);
+
+        let err = dispatch_attest_offbox(
+            &client,
+            &acquire_req(),
+            &measured_metrics(),
+            "f".repeat(64).as_str(),
+            "1".repeat(64).as_str(),
+            "2".repeat(64).as_str(),
+            "3".repeat(64).as_str(),
+        )
+        .expect_err("absent envelope_ingest is a fail-closed error");
+        assert!(
+            matches!(err, RunnerExecError::NoEnvelopeIngest(_)),
+            "must be NoEnvelopeIngest, got {err:?}"
+        );
+
+        // No submit was attempted (fail-closed before ingest); the lease WAS closed.
+        let calls = client.transport().calls();
+        assert_eq!(calls.len(), 2, "acquire → close (no submit, no poll)");
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.url.ends_with("/lease-no-ingest/close") && c.method == "POST"),
+            "the lease must be closed even on the fail-closed path: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.url.contains("/envelope/ingest")),
+            "no ingest submit on the fail-closed path"
+        );
+    }
+
+    /// (A-3) `project_intent_metrics` carries the measured AGGREGATE faithfully
+    /// into the §13.2 event batch: tokens on the first model_turn, model_turns as
+    /// the model_turn count, tool_calls + the per-tool split as tool_call events.
+    #[test]
+    fn project_intent_metrics_is_faithful_to_the_aggregate() {
+        let events = project_intent_metrics(&measured_metrics());
+
+        let tool_calls: Vec<_> = events.iter().filter(|e| e.kind == "tool_call").collect();
+        assert_eq!(tool_calls.len(), 5, "tool_calls reproduced");
+        assert_eq!(
+            tool_calls
+                .iter()
+                .filter(|e| e.tool.as_deref() == Some("Bash"))
+                .count(),
+            3
+        );
+        assert_eq!(
+            tool_calls
+                .iter()
+                .filter(|e| e.tool.as_deref() == Some("Edit"))
+                .count(),
+            2
+        );
+
+        let model_turns: Vec<_> = events.iter().filter(|e| e.kind == "model_turn").collect();
+        assert_eq!(model_turns.len(), 2, "model_turns reproduced");
+        // The FIRST turn carries the full token cache-split + the active_ms busy span.
+        let usage = model_turns[0]
+            .usage
+            .as_ref()
+            .expect("first turn carries usage");
+        assert_eq!(usage.input, 111);
+        assert_eq!(usage.output, 222);
+        assert_eq!(usage.cache_read, 333);
+        assert_eq!(usage.cache_write, 444);
+        assert_eq!(model_turns[0].busy_ms, 7600);
+        // Subsequent turns carry no usage (the aggregate is on turn 0).
+        assert!(model_turns[1].usage.is_none());
     }
 }
