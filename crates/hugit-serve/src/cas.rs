@@ -4026,6 +4026,58 @@ mod tests {
         assert_eq!(casrw.get(&"ee".repeat(20)), None);
     }
 
+    /// THE thin-pack / CAS-base-reachability seam: a REF_DELTA base (or an
+    /// incremental-push ancestor) that lives ONLY in SERVER-SIDE history is resolved
+    /// by `receive_pack` via `cas.get`/`cas.contains` on the `CasRw` adapter — which
+    /// resolves a git-oid through the persisted `oid-index → blake3 → R2 (read
+    /// source)` path, NOT just the in-push buffer. This proves (a) `contains`/`get`
+    /// see server-side history, and (b) the bytes `get` returns are exactly what the
+    /// receive-pack thin-base resolver decodes (the loose framing — `decode_loose`
+    /// parity), so the proto seam consumes them directly.
+    #[test]
+    fn casrw_resolves_server_history_oid_for_thin_pack_base() {
+        // A tree object that is part of the repo's server-side history (NOT in this
+        // push): only in the persisted oid-index + the CAS, never buffered.
+        let body: &[u8] = b"\x00\x01\x02tree-ish body bytes for a server-side base";
+        let framing = encode_loose(ObjectKind::Tree, body);
+        let blake3 = cas_key(&framing);
+        let history_oid = "ab".repeat(20); // a 40-hex git oid in server history
+
+        // Seed the CAS read source (the same git-oid→blake3→R2 path the read side uses).
+        let transport = MapCasTransport::default();
+        transport
+            .objects
+            .lock()
+            .unwrap()
+            .insert(blake3.clone(), framing.clone());
+
+        // The persisted oid-index (re-read by `open_writer` at push time) maps the
+        // git oid to its blake3 — server-side history, NOT an in-push write.
+        let mut existing = OidIndex::new();
+        existing.insert(history_oid.clone(), blake3);
+        // An EMPTY push (no buffered objects): `get`/`contains` answer purely from
+        // server-side history, exactly the thin-pack-base case.
+        let casrw = CasRw::new(client_with(transport), existing);
+
+        // (a) the anchor / reachability `contains` sees server history.
+        assert!(
+            casrw.contains(&history_oid),
+            "contains resolves a server-side-history oid via the oid-index"
+        );
+        // (b) `get` returns the loose framing the proto thin-base resolver decodes.
+        let got = casrw
+            .get(&history_oid)
+            .expect("get resolves the server-history object via oid-index→R2");
+        let (kind, decoded) =
+            decode_loose(&got).expect("get returns proto-decodable loose framing");
+        assert_eq!(kind, ObjectKind::Tree);
+        assert_eq!(
+            decoded.as_slice(),
+            body,
+            "byte-identical to the server-side base"
+        );
+    }
+
     #[test]
     fn casrw_put_buffers_over_an_existing_object_then_serves_the_push() {
         // The pushed object's oid is also in the existing closure (a re-push): the
