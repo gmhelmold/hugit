@@ -26,21 +26,30 @@
 //! the only thing on the intent log is an *external change*, never a fabricated
 //! intent.
 //!
-//! # v0 scope: self-contained packs only
+//! # Thin packs + incremental pushes: CAS-base reachability
 //!
-//! A pushed pack may carry deltas (OFS_DELTA / REF_DELTA). v0 resolves a delta
-//! **only if its base is itself in the pack**. A *thin pack* — a delta whose base
-//! is a server-side object NOT delivered in the pack — is a documented v0
-//! limitation and is rejected as [`ReceiveError::MalformedPack`]; thin-pack base
-//! resolution against the CAS is a tracked follow-up, not this path.
+//! A pushed pack may carry deltas (OFS_DELTA / REF_DELTA). OFS_DELTA always names
+//! an in-pack base (a negative offset), so it can never be thin. A **REF_DELTA**
+//! may name a base by oid that the push did NOT deliver because it already lives
+//! server-side (a *thin pack*). The unpack resolves such a base against the
+//! read-only [`Cas`]: when the fixpoint stalls (no in-pack base resolved a whole
+//! pass) the remaining REF_DELTA bases are fetched from the CAS
+//! ([`Cas::get`]) and used as the delta pre-image; the resolved object's oid is
+//! still re-derived (`gix_object::compute_hash`) — that is the verification. A
+//! base in NEITHER the pack NOR the CAS is a TRUE thin base nowhere and is
+//! rejected as [`ReceiveError::MalformedPack`].
 //!
-//! Likewise, **reachability requires the target's FULL closure in the pushed set**
-//! ([`UnpackedPack::target_reachable`] walks the pushed objects only, never the
-//! CAS): a first/orphan push (whole closure delivered) works; an *incremental*
-//! push whose parent commits / unchanged trees already live server-side is
-//! rejected as [`ReceiveError::UnreachableTarget`]. That is the same
-//! "consult the CAS for objects the push omits" follow-up as thin-pack bases —
-//! out of scope for v0, which serves complete-closure pushes.
+//! Likewise **reachability is satisfied by (pushed ∪ CAS)**, not the pushed set
+//! alone ([`UnpackedPack::target_reachable`]): a referenced oid that is absent
+//! from the pushed objects but present in the CAS is a SATISFIED boundary leaf
+//! (the walk stops there, exactly like a gitlink) — so an *incremental* push
+//! whose parent commits / unchanged trees already live server-side is reachable.
+//! A reference in NEITHER pushed objects NOR the CAS still fails the closure
+//! ([`ReceiveError::UnreachableTarget`]) — no bare oid is trusted.
+//!
+//! Both new CAS-read surfaces are bounded by [`RecvLimits::max_cas_lookups`] and
+//! fail closed on exceed ([`ReceiveError::CasLookupBudgetExceeded`]) so an
+//! adversarial push can never trigger unbounded R2 fan-out (a DoS).
 
 use crate::write::flag::{FlagGate, WritePathDisabled};
 use crate::write::store::{Cas, CasObject, Oid, record_ref_update, store_objects};
@@ -94,6 +103,22 @@ pub const DEFAULT_MAX_OBJECTS: u64 = 1_000_000;
 /// O(n²) blowup.
 pub const DEFAULT_MAX_DELTA_PASSES: u32 = 1024;
 
+/// Default ceiling on the number of read-only CAS lookups one ingest may perform
+/// while resolving thin-pack REF_DELTA bases (each an R2 `get`) and walking the
+/// reachability closure across the pushed/CAS boundary (each a `contains`). A push
+/// that omits server-side ancestors legitimately references the CAS, but it MUST
+/// NOT be able to trigger unbounded R2 fan-out: this bound fails the ingest closed
+/// once the lookups exceed it ([`ReceiveError::CasLookupBudgetExceeded`]).
+///
+/// Sized generous for an honest incremental push (whose pushed-vs-CAS *frontier* —
+/// the parent commit + the handful of unchanged top-level trees — is tiny) yet far
+/// below what a 16 MiB pack of minimal REF_DELTA entries could declare (~550k), so
+/// the adversarial fan-out case fails closed long before it costs real R2 traffic.
+/// The two new CAS-read surfaces (delta-base resolution in `unpack_pack`, and the
+/// reachability walk) are each bounded by this value independently, so the total
+/// CAS lookups one ingest can make is ≤ 2× this ceiling — still finite.
+pub const DEFAULT_MAX_CAS_LOOKUPS: u32 = 100_000;
+
 /// Limits applied to one receive-pack ingest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecvLimits {
@@ -108,6 +133,10 @@ pub struct RecvLimits {
     /// closed — the algorithmic-complexity (O(n²)) DoS guard for a pack of
     /// reverse-ordered REF_DELTA entries.
     pub max_delta_passes: u32,
+    /// Maximum read-only CAS lookups one ingest may perform (thin-pack base `get`s
+    /// plus reachability `contains` across the pushed/CAS boundary) before failing
+    /// closed — the unbounded-R2-fan-out DoS guard for an incremental push.
+    pub max_cas_lookups: u32,
 }
 
 impl Default for RecvLimits {
@@ -117,6 +146,7 @@ impl Default for RecvLimits {
             max_inflated_bytes: DEFAULT_MAX_INFLATED_BYTES,
             max_objects: DEFAULT_MAX_OBJECTS,
             max_delta_passes: DEFAULT_MAX_DELTA_PASSES,
+            max_cas_lookups: DEFAULT_MAX_CAS_LOOKUPS,
         }
     }
 }
@@ -206,6 +236,14 @@ pub enum ReceiveError {
         /// The target oid that is not reachable from the pushed objects.
         target: Oid,
     },
+    /// The ingest exceeded its read-only CAS lookup budget while resolving
+    /// thin-pack bases or walking the reachability closure across the pushed/CAS
+    /// boundary — a guard against an incremental push triggering unbounded R2
+    /// fan-out (DoS). Rejected fail-closed: no object committed, no event appended.
+    CasLookupBudgetExceeded {
+        /// The configured ceiling that was exceeded.
+        max: u32,
+    },
     /// The compare-and-append check failed: the ref had already moved off the tip
     /// the pusher expected (a concurrent push won). The winner is preserved;
     /// nothing is overwritten and nothing is appended (no lost update).
@@ -256,7 +294,11 @@ impl std::fmt::Display for ReceiveError {
             ),
             ReceiveError::UnreachableTarget { ref_name, target } => write!(
                 f,
-                "ref update rejected: {ref_name} → {target} present in the pushed set but not reachable as a complete closure"
+                "ref update rejected: {ref_name} → {target} not reachable as a complete closure over (pushed ∪ CAS)"
+            ),
+            ReceiveError::CasLookupBudgetExceeded { max } => write!(
+                f,
+                "pack rejected: exceeded the CAS lookup budget ({max}) resolving thin-pack bases / reachability — refusing unbounded R2 fan-out (fail-closed)"
             ),
             ReceiveError::StaleRef {
                 ref_name,
@@ -350,7 +392,10 @@ pub fn receive_pack(
     // 2+3. unpack + verify with the pure-Rust pack engine. Every object's oid is
     //      recomputed from its decoded pre-image; a malformed / injected object
     //      computes a different id, so the recomputed oid IS the verification.
-    let unpacked = unpack_pack(&req.pack, limits)?;
+    //      A REF_DELTA base or an unchanged ancestor that already lives server-side
+    //      (a thin pack / incremental push) is resolved against the read-only CAS,
+    //      bounded by `limits.max_cas_lookups` (fail-closed on unbounded fan-out).
+    let unpacked = unpack_pack(&req.pack, &*cas, limits)?;
     let objects = &unpacked.objects;
 
     // 5a. anchor the requested ref update: its target must have been delivered by
@@ -363,12 +408,16 @@ pub fn receive_pack(
         });
     }
 
-    // 5b. reachability: the target must be REACHABLE from the pushed pack — its
-    //     full commit→tree→(subtree|blob) closure present in the delivered set —
-    //     not merely present somewhere. A pack that smuggles a stray object
-    //     (present but with an incomplete closure) is rejected. (Targets already
-    //     live in CAS are trusted prior tips.)
-    if delivered && !unpacked.target_reachable(&req.update.new_oid) {
+    // 5b. reachability: the target must be REACHABLE — its full commit→tree→
+    //     (subtree|blob) closure present in (the delivered set ∪ the CAS), not
+    //     merely present somewhere. A pack that smuggles a stray object (present but
+    //     with an incomplete closure that is satisfied by NEITHER the push NOR the
+    //     CAS) is rejected. An unchanged ancestor already in CAS is a satisfied
+    //     boundary leaf — so an incremental push reaches. (Targets already live in
+    //     CAS are trusted prior tips, handled by the `delivered` guard above.)
+    if delivered
+        && !unpacked.target_reachable(&req.update.new_oid, &*cas, limits.max_cas_lookups)?
+    {
         return Err(ReceiveError::UnreachableTarget {
             ref_name: req.update.ref_name.clone(),
             target: req.update.new_oid.clone(),
@@ -536,24 +585,47 @@ struct UnpackedPack {
 }
 
 impl UnpackedPack {
-    /// Whether `target` is REACHABLE from the pushed set: it is present AND its
-    /// full closure (commit → tree → subtree/blob, tag → target, …) is wholly
-    /// present in the unpacked set. A stray/dangling target or an incomplete
-    /// closure → NOT reachable. Fail-closed and panic-free on malformed objects:
-    /// an object that fails to parse makes the closure incomplete (unreachable),
-    /// never a panic.
-    fn target_reachable(&self, target: &str) -> bool {
+    /// Whether `target` is REACHABLE over (the pushed set ∪ the CAS): it is present
+    /// AND its full closure (commit → tree → subtree/blob, tag → target, …) is
+    /// wholly satisfiable. A referenced oid absent from the pushed set but present
+    /// in `cas` is a SATISFIED boundary leaf — the walk stops there (an incremental
+    /// push's unchanged server-side ancestors), exactly like the gitlink skip. A
+    /// reference in NEITHER the pushed set NOR the CAS → NOT reachable. Fail-closed
+    /// and panic-free on malformed objects: an object that fails to parse makes the
+    /// closure incomplete (unreachable), never a panic.
+    ///
+    /// Each pushed/CAS-boundary `cas.contains` is one CAS lookup; the walk fails
+    /// closed with [`ReceiveError::CasLookupBudgetExceeded`] once it exceeds
+    /// `max_cas_lookups` (the unbounded-R2-fan-out guard).
+    fn target_reachable(
+        &self,
+        target: &str,
+        cas: &dyn Cas,
+        max_cas_lookups: u32,
+    ) -> Result<bool, ReceiveError> {
         // BFS over the object graph. Every referenced oid must be present in the
-        // unpacked set; a missing reference fails the closure (not reachable).
+        // pushed set OR resolvable in the CAS (a satisfied boundary); a reference in
+        // neither fails the closure (not reachable).
         let mut stack: Vec<String> = vec![target.to_string()];
         let mut seen: HashMap<String, ()> = HashMap::new();
+        let mut cas_lookups: u32 = 0;
         while let Some(oid) = stack.pop() {
             if seen.insert(oid.clone(), ()).is_some() {
                 continue;
             }
             let Some((kind, data)) = self.by_oid.get(&oid) else {
-                // A referenced object is absent → the closure is incomplete.
-                return false;
+                // Absent from the push → consult the CAS. Present → a satisfied
+                // boundary leaf (stop the walk here). Absent in both → unreachable.
+                cas_lookups += 1;
+                if cas_lookups > max_cas_lookups {
+                    return Err(ReceiveError::CasLookupBudgetExceeded {
+                        max: max_cas_lookups,
+                    });
+                }
+                if cas.contains(&oid) {
+                    continue;
+                }
+                return Ok(false);
             };
             match kind {
                 Kind::Blob => {}
@@ -562,7 +634,7 @@ impl UnpackedPack {
                     let mut iter = gix_object::CommitRefIter::from_bytes(data);
                     match iter.tree_id() {
                         Ok(tree) => stack.push(tree.to_hex().to_string()),
-                        Err(_) => return false,
+                        Err(_) => return Ok(false),
                     }
                     for parent in gix_object::CommitRefIter::from_bytes(data).parent_ids() {
                         stack.push(parent.to_hex().to_string());
@@ -571,7 +643,7 @@ impl UnpackedPack {
                 Kind::Tree => {
                     let entries = match gix_object::TreeRefIter::from_bytes(data).entries() {
                         Ok(e) => e,
-                        Err(_) => return false,
+                        Err(_) => return Ok(false),
                     };
                     for entry in entries {
                         // A gitlink (submodule commit) is a boundary object git
@@ -585,12 +657,12 @@ impl UnpackedPack {
                 }
                 Kind::Tag => match gix_object::TagRefIter::from_bytes(data).target_id() {
                     Ok(t) => stack.push(t.to_hex().to_string()),
-                    Err(_) => return false,
+                    Err(_) => return Ok(false),
                 },
             }
         }
         // The target itself must have been present (the very first pop checks it).
-        self.by_oid.contains_key(target)
+        Ok(self.by_oid.contains_key(target))
     }
 }
 
@@ -605,11 +677,20 @@ struct RawEntry {
 /// Unpack `pack` with the pure-Rust pack engine, enforcing the inflated / object
 /// bombs fail-closed. Returns the CAS-ready loose objects + the decoded graph.
 ///
-/// v0 resolves only SELF-CONTAINED deltas (base in the pack). A thin-pack delta
-/// (base absent) is rejected as [`ReceiveError::MalformedPack`]. The pack bytes
-/// are attacker-controlled: every parse / decompress / delta step is fallible and
+/// Resolves SELF-CONTAINED deltas (base in the pack) AND thin-pack REF_DELTA bases
+/// that already live server-side: when the in-pack fixpoint stalls, a remaining
+/// REF_DELTA's base is fetched from the read-only `cas` and used as the delta
+/// pre-image (the resolved object's oid is still re-derived — the verify). A base
+/// in NEITHER the pack NOR the CAS is rejected as [`ReceiveError::MalformedPack`].
+/// Each CAS base fetch is bounded by `limits.max_cas_lookups`
+/// ([`ReceiveError::CasLookupBudgetExceeded`] on exceed). The pack bytes are
+/// attacker-controlled: every parse / decompress / delta step is fallible and
 /// bounds-checked — a malformed pack is a typed error, never a panic.
-fn unpack_pack(pack: &[u8], limits: RecvLimits) -> Result<UnpackedPack, ReceiveError> {
+fn unpack_pack(
+    pack: &[u8],
+    cas: &dyn Cas,
+    limits: RecvLimits,
+) -> Result<UnpackedPack, ReceiveError> {
     // Defensive re-validation (the caller already checked, but unpack is reachable
     // in isolation): signature + V2 before the engine, which `assert!`s on non-V2.
     pack_header_object_count(pack)?;
@@ -771,6 +852,9 @@ fn unpack_pack(pack: &[u8], limits: RecvLimits) -> Result<UnpackedPack, ReceiveE
     // pathological ordering fails closed instead of freezing the single-threaded
     // engine. An honest pack converges in a few passes (chain depth ≪ the cap).
     let mut passes: u32 = 0;
+    // Read-only CAS base fetches performed (thin-pack resolution) — bounded by
+    // `max_cas_lookups` so an incremental push can never trigger unbounded R2 fan-out.
+    let mut cas_lookups: u32 = 0;
     while !remaining.is_empty() {
         passes += 1;
         if passes > limits.max_delta_passes {
@@ -853,11 +937,61 @@ fn unpack_pack(pack: &[u8], limits: RecvLimits) -> Result<UnpackedPack, ReceiveE
             progressed = true;
         }
         if !progressed {
-            // No delta resolved this pass: every remaining base is missing from the
-            // pack → a thin pack (v0 limitation), rejected fail-closed.
+            // No IN-PACK base resolved this pass: every remaining REF_DELTA's base is
+            // absent from the pack. Before failing, consult the CAS — a thin pack /
+            // incremental push whose base already lives server-side. OFS_DELTAs only
+            // ever name an in-pack base, so they are deferred (their chain root is a
+            // REF_DELTA resolved here, which unblocks them on the next normal pass).
+            let mut cas_progress = false;
+            let mut still_thin: Vec<usize> = Vec::new();
+            for &i in &remaining {
+                let PackHeader::RefDelta { base_id } = raws[i].header else {
+                    // An OFS_DELTA (or any non-REF) — its base is in-pack by
+                    // construction; defer to the next normal pass.
+                    still_thin.push(i);
+                    continue;
+                };
+                let base_oid = base_id.to_hex().to_string();
+                cas_lookups += 1;
+                if cas_lookups > limits.max_cas_lookups {
+                    return Err(ReceiveError::CasLookupBudgetExceeded {
+                        max: limits.max_cas_lookups,
+                    });
+                }
+                let Some(raw_base) = cas.get(&base_oid) else {
+                    // Base in NEITHER the pack NOR the CAS — a TRUE thin base nowhere.
+                    still_thin.push(i);
+                    continue;
+                };
+                // The CAS base was verified on its own ingest; decode it to its
+                // (kind, body) pre-image (the loose framing — zlib OR uncompressed).
+                let (base_kind, base_data) = decode_cas_object(&raw_base)?;
+                let remaining_budget = limits.max_inflated_bytes.saturating_sub(total_resolved);
+                let resolved_data = apply_delta(&base_data, &raws[i].data, remaining_budget)?;
+                // The RESOLVED object's oid is re-derived in `finalize` (the verify).
+                let oid = finalize(
+                    base_kind,
+                    &resolved_data,
+                    &mut by_oid,
+                    &mut objects,
+                    &mut total_resolved,
+                    limits.max_inflated_bytes,
+                )?;
+                resolved[i] = Some((base_kind, resolved_data));
+                oid_to_index.insert(oid, i);
+                cas_progress = true;
+            }
+            if cas_progress {
+                // CAS-resolved a base → re-run the fixpoint; the now-resolved object
+                // may itself be the base for a deferred in-pack (OFS/REF) delta.
+                remaining = still_thin;
+                continue;
+            }
+            // No base found in the pack OR the CAS for ANY remaining delta → a true
+            // thin base nowhere, rejected fail-closed.
             return Err(ReceiveError::MalformedPack {
-                detail: "thin pack: a delta's base object is not in the pack (v0 \
-                         resolves self-contained packs only)"
+                detail: "thin pack: a delta's base object is in neither the pack \
+                         nor the CAS"
                     .to_string(),
             });
         }
@@ -865,6 +999,56 @@ fn unpack_pack(pack: &[u8], limits: RecvLimits) -> Result<UnpackedPack, ReceiveE
     }
 
     Ok(UnpackedPack { objects, by_oid })
+}
+
+/// Parse a git loose-object pre-image `"<type> <len>\0<body>"` into `(Kind, body)`,
+/// validating the declared length against the actual body. `None` for any
+/// malformation (no NUL, no space, an unknown kind token, a non-numeric or
+/// mismatched length) so the caller can try the other framing form.
+fn parse_loose_framing(framing: &[u8]) -> Option<(Kind, Vec<u8>)> {
+    let nul = framing.iter().position(|&b| b == 0)?;
+    let header = &framing[..nul];
+    let body = &framing[nul + 1..];
+    let sp = header.iter().position(|&b| b == b' ')?;
+    let kind = match &header[..sp] {
+        b"blob" => Kind::Blob,
+        b"tree" => Kind::Tree,
+        b"commit" => Kind::Commit,
+        b"tag" => Kind::Tag,
+        _ => return None,
+    };
+    let len: usize = std::str::from_utf8(&header[sp + 1..]).ok()?.parse().ok()?;
+    if len != body.len() {
+        return None;
+    }
+    Some((kind, body.to_vec()))
+}
+
+/// Decode a CAS-returned loose object (a thin-pack REF_DELTA base) into its
+/// `(Kind, body)` pre-image.
+///
+/// The [`Cas`] read surface is NOT byte-uniform across implementations: the
+/// trait-documented form (and `InMemoryCas` / `GitDirCas`) returns git's verbatim
+/// **zlib-compressed** loose bytes, while the live serve adapter
+/// (`hugit_serve::cas::CasRw`, backed by the oid-index→R2 read source) returns the
+/// **uncompressed** `"<type> <len>\0<body>"` framing it serves on the read path. So
+/// this accepts BOTH: it first tries to parse the bytes directly as the loose
+/// framing (the uncompressed form — a zlib stream never parses as a valid framing
+/// because its leading CMF byte is not a kind token), and otherwise zlib-inflates
+/// and parses the result. A base that is neither → [`ReceiveError::MalformedPack`].
+fn decode_cas_object(bytes: &[u8]) -> Result<(Kind, Vec<u8>), ReceiveError> {
+    if let Some(decoded) = parse_loose_framing(bytes) {
+        return Ok(decoded);
+    }
+    let mut inflated = Vec::new();
+    flate2::read::ZlibDecoder::new(bytes)
+        .read_to_end(&mut inflated)
+        .map_err(|e| ReceiveError::MalformedPack {
+            detail: format!("CAS thin-pack base inflate failed: {e}"),
+        })?;
+    parse_loose_framing(&inflated).ok_or_else(|| ReceiveError::MalformedPack {
+        detail: "CAS thin-pack base is not a valid git loose object".to_string(),
+    })
 }
 
 /// Inflate one pack-entry payload (a raw zlib stream) to exactly
@@ -1156,6 +1340,14 @@ mod tests {
     //! real, self-contained pack fixture. Grep this file: zero `Command::new`.
 
     use super::*;
+    use crate::write::store::InMemoryCas;
+
+    /// An empty read-only CAS — the v0 "pushed-set-only" oracle: with no objects in
+    /// the CAS, the new thin-base / reachability-boundary fallbacks resolve nothing,
+    /// so these tests pin exactly the pre-thin-pack behaviour.
+    fn no_cas() -> InMemoryCas {
+        InMemoryCas::new()
+    }
 
     /// A REAL, self-contained git pack (committed as raw bytes): one commit, its
     /// tree, and one blob — no deltas, no external bases. The acceptance harness
@@ -1171,7 +1363,8 @@ mod tests {
     /// re-derives its oid (the verify).
     #[test]
     fn unpacks_fixture_to_three_verified_objects() {
-        let up = unpack_pack(FIXTURE, RecvLimits::default()).expect("self-contained pack unpacks");
+        let up = unpack_pack(FIXTURE, &no_cas(), RecvLimits::default())
+            .expect("self-contained pack unpacks");
 
         assert_eq!(up.objects.len(), 3, "exactly three objects");
         let oids: std::collections::BTreeSet<&str> =
@@ -1214,18 +1407,18 @@ mod tests {
     /// wholly present); a random non-present oid is NOT reachable.
     #[test]
     fn reachability_holds_for_complete_closure_only() {
-        let up = unpack_pack(FIXTURE, RecvLimits::default()).expect("unpacks");
+        let up = unpack_pack(FIXTURE, &no_cas(), RecvLimits::default()).expect("unpacks");
         assert!(
-            up.target_reachable(COMMIT_OID),
+            up.target_reachable(COMMIT_OID, &no_cas(), 100_000).unwrap(),
             "commit reachable: tree + blob closure present"
         );
         assert!(
-            up.target_reachable(TREE_OID),
+            up.target_reachable(TREE_OID, &no_cas(), 100_000).unwrap(),
             "tree reachable: its blob is present"
         );
         let absent = "0000000000000000000000000000000000000000";
         assert!(
-            !up.target_reachable(absent),
+            !up.target_reachable(absent, &no_cas(), 100_000).unwrap(),
             "a random non-present oid is not reachable"
         );
     }
@@ -1238,7 +1431,8 @@ mod tests {
             max_objects: 1,
             ..RecvLimits::default()
         };
-        let err = unpack_pack(FIXTURE, tiny_objects).expect_err("object-count cap trips");
+        let err =
+            unpack_pack(FIXTURE, &no_cas(), tiny_objects).expect_err("object-count cap trips");
         assert!(
             matches!(err, ReceiveError::DecompressionBomb { .. }),
             "expected DecompressionBomb, got {err:?}"
@@ -1248,7 +1442,7 @@ mod tests {
             max_inflated_bytes: 1,
             ..RecvLimits::default()
         };
-        let err = unpack_pack(FIXTURE, tiny_inflated).expect_err("inflated cap trips");
+        let err = unpack_pack(FIXTURE, &no_cas(), tiny_inflated).expect_err("inflated cap trips");
         assert!(
             matches!(err, ReceiveError::DecompressionBomb { .. }),
             "expected DecompressionBomb, got {err:?}"
@@ -1261,7 +1455,7 @@ mod tests {
     fn truncated_pack_is_malformed_not_a_panic() {
         // Drop the trailing checksum + part of the last entry.
         let truncated = &FIXTURE[..FIXTURE.len() - 24];
-        let err = unpack_pack(truncated, RecvLimits::default())
+        let err = unpack_pack(truncated, &no_cas(), RecvLimits::default())
             .expect_err("a truncated pack must be rejected");
         assert!(
             matches!(err, ReceiveError::MalformedPack { .. }),
@@ -1275,7 +1469,7 @@ mod tests {
     fn non_v2_pack_is_rejected_without_panic() {
         let mut bad = FIXTURE.to_vec();
         bad[7] = 3; // version 3
-        let err = unpack_pack(&bad, RecvLimits::default()).expect_err("non-V2 rejected");
+        let err = unpack_pack(&bad, &no_cas(), RecvLimits::default()).expect_err("non-V2 rejected");
         assert!(
             matches!(err, ReceiveError::MalformedPack { .. }),
             "expected MalformedPack, got {err:?}"
@@ -1295,7 +1489,8 @@ mod tests {
     /// delta application — a tampered delta would compute a different oid). git-free.
     #[test]
     fn delta_pack_resolves_ofs_delta_and_verifies() {
-        let up = unpack_pack(DELTA_FIXTURE, RecvLimits::default()).expect("delta pack unpacks");
+        let up = unpack_pack(DELTA_FIXTURE, &no_cas(), RecvLimits::default())
+            .expect("delta pack unpacks");
         assert_eq!(up.objects.len(), 6, "two commits + two trees + two blobs");
         assert_eq!(
             up.by_oid.get(DELTA_BASE_BLOB).map(|(k, _)| *k),
@@ -1316,7 +1511,7 @@ mod tests {
             "the delta-RESOLVED body re-derives its oid (apply_delta is correct)"
         );
         assert!(
-            up.target_reachable(DELTA_HEAD),
+            up.target_reachable(DELTA_HEAD, &no_cas(), 100_000).unwrap(),
             "HEAD's full multi-commit closure (parent + trees + blobs) is present"
         );
     }
@@ -1334,7 +1529,7 @@ mod tests {
             max_inflated_bytes: 5000,
             ..RecvLimits::default()
         };
-        let err = unpack_pack(DELTA_FIXTURE, tight)
+        let err = unpack_pack(DELTA_FIXTURE, &no_cas(), tight)
             .expect_err("tight inflated cap rejects the delta pack");
         assert!(
             matches!(
@@ -1357,7 +1552,6 @@ mod tests {
     //    fixture (COMMIT_OID) against a crafted authoritative `current_refs`. ──
 
     use crate::write::flag::FlagGate;
-    use crate::write::store::InMemoryCas;
 
     /// Build a CREATE/UPDATE request that pushes the fixture's commit to
     /// `refs/heads/main` with the given `expected` old tip.
@@ -1472,11 +1666,11 @@ mod tests {
     /// PRESENT-but-incomplete-closure target is rejected.
     #[test]
     fn incomplete_closure_target_is_unreachable() {
-        let up = unpack_pack(INCOMPLETE_FIXTURE, RecvLimits::default())
+        let up = unpack_pack(INCOMPLETE_FIXTURE, &no_cas(), RecvLimits::default())
             .expect("commit-only pack unpacks");
         assert_eq!(up.objects.len(), 1, "only the commit object is delivered");
         assert!(
-            !up.target_reachable(DELTA_HEAD),
+            !up.target_reachable(DELTA_HEAD, &no_cas(), 100_000).unwrap(),
             "a commit whose tree/blob closure is absent must be UNREACHABLE (fail-closed)"
         );
     }
@@ -1498,7 +1692,7 @@ mod tests {
             max_inflated_bytes: 1,
             ..RecvLimits::default()
         };
-        let err = unpack_pack(FIXTURE, tight).expect_err("over-budget pack rejected");
+        let err = unpack_pack(FIXTURE, &no_cas(), tight).expect_err("over-budget pack rejected");
         assert!(
             matches!(err, ReceiveError::DecompressionBomb { .. }),
             "expected DecompressionBomb, got {err:?}"
@@ -1627,7 +1821,7 @@ mod tests {
     fn reverse_ordered_ref_delta_pack_hits_pass_cap_fail_closed() {
         let pack = reverse_ordered_ref_delta_pack(6);
         // Valid: with the default (generous) pass budget it resolves to base + 6.
-        let ok = unpack_pack(&pack, RecvLimits::default())
+        let ok = unpack_pack(&pack, &no_cas(), RecvLimits::default())
             .expect("a valid reverse-ordered chain resolves under the default pass budget");
         assert_eq!(ok.objects.len(), 7, "base blob + 6 delta-resolved targets");
 
@@ -1636,11 +1830,183 @@ mod tests {
             max_delta_passes: 3,
             ..RecvLimits::default()
         };
-        let err = unpack_pack(&pack, capped)
+        let err = unpack_pack(&pack, &no_cas(), capped)
             .expect_err("the pass cap must reject the reverse-ordered chain");
         assert!(
             matches!(err, ReceiveError::DecompressionBomb { .. }),
             "expected DecompressionBomb (pass cap), got {err:?}"
         );
+    }
+
+    // ── Thin-pack / CAS-base reachability (the incremental-push capability) ──────
+    //    The same git-free builders drive REF_DELTA packs whose base lives ONLY in
+    //    a mock CAS (server-side history), proving an incremental push lands.
+
+    /// Seed `cas` with a blob in the **zlib-compressed** loose form (the
+    /// trait-documented `Cas::get` shape — `InMemoryCas` / `GitDirCas`). Returns the
+    /// blob's 20-byte git oid (for the REF_DELTA base field).
+    fn seed_cas_blob(cas: &mut InMemoryCas, body: &[u8]) -> [u8; 20] {
+        let framing = encode_loose(Kind::Blob, body);
+        let bytes = zlib_compress(&framing).expect("zlib loose");
+        let oid_hex = gix_object::compute_hash(HashKind::Sha1, GixKind::Blob, body)
+            .expect("hash")
+            .to_hex()
+            .to_string();
+        cas.put(&CasObject {
+            oid: oid_hex,
+            bytes,
+        });
+        blob_oid_bytes(body)
+    }
+
+    /// Build a valid V2 pack of `n` REF_DELTA blob entries, each a pure-INSERT delta
+    /// against an EXTERNAL base oid (NOT delivered in the pack — a thin pack). The
+    /// bases must be supplied to the CAS for resolution to succeed.
+    fn thin_ref_delta_pack(entries: &[([u8; 20], u64, Vec<u8>)]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(b"PACK");
+        body.extend_from_slice(&2u32.to_be_bytes());
+        body.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+        for (base_oid, base_len, target) in entries {
+            let delta = delta_insert(*base_len, target);
+            let mut e = pack_entry_header(7 /* REF_DELTA */, delta.len() as u64);
+            e.extend_from_slice(base_oid);
+            e.extend_from_slice(&zlib_raw(&delta));
+            body.extend_from_slice(&e);
+        }
+        let mut hasher = gix_hash::hasher(HashKind::Sha1);
+        hasher.update(&body);
+        body.extend_from_slice(hasher.try_finalize().unwrap().as_bytes());
+        body
+    }
+
+    /// The tolerant CAS-base decoder accepts BOTH the trait-documented zlib loose
+    /// form AND the uncompressed `<type> <len>\0<body>` framing the live `CasRw`
+    /// serve adapter returns — and rejects garbage without a panic.
+    #[test]
+    fn decode_cas_object_handles_both_zlib_and_raw_framing() {
+        let body = b"a base object body";
+        let framing = encode_loose(Kind::Blob, body);
+        // Uncompressed framing — the CasRw serve form.
+        let (k1, b1) = decode_cas_object(&framing).expect("raw framing decodes");
+        assert_eq!(k1, Kind::Blob);
+        assert_eq!(b1.as_slice(), body);
+        // zlib-compressed loose — the InMemoryCas / GitDirCas / trait-documented form.
+        let zlib = zlib_compress(&framing).unwrap();
+        let (k2, b2) = decode_cas_object(&zlib).expect("zlib loose decodes");
+        assert_eq!(k2, Kind::Blob);
+        assert_eq!(b2.as_slice(), body);
+        // Garbage → MalformedPack, never a panic.
+        assert!(matches!(
+            decode_cas_object(&[0xde, 0xad, 0xbe, 0xef]),
+            Err(ReceiveError::MalformedPack { .. })
+        ));
+    }
+
+    /// An INCREMENTAL push: a child commit (delivered) whose parent + unchanged
+    /// trees/blobs are pre-seeded in the CAS (server-side history) is REACHABLE over
+    /// (pushed ∪ CAS) — with an empty CAS the same target is unreachable (the v0
+    /// limit), proving the CAS boundary is what unblocks it.
+    #[test]
+    fn incremental_push_on_cas_ancestor_reachable() {
+        // Pre-seed the CAS with the full closure (parent commit + all trees/blobs).
+        let full = unpack_pack(DELTA_FIXTURE, &no_cas(), RecvLimits::default())
+            .expect("full closure unpacks");
+        let mut cas = InMemoryCas::new();
+        for o in &full.objects {
+            cas.put(o);
+        }
+        // The push delivers ONLY the head commit (its tree + parent are server-side).
+        let up = unpack_pack(INCOMPLETE_FIXTURE, &no_cas(), RecvLimits::default())
+            .expect("commit-only pack unpacks");
+        assert_eq!(up.objects.len(), 1, "only the commit is delivered");
+        // Empty CAS → unreachable (the pre-thin-pack v0 behaviour).
+        assert!(
+            !up.target_reachable(DELTA_HEAD, &no_cas(), 100_000).unwrap(),
+            "with no CAS ancestors the incomplete closure is unreachable"
+        );
+        // Ancestors in CAS → the closure is satisfied → reachable, lands.
+        assert!(
+            up.target_reachable(DELTA_HEAD, &cas, 100_000).unwrap(),
+            "the commit's tree + parent are satisfied CAS boundary leaves → reachable"
+        );
+    }
+
+    /// A REF_DELTA whose base is ONLY in the CAS (a thin pack) resolves against the
+    /// CAS base and the RESOLVED object's oid is re-derived (the verify holds).
+    #[test]
+    fn ref_delta_base_from_cas_resolves() {
+        let base_body = b"the server-side base blob the delta builds on";
+        let mut cas = InMemoryCas::new();
+        let base_oid = seed_cas_blob(&mut cas, base_body);
+
+        let target = b"the resolved object, produced by delta from the CAS base";
+        let pack = thin_ref_delta_pack(&[(base_oid, base_body.len() as u64, target.to_vec())]);
+
+        let up = unpack_pack(&pack, &cas, RecvLimits::default())
+            .expect("thin REF_DELTA resolves vs CAS");
+        assert_eq!(up.objects.len(), 1, "the single delta-resolved object");
+        let target_oid = gix_object::compute_hash(HashKind::Sha1, GixKind::Blob, target)
+            .unwrap()
+            .to_hex()
+            .to_string();
+        let (k, body) = up
+            .by_oid
+            .get(&target_oid)
+            .expect("resolved + oid-verified (compute_hash re-derived this oid)");
+        assert_eq!(*k, Kind::Blob);
+        assert_eq!(
+            body.as_slice(),
+            target,
+            "delta applied against the CAS base"
+        );
+    }
+
+    /// A REF_DELTA whose base is in NEITHER the pack NOR the CAS → MalformedPack (a
+    /// true thin base nowhere; no bare oid is trusted).
+    #[test]
+    fn true_thin_base_nowhere_rejected() {
+        let base_body = b"a base object that exists nowhere";
+        let base_oid = blob_oid_bytes(base_body);
+        let pack = thin_ref_delta_pack(&[(base_oid, base_body.len() as u64, b"target".to_vec())]);
+        // Empty CAS: the base is in neither the pack nor the CAS.
+        let err = unpack_pack(&pack, &no_cas(), RecvLimits::default())
+            .expect_err("a base nowhere must be rejected");
+        assert!(
+            matches!(err, ReceiveError::MalformedPack { .. }),
+            "expected MalformedPack (thin base nowhere), got {err:?}"
+        );
+    }
+
+    /// A push that needs MORE CAS base lookups than `max_cas_lookups` fails closed
+    /// with [`ReceiveError::CasLookupBudgetExceeded`] — the unbounded-R2-fan-out DoS
+    /// guard. Under a generous budget the same pack resolves fully.
+    #[test]
+    fn cas_lookup_cap_rejects_fail_closed() {
+        let b1 = b"server base number one (distinct)";
+        let b2 = b"server base number two (distinct)";
+        let mut cas = InMemoryCas::new();
+        let oid1 = seed_cas_blob(&mut cas, b1);
+        let oid2 = seed_cas_blob(&mut cas, b2);
+        let pack = thin_ref_delta_pack(&[
+            (oid1, b1.len() as u64, b"target one".to_vec()),
+            (oid2, b2.len() as u64, b"target two".to_vec()),
+        ]);
+
+        // Cap at 1 CAS lookup: the second base fetch trips the budget, fail-closed.
+        let capped = RecvLimits {
+            max_cas_lookups: 1,
+            ..RecvLimits::default()
+        };
+        let err = unpack_pack(&pack, &cas, capped).expect_err("the CAS lookup cap must trip");
+        assert!(
+            matches!(err, ReceiveError::CasLookupBudgetExceeded { max: 1 }),
+            "expected CasLookupBudgetExceeded {{ max: 1 }}, got {err:?}"
+        );
+
+        // A generous budget resolves both thin bases (the pack is otherwise valid).
+        let ok = unpack_pack(&pack, &cas, RecvLimits::default())
+            .expect("both thin bases resolve under a generous budget");
+        assert_eq!(ok.objects.len(), 2, "both delta-resolved objects");
     }
 }
