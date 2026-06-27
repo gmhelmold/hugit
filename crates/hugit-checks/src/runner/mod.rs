@@ -41,11 +41,15 @@ pub mod metrics;
 pub mod nondeterminism;
 
 pub use byte_identity::{ArtifactDiff, ByteIdentityReport, compare_byte_identity};
-pub use dispatch::{DispatchOutcome, dispatch_check, exec_and_collect};
+pub use dispatch::{
+    DispatchOutcome, dispatch_attest_offbox, dispatch_check, exec_and_collect,
+    project_intent_metrics,
+};
 pub use hit_rate::{HitRateMeter, HitRateReport};
 pub use lease_client::{
-    AcquireLeaseRequest, ExecAck, LeaseClient, RawEvents, RawMeta, RunnerConfig, RunnerError,
-    RunnerTransport, UreqRunnerTransport, runner_from_env,
+    AcquireLeaseRequest, AcquireResponse, EnvelopeIngest, ExecAck, IngestEvent, IngestUsage,
+    LeaseClient, RawEvents, RawMeta, RunnerConfig, RunnerError, RunnerTransport,
+    UreqRunnerTransport, runner_from_env,
 };
 pub use lease_exec::{
     InProcessRunnerExecutor, LiveBoxRunnerExecutor, RunnerExecError, RunnerExecutor,

@@ -51,8 +51,10 @@
 //! the runner fabric's `/v1/leases/{id}/exec` spawn path (the runners TL's lane).
 
 use hugit_checks::runner::{
-    AcquireLeaseRequest, LeaseClient, RunnerError, RunnerExecError, RunnerTransport, dispatch_check,
+    AcquireLeaseRequest, LeaseClient, RunnerError, RunnerExecError, RunnerTransport,
+    dispatch_attest_offbox,
 };
+use hugit_contracts::context_envelope::TokenCounts;
 use hugit_contracts::{CheckDef, IntentMetrics};
 use hugit_refstore::EventLog;
 use serde_json::Value;
@@ -139,14 +141,22 @@ pub fn land_with_dispatch<T: RunnerTransport>(
     .map_err(DispatchLandError::Pr)
 }
 
-/// Dispatch the PR's land-time check on the runner fabric and return its §13.1
-/// [`IntentMetrics`].
+/// Dispatch the PR's land-time check on the runner fabric (cost-killer path "A",
+/// the OFF-BOX §13 ingest) and return its §13.1 [`IntentMetrics`].
 ///
-/// Drives the full lease lifecycle via [`dispatch_check`] (acquire → exec →
-/// poll_meta → close, always releasing the lease). Only the metrics are
-/// consumed; the stamped `CheckResult` is discarded (see the module-level
-/// disclosed-seam note — there is no real tree / CI definition at the porcelain
-/// land altitude).
+/// Drives the full A-path lease lifecycle via [`dispatch_attest_offbox`]: acquire
+/// → SUBMIT the land-identity trajectory to the lease's §13.2 ingest endpoint
+/// (the SCOPED ingest credential the acquire response carries — NEVER the tenant
+/// PAT) → poll the fabric's signed envelope (PAT) → close (PAT), always releasing
+/// the lease. FAIL-CLOSED: a check lease whose acquire response carries no
+/// `envelope_ingest` (§13 not wired) is an error, never a silent fall-back.
+///
+/// Only the metrics are consumed; the stamped `CheckResult` is discarded (see the
+/// module-level disclosed-seam note — there is no real tree / CI definition at
+/// the porcelain land altitude). At this altitude there is no live OFF-BOX agent
+/// loop either, so the SUBMITTED trajectory is honest-zero (the disclosed P2
+/// seam); the CAPTURED cost is the fabric's signed readback — the runner is the
+/// source of truth, never a hand-stamp.
 fn dispatch_pr_metrics<T: RunnerTransport>(
     client: &LeaseClient<T>,
     opened: &OpenedPr,
@@ -160,10 +170,14 @@ fn dispatch_pr_metrics<T: RunnerTransport>(
     let def = land_check_def(opened);
     let def_digest = def.def_digest.clone();
     let memo_key = land_memo_key(opened, &def_digest);
-    let outcome = dispatch_check(
+    let outcome = dispatch_attest_offbox(
         client,
         &acquire,
-        &def,
+        // The off-box-measured §13.1 metrics submitted as the trajectory. At the
+        // porcelain land altitude there is no live off-box agent loop (the P2
+        // seam), so this is honest-zero; the captured figure is the fabric's
+        // signed readback, not this submission.
+        &zero_intent_metrics(),
         &memo_key,
         // tree_root: honestly empty — no materialized tree at this altitude (the
         // P2 seam). The CheckResult these axes stamp onto is discarded; only the
@@ -174,6 +188,27 @@ fn dispatch_pr_metrics<T: RunnerTransport>(
         "",
     )?;
     Ok(outcome.metrics)
+}
+
+/// An honest-zero §13.1 [`IntentMetrics`] (`IntentMetrics` has no `Default`). The
+/// land-altitude A-path submits this as its (disclosed-P2-seam) trajectory; it is
+/// NEVER the captured figure — that is the fabric's signed readback.
+fn zero_intent_metrics() -> IntentMetrics {
+    IntentMetrics {
+        tokens: TokenCounts {
+            input: 0,
+            output: 0,
+            cache_read: 0,
+            cache_write: 0,
+            total: 0,
+        },
+        wall_ms: 0,
+        active_ms: 0,
+        tool_calls: 0,
+        tool_breakdown: vec![],
+        model_turns: 0,
+        cost_usd_micros: 0,
+    }
 }
 
 /// The deterministic land-time [`CheckDef`] for a PR (the disclosed-seam
@@ -265,8 +300,8 @@ pub fn runner_error(e: &RunnerExecError) -> PorcelainError {
 mod tests {
     use super::*;
     use crate::pr::{AuthorKind, LandArgs, OpenArgs, land, open};
-    use hugit_checks::runner::{ExecAck, RunnerConfig};
-    use hugit_contracts::context_envelope::{ContextEnvelope, TokenCounts};
+    use hugit_checks::runner::{AcquireResponse, EnvelopeIngest, RunnerConfig};
+    use hugit_contracts::context_envelope::ContextEnvelope;
     use hugit_contracts::{Altitude, RunnerLease, RunnerState};
     use std::collections::VecDeque;
     use std::sync::Mutex;
@@ -344,17 +379,30 @@ mod tests {
         .to_vec()
     }
 
-    /// A full acquire→exec→poll→close FIFO that returns the distinctive metrics.
+    /// The acquire-response WRAPPER for the land lease, carrying the §13.2 ingest
+    /// credential (the A-path needs it).
+    fn acquire_resp_with_ingest() -> AcquireResponse {
+        AcquireResponse {
+            lease: held_lease(),
+            exec_endpoint: "/v1/leases/lease-land-1/exec".to_string(),
+            envelope_ingest: Some(EnvelopeIngest {
+                ingest_path: "/v1/leases/lease-land-1/envelope/ingest".to_string(),
+                credential: "scoped-ingest-land-cred".to_string(),
+            }),
+        }
+    }
+
+    /// A full A-path acquire→submit→poll→close FIFO that returns the distinctive
+    /// metrics on the poll (the fabric's signed envelope readback).
     fn happy_responses() -> Vec<(u16, Vec<u8>)> {
-        let ack = ExecAck {
-            lease_id: "lease-land-1".to_string(),
-            accepted: true,
-        };
         vec![
-            (201, serde_json::to_vec(&held_lease()).unwrap()), // acquire
-            (202, serde_json::to_vec(&ack).unwrap()),          // exec
-            (200, envelope_body()),                            // poll_meta
-            (204, Vec::new()),                                 // close
+            (
+                200,
+                serde_json::to_vec(&acquire_resp_with_ingest()).unwrap(),
+            ), // acquire (wrapper)
+            (200, Vec::new()),      // submit_envelope (§13.2 ingest)
+            (200, envelope_body()), // poll_meta (fabric signed envelope)
+            (204, Vec::new()),      // close
         ]
     }
 
@@ -487,9 +535,13 @@ mod tests {
     #[test]
     fn pat_never_leaks_in_dispatch_error() {
         let mut log = open_and_queue();
-        // exec rejected with 401 (bad PAT) → terminal; close attempted.
+        // §13.2 ingest submit rejected with 401 (bad credential) → terminal; close
+        // attempted (PAT). Acquire must return the WRAPPER (else a decode error).
         let client = client_with(FakeTransport::with(vec![
-            (201, serde_json::to_vec(&held_lease()).unwrap()),
+            (
+                200,
+                serde_json::to_vec(&acquire_resp_with_ingest()).unwrap(),
+            ),
             (401, Vec::new()),
             (204, Vec::new()),
         ]));
@@ -517,6 +569,46 @@ mod tests {
             "names the missing piece"
         );
         assert!(!json.contains(SENTINEL_PAT));
+    }
+
+    /// (5b) FAIL-CLOSED at the land altitude: a check lease whose acquire response
+    /// carries NO `envelope_ingest` (§13 not wired) is a fatal `--dispatch` error
+    /// (`NoEnvelopeIngest`) — the PR is NOT settled and NO envelope is captured,
+    /// never a silent fall-back or a fabricated cost.
+    #[test]
+    fn dispatch_absent_envelope_ingest_lands_nothing() {
+        let mut log = open_and_queue();
+        let records_before = log.records().len();
+        // Acquire returns a wrapper with NO envelope_ingest (a runner lease shape);
+        // the close is still attempted (PAT).
+        let no_ingest = AcquireResponse {
+            lease: held_lease(),
+            exec_endpoint: "/v1/leases/lease-land-1/exec".to_string(),
+            envelope_ingest: None,
+        };
+        let client = client_with(FakeTransport::with(vec![
+            (200, serde_json::to_vec(&no_ingest).unwrap()),
+            (204, Vec::new()),
+        ]));
+
+        let err = land_with_dispatch(&mut log, &client, "42", 3000)
+            .expect_err("absent envelope_ingest is a fatal --dispatch error");
+        let DispatchLandError::Runner(runner) = err else {
+            panic!("expected a runner error, got {err:?}");
+        };
+        assert!(
+            matches!(runner, RunnerExecError::NoEnvelopeIngest(_)),
+            "must be NoEnvelopeIngest, got {runner:?}"
+        );
+        assert_eq!(
+            log.records().len(),
+            records_before,
+            "a fail-closed --dispatch appends nothing to the log"
+        );
+        assert!(
+            captured_pr_envelope(&log).is_none(),
+            "no fabricated envelope"
+        );
     }
 
     /// (6) Plain land (no --dispatch) is UNCHANGED: `settle` with the default
