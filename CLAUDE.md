@@ -36,12 +36,13 @@ adversarial round (1–13) + a SOTA sweep. The integrity spine is genuinely soli
   git-free gix-pack unpack on the distroless engine; first real push returned `unpack ok` +
   `ok refs/heads/_pushsmoke`). The **live ref hot-swap is DONE** (#201, deployed 2026-06-26 —
   verified: a ref pushed post-deploy appears in the receive-pack advertise immediately, same engine
-  lifetime, no reboot), so the stale-advertise / false-non-fast-forward gap is CLOSED. Remaining caveats:
-  **(a)** an *incremental* push that builds on server-side history still hits the v0 self-contained-pack
-  limit (the pushed pack omits the existing-ancestor base → thin-pack / CAS-base reachability is the
-  tracked follow-up; a fresh-closure push is fine); **(b)** clone-back over the wire is still blocked by
-  the private read-gate (public-flag deferred).
-  clone-back over the wire is still blocked by the private read-gate (public-flag deferred).
+  lifetime, no reboot), so the stale-advertise / false-non-fast-forward gap is CLOSED. **Caveat (a) is
+  now also CLOSED:** an *incremental* push that builds on server-side history LANDS (#206 thin-pack /
+  CAS-base reachability — the resolver + reachability walk consult the CAS for an ancestor/REF_DELTA base
+  the pack omits; deployed + prod-verified 2026-06-26: a real fast-forward `0886fda..abb77f0` on a
+  server-side ancestor landed, reads stayed 200). So CREATE, UPDATE, and INCREMENTAL push all work live.
+  Remaining caveat: **(b)** clone-back over the wire is still blocked by the private read-gate
+  (public-flag deferred).
 - **Substrate — AC LIVE (2026-06-22), runner still transferred.** The CoreLink AC
   (memoization) is now LIVE: `check run` + `land queue` prefer `HttpAcClient::from_runtime`
   (#182), smoke-proven MISS→remote-HIT against tenant `3560e213`; the hot-CAS git tenant
@@ -147,11 +148,12 @@ the 9 POST verbs are code-complete + R2-CAS-persisted (proven against prod R2),
 SSE replay-then-close. The engine is **lazy git-from-CAS** (boots from the CoreLink
 CAS, ~5 s cold-start) and is now MULTI-REPO. **Magnitude: the single-tenant forge is now read+WRITE
 live — the `/v1` API (~20–25% across 2 repos, AC-memoized) PLUS git `push` over the wire (live
-2026-06-26: a pushed ref is advertised immediately via the live ref hot-swap #201, no reboot; CREATE
-*and* UPDATE of an existing branch both work live (the #2a update-false-reject was fixed + deployed +
-prod-verified 2026-06-26); remaining caveats — v0 = self-contained packs only (an incremental push on
-server-side history is rejected fail-closed); clone-back blocked by the private read-gate). Call it
-~25–30% of a single-tenant forge. Still single-digit % for a full
+2026-06-26: a pushed ref is advertised immediately via the live ref hot-swap #201, no reboot; CREATE,
+UPDATE, *and* INCREMENTAL push on server-side history all work live + prod-verified (#2a update-fix +
+#206 thin-pack/CAS-base reachability, both deployed + verified 2026-06-26); remaining caveat — clone-back
+blocked by the private read-gate). **The single-tenant WRITE path is now functionally complete over the
+wire.** Call it ~30% of a single-tenant forge (the remaining single-tenant gap is the read side: anonymous
+clone, owner-gated on the public-flag). Still single-digit % for a full
 MULTI-TENANT end-to-end forge: no live runner exec (dispatch waits on the runners-TL fabricd spawn
 fix), no multi-tenant identity, no anonymous clone, killer-data render unverified-from-here.**
 
@@ -159,8 +161,10 @@ fix), no multi-tenant identity, no anonymous clone, killer-data render unverifie
 ~~deploy current `main`~~ DONE (multi-repo + killer-data + AC live) → githugr TL render-verifies
 the killer-data with a token + runs the www → ~~git `push`/receive-pack~~ **DONE (#198, live
 2026-06-26 with caveats a+b)** → ~~live-snapshot refresh~~ **DONE (#201, live ref hot-swap — a pushed
-ref reflects in the advertise immediately, no reboot)** → **thin-pack / CAS-base reachability** (so an
-incremental push on server-side history works) + **anonymous-clone public-flag** (unblocks clone-back) → identity
+ref reflects in the advertise immediately, no reboot)** → ~~thin-pack / CAS-base reachability~~ **DONE
+(#206, deployed + prod-verified 2026-06-26 — incremental push on server-side history lands; the
+single-tenant WRITE path is now functionally complete)** → **anonymous-clone public-flag** (unblocks
+clone-back — the remaining single-tenant gap, owner-gated) → identity
 Clerk exchange (still gated on `HUGIT_SESSION_EXCHANGE_URL` + `hugit-prod-d1`) → runner fabric live →
 GitHub App + live mirror → multi-tenant. The non-code ones are owner/infra-gated. Per-capability
 status table + tracked seams: the audit doc above.
