@@ -116,16 +116,38 @@ fn validate_lease_id(lease_id: &str) -> Result<(), RunnerError> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Request body for `POST /v1/leases` — acquire a runner lease.
+///
+/// Transcribed from the AUTHORITATIVE frozen fabric DTO
+/// (`corelink-fabric-api::dto::AcquireRequest`), which is `deny_unknown_fields`:
+/// the caller supplies ONLY the fields the fabric cannot derive
+/// (`principal_chain`/`path_set` are resolved server-side from the authenticated
+/// tenant + claim, NOT sent). The prior shape carried `principal_chain` +
+/// `path_set` + a `ttl_ms` field — an OLD/never-live contract the fake-transport,
+/// PAT-gated client never exercised, so a real acquire `422`d
+/// `unknown field principal_chain` against the live fabric (the same drift class
+/// as the acquire-RESPONSE wrapper fix #204 and the close fix #205).
+///
+/// hugit is LIBERAL on its OWN side (no `deny_unknown_fields`); the load-bearing
+/// invariant is that it SERIALIZES to exactly the four keys the fabric accepts.
+/// The fabric's `runner` (direct-CI runner mode) + `toolchain_digest` (check-host
+/// B) fields are `#[serde(default)]` there and hugit's classic OFF-BOX path never
+/// sets them, so OMITTING them here is byte-identical to `runner: None,
+/// toolchain_digest: None` — they are deliberately NOT transcribed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AcquireLeaseRequest {
-    /// Ordered chain of principals (agent ids / user ids) requesting the lease.
-    pub principal_chain: Vec<String>,
-    /// Filesystem paths the lease should grant access to.
-    pub path_set: Vec<String>,
+    /// Pinned image reference (the fabric only FORMAT-checks for `sha256:`, NOT
+    /// existence). For hugit's off-box A-mode this is recorded metadata — no box
+    /// is ever spawned (hugit submits §13 off-box, never execs).
+    pub image_digest: String,
     /// Network policy name / ref governing the runner's outbound access.
     pub net_policy: String,
-    /// Requested lease time-to-live, in milliseconds.
-    pub ttl_ms: u64,
+    /// Temporary root directory requested for this runner (mirrors
+    /// `RunnerLease.tmp_root`).
+    pub tmp_root: String,
+    /// Requested lease TTL, in milliseconds; the fabric converts it into the
+    /// absolute `RunnerLease.expiry`. (The fabric's field name for the same u64
+    /// the prior `ttl_ms` carried.)
+    pub expiry_ms: u64,
 }
 
 /// §13.2 OFF-BOX ingest credential surfaced on the acquire response — the
@@ -913,10 +935,10 @@ mod tests {
 
         // acquire — the wrapper parses; the inner lease is byte-identical.
         let req = AcquireLeaseRequest {
-            principal_chain: vec!["agent:tester".to_string()],
-            path_set: vec!["/work".to_string()],
+            image_digest: "alpine@sha256:d9e853af2c8e".to_string(),
             net_policy: "deny-all".to_string(),
-            ttl_ms: 60_000,
+            tmp_root: "/work/tmp".to_string(),
+            expiry_ms: 60_000,
         };
         let got = client.acquire(&req).unwrap();
         assert_eq!(got.lease, lease);
@@ -981,6 +1003,50 @@ mod tests {
         assert_eq!(close_req["status"], "succeeded");
     }
 
+    /// The acquire REQUEST body serializes to EXACTLY the four keys the frozen
+    /// fabric `AcquireRequest` (`deny_unknown_fields`) accepts —
+    /// `{image_digest, net_policy, tmp_root, expiry_ms}` — and NONE of the
+    /// old/never-live fields (`principal_chain` / `path_set` / `ttl_ms`) that made
+    /// a real acquire `422 unknown field principal_chain`. This guards the wire
+    /// drift so it cannot recur.
+    #[test]
+    fn acquire_request_serializes_to_exactly_the_four_fabric_keys() {
+        let req = AcquireLeaseRequest {
+            image_digest: "alpine@sha256:d9e853af2c8e".to_string(),
+            net_policy: "isolated".to_string(),
+            tmp_root: "/work/tmp".to_string(),
+            expiry_ms: 60_000,
+        };
+        let value = serde_json::to_value(&req).unwrap();
+        let obj = value
+            .as_object()
+            .expect("the acquire request serializes to a JSON object");
+
+        // Exactly the four fabric keys — no more, no fewer.
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["expiry_ms", "image_digest", "net_policy", "tmp_root"],
+            "the acquire body must carry ONLY the four keys the fabric's \
+             deny_unknown_fields AcquireRequest accepts"
+        );
+
+        // The retired fields must be ABSENT (their presence is the 422 root cause).
+        for retired in ["principal_chain", "path_set", "ttl_ms"] {
+            assert!(
+                !obj.contains_key(retired),
+                "the retired field `{retired}` must never be serialized (it 422s the fabric)"
+            );
+        }
+
+        // The values are carried verbatim under the fabric's field names.
+        assert_eq!(obj["image_digest"], "alpine@sha256:d9e853af2c8e");
+        assert_eq!(obj["net_policy"], "isolated");
+        assert_eq!(obj["tmp_root"], "/work/tmp");
+        assert_eq!(obj["expiry_ms"], 60_000);
+    }
+
     /// A representative fabric `CloseResponse` body — the §13.1 metrics PLUS the
     /// fabric extras (`attestation`, the result-binding sigs, `fabric_key_id`,
     /// echoed `check_result`) hugit deliberately tolerates-and-ignores (liberal,
@@ -1015,10 +1081,10 @@ mod tests {
         let config = RunnerConfig::new("https://runner.example", SENTINEL_PAT).unwrap();
         let client = LeaseClient::with_transport(config, transport);
         let req = AcquireLeaseRequest {
-            principal_chain: vec![],
-            path_set: vec![],
+            image_digest: "alpine@sha256:d9e853af2c8e".to_string(),
             net_policy: "deny-all".to_string(),
-            ttl_ms: 1,
+            tmp_root: "/work/tmp".to_string(),
+            expiry_ms: 1,
         };
         match client.acquire(&req) {
             Err(RunnerError::Busy { .. }) => {}
@@ -1137,10 +1203,10 @@ mod tests {
         let config = RunnerConfig::new("https://runner.example", SENTINEL_PAT).unwrap();
         let client = LeaseClient::with_transport(config, transport);
         let req = AcquireLeaseRequest {
-            principal_chain: vec![],
-            path_set: vec![],
+            image_digest: "alpine@sha256:d9e853af2c8e".to_string(),
             net_policy: "deny-all".to_string(),
-            ttl_ms: 1,
+            tmp_root: "/work/tmp".to_string(),
+            expiry_ms: 1,
         };
         let got = client.acquire(&req).unwrap();
         assert_eq!(got.lease, lease);
@@ -1169,10 +1235,10 @@ mod tests {
         let config = RunnerConfig::new("https://runner.example", SENTINEL_PAT).unwrap();
         let client = LeaseClient::with_transport(config, transport);
         let req = AcquireLeaseRequest {
-            principal_chain: vec![],
-            path_set: vec![],
+            image_digest: "alpine@sha256:d9e853af2c8e".to_string(),
             net_policy: "deny-all".to_string(),
-            ttl_ms: 1,
+            tmp_root: "/work/tmp".to_string(),
+            expiry_ms: 1,
         };
         let got = client.acquire(&req).unwrap();
         assert_eq!(got.lease, lease);

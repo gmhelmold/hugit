@@ -68,8 +68,25 @@ use crate::porcelain::PorcelainError;
 /// no outbound network at the porcelain altitude → deny-all (fail-closed).
 const LAND_DISPATCH_NET_POLICY: &str = "deny-all";
 
-/// The TTL (ms) requested for a land-time check-dispatch lease.
+/// The TTL (ms) requested for a land-time check-dispatch lease (the fabric's
+/// `expiry_ms`).
 const LAND_DISPATCH_TTL_MS: u64 = 300_000;
+
+/// The `tmp_root` requested for a land-time check-dispatch lease. The fabric
+/// requires the field; hugit's off-box A-mode never materializes a box, so this
+/// is recorded metadata (the canonical fabric value).
+const LAND_DISPATCH_TMP_ROOT: &str = "/work/tmp";
+
+/// The pinned-FORMAT `image_digest` for a land-time OFF-BOX §13-ingest lease.
+///
+/// hugit's off-box A-mode submits its §13 trajectory off-box and NEVER calls
+/// `exec`, so the fabric records this digest but spawns NO box — it is metadata.
+/// The fabric only FORMAT-checks for `sha256:` (it does NOT resolve existence),
+/// so a clearly-labelled all-zero sentinel is HONEST about "recorded, never
+/// spawned" — more honest than borrowing a real image's digest (which would
+/// imply a box that never runs).
+const LAND_DISPATCH_IMAGE_DIGEST: &str =
+    "hugit-offbox-attest@sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
 /// An error from the `--dispatch` land path.
 ///
@@ -161,11 +178,14 @@ fn dispatch_pr_metrics<T: RunnerTransport>(
     client: &LeaseClient<T>,
     opened: &OpenedPr,
 ) -> Result<IntentMetrics, RunnerExecError> {
+    // The fabric resolves principal_chain/path_set server-side from the
+    // authenticated tenant + claim; the acquire body carries ONLY the four fields
+    // the frozen `deny_unknown_fields` AcquireRequest accepts.
     let acquire = AcquireLeaseRequest {
-        principal_chain: vec![format!("pr:{}", opened.pr_id)],
-        path_set: vec![],
+        image_digest: LAND_DISPATCH_IMAGE_DIGEST.to_string(),
         net_policy: LAND_DISPATCH_NET_POLICY.to_string(),
-        ttl_ms: LAND_DISPATCH_TTL_MS,
+        tmp_root: LAND_DISPATCH_TMP_ROOT.to_string(),
+        expiry_ms: LAND_DISPATCH_TTL_MS,
     };
     let def = land_check_def(opened);
     let def_digest = def.def_digest.clone();
