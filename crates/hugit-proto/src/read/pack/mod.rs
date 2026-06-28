@@ -552,6 +552,16 @@ pub const MAX_DIFF_FILES: usize = 2_000;
 /// line counts are reported as `0`/`0` (treated like a binary blob).
 const MAX_DIFF_BLOB_BYTES: usize = 1024 * 1024;
 
+/// Hard WALL-CLOCK ceiling on one `tree_diff`. `MAX_DIFF_FILES` is a RESULT bound,
+/// NOT a latency bound: on the single-threaded engine each subtree/blob is a
+/// synchronous CAS (R2) fetch, so a cold-cache diff of a large commit walks up to
+/// ~`MAX_DIFF_FILES` sequential fetches and blocks the WHOLE accept loop for minutes
+/// — the same single-thread DoS class as the code-search wedge (2026-06-27). The
+/// walk STOPS at this deadline with the partial diff it has, rather than wedge the
+/// engine (a diffstat is informational; partial is acceptable). Checked between
+/// every subtree recursion + file row.
+pub const DIFF_BUDGET: std::time::Duration = std::time::Duration::from_millis(2_000);
+
 /// Resolve a commit oid to its root-tree oid. `Ok(None)` when the object is
 /// absent or is not a commit. The commit's tree id is decoded with the canonical
 /// `gix_object::CommitRefIter` — the same decoder [`crate::read::serve`] uses —
@@ -592,8 +602,28 @@ pub fn tree_diff(
     parent_tree: &ObjectId,
     new_tree: &ObjectId,
 ) -> Result<Vec<FileDiff>, PackError> {
+    tree_diff_until(
+        src,
+        parent_tree,
+        new_tree,
+        std::time::Instant::now() + DIFF_BUDGET,
+    )
+}
+
+/// Like [`tree_diff`] but with an explicit wall-clock `deadline` — the tree walk
+/// stops at it and returns the PARTIAL diff accumulated so far (rather than wedge
+/// the single-threaded engine on a cold-cache large-commit diff; see [`DIFF_BUDGET`]).
+/// A caller that runs MANY diffs (e.g. a review over N intents) shares ONE deadline
+/// across them so the whole request is bounded, not N × the budget. Deterministically
+/// testable: a deadline already in the past stops before any fetch.
+pub fn tree_diff_until(
+    src: &dyn ObjectSource,
+    parent_tree: &ObjectId,
+    new_tree: &ObjectId,
+    deadline: std::time::Instant,
+) -> Result<Vec<FileDiff>, PackError> {
     let mut out = Vec::new();
-    tree_diff_inner(src, parent_tree, new_tree, "", 0, &mut out)?;
+    tree_diff_inner(src, parent_tree, new_tree, "", 0, deadline, &mut out)?;
     out.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(out)
 }
@@ -633,8 +663,16 @@ fn tree_diff_inner(
     new_tree: &ObjectId,
     prefix: &str,
     depth: usize,
+    deadline: std::time::Instant,
     out: &mut Vec<FileDiff>,
 ) -> Result<(), PackError> {
+    // WALL-CLOCK DoS guard: stop with the partial diff rather than block the
+    // single-threaded accept loop on a cold-cache large diff (each subtree/blob is
+    // a synchronous CAS fetch). Checked here so every recursion + the file loop
+    // below re-checks it.
+    if std::time::Instant::now() >= deadline {
+        return Ok(());
+    }
     // Identical subtree → no change anywhere below; git's fast prune.
     if parent_tree == new_tree {
         return Ok(());
@@ -650,8 +688,8 @@ fn tree_diff_inner(
         old_entries.keys().chain(new_entries.keys()).collect();
 
     for name in names {
-        if out.len() >= MAX_DIFF_FILES {
-            return Ok(());
+        if out.len() >= MAX_DIFF_FILES || std::time::Instant::now() >= deadline {
+            return Ok(()); // result-count OR wall-clock ceiling → partial diff.
         }
         let old = old_entries.get(name);
         let new = new_entries.get(name);
@@ -667,7 +705,7 @@ fn tree_diff_inner(
                     continue; // identical oid on both sides — unchanged.
                 }
                 if o_mode.is_tree() && n_mode.is_tree() {
-                    tree_diff_inner(src, o_oid, n_oid, &path, depth + 1, out)?;
+                    tree_diff_inner(src, o_oid, n_oid, &path, depth + 1, deadline, out)?;
                 } else if o_mode.is_tree() != n_mode.is_tree() {
                     // file ↔ directory replacement: remove all the old, add all the new.
                     diff_one_side(src, o_oid, *o_mode, &path, FileChange::Removed, out)?;
@@ -854,6 +892,30 @@ mod tree_diff_tests {
         let b = blob(&mut src, "a\nb\n");
         let t = tree(&mut src, vec![("100644", "f.txt", b)]);
         assert!(tree_diff(&src, &t, &t).unwrap().is_empty());
+    }
+
+    #[test]
+    fn tree_diff_wall_clock_budget_stops_before_any_fetch() {
+        // The wall-clock DIFF_BUDGET is the real latency guard on the single-threaded
+        // engine (MAX_DIFF_FILES is only a result bound — 2000 cold-cache R2 fetches
+        // still wedge the accept loop, the 2026-06-27 code-search DoS class). A
+        // deadline in the PAST must stop the walk before producing any row —
+        // deterministic, no timing flake.
+        let mut src = CasObjectSource::new();
+        let old = blob(&mut src, "a\n");
+        let new = blob(&mut src, "a\nb\n");
+        let parent = tree(&mut src, vec![("100644", "f.txt", old)]);
+        let child = tree(&mut src, vec![("100644", "f.txt", new)]);
+        let past = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        assert!(
+            tree_diff_until(&src, &parent, &child, past)
+                .unwrap()
+                .is_empty(),
+            "a past deadline must stop the diff before any row"
+        );
+        // The guard bounds LATENCY, it does not break diffs: a real (future) budget
+        // still produces the row.
+        assert_eq!(tree_diff(&src, &parent, &child).unwrap().len(), 1);
     }
 
     #[test]

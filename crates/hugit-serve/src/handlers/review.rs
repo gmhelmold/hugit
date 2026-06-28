@@ -107,6 +107,14 @@ pub fn build_review(
     })
 }
 
+/// Max intents whose diffs are summed into one PR diffstat. Each intent diff is a
+/// CAS tree-walk (`tree_diff`, itself wall-clock-bounded); this caps how many of
+/// them ONE request runs so a PR with pathologically many intents can't multiply
+/// the per-diff budget into a single-threaded-engine stall (the diffstat is
+/// informational — a partial sum is acceptable, and `tree_diff`'s own budget is
+/// the load-bearing latency guard).
+const MAX_REVIEW_DIFF_INTENTS: usize = 64;
+
 /// The PR's aggregate diffstat: `(file_count, added, removed)` over the union of
 /// its intents' commits vs. their parents. Honest `(0, 0, 0)` when there is no
 /// git source or no intent commit resolves. A path touched by ≥2 intents is
@@ -121,7 +129,7 @@ fn pr_diffstat(log: &EventLog, intent_ids: &[String], src: GitSrc<'_>) -> (usize
     // Union the per-intent file rows by path; sum added/removed per path.
     let mut by_path: std::collections::BTreeMap<String, (u32, u32)> =
         std::collections::BTreeMap::new();
-    for id in intent_ids {
+    for id in intent_ids.iter().take(MAX_REVIEW_DIFF_INTENTS) {
         let Some(intent) = intent_log.by_id(id) else {
             continue;
         };
