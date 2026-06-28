@@ -1,9 +1,10 @@
 //! Hugit-side wire-conformance fixtures for the runner-fabric response shapes.
 //!
-//! These pin the EXACT JSON shapes hugit's lease client must parse off the live
-//! CoreLink Runners fabric, so the transcription-drift class that produced the
-//! `acquire` wrapper bug (#204) and the `close` empty-body bug (this change)
-//! cannot silently recur. Each fixture is deserialized into hugit's transcribed
+//! These pin the EXACT JSON shapes hugit's lease client must parse off — AND the
+//! acquire REQUEST body it must SEND to — the live CoreLink Runners fabric, so the
+//! transcription-drift class that produced the `acquire` wrapper bug (#204), the
+//! `close` empty-body bug (#205), and the acquire-REQUEST `unknown field
+//! principal_chain` 422 (this change) cannot silently recur. Each fixture is deserialized into hugit's transcribed
 //! type and asserted field-for-field; an unannounced field rename / type / shape
 //! drift on the fabric breaks these tests, BEFORE any live call.
 //!
@@ -21,7 +22,7 @@
 
 use std::path::PathBuf;
 
-use hugit_checks::runner::{AcquireResponse, CloseResponse};
+use hugit_checks::runner::{AcquireLeaseRequest, AcquireResponse, CloseResponse};
 use hugit_contracts::{IntentMetrics, RunnerState};
 
 /// Read a wire fixture under `tests/fixtures/wire/`.
@@ -31,6 +32,61 @@ fn fixture(name: &str) -> String {
         .join(name);
     std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read fixture {}: {e}", path.display()))
+}
+
+/// The acquire REQUEST hugit SENDS serializes to EXACTLY the four keys the frozen
+/// `deny_unknown_fields` fabric `AcquireRequest` accepts
+/// (`{image_digest, net_policy, tmp_root, expiry_ms}`) and carries NONE of the
+/// old/never-live fields (`principal_chain` / `path_set` / `ttl_ms`) that made a
+/// real acquire `422 unknown field principal_chain`. The canonical fabric body
+/// (`AcquireRequest.json`) pins the key-set so this drift class cannot recur.
+#[test]
+fn acquire_request_serializes_to_exactly_the_fabric_keys() {
+    // The canonical fabric body — the authoritative key-set hugit must produce.
+    let fabric: serde_json::Value = serde_json::from_str(&fixture("AcquireRequest.json")).unwrap();
+    let mut fabric_keys: Vec<&str> = fabric
+        .as_object()
+        .expect("the canonical fabric AcquireRequest is a JSON object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    fabric_keys.sort_unstable();
+    assert_eq!(
+        fabric_keys,
+        vec!["expiry_ms", "image_digest", "net_policy", "tmp_root"],
+        "the fixture pins the frozen fabric key-set"
+    );
+
+    // hugit's transcribed request must serialize to EXACTLY that key-set.
+    let req = AcquireLeaseRequest {
+        image_digest: "alpine@sha256:d9e853af2c8e".to_string(),
+        net_policy: "isolated".to_string(),
+        tmp_root: "/work/tmp".to_string(),
+        expiry_ms: 60_000,
+    };
+    let value = serde_json::to_value(&req).unwrap();
+    let obj = value.as_object().expect("acquire request → JSON object");
+    let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys, fabric_keys,
+        "hugit's acquire body must carry ONLY the four frozen fabric keys"
+    );
+    for retired in ["principal_chain", "path_set", "ttl_ms"] {
+        assert!(
+            !obj.contains_key(retired),
+            "the retired field `{retired}` must never serialize (it 422s the fabric)"
+        );
+    }
+
+    // It also round-trips back through hugit's transcribed type from the canonical
+    // fabric body (liberal-in: hugit parses what the fabric accepts).
+    let parsed: AcquireLeaseRequest =
+        serde_json::from_str(&fixture("AcquireRequest.json")).unwrap();
+    assert_eq!(parsed.net_policy, "isolated");
+    assert_eq!(parsed.tmp_root, "/work/tmp");
+    assert_eq!(parsed.expiry_ms, 60_000);
+    assert!(parsed.image_digest.contains("sha256:"));
 }
 
 /// The `AcquireResponse` WRAPPER for a CHECK lease deserializes byte-faithfully:

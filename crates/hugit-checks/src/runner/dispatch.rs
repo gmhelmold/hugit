@@ -541,10 +541,10 @@ mod tests {
 
     fn acquire_req() -> AcquireLeaseRequest {
         AcquireLeaseRequest {
-            principal_chain: vec!["agent:tester".to_string()],
-            path_set: vec!["/work".to_string()],
+            image_digest: "alpine@sha256:d9e853af2c8e".to_string(),
             net_policy: "deny-all".to_string(),
-            ttl_ms: 60_000,
+            tmp_root: "/work/tmp".to_string(),
+            expiry_ms: 60_000,
         }
     }
 

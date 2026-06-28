@@ -1,0 +1,6 @@
+{
+  "image_digest": "alpine@sha256:d9e853af2c8e6b6da8a2c4c8c8e2f3a1b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1",
+  "net_policy": "isolated",
+  "tmp_root": "/work/tmp",
+  "expiry_ms": 60000
+}
