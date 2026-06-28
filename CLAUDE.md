@@ -49,6 +49,17 @@ adversarial round (1–13) + a SOTA sweep. The integrity spine is genuinely soli
   `d863fafb` serves the engine's repos. STILL deferred: the runner fabric → `corelink-runners`;
   cold-store (`UnwiredColdStore`) persists no transcript blobs; **merge-as-re-execution records
   the demand but never dispatches an agent** (intentional P2 deferral).
+  **Cost-killer (A-path) WIRE PROVEN LIVE 2026-06-28** (after CoreLink's #224 share-agent token-store fix
+  — my diagnosis): a manual smoke against `corelink-fabricd` with the minted `HUGIT_RUNNER_PAT` ran the
+  WHOLE off-box A-path — `acquire 200` → `§13 ingest 200` (scoped cred) → `close 200` with the fabric
+  **deriving tokens from the submitted events + signing the attestation** (`result_binding_sig_v2`). En
+  route this surfaced + fixed the 3rd lease-client wire-drift (acquire REQUEST shape — `principal_chain`
+  → the fabric's `{image_digest,net_policy,tmp_root,expiry_ms}`, #214; after the acquire-resp #204 + close
+  #205). **Cost is honest-zero (`cost_usd_micros:0`)** — the fabric's `IngestUsage`/`CloseRequest` carry
+  tokens but NO cost field yet, so non-zero attested cost waits on the Runners TL adding `cost_usd_micros`
+  to those DTOs (per the owner's provider-billed re-decision) + hugit's #64 submit-side + a real off-box
+  agent-loop event source (P2). Owner-decided 2026-06-28: hold the first public `/insights` land until the
+  cost-field lands, so the page's first rendered cost is real + non-zero (no honest-zero intermediate).
 - **Deployed network surface:** `hugit-serve` (`/v1` + `/readyz` + git-from-CAS upload-pack),
   MULTI-REPO serving `hugit` + `githugr` (2026-06-22). NO runner endpoint; receive-pack (push)
   **now live** (flag-on + `cas:rw` PAT on prod, 2026-06-26 — caveats a+b above).
