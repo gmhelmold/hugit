@@ -131,6 +131,7 @@ fn cost_for(log: &EventLog, opened: &OpenedPr) -> CostVm {
     match record {
         Ok(rec) => CostVm {
             tokens_total: rec.cost.total.tokens,
+            cost_usd_micros: rec.cost.total.cost_usd_micros,
             usd: rec.cost.total.cost_usd_micros as f64 / 1_000_000.0,
             // HONEST: the rollup carries no per-model token split, so emitting
             // `(model, 0)` would be a misleading stub-zero. Empty is honest.
@@ -146,6 +147,7 @@ fn cost_for(log: &EventLog, opened: &OpenedPr) -> CostVm {
 fn zero_cost() -> CostVm {
     CostVm {
         tokens_total: 0,
+        cost_usd_micros: 0,
         usd: 0.0,
         model_breakdown: vec![],
         cache_savings: String::new(),

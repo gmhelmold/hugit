@@ -154,7 +154,16 @@ pub struct EnvelopeVm {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CostVm {
     pub tokens_total: u64,
+    /// DEPRECATED (kept one release for back-compat) — the pre-divided dollar cost
+    /// as an f64. Prefer [`cost_usd_micros`](Self::cost_usd_micros): the canonical
+    /// integer-micro-USD money unit (ADR-0001), no float rounding. While both
+    /// coexist, `usd == cost_usd_micros as f64 / 1_000_000.0`.
     pub usd: f64,
+    /// The canonical money unit: integer micro-USD (ADR-0001) — the same
+    /// `cost_usd_micros: u64` the rest of the contract uses. Additive + serde-default
+    /// (forward-compat: an older payload without it deserializes to `0`).
+    #[serde(default)]
+    pub cost_usd_micros: u64,
     /// (model, tokens) pairs, largest first.
     pub model_breakdown: Vec<(String, u64)>,
     #[serde(default)]

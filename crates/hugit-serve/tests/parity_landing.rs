@@ -205,6 +205,7 @@ fn landing_item_card_round_trips_externally_tagged() {
             },
             cost: CostVm {
                 tokens_total: 0,
+                cost_usd_micros: 0,
                 usd: 0.0,
                 model_breakdown: vec![],
                 cache_savings: String::new(),
