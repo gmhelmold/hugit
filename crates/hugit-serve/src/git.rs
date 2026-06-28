@@ -391,8 +391,13 @@ const PUSH_FORBIDDEN_BODY: &str =
 /// is plain text because `git` echoes the remote body in the terminal, giving
 /// the developer an actionable message instead of a cryptic connection error.
 /// The receive-pack (push) capabilities we advertise. `report-status` so the client
-/// reads our result report; `object-format=sha1` matches the proto's hash.
-const RECEIVE_CAPS: &str = "report-status object-format=sha1 agent=hugit-serve";
+/// reads our result report; `delete-refs` so the git CLIENT will actually SEND a
+/// zero-id (delete) command — per the protocol a client refuses to push a
+/// `<old> 0{40} <ref>` delete unless the server advertised `delete-refs`, which is
+/// why `git push --delete` silently sent an empty command list before this (the
+/// server-side delete handler already worked — proven via a raw POST; this unlocks
+/// the client path); `object-format=sha1` matches the proto's hash.
+const RECEIVE_CAPS: &str = "report-status delete-refs object-format=sha1 agent=hugit-serve";
 
 /// Serve `GET /<repo>/info/refs?service=git-receive-pack` — the push advertisement.
 /// Gated identically to the push itself (flag + write seam + write-authz), so a
@@ -1289,5 +1294,20 @@ mod live_refs_tests {
             delete_ref_decision(&refs, "refs/heads/ghost", &"a".repeat(40)),
             Err("delete-of-absent-ref")
         );
+    }
+
+    #[test]
+    fn receive_advert_advertises_delete_refs_so_the_client_sends_deletes() {
+        // Per the git protocol, a client refuses to send a zero-id (delete)
+        // command unless the server advertised `delete-refs` — without it
+        // `git push --delete` ships an EMPTY command list and the delete never
+        // reaches the (working) server handler. This regression-guards that the
+        // capability stays advertised.
+        assert!(
+            RECEIVE_CAPS.split(' ').any(|c| c == "delete-refs"),
+            "receive-pack advert must offer delete-refs; got: {RECEIVE_CAPS}"
+        );
+        // report-status must also stay (the client reads our ok/ng report).
+        assert!(RECEIVE_CAPS.split(' ').any(|c| c == "report-status"));
     }
 }
