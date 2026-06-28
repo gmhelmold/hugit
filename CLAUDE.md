@@ -152,12 +152,13 @@ live — the `/v1` API (~20–25% across 2 repos, AC-memoized) PLUS git `push` o
 UPDATE, INCREMENTAL push on server-side history, *and* DELETE all work live + prod-verified
 (#2a update-fix + #206 thin-pack/CAS-base reachability, deployed+verified 2026-06-26; #208 delete-ref with
 a default-branch guard, deployed+verified 2026-06-28 — 3 test refs deleted live via the receive-pack wire,
-`main` guarded, advertise dropped them immediately); remaining caveats — clone-back blocked by the private
-read-gate, AND `git push --delete` via the git CLIENT currently gets "remote rejected" (the SERVER delete
-is proven live via a raw receive-pack POST returning `ok`; the git-client path likely sends an
-empty-pack/extra-capability the v0 single-ref handler rejects — a tracked compat follow-up, NOT a server
-hole). **The single-tenant WRITE path is functionally complete at the wire (create + update + incremental +
-delete all proven live); the git-client delete UX is the one open refinement.** (Op note: the engine is behind Cloudflare bot-protection —
+`main` guarded, advertise dropped them immediately; #209 added the `delete-refs` capability to the
+advertise — deployed+verified 2026-06-28 — so **`git push --delete` works via the REAL git client**, proven
+live: `git push --delete _clidel` → ` - [deleted]` and the ref dropped from the advertise. The earlier
+"remote rejected" was the client refusing to send a zero-id delete because the v0 advertise omitted
+`delete-refs`; the server handler always worked); remaining caveat — clone-back blocked by the private
+read-gate. **The single-tenant WRITE path is fully client-usable via standard git: create + update +
+incremental + delete, all proven live end-to-end.** (Op note: the engine is behind Cloudflare bot-protection —
 a non-git/non-browser UA gets `403 error 1010`; probe with a `git/`/browser UA.) Call it ~30% of a single-tenant forge (the remaining single-tenant gap is the read side: anonymous
 clone, owner-gated on the public-flag). Still single-digit % for a full
 MULTI-TENANT end-to-end forge: no live runner exec (dispatch waits on the runners-TL fabricd spawn
