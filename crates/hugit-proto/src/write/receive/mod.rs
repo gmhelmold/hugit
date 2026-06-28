@@ -111,13 +111,20 @@ pub const DEFAULT_MAX_DELTA_PASSES: u32 = 1024;
 /// once the lookups exceed it ([`ReceiveError::CasLookupBudgetExceeded`]).
 ///
 /// Sized generous for an honest incremental push (whose pushed-vs-CAS *frontier* —
-/// the parent commit + the handful of unchanged top-level trees — is tiny) yet far
-/// below what a 16 MiB pack of minimal REF_DELTA entries could declare (~550k), so
-/// the adversarial fan-out case fails closed long before it costs real R2 traffic.
-/// The two new CAS-read surfaces (delta-base resolution in `unpack_pack`, and the
-/// reachability walk) are each bounded by this value independently, so the total
-/// CAS lookups one ingest can make is ≤ 2× this ceiling — still finite.
-pub const DEFAULT_MAX_CAS_LOOKUPS: u32 = 100_000;
+/// the parent commit + the handful of unchanged top-level trees — is tiny: tens to
+/// low-hundreds of objects even for a large incremental push) yet bounds the
+/// adversarial fan-out. **A COUNT bound (fail-closed on exceed) is the right guard
+/// HERE, not a wall-clock budget**: a push is a transaction, so truncating it
+/// mid-resolution would be wrong — reject the (pathological) push outright instead.
+/// **Lowered 100_000 → 4_096 (audit 2026-06-28):** on the SINGLE-THREADED engine
+/// each lookup is a synchronous R2 fetch, so 100k = ~hours of blocked accept loop
+/// (the count-bound-not-latency-bound systemic pattern — same class as the
+/// code-search/diff DoS, here on the operator-only write path). 4_096 covers any
+/// honest incremental push by a wide margin while capping a malicious thin-pack's
+/// R2 fan-out to minutes, fail-closed. The two CAS-read surfaces (delta-base
+/// resolution + the reachability walk) are each bounded by this independently, so
+/// one ingest makes ≤ 2× this — still finite.
+pub const DEFAULT_MAX_CAS_LOOKUPS: u32 = 4_096;
 
 /// Limits applied to one receive-pack ingest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
