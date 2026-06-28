@@ -45,6 +45,56 @@ pub struct DiffVm {
     pub hunks: Vec<HunkVm>,
 }
 
+/// The structured outcome class of a [`VerdictVm`], beside the localized
+/// `verdict` prose — githugr styles from this discriminant instead of
+/// substring-matching the prose. Three-state, mirroring the engine's
+/// `Verdict::{Approve, FixFirst, Reject}` (`verdict_object.rs`):
+/// - `Pass` — approve-shaped (APPROVE / PROVEN).
+/// - `Warn` — fix-first-shaped (FIX-FIRST / changes-requested).
+/// - `Fail` — reject-shaped (REJECT).
+///
+/// CONSERVATIVE DEFAULT: an unrecognized outcome maps to the safest NON-green
+/// `Warn` (never `Pass` — an unknown verdict is never silently "green"). The
+/// `#[default]` variant is `Pass` only so an ABSENT field on an old/forward-compat
+/// payload round-trips to the value those payloads implied (no verdict carried =
+/// the contract's neutral baseline); the live mapping fn [`decision_of`] never
+/// returns `Pass` for an unrecognized string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum VerdictDecision {
+    #[default]
+    Pass,
+    Warn,
+    Fail,
+}
+
+/// Map an engine verdict outcome string to a structured [`VerdictDecision`].
+///
+/// The SINGLE shared mapping used by every VerdictVm build site so all surfaces
+/// agree. Accepts every canonical spelling the engine emits across the 4 sites:
+/// the uppercase porcelain form (`APPROVE` / `FIX-FIRST` / `REJECT`,
+/// `review.rs`/`attention.rs`/`intent_detail.rs`) AND the `Debug`-of-enum form
+/// the redacted `VerdictView.outcome` carries (`Approve` / `FixFirst` / `Reject`,
+/// `landing.rs`/the ledger fallback). Also recognizes the `PROVEN` / `changes
+/// requested` aliases that appear on the intent status surfaces. Matching is
+/// case-insensitive and tolerant of `-`/`_`/space separators.
+///
+/// CONSERVATIVE: an UNRECOGNIZED outcome → `Warn` (the safest non-green), never
+/// `Pass` — an unknown verdict is never silently treated as approved.
+pub fn decision_of(outcome: &str) -> VerdictDecision {
+    let norm: String = outcome
+        .chars()
+        .filter(|c| !matches!(c, '-' | '_' | ' '))
+        .flat_map(char::to_lowercase)
+        .collect();
+    match norm.as_str() {
+        "approve" | "approved" | "pass" | "passed" | "proven" => VerdictDecision::Pass,
+        "fixfirst" | "warn" | "changesrequested" => VerdictDecision::Warn,
+        "reject" | "rejected" | "fail" | "failed" => VerdictDecision::Fail,
+        // Conservative: an unknown outcome is never "green".
+        _ => VerdictDecision::Warn,
+    }
+}
+
 /// A review verdict as displayed (APPROVE / FIX-FIRST / REJECT shape).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerdictVm {
@@ -57,6 +107,12 @@ pub struct VerdictVm {
     pub lens: String,
     #[serde(default)]
     pub evidence_mono_terms: Vec<String>,
+    /// Structured outcome class beside the `verdict` prose (githugr styles from
+    /// this discriminant). Derived from the SAME outcome via [`decision_of`].
+    /// Additive + forward-compat: an old payload without it defaults to
+    /// [`VerdictDecision::Pass`] (the neutral baseline). The prose `verdict` stays.
+    #[serde(default)]
+    pub decision: VerdictDecision,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -218,4 +274,68 @@ pub struct DashboardRepoVm {
     pub visibility: String,
     pub open_prs: u32,
     pub last_activity: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `decision_of` maps every canonical engine outcome spelling (both the
+    /// uppercase porcelain form and the `Debug`-of-enum form) to the right class,
+    /// and falls CONSERVATIVE (`Warn`, never `Pass`) for an unrecognized outcome.
+    #[test]
+    fn decision_of_maps_canonical_outcomes() {
+        // approve-shaped → Pass
+        for s in ["APPROVE", "Approve", "approved", "PROVEN", "proven", "pass"] {
+            assert_eq!(decision_of(s), VerdictDecision::Pass, "{s} → Pass");
+        }
+        // fix-first / warn-shaped → Warn
+        for s in [
+            "FIX-FIRST",
+            "FixFirst",
+            "fix_first",
+            "warn",
+            "changes requested",
+        ] {
+            assert_eq!(decision_of(s), VerdictDecision::Warn, "{s} → Warn");
+        }
+        // reject / fail-shaped → Fail
+        for s in ["REJECT", "Reject", "rejected", "fail"] {
+            assert_eq!(decision_of(s), VerdictDecision::Fail, "{s} → Fail");
+        }
+        // Unrecognized → conservative Warn (NEVER Pass).
+        assert_eq!(decision_of("???"), VerdictDecision::Warn);
+        assert_eq!(decision_of(""), VerdictDecision::Warn);
+    }
+
+    /// `VerdictVm.decision` round-trips beside the prose AND forward-compat-
+    /// defaults to `Pass` when absent from an old payload (the prose stays).
+    #[test]
+    fn verdict_vm_decision_round_trips_and_defaults() {
+        let vm = VerdictVm {
+            verdict: "REJECT".to_string(),
+            reviewer: "opus-4.8".to_string(),
+            summary: "blocked".to_string(),
+            adversarial: true,
+            lens: "correctness".to_string(),
+            evidence_mono_terms: vec!["iat".to_string()],
+            decision: decision_of("REJECT"),
+        };
+        assert_eq!(vm.decision, VerdictDecision::Fail);
+        let reparsed: VerdictVm =
+            serde_json::from_str(&serde_json::to_string(&vm).unwrap()).unwrap();
+        assert_eq!(vm, reparsed, "VerdictVm round-trip is lossless");
+
+        // Forward-compat: an old payload WITHOUT `decision` defaults to Pass.
+        let legacy = r#"{
+            "verdict": "APPROVE", "reviewer": "r", "summary": "s",
+            "adversarial": true
+        }"#;
+        let parsed: VerdictVm = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            parsed.decision,
+            VerdictDecision::Pass,
+            "absent decision defaults to Pass (forward-compat)"
+        );
+    }
 }

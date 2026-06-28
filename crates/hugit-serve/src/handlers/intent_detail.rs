@@ -26,7 +26,7 @@ use hugit_cli::pr::{INTENT_ENVELOPE_KIND, PR_OPENED_KIND};
 use hugit_cli::verdict::VERDICT_RECORDED_KIND;
 use hugit_contracts::VerdictObject;
 use hugit_contracts::context_envelope::{Altitude, ContextEnvelope};
-use hugit_http_contracts::common::{CampaignChipVm, DiffVm, VerdictVm};
+use hugit_http_contracts::common::{CampaignChipVm, DiffVm, VerdictVm, decision_of};
 use hugit_http_contracts::intent_detail::{
     AuthorshipVm, EnvelopeAltitudeVm, IntentDetailVm, MetricsVm, SnapshotVm,
 };
@@ -92,6 +92,8 @@ pub fn build_intent_detail(
                     adversarial: true, // panel-sourced (was wrongly hardcoded false)
                     lens: scrub(&v.lens),
                     evidence_mono_terms: v.claims_checked.iter().map(|c| scrub(c)).collect(),
+                    // REAL — structured, from the canonical (unscrubbed) outcome.
+                    decision: decision_of(&v.outcome),
                 }]
             })
             .unwrap_or_default()
@@ -351,6 +353,7 @@ fn verdict_vm_from_object(vo: &VerdictObject) -> VerdictVm {
         adversarial: true, // panel-sourced invariant (matches review.rs)
         lens,
         evidence_mono_terms,
+        decision: decision_of(outcome), // REAL — structured, same outcome source
     }
 }
 

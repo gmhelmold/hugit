@@ -9,12 +9,12 @@
 use crate::fmt::{PR_CARDS_CAP, scrub};
 use hugit_cli::pr::{
     CAMPAIGN_OPENED_KIND, INTENT_ENVELOPE_KIND, OpenedPr, PR_ABANDONED_KIND, PR_ENVELOPE_KIND,
-    PR_LANDED_KIND, PR_OPENED_KIND, PR_QUEUED_KIND, find_pr_opened,
+    PR_LANDED_KIND, PR_OPENED_KIND, PR_QUEUED_KIND, all_pr_queued, find_pr_opened,
 };
 use hugit_contracts::context_envelope::{Altitude, CiCost, ContextEnvelope};
 use hugit_http_contracts::CampaignVm;
 use hugit_http_contracts::common::{CampaignChipVm, EnvelopeVm, MirrorVm};
-use hugit_http_contracts::landing::{CampaignIntentChipVm, CampaignPrVm};
+use hugit_http_contracts::landing::{CampaignIntentChipVm, CampaignPrVm, PrState};
 use hugit_http_contracts::pr_detail::{CostSplitVm, StatVm};
 use hugit_ledger::Ledger;
 use hugit_ledger::rollup::{PrQueueInput, pr_record};
@@ -148,6 +148,20 @@ fn build_campaign_pr(log: &EventLog, ledger: &Ledger, opened: &OpenedPr) -> Camp
     };
     let title = scrub(&raw_title);
     let landed = pr_has_event(log, PR_LANDED_KIND, &opened.pr_id);
+    // Structured lifecycle discriminant — SAME precedence as the prose label below
+    // and as `landing.rs::pr_state` (landed ≻ abandoned ≻ queued ≻ proposed). The
+    // `state` makes the `state_label.contains("bloque")||"✗"` substring-inference
+    // structured (PR_ABANDONED_KIND → Blocked). Queued check uses `all_pr_queued`
+    // (mirrors `pr_state`), which excludes settled PRs by construction.
+    let state = if landed {
+        PrState::Landed
+    } else if pr_has_event(log, PR_ABANDONED_KIND, &opened.pr_id) {
+        PrState::Blocked
+    } else if all_pr_queued(log).iter().any(|q| q.pr_id == opened.pr_id) {
+        PrState::Queued
+    } else {
+        PrState::Open
+    };
     let state_label = if landed {
         "pousou ✓".to_string()
     } else if pr_has_event(log, PR_ABANDONED_KIND, &opened.pr_id) {
@@ -180,6 +194,7 @@ fn build_campaign_pr(log: &EventLog, ledger: &Ledger, opened: &OpenedPr) -> Camp
         landed,
         why,
         intents,
+        state, // REAL — structured lifecycle (same precedence as state_label)
     }
 }
 

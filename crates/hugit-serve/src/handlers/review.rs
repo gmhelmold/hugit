@@ -13,7 +13,7 @@ use hugit_cli::pr::{PR_ABANDONED_KIND, PR_LANDED_KIND, PR_QUEUED_KIND, find_pr_o
 use hugit_cli::verdict::VERDICT_RECORDED_KIND;
 use hugit_contracts::VerdictObject;
 use hugit_http_contracts::common::{
-    CampaignChipVm, DiffLineKind, DiffLineVm, FileRowVm, HunkVm, VerdictVm,
+    CampaignChipVm, DiffLineKind, DiffLineVm, FileRowVm, HunkVm, VerdictVm, decision_of,
 };
 use hugit_http_contracts::review::{ReviewEventVm, ReviewReplyVm, ReviewThreadVm, ReviewVm};
 use hugit_refstore::EventLog;
@@ -277,6 +277,7 @@ fn verdict_pair(vo: &VerdictObject) -> (VerdictVm, String) {
         adversarial: true,
         lens,
         evidence_mono_terms,
+        decision: decision_of(outcome_str), // REAL — structured, same outcome source
     };
     (vm, evidence_prose)
 }

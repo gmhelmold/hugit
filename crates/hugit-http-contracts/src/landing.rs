@@ -10,8 +10,11 @@ use crate::common::{
     CampaignChipVm, CostVm, DiffVm, EnvelopeVm, FileRowVm, IntentSummaryVm, MirrorVm, UnionVm,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PrState {
+    /// An opened, non-terminal PR (proposed) — the honest default for an absent
+    /// or unrecognized state on an old/forward-compat payload.
+    #[default]
     Open,
     Queued,
     Testing,
@@ -62,6 +65,12 @@ pub struct CampaignPrVm {
     pub landed: bool,
     pub why: String,
     pub intents: Vec<CampaignIntentChipVm>,
+    /// Structured lifecycle discriminant beside the localized `state_label` prose
+    /// (githugr styles from this instead of substring-matching pt-BR). Reuses the
+    /// landing-card [`PrState`]. Additive + forward-compat: an old payload without
+    /// it defaults to [`PrState::Open`]. The existing `state_label`/`landed` stay.
+    #[serde(default)]
+    pub state: PrState,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -253,6 +262,42 @@ mod tests {
         assert_eq!(
             card.eta_seconds, None,
             "PrCardVm.eta_seconds defaults to None when absent from JSON"
+        );
+    }
+
+    /// `CampaignPrVm.state` (the new structured discriminant beside `state_label`)
+    /// round-trips losslessly AND forward-compat-defaults to `Open` when absent
+    /// from an old payload.
+    #[test]
+    fn campaign_pr_vm_state_round_trips_and_defaults() {
+        let pr = CampaignPrVm {
+            number: 128,
+            title: "fix: refresh expira cedo".to_string(),
+            intent_count: 2,
+            cost_usd_micros: 60_000,
+            union_label: "verde".to_string(),
+            state_label: "pousou ✓".to_string(),
+            landed: true,
+            why: "o refresh deve reemitir um TTL completo".to_string(),
+            intents: vec![],
+            state: PrState::Landed,
+        };
+        let reparsed: CampaignPrVm =
+            serde_json::from_str(&serde_json::to_string(&pr).unwrap()).unwrap();
+        assert_eq!(pr, reparsed, "CampaignPrVm round-trip is lossless");
+        assert_eq!(reparsed.state, PrState::Landed);
+
+        // Forward-compat: an old payload WITHOUT `state` defaults to Open.
+        let legacy = r#"{
+            "number": 9, "title": "t", "intent_count": 0, "cost_usd_micros": 0,
+            "union_label": "", "state_label": "proposto", "landed": false,
+            "why": "", "intents": []
+        }"#;
+        let parsed: CampaignPrVm = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            parsed.state,
+            PrState::Open,
+            "absent state defaults to Open (forward-compat)"
         );
     }
 }

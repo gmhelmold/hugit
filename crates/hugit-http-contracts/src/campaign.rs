@@ -10,12 +10,55 @@ use crate::common::{CampaignChipVm, EnvelopeVm, MirrorVm};
 use crate::landing::{CampaignPrVm, OriginRefVm};
 use crate::pr_detail::{CostSplitVm, StatVm};
 
+/// The structured role of a [`CampaignWhoVm`] rail row, beside the localized
+/// `role` prose. The variants mirror the engine's real principal classes
+/// (`PrincipalClass::{Human, Orchestrator, Worker, Model}` in
+/// `hugit-refstore/authz`) — NOT invented roles. `#[default] Unknown` is the
+/// honest value for an absent/forward-compat payload (no role asserted).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum WhoRole {
+    #[default]
+    Unknown,
+    /// The human stakeholder — decides, approves, interrogates.
+    Human,
+    /// The orchestrator (tech-lead seat) — plans, dispatches, lands.
+    Orchestrator,
+    /// A worker agent — executes one intent within a campaign.
+    Worker,
+    /// A model — a first-class identity with permissions/budgets/attribution.
+    Model,
+}
+
+/// The structured status of a [`CampaignWhoVm`] rail row, beside the localized
+/// `status` prose. `#[default] Unknown` is the honest value for an absent payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum WhoStatus {
+    #[default]
+    Unknown,
+    Active,
+    Pending,
+    Done,
+}
+
 /// One "Quem" rail row (operator / orchestrator / reviewer).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CampaignWhoVm {
     pub name: String,
     pub role: String,
     pub status: String,
+    /// Structured role discriminant beside the localized `role` prose (githugr
+    /// styles from this). Mirrors the engine's principal classes. Additive +
+    /// forward-compat: an old payload without it defaults to [`WhoRole::Unknown`].
+    /// NOTE: no live builder constructs `CampaignWhoVm` yet (the campaign `who`
+    /// rail is a STUB — `build_campaign` emits `who: vec![]`); these structured
+    /// fields are carried on the contract so githugr can light them the moment a
+    /// builder lands. The prose `role`/`status` stay.
+    #[serde(default)]
+    pub role_kind: WhoRole,
+    /// Structured status discriminant beside the localized `status` prose.
+    /// Additive + forward-compat → [`WhoStatus::Unknown`] when absent.
+    #[serde(default)]
+    pub status_kind: WhoStatus,
 }
 
 /// The campaign page view-model. `PartialEq` only — embeds `CostSplitVm` (f64).
@@ -107,6 +150,7 @@ mod tests {
                     id: "a31".to_string(),
                     note: "refresh · opus-4.8".to_string(),
                 }],
+                state: crate::landing::PrState::Landed,
             }],
             envelope: EnvelopeVm {
                 session: "orq-014".to_string(),
@@ -152,6 +196,8 @@ mod tests {
                 name: "gustavo".to_string(),
                 role: "operador humano".to_string(),
                 status: "assinou ✓".to_string(),
+                role_kind: WhoRole::Human,
+                status_kind: WhoStatus::Done,
             }],
             attested_label: "5/5 assinados".to_string(),
             envelope_cas: "cas:a7e0… ✓".to_string(),
@@ -165,5 +211,39 @@ mod tests {
         let json = serde_json::to_string(&vm).expect("CampaignVm serializes");
         let reparsed: CampaignVm = serde_json::from_str(&json).expect("CampaignVm deserializes");
         assert_eq!(vm, reparsed, "CampaignVm round-trip is lossless");
+        // The structured discriminants round-trip beside the prose.
+        assert_eq!(reparsed.who[0].role_kind, WhoRole::Human);
+        assert_eq!(reparsed.who[0].status_kind, WhoStatus::Done);
+        assert_eq!(reparsed.prs[0].state, crate::landing::PrState::Landed);
+    }
+
+    /// `CampaignWhoVm`'s structured `role_kind`/`status_kind` default to `Unknown`
+    /// (forward-compat) when absent from an old payload — the prose stays.
+    #[test]
+    fn campaign_who_vm_structured_fields_default_unknown() {
+        let legacy = r#"{ "name": "ana", "role": "orquestrador", "status": "ativo" }"#;
+        let who: CampaignWhoVm = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            who.role_kind,
+            WhoRole::Unknown,
+            "absent role_kind → Unknown"
+        );
+        assert_eq!(
+            who.status_kind,
+            WhoStatus::Unknown,
+            "absent status_kind → Unknown"
+        );
+        assert_eq!(who.role, "orquestrador", "prose role preserved");
+        // Round-trip with the structured fields populated.
+        let full = CampaignWhoVm {
+            name: "orq-014".to_string(),
+            role: "orquestrador".to_string(),
+            status: "ativo".to_string(),
+            role_kind: WhoRole::Orchestrator,
+            status_kind: WhoStatus::Active,
+        };
+        let reparsed: CampaignWhoVm =
+            serde_json::from_str(&serde_json::to_string(&full).unwrap()).unwrap();
+        assert_eq!(full, reparsed);
     }
 }

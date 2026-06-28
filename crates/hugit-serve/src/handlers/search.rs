@@ -41,7 +41,9 @@ use gix_hash::ObjectId;
 use hugit_cli::pr::{
     PR_ABANDONED_KIND, PR_LANDED_KIND, PR_OPENED_KIND, find_pr_opened, find_pr_queued,
 };
-use hugit_http_contracts::search::{SearchCodeVm, SearchIntentVm, SearchRefVm, SearchVm};
+use hugit_http_contracts::search::{
+    IntentState, SearchCodeVm, SearchIntentVm, SearchRefVm, SearchVm,
+};
 use hugit_proto::{ObjectKind, ObjectSource};
 use hugit_refstore::EventLog;
 use hugit_refstore::intent::intents_from_log;
@@ -303,6 +305,12 @@ fn search_intents(log: &EventLog, q_lower: &str) -> Vec<SearchIntentVm> {
             pr: 0,                 // honest-default: no PR back-link on the record
             status: String::new(), // honest-default: intent.landed carries no status
             age: humanize_age(intent.recorded_at),
+            // Structured discriminant beside the prose `status`. Same source as
+            // `status`: the search projection folds `intent.landed`, which carries
+            // NO status field — so the honest live value is `Unknown` (mirrors the
+            // empty `status` prose). The contract carries the enum so githugr can
+            // light it the moment the projection grows a real status seam.
+            state: IntentState::Unknown,
         });
     }
     out
