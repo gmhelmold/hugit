@@ -144,6 +144,16 @@ impl LiveRefs {
             .unwrap_or_else(|e| e.into_inner())
             .insert(ref_name.to_string(), oid.to_string());
     }
+
+    /// Atomically remove `ref_name` from the LIVE map (a delete-ref hot-swap). A
+    /// no-op if the ref is absent (the durable finalize already validated presence;
+    /// this only mirrors the committed removal into the in-memory advertise).
+    pub fn remove_ref(&self, ref_name: &str) {
+        self.0
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(ref_name);
+    }
 }
 
 impl From<BTreeMap<String, String>> for LiveRefs {
@@ -312,6 +322,21 @@ impl RepoState {
         // in R2/CAS), this call site MUST re-assert tip resolvability before advancing.
         self.git_refs.set_ref(ref_name, new_oid);
         Ok(())
+    }
+
+    /// The live in-process delete-ref hot-swap (the frozen design's step 3): after a
+    /// SUCCESSFUL CAS-mode [`crate::cas::finalize_cas_delete`] (the durable refs.json
+    /// rewrite + the `ref.delete` event already committed), remove the ref from THIS
+    /// engine's in-memory advertise so the deleted branch stops being advertised with
+    /// NO reboot.
+    ///
+    /// The oid-index is deliberately NOT touched — a git delete-ref drops only the ref
+    /// pointer, never the objects (no GC), so the deleted tip's closure stays resolvable
+    /// for any OTHER ref that names it. Called ONLY AFTER the durable finalize, never
+    /// ahead of R2 (the in-memory view never leads the durable store), mirroring the
+    /// [`apply_cas_push_inmemory`](Self::apply_cas_push_inmemory) ordering discipline.
+    pub fn apply_cas_delete_inmemory(&self, ref_name: &str) {
+        self.git_refs.remove_ref(ref_name);
     }
 }
 

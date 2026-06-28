@@ -675,6 +675,263 @@ fn real_git_push_succeeds() {
     );
 }
 
+/// End-to-end `git push --delete <branch>` (receive-pack delete): create a branch over
+/// the wire, then DELETE it. After the delete a fresh serve over the same git dir no
+/// longer advertises the branch (durable removal), while `main` keeps serving.
+/// Deleting the default branch (`main`) is REFUSED.
+#[test]
+fn real_git_push_delete_ref_succeeds() {
+    if !have_git() {
+        eprintln!("SKIP real_git_push_delete_ref_succeeds: `git` not on PATH");
+        return;
+    }
+    let git_cfg = |c: &mut Command| {
+        c.args([
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "-c",
+            "protocol.version=0",
+        ]);
+    };
+
+    // Seed a bare server repo with one commit on main.
+    let root = scratch_dir();
+    let work = root.join("work");
+    let bare = root.join("repo.git");
+    {
+        let mut c = Command::new("git");
+        git_cfg(&mut c);
+        c.args(["init", "-q", work.to_str().unwrap()])
+            .output()
+            .unwrap();
+        std::fs::write(work.join("README"), b"seed\n").unwrap();
+        for args in [
+            vec!["add", "."],
+            vec!["commit", "-q", "-m", "init"],
+            vec!["branch", "-M", "main"],
+        ] {
+            let mut c = Command::new("git");
+            git_cfg(&mut c);
+            c.arg("-C").arg(&work).args(&args).output().unwrap();
+        }
+        Command::new("git")
+            .args(["init", "-q", "--bare", bare.to_str().unwrap()])
+            .output()
+            .unwrap();
+        let mut c = Command::new("git");
+        git_cfg(&mut c);
+        c.arg("-C")
+            .arg(&work)
+            .args(["push", "-q", bare.to_str().unwrap(), "main"])
+            .output()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&bare)
+            .args(["symbolic-ref", "HEAD", "refs/heads/main"])
+            .output()
+            .unwrap();
+    }
+
+    let log_dir = scratch_dir();
+    let mut log = EventLog::new();
+    log.append_for_test(
+        "repo.meta",
+        vec![],
+        serde_json::json!({"visibility": "public", "owner_tenant": "org-a"}).to_string(),
+        0,
+    );
+    std::fs::write(
+        log_dir.join("pushrepo.json"),
+        serde_json::to_string_pretty(log.records()).unwrap(),
+    )
+    .unwrap();
+    let build_state = || {
+        let mut s = AppState::new(log_dir.clone(), TOKEN.to_string());
+        s.set_repo_from_git_dir("pushrepo", bare.to_str().unwrap())
+            .expect("load bare git dir");
+        s.enable_write_path();
+        s
+    };
+    let addr_a = spawn(build_state());
+
+    // Clone, create an orphan branch, push it (a create).
+    let clone_a = root.join("clone_a");
+    let mut c = Command::new("git");
+    git_cfg(&mut c);
+    c.args([
+        "clone",
+        "-q",
+        &format!("http://{addr_a}/pushrepo"),
+        clone_a.to_str().unwrap(),
+    ])
+    .output()
+    .unwrap();
+    let mut c = Command::new("git");
+    git_cfg(&mut c);
+    c.arg("-C")
+        .arg(&clone_a)
+        .args(["checkout", "-q", "--orphan", "doomed"])
+        .output()
+        .unwrap();
+    let mut c = Command::new("git");
+    git_cfg(&mut c);
+    c.arg("-C")
+        .arg(&clone_a)
+        .args(["rm", "-rfq", "."])
+        .output()
+        .ok();
+    std::fs::write(clone_a.join("F"), b"x\n").unwrap();
+    for args in [vec!["add", "."], vec!["commit", "-q", "-m", "doomed"]] {
+        let mut c = Command::new("git");
+        git_cfg(&mut c);
+        c.arg("-C").arg(&clone_a).args(&args).output().unwrap();
+    }
+    let auth = format!("http.extraHeader=Authorization: Bearer {TOKEN}");
+    let mut c = Command::new("git");
+    git_cfg(&mut c);
+    let push = c
+        .arg("-C")
+        .arg(&clone_a)
+        .arg("-c")
+        .arg(&auth)
+        .args([
+            "push",
+            "-q",
+            &format!("http://{addr_a}/pushrepo"),
+            "HEAD:refs/heads/doomed",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        push.status.success(),
+        "create-branch push failed:\nstderr={}",
+        String::from_utf8_lossy(&push.stderr)
+    );
+
+    // Read back the tips a delete must carry as its `old_oid` (git sends the real
+    // current tip). `doomed` was just created; `main` is the seeded tip.
+    let doomed_oid = git_in(&bare, &["rev-parse", "refs/heads/doomed"])
+        .trim()
+        .to_string();
+    let main_oid = git_in(&bare, &["rev-parse", "refs/heads/main"])
+        .trim()
+        .to_string();
+
+    // The GIT_DIR create-push lands the ref on disk but does NOT hot-swap instance A's
+    // boot-time `git_refs` snapshot (only the CAS path hot-swaps). The delete's
+    // stale-check reads that authoritative snapshot, so it must run against a FRESH
+    // instance whose boot snapshot already includes `doomed` from the on-disk dir.
+    // (The git client refuses to delete a remote's HEAD branch + has version-specific
+    // remote-tracking quirks, so the delete is driven by a RAW receive-pack POST — it
+    // exercises the exact serve handler the git client would hit, deterministically.)
+    let addr_b = spawn(build_state());
+
+    // 1. Deleting the DEFAULT branch (main) → `ng refuse-delete-default-branch`, ref kept.
+    let report = post_receive_delete(&addr_b, "pushrepo", &main_oid, "refs/heads/main");
+    assert!(
+        report.contains("unpack ok") && report.contains("ng refs/heads/main"),
+        "default-branch delete is refused per-ref: {report}"
+    );
+    assert!(
+        report.contains("refuse-delete-default-branch"),
+        "the refusal reason is the frozen token: {report}"
+    );
+
+    // 2. A stale old_oid on `doomed` → `ng non-fast-forward`, ref kept.
+    let stale = "0".repeat(39) + "1";
+    let report = post_receive_delete(&addr_b, "pushrepo", &stale, "refs/heads/doomed");
+    assert!(
+        report.contains("ng refs/heads/doomed") && report.contains("non-fast-forward"),
+        "a stale-tip delete is a non-fast-forward: {report}"
+    );
+
+    // 3. The valid delete of `doomed` (correct current tip) → `ok refs/heads/doomed`.
+    let report = post_receive_delete(&addr_b, "pushrepo", &doomed_oid, "refs/heads/doomed");
+    assert!(
+        report.contains("unpack ok") && report.contains("ok refs/heads/doomed"),
+        "the delete succeeds: {report}"
+    );
+    assert!(
+        !report.contains("ng "),
+        "no ng line on the successful delete: {report}"
+    );
+
+    // The same instance B (live hot-swap) no longer advertises `doomed`; main remains.
+    let advert_b = http_get_raw(&addr_b, "/pushrepo/info/refs?service=git-upload-pack");
+    let (_, _, body_b) = split_response(&advert_b);
+    let body_b = String::from_utf8_lossy(&body_b);
+    assert!(
+        !body_b.contains("refs/heads/doomed"),
+        "the deleted ref drops from B's advertise with no reboot: {body_b}"
+    );
+    assert!(
+        body_b.contains("refs/heads/main"),
+        "main still advertised on B"
+    );
+
+    // And it is DURABLE: a FRESH serve C over the same git dir also lacks `doomed`.
+    let addr_c = spawn(build_state());
+    let advert = http_get_raw(&addr_c, "/pushrepo/info/refs?service=git-upload-pack");
+    let (_, _, body_bytes) = split_response(&advert);
+    let body = String::from_utf8_lossy(&body_bytes);
+    assert!(
+        !body.contains("refs/heads/doomed"),
+        "the deleted ref is durably gone from a fresh serve's advertise"
+    );
+    assert!(
+        body.contains("refs/heads/main"),
+        "main still advertised after the delete"
+    );
+}
+
+/// POST a delete-only `git-receive-pack` body (one `<old> 00..0 <ref>` command +
+/// `report-status` cap + a flush, NO packfile) to `/<repo>/git-receive-pack` with the
+/// dev-token bearer, and return the decoded report-status text. Drives the exact serve
+/// handler a `git push --delete` would hit, without the git client's remote-view quirks.
+fn post_receive_delete(addr: &str, repo: &str, old_oid: &str, ref_name: &str) -> String {
+    let zero = "0".repeat(40);
+    let mut first = format!("{old_oid} {zero} {ref_name}").into_bytes();
+    first.push(0);
+    first.extend_from_slice(b"report-status");
+    let mut body = Vec::new();
+    body.extend_from_slice(format!("{:04x}", first.len() + 4).as_bytes());
+    body.extend_from_slice(&first);
+    body.extend_from_slice(b"0000"); // flush — no pack follows (a delete)
+
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    let head = format!(
+        "POST /{repo}/git-receive-pack HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {TOKEN}\r\n\
+         Content-Type: application/x-git-receive-pack-request\r\nContent-Length: {}\r\n\
+         Connection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).unwrap();
+    stream.write_all(&body).unwrap();
+    let mut resp = Vec::new();
+    stream.read_to_end(&mut resp).unwrap();
+    let (_, _, body_bytes) = split_response(&resp);
+    // Decode the pkt-line report into readable text (strip 4-hex length prefixes).
+    let mut out = String::new();
+    let mut b = &body_bytes[..];
+    while b.len() >= 4 {
+        let len =
+            usize::from_str_radix(std::str::from_utf8(&b[..4]).unwrap_or("zzzz"), 16).unwrap_or(0);
+        if len < 4 {
+            b = &b[4..];
+            continue;
+        }
+        if len > b.len() {
+            break;
+        }
+        out.push_str(&String::from_utf8_lossy(&b[4..len]));
+        b = &b[len..];
+    }
+    out
+}
+
 fn have_git() -> bool {
     Command::new("git")
         .arg("--version")
