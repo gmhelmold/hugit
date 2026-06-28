@@ -187,6 +187,7 @@ mod tests {
                         "iat".to_string(),
                         "test_refresh_full_ttl".to_string(),
                     ],
+                    decision: crate::common::VerdictDecision::Pass,
                 },
                 "O campo `exp` é derivado do instante atual — prova byte-idêntica ×3.".to_string(),
             )],

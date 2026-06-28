@@ -24,6 +24,24 @@ pub struct SearchRefVm {
     pub extra: String,
 }
 
+/// The structured lifecycle state of a [`SearchIntentVm`], beside the localized
+/// `status` prose — githugr styles from this discriminant. The variants match the
+/// intent states the search projection can know: an intent that landed but is not
+/// yet proven/rejected is `Landed`; the proven/rejected terminal states; `Unknown`
+/// (`#[default]`) when no status is on the record (the current `intent.landed`
+/// projection carries no status, so this is the honest live value today).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum IntentState {
+    #[default]
+    Unknown,
+    /// In flight / proposed — not yet landed.
+    InFlight,
+    /// Landed onto a ref (the `intent.landed` projection's value).
+    Landed,
+    /// Verdict-rejected.
+    Rejected,
+}
+
 /// One intent hit — the search finds CHARTERS, not just code.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchIntentVm {
@@ -33,6 +51,12 @@ pub struct SearchIntentVm {
     pub pr: u32,
     pub status: String,
     pub age: String,
+    /// Structured lifecycle discriminant beside the localized `status` prose
+    /// (githugr styles from this). Derived from the same source as `status`.
+    /// Additive + forward-compat: an old payload without it defaults to
+    /// [`IntentState::Unknown`]. The prose `status` stays.
+    #[serde(default)]
+    pub state: IntentState,
 }
 
 /// One commit hit.
@@ -97,6 +121,7 @@ mod tests {
                 pr: 128,
                 status: "pousou".to_string(),
                 age: "há 3 dias".to_string(),
+                state: IntentState::Landed,
             }],
             commits: vec![SearchCommitVm {
                 sha: "a31f9c".to_string(),
@@ -110,5 +135,33 @@ mod tests {
         let reparsed: SearchVm = serde_json::from_str(&json).unwrap();
         assert_eq!(vm, reparsed, "SearchVm round-trip is lossless");
         assert_eq!(reparsed.code_total, 6);
+        assert_eq!(reparsed.intents[0].state, IntentState::Landed);
+    }
+
+    /// `SearchIntentVm.state` (the new structured discriminant beside `status`)
+    /// round-trips AND forward-compat-defaults to `Unknown` when absent.
+    #[test]
+    fn search_intent_vm_state_round_trips_and_defaults() {
+        let it = SearchIntentVm {
+            id: "i-9".to_string(),
+            charter: "c".to_string(),
+            model: String::new(),
+            pr: 0,
+            status: String::new(),
+            age: "há 1 dia".to_string(),
+            state: IntentState::Rejected,
+        };
+        let reparsed: SearchIntentVm =
+            serde_json::from_str(&serde_json::to_string(&it).unwrap()).unwrap();
+        assert_eq!(reparsed.state, IntentState::Rejected);
+
+        let legacy =
+            r#"{ "id": "i-1", "charter": "c", "model": "", "pr": 0, "status": "", "age": "" }"#;
+        let parsed: SearchIntentVm = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            parsed.state,
+            IntentState::Unknown,
+            "absent state defaults to Unknown (forward-compat)"
+        );
     }
 }

@@ -70,6 +70,7 @@ mod tests {
                     adversarial: true,
                     lens: "correctness".into(),
                     evidence_mono_terms: vec!["iat".into()],
+                    decision: crate::common::VerdictDecision::Pass,
                 }],
                 evidence: vec![AttentionEvidenceVm {
                     section: "Prova".into(),

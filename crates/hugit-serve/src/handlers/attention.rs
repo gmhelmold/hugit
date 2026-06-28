@@ -38,7 +38,7 @@ use hugit_contracts::VerdictObject;
 use hugit_http_contracts::attention::{
     AttentionActionVm, AttentionDecisionVm, AttentionEvidenceVm, AttentionVm,
 };
-use hugit_http_contracts::common::VerdictVm;
+use hugit_http_contracts::common::{VerdictVm, decision_of};
 use hugit_refstore::EventLog;
 use serde_json::Value;
 
@@ -249,6 +249,7 @@ fn verdict_pair(vo: &VerdictObject) -> (VerdictVm, String) {
         adversarial: true,
         lens,
         evidence_mono_terms,
+        decision: decision_of(outcome_str), // REAL — structured, same outcome source
     };
     (vm, evidence_prose)
 }

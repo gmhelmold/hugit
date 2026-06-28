@@ -202,6 +202,7 @@ mod tests {
                 adversarial: true,
                 lens: "correctness".to_string(),
                 evidence_mono_terms: vec!["iat".to_string()],
+                decision: crate::common::VerdictDecision::Pass,
             }],
             commit_hash: "a31f9c".to_string(),
         };

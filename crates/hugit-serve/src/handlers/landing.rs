@@ -13,7 +13,7 @@ use hugit_cli::pr::{
 };
 use hugit_contracts::context_envelope::{Altitude, CiCost, ContextEnvelope};
 use hugit_http_contracts::common::{
-    CampaignChipVm, CostVm, IntentSummaryVm, MirrorVm, UnionVm, VerdictVm,
+    CampaignChipVm, CostVm, IntentSummaryVm, MirrorVm, UnionVm, VerdictVm, decision_of,
 };
 use hugit_http_contracts::landing::{
     ChecksBadgeVm, LandingColumnVm, LandingItemVm, PrCardVm, PrDrawerVm, PrState,
@@ -193,6 +193,7 @@ fn intent_summary(entry: &LedgerEntry) -> IntentSummaryVm {
             adversarial: false,      // STUB — panel-source not on the view
             lens: v.lens.clone(),    // REAL
             evidence_mono_terms: v.claims_checked.clone(), // REAL
+            decision: decision_of(&v.outcome), // REAL — structured, same source
         })
         .collect();
 
