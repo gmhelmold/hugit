@@ -2261,6 +2261,70 @@ pub fn commit_cas_push_manifests<R: R2Get + R2Put>(
     Ok(())
 }
 
+/// Finalize a CAS-mode **delete-ref** push (`git push --delete <branch>`) after the
+/// serve handler validated it (deploy-gate + write-authz + the default-branch guard +
+/// the stale-check). The MIRROR of [`finalize_cas_push`], but it REMOVES the ref
+/// instead of advancing a tip — there is no object closure to upload (a delete carries
+/// no pack), so the only durable steps are:
+///
+/// 1. **log** — `persist_log` (the caller's compare-and-swap append of the `ref.delete`
+///    event). Runs FIRST: the removal must be recorded before the manifest drops the
+///    pointer, so the ref is never gone from refs.json without the event on the log.
+/// 2. **manifest** — [`remove_cas_ref_from_manifest`]: read `refs.json`, drop
+///    `refs[ref_name]`, PUT it back to hugit's R2. `oid-index.json` is UNCHANGED — a
+///    git delete-ref drops only the ref pointer, never the objects (no GC), so the
+///    deleted tip's closure stays resolvable for any other ref that names it.
+///
+/// Each step is fail-closed → a distinct [`CasPushError`] on fault. Returns `Ok(())`
+/// ONLY when the event is durably appended AND `refs.json` is durably rewritten without
+/// the ref. NO objects are flushed (a delete uploads nothing).
+pub fn finalize_cas_delete<R, P>(
+    r2: &R,
+    tenant: &str,
+    repo: &str,
+    ref_name: &str,
+    persist_log: P,
+) -> Result<(), CasPushError>
+where
+    R: R2Get + R2Put,
+    P: FnOnce() -> Result<(), String>,
+{
+    // 1. log FIRST — the compare-and-swap append of the `ref.delete` event. The ref is
+    //    never dropped from refs.json without the removal recorded on the log.
+    persist_log().map_err(CasPushError::Persist)?;
+    // 2. manifest — drop the ref pointer; oid-index untouched (objects stay in CAS).
+    remove_cas_ref_from_manifest(r2, tenant, repo, ref_name).map_err(CasPushError::Manifest)
+}
+
+/// Read-modify-write `<tenant>/<repo>/refs.json` to REMOVE `ref_name`, then PUT it back
+/// to hugit's R2. `oid-index.json` is deliberately NOT touched (a delete drops only the
+/// ref pointer, never the objects). Fail-closed on any R2 read/parse/serialize/PUT fault.
+///
+/// Same SINGLE-WRITER read-modify-CAS caveat as [`commit_cas_push_manifests`] (the
+/// `self-hosted-alpha` single-tenant, `HUGIT_SERVE_RECEIVE_PACK`-gated deploy): it
+/// RE-READS refs.json immediately before the removal so a concurrent push's landed
+/// write is preserved; the unconditional PUT is safe only under the single-writer
+/// invariant. A missing refs.json is treated as nothing-to-remove (idempotent — the
+/// handler already validated presence against the live snapshot).
+pub fn remove_cas_ref_from_manifest<R: R2Get + R2Put>(
+    r2: &R,
+    tenant: &str,
+    repo: &str,
+    ref_name: &str,
+) -> Result<(), String> {
+    let refs_key = refs_manifest_key(tenant, repo);
+    let mut manifest = match r2.get_object(&refs_key)? {
+        Some(bytes) => parse_refs_manifest(&bytes)?,
+        // No refs.json yet ⇒ nothing to remove (idempotent). Don't fabricate one.
+        None => return Ok(()),
+    };
+    manifest.refs.remove(ref_name);
+    let refs_bytes =
+        serde_json::to_vec(&manifest).map_err(|e| format!("delete: refs.json serialize: {e}"))?;
+    r2.put_object(&refs_key, &refs_bytes)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4406,5 +4470,176 @@ mod tests {
         // The owning tenant + the operator may push.
         assert!(authorize_write(&["clerk:org-a:user-1".to_string()], &meta));
         assert!(authorize_write(&["orchestrator:hugit".to_string()], &meta));
+    }
+
+    // ── J. CAS-mode delete-ref finalize (log → manifest, fail-closed) ──────────
+
+    /// Seed a `MapR2` with a two-ref refs.json (HEAD = `refs/heads/main` at `main_tip`,
+    /// plus a deletable `refs/heads/stale` at `stale_tip`) and an oid-index holding
+    /// `existing`. Returns nothing — the caller reads the doubles back.
+    fn seed_two_ref_manifests(
+        r2: &MapR2,
+        tenant: &str,
+        repo: &str,
+        main_tip: &str,
+        stale_tip: &str,
+        existing: &OidIndex,
+    ) {
+        let mut refs = BTreeMap::new();
+        refs.insert("refs/heads/main".to_string(), main_tip.to_string());
+        refs.insert("refs/heads/stale".to_string(), stale_tip.to_string());
+        let manifest = RefsManifest {
+            head: "refs/heads/main".to_string(),
+            refs,
+        };
+        r2.put_object(
+            &refs_manifest_key(tenant, repo),
+            &serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        r2.put_object(
+            &oid_index_key(tenant, repo),
+            &serde_json::to_vec(existing).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn finalize_cas_delete_removes_ref_keeps_objects_and_other_refs() {
+        let (tenant, repo) = ("t", "hugit");
+        let r2 = MapR2::default();
+        let main_tip = "aa".repeat(20);
+        let stale_tip = "bb".repeat(20);
+        let mut existing = OidIndex::new();
+        existing.insert(
+            stale_tip.clone(),
+            cas_key(&encode_loose(ObjectKind::Commit, b"stale tip body")),
+        );
+        seed_two_ref_manifests(&r2, tenant, repo, &main_tip, &stale_tip, &existing);
+
+        let mut persisted = false;
+        finalize_cas_delete(&r2, tenant, repo, "refs/heads/stale", || {
+            persisted = true;
+            Ok(())
+        })
+        .expect("delete finalize succeeds");
+        assert!(persisted, "the `ref.delete` log-persist step ran");
+
+        // refs.json: the deleted ref is GONE, the untouched ref preserved.
+        let m = parse_refs_manifest(
+            &r2.get_object(&refs_manifest_key(tenant, repo))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !m.refs.contains_key("refs/heads/stale"),
+            "the deleted ref is removed from refs.json"
+        );
+        assert_eq!(
+            m.refs.get("refs/heads/main"),
+            Some(&main_tip),
+            "an untouched ref survives the delete"
+        );
+
+        // oid-index UNCHANGED — a delete drops only the ref pointer, never the objects.
+        let idx = parse_oid_index(
+            &r2.get_object(&oid_index_key(tenant, repo))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            idx.contains_key(&stale_tip),
+            "the deleted tip's object stays indexed (no GC)"
+        );
+    }
+
+    #[test]
+    fn finalize_cas_delete_persist_failure_does_not_remove_ref() {
+        // A log-persist (compare-and-swap) fault aborts BEFORE the manifest rewrite —
+        // the ref must stay advertised (fail-closed: the removal event is the gate).
+        let (tenant, repo) = ("t", "hugit");
+        let r2 = MapR2::default();
+        let main_tip = "aa".repeat(20);
+        let stale_tip = "bb".repeat(20);
+        seed_two_ref_manifests(&r2, tenant, repo, &main_tip, &stale_tip, &OidIndex::new());
+
+        let err = finalize_cas_delete(&r2, tenant, repo, "refs/heads/stale", || {
+            Err("cas-conflict".to_string())
+        })
+        .expect_err("a persist fault fails the finalize");
+        assert!(matches!(err, CasPushError::Persist(_)), "{err:?}");
+
+        let m = parse_refs_manifest(
+            &r2.get_object(&refs_manifest_key(tenant, repo))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            m.refs.get("refs/heads/stale"),
+            Some(&stale_tip),
+            "the ref is STILL advertised — never removed without the recorded event"
+        );
+    }
+
+    #[test]
+    fn finalize_cas_delete_manifest_failure_aborts_not_ok() {
+        // THE fail-closed invariant for §5: an R2 refs.json PUT fault → a Manifest
+        // error (NOT Ok). The handler maps it to an `ng`, never an `ok`.
+        #[derive(Default, Clone)]
+        struct PutFailsR2 {
+            inner: MapR2,
+        }
+        impl R2Get for PutFailsR2 {
+            fn get_object(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
+                self.inner.get_object(key)
+            }
+        }
+        impl R2Put for PutFailsR2 {
+            fn put_object(&self, _key: &str, _body: &[u8]) -> Result<(), String> {
+                Err("injected R2 PUT fault".to_string())
+            }
+        }
+
+        let (tenant, repo) = ("t", "hugit");
+        let r2 = PutFailsR2::default();
+        let main_tip = "aa".repeat(20);
+        let stale_tip = "bb".repeat(20);
+        seed_two_ref_manifests(
+            &r2.inner,
+            tenant,
+            repo,
+            &main_tip,
+            &stale_tip,
+            &OidIndex::new(),
+        );
+
+        let mut persisted = false;
+        let err = finalize_cas_delete(&r2, tenant, repo, "refs/heads/stale", || {
+            persisted = true;
+            Ok(())
+        })
+        .expect_err("a manifest PUT fault fails the finalize");
+        assert!(matches!(err, CasPushError::Manifest(_)), "{err:?}");
+        assert!(
+            persisted,
+            "the persist ran (the fault is downstream, at the manifest PUT)"
+        );
+
+        // The ref is STILL present in the (un-PUT) refs.json — never `ok`, never removed.
+        let m = parse_refs_manifest(
+            &r2.inner
+                .get_object(&refs_manifest_key(tenant, repo))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            m.refs.get("refs/heads/stale"),
+            Some(&stale_tip),
+            "refs.json never lost the ref (the PUT was rejected)"
+        );
     }
 }

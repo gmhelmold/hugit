@@ -529,15 +529,16 @@ fn handle_receive_pack(state: &AppState, repo: &str, body: &[u8], request: Reque
     }
     let cmd = wire.commands[0].clone();
     if cmd.is_delete() {
-        // delete-ref is out of v0 scope — a clean per-ref `ng`, not a hard error.
-        let report = build_report_status(
-            Ok(()),
-            &[RefOutcome::Ng {
-                ref_name: cmd.ref_name.clone(),
-                reason: "delete-not-supported".into(),
-            }],
+        // DELETE-ref path. A delete is a WRITE — it has already cleared the same
+        // deploy-gate + auth + write-authz (ownership) gates above as any push (do NOT
+        // weaken that). It carries NO pack / no target / no reachability, so it never
+        // touches the proto `receive_pack` unpack path. Below: the default-branch guard
+        // + the stale-check against the AUTHORITATIVE live `git_refs` snapshot, then the
+        // durable finalize (refs.json rewrite + `ref.delete` event) and the in-memory
+        // hot-swap. `ok` ONLY after a durable removal (fail-closed).
+        return handle_delete_ref(
+            state, repo, repo_state, &cmd, &principal, &mut log, &token, request,
         );
-        return send_report(request, report);
     }
 
     let req = ReceiveRequest {
@@ -715,6 +716,188 @@ fn handle_receive_pack(state: &AppState, repo: &str, body: &[u8], request: Reque
             );
             send_report(request, report)
         }
+    }
+}
+
+/// The pure delete-ref pre-condition decision (the frozen design's §1.a + §1.b),
+/// evaluated against the AUTHORITATIVE live `git_refs` snapshot `current_refs`:
+///
+/// * `Err("refuse-delete-default-branch")` — `ref_name` is the repo's default/HEAD
+///   branch (the one [`pick_default_branch`] resolves HEAD to). Never nuke main.
+/// * `Err("delete-of-absent-ref")` — the ref is not present (no fabricated success).
+/// * `Err("non-fast-forward")` — the ref's current tip differs from the pusher's
+///   `old_oid` (someone else moved/removed it; git sends the real current `old_oid`).
+/// * `Ok(())` — the delete may proceed to the durable finalize.
+fn delete_ref_decision(
+    current_refs: &std::collections::BTreeMap<String, String>,
+    ref_name: &str,
+    old_oid: &str,
+) -> Result<(), &'static str> {
+    // The default-branch guard FIRST — a refusal to delete main is the strongest
+    // safety, evaluated before the stale-check even reads the tip.
+    if let Some(default_branch) = pick_default_branch(current_refs)
+        && default_branch == ref_name
+    {
+        return Err("refuse-delete-default-branch");
+    }
+    // The stale-check against the authoritative snapshot.
+    match current_refs.get(ref_name) {
+        None => Err("delete-of-absent-ref"),
+        Some(tip) if tip != old_oid => Err("non-fast-forward"),
+        Some(_) => Ok(()),
+    }
+}
+
+/// The DELETE-ref path of `handle_receive_pack` (`git push --delete <branch>`).
+///
+/// PRE-VALIDATED by the caller: deploy-gate ON, the pusher authenticated, a write
+/// seam exists, and write-authz (OWNERSHIP) passed — a delete is a WRITE with the
+/// SAME authz as any push (never the read predicate). This fn adds the delete-only
+/// checks, then the durable removal:
+///
+/// 1. **default-branch guard** — REFUSE to delete the repo's default/HEAD branch (the
+///    one the advertise resolves HEAD to via [`pick_default_branch`]) → a per-ref
+///    `ng refuse-delete-default-branch`. Never let a push nuke main.
+/// 2. **stale-check** against the AUTHORITATIVE live `git_refs` snapshot (NOT
+///    `replay(log)` — the #2a discipline): the command's `old_oid` MUST equal the
+///    current tip of `ref_name`. Absent ref → `ng delete-of-absent-ref`; tip differs
+///    → `ng non-fast-forward` (someone else moved/removed it).
+/// 3. **no pack / no objects / no reachability** — a delete carries no target, so the
+///    proto `receive_pack` unpack path is NEVER entered.
+/// 4. durable removal: [`crate::cas::finalize_cas_delete`] (refs.json rewrite +
+///    `ref.delete` event), THEN [`RepoState::apply_cas_delete_inmemory`]. `ok` ONLY
+///    after the durable removal (fail-closed).
+#[allow(clippy::too_many_arguments)]
+fn handle_delete_ref(
+    state: &AppState,
+    repo: &str,
+    repo_state: &crate::state::RepoState,
+    cmd: &crate::receive_wire::ReceiveCommand,
+    principal: &[String],
+    log: &mut hugit_refstore::log::EventLog,
+    token: &crate::writes::CasToken,
+    request: Request,
+) {
+    use crate::receive_wire::{RefOutcome, build_report_status};
+    use crate::state::RepoWriter;
+    use crate::writes::LogSink;
+
+    let ng = |request: Request, reason: &str| {
+        let report = build_report_status(
+            Ok(()),
+            &[RefOutcome::Ng {
+                ref_name: cmd.ref_name.clone(),
+                reason: reason.to_string(),
+            }],
+        );
+        send_report(request, report);
+    };
+
+    // The AUTHORITATIVE current ref view — the SAME live `git_refs` projection the
+    // advertise is built from, NOT `replay(log)` (a CAS-ingested branch has no
+    // `ref.update` event on the log, so a log-derived view would mis-resolve).
+    let current_refs = repo_state.git_refs.snapshot();
+
+    // 1+2. The default-branch guard + the stale-check, as one pure decision (tested
+    //       directly). A rejection → the matching per-ref `ng`, ref untouched.
+    if let Err(reason) = delete_ref_decision(&current_refs, &cmd.ref_name, &cmd.old_oid) {
+        return ng(request, reason);
+    }
+
+    // 3. No pack / no objects / no reachability — open the write seam ONLY to route the
+    //    durable removal to the right backend. A delete never enters the unpack path.
+    let writer = match repo_state.open_writer() {
+        Ok(Some(w)) => w,
+        Ok(None) => return respond_not_found(request),
+        Err(_) => return ng(request, "write-seam-unavailable"),
+    };
+
+    match writer {
+        // GIT_DIR mode: append the `ref.delete` event (compare-and-swap persist) then
+        // drop the on-disk ref so the upload-pack wire stops advertising it. Fail-closed.
+        RepoWriter::GitDir { git_dir, .. } => {
+            hugit_proto::write::store::record_ref_delete(
+                log,
+                principal.to_vec(),
+                &cmd.ref_name,
+                now_ms(),
+            );
+            if let Err(e) = state.persist(repo, log, token) {
+                return ng(request, &format!("persist:{}", e.status));
+            }
+            if let Err(reason) = delete_git_ref(&git_dir, &cmd.ref_name, &cmd.old_oid) {
+                return ng(request, &reason);
+            }
+            repo_state.apply_cas_delete_inmemory(&cmd.ref_name);
+            let report = build_report_status(Ok(()), &[RefOutcome::Ok(cmd.ref_name.clone())]);
+            send_report(request, report)
+        }
+        // CAS mode: log → manifest, each fail-closed (no objects to flush). `ok` ONLY
+        // after the durable refs.json rewrite + the recorded `ref.delete` event.
+        RepoWriter::Cas { seam, .. } => {
+            let res = crate::cas::finalize_cas_delete(
+                &seam.r2,
+                &seam.tenant,
+                &seam.repo_slug,
+                &cmd.ref_name,
+                || {
+                    hugit_proto::write::store::record_ref_delete(
+                        log,
+                        principal.to_vec(),
+                        &cmd.ref_name,
+                        now_ms(),
+                    );
+                    state
+                        .persist(repo, log, token)
+                        .map_err(|e| format!("persist:{}", e.status))
+                },
+            );
+            match res {
+                Ok(()) => {
+                    // The delete is DURABLE (event recorded + refs.json rewritten without
+                    // the ref). Drop it from this engine's in-memory advertise so it stops
+                    // serving with NO reboot. The oid-index is untouched (objects remain
+                    // resolvable for any other ref).
+                    repo_state.apply_cas_delete_inmemory(&cmd.ref_name);
+                    let report =
+                        build_report_status(Ok(()), &[RefOutcome::Ok(cmd.ref_name.clone())]);
+                    send_report(request, report)
+                }
+                Err(crate::cas::CasPushError::Persist(reason)) => {
+                    let report = build_report_status(
+                        Err("log-persist-failed"),
+                        &[RefOutcome::Ng {
+                            ref_name: cmd.ref_name.clone(),
+                            reason,
+                        }],
+                    );
+                    send_report(request, report)
+                }
+                // A manifest fault AFTER the event recorded: the removal event is durable
+                // but refs.json still names the tip — `ng`, the client retries (idempotent).
+                Err(crate::cas::CasPushError::Manifest(_)) => ng(request, "manifest-write-failed"),
+                // A delete flushes NO objects, so the Flush variant is unreachable here;
+                // map it to a generic fail-closed `ng` rather than fabricating success.
+                Err(crate::cas::CasPushError::Flush(_)) => ng(request, "delete-rejected"),
+            }
+        }
+    }
+}
+
+/// Delete the pushed ref from the git dir via `git update-ref -d`, compare-and-swap on
+/// the expected old value (git refuses if the ref no longer holds `old_oid`). Returns a
+/// short `ng` reason on failure.
+fn delete_git_ref(git_dir: &std::path::Path, ref_name: &str, old_oid: &str) -> Result<(), String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(git_dir)
+        .args(["update-ref", "-d", ref_name, old_oid])
+        .output()
+        .map_err(|e| format!("update-ref-spawn:{e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err("ref-delete-failed".to_string())
     }
 }
 
@@ -1003,6 +1186,108 @@ mod live_refs_tests {
             after.get("refs/heads/main"),
             Some(&old_tip),
             "the ref was NOT advanced (prior tip still served, fail-closed)"
+        );
+    }
+
+    // ── delete-ref: the in-memory hot-swap + the pure pre-condition decision ───
+
+    /// After `apply_cas_delete_inmemory`, the advertise IMMEDIATELY stops listing the
+    /// deleted ref (same process, no reboot) — the other refs are untouched.
+    #[test]
+    fn advertise_drops_deleted_ref_with_no_reboot() {
+        let repo = "hugit";
+        let main_tip = "a".repeat(40);
+        let stale_tip = "b".repeat(40);
+
+        let dir = seed_public_log(repo);
+        let mut state = AppState::new(dir, TOKEN.to_string());
+        let mut refs = std::collections::BTreeMap::new();
+        refs.insert("refs/heads/main".to_string(), main_tip.clone());
+        refs.insert("refs/heads/stale".to_string(), stale_tip.clone());
+        state
+            .repos
+            .insert(repo.to_string(), cas_mode_repo_state(refs));
+
+        // Before: both refs advertised.
+        let before = git_refs_for(&state, repo).expect("advertises");
+        assert_eq!(before.get("refs/heads/stale"), Some(&stale_tip));
+
+        state
+            .repo_state(repo)
+            .unwrap()
+            .apply_cas_delete_inmemory("refs/heads/stale");
+
+        // After: the deleted ref is GONE; main is intact.
+        let after = git_refs_for(&state, repo).expect("still advertises");
+        assert!(
+            !after.contains_key("refs/heads/stale"),
+            "the deleted ref drops out of the advertise with no reboot"
+        );
+        assert_eq!(after.get("refs/heads/main"), Some(&main_tip), "main intact");
+    }
+
+    /// §1.a — deleting the default/HEAD branch is REFUSED, ref untouched.
+    #[test]
+    fn delete_default_branch_refused() {
+        let mut refs = std::collections::BTreeMap::new();
+        refs.insert("refs/heads/main".to_string(), "a".repeat(40));
+        refs.insert("refs/heads/feature".to_string(), "b".repeat(40));
+        // `main` is the default (pick_default_branch prefers refs/heads/main).
+        assert_eq!(
+            delete_ref_decision(&refs, "refs/heads/main", &"a".repeat(40)),
+            Err("refuse-delete-default-branch")
+        );
+        // The guard fires even with a matching old_oid — it precedes the stale-check.
+        // A non-default branch with the right old_oid is permitted.
+        assert_eq!(
+            delete_ref_decision(&refs, "refs/heads/feature", &"b".repeat(40)),
+            Ok(())
+        );
+    }
+
+    /// §1.a — when there is no `main`/`master`, the default is the first `refs/heads/*`
+    /// (the same pick the advertise uses for HEAD), and IT is refused.
+    #[test]
+    fn delete_default_branch_refused_when_first_branch_is_head() {
+        let mut refs = std::collections::BTreeMap::new();
+        refs.insert("refs/heads/alpha".to_string(), "a".repeat(40));
+        refs.insert("refs/heads/beta".to_string(), "b".repeat(40));
+        // pick_default_branch → first refs/heads/* alphabetically == alpha.
+        assert_eq!(
+            delete_ref_decision(&refs, "refs/heads/alpha", &"a".repeat(40)),
+            Err("refuse-delete-default-branch")
+        );
+        assert_eq!(
+            delete_ref_decision(&refs, "refs/heads/beta", &"b".repeat(40)),
+            Ok(())
+        );
+    }
+
+    /// §1.b — a delete whose `old_oid` ≠ the current tip is a non-fast-forward, refused.
+    #[test]
+    fn delete_with_stale_old_oid_rejected() {
+        let mut refs = std::collections::BTreeMap::new();
+        refs.insert("refs/heads/main".to_string(), "a".repeat(40));
+        refs.insert("refs/heads/stale".to_string(), "b".repeat(40));
+        assert_eq!(
+            delete_ref_decision(&refs, "refs/heads/stale", &"c".repeat(40)),
+            Err("non-fast-forward")
+        );
+        // The exact current tip is accepted.
+        assert_eq!(
+            delete_ref_decision(&refs, "refs/heads/stale", &"b".repeat(40)),
+            Ok(())
+        );
+    }
+
+    /// §1.b — deleting a ref that does not exist is refused (no fabricated success).
+    #[test]
+    fn delete_absent_branch_rejected() {
+        let mut refs = std::collections::BTreeMap::new();
+        refs.insert("refs/heads/main".to_string(), "a".repeat(40));
+        assert_eq!(
+            delete_ref_decision(&refs, "refs/heads/ghost", &"a".repeat(40)),
+            Err("delete-of-absent-ref")
         );
     }
 }
