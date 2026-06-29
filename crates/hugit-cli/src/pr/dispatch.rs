@@ -206,6 +206,14 @@ fn dispatch_pr_metrics<T: RunnerTransport>(
         &def_digest,
         // toolchain_digest: unknown at the porcelain land altitude → empty.
         "",
+        // TODO(#64): real provider-billed cost from the agent run's /usage — None
+        // ⇒ honest-zero until the off-box agent-loop source exists. There is NO
+        // real provider-cost source at the porcelain land altitude today (no live
+        // off-box agent loop — the disclosed P2 seam above), so we submit None: the
+        // fabric keeps its honest-zero derived floor. Threading a derived figure
+        // here would be a misattribution (the per-PR honesty law). When the off-box
+        // agent loop lands, read its provider `/usage` and pass `Some(micros)`.
+        None,
     )?;
     Ok(outcome.metrics)
 }

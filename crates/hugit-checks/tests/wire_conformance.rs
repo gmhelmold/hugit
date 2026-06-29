@@ -22,7 +22,7 @@
 
 use std::path::PathBuf;
 
-use hugit_checks::runner::{AcquireLeaseRequest, AcquireResponse, CloseResponse};
+use hugit_checks::runner::{AcquireLeaseRequest, AcquireResponse, CloseRequest, CloseResponse};
 use hugit_contracts::{IntentMetrics, RunnerState};
 
 /// Read a wire fixture under `tests/fixtures/wire/`.
@@ -162,6 +162,55 @@ fn close_response_parses_and_metrics_map_to_intent_metrics() {
     assert_eq!(im.tool_breakdown.len(), 3);
     assert_eq!(im.tool_breakdown[0].tool, "Bash");
     assert_eq!(im.tool_breakdown[0].count, 17);
+}
+
+/// The `CloseRequest` hugit SENDS serializes EXACTLY to the keys the frozen
+/// `deny_unknown_fields` fabric `CloseRequest` accepts — and crucially OMITS
+/// `cost_usd_micros` when `None` (the `skip_serializing_if` invariant). This locks
+/// the #64 submit-side contract: the body stays byte-identical to today's
+/// `{"status":"…"}` for a `None` cost (accepted by BOTH the not-yet-redeployed
+/// fabric with no such field AND the new one that `#[serde(default)]`s it), and
+/// carries the EXACT `cost_usd_micros` key when `Some`. A regression that emitted
+/// the field as `null` (or under a wrong key) would 400 the `deny_unknown_fields`
+/// fabric — this test fails first.
+#[test]
+fn close_request_omits_cost_when_none_and_includes_it_when_some() {
+    // (a) None → EXACTLY `{"status":"succeeded"}` (the skip works; byte-identical
+    // to today's body, no `cost_usd_micros` key, never a `null`).
+    let none = CloseRequest {
+        status: "succeeded".to_string(),
+        cost_usd_micros: None,
+    };
+    let none_json = serde_json::to_string(&none).unwrap();
+    assert_eq!(
+        none_json, r#"{"status":"succeeded"}"#,
+        "None must omit cost_usd_micros — byte-identical to today's status-only body"
+    );
+    let none_obj: serde_json::Value = serde_json::from_str(&none_json).unwrap();
+    assert!(
+        none_obj
+            .as_object()
+            .unwrap()
+            .get("cost_usd_micros")
+            .is_none(),
+        "the cost key must NOT appear when None (deny_unknown_fields safety)"
+    );
+
+    // (b) Some(4_200_000) → carries the EXACT `cost_usd_micros` key + value, the
+    // shape the canonical fabric fixture pins.
+    let some = CloseRequest {
+        status: "succeeded".to_string(),
+        cost_usd_micros: Some(4_200_000),
+    };
+    let some_value = serde_json::to_value(&some).unwrap();
+    let fabric: serde_json::Value =
+        serde_json::from_str(&fixture("CloseRequest_with_cost.json")).unwrap();
+    assert_eq!(
+        some_value, fabric,
+        "Some(n) must serialize to EXACTLY the canonical fabric CloseRequest body"
+    );
+    assert_eq!(some_value["status"], "succeeded");
+    assert_eq!(some_value["cost_usd_micros"], 4_200_000);
 }
 
 /// A `CloseResponse` MUST carry `metrics` — §13.1 "never optional when the job
