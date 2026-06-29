@@ -80,6 +80,23 @@ pub struct BlobTreeRowVm {
     pub current: bool,
 }
 
+/// One revision in the blob "Histórico" drawer — a commit that touched this file,
+/// computed from a bounded `git log --first-parent <path>` over the git-from-CAS
+/// history. Every field is REAL (read from the commit) or the row is not emitted;
+/// nothing is fabricated. `author`/`summary` are free text scrubbed at the engine's
+/// read boundary. An empty `BlobVm::history` keeps the drawer disabled-honest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlobHistoryVm {
+    /// The commit oid (hex) the revision was recorded at. The drawer links to it.
+    pub rev_ref: String,
+    /// Humanized commit (author) time, e.g. "3 days ago".
+    pub when: String,
+    /// The commit author display string (`name <email>`), scrubbed at the read boundary.
+    pub author: String,
+    /// The commit message's FIRST LINE only, scrubbed at the read boundary.
+    pub summary: String,
+}
+
 /// The blob view-model: one file at a ref with why-blame, outline, tree sidebar.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlobVm {
@@ -95,6 +112,12 @@ pub struct BlobVm {
     pub actions: Vec<String>,
     #[serde(default)]
     pub tree: Vec<BlobTreeRowVm>,
+    /// The per-path revision timeline (the "Histórico" drawer). Additive +
+    /// forward-compat (`#[serde(default)]`): empty → the drawer stays disabled-honest;
+    /// populated → newest-first revisions that touched this file. Bounded engine-side
+    /// (wall-clock + count) so a deep history never wedges the single-threaded engine.
+    #[serde(default)]
+    pub history: Vec<BlobHistoryVm>,
 }
 
 #[cfg(test)]
@@ -201,6 +224,12 @@ mod tests {
                     current: true,
                 },
             ],
+            history: vec![BlobHistoryVm {
+                rev_ref: "9f2e1a4".into(),
+                when: "3 days ago".into(),
+                author: "Carol <c@x>".into(),
+                summary: "rotate-on-use refresh".into(),
+            }],
         };
 
         let json = serde_json::to_string(&vm).expect("BlobVm serializes");

@@ -204,7 +204,7 @@ fn advertise_refs(state: &AppState, repo: &str) -> Option<Vec<u8>> {
 /// Pick the default branch ref to advertise as HEAD: `refs/heads/main`, else
 /// `refs/heads/master`, else the first `refs/heads/*`, else the first ref of any
 /// kind. `None` only for an empty map (which `git_refs_for` already rejects).
-fn pick_default_branch(refs: &BTreeMap<String, String>) -> Option<String> {
+pub(crate) fn pick_default_branch(refs: &BTreeMap<String, String>) -> Option<String> {
     if refs.contains_key("refs/heads/main") {
         return Some("refs/heads/main".to_string());
     }

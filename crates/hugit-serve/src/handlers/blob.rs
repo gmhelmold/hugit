@@ -28,10 +28,17 @@
 use std::sync::Arc;
 
 use gix_hash::ObjectId;
-use hugit_http_contracts::blob::{BlobTreeRowVm, BlobVm};
+use hugit_http_contracts::blob::{BlobHistoryVm, BlobTreeRowVm, BlobVm};
 use hugit_refstore::EventLog;
 
-use crate::fmt::scrub;
+use crate::fmt::{humanize_age, scrub};
+
+/// Hard WALL-CLOCK ceiling on the per-path history walk — re-exported from the proto
+/// layer so the budget constant lives next to the bounded primitive it guards.
+const BLOB_HISTORY_BUDGET: std::time::Duration = hugit_proto::BLOB_HISTORY_BUDGET;
+/// Max revisions surfaced in the "Histórico" drawer (a RESULT cap; the wall-clock
+/// budget above is the real latency bound on the single-threaded engine).
+const MAX_HISTORY_REVS: usize = hugit_proto::MAX_HISTORY_REVS;
 
 /// Maximum blob size (in bytes) that will be buffered into RAM and served.
 /// Blobs larger than this return `None` (→ 404) rather than OOMing the server.
@@ -52,6 +59,7 @@ pub fn build_blob(
     path: &str,
     src: Option<&Arc<dyn hugit_proto::ObjectSource + Send + Sync>>,
     root_tree: Option<&ObjectId>,
+    head_commit: Option<&ObjectId>,
 ) -> Option<BlobVm> {
     // The content seam: both the source and the root tree must be present.
     let (src, root_tree) = (src?, root_tree?);
@@ -101,6 +109,10 @@ pub fn build_blob(
         // Fail-closed: any missing object or malformed tree yields an empty
         // sidebar rather than a 404.
         tree: build_tree_sidebar(src.as_ref(), root_tree, path),
+        // REAL: the per-path revision timeline (the "Histórico" drawer). Bounded
+        // (wall-clock + count) so a deep history never wedges the single-threaded
+        // engine; empty when no HEAD commit is threaded (honest "seam not live").
+        history: build_history(src.as_ref(), head_commit, path),
     })
 }
 
@@ -156,6 +168,43 @@ fn build_tree_sidebar(
                 depth: 0,
                 is_dir: e.is_dir,
             }
+        })
+        .collect()
+}
+
+/// Build the per-path revision timeline (the "Histórico" drawer) via the bounded
+/// `hugit_proto::blob_history` walk.
+///
+/// `head_commit` is the repo's default-branch tip (threaded from `AppState`); `None`
+/// → empty history (the honest "no HEAD / seam not live" — the drawer stays disabled).
+///
+/// DoS: the walk is bounded by BOTH a WALL-CLOCK [`BLOB_HISTORY_BUDGET`] deadline AND
+/// the [`MAX_HISTORY_REVS`] count — each commit is a synchronous CAS fetch on the
+/// single-threaded engine, so an unbounded deep-history walk would wedge the accept
+/// loop (the code-search-wedge class). Fail-closed: a bound trip / garbled object
+/// returns the partial newest-first list, never an error.
+///
+/// REDACTION: `author` and `summary` are FREE TEXT from the commit (a commit message
+/// or author identity could embed a secret) → both are [`scrub`]bed at the read
+/// boundary, exactly like every other free-text field this handler serves. `rev_ref`
+/// is a hex oid (no scrub needed); `when` is a humanized timestamp.
+fn build_history(
+    src: &dyn hugit_proto::ObjectSource,
+    head_commit: Option<&ObjectId>,
+    path: &str,
+) -> Vec<BlobHistoryVm> {
+    let Some(head) = head_commit else {
+        return vec![];
+    };
+    let deadline = std::time::Instant::now() + BLOB_HISTORY_BUDGET;
+    hugit_proto::blob_history(src, head, path, deadline, MAX_HISTORY_REVS)
+        .into_iter()
+        .map(|e| BlobHistoryVm {
+            rev_ref: e.commit_hex,
+            when: humanize_age(e.author_time_ms),
+            // SCRUB free text at the read boundary — defence-in-depth.
+            author: scrub(&e.author),
+            summary: scrub(&e.summary),
         })
         .collect()
 }
@@ -320,7 +369,7 @@ mod tests {
         );
         let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
 
-        let vm = build_blob(&log(), "hugit", "main.rs", Some(&src), Some(&root))
+        let vm = build_blob(&log(), "hugit", "main.rs", Some(&src), Some(&root), None)
             .expect("a present blob resolves to Some");
 
         assert_eq!(vm.path, "main.rs");
@@ -369,7 +418,8 @@ mod tests {
         );
         let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
 
-        let vm = build_blob(&log(), "r", "k.rs", Some(&src), Some(&root)).expect("rs resolves");
+        let vm =
+            build_blob(&log(), "r", "k.rs", Some(&src), Some(&root), None).expect("rs resolves");
         // The guard did NOT swallow the real outline — the file's symbols survive.
         assert!(
             !vm.outline.is_empty(),
@@ -405,7 +455,8 @@ mod tests {
         );
         let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
 
-        let vm = build_blob(&log(), "r", "m.rs", Some(&src), Some(&root)).expect("rs resolves");
+        let vm =
+            build_blob(&log(), "r", "m.rs", Some(&src), Some(&root), None).expect("rs resolves");
         let kinds: Vec<(&str, &str)> = vm
             .outline
             .iter()
@@ -415,8 +466,8 @@ mod tests {
         assert!(kinds.contains(&("fn", "area")), "outline: {kinds:?}");
 
         // An unsupported extension (.txt) yields an empty outline — honest, not faked.
-        let vm_txt =
-            build_blob(&log(), "r", "notes.txt", Some(&src), Some(&root)).expect("txt resolves");
+        let vm_txt = build_blob(&log(), "r", "notes.txt", Some(&src), Some(&root), None)
+            .expect("txt resolves");
         assert!(
             vm_txt.outline.is_empty(),
             "unsupported lang → empty outline"
@@ -440,7 +491,7 @@ mod tests {
         );
         let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
 
-        let vm = build_blob(&log(), "r", "s.rs", Some(&src), Some(&root)).expect("resolves");
+        let vm = build_blob(&log(), "r", "s.rs", Some(&src), Some(&root), None).expect("resolves");
         let names: String = vm.outline.iter().map(|o| o.name.clone()).collect();
         assert!(
             !names.contains("gho_16C7e42F292c6912E7710c838347Ae178B4a"),
@@ -470,7 +521,8 @@ mod tests {
         );
         let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
 
-        let vm = build_blob(&log(), "r", "a/c.txt", Some(&src), Some(&root)).expect("nested file");
+        let vm =
+            build_blob(&log(), "r", "a/c.txt", Some(&src), Some(&root), None).expect("nested file");
         assert_eq!(vm.lines[0].text, "deep");
         assert_eq!(vm.lang, None); // .txt has no mapping
     }
@@ -536,7 +588,8 @@ mod tests {
 
         // Viewing a NESTED file: the sidebar lists "a/"'s children, each with a
         // path PREFIXED by the parent dir; the open file is `current`.
-        let vm = build_blob(&log(), "r", "a/c.txt", Some(&src), Some(&root)).expect("nested file");
+        let vm =
+            build_blob(&log(), "r", "a/c.txt", Some(&src), Some(&root), None).expect("nested file");
         let by_name = |n: &str| vm.tree.iter().find(|r| r.name == n).expect("row present");
         assert_eq!(by_name("c.txt").path, "a/c.txt");
         assert!(by_name("c.txt").current, "open file marked current");
@@ -547,7 +600,7 @@ mod tests {
 
         // Viewing a ROOT-level file: entry path has no parent prefix.
         let vm_root =
-            build_blob(&log(), "r", "top.txt", Some(&src), Some(&root)).expect("root file");
+            build_blob(&log(), "r", "top.txt", Some(&src), Some(&root), None).expect("root file");
         let top = vm_root
             .tree
             .iter()
@@ -578,16 +631,16 @@ mod tests {
             }],
         );
         let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
-        assert!(build_blob(&log(), "r", "absent.txt", Some(&src), Some(&root)).is_none());
+        assert!(build_blob(&log(), "r", "absent.txt", Some(&src), Some(&root), None).is_none());
     }
 
     #[test]
     fn absent_git_source_is_none_not_fake_content() {
         // The honest "content seam not live" 404 — NOT a fake blank file.
-        assert!(build_blob(&log(), "r", "any.rs", None, None).is_none());
+        assert!(build_blob(&log(), "r", "any.rs", None, None, None).is_none());
         // root_tree present but src absent → still None (lock-step).
         let root = ObjectId::from_hex(b"0000000000000000000000000000000000000001").unwrap();
-        assert!(build_blob(&log(), "r", "any.rs", None, Some(&root)).is_none());
+        assert!(build_blob(&log(), "r", "any.rs", None, Some(&root), None).is_none());
     }
 
     #[test]
@@ -608,7 +661,8 @@ mod tests {
         );
         let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
 
-        let vm = build_blob(&log(), "r", "cfg.rs", Some(&src), Some(&root)).expect("resolves");
+        let vm =
+            build_blob(&log(), "r", "cfg.rs", Some(&src), Some(&root), None).expect("resolves");
         let joined: String = vm.lines.iter().map(|l| l.text.clone()).collect();
         assert!(
             !joined.contains(secret),
@@ -648,7 +702,7 @@ mod tests {
 
         // Must be None — not OOM, not a partial result.
         assert!(
-            build_blob(&log(), "r", "huge.bin", Some(&src), Some(&root)).is_none(),
+            build_blob(&log(), "r", "huge.bin", Some(&src), Some(&root), None).is_none(),
             "a blob over the cap must not be served"
         );
 
@@ -666,7 +720,7 @@ mod tests {
         );
         let src2: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src2);
         assert!(
-            build_blob(&log(), "r", "exact.bin", Some(&src2), Some(&root2)).is_some(),
+            build_blob(&log(), "r", "exact.bin", Some(&src2), Some(&root2), None).is_some(),
             "a blob exactly at the cap must still be served"
         );
     }
@@ -710,7 +764,7 @@ mod tests {
         );
         let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
 
-        let vm = build_blob(&log(), "r", "lib.rs", Some(&src), Some(&root))
+        let vm = build_blob(&log(), "r", "lib.rs", Some(&src), Some(&root), None)
             .expect("root-level file resolves");
 
         // Three entries: lib.rs, main.rs, src (dir) — all in the root tree.
@@ -792,7 +846,7 @@ mod tests {
         let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
 
         // Requesting "src/util.rs" → tree = entries of the "src/" directory.
-        let vm = build_blob(&log(), "r", "src/util.rs", Some(&src), Some(&root))
+        let vm = build_blob(&log(), "r", "src/util.rs", Some(&src), Some(&root), None)
             .expect("nested file resolves");
 
         assert_eq!(vm.tree.len(), 3, "tree entries: {:?}", vm.tree);
@@ -848,8 +902,8 @@ mod tests {
         );
         let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
 
-        let vm =
-            build_blob(&log(), "r", "real.rs", Some(&src), Some(&root)).expect("real.rs resolves");
+        let vm = build_blob(&log(), "r", "real.rs", Some(&src), Some(&root), None)
+            .expect("real.rs resolves");
 
         // The secret-shaped filename must not appear verbatim in the sidebar.
         let names: Vec<&str> = vm.tree.iter().map(|e| e.name.as_str()).collect();
@@ -891,7 +945,7 @@ mod tests {
         );
         let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
 
-        let vm = build_blob(&log(), "r", "real.rs", Some(&src), Some(&root))
+        let vm = build_blob(&log(), "r", "real.rs", Some(&src), Some(&root), None)
             .expect("real file resolves");
 
         // Only real.rs should appear; link.rs is excluded.
@@ -902,5 +956,168 @@ mod tests {
             vm.tree
         );
         assert_eq!(vm.tree[0].name, "real.rs");
+    }
+
+    // ── blob.history ("Histórico" drawer) tests ──────────────────────────────
+
+    /// Build a commit object referencing `tree`, with one optional `parent`.
+    fn insert_commit(
+        src: &mut CasObjectSource,
+        tree: ObjectId,
+        parent: Option<ObjectId>,
+        author: &str,
+        time_secs: i64,
+        message: &str,
+    ) -> ObjectId {
+        let mut body = format!("tree {tree}\n");
+        if let Some(p) = parent {
+            body.push_str(&format!("parent {p}\n"));
+        }
+        body.push_str(&format!(
+            "author {author} {time_secs} +0000\ncommitter {author} {time_secs} +0000\n\n{message}\n"
+        ));
+        src.insert_raw(ObjectKind::Commit, body.into_bytes())
+    }
+
+    /// REAL history flows END-TO-END through build_blob: a HEAD commit threaded in
+    /// populates `history` with the touching revisions (newest-first); a `None` HEAD
+    /// keeps it empty (the honest "seam not live" → the drawer stays disabled).
+    #[test]
+    fn history_flows_through_build_blob_and_is_empty_without_head() {
+        let mut src = CasObjectSource::new();
+        // C1 (root): introduces foo.rs.
+        let foo_v1 = src.insert_raw(ObjectKind::Blob, b"v1".to_vec());
+        let t1 = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_BLOB,
+                name: "foo.rs",
+                oid: foo_v1,
+            }],
+        );
+        let c1 = insert_commit(&mut src, t1, None, "Alice <a@x>", 1000, "add foo");
+        // C2 (head): edits foo.rs.
+        let foo_v2 = src.insert_raw(ObjectKind::Blob, b"v2".to_vec());
+        let t2 = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_BLOB,
+                name: "foo.rs",
+                oid: foo_v2,
+            }],
+        );
+        let c2 = insert_commit(
+            &mut src,
+            t2,
+            Some(c1),
+            "Bob <b@x>",
+            2000,
+            "edit foo\n\nbody",
+        );
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
+
+        // With the HEAD commit threaded: real revisions, newest-first.
+        let vm = build_blob(&log(), "r", "foo.rs", Some(&src), Some(&t2), Some(&c2))
+            .expect("foo.rs resolves");
+        assert_eq!(vm.history.len(), 2, "history: {:?}", vm.history);
+        assert_eq!(vm.history[0].rev_ref, c2.to_hex().to_string());
+        assert_eq!(vm.history[0].summary, "edit foo"); // FIRST LINE only
+        assert_eq!(vm.history[0].author, "Bob <b@x>");
+        assert!(!vm.history[0].when.is_empty(), "when is humanized");
+        assert_eq!(vm.history[1].rev_ref, c1.to_hex().to_string());
+
+        // Without a HEAD commit: empty history (drawer stays disabled-honest).
+        let vm_none = build_blob(&log(), "r", "foo.rs", Some(&src), Some(&t2), None)
+            .expect("foo.rs resolves");
+        assert!(
+            vm_none.history.is_empty(),
+            "no HEAD → empty history (honest seam-not-live)"
+        );
+    }
+
+    /// SECRET-MATRIX: a commit author identity AND a commit summary containing a
+    /// secret-shaped string MUST be `[REDACTED]` in the history VM — the free-text
+    /// commit fields are scrubbed at the read boundary, no redaction bypass.
+    #[test]
+    fn history_author_and_summary_are_scrubbed_at_the_read_boundary() {
+        let secret = "ghp_16C7e42F292c6912E7710c838347Ae178B4a";
+        let mut src = CasObjectSource::new();
+        let foo = src.insert_raw(ObjectKind::Blob, b"v1".to_vec());
+        let t1 = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_BLOB,
+                name: "foo.rs",
+                oid: foo,
+            }],
+        );
+        // Both the author identity and the message carry a secret-shaped token.
+        let author = format!("leak {secret} <l@x>");
+        let message = format!("token {secret} added");
+        let c1 = insert_commit(&mut src, t1, None, &author, 1000, &message);
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
+
+        let vm = build_blob(&log(), "r", "foo.rs", Some(&src), Some(&t1), Some(&c1))
+            .expect("foo.rs resolves");
+        assert_eq!(vm.history.len(), 1, "history: {:?}", vm.history);
+        let row = &vm.history[0];
+        assert!(
+            !row.author.contains(secret),
+            "a secret in the author must be scrubbed: {}",
+            row.author
+        );
+        assert!(
+            !row.summary.contains(secret),
+            "a secret in the summary must be scrubbed: {}",
+            row.summary
+        );
+        assert!(
+            row.author.contains(hugit_ledger::redact::REDACTED)
+                && row.summary.contains(hugit_ledger::redact::REDACTED),
+            "the REDACTED sentinel must be present in both fields"
+        );
+    }
+
+    /// The history walk is WALL-CLOCK bounded inside build_blob: a deadline-in-the-
+    /// past path returns the partial newest list, never exhausting the walk (covered
+    /// at the proto layer; here we assert build_blob never errors / 503s on a deep
+    /// history — it returns Some with a bounded list ≤ MAX_HISTORY_REVS).
+    #[test]
+    fn history_is_count_bounded_in_build_blob() {
+        let mut src = CasObjectSource::new();
+        let mut parent: Option<ObjectId> = None;
+        let mut head_tree = None;
+        let mut head = None;
+        // Build more touching commits than the cap.
+        for i in 0..(MAX_HISTORY_REVS as u32 + 10) {
+            let blob = src.insert_raw(ObjectKind::Blob, format!("v{i}").into_bytes());
+            let tree = insert_tree(
+                &mut src,
+                vec![TreeEntry {
+                    mode: MODE_BLOB,
+                    name: "foo.rs",
+                    oid: blob,
+                }],
+            );
+            let c = insert_commit(&mut src, tree, parent, "A <a@x>", 1000 + i as i64, "edit");
+            parent = Some(c);
+            head = Some(c);
+            head_tree = Some(tree);
+        }
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
+        let vm = build_blob(
+            &log(),
+            "r",
+            "foo.rs",
+            Some(&src),
+            head_tree.as_ref(),
+            head.as_ref(),
+        )
+        .expect("foo.rs resolves");
+        assert_eq!(
+            vm.history.len(),
+            MAX_HISTORY_REVS,
+            "history must be count-capped at MAX_HISTORY_REVS"
+        );
     }
 }
