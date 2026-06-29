@@ -228,6 +228,20 @@ impl RepoState {
             .and_then(|d| hugit_proto::write::store::GitDirCas::new(d).ok())
     }
 
+    /// The repo's HEAD commit oid — the LIVE default-branch tip (`refs/heads/main`,
+    /// else `master`, else the first head; the same picker the clone advertise uses).
+    /// `None` for a refless repo or a tip that is not a valid oid. Read from the
+    /// interior-mutable [`git_refs`](Self::git_refs) snapshot so a just-pushed tip is
+    /// reflected immediately (the live hot-swap). This is the start commit for the
+    /// blob "Histórico" per-path history walk.
+    #[must_use]
+    pub fn head_commit(&self) -> Option<gix_hash::ObjectId> {
+        let refs = self.git_refs.snapshot();
+        let branch = crate::git::pick_default_branch(&refs)?;
+        let tip = refs.get(&branch)?;
+        gix_hash::ObjectId::from_hex(tip.as_bytes()).ok()
+    }
+
     /// Whether this repo has ANY push write seam (a local git dir OR a CAS write
     /// seam). `false` → receive-pack 404s for it (no oracle). The deploy flag
     /// ([`AppState::write_path_enabled`]) is a SEPARATE, earlier gate.

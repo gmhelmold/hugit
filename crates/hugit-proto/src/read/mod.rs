@@ -13,6 +13,7 @@
 //! - [`serve`] is the clone / fetch orchestration that walks reachability and
 //!   drives pack assembly.
 
+pub mod history;
 pub mod negotiate;
 pub mod pack;
 pub mod serve;

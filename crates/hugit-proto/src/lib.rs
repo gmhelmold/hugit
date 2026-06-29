@@ -32,6 +32,7 @@
 pub mod read;
 pub mod write;
 
+pub use read::history::{BLOB_HISTORY_BUDGET, BlobHistoryEntry, MAX_HISTORY_REVS, blob_history};
 pub use read::negotiate::{Capabilities, NegotiationError, RefAdvertisement, RefView, WantHave};
 pub use read::pack::{
     CasObjectSource, FileChange, FileDiff, GitObject, ObjectKind, ObjectSource, PackAssembly,

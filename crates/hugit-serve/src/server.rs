@@ -291,14 +291,22 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
             // map; a repo with no git seam loaded → `None` → those reads 404
             // honestly (identical to a not-wired engine, no oracle).
             let repo_git = state.repo_state(repo);
+            // The per-repo git content seam (object source + HEAD root-tree + HEAD
+            // commit), bundled so the dispatcher takes one param not three. The HEAD
+            // commit (default-branch tip) is the start of the blob "Histórico"
+            // per-path history walk; `None` for a refless repo.
+            let git = repo_git.map(|r| RepoGit {
+                source: &r.git_source,
+                root_tree: &r.git_root_tree,
+                head_commit: r.head_commit(),
+            });
             dispatch_repo(
                 repo,
                 tail,
                 url.split('?').nth(1).unwrap_or(""),
                 &log,
                 &principal,
-                repo_git.map(|r| &r.git_source),
-                repo_git.map(|r| &r.git_root_tree),
+                git.as_ref(),
             )
         }
         // Identity-scoped reads (/v1/me/*): no {repo} path param — they bind the
@@ -816,6 +824,18 @@ fn dispatch_repo_write(
     }
 }
 
+/// The per-repo git content seam, borrowed for the duration of one read dispatch:
+/// the object source (`blob`/`edit`/`search` content), HEAD's root tree, and the
+/// HEAD commit (the default-branch tip — the start of the blob "Histórico" history
+/// walk). Bundled into one struct so [`dispatch_repo`] takes a single git param
+/// rather than three positional ones (clippy `too_many_arguments`). `None` for a
+/// repo with no content seam loaded → the git-backed reads 404 honestly.
+struct RepoGit<'a> {
+    source: &'a std::sync::Arc<dyn hugit_proto::ObjectSource + Send + Sync>,
+    root_tree: &'a gix_hash::ObjectId,
+    head_commit: Option<gix_hash::ObjectId>,
+}
+
 /// Dispatch an authenticated `/v1/repos/{repo}/<tail...>` read. `query` is the
 /// raw query string (after `?`), threaded for the param-driven reads (search).
 /// Dispatch a repo read over an ALREADY loaded + verified + tenant-gated `log`
@@ -827,9 +847,12 @@ fn dispatch_repo(
     query: &str,
     log: &hugit_refstore::EventLog,
     principal: &[String],
-    git_source: Option<&std::sync::Arc<dyn hugit_proto::ObjectSource + Send + Sync>>,
-    root_tree: Option<&gix_hash::ObjectId>,
+    git: Option<&RepoGit<'_>>,
 ) -> (u16, String) {
+    // Unpack the bundled git seam (or `None` legs for a repo with no content seam).
+    let git_source = git.map(|g| g.source);
+    let root_tree = git.map(|g| g.root_tree);
+    let head_commit = git.and_then(|g| g.head_commit);
     match tail {
         ["home"] => ok(&handlers::build_home(log, repo)),
         ["new-pr"] => ok(&handlers::build_new_pr(log, repo)),
@@ -951,7 +974,14 @@ fn dispatch_repo(
         // `dispatch_repo_write` — this is the GET read of the file to edit.
         ["blob", rest @ ..] if !rest.is_empty() => {
             let path = rest.join("/");
-            match handlers::build_blob(log, repo, &path, git_source, root_tree) {
+            match handlers::build_blob(
+                log,
+                repo,
+                &path,
+                git_source,
+                root_tree,
+                head_commit.as_ref(),
+            ) {
                 Some(vm) => ok(&vm),
                 None => err(EngineErr::not_found()),
             }
