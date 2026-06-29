@@ -201,8 +201,12 @@ pub fn dispatch_check<T: RunnerTransport>(
     // honest-ZERO projection — preferring it would WIPE the figure the box
     // actually measured. (Contrast the A-path, where the lease carries a §13.2
     // hook and the close metrics ARE the finalized source of truth.)
+    // B-path: a box-exec lease has no off-box provider-cost source, so the close
+    // submits no `cost_usd_micros` — the box-measured `poll_meta` metrics already
+    // carry the figure this path keeps, and the fabric's honest-zero floor is
+    // correct for the close itself.
     let close = client
-        .close(&lease_id, status)
+        .close(&lease_id, status, None)
         .map_err(RunnerExecError::Lease);
 
     match outcome {
@@ -298,6 +302,18 @@ pub fn project_intent_metrics(m: &IntentMetrics) -> Vec<IngestEvent> {
 ///   a lease never leaks runner capacity;
 /// - the SCOPED credential is used ONLY for the ingest submit; acquire / poll /
 ///   close use the tenant PAT (held privately in the [`LeaseClient`]).
+///
+/// `cost_usd_micros` is the PROVIDER-billed total cost of the off-box agent run
+/// (read from the provider's `/usage` by the off-box loop) — submitted VERBATIM on
+/// the close (#64), where the fabric (#226) records it into
+/// `CloseResponse.metrics.cost_usd_micros`. Pass `None` when no real
+/// provider-billed figure exists yet (honest-zero floor); NEVER pass a
+/// derived/misattributed number (the per-PR honesty law). The off-box agent-loop
+/// source that would furnish a real figure is not yet built (see the callers).
+// The lease-lifecycle inputs (acquire spec, measured metrics, the three memo axes,
+// the toolchain digest) plus the #64 provider cost are each load-bearing and
+// distinct; a params struct would only obscure the call sites — allow the count.
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_attest_offbox<T: RunnerTransport>(
     client: &LeaseClient<T>,
     acquire: &AcquireLeaseRequest,
@@ -306,6 +322,7 @@ pub fn dispatch_attest_offbox<T: RunnerTransport>(
     tree_root: &str,
     def_digest: &str,
     toolchain_digest: &str,
+    cost_usd_micros: Option<u64>,
 ) -> Result<DispatchOutcome, RunnerExecError> {
     let acquired = client.acquire(acquire).map_err(RunnerExecError::Lease)?;
     let lease_id = acquired.lease.lease_id.clone();
@@ -329,8 +346,11 @@ pub fn dispatch_attest_offbox<T: RunnerTransport>(
 
     // ALWAYS close — even when the attest step errored (incl. a missing ingest
     // credential). Explicit so the close is observable in the transport asserts.
+    // A-path: submit the off-box provider-billed cost (#64) on the close. The
+    // fabric records it verbatim into `CloseResponse.metrics.cost_usd_micros`.
+    // `None` ⇒ the fabric keeps its honest-zero derived floor.
     let close = client
-        .close(&lease_id, status)
+        .close(&lease_id, status, cost_usd_micros)
         .map_err(RunnerExecError::Lease);
 
     match collected {
@@ -447,6 +467,7 @@ mod tests {
         method: &'static str,
         url: String,
         bearer: String,
+        body: Vec<u8>,
     }
 
     /// In-memory transport: FIFO queued `(status, body)` responses, records every
@@ -482,12 +503,13 @@ mod tests {
             &self,
             url: &str,
             bearer: &str,
-            _body: &[u8],
+            body: &[u8],
         ) -> Result<(u16, Vec<u8>), RunnerError> {
             self.calls.lock().unwrap().push(FakeCall {
                 method: "POST",
                 url: url.to_string(),
                 bearer: bearer.to_string(),
+                body: body.to_vec(),
             });
             self.next()
         }
@@ -496,6 +518,7 @@ mod tests {
                 method: "GET",
                 url: url.to_string(),
                 bearer: bearer.to_string(),
+                body: Vec::new(),
             });
             self.next()
         }
@@ -868,6 +891,9 @@ mod tests {
             "1".repeat(64).as_str(),
             "2".repeat(64).as_str(),
             "3".repeat(64).as_str(),
+            // A representative provider-billed cost (#64): it must ride the close
+            // body with the exact `cost_usd_micros` key the frozen fabric expects.
+            Some(9_900_000),
         )
         .expect("A-path lifecycle succeeds");
 
@@ -877,6 +903,10 @@ mod tests {
 
         let calls = client.transport().calls();
         assert_eq!(calls.len(), 4, "acquire → submit → poll → close");
+        // The close body carried the submitted provider-billed cost verbatim (#64).
+        let close_body: serde_json::Value = serde_json::from_slice(&calls[3].body).unwrap();
+        assert_eq!(close_body["status"], "succeeded");
+        assert_eq!(close_body["cost_usd_micros"], 9_900_000);
         // acquire — PAT.
         assert_eq!(calls[0].url, "https://runner.example/v1/leases");
         assert_eq!(calls[0].bearer, format!("Bearer {SENTINEL_PAT}"));
@@ -925,6 +955,7 @@ mod tests {
             "1".repeat(64).as_str(),
             "2".repeat(64).as_str(),
             "3".repeat(64).as_str(),
+            None,
         )
         .expect_err("absent envelope_ingest is a fail-closed error");
         assert!(
@@ -1017,6 +1048,7 @@ mod tests {
             "1".repeat(64).as_str(),
             "2".repeat(64).as_str(),
             "3".repeat(64).as_str(),
+            None,
         )
         .expect("A-path lifecycle succeeds");
 
@@ -1064,6 +1096,7 @@ mod tests {
             "1".repeat(64).as_str(),
             "2".repeat(64).as_str(),
             "3".repeat(64).as_str(),
+            None,
         )
         .expect("A-path lifecycle succeeds");
 

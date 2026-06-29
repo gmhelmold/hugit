@@ -311,6 +311,24 @@ impl CloseStatus {
 pub struct CloseRequest {
     /// `"succeeded"` | `"failed"` — the only two the caller may claim.
     pub status: String,
+
+    /// The PROVIDER-billed total cost of the lease's work, in USD micro-dollars
+    /// (`u64`; `1_000_000` == $1) — the owner's 2026-06-27 re-decision (#64). The
+    /// fabric (`CloseRequest.cost_usd_micros`, #226) records this figure VERBATIM
+    /// into `CloseResponse.metrics.cost_usd_micros`; it never recomputes or
+    /// price-cards it. `Some(n)` is a REAL provider-billed figure (read from the
+    /// provider's `/usage` by the off-box caller); `None` keeps the honest-zero
+    /// derived floor. The honesty law is load-bearing: this is ONLY ever a figure
+    /// measured for THIS lease's work — never a derived/misattributed stand-in.
+    ///
+    /// `skip_serializing_if` is REQUIRED, not cosmetic: the fabric body is
+    /// `deny_unknown_fields`, so when `None` the field MUST NOT appear on the wire
+    /// — the body stays byte-identical to today's `{"status":"..."}`, accepted by
+    /// BOTH the not-yet-redeployed fabric (no such field) and the new one (which
+    /// `#[serde(default)]`s it). When `Some(n)` it serializes as
+    /// `"cost_usd_micros": n`, the exact key the frozen fabric DTO expects.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_usd_micros: Option<u64>,
 }
 
 /// Response body for `POST /v1/leases/{lease_id}/close` — the §13.1 finalized
@@ -664,11 +682,24 @@ impl<T: RunnerTransport> LeaseClient<T> {
     /// accepted as success (it would mean a metrics-less close — a contract
     /// violation; surfaced as [`RunnerError::Status`]). The metrics are never
     /// fabricated: a close error surfaces, it is never papered over with a zero.
-    pub fn close(&self, lease_id: &str, status: CloseStatus) -> Result<CloseResponse, RunnerError> {
+    /// `cost_usd_micros` is the PROVIDER-billed total cost for this lease's work
+    /// (read from the provider's `/usage` by the off-box caller), recorded VERBATIM
+    /// by the fabric (#226) into `CloseResponse.metrics.cost_usd_micros`. `None` is
+    /// the honest default (the fabric keeps its derived honest-zero floor) and the
+    /// body stays byte-identical to today (`{"status":"..."}`); `Some(n)` adds the
+    /// `cost_usd_micros` key. NEVER pass a derived/misattributed figure — only a
+    /// real cost measured for THIS lease's work (the per-PR honesty law).
+    pub fn close(
+        &self,
+        lease_id: &str,
+        status: CloseStatus,
+        cost_usd_micros: Option<u64>,
+    ) -> Result<CloseResponse, RunnerError> {
         validate_lease_id(lease_id)?;
         let url = format!("{}/v1/leases/{}/close", self.config.base(), lease_id);
         let req = CloseRequest {
             status: status.as_wire().to_string(),
+            cost_usd_micros,
         };
         let body = serde_json::to_vec(&req).map_err(|e| RunnerError::Decode(e.to_string()))?;
         let (code, resp) = self.transport.post(&url, &self.config.bearer(), &body)?;
@@ -961,7 +992,9 @@ mod tests {
         assert!(events.0.starts_with(b"event: started"));
 
         // close — POSTs the required status body and parses CloseResponse.
-        let closed = client.close(lease_id, CloseStatus::Succeeded).unwrap();
+        let closed = client
+            .close(lease_id, CloseStatus::Succeeded, None)
+            .unwrap();
         assert_eq!(
             closed.metrics.cost_usd_micros, 1834290,
             "close returns the finalized §13.1 metrics"
@@ -1356,7 +1389,7 @@ mod tests {
         let client = LeaseClient::with_transport(config, transport);
 
         let resp = client
-            .close("lease-abc123", CloseStatus::Succeeded)
+            .close("lease-abc123", CloseStatus::Succeeded, Some(4_200_000))
             .unwrap();
         // The response carries the finalized metrics (full cache-split preserved).
         assert_eq!(resp.lease_id, "lease-abc123");
@@ -1366,7 +1399,9 @@ mod tests {
         assert_eq!(resp.metrics.tokens.cache_read, 120557);
         assert_eq!(resp.metrics.tokens.cache_write, 3361);
 
-        // The request carried the REQUIRED `status` field (never an empty body).
+        // The request carried the REQUIRED `status` field (never an empty body)
+        // AND the provider-billed `cost_usd_micros` (the #64 submit side) with the
+        // EXACT key the frozen fabric DTO expects.
         let calls = client.transport.calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].method, "POST");
@@ -1376,8 +1411,36 @@ mod tests {
         );
         let body: serde_json::Value = serde_json::from_slice(&calls[0].body).unwrap();
         assert_eq!(body["status"], "succeeded");
+        assert_eq!(body["cost_usd_micros"], 4_200_000);
         // A `failed` close maps to the other wire token.
         assert_eq!(CloseStatus::Failed.as_wire(), "failed");
+    }
+
+    /// `close` with `cost_usd_micros: None` sends a body BYTE-IDENTICAL to today's
+    /// (`{"status":"..."}`) — the `skip_serializing_if` omits the field entirely,
+    /// so the body stays accepted by the `deny_unknown_fields` fabric (BOTH the
+    /// not-yet-redeployed one with no such field and the new one). The honest
+    /// default never poisons the wire with a `null`.
+    #[test]
+    fn close_with_none_cost_omits_the_field_byte_identically() {
+        let transport = FakeTransport::with_responses(vec![(200, sample_close_response_body())]);
+        let config = RunnerConfig::new("https://runner.example", SENTINEL_PAT).unwrap();
+        let client = LeaseClient::with_transport(config, transport);
+        client
+            .close("lease-abc123", CloseStatus::Succeeded, None)
+            .unwrap();
+        let calls = client.transport.calls();
+        // EXACTLY `{"status":"succeeded"}` — no `cost_usd_micros` key at all.
+        assert_eq!(
+            String::from_utf8(calls[0].body.clone()).unwrap(),
+            r#"{"status":"succeeded"}"#,
+            "None must omit the field, keeping the body byte-identical to today"
+        );
+        let body: serde_json::Value = serde_json::from_slice(&calls[0].body).unwrap();
+        assert!(
+            body.as_object().unwrap().get("cost_usd_micros").is_none(),
+            "the cost field must NOT appear when None"
+        );
     }
 
     /// `close` authenticates with the tenant PAT (NEVER a scoped ingest
@@ -1389,7 +1452,7 @@ mod tests {
         let config = RunnerConfig::new("https://runner.example", SENTINEL_PAT).unwrap();
         let client = LeaseClient::with_transport(config, transport);
         client
-            .close("lease-abc123", CloseStatus::Succeeded)
+            .close("lease-abc123", CloseStatus::Succeeded, None)
             .unwrap();
         let calls = client.transport.calls();
         assert_eq!(calls[0].bearer, format!("Bearer {SENTINEL_PAT}"));
