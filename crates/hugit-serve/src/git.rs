@@ -589,7 +589,7 @@ fn handle_receive_pack(state: &AppState, repo: &str, body: &[u8], request: Reque
     let recv = {
         let cas: &mut dyn Cas = match &mut writer {
             RepoWriter::GitDir { cas, .. } => cas,
-            RepoWriter::Cas { cas, .. } => cas,
+            RepoWriter::Cas { cas, .. } => cas.as_mut(),
         };
         receive_pack(
             &gate,
@@ -636,7 +636,7 @@ fn handle_receive_pack(state: &AppState, repo: &str, body: &[u8], request: Reque
             // owns the flush + manifest steps; the log persist stays our closure.
             RepoWriter::Cas { cas, seam } => {
                 let res = crate::cas::finalize_cas_push(
-                    cas,
+                    cas.as_mut(),
                     &seam.r2,
                     &seam.tenant,
                     &seam.repo_slug,
@@ -663,6 +663,7 @@ fn handle_receive_pack(state: &AppState, repo: &str, body: &[u8], request: Reque
                             &cmd.ref_name,
                             &cmd.new_oid,
                             cas.index_additions(),
+                            &cas.consumed_existing_bases(),
                         ) {
                             eprintln!(
                                 "hugit-serve: CAS push durable but in-memory ref hot-swap \
@@ -1107,7 +1108,7 @@ mod live_refs_tests {
         state
             .repo_state(repo)
             .unwrap()
-            .apply_cas_push_inmemory("refs/heads/main", &new_tip, &HashMap::new())
+            .apply_cas_push_inmemory("refs/heads/main", &new_tip, &HashMap::new(), &[])
             .expect("hot-swap applies");
 
         // After the push: the SAME state (no reload) advertises the NEW tip.
@@ -1145,7 +1146,7 @@ mod live_refs_tests {
         state
             .repo_state(repo)
             .unwrap()
-            .apply_cas_push_inmemory("refs/heads/feature", &created_tip, &HashMap::new())
+            .apply_cas_push_inmemory("refs/heads/feature", &created_tip, &HashMap::new(), &[])
             .expect("hot-swap applies");
 
         let after = git_refs_for(&state, repo).expect("advertises");
@@ -1179,7 +1180,7 @@ mod live_refs_tests {
         let err = state
             .repo_state(repo)
             .unwrap()
-            .apply_cas_push_inmemory("refs/heads/main", &new_tip, &bad)
+            .apply_cas_push_inmemory("refs/heads/main", &new_tip, &bad, &[])
             .expect_err("a malformed oid must abort the refresh");
         assert!(
             err.contains("not a valid git oid"),
@@ -1191,6 +1192,113 @@ mod live_refs_tests {
             after.get("refs/heads/main"),
             Some(&old_tip),
             "the ref was NOT advanced (prior tip still served, fail-closed)"
+        );
+    }
+
+    /// A CAS-mode `RepoState` whose live oid-index is SEEDED with the given base oids
+    /// (the thin-pack re-assert tests need a non-empty read-path index to consult).
+    fn cas_mode_repo_state_with_index(
+        refs: std::collections::BTreeMap<String, String>,
+        seed_bases: &[&str],
+    ) -> RepoState {
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> =
+            Arc::new(hugit_proto::CasObjectSource::new());
+        let mut index = std::collections::BTreeMap::new();
+        for hex in seed_bases {
+            index.insert(
+                gix_hash::ObjectId::from_hex(hex.as_bytes()).expect("valid base oid"),
+                "f".repeat(64),
+            );
+        }
+        RepoState {
+            git_source: src,
+            git_root_tree: gix_hash::ObjectId::from_hex(&[b'0'; 40]).unwrap(),
+            git_refs: LiveRefs::new(refs),
+            git_dir: None,
+            cas_write: None,
+            live_oid_index: Some(LiveOidIndex::new(index)),
+        }
+    }
+
+    /// Defence-in-depth (#206 thin-pack follow-up): if a push resolved a delta against
+    /// a base that is ABSENT from the read-path live oid-index, the hot-swap REFUSES to
+    /// advance the ref — the prior tip keeps serving (the push stays durable; the
+    /// correct tip loads on reboot). This guards a future HA / stale-index divergence
+    /// from ever advertising a tip whose closure the read path can't resolve.
+    #[test]
+    fn hotswap_refuses_when_consumed_base_absent_from_live_index() {
+        let repo = "hugit";
+        let old_tip = "a".repeat(40);
+        let new_tip = "b".repeat(40);
+        // A consumed base oid that is NOT seeded into the live index.
+        let absent_base = "d".repeat(40);
+
+        let dir = seed_public_log(repo);
+        let mut state = AppState::new(dir, TOKEN.to_string());
+        let mut refs = std::collections::BTreeMap::new();
+        refs.insert("refs/heads/main".to_string(), old_tip.clone());
+        state.repos.insert(
+            repo.to_string(),
+            cas_mode_repo_state_with_index(refs, &[]), // empty live index
+        );
+
+        let err = state
+            .repo_state(repo)
+            .unwrap()
+            .apply_cas_push_inmemory(
+                "refs/heads/main",
+                &new_tip,
+                &HashMap::new(),
+                std::slice::from_ref(&absent_base),
+            )
+            .expect_err("an unresolvable consumed base must abort the hot-swap");
+        assert!(
+            err.contains("absent from the live oid-index"),
+            "names the fault: {err}"
+        );
+
+        let after = git_refs_for(&state, repo).expect("still advertises");
+        assert_eq!(
+            after.get("refs/heads/main"),
+            Some(&old_tip),
+            "the ref was NOT advanced (prior tip still serves, fail-closed)"
+        );
+    }
+
+    /// The positive leg: a consumed thin-pack base that IS present in the live
+    /// oid-index lets the hot-swap advance the tip (the re-assert passes).
+    #[test]
+    fn hotswap_advances_when_consumed_base_present_in_live_index() {
+        let repo = "hugit";
+        let old_tip = "a".repeat(40);
+        let new_tip = "b".repeat(40);
+        let present_base = "d".repeat(40);
+
+        let dir = seed_public_log(repo);
+        let mut state = AppState::new(dir, TOKEN.to_string());
+        let mut refs = std::collections::BTreeMap::new();
+        refs.insert("refs/heads/main".to_string(), old_tip.clone());
+        state.repos.insert(
+            repo.to_string(),
+            cas_mode_repo_state_with_index(refs, &[&present_base]), // base seeded
+        );
+
+        state
+            .repo_state(repo)
+            .unwrap()
+            .apply_cas_push_inmemory(
+                "refs/heads/main",
+                &new_tip,
+                &HashMap::new(),
+                std::slice::from_ref(&present_base),
+            )
+            .expect("a resolvable consumed base lets the hot-swap advance");
+
+        let after = git_refs_for(&state, repo).expect("advertises");
+        assert_eq!(
+            after.get("refs/heads/main"),
+            Some(&new_tip),
+            "the tip advanced (the re-assert passed)"
         );
     }
 
