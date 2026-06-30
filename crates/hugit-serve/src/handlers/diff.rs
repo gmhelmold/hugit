@@ -70,6 +70,127 @@ pub fn empty_diff() -> DiffVm {
     }
 }
 
+// ── Commit/ref-level diffs (compare / pr_detail / commit_detail) ─────────────
+//
+// The numstat surfaces above (compare base→head, pr_detail intent-vs-parent,
+// commit_detail commit-vs-first-parent) all start from COMMITS or REFS, not raw
+// tree oids. These helpers resolve the trees, then defer to [`diff_vm`] — so the
+// ONE wall-clock budget ([`hugit_proto::DIFF_BUDGET`], baked into `tree_diff`)
+// governs every numstat the engine serves. Each handler runs exactly ONE
+// `diff_vm`, so no single read exceeds that budget.
+//
+// Honest-default contract (identical to `diff_vm`): no git source, an
+// unresolvable ref/oid, a root commit (no first parent), or a fail-closed
+// tree-walk → the honest-empty diff. We never synthesise an against-the-empty-tree
+// "all-added" numstat for a root commit: with no parent there is no real
+// before-state to diff, so honest-empty is the truthful answer (never a
+// fabricated wall of additions).
+
+/// The root-tree oid of a commit, via the canonical proto decoder. `None` when
+/// the object is absent / not a commit (fail-closed — never a fabricated tree).
+fn commit_tree(src: &dyn hugit_proto::ObjectSource, commit: &ObjectId) -> Option<ObjectId> {
+    hugit_proto::commit_root_tree(src, commit).ok().flatten()
+}
+
+/// The FIRST-parent oid of a commit (git's `^1` / `--first-parent`). `None` for
+/// a root commit (no parents) or an absent/non-commit object. Decoded with the
+/// canonical `gix_object::CommitRefIter` — the commit byte format is never
+/// reimplemented here (mirrors `hugit_proto::commit_root_tree`).
+fn first_parent(src: &dyn hugit_proto::ObjectSource, commit: &ObjectId) -> Option<ObjectId> {
+    let object = src.get(commit).ok().flatten()?;
+    if object.kind != hugit_proto::ObjectKind::Commit {
+        return None;
+    }
+    // `parent_ids()` yields the parents in order; the first is `^1`. A decode
+    // error (a malformed commit) surfaces as `None` → the honest-empty diff, never
+    // a panic and never a partial fabrication.
+    gix_object::CommitRefIter::from_bytes(&object.data)
+        .parent_ids()
+        .next()
+}
+
+/// Resolve a `base`/`head` ref-ish (as it arrives in the compare URL) to a commit
+/// oid, consulting the live refs first, then the raw-oid fallback.
+///
+/// Resolution order (git's own short-name precedence, narrowed to what we store):
+/// 1. an EXACT key in the live `refs` map (`refs/heads/main`, `refs/tags/v1`, …);
+/// 2. `refs/heads/{refish}` then `refs/tags/{refish}` (a short branch/tag name);
+/// 3. the `refish` parsed as a raw 40-hex commit oid.
+///
+/// `None` when none resolves to a syntactically valid oid — the caller serves the
+/// honest-empty diff (no existence oracle; an unknown ref looks like an empty
+/// change, never an error).
+fn resolve_refish(
+    refs: &std::collections::BTreeMap<String, String>,
+    refish: &str,
+) -> Option<ObjectId> {
+    let candidates = [
+        refs.get(refish),
+        refs.get(&format!("refs/heads/{refish}")),
+        refs.get(&format!("refs/tags/{refish}")),
+    ];
+    for tip in candidates.into_iter().flatten() {
+        if let Ok(oid) = ObjectId::from_hex(tip.as_bytes()) {
+            return Some(oid);
+        }
+    }
+    // Raw-oid fallback: a 40-hex `refish` is itself a commit reference.
+    ObjectId::from_hex(refish.as_bytes()).ok()
+}
+
+/// The numstat between two COMMITS (`base_commit` → `head_commit`): resolve both
+/// root trees, then [`diff_vm`]. Any leg `None` / an unresolvable tree → the
+/// honest-empty diff.
+#[must_use]
+pub fn diff_commits(
+    src: Option<&Arc<dyn hugit_proto::ObjectSource + Send + Sync>>,
+    base_commit: Option<&ObjectId>,
+    head_commit: Option<&ObjectId>,
+) -> DiffVm {
+    let (Some(src), Some(base), Some(head)) = (src, base_commit, head_commit) else {
+        return empty_diff();
+    };
+    let base_tree = commit_tree(src.as_ref(), base);
+    let head_tree = commit_tree(src.as_ref(), head);
+    diff_vm(Some(src), base_tree.as_ref(), head_tree.as_ref())
+}
+
+/// The numstat for a `base`→`head` COMPARE, resolving each ref-ish against the
+/// live `refs` map (then the raw-oid fallback). An unresolvable side → the
+/// honest-empty diff (no oracle).
+#[must_use]
+pub fn diff_compare(
+    src: Option<&Arc<dyn hugit_proto::ObjectSource + Send + Sync>>,
+    refs: &std::collections::BTreeMap<String, String>,
+    base: &str,
+    head: &str,
+) -> DiffVm {
+    let Some(src) = src else {
+        return empty_diff();
+    };
+    let base_commit = resolve_refish(refs, base);
+    let head_commit = resolve_refish(refs, head);
+    diff_commits(Some(src), base_commit.as_ref(), head_commit.as_ref())
+}
+
+/// The numstat of a single COMMIT against its FIRST parent (`commit_detail`, and
+/// the per-intent commit in `pr_detail`). A ROOT commit (no parent), an absent /
+/// unresolvable commit, or an unresolvable parent tree → the honest-empty diff
+/// (we never fabricate an all-added wall against a non-existent before-state).
+#[must_use]
+pub fn diff_against_first_parent(
+    src: Option<&Arc<dyn hugit_proto::ObjectSource + Send + Sync>>,
+    commit: Option<&ObjectId>,
+) -> DiffVm {
+    let (Some(src), Some(commit)) = (src, commit) else {
+        return empty_diff();
+    };
+    // No first parent ⇒ root commit ⇒ honest-empty (`diff_commits` short-circuits
+    // on the `None` base, exactly the no-before-state honest default).
+    let parent = first_parent(src.as_ref(), commit);
+    diff_commits(Some(src), parent.as_ref(), Some(commit))
+}
+
 /// `(file_count, added, removed)` rollup over a [`DiffVm`]'s file rows — the
 /// scalar diffstat the review header renders (`file_count` / `added` / `removed`).
 #[must_use]

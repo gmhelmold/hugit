@@ -299,6 +299,7 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
                 source: &r.git_source,
                 root_tree: &r.git_root_tree,
                 head_commit: r.head_commit(),
+                refs: r.git_refs.snapshot(),
             });
             dispatch_repo(
                 repo,
@@ -834,6 +835,9 @@ struct RepoGit<'a> {
     source: &'a std::sync::Arc<dyn hugit_proto::ObjectSource + Send + Sync>,
     root_tree: &'a gix_hash::ObjectId,
     head_commit: Option<gix_hash::ObjectId>,
+    /// The LIVE ref snapshot (ref-name → oid hex) — the compare base/head resolver.
+    /// Owned (a `snapshot()`), so a just-pushed tip is reflected without a reboot.
+    refs: std::collections::BTreeMap<String, String>,
 }
 
 /// Dispatch an authenticated `/v1/repos/{repo}/<tail...>` read. `query` is the
@@ -853,11 +857,16 @@ fn dispatch_repo(
     let git_source = git.map(|g| g.source);
     let root_tree = git.map(|g| g.root_tree);
     let head_commit = git.and_then(|g| g.head_commit);
+    // The live ref snapshot for the compare base/head resolver (empty for a repo
+    // with no content seam → an honest-empty compare diff).
+    let git_refs = git.map(|g| g.refs.clone()).unwrap_or_default();
     match tail {
         ["home"] => ok(&handlers::build_home(log, repo)),
         ["new-pr"] => ok(&handlers::build_new_pr(log, repo)),
         ["knowledge"] => ok(&handlers::build_knowledge(log, repo)),
-        ["compare", base, head] => ok(&handlers::build_compare(log, repo, base, head)),
+        ["compare", base, head] => ok(&handlers::build_compare(
+            log, repo, base, head, git_source, &git_refs,
+        )),
         ["landing"] => ok(&handlers::build_landing(log, repo)),
         ["checks"] => ok(&handlers::build_checks(log, repo)),
         ["commits"] => ok(&handlers::build_commits(log, repo)),
@@ -892,7 +901,7 @@ fn dispatch_repo(
             ok(&handlers::build_viewer_can(principal, &meta))
         }
         ["prs", n] => match n.parse::<u32>() {
-            Ok(num) => match handlers::build_pr_detail(log, repo, num) {
+            Ok(num) => match handlers::build_pr_detail(log, repo, num, git_source) {
                 Some(vm) => ok(&vm),
                 None => err(EngineErr::not_found()), // get_opt: absent PR → 404, no leak
             },
@@ -925,7 +934,7 @@ fn dispatch_repo(
             Some(vm) => ok(&vm),
             None => err(EngineErr::not_found()),
         },
-        ["commit", sha] => match handlers::build_commit_detail(log, repo, sha) {
+        ["commit", sha] => match handlers::build_commit_detail(log, repo, sha, git_source) {
             Some(vm) => ok(&vm),
             None => err(EngineErr::not_found()),
         },

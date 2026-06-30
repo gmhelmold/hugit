@@ -1,12 +1,20 @@
 //! Parity test for `build_commit_detail` (by-sha → Option). Found/404 + the
 //! SECRET-MATRIX guard (a PAT in the charter must redact in the title).
 
+use std::sync::Arc;
+
 use hugit_contracts::IntentSidecar;
 use hugit_refstore::EventLog;
 use hugit_refstore::intent::import_sidecar;
 use hugit_serve::handlers::build_commit_detail;
 
 const PAT: &str = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+/// No git source — these parity tests assert the projection + redaction, not the
+/// numstat (which is honest-empty without a git seam).
+fn no_git() -> Option<&'static Arc<dyn hugit_proto::ObjectSource + Send + Sync>> {
+    None
+}
 
 fn sidecar(intent_id: &str, charter: &str) -> IntentSidecar {
     IntentSidecar {
@@ -39,7 +47,7 @@ fn found_by_6char_prefix() {
         "fix: token expiry",
         "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
     );
-    let vm = build_commit_detail(&log, "hugit", "a1b2c3").expect("prefix matches → Some");
+    let vm = build_commit_detail(&log, "hugit", "a1b2c3", no_git()).expect("prefix matches → Some");
     assert_eq!(vm.sha, "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2");
     assert_eq!(vm.intent_id.as_deref(), Some("i-1"));
     assert!(!vm.external);
@@ -51,7 +59,7 @@ fn found_by_6char_prefix() {
 fn unknown_sha_is_none_404() {
     let log = EventLog::new();
     assert!(
-        build_commit_detail(&log, "hugit", "deadbe").is_none(),
+        build_commit_detail(&log, "hugit", "deadbe", no_git()).is_none(),
         "absent → None (404, no leak)"
     );
 }
@@ -65,8 +73,8 @@ fn secret_in_charter_redacts_in_title() {
         &format!("ship {PAT} now"),
         "cafe00cafe00cafe00cafe00cafe00cafe00cafe",
     );
-    let vm =
-        build_commit_detail(&log, "hugit", "cafe00").expect("Some — secret scrubbed, not dropped");
+    let vm = build_commit_detail(&log, "hugit", "cafe00", no_git())
+        .expect("Some — secret scrubbed, not dropped");
     let json = serde_json::to_string(&vm).unwrap();
     assert!(!json.contains(PAT), "raw PAT must NEVER reach the VM JSON");
     assert_eq!(

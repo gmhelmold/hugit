@@ -10,7 +10,11 @@
 //! (no diffstat seam), impact (blast-radius not wired), source/target_branch
 //! (no git-ref tracking), reviewers/labels/conversation, mirror (P2).
 
+use std::sync::Arc;
+
 use crate::fmt::{CHECKS_CAP, pct_u8, scrub, scrub_all, str_field};
+use crate::handlers::diff::{diff_against_first_parent, diff_totals, empty_diff};
+use gix_hash::ObjectId;
 use hugit_cli::checks::CHECK_RECORDED_KIND;
 use hugit_cli::pr::{
     INTENT_ENVELOPE_KIND, OpenedPr, PR_ABANDONED_KIND, PR_ENVELOPE_KIND, PR_LANDED_KIND,
@@ -23,8 +27,9 @@ use hugit_http_contracts::common::{
 use hugit_http_contracts::{CostSplitVm, ImpactVm, PrDetailVm};
 use hugit_ledger::{Ledger, PrQueueInput, pr_record};
 use hugit_refstore::EventLog;
+use hugit_refstore::intent::projection::{ProjectionRow, project_machine};
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Build the PR-detail view-model for PR `pr_number`.
 ///
@@ -36,11 +41,22 @@ use std::collections::BTreeSet;
 /// Field provenance is tagged inline: REAL (a real engine fn), PRESENTATION
 /// (adapter humanizes a real datum), or STUB (no local source → honest default,
 /// never faked) per master-plan §0/§5.
-pub fn build_pr_detail(log: &EventLog, repo: &str, pr_number: u32) -> Option<PrDetailVm> {
+pub fn build_pr_detail(
+    log: &EventLog,
+    repo: &str,
+    pr_number: u32,
+    git_source: Option<&Arc<dyn hugit_proto::ObjectSource + Send + Sync>>,
+) -> Option<PrDetailVm> {
     let pr_id = pr_number.to_string();
 
     // ── REAL: the PR must exist on the log (else 404, no existence leak) ─────
     let opened = find_pr_opened(log, &pr_id)?;
+
+    // ── REAL: map each intent_id → its landed commit oid (machine projection) ─
+    // Used to compute the per-intent and PR-level numstats (commit vs first
+    // parent). Only well-formed 40-hex targets are kept; a short/synthetic target
+    // simply has no entry → an honest-empty per-intent diff.
+    let intent_commits = intent_commit_oids(log);
 
     // ── REAL: state_label — PR lifecycle state projected off the log ────────
     // Mirrors the documented `pr_state` precedence (landed ≻ abandoned ≻ queued
@@ -91,8 +107,17 @@ pub fn build_pr_detail(log: &EventLog, repo: &str, pr_number: u32) -> Option<PrD
         ),
     };
 
-    // ── REAL: intents in this PR's bundle (Ledger projection) ───────────────
-    let intents = build_intents(log, &opened);
+    // ── REAL: intents in this PR's bundle (Ledger projection) — each carries
+    //          its own commit-vs-first-parent numstat when a git source is wired ─
+    let intents = build_intents(log, &opened, git_source, &intent_commits);
+
+    // ── REAL or honest-EMPTY: the PR-level numstat ───────────────────────────
+    // The PR's representative diff is its tip intent's commit vs first parent —
+    // the LAST bundle intent with a resolvable commit (bundle order = landing
+    // order). No git source / no resolvable commit → an honest-empty diff. The
+    // scalar diffstat (file_count/added/removed) is the rollup of that diff.
+    let pr_diff = pr_level_diff(git_source, &opened, &intent_commits);
+    let (pr_file_count, pr_added, pr_removed) = diff_totals(&pr_diff);
 
     // ── REAL: check_rows from check.recorded events (capped — the VM is the page) ─
     let mut check_rows = build_check_rows(log);
@@ -119,10 +144,10 @@ pub fn build_pr_detail(log: &EventLog, repo: &str, pr_number: u32) -> Option<PrD
         source_branch: String::new(),
         target_branch: String::new(),
         models_note: String::new(), // STUB — no models seam at this altitude
-        // STUB — no diffstat seam
-        file_count: 0,
-        added: 0,
-        removed: 0,
+        // REAL — rollup of the PR-level numstat (0/0/0 honestly when no git seam)
+        file_count: pr_file_count,
+        added: pr_added,
+        removed: pr_removed,
         better_chips: vec![], // STUB
         regen_note: None,     // STUB
         why,
@@ -155,12 +180,9 @@ pub fn build_pr_detail(log: &EventLog, repo: &str, pr_number: u32) -> Option<PrD
         check_rows,
         checks_cost_note: String::new(),  // STUB — not in log payload
         checks_cache_note: String::new(), // STUB
-        diff: DiffVm {
-            files: vec![],
-            hunks: vec![],
-        }, // STUB — no diffstat seam
-        landing_status: vec![],           // STUB — no landing-status (k,v) seam
-        reviewers: vec![],                // STUB — no reviewer rail seam
+        diff: pr_diff, // REAL — PR tip intent vs first parent (honest-empty w/o git seam)
+        landing_status: vec![], // STUB — no landing-status (k,v) seam
+        reviewers: vec![], // STUB — no reviewer rail seam
         panel_note: String::new(),
         assignee: String::new(),  // STUB
         labels: vec![],           // STUB
@@ -266,36 +288,87 @@ fn envelope_vm(env: &ContextEnvelope) -> EnvelopeVm {
 }
 
 /// The PR's intents (Ledger projection), filtered to the PR's bundle — REAL.
-fn build_intents(log: &EventLog, opened: &OpenedPr) -> Vec<IntentSummaryVm> {
+/// Each intent's `diff` is its landed commit vs first parent (REAL when a git
+/// source is wired AND the intent has a resolvable 40-hex commit; honest-empty
+/// otherwise — never faked).
+fn build_intents(
+    log: &EventLog,
+    opened: &OpenedPr,
+    git_source: Option<&Arc<dyn hugit_proto::ObjectSource + Send + Sync>>,
+    intent_commits: &BTreeMap<String, ObjectId>,
+) -> Vec<IntentSummaryVm> {
     let bundle: BTreeSet<&str> = opened.intent_ids.iter().map(String::as_str).collect();
     let ledger = Ledger::from_records(log.records());
     ledger
         .entries()
         .iter()
         .filter(|e| bundle.contains(e.intent_id.as_str()))
-        .map(|e| IntentSummaryVm {
-            id: e.intent_id.clone(),
-            title: e.charter.clone(),
-            status: if e.rejected {
-                "REJECTED".to_string()
-            } else if e.proven {
-                "PROVEN".to_string()
-            } else {
-                "LANDED".to_string()
-            },
-            charter: e.charter.clone(),
-            context_json: String::new(), // STUB — no context.json snapshot here
-            diff: DiffVm {
-                files: vec![],
-                hunks: vec![],
-            }, // STUB — no diffstat seam
-            verdicts: vec![],            // STUB — verdict detail not projected here
-            model: None,                 // STUB
-            envelope: None,              // STUB — intent envelope refs not surfaced here
-            blame_quote: None,           // serde(default)
-            blame_proof: None,           // serde(default)
+        .map(|e| {
+            // REAL: this intent's commit-vs-first-parent numstat (honest-empty
+            // when no git seam or no resolvable commit for the intent).
+            let diff = match intent_commits.get(e.intent_id.as_str()) {
+                Some(commit) => diff_against_first_parent(git_source, Some(commit)),
+                None => empty_diff(),
+            };
+            IntentSummaryVm {
+                id: e.intent_id.clone(),
+                title: e.charter.clone(),
+                status: if e.rejected {
+                    "REJECTED".to_string()
+                } else if e.proven {
+                    "PROVEN".to_string()
+                } else {
+                    "LANDED".to_string()
+                },
+                charter: e.charter.clone(),
+                context_json: String::new(), // STUB — no context.json snapshot here
+                diff,                        // REAL — intent commit vs first parent
+                verdicts: vec![],            // STUB — verdict detail not projected here
+                model: None,                 // STUB
+                envelope: None,              // STUB — intent envelope refs not surfaced here
+                blame_quote: None,           // serde(default)
+                blame_proof: None,           // serde(default)
+            }
         })
         .collect()
+}
+
+/// Map `intent_id → landed commit oid` from the machine projection. Only
+/// well-formed 40-hex targets are kept (a short/synthetic target has no entry →
+/// an honest-empty per-intent diff downstream). The LAST landed commit wins for a
+/// re-landed intent (the current tip).
+fn intent_commit_oids(log: &EventLog) -> BTreeMap<String, ObjectId> {
+    let mut out = BTreeMap::new();
+    let Ok(machine) = project_machine(log) else {
+        return out;
+    };
+    for row in machine.rows() {
+        if let ProjectionRow::Intent(c) = row
+            && let Ok(oid) = ObjectId::from_hex(c.target.as_bytes())
+        {
+            out.insert(c.intent_id.clone(), oid);
+        }
+    }
+    out
+}
+
+/// The PR's representative numstat: its TIP intent's commit vs first parent —
+/// the last bundle intent (landing order) with a resolvable commit. No git source
+/// / no resolvable commit → the honest-empty diff.
+fn pr_level_diff(
+    git_source: Option<&Arc<dyn hugit_proto::ObjectSource + Send + Sync>>,
+    opened: &OpenedPr,
+    intent_commits: &BTreeMap<String, ObjectId>,
+) -> DiffVm {
+    let tip = opened
+        .intent_ids
+        .iter()
+        .rev()
+        .find_map(|id| intent_commits.get(id.as_str()));
+    match tip {
+        Some(commit) => diff_against_first_parent(git_source, Some(commit)),
+        None => empty_diff(),
+    }
 }
 
 /// The check rows from `check.recorded` events — REAL (same projection as the
