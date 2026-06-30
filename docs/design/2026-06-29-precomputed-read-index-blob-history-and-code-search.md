@@ -77,4 +77,35 @@ indexes (built in the same fail-closed finalize step; if the index write fails t
 No background worker, no cron, no second instance, no new tenant. It is a write-path side-effect
 + a read-path cache, both inside the existing engine. That is why it's tractable now.
 
+## CRITICAL FINDING (2026-06-30, after recon) — the single-threaded-invariant constraint
+The recon surfaced a real architectural fork that reshapes the phasing:
+- The engine HAS an R2 write seam (`cas.rs::put_object`, used for `refs.json`/`oid-index.json`),
+  reachable on prod (the `cas:rw` seam is live with receive-pack). So R2 index writes ARE possible.
+- BUT a **complete first-view/first-query** needs the index built BEFORE the read, which on this
+  engine means either (a) push-side incremental (covers only new pushes, not existing history) or
+  (b) a backfill of existing history. A backfill that doesn't wedge the single-threaded accept loop
+  would want a **background thread** — and that **BREAKS the single-threaded invariant the write
+  path's safety explicitly depends on** ("the unconditional refs.json PUT is safe ONLY by the
+  single-instance + single-threaded invariant"). So a backfill thread is **gated on the pre-HA
+  `If-Match` conditional-PUT work** (the tracked pre-HA seam) — not free.
+- A **read-side lazy/progressive cache** (build incrementally across reads, in-memory, single-thread-
+  safe, no new thread, no write-path change) is the safe option that ships now — but it only helps
+  **REPEAT access** (the first read of a path/term is still bounded-partial). Its value therefore
+  depends on the access pattern:
+  - **blob-history (#70a): LOW** — users view a file's history once; a repeat-access cache rarely
+    helps. The real fix (complete first-view) needs the pre-build, which is HA-gated. → **DEFER #70a
+    to post-HA**; the #217 carry-forward (~2x deeper per segment) is the honest interim.
+  - **code-search (#63): HIGH** — search is issued MANY times over one repo; a lazy progressive
+    in-memory index builds across the first few queries, then serves all subsequent queries O(1),
+    and retires the per-query `CODE_SCAN_BUDGET` tree scan at root. Single-thread-safe, self-contained.
+
+## Revised phasing (this finding supersedes the P0/P1 above)
+- **P0 (build now): code-search lazy progressive in-memory index** — the high-value, single-thread-
+  safe target. Build incrementally across queries (each query advances a bounded build segment +
+  serves from the postings built so far), in-memory `AppState` cache, scrub at read boundary,
+  invalidate/rebuild on HEAD change. No R2 write, no background thread, no write-path change.
+- **P1 (post-HA): R2-persistent + push-incremental + backfill-thread** for complete first-view of
+  BOTH indexes — gated on the `If-Match` conditional-PUT pre-HA seam (so a background writer is safe).
+  This is where blob-history (#70a) gets its complete-first-view fix too.
+
 — hugit TL
