@@ -53,14 +53,33 @@
 //!
 //! ## Auth
 //!
-//! A `git` client sends no `Bearer`. A clone is gated on the repo's **READ
-//! visibility** — the SAME `authz::authorize_read` predicate every `/v1` read
-//! uses, against an unauthenticated principal. Only a **publicly readable** repo
-//! is served; anything else is a 404 (no existence oracle — never reveal a
-//! private/absent repo). When the requested repo has no git seam loaded (not in
-//! the [`AppState`](crate::state::AppState) repo map) every git route is a 404
-//! (git serving is not live for it — honest, no fake; no oracle for which repos
-//! are git-served).
+//! A clone is gated on the repo's **READ visibility** — the SAME
+//! `authz::authorize_read` predicate every `/v1` read uses. The principal is
+//! derived from an OPTIONAL `Authorization: Bearer <token>` the client may send
+//! (real `git` can carry one via `http.extraHeader`):
+//!
+//! * **No / invalid / expired Bearer** → the ANONYMOUS principal (`&[]`). A
+//!   public repo is served; a private/absent repo is a uniform 404. This is the
+//!   fail-CLOSED default: a malformed credential is treated as anonymous (public
+//!   only), never as authenticated.
+//! * **A valid engine token** (Tier-1 of the `/v1` token store — a Clerk session
+//!   exchange minted it) → the real `clerk:{org}:{user}` tenant principal. So the
+//!   OWNING tenant clones its own PRIVATE repo, and a FOREIGN tenant gets the same
+//!   404 as a non-existent repo (cross-tenant isolation — no existence oracle).
+//!
+//! The token validation is the IDENTICAL Tier-1 path `two_tier_auth` runs for the
+//! receive-pack (push) write side ([`crate::token::TokenStore::lookup`] — the
+//! constant-time SHA-256 compare + expiry sweep). The ONE deliberate difference:
+//! the clone read path does NOT consult the Tier-2 **dev-token** fallback, so the
+//! operator god-principal (`orchestrator:*` → sees-all) can NEVER be acquired over
+//! the clone wire — a clone principal is ONLY a real validated tenant or anonymous
+//! (go-live decision: a real user gets no god-token; the read wire must not inherit
+//! the operator bypass). Both the `info/refs` advertise AND the `git-upload-pack`
+//! POST run the SAME derivation + `authorize_read`, so neither route can leak a
+//! repo the other hides. When the requested repo has no git seam loaded (not in the
+//! [`AppState`](crate::state::AppState) repo map) every git route is a 404 (git
+//! serving is not live for it — honest, no fake; no oracle for which repos are
+//! git-served).
 
 use std::collections::BTreeMap;
 
@@ -117,7 +136,11 @@ pub fn respond_git(state: &AppState, method: &Method, url: &str, body: &[u8], re
             if svc != Some(UPLOAD_PACK) {
                 return respond_not_found(request);
             }
-            match advertise_refs(state, repo) {
+            // Derive the clone principal from an OPTIONAL Bearer (anonymous on
+            // absent/invalid/expired — fail-closed), then gate on authorize_read.
+            // SAME derivation the upload-pack POST runs (no split-route bypass).
+            let principal = clone_principal(state, request.headers());
+            match advertise_refs(state, repo, &principal) {
                 Some(body) => {
                     let resp = Response::from_data(body).with_status_code(200).with_header(
                         git_content_type("application/x-git-upload-pack-advertisement"),
@@ -127,15 +150,21 @@ pub fn respond_git(state: &AppState, method: &Method, url: &str, body: &[u8], re
                 None => respond_not_found(request),
             }
         }
-        (Method::Post, [repo, "git-upload-pack"]) => match upload_pack(state, repo, body) {
-            Some(out) => {
-                let resp = Response::from_data(out)
-                    .with_status_code(200)
-                    .with_header(git_content_type("application/x-git-upload-pack-result"));
-                send(request, resp);
+        (Method::Post, [repo, "git-upload-pack"]) => {
+            // IDENTICAL principal derivation + authz to the advertise above: the
+            // POST must 404 for every case the advertise hides (no split-route
+            // bypass where a pack is served for a repo the advertise concealed).
+            let principal = clone_principal(state, request.headers());
+            match upload_pack(state, repo, body, &principal) {
+                Some(out) => {
+                    let resp = Response::from_data(out)
+                        .with_status_code(200)
+                        .with_header(git_content_type("application/x-git-upload-pack-result"));
+                    send(request, resp);
+                }
+                None => respond_not_found(request),
             }
-            None => respond_not_found(request),
-        },
+        }
         // POST git-receive-pack (push) → the write path (gated). Other methods on
         // the receive-pack route → the clear 403 (not a silent 404).
         (Method::Post, [repo, "git-receive-pack"]) => {
@@ -147,12 +176,65 @@ pub fn respond_git(state: &AppState, method: &Method, url: &str, body: &[u8], re
     }
 }
 
+/// Derive the READ principal for a clone from an OPTIONAL `Authorization: Bearer`.
+///
+/// This is the authenticated-clone seam (the go-live cross-tenant read gate). It
+/// reuses the EXACT Tier-1 token validation `crate::server::two_tier_auth` runs for
+/// the receive-pack write side — [`crate::token::TokenStore::lookup`] (constant-time
+/// SHA-256 compare + expiry sweep) — and maps a valid record to the SAME
+/// `clerk:{org}:{user}` principal shape `authorize_read` classifies as a tenant.
+///
+/// Fail-CLOSED to ANONYMOUS (the empty chain `vec![]`) on every non-success:
+/// * no `Authorization: Bearer` header at all (a plain anonymous `git clone`),
+/// * an unknown / garbage / malformed token (Tier-1 `Invalid`),
+/// * an EXPIRED engine token (Tier-1 `Expired`),
+/// * a token-store lock fault (`lookup` already returns `Invalid` fail-closed).
+///
+/// "Anonymous" (not an error) is correct here because a clone of a PUBLIC repo
+/// must still succeed without a credential — so an invalid Bearer degrades to the
+/// public-only anonymous principal, NEVER to "authenticated as someone". A private
+/// repo with an anonymous principal is denied by `authorize_read` → a uniform 404.
+///
+/// DELIBERATELY does NOT consult the Tier-2 **dev-token** fallback: the operator
+/// god-principal (`orchestrator:*`, which `authorize_read` treats as sees-all) must
+/// NEVER be acquirable over the clone wire (go-live: a real user gets no god-token;
+/// the read wire derives ONLY a real validated tenant or anonymous). The dev/operator
+/// bypass stays confined to the `/v1` POST write door + receive-pack, which call
+/// `two_tier_auth` directly — it is NOT entangled here.
+fn clone_principal(state: &AppState, headers: &[tiny_http::Header]) -> Vec<String> {
+    // Extract `Authorization: Bearer <token>` (case-insensitive header name); absent
+    // → anonymous. Mirrors `two_tier_auth`'s extraction exactly.
+    let raw = headers
+        .iter()
+        .find(|h| {
+            h.field
+                .as_str()
+                .as_str()
+                .eq_ignore_ascii_case("Authorization")
+        })
+        .and_then(|h| h.value.as_str().strip_prefix("Bearer ").map(str::to_string));
+    let Some(raw) = raw else {
+        return Vec::new(); // no Bearer → anonymous (public-clone gate)
+    };
+
+    // Tier-1 ONLY: the engine-token store (a Clerk session exchange minted it). A
+    // valid, unexpired record → the real tenant principal. Anything else (Invalid /
+    // Expired / lock fault) → anonymous, NOT an error and NOT the operator path.
+    match state.token_store.lookup(&raw) {
+        crate::token::LookupResult::Ok(rec) => {
+            vec![format!("clerk:{}:{}", rec.org, rec.user)]
+        }
+        _ => Vec::new(), // invalid/expired token → fail-closed to anonymous (public only)
+    }
+}
+
 /// Build the v1 `info/refs` advertisement body for `repo`, or `None` (→ 404) when
-/// git serving is not live, the repo is unsafe/absent, or it is not publicly
-/// readable. The auth gate is the SAME `authorize_read` predicate as the `/v1`
-/// reads, evaluated against an unauthenticated principal.
-fn advertise_refs(state: &AppState, repo: &str) -> Option<Vec<u8>> {
-    let refs = git_refs_for(state, repo)?;
+/// git serving is not live, the repo is unsafe/absent, or `principal` is not
+/// authorized to READ it. The auth gate is the SAME `authorize_read` predicate as
+/// the `/v1` reads, evaluated against the clone principal (`clone_principal`):
+/// anonymous for a public clone, a real tenant for an authed private clone.
+fn advertise_refs(state: &AppState, repo: &str, principal: &[String]) -> Option<Vec<u8>> {
+    let refs = git_refs_for(state, repo, principal)?;
 
     // pkt-line framing, built directly (the envelope owns the framing; the proto
     // owns the payload semantics). Smart-HTTP v1 info/refs:
@@ -220,8 +302,8 @@ pub(crate) fn pick_default_branch(refs: &BTreeMap<String, String>) -> Option<Str
 /// Handle a `git-upload-pack` POST: parse the want/have negotiation, assemble the
 /// pack, and frame the v1 result (`NAK` + raw packfile). `None` (→ 404) on the
 /// same not-live / unsafe / not-public / malformed conditions as the advertisement.
-fn upload_pack(state: &AppState, repo: &str, body: &[u8]) -> Option<Vec<u8>> {
-    let refs = git_refs_for(state, repo)?;
+fn upload_pack(state: &AppState, repo: &str, body: &[u8], principal: &[String]) -> Option<Vec<u8>> {
+    let refs = git_refs_for(state, repo, principal)?;
     let source = &state.repo_state(repo)?.git_source;
 
     // Real git appends a capability list to the FIRST `want` line of a v1/v0
@@ -255,11 +337,15 @@ fn upload_pack(state: &AppState, repo: &str, body: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// The refs to advertise for `repo`, or `None` when git serving is not live for
-/// it. Enforces, in order: git dir wired at all → repo slug safe → repo publicly
-/// readable (the `authorize_read` gate against an unauthenticated principal) →
-/// non-empty ref set. Every failure is `None` (the caller maps it to a uniform
-/// 404 — no existence oracle, identical for absent/private/not-live).
-fn git_refs_for(state: &AppState, repo: &str) -> Option<BTreeMap<String, String>> {
+/// it. Enforces, in order: git dir wired at all → repo slug safe → `principal`
+/// authorized to read (the `authorize_read` gate) → non-empty ref set. Every
+/// failure is `None` (the caller maps it to a uniform 404 — no existence oracle,
+/// identical for absent / private-unauthorized / cross-tenant / not-live).
+fn git_refs_for(
+    state: &AppState,
+    repo: &str,
+    principal: &[String],
+) -> Option<BTreeMap<String, String>> {
     if !crate::state::is_safe_repo_slug(repo) {
         return None;
     }
@@ -270,14 +356,16 @@ fn git_refs_for(state: &AppState, repo: &str) -> Option<BTreeMap<String, String>
     if repo_state.git_refs.is_empty() {
         return None;
     }
-    // READ-visibility gate, identical predicate to the `/v1` reads, against an
-    // UNAUTHENTICATED principal (git sends no Bearer): only a publicly readable
-    // repo is cloneable. A load/verify failure or a private/absent repo → None
-    // (→ 404, no oracle). The operator bypass does not apply: there is no operator
-    // credential on the git wire.
+    // READ-visibility gate, identical predicate to the `/v1` reads, against the
+    // clone `principal` (anonymous for an unauthed clone, a real `clerk:{org}:{user}`
+    // tenant for an authed one — see `clone_principal`, which fail-closes to anon and
+    // never grants the operator path). A public repo serves any principal incl. anon;
+    // a PRIVATE repo serves ONLY its owning tenant (so the owner clones it; a foreign
+    // tenant or anon gets the same 404 as an absent repo). A load/verify failure or a
+    // denied read → None (→ 404, no oracle).
     let log = state.load_verified(repo).ok()?;
     let meta = crate::authz::project_repo_meta(&log);
-    if !crate::authz::authorize_read(&[], &meta) {
+    if !crate::authz::authorize_read(principal, &meta) {
         return None;
     }
     // This repo's OWN refs (the multi-repo forge resolves `{repo}` → its RepoState).
@@ -1101,7 +1189,7 @@ mod live_refs_tests {
             .insert(repo.to_string(), cas_mode_repo_state(refs));
 
         // Before the push: the advertise shows the old tip.
-        let before = git_refs_for(&state, repo).expect("public repo advertises");
+        let before = git_refs_for(&state, repo, &[]).expect("public repo advertises");
         assert_eq!(before.get("refs/heads/main"), Some(&old_tip));
 
         // Simulate a successful CAS push finalize → in-memory hot-swap.
@@ -1112,14 +1200,14 @@ mod live_refs_tests {
             .expect("hot-swap applies");
 
         // After the push: the SAME state (no reload) advertises the NEW tip.
-        let after = git_refs_for(&state, repo).expect("still advertises");
+        let after = git_refs_for(&state, repo, &[]).expect("still advertises");
         assert_eq!(
             after.get("refs/heads/main"),
             Some(&new_tip),
             "advertise reflects the just-pushed tip with no reboot"
         );
         // And the raw advertisement bytes carry the new oid, not the old one.
-        let body = advertise_refs(&state, repo).expect("advertisement body");
+        let body = advertise_refs(&state, repo, &[]).expect("advertisement body");
         let text = String::from_utf8_lossy(&body);
         assert!(text.contains(&new_tip), "advertisement lists the new tip");
         assert!(
@@ -1149,7 +1237,7 @@ mod live_refs_tests {
             .apply_cas_push_inmemory("refs/heads/feature", &created_tip, &HashMap::new(), &[])
             .expect("hot-swap applies");
 
-        let after = git_refs_for(&state, repo).expect("advertises");
+        let after = git_refs_for(&state, repo, &[]).expect("advertises");
         assert_eq!(after.get("refs/heads/main"), Some(&main_tip), "main intact");
         assert_eq!(
             after.get("refs/heads/feature"),
@@ -1187,7 +1275,7 @@ mod live_refs_tests {
             "names the fault: {err}"
         );
 
-        let after = git_refs_for(&state, repo).expect("still advertises");
+        let after = git_refs_for(&state, repo, &[]).expect("still advertises");
         assert_eq!(
             after.get("refs/heads/main"),
             Some(&old_tip),
@@ -1257,7 +1345,7 @@ mod live_refs_tests {
             "names the fault: {err}"
         );
 
-        let after = git_refs_for(&state, repo).expect("still advertises");
+        let after = git_refs_for(&state, repo, &[]).expect("still advertises");
         assert_eq!(
             after.get("refs/heads/main"),
             Some(&old_tip),
@@ -1294,7 +1382,7 @@ mod live_refs_tests {
             )
             .expect("a resolvable consumed base lets the hot-swap advance");
 
-        let after = git_refs_for(&state, repo).expect("advertises");
+        let after = git_refs_for(&state, repo, &[]).expect("advertises");
         assert_eq!(
             after.get("refs/heads/main"),
             Some(&new_tip),
@@ -1322,7 +1410,7 @@ mod live_refs_tests {
             .insert(repo.to_string(), cas_mode_repo_state(refs));
 
         // Before: both refs advertised.
-        let before = git_refs_for(&state, repo).expect("advertises");
+        let before = git_refs_for(&state, repo, &[]).expect("advertises");
         assert_eq!(before.get("refs/heads/stale"), Some(&stale_tip));
 
         state
@@ -1331,7 +1419,7 @@ mod live_refs_tests {
             .apply_cas_delete_inmemory("refs/heads/stale");
 
         // After: the deleted ref is GONE; main is intact.
-        let after = git_refs_for(&state, repo).expect("still advertises");
+        let after = git_refs_for(&state, repo, &[]).expect("still advertises");
         assert!(
             !after.contains_key("refs/heads/stale"),
             "the deleted ref drops out of the advertise with no reboot"
