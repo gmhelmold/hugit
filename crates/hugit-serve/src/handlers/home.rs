@@ -144,9 +144,13 @@ pub fn build_home(log: &EventLog, repo: &str) -> RepoHomeVm {
     let contributors: Vec<String> = contributor_set.into_iter().take(CONTRIBUTORS_CAP).collect();
 
     // ── PRESENTATION: about.updated_ago from last record's recorded_at ──────
+    // HONEST: a 0 / absent timestamp emits EMPTY, never a fabricated "há NN anos"
+    // (a 0 epoch humanizes to "há 56 anos" — a fake last-update the consumer would
+    // render; the read VM must never invent a timestamp it doesn't have).
     let updated_ago = log
         .records()
         .last()
+        .filter(|r| r.recorded_at > 0)
         .map(|r| humanize_age(r.recorded_at))
         .unwrap_or_default();
 
@@ -185,5 +189,48 @@ pub fn build_home(log: &EventLog, repo: &str) -> RepoHomeVm {
         synergy: SynergyVm {
             lines: vec![], // STUB — no live AC seam in this wave
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// HONESTY (epoch-0): a record whose `recorded_at` is 0 (an ingested/synthetic
+    /// record with no real timestamp) must yield an EMPTY `updated_ago` — never the
+    /// fabricated "há 56 anos" that a 0-epoch humanizes to (the consumer renders any
+    /// non-empty string). The read VM never invents a timestamp it does not have.
+    #[test]
+    fn epoch_zero_timestamp_yields_empty_updated_ago_never_fabricated() {
+        let mut log = EventLog::new();
+        log.append_for_test(
+            "ref.update",
+            vec!["test".to_string()],
+            r#"{"ref":"refs/heads/main","target":"aabbcc112233"}"#.to_string(),
+            0, // recorded_at = 0 → must NOT humanize to "há 56 anos"
+        );
+        let vm = build_home(&log, "githugr");
+        assert!(
+            vm.about.updated_ago.is_empty(),
+            "a 0/absent timestamp must emit empty updated_ago, got: {:?}",
+            vm.about.updated_ago
+        );
+    }
+
+    /// A real (non-zero) timestamp still humanizes — the guard only drops epoch-0.
+    #[test]
+    fn real_timestamp_still_humanizes_updated_ago() {
+        let mut log = EventLog::new();
+        log.append_for_test(
+            "ref.update",
+            vec!["test".to_string()],
+            r#"{"ref":"refs/heads/main","target":"aabbcc112233"}"#.to_string(),
+            1_700_000_000, // a real epoch
+        );
+        let vm = build_home(&log, "githugr");
+        assert!(
+            !vm.about.updated_ago.is_empty(),
+            "a real timestamp must humanize to a non-empty updated_ago"
+        );
     }
 }
