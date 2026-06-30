@@ -1,0 +1,24 @@
+[package]
+name = "hugit-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "hugit MCP server — a user-hosted, stdio JSON-RPC Model Context Protocol server exposing the four hugit LLM-native tools (claim-disjointness, land-status, cost-attest, liveness-probe). Ships with hugit, free/open."
+
+[[bin]]
+name = "hugit-mcp"
+path = "src/main.rs"
+
+[dependencies]
+# claim-disjointness wraps the REAL union-engine disjointness primitive — no
+# second source of truth (hugit_queue::core::AffectedSet::is_disjoint).
+hugit-queue = { path = "../hugit-queue" }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+# cost-attest + liveness-probe HTTP. Already a workspace dep at this exact
+# version (hugit-serve/checks/proto/queue) — adds no new crate/version to the
+# lock. `tls` feature for the https engine endpoint.
+ureq = { workspace = true }
