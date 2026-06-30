@@ -157,9 +157,17 @@ pub fn build_intent_detail(
                 model: scrub(&e.authorship.model),
                 principal_chain,
                 operator: scrub(&e.authorship.operator),
-                agent_type: e.authorship.agent_type.clone(),
-                run_id: e.authorship.spawn.run_id.clone(),
-                parent_run_id: e.authorship.spawn.parent_run_id.clone().unwrap_or_default(),
+                // payload free-text from the envelope — scrubbed at the read boundary
+                // (a real agent-type / uuid survives; a secret-shaped value is redacted).
+                agent_type: scrub(&e.authorship.agent_type),
+                run_id: scrub(&e.authorship.spawn.run_id),
+                parent_run_id: scrub(
+                    e.authorship
+                        .spawn
+                        .parent_run_id
+                        .as_deref()
+                        .unwrap_or_default(),
+                ),
                 wall_time_human: humanize_wall_ms(
                     e.authorship
                         .spawn
@@ -235,7 +243,7 @@ pub fn build_intent_detail(
                 alts.push(EnvelopeAltitudeVm {
                     label: "resumo compactado".to_string(),
                     desc: "transcript compactado da sessão".to_string(),
-                    cas_ref: cas.clone(), // structural CAS ref — not scrubbed
+                    cas_ref: scrub(cas), // payload ref — scrubbed (a real algo:hex survives)
                     body: vec![],
                     priv_note: None,
                     body_tool_terms: vec![],
@@ -246,7 +254,7 @@ pub fn build_intent_detail(
                 alts.push(EnvelopeAltitudeVm {
                     label: "transcript completo".to_string(),
                     desc: "transcript bruto born → die".to_string(),
-                    cas_ref: cas.clone(),
+                    cas_ref: scrub(cas), // payload ref — scrubbed (a real algo:hex survives)
                     body: vec![],
                     priv_note: Some("tenant-private · redactado na escrita".to_string()),
                     body_tool_terms: vec![],
@@ -259,11 +267,17 @@ pub fn build_intent_detail(
     };
 
     let (context_cas, compact_context_ref, bundle_ref, compact_transcript_ref) = match &env {
+        // payload refs scrubbed at the read boundary (a real `algo:hex` ref survives).
         Some(e) => (
-            e.snapshot.prompt_ref.clone().unwrap_or_default(),
+            scrub(e.snapshot.prompt_ref.as_deref().unwrap_or_default()),
             String::new(),
             String::new(),
-            e.trajectory.task_transcript_ref.clone().unwrap_or_default(),
+            scrub(
+                e.trajectory
+                    .task_transcript_ref
+                    .as_deref()
+                    .unwrap_or_default(),
+            ),
         ),
         None => (String::new(), String::new(), String::new(), String::new()),
     };

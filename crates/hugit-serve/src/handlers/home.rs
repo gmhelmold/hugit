@@ -38,10 +38,12 @@ pub fn build_home(log: &EventLog, repo: &str) -> RepoHomeVm {
     // inserts a symbolic `refs/HEAD` pointer (a `refs/HEAD` lookup here was dead
     // code — dropped), so this sorted-first heads entry IS the real path. Empty
     // when the log has advanced no branch ref.
+    // Ref short-name is attacker-controllable (a pushed branch name is free text), so
+    // scrub it at the read boundary — a secret-shaped branch must never echo.
     let branch: String = ref_state
         .iter()
         .find_map(|(name, _)| name.strip_prefix("refs/heads/"))
-        .map(str::to_string)
+        .map(scrub)
         .unwrap_or_default();
 
     let mut branch_count: usize = 0;
@@ -51,7 +53,7 @@ pub fn build_home(log: &EventLog, repo: &str) -> RepoHomeVm {
     for (name, _target) in ref_state.iter() {
         if let Some(short) = name.strip_prefix("refs/heads/") {
             branch_count += 1;
-            branches.push(short.to_string());
+            branches.push(scrub(short)); // attacker-controllable ref name — scrub
         } else if name.starts_with("refs/tags/") {
             tag_count += 1;
         }
