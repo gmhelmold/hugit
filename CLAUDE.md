@@ -55,11 +55,18 @@ adversarial round (1–13) + a SOTA sweep. The integrity spine is genuinely soli
   **deriving tokens from the submitted events + signing the attestation** (`result_binding_sig_v2`). En
   route this surfaced + fixed the 3rd lease-client wire-drift (acquire REQUEST shape — `principal_chain`
   → the fabric's `{image_digest,net_policy,tmp_root,expiry_ms}`, #214; after the acquire-resp #204 + close
-  #205). **Cost is honest-zero (`cost_usd_micros:0`)** — the fabric's `IngestUsage`/`CloseRequest` carry
-  tokens but NO cost field yet, so non-zero attested cost waits on the Runners TL adding `cost_usd_micros`
-  to those DTOs (per the owner's provider-billed re-decision) + hugit's #64 submit-side + a real off-box
-  agent-loop event source (P2). Owner-decided 2026-06-28: hold the first public `/insights` land until the
-  cost-field lands, so the page's first rendered cost is real + non-zero (no honest-zero intermediate).
+  #205). **Cost PATH NOW LIVE + verified end-to-end (2026-06-30):** the Runners TL added
+  `CloseRequest.cost_usd_micros` (#226, recorded verbatim) + hugit landed the submit-side (#64,
+  `Option<u64>` skip-when-none) — and a live close submitting `cost_usd_micros: 4200000` against the
+  DEPLOYED fabricd recorded `metrics.cost_usd_micros == 4200000` exactly (submit→record→attest proven).
+  The four lease DTOs are now frozen byte-identical in both repos (#220 conformance vectors + tripwire —
+  no drift; the 3-wire-drift history ends). **The ONLY remaining gap to a non-zero RENDERED killer is a
+  real provider-`/usage` cost SOURCE** — an off-box agent-loop (merge-as-re-execution P2) that reads the
+  LLM provider's billed figure; hugit's dispatch passes `None` (honest-zero) until then, NEVER the derived
+  `IntentMetrics` COGS (that would misattribute). Honest caveat: hugit's `CloseResponse` DTO currently
+  ignores the attestation block (`result_binding_sig_v2`/`fabric_key_id`) — fine for the v1 cost (rides
+  same-trust as the tokens), but must be captured to light the `✓ cas:` marker (a tracked additive change).
+  Owner-decided 2026-06-28: hold the first public `/insights` land until cost is non-zero.
 - **Deployed network surface:** `hugit-serve` (`/v1` + `/readyz` + git-from-CAS upload-pack),
   MULTI-REPO serving `hugit` + `githugr` (2026-06-22). NO runner endpoint; receive-pack (push)
   **now live** (flag-on + `cas:rw` PAT on prod, 2026-06-26 — caveats a+b above).
@@ -189,10 +196,16 @@ status table + tracked seams: the audit doc above.
 
 **Gate + CI:** `main` green by the local gate (fmt + clippy `--workspace --all-targets
 --locked -D warnings` + test `--workspace --locked` + `cargo deny`) AND runner-verified
-per code push (docs-only pushes skip CI via `paths-ignore`). The single self-hosted
-runner is contention-flaky (~37% of runs fail on infra); HEAD may show a false failure.
-**Never claim green without a concluded `mergeStateStatus=CLEAN` + both checks SUCCESS —
-never asserted by a watcher's exit.**
+per code push (docs-only pushes skip CI via `paths-ignore`). **CI runner: SELF-HOSTED macOS
+again (`hugit-builder-01`, #219, 2026-06-29)** — switched back from GitHub-hosted ubuntu when
+the hosted pool entered a sustained outage (jobs completing-failure with ZERO steps). It runs
+on THIS dev box (start it: `cd ~/actions-runner-hugit && nohup ./run.sh &`), so the
+runner-is-local-machine rule applies: **don't run local `cargo` —esp. `--workspace`— while a
+PR's CI is in-flight** (it starves the runner). A hosted-runner failure with empty failed-steps
+is infra, not code. A `conformance/manifest.sha256` change must run the full-workspace
+`hugit-invariants/x4` validator, not just the touched crate (it pins the exact VECTORS set +
+two-space format). **Never claim green without a concluded `mergeStateStatus=CLEAN` + both
+checks SUCCESS — never asserted by a watcher's exit.**
 
 Read first: `docs/review/2026-06-17-honest-delivery-audit-double-checked.md` (the TRUE
 state — what's live vs hermetic vs absent) · `docs/whitepaper/hugit-v1.md` (product design) ·
