@@ -22,7 +22,7 @@ use hugit_http_contracts::security::{
 use hugit_refstore::EventLog;
 use serde_json::Value;
 
-use crate::fmt::humanize_age;
+use crate::fmt::{humanize_age, scrub};
 
 const POLICY_SET_KIND: &str = "policy.set";
 const ERASURE_DECIDED_KIND: &str = "erasure.decided";
@@ -192,7 +192,7 @@ fn build_erasure(decisions: &[ErasureDecision]) -> Option<ErasureVm> {
         .max_by_key(|d| d.seq)?;
     Some(ErasureVm {
         pending_label: "1 pedido aprovado".to_string(),
-        request_id: approved.erasure_id.clone(),
+        request_id: scrub(&approved.erasure_id), // payload free-text — scrubbed at read
         requester: String::new(),
         target: String::new(),
         reason: String::new(),

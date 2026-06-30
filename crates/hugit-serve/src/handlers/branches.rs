@@ -96,7 +96,8 @@ pub fn build_branches(log: &EventLog, repo: &str) -> BranchesVm {
             .find(|r| r.is_default)
             .cloned()
             .unwrap_or_else(|| BranchRowVm {
-                name: default_name.clone(),
+                // attacker-controllable ref name — scrub (mirrors the in-row path :63)
+                name: scrub(&default_name),
                 is_default: true,
                 protected: false,
                 head_sha: String::new(),

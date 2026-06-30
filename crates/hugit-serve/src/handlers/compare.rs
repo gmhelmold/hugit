@@ -32,16 +32,19 @@ pub fn build_compare(log: &EventLog, repo: &str, base: &str, head: &str) -> Comp
         .map(|(name, _)| name.strip_prefix("refs/heads/").unwrap_or(name).to_string())
         .collect();
 
+    // Ref short-names are ATTACKER-CONTROLLABLE now that `git push` is live (a pushed
+    // branch name is free text), so they are scrubbed at the read boundary exactly like
+    // `base`/`head` below — a secret-shaped branch name must never echo to a viewer.
     let generated_branches: Vec<String> = all_head_refs
         .iter()
         .filter(|b| b.starts_with("intent/"))
-        .cloned()
+        .map(|b| scrub(b))
         .collect();
 
     let branches: Vec<String> = all_head_refs
         .iter()
         .filter(|b| !b.starts_with("intent/"))
-        .cloned()
+        .map(|b| scrub(b))
         .collect();
 
     // ── HONEST-STUB: diff, commits, can_merge, notes ─────────────────────────
@@ -156,5 +159,43 @@ mod tests {
         let json = serde_json::to_string(&vm).expect("CompareVm serializes");
         let back: CompareVm = serde_json::from_str(&json).expect("CompareVm round-trips");
         assert_eq!(vm, back, "JSON round-trip must be lossless");
+    }
+
+    /// SECRET-MATRIX (read-path audit 2026-06-30): a branch name is ATTACKER-CONTROLLABLE
+    /// now that `git push` is live, so a secret-shaped branch name MUST be `[REDACTED]` in
+    /// the compare VM's `branches`/`generated_branches` — never echoed raw to a viewer.
+    #[test]
+    fn secret_shaped_branch_name_is_scrubbed() {
+        use hugit_ledger::redact::REDACTED;
+        // The canonical classic-PAT specimen the detector redacts.
+        let secret = "ghp_16C7e42F292c6912E7710c838347Ae178B4a";
+        let mut log = EventLog::new();
+        log.append_for_test(
+            "ref.update",
+            vec!["test".to_string()],
+            format!(r#"{{"ref":"refs/heads/{secret}","target":"aabbcc112233"}}"#),
+            0,
+        );
+        log.append_for_test(
+            "ref.update",
+            vec!["test".to_string()],
+            format!(r#"{{"ref":"refs/heads/intent/{secret}","target":"ddeeff445566"}}"#),
+            1,
+        );
+        let vm = build_compare(&log, "hugit", "main", "feat/x");
+        for b in vm.branches.iter().chain(vm.generated_branches.iter()) {
+            assert!(
+                !b.contains("ghp_"),
+                "a secret-shaped branch name must never echo raw: {b}"
+            );
+            assert!(
+                b.contains(REDACTED),
+                "the secret-shaped branch name must be redacted: {b}"
+            );
+        }
+        assert!(
+            !vm.branches.is_empty() || !vm.generated_branches.is_empty(),
+            "the seeded branches must surface (scrubbed)"
+        );
     }
 }
