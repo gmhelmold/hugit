@@ -1166,6 +1166,7 @@ mod live_refs_tests {
             git_dir: None,
             cas_write: None,
             live_oid_index: Some(LiveOidIndex::new(std::collections::BTreeMap::new())),
+            code_index: crate::code_index::CodeIndex::new(),
         }
     }
 
@@ -1305,6 +1306,7 @@ mod live_refs_tests {
             git_dir: None,
             cas_write: None,
             live_oid_index: Some(LiveOidIndex::new(index)),
+            code_index: crate::code_index::CodeIndex::new(),
         }
     }
 

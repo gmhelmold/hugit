@@ -425,17 +425,64 @@ fn search_code(
     (hits, code_total)
 }
 
+/// Code search dispatch: try the lazy progressive in-memory index first, fall back to
+/// the live bounded git-tree grep on ANY index error (so the new path is strictly
+/// never-worse than the existing one). `q_lower` is already trimmed + lowercased and
+/// non-empty (the caller short-circuits an empty query). Index hits are SCRUBBED here
+/// at the read boundary — the index stores raw text, redaction is applied on read.
+fn code_search(
+    code_index: Option<&crate::code_index::CodeIndex>,
+    src: &Arc<dyn hugit_proto::ObjectSource + Send + Sync>,
+    root: &ObjectId,
+    q_lower: &str,
+) -> (Vec<SearchCodeVm>, usize) {
+    if let Some(index) = code_index {
+        match index.search(src.as_ref(), root, q_lower) {
+            Ok((hits, total)) => {
+                // Map index hits → the wire VM, SCRUBBING every path + line at the read
+                // boundary (the index holds raw text). `lines_tokens` stays empty (no
+                // syntax-highlight this wave, same as the live walk).
+                let code = hits
+                    .into_iter()
+                    .map(|h| SearchCodeVm {
+                        path: scrub(&h.path),
+                        lines: h
+                            .lines
+                            .into_iter()
+                            .map(|(n, text)| (n, scrub(&text)))
+                            .collect(),
+                        lines_tokens: vec![],
+                    })
+                    .collect();
+                return (code, total);
+            }
+            // The index is a rebuildable cache, never a source of truth: on any error
+            // fall through to the live walk (never-worse than today).
+            Err(e) => {
+                eprintln!("hugit-serve: code index error, falling back to live walk: {e}");
+            }
+        }
+    }
+    // Fallback (or no index threaded): the live bounded git-tree grep (F4c).
+    search_code(src.as_ref(), root, q_lower, CODE_SCAN_BUDGET)
+}
+
 /// Build the search view-model.
 ///
-/// When a git source (`git_source` + `root_tree`) is wired, a REAL interim code
-/// search (F4c) greps the git tree's blob contents. Without a git source,
-/// `code`/`code_total` are honest-empty (never faked).
+/// When a git source (`git_source` + `root_tree`) is wired, code search runs. The
+/// PREFERRED path is the lazy progressive in-memory index ([`crate::code_index`],
+/// `code_index` arg): it advances one bounded build segment per query then serves from
+/// the postings (retiring the per-query tree scan). On ANY index error — or when no
+/// index is threaded — it FALLS BACK to the live bounded git-tree grep
+/// ([`search_code`], F4c), so this is strictly never-worse than today. Without a git
+/// source, `code`/`code_total` are honest-empty (never faked).
 pub fn build_search(
     log: &EventLog,
     repo: &str,
     q: &str,
     git_source: Option<&Arc<dyn hugit_proto::ObjectSource + Send + Sync>>,
     root_tree: Option<&ObjectId>,
+    code_index: Option<&crate::code_index::CodeIndex>,
 ) -> SearchVm {
     let q_echo = scrub(q); // caller free-text round-trips into the VM — scrub it
     let q_lower = q.trim().to_lowercase();
@@ -451,13 +498,14 @@ pub fn build_search(
         )
     };
 
-    // F4c interim code search: real git-tree grep when the content seam is wired.
-    // No git source → honest-empty (not faked).
+    // Code search: prefer the lazy progressive in-memory index, fall back to the live
+    // bounded git-tree grep on ANY index error (never-worse). No git source →
+    // honest-empty (not faked).
     let (code, code_total) = if !q_lower.is_empty()
         && let Some(src) = git_source
         && let Some(root) = root_tree
     {
-        search_code(src.as_ref(), root, &q_lower, CODE_SCAN_BUDGET)
+        code_search(code_index, src, root, &q_lower)
     } else {
         (vec![], 0)
     };
@@ -554,7 +602,7 @@ mod tests {
 
     #[test]
     fn empty_log_honest_defaults() {
-        let vm = build_search(&EventLog::new(), "r", "anything", None, None);
+        let vm = build_search(&EventLog::new(), "r", "anything", None, None, None);
         assert!(vm.prs.is_empty());
         assert!(vm.issues.is_empty());
         assert!(vm.intents.is_empty());
@@ -576,7 +624,7 @@ mod tests {
         issue(&mut log, 7, "open", None, 100);
         intent(&mut log, "i-1", "fix the thing", 100);
         // Whitespace-only q matches nothing but still populates repo/q/notes.
-        let vm = build_search(&log, "r", "   ", None, None);
+        let vm = build_search(&log, "r", "   ", None, None, None);
         assert!(vm.prs.is_empty() && vm.issues.is_empty() && vm.intents.is_empty());
         assert_eq!(vm.q, "   ");
         assert_eq!(vm.intents_note, INTENTS_NOTE);
@@ -589,7 +637,7 @@ mod tests {
         let mut log = EventLog::new();
         open_pr(&mut log, "128", "auth-wave", &["a31", "a32"], 100);
         open_pr(&mut log, "999", "other", &["z9"], 200);
-        let vm = build_search(&log, "r", "auth-wave", None, None);
+        let vm = build_search(&log, "r", "auth-wave", None, None, None);
         assert_eq!(vm.prs.len(), 1);
         assert_eq!(vm.prs[0].number, 128);
         assert!(vm.prs[0].open);
@@ -609,7 +657,7 @@ mod tests {
             serde_json::json!({"pr_id": "42"}),
             200,
         );
-        let vm = build_search(&log, "r", "needle-intent", None, None);
+        let vm = build_search(&log, "r", "needle-intent", None, None, None);
         assert_eq!(vm.prs.len(), 1);
         assert_eq!(vm.prs[0].number, 42);
         assert!(!vm.prs[0].open);
@@ -621,7 +669,7 @@ mod tests {
         let mut log = EventLog::new();
         issue(&mut log, 412, "open", Some("P0"), 100);
         issue(&mut log, 7, "closed", None, 100);
-        let vm = build_search(&log, "r", "412", None, None);
+        let vm = build_search(&log, "r", "412", None, None, None);
         assert_eq!(vm.issues.len(), 1);
         assert_eq!(vm.issues[0].number, 412);
         assert!(vm.issues[0].open);
@@ -640,7 +688,7 @@ mod tests {
             100,
         );
         intent(&mut log, "b99", "unrelated change", 200);
-        let vm = build_search(&log, "r", "refresh", None, None);
+        let vm = build_search(&log, "r", "refresh", None, None, None);
         assert_eq!(vm.intents.len(), 1);
         assert_eq!(vm.intents[0].id, "a31");
         // Charter is FIRST LINE only.
@@ -655,7 +703,7 @@ mod tests {
     fn case_insensitive_match() {
         let mut log = EventLog::new();
         open_pr(&mut log, "5", "SkewFix", &[], 100);
-        let vm = build_search(&log, "r", "skewfix", None, None);
+        let vm = build_search(&log, "r", "skewfix", None, None, None);
         assert_eq!(vm.prs.len(), 1);
     }
 
@@ -669,7 +717,7 @@ mod tests {
         open_pr(&mut log, "7", "wave-a", &["i-1"], 1000);
         queue_pr(&mut log, "7", "item-001", 1, 2000);
         land_pr(&mut log, "7", 3000);
-        let vm = build_search(&log, "r", "wave-a", None, None);
+        let vm = build_search(&log, "r", "wave-a", None, None, None);
         assert_eq!(vm.prs.len(), 1);
         assert!(!vm.prs[0].open, "landed PR must not be open");
         assert!(
@@ -684,7 +732,7 @@ mod tests {
         let mut log = EventLog::new();
         open_pr(&mut log, "9", "wave-b", &["i-2"], 1000);
         queue_pr(&mut log, "9", "item-002", 1, 2000);
-        let vm = build_search(&log, "r", "wave-b", None, None);
+        let vm = build_search(&log, "r", "wave-b", None, None, None);
         assert_eq!(vm.prs.len(), 1);
         assert!(vm.prs[0].open, "queued PR must still be open");
         assert!(
@@ -699,7 +747,7 @@ mod tests {
         let mut log = EventLog::new();
         open_pr(&mut log, "13", &format!("camp-{PAT}"), &["i-1"], 100);
         // q must match the corpus so the PR surfaces and the campaign is echoed.
-        let vm = build_search(&log, "r", "camp-", None, None);
+        let vm = build_search(&log, "r", "camp-", None, None, None);
         assert_eq!(vm.prs.len(), 1);
         let j = serde_json::to_string(&vm).unwrap();
         assert!(!j.contains(PAT), "PAT must not appear in the VM JSON");
@@ -710,7 +758,7 @@ mod tests {
     fn redaction_pat_in_charter_not_leaked() {
         let mut log = EventLog::new();
         intent(&mut log, "needle", &format!("secret {PAT} here"), 100);
-        let vm = build_search(&log, "r", "needle", None, None);
+        let vm = build_search(&log, "r", "needle", None, None, None);
         assert_eq!(vm.intents.len(), 1);
         let j = serde_json::to_string(&vm).unwrap();
         assert!(!j.contains(PAT));
@@ -720,7 +768,7 @@ mod tests {
     fn redaction_pat_in_issue_priority_not_leaked() {
         let mut log = EventLog::new();
         issue(&mut log, 77, "open", Some(PAT), 100);
-        let vm = build_search(&log, "r", "77", None, None);
+        let vm = build_search(&log, "r", "77", None, None, None);
         assert_eq!(vm.issues.len(), 1);
         let j = serde_json::to_string(&vm).unwrap();
         assert!(!j.contains(PAT));
@@ -729,7 +777,7 @@ mod tests {
     #[test]
     fn redaction_pat_in_query_echo_not_leaked() {
         let q = format!("find {PAT}");
-        let vm = build_search(&EventLog::new(), "r", &q, None, None);
+        let vm = build_search(&EventLog::new(), "r", &q, None, None, None);
         let j = serde_json::to_string(&vm).unwrap();
         assert!(!j.contains(PAT));
     }
@@ -740,7 +788,7 @@ mod tests {
         for n in 0..(RESULT_CAP as u32 + 25) {
             open_pr(&mut log, &n.to_string(), "needle", &[], 100 + n as u64);
         }
-        let vm = build_search(&log, "r", "needle", None, None);
+        let vm = build_search(&log, "r", "needle", None, None, None);
         assert_eq!(vm.prs.len(), RESULT_CAP);
     }
 
@@ -750,7 +798,7 @@ mod tests {
         open_pr(&mut log, "1", "wave-test", &["i-1"], 100);
         issue(&mut log, 1, "open", Some("P1"), 100);
         intent(&mut log, "i-1", "charter line one", 100);
-        let vm = build_search(&log, "humangr/hugit", "1", None, None);
+        let vm = build_search(&log, "humangr/hugit", "1", None, None, None);
         let j = serde_json::to_string(&vm).unwrap();
         assert_eq!(vm, serde_json::from_str::<SearchVm>(&j).unwrap());
     }
@@ -786,7 +834,14 @@ mod tests {
         // real code hits in the VM (NOT honest-empty).
         let content = b"fn frobnicate(x: u32) -> u32 { x + 1 }\n";
         let (src, root) = make_git_src_with_file("lib.rs", content);
-        let vm = build_search(&EventLog::new(), "r", "frobnicate", Some(&src), Some(&root));
+        let vm = build_search(
+            &EventLog::new(),
+            "r",
+            "frobnicate",
+            Some(&src),
+            Some(&root),
+            None,
+        );
         assert!(
             !vm.code.is_empty(),
             "code must be non-empty when git source is wired and query matches"
@@ -823,7 +878,14 @@ mod tests {
     fn code_search_is_case_insensitive() {
         let content = b"const MAX_FROB: usize = 42;\n";
         let (src, root) = make_git_src_with_file("cfg.rs", content);
-        let vm = build_search(&EventLog::new(), "r", "max_frob", Some(&src), Some(&root));
+        let vm = build_search(
+            &EventLog::new(),
+            "r",
+            "max_frob",
+            Some(&src),
+            Some(&root),
+            None,
+        );
         assert!(
             !vm.code.is_empty(),
             "case-insensitive match must return a hit"
@@ -833,7 +895,7 @@ mod tests {
     #[test]
     fn code_search_empty_when_no_git_source() {
         // Without a git source, code / code_total are honest-empty (not faked).
-        let vm = build_search(&EventLog::new(), "r", "frobnicate", None, None);
+        let vm = build_search(&EventLog::new(), "r", "frobnicate", None, None, None);
         assert!(vm.code.is_empty(), "no git source → code must be empty");
         assert_eq!(vm.code_total, 0);
     }
@@ -846,7 +908,7 @@ mod tests {
         let content = format!("const KEY: &str = \"{secret}\";\n");
         let (src, root) = make_git_src_with_file("secret.rs", content.as_bytes());
         // q matches the file (via the KEY word before the secret)
-        let vm = build_search(&EventLog::new(), "r", "key", Some(&src), Some(&root));
+        let vm = build_search(&EventLog::new(), "r", "key", Some(&src), Some(&root), None);
         let j = serde_json::to_string(&vm).unwrap();
         assert!(
             !j.contains(secret),
@@ -856,5 +918,127 @@ mod tests {
             j.contains("[REDACTED]"),
             "REDACTED sentinel must appear in place of secret: {j}"
         );
+    }
+
+    // ── lazy progressive in-memory code index (the W-SEARCHINDEX path) ───────────
+
+    use crate::code_index::CodeIndex;
+
+    /// Build a single-file CAS whose root tree is a real git tree (so the index DFS
+    /// walk works) and return the source + root oid.
+    fn index_src_with_file(
+        name: &str,
+        content: &[u8],
+    ) -> (Arc<dyn hugit_proto::ObjectSource + Send + Sync>, ObjectId) {
+        use hugit_proto::CasObjectSource;
+        let mut cas = CasObjectSource::new();
+        let blob = cas.insert_raw(ObjectKind::Blob, content.to_vec());
+        let mut tree = Vec::new();
+        tree.extend_from_slice(b"100644 ");
+        tree.extend_from_slice(name.as_bytes());
+        tree.push(0);
+        tree.extend_from_slice(blob.as_bytes());
+        let root = cas.insert_raw(ObjectKind::Tree, tree);
+        (Arc::new(cas), root)
+    }
+
+    #[test]
+    fn index_path_serves_symbol_hit() {
+        // With an index threaded, a query matching a real symbol name serves a hit
+        // (the index path, NOT the live-walk fallback).
+        let (src, root) = index_src_with_file("lib.rs", b"fn frobnicate() {}\n");
+        let index = CodeIndex::new();
+        let vm = build_search(
+            &EventLog::new(),
+            "r",
+            "frobnicate",
+            Some(&src),
+            Some(&root),
+            Some(&index),
+        );
+        assert_eq!(vm.code.len(), 1, "index serves the symbol hit");
+        assert_eq!(vm.code[0].path, "lib.rs");
+        assert!(vm.code_total >= 1);
+        // The index is now built against this HEAD.
+        assert!(index.is_complete());
+    }
+
+    #[test]
+    fn index_path_secret_in_symbol_name_is_scrubbed() {
+        // A secret-shaped token embedded in an INDEXED token (here a const's name)
+        // must be scrubbed at the read boundary — the index stores raw, scrub on read.
+        let secret = "ghp_16C7e42F292c6912E7710c838347Ae178B4a";
+        // The secret is the const IDENTIFIER, so it becomes a real indexed symbol name.
+        let content = format!("const {secret}: u32 = 1;\n");
+        let (src, root) = index_src_with_file("c.rs", content.as_bytes());
+        let index = CodeIndex::new();
+        // Query a prefix of the secret so the symbol-name token matches.
+        let vm = build_search(
+            &EventLog::new(),
+            "r",
+            "ghp_",
+            Some(&src),
+            Some(&root),
+            Some(&index),
+        );
+        let j = serde_json::to_string(&vm).unwrap();
+        assert!(
+            !j.contains(secret),
+            "secret in an indexed symbol name must be scrubbed: {j}"
+        );
+        assert!(j.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn index_path_falls_back_gracefully_with_no_index() {
+        // No index threaded (None) → the live bounded walk still serves (never-worse).
+        let (src, root) = index_src_with_file("lib.rs", b"fn frobnicate() {}\n");
+        let vm = build_search(
+            &EventLog::new(),
+            "r",
+            "frobnicate",
+            Some(&src),
+            Some(&root),
+            None,
+        );
+        assert!(!vm.code.is_empty(), "live-walk fallback finds the hit");
+    }
+
+    #[test]
+    fn index_path_head_change_does_not_serve_stale() {
+        // The index is keyed on HEAD's root tree: after a HEAD change a symbol only in
+        // the OLD tree must NOT be served (no stale results).
+        let (src1, root1) = index_src_with_file("old.rs", b"fn only_old() {}\n");
+        let index = CodeIndex::new();
+        let vm1 = build_search(
+            &EventLog::new(),
+            "r",
+            "only_old",
+            Some(&src1),
+            Some(&root1),
+            Some(&index),
+        );
+        assert_eq!(vm1.code.len(), 1);
+
+        let (src2, root2) = index_src_with_file("new.rs", b"fn only_new() {}\n");
+        // Same index cell, new HEAD → reset; the old symbol is gone.
+        let vm_old = build_search(
+            &EventLog::new(),
+            "r",
+            "only_old",
+            Some(&src2),
+            Some(&root2),
+            Some(&index),
+        );
+        assert!(vm_old.code.is_empty(), "no stale hit after HEAD change");
+        let vm_new = build_search(
+            &EventLog::new(),
+            "r",
+            "only_new",
+            Some(&src2),
+            Some(&root2),
+            Some(&index),
+        );
+        assert_eq!(vm_new.code.len(), 1, "new HEAD's symbol is served");
     }
 }

@@ -106,6 +106,14 @@ pub struct RepoState {
     /// hot-swap and advanced BEFORE the ref tip (fail-closed: the tip is never
     /// observable before its objects are resolvable in-memory).
     pub live_oid_index: Option<LiveOidIndex>,
+    /// The repo's lazy progressive in-memory code-search index
+    /// ([`crate::code_index::CodeIndex`]). Engine-lifetime cache, interior-mutable
+    /// (one shared `Arc<RwLock<…>>`), single-thread-safe (the accept loop is
+    /// single-threaded). Built incrementally across `search` queries from THIS repo's
+    /// [`git_source`](Self::git_source) and keyed on the live HEAD root-tree (a push
+    /// hot-swap resets it). Starts empty; introduces no thread + no write-path change.
+    /// `search.rs` falls back to the live bounded walk on ANY index error (never-worse).
+    pub code_index: crate::code_index::CodeIndex,
 }
 
 /// An interior-mutable, shared `ref name → tip oid hex` map — the live counterpart
@@ -556,6 +564,7 @@ impl AppState {
                         git_dir: None, // CAS mode: no local dir; push sink is cas_write
                         cas_write,
                         live_oid_index: Some(live_oid_index),
+                        code_index: crate::code_index::CodeIndex::new(),
                     },
                 );
             }
@@ -588,6 +597,7 @@ impl AppState {
                             // GitDir push is unchanged (durable ref via `git update-ref`,
                             // re-read on the next boot): no in-memory oid-index hot-swap.
                             live_oid_index: None,
+                            code_index: crate::code_index::CodeIndex::new(),
                         },
                     );
                 }
@@ -655,6 +665,7 @@ impl AppState {
                 git_dir: None,
                 cas_write: None,
                 live_oid_index: None,
+                code_index: crate::code_index::CodeIndex::new(),
             },
         );
     }
@@ -679,6 +690,7 @@ impl AppState {
                 git_dir: Some(PathBuf::from(dir)),
                 cas_write: None,
                 live_oid_index: None,
+                code_index: crate::code_index::CodeIndex::new(),
             },
         );
         Ok(())

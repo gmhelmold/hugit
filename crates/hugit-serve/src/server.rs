@@ -299,6 +299,7 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
                 source: &r.git_source,
                 root_tree: &r.git_root_tree,
                 head_commit: r.head_commit(),
+                code_index: &r.code_index,
             });
             dispatch_repo(
                 repo,
@@ -834,6 +835,10 @@ struct RepoGit<'a> {
     source: &'a std::sync::Arc<dyn hugit_proto::ObjectSource + Send + Sync>,
     root_tree: &'a gix_hash::ObjectId,
     head_commit: Option<gix_hash::ObjectId>,
+    /// The repo's lazy progressive in-memory code-search index (engine-lifetime,
+    /// interior-mutable). Threaded into the `search` read so it advances + serves from
+    /// the postings; `search.rs` falls back to the live bounded walk on any error.
+    code_index: &'a crate::code_index::CodeIndex,
 }
 
 /// Dispatch an authenticated `/v1/repos/{repo}/<tail...>` read. `query` is the
@@ -853,6 +858,7 @@ fn dispatch_repo(
     let git_source = git.map(|g| g.source);
     let root_tree = git.map(|g| g.root_tree);
     let head_commit = git.and_then(|g| g.head_commit);
+    let code_index = git.map(|g| g.code_index);
     match tail {
         ["home"] => ok(&handlers::build_home(log, repo)),
         ["new-pr"] => ok(&handlers::build_new_pr(log, repo)),
@@ -880,7 +886,7 @@ fn dispatch_repo(
             // 1 024 bytes is ample for any real search term.
             q.truncate(1024);
             ok(&handlers::build_search(
-                log, repo, &q, git_source, root_tree,
+                log, repo, &q, git_source, root_tree, code_index,
             ))
         }
         // viewer-can mirrors the REAL per-caller write gate (`authorize_write`,
