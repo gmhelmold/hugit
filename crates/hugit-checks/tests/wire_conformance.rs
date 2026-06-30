@@ -12,13 +12,14 @@
 //! (`corelink-fabric-api::dto::{AcquireResponse, CloseResponse, EnvelopeIngest}`)
 //! and the §13.1 `IntentMetrics` table of the integration contract.
 //!
-//! NOTE — cross-repo joint pass (Runners TL's lane): the BYTE-frozen cross-repo
-//! vectors (`corelink-runners/conformance/AcquireResponse.json` +
-//! `CloseResponse.json`, the §13.4-style drift tripwire committed byte-identical
-//! in both repos) are the Runners TL's joint-pass lane and are PENDING that pass.
-//! These hugit-side fixtures pin what hugit PARSES; when the cross-repo vectors
-//! land, this test should additionally pin them byte-identically (as
-//! `runner/metrics.rs` already does for `conformance/IntentMetrics.json`).
+//! NOTE — cross-repo joint pass (DONE 2026-06-30): the BYTE-frozen cross-repo
+//! vectors for all FOUR lease DTOs (`conformance/{AcquireRequest,AcquireResponse,
+//! CloseRequest,CloseResponse}.json`) are now committed byte-identical in both repos
+//! (Runners TL published #230; hugit mirrored + sha-verified in
+//! `conformance/manifest.sha256`). The `canonical_*_subset_round_trips` tests at the
+//! bottom of this file pin them on hugit's side (subset round-trip — see the note
+//! there for why subset, not blanket byte-identical). The `fixtures/wire/*` tests
+//! above remain the per-shape parse assertions.
 
 use std::path::PathBuf;
 
@@ -223,4 +224,88 @@ fn close_response_without_metrics_is_a_decode_error() {
         serde_json::from_str::<CloseResponse>(no_metrics).is_err(),
         "a metrics-less close must fail closed, never default to zero"
     );
+}
+
+// ── The CANONICAL byte-frozen lease DTO vectors (drift tripwire, lockstep with
+//    corelink-runners) ──────────────────────────────────────────────────────────
+//
+// `conformance/{AcquireRequest,AcquireResponse,CloseRequest,CloseResponse}.json` are
+// copied BYTE-IDENTICAL from `corelink-runners/conformance/` (#230; sha256 in
+// `conformance/manifest.sha256`, matched against the Runners TL's published hashes).
+// These pin the wire SHAPE so the 3-wire-drift history (acquire-req/-resp/close) ends.
+//
+// NOTE on the assertion: hugit's CLIENT DTOs are intentional SUBSETS of the full
+// fabric DTOs — `AcquireLeaseRequest` omits `runner`/`toolchain_digest` (the classic
+// off-box path never sets them), `CloseRequest` omits `check_result`, and
+// `CloseResponse` captures only the fields hugit consumes (`lease_id`/`released`/
+// `capture_incomplete`/`metrics`), liberally ignoring the attestation block. A blanket
+// byte-identical re-serialize would therefore FALSELY fail on those subsets. The
+// correct tripwire is SUBSET round-trip equality: deserialize the canonical vector into
+// hugit's DTO, re-serialize, and assert EVERY key hugit produces equals the canonical's
+// value for that key. A renamed/retyped/restructured field hugit consumes trips this; a
+// field hugit deliberately doesn't carry is simply absent from its output (not asserted).
+
+/// Read a canonical byte-frozen vector from the repo-root `conformance/` dir.
+fn conformance(name: &str) -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../conformance")
+        .join(name);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("read conformance vector {}: {e}", path.display()))
+}
+
+/// Assert every key hugit's DTO PRODUCES round-trips to exactly the canonical value
+/// (subset equality — hugit may omit fabric-only optional fields, but must never drift
+/// on a field it carries).
+fn assert_subset_roundtrip(produced: &serde_json::Value, canonical_src: &str) {
+    let canonical: serde_json::Value = serde_json::from_str(canonical_src).unwrap();
+    for (key, val) in produced
+        .as_object()
+        .expect("hugit DTO serializes to an object")
+    {
+        assert_eq!(
+            val, &canonical[key],
+            "hugit drifts from the canonical fabric vector on key `{key}`: \
+             hugit={val} canonical={}",
+            canonical[key]
+        );
+    }
+}
+
+#[test]
+fn canonical_acquire_request_subset_round_trips() {
+    let src = conformance("AcquireRequest.json");
+    let dto: AcquireLeaseRequest = serde_json::from_str(&src).expect("hugit parses canonical");
+    assert_subset_roundtrip(&serde_json::to_value(&dto).unwrap(), &src);
+}
+
+#[test]
+fn canonical_acquire_response_subset_round_trips() {
+    let src = conformance("AcquireResponse.json");
+    let dto: AcquireResponse = serde_json::from_str(&src).expect("hugit parses canonical");
+    assert_subset_roundtrip(&serde_json::to_value(&dto).unwrap(), &src);
+    // The §13.2 off-box ingest credential round-trips (the field the cost-killer needs).
+    assert!(
+        dto.envelope_ingest.is_some(),
+        "the canonical AcquireResponse exercises envelope_ingest; hugit must capture it"
+    );
+}
+
+#[test]
+fn canonical_close_request_subset_round_trips() {
+    let src = conformance("CloseRequest.json");
+    let dto: CloseRequest = serde_json::from_str(&src).expect("hugit parses canonical");
+    assert_subset_roundtrip(&serde_json::to_value(&dto).unwrap(), &src);
+    // The provider-billed cost round-trips verbatim (the #64 submit field).
+    assert_eq!(dto.cost_usd_micros, Some(4_200_000));
+}
+
+#[test]
+fn canonical_close_response_subset_round_trips() {
+    let src = conformance("CloseResponse.json");
+    let dto: CloseResponse = serde_json::from_str(&src).expect("hugit parses canonical");
+    assert_subset_roundtrip(&serde_json::to_value(&dto).unwrap(), &src);
+    // hugit consumes the finalized metrics (incl. the attested cost); the attestation
+    // block is liberally ignored on this DTO (a separate verification path owns sigs).
+    assert_eq!(dto.metrics.cost_usd_micros, 4_200_000);
 }
