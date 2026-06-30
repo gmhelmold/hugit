@@ -83,6 +83,13 @@ pub fn blob_history(
 ) -> Vec<BlobHistoryEntry> {
     let mut out = Vec::new();
     let mut current = Some(*head_commit);
+    // Carry the first parent we resolve THIS iteration forward: it becomes the next
+    // iteration's `current`, and the parent's path-blob we compute here IS the next
+    // iteration's `this_blob` (same path, same tree → same oid). Reusing both halves
+    // the per-commit CAS work (one commit-load + one tree-walk per commit instead of
+    // two), so the wall-clock budget reaches ~2x deeper into history — same bound,
+    // same fail-closed semantics, strictly fewer fetches.
+    let mut carried: Option<(CommitInfo, Option<ObjectId>)> = None;
 
     while let Some(commit_oid) = current {
         // WALL-CLOCK DoS guard, checked once per commit BEFORE any fetch: stop with
@@ -94,28 +101,43 @@ pub fn blob_history(
             break;
         }
 
-        // Decode the commit. A missing/garbled object → stop + return partial (never
-        // propagate — this must not 500 the blob read).
-        let Some(commit) = load_commit(src, &commit_oid) else {
-            break;
+        // This commit's info + path-blob: reuse the carry from the previous iteration
+        // (which already loaded this commit as its first parent), or fetch fresh (the
+        // HEAD, or after a carry was dropped). A missing/garbled object → stop +
+        // return partial (never propagate — this must not 500 the blob read).
+        let (commit, this_blob) = match carried.take() {
+            Some(pair) => pair,
+            None => {
+                let Some(commit) = load_commit(src, &commit_oid) else {
+                    break;
+                };
+                let this_blob = resolve_blob_oid(src, &commit.tree, path);
+                (commit, this_blob)
+            }
         };
 
-        // This commit's path-blob oid, and its FIRST parent (the first-parent
-        // simplification — standard `git log --first-parent <path>`).
-        let this_blob = resolve_blob_oid(src, &commit.tree, path);
+        // The FIRST parent (the first-parent simplification — standard
+        // `git log --first-parent <path>`).
         let first_parent = commit.parents.first().copied();
 
         let touched = match first_parent {
             // A root commit (no parent) that CONTAINS the path = its introduction.
             None => this_blob.is_some(),
-            Some(parent_oid) => {
-                // Resolve the parent's path-blob oid via the parent's ROOT TREE. A
-                // missing/garbled parent tree → treat as "path absent in parent" so a
-                // present-here path still emits (introduction), fail-closed-honest.
-                let parent_blob = load_commit(src, &parent_oid)
-                    .and_then(|p| resolve_blob_oid(src, &p.tree, path));
-                this_blob != parent_blob
-            }
+            Some(parent_oid) => match load_commit(src, &parent_oid) {
+                Some(parent) => {
+                    // Resolve the parent's path-blob via its ROOT TREE, then CARRY the
+                    // parent (info + path-blob) to the next iteration so it is never
+                    // re-fetched as `current`.
+                    let parent_blob = resolve_blob_oid(src, &parent.tree, path);
+                    let touched = this_blob != parent_blob;
+                    carried = Some((parent, parent_blob));
+                    touched
+                }
+                // A missing/garbled parent → treat as "path absent in parent" so a
+                // present-here path still emits (introduction), fail-closed-honest;
+                // nothing to carry, and the next iteration's fresh load breaks.
+                None => this_blob.is_some(),
+            },
         };
 
         if touched {
@@ -602,5 +624,74 @@ mod tests {
         assert_eq!(hist[0].commit_hex, c3.to_hex().to_string());
         assert_eq!(hist[1].commit_hex, c1.to_hex().to_string());
         assert!(!hist.iter().any(|h| h.commit_hex == c2.to_hex().to_string()));
+    }
+
+    /// An `ObjectSource` decorator that counts `get` calls — so a test can ASSERT the
+    /// carry-forward optimization actually halves the per-commit CAS fetches (a perf
+    /// claim must be measured, not asserted).
+    struct CountingSource<'a> {
+        inner: &'a CasObjectSource,
+        gets: std::cell::Cell<usize>,
+    }
+    impl ObjectSource for CountingSource<'_> {
+        fn get(
+            &self,
+            oid: &ObjectId,
+        ) -> Result<Option<crate::read::pack::GitObject>, crate::read::pack::PackError> {
+            self.gets.set(self.gets.get() + 1);
+            self.inner.get(oid)
+        }
+    }
+
+    /// PROOF (optimization): the carry-forward reuse keeps the per-commit fetch budget
+    /// at ~ONE commit-load + ONE tree-walk (≈2 gets/commit for a root-level path),
+    /// HALF of the naive ~4 gets/commit (commit+tree for both the commit AND its parent,
+    /// then re-fetching the parent next iteration). On an N-commit chain the walk does
+    /// well under `3*N` gets — a bound the un-optimized walk could never meet — so the
+    /// 2 s budget reaches ~2x deeper into history.
+    #[test]
+    fn carry_forward_halves_the_per_commit_fetches() {
+        let mut src = CasObjectSource::new();
+        // A linear chain of N commits, each modifying foo.rs (every commit touches the
+        // path → no early exit, the worst case for fetch count).
+        const N: usize = 12;
+        let mut parent: Option<ObjectId> = None;
+        let mut head = ObjectId::null(gix_hash::Kind::Sha1);
+        for i in 0..N {
+            let blob = src.insert_raw(ObjectKind::Blob, format!("v{i}").into_bytes());
+            let tree = insert_tree(
+                &mut src,
+                vec![TreeEntry {
+                    mode: MODE_BLOB,
+                    name: "foo.rs",
+                    oid: blob,
+                }],
+            );
+            head = insert_commit(
+                &mut src,
+                tree,
+                parent,
+                "A <a@x>",
+                1000 + i as i64,
+                "edit foo",
+            );
+            parent = Some(head);
+        }
+
+        let counting = CountingSource {
+            inner: &src,
+            gets: std::cell::Cell::new(0),
+        };
+        let hist = blob_history(&counting, &head, "foo.rs", far_deadline(), 1_000);
+
+        assert_eq!(hist.len(), N, "every commit touched foo.rs → N revisions");
+        let gets = counting.gets.get();
+        assert!(
+            gets < 3 * N,
+            "carry-forward must keep fetches under 3*N ({}); got {} — the naive walk \
+             would be ~4*N",
+            3 * N,
+            gets
+        );
     }
 }
