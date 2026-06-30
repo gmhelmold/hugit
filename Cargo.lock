@@ -1000,6 +1000,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hugit-mcp"
+version = "0.1.0"
+dependencies = [
+ "hugit-queue",
+ "serde",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
 name = "hugit-mirror"
 version = "0.1.0"
 dependencies = [
