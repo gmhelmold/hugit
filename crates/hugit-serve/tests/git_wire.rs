@@ -343,6 +343,214 @@ fn non_public_repo_is_404_over_git_wire() {
     );
 }
 
+// ── AUTHENTICATED CLONE-BACK (the go-live cross-tenant READ gate) ────────────
+//
+// A real user clones THEIR private repo with THEIR engine token. The principal is
+// derived from `Authorization: Bearer <token>` validated against the SAME Tier-1
+// token store the receive-pack write side uses, then fed to `authorize_read`.
+
+/// Mint a real engine token (the Tier-1 path: a Clerk session exchange would have
+/// minted this) for tenant `org` in `state`'s token store, returning the raw token
+/// a client presents as `Authorization: Bearer <raw>`. This is the SAME store
+/// `clone_principal`/`two_tier_auth` look up.
+fn mint_tenant_token(state: &AppState, org: &str, user: &str) -> String {
+    state
+        .token_store
+        .mint(&hugit_serve::token::ClerkPrincipal {
+            user: user.to_string(),
+            org: org.to_string(),
+            fresh_auth: false,
+        })
+        .expect("mint engine token")
+}
+
+/// GET info/refs?service=git-upload-pack with an explicit `Authorization: Bearer`.
+fn http_get_authed(addr: &str, path: &str, bearer: &str) -> Vec<u8> {
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    let req = format!(
+        "GET {path} HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {bearer}\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(req.as_bytes()).unwrap();
+    let mut resp = Vec::new();
+    stream.read_to_end(&mut resp).unwrap();
+    resp
+}
+
+/// POST git-upload-pack with an explicit `Authorization: Bearer`.
+fn http_post_authed(
+    addr: &str,
+    path: &str,
+    content_type: &str,
+    bearer: &str,
+    body: &[u8],
+) -> Vec<u8> {
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {bearer}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).unwrap();
+    stream.write_all(body).unwrap();
+    let mut resp = Vec::new();
+    stream.read_to_end(&mut resp).unwrap();
+    resp
+}
+
+#[test]
+fn authed_clone_of_private_repo_succeeds() {
+    // A real `git clone` carrying the OWNER tenant's Bearer of a PRIVATE repo
+    // (owner_tenant=org-a) SUCCEEDS — the advertise serves the tips and the
+    // upload-pack POST serves the pack. (state_with_git sets owner_tenant=org-a.)
+    if !have_git() {
+        eprintln!("SKIP authed_clone_of_private_repo_succeeds: `git` not on PATH");
+        return;
+    }
+    let (state, _d, _seed) = state_with_git("acme", "private");
+    let token = mint_tenant_token(&state, "org-a", "user-1");
+    let addr = spawn(state);
+
+    let dst = scratch_dir().join("authed_clone");
+    let out = Command::new("git")
+        .args(["-c", "protocol.version=0"])
+        .arg("-c")
+        .arg(format!("http.extraHeader=Authorization: Bearer {token}"))
+        .args([
+            "clone",
+            "-q",
+            &format!("http://{addr}/acme"),
+            dst.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "owner-tenant clone of its private repo must succeed:\nstderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The working tree was reconstructed (the README blob from the seed graph).
+    assert!(
+        dst.join("README").exists(),
+        "the clone reconstructed the README from the private repo's closure"
+    );
+}
+
+#[test]
+fn anon_clone_of_private_repo_is_404() {
+    // No Bearer at all → anonymous → a private repo is a uniform 404 (unchanged).
+    let (state, _d, _s) = state_with_git("acme", "private");
+    let addr = spawn(state);
+    let resp = http_get_raw(&addr, "/acme/info/refs?service=git-upload-pack");
+    let (status, _h, _b) = split_response(&resp);
+    assert!(
+        status.starts_with("HTTP/1.1 404"),
+        "anon clone of private → 404: {status}"
+    );
+}
+
+#[test]
+fn foreign_tenant_clone_of_private_repo_is_404() {
+    // THE crown jewel: a VALID Bearer for the WRONG tenant (org-b) cloning org-a's
+    // private repo gets the SAME 404 as a non-existent repo — a foreign tenant must
+    // not even learn the repo exists. Both the advertise and the POST.
+    let (state, _d, _s) = state_with_git("acme", "private");
+    let foreign = mint_tenant_token(&state, "org-b", "user-x");
+    let addr = spawn(state);
+
+    let resp = http_get_authed(&addr, "/acme/info/refs?service=git-upload-pack", &foreign);
+    let (status, _h, _b) = split_response(&resp);
+    assert!(
+        status.starts_with("HTTP/1.1 404"),
+        "foreign-tenant advertise → 404 (cross-tenant isolation): {status}"
+    );
+
+    let resp = http_post_authed(
+        &addr,
+        "/acme/git-upload-pack",
+        "application/x-git-upload-pack-request",
+        &foreign,
+        b"0000",
+    );
+    let (status, _h, _b) = split_response(&resp);
+    assert!(
+        status.starts_with("HTTP/1.1 404"),
+        "foreign-tenant upload-pack POST → 404: {status}"
+    );
+}
+
+#[test]
+fn invalid_bearer_falls_back_to_anonymous() {
+    // An invalid/garbage Bearer is treated as ANONYMOUS (fail-closed, NOT
+    // authenticated): a PUBLIC repo still clones (anon-public gate), a PRIVATE repo
+    // is 404. Same for an unknown token shape.
+    let garbage = "deadbeefnotarealtoken";
+
+    // Public repo + garbage Bearer → still advertises (treated anon).
+    let (state, _d, seed) = state_with_git("pubrepo", "public");
+    let addr = spawn(state);
+    let resp = http_get_authed(&addr, "/pubrepo/info/refs?service=git-upload-pack", garbage);
+    let (status, _h, body) = split_response(&resp);
+    assert!(
+        status.starts_with("HTTP/1.1 200"),
+        "garbage Bearer on a PUBLIC repo → still clones (anon): {status}"
+    );
+    assert!(
+        String::from_utf8_lossy(&body).contains(&seed.c2.to_string()),
+        "public advertise still serves the tip under a garbage Bearer"
+    );
+
+    // Private repo + garbage Bearer → 404 (NOT authenticated, fail-closed).
+    let (state2, _d2, _s2) = state_with_git("privrepo", "private");
+    let addr2 = spawn(state2);
+    let resp = http_get_authed(
+        &addr2,
+        "/privrepo/info/refs?service=git-upload-pack",
+        garbage,
+    );
+    let (status, _h, _b) = split_response(&resp);
+    assert!(
+        status.starts_with("HTTP/1.1 404"),
+        "garbage Bearer on a PRIVATE repo → 404 (fail-closed to anon): {status}"
+    );
+}
+
+#[test]
+#[allow(non_snake_case)] // the spec'd test name uses `POST` for legibility
+fn upload_pack_POST_gates_identically_to_advertise() {
+    // No split-route bypass: the upload-pack POST must 404 for EXACTLY the cases
+    // the advertise hides. Checked for both anon-on-private and foreign-tenant.
+    let (state, _d, _s) = state_with_git("acme", "private");
+    let foreign = mint_tenant_token(&state, "org-b", "user-x");
+    let addr = spawn(state);
+
+    // (a) anon POST on a private repo → 404 (advertise also 404s — proven above).
+    let resp = http_post_raw(
+        &addr,
+        "/acme/git-upload-pack",
+        "application/x-git-upload-pack-request",
+        b"0000",
+    );
+    let (status, _h, _b) = split_response(&resp);
+    assert!(
+        status.starts_with("HTTP/1.1 404"),
+        "anon upload-pack POST on private → 404: {status}"
+    );
+
+    // (b) foreign-tenant POST → 404 (the advertise hid it; the POST must not leak
+    //     a pack the advertise concealed).
+    let resp = http_post_authed(
+        &addr,
+        "/acme/git-upload-pack",
+        "application/x-git-upload-pack-request",
+        &foreign,
+        b"0000",
+    );
+    let (status, _h, _b) = split_response(&resp);
+    assert!(
+        status.starts_with("HTTP/1.1 404"),
+        "foreign-tenant upload-pack POST → 404 (gates like the advertise): {status}"
+    );
+}
+
 #[test]
 fn receive_pack_post_is_403_with_human_message() {
     // Push (git-receive-pack POST) → 403 with a clear human-readable body,
