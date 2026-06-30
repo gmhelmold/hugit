@@ -1,0 +1,26 @@
+{
+  "status": "succeeded",
+  "check_result": {
+    "memo_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "tree_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "def_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "toolchain_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "exit": 1,
+    "artifacts": [
+      {
+        "path": "target/release/app",
+        "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      {
+        "path": "dist/report.json",
+        "digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      }
+    ],
+    "stdout_ref": "cas:sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "stderr_ref": "cas:sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "duration_ms": 1234,
+    "runner_ref": "runner:corelink-builder-01",
+    "produced_at": 1700000000000
+  },
+  "cost_usd_micros": 4200000
+}

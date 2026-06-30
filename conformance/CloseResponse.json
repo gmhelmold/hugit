@@ -1,0 +1,65 @@
+{
+  "lease_id": "lease-0000000000000001",
+  "released": true,
+  "capture_incomplete": false,
+  "metrics": {
+    "tokens": {
+      "input": 12000,
+      "output": 3400,
+      "cache_read": 50000,
+      "cache_write": 8000,
+      "total": 73400
+    },
+    "wall_ms": 45000,
+    "active_ms": 31000,
+    "tool_calls": 17,
+    "tool_breakdown": [
+      {
+        "tool": "Edit",
+        "count": 9
+      },
+      {
+        "tool": "Bash",
+        "count": 8
+      }
+    ],
+    "model_turns": 6,
+    "cost_usd_micros": 4200000
+  },
+  "check_result": {
+    "memo_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "tree_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "def_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "toolchain_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "exit": 1,
+    "artifacts": [
+      {
+        "path": "target/release/app",
+        "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      {
+        "path": "dist/report.json",
+        "digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      }
+    ],
+    "stdout_ref": "cas:sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "stderr_ref": "cas:sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "duration_ms": 1234,
+    "runner_ref": "runner:corelink-builder-01",
+    "produced_at": 1700000000000
+  },
+  "attestation": {
+    "tree": "cas:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "def": "cas:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "runner": "runner:corelink-builder-01",
+    "model": "anthropic:claude-opus-4-8",
+    "principal": [
+      "tenant:acme",
+      "agent:claude-01"
+    ],
+    "sig": "c2lnbmF0dXJlLWJ5dGVzLWJhc2U2NC1wbGFjZWhvbGRlcg=="
+  },
+  "result_binding_sig": "cmVzdWx0LWJpbmRpbmctc2lnLXYxLWJhc2U2NA==",
+  "result_binding_sig_v2": "cmVzdWx0LWJpbmRpbmctc2lnLXYyLWJhc2U2NA==",
+  "fabric_key_id": "2d16e9ef2102df2a"
+}

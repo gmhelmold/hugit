@@ -1,0 +1,19 @@
+{
+  "image_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "net_policy": "hermetic",
+  "tmp_root": "/run/corelink/abcd",
+  "expiry_ms": 60000,
+  "runner": {
+    "target": {
+      "repo": {
+        "owner": "humangr-labs",
+        "repo": "corelink-runners"
+      }
+    },
+    "labels": [
+      "corelink",
+      "linux-x64"
+    ]
+  },
+  "toolchain_digest": "blake3:3333333333333333333333333333333333333333333333333333333333333333"
+}

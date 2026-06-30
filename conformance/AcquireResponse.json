@@ -1,0 +1,21 @@
+{
+  "lease": {
+    "lease_id": "lease-0000000000000001",
+    "principal_chain": [
+      "tenant:acme",
+      "agent:claude-01"
+    ],
+    "path_set": [
+      "/run/corelink/abcd"
+    ],
+    "expiry": 1700000060000,
+    "net_policy": "hermetic",
+    "tmp_root": "/run/corelink/abcd",
+    "state": "held"
+  },
+  "exec_endpoint": "/v1/leases/lease-0000000000000001/exec",
+  "envelope_ingest": {
+    "ingest_path": "/v1/leases/lease-0000000000000001/envelope/ingest",
+    "credential": "lease-ingest-tok-deadbeefcafef00d"
+  }
+}

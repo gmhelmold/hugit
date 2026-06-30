@@ -307,7 +307,9 @@ impl CloseStatus {
 /// off-box result is the fabric's signed envelope), and serde treats a missing
 /// `Option` field as `None`, so `{"status":"..."}` is accepted by the fabric's
 /// `deny_unknown_fields` body verbatim.
-#[derive(Debug, Clone, Serialize)]
+// `Deserialize` is derived only so the conformance test can round-trip the canonical
+// fabric vector (hugit SENDS this DTO, never receives it); otherwise unused.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CloseRequest {
     /// `"succeeded"` | `"failed"` — the only two the caller may claim.
     pub status: String,
@@ -345,7 +347,9 @@ pub struct CloseRequest {
 /// It is intentionally NOT defaulted (a metrics-less close is a contract
 /// violation — §13.1 "never optional when the job succeeded" — so an absent
 /// `metrics` is a decode error, never a fabricated zero).
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+// `Serialize` is derived only so the conformance test can round-trip the canonical
+// fabric vector (hugit RECEIVES this DTO, never sends it); otherwise unused.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CloseResponse {
     /// The closed lease id (echoed).
     pub lease_id: String,
