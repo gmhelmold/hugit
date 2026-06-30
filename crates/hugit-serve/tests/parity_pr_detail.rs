@@ -1,7 +1,7 @@
 //! Parity test for `build_pr_detail` (Wave 1 prs/{n} handler).
 //!
 //! Verifies:
-//!   1. An empty log → `build_pr_detail(&log, "hugit", 128)` returns `None`
+//!   1. An empty log → `build_pr_detail(&log, "hugit", 128, no_git())` returns `None`
 //!      (no such PR → HTTP 404, `get_opt` semantics, no existence leak).
 //!   2. A minimal log carrying ONE real `pr.opened` for PR 128 (constructed via
 //!      the public `hugit_cli::pr::open` verb, the same way the engine creates
@@ -16,9 +16,17 @@ use hugit_contracts::context_envelope::{
     Altitude, Authorship, ContextEnvelope, FileRead, IntentMetrics, Snapshot, Spawn, TokenCounts,
     Trajectory,
 };
+use std::sync::Arc;
+
 use hugit_http_contracts::PrDetailVm;
 use hugit_refstore::EventLog;
 use hugit_serve::handlers::build_pr_detail;
+
+/// No git source — these parity tests assert the PR projection + cost split, not
+/// the numstat (honest-empty without a git seam, exactly as before this wire-up).
+fn no_git() -> Option<&'static Arc<dyn hugit_proto::ObjectSource + Send + Sync>> {
+    None
+}
 
 /// A fresh empty `EventLog` — trivially chain-verified (the handler contract:
 /// the log is ALREADY verified by the caller).
@@ -49,7 +57,7 @@ fn log_with_open_pr(n: u32) -> EventLog {
 fn empty_log_unknown_pr_is_none() {
     let log = empty_log();
     assert!(
-        build_pr_detail(&log, "hugit", 128).is_none(),
+        build_pr_detail(&log, "hugit", 128, no_git()).is_none(),
         "no pr.opened for 128 on an empty log → None (HTTP 404, no existence leak)"
     );
 }
@@ -60,14 +68,14 @@ fn empty_log_none_path_is_total() {
     // total "not found", not an id-specific quirk.
     let log = empty_log();
     for n in [0u32, 1, 42, 128, u32::MAX] {
-        assert!(build_pr_detail(&log, "hugit", n).is_none());
+        assert!(build_pr_detail(&log, "hugit", n, no_git()).is_none());
     }
 }
 
 #[test]
 fn open_pr_round_trips() {
     let log = log_with_open_pr(128);
-    let vm = build_pr_detail(&log, "hugit", 128).expect("PR 128 is present → Some(vm)");
+    let vm = build_pr_detail(&log, "hugit", 128, no_git()).expect("PR 128 is present → Some(vm)");
 
     // 1. Serializes without error.
     let json = serde_json::to_string(&vm).expect("PrDetailVm serializes");
@@ -79,7 +87,7 @@ fn open_pr_round_trips() {
 #[test]
 fn open_pr_real_fields() {
     let log = log_with_open_pr(128);
-    let vm = build_pr_detail(&log, "hugit", 128).unwrap();
+    let vm = build_pr_detail(&log, "hugit", 128, no_git()).unwrap();
     assert_eq!(vm.repo, "hugit");
     assert_eq!(vm.number, 128);
     assert_eq!(
@@ -96,7 +104,7 @@ fn open_pr_real_fields() {
 fn open_pr_no_envelope_cost_is_zero() {
     // No PR-altitude envelope on the log → honest ZERO cost, never faked.
     let log = log_with_open_pr(128);
-    let vm = build_pr_detail(&log, "hugit", 128).unwrap();
+    let vm = build_pr_detail(&log, "hugit", 128, no_git()).unwrap();
     assert_eq!(vm.cost.work_usd, 0.0, "no envelope → work_usd 0.0");
     assert_eq!(vm.cost.orchestration_usd, 0.0);
     assert_eq!(vm.cost.verification_usd, 0.0);
@@ -114,7 +122,7 @@ fn open_pr_no_envelope_cost_is_zero() {
 #[test]
 fn open_pr_stub_fields_are_honest_defaults() {
     let log = log_with_open_pr(128);
-    let vm = build_pr_detail(&log, "hugit", 128).unwrap();
+    let vm = build_pr_detail(&log, "hugit", 128, no_git()).unwrap();
 
     // No diffstat seam.
     assert!(vm.diff.files.is_empty(), "diff.files [] — no diffstat seam");
@@ -241,7 +249,7 @@ fn log_with_poisoned_envelope(n: u32) -> EventLog {
 #[test]
 fn pr_altitude_secrets_are_scrubbed_not_echoed() {
     let log = log_with_poisoned_envelope(128);
-    let vm = build_pr_detail(&log, "hugit", 128).expect("PR 128 present → Some(vm)");
+    let vm = build_pr_detail(&log, "hugit", 128, no_git()).expect("PR 128 present → Some(vm)");
 
     // The whole serialized VM must carry NO raw secret anywhere.
     let json = serde_json::to_string(&vm).expect("PrDetailVm serializes");
@@ -301,7 +309,7 @@ fn pr_opened_campaign_is_scrubbed_at_read_boundary() {
         1_000,
     );
 
-    let vm = build_pr_detail(&log, "hugit", 128).expect("PR 128 is present");
+    let vm = build_pr_detail(&log, "hugit", 128, no_git()).expect("PR 128 is present");
     assert!(
         vm.title.contains("[REDACTED]"),
         "PR title scrubs the campaign, got: {}",
