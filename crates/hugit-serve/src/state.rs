@@ -177,7 +177,10 @@ pub enum RepoWriter {
     /// (flush the objects + rewrite the R2 manifests).
     Cas {
         /// The buffering receive→CAS write adapter (objects flush on `finalize`).
-        cas: crate::cas::CasRw,
+        /// Boxed alongside `seam` so the `Cas` variant doesn't dwarf `GitDir`
+        /// (clippy `large_enum_variant`); field access auto-derefs through the
+        /// `Box`, so call sites are unchanged.
+        cas: Box<crate::cas::CasRw>,
         /// The CAS client + R2 manifest store + tenant/slug for the commit. Boxed
         /// so the `Cas` variant doesn't dwarf `GitDir` (clippy `large_enum_variant`);
         /// field access auto-derefs through the `Box`, so call sites are unchanged.
@@ -267,7 +270,7 @@ impl RepoState {
         if let Some(seam) = &self.cas_write {
             let cas = seam.open_writer()?;
             return Ok(Some(RepoWriter::Cas {
-                cas,
+                cas: Box::new(cas),
                 seam: Box::new(seam.clone()),
             }));
         }
@@ -302,6 +305,7 @@ impl RepoState {
         ref_name: &str,
         new_oid: &str,
         index_add: &std::collections::HashMap<String, String>,
+        consumed_bases: &[String],
     ) -> Result<(), String> {
         // Parse every pushed git oid BEFORE touching any in-memory state, so a
         // malformed oid leaves the view unchanged (fail-closed, never half-applied).
@@ -328,12 +332,41 @@ impl RepoState {
             }
             None => {}
         }
-        // 2. ref tip LAST. Under v0 (self-contained packs) the pushed pack carries the
-        // tip AND its whole closure, so the additions merged above (∪ the boot index,
-        // which == R2's oid-index) always make the advertised tip resolvable. This holds
-        // by the self-contained invariant, NOT by a runtime check here — when thin-pack
-        // base resolution lands (the deferred follow-up, where a tip's base may live only
-        // in R2/CAS), this call site MUST re-assert tip resolvability before advancing.
+        // 2. RE-ASSERT thin-pack base resolvability (defence-in-depth) — DONE here.
+        // Post-#206 a push may resolve a delta against a base that lives ONLY in the
+        // repo's prior closure (a thin-pack / REF_DELTA base the pushed pack omits).
+        // `consumed_bases` is exactly the existing-closure oids THIS push resolved a
+        // base from. Before advancing the tip, every one MUST be present in the
+        // read-path `live_oid_index` — else the advertise would name a tip whose
+        // closure the read path can't resolve (a clone would 500 mid-stream).
+        //
+        // Today this is safe BY CONSTRUCTION under `max_instances:1`: a consumed base
+        // ∈ `CasRw.existing` == R2's `oid-index.json` == the `live_oid_index` boot
+        // seed, so the check never fires. The guard exists to catch a FUTURE
+        // divergence (HA / a stale live index) — fail-closed: refuse to advance (the
+        // push is already durable; the prior tip keeps serving and the correct tip
+        // loads on reboot — the existing failure path). The `None` index case is
+        // already refused by the `None if !parsed.is_empty()` guard above; this
+        // base-check only runs when there IS a live index to consult.
+        if let Some(index) = &self.live_oid_index {
+            for base_hex in consumed_bases {
+                let base = gix_hash::ObjectId::from_hex(base_hex.as_bytes()).map_err(|e| {
+                    format!(
+                        "push hot-swap: consumed thin-pack base {base_hex:?} is not a valid \
+                         git oid: {e}"
+                    )
+                })?;
+                if !index.contains(&base) {
+                    return Err(format!(
+                        "push hot-swap: thin-pack base {base_hex} resolved during the push is \
+                         absent from the live oid-index (refusing to advertise an unresolvable tip)"
+                    ));
+                }
+            }
+        }
+        // 3. ref tip LAST — the new objects (step 1) AND every consumed base (step 2)
+        // are now proven resolvable on the read path, so the advertised tip's closure
+        // is whole the moment it appears.
         self.git_refs.set_ref(ref_name, new_oid);
         Ok(())
     }

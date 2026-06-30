@@ -690,4 +690,83 @@ mod tests {
         assert_eq!(pr_env.metrics.cost_usd_micros, 0);
         assert_eq!(pr_env.metrics.tool_calls, 0);
     }
+
+    /// Shared `(url, body)` capture buffer — the test keeps a clone while the
+    /// transport is moved into the `LeaseClient`.
+    type PostLog = std::sync::Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+
+    /// A body-CAPTURING transport: records every POST `(url, body)` into a SHARED
+    /// buffer the test keeps a handle to (the transport itself is moved into the
+    /// `LeaseClient`). FIFO responses like [`FakeTransport`].
+    #[derive(Debug)]
+    struct CapturingTransport {
+        responses: Mutex<VecDeque<(u16, Vec<u8>)>>,
+        posts: PostLog,
+    }
+    impl CapturingTransport {
+        fn with(responses: Vec<(u16, Vec<u8>)>, posts: PostLog) -> Self {
+            Self {
+                responses: Mutex::new(responses.into()),
+                posts,
+            }
+        }
+        fn next(&self) -> Result<(u16, Vec<u8>), RunnerError> {
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| RunnerError::Transport("capturing: no queued response".into()))
+        }
+    }
+    impl RunnerTransport for CapturingTransport {
+        fn post(&self, u: &str, _b: &str, body: &[u8]) -> Result<(u16, Vec<u8>), RunnerError> {
+            self.posts
+                .lock()
+                .unwrap()
+                .push((u.to_string(), body.to_vec()));
+            self.next()
+        }
+        fn get(&self, _u: &str, _b: &str) -> Result<(u16, Vec<u8>), RunnerError> {
+            self.next()
+        }
+    }
+
+    /// HONESTY GUARD (per-PR honesty law, LOW finding #6): the `pr land --dispatch`
+    /// close path MUST submit `cost_usd_micros: None` today — there is NO real
+    /// provider-/usage cost source at the porcelain land altitude (the disclosed P2
+    /// seam), so the fabric keeps its honest-zero derived floor. A future caller
+    /// change that threaded a derived/non-real figure into the close body would be a
+    /// misattribution — this test (the close POST body carries NO `cost_usd_micros`
+    /// key) catches it first.
+    #[test]
+    fn land_dispatch_close_submits_no_cost_honest_zero() {
+        let mut log = open_and_queue();
+        let posts = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let transport = CapturingTransport::with(happy_responses(), std::sync::Arc::clone(&posts));
+        let config = RunnerConfig::new("https://runner.example/", SENTINEL_PAT).unwrap();
+        let client = LeaseClient::with_transport(config, transport);
+
+        land_with_dispatch(&mut log, &client, "42", 3000).expect("dispatch land");
+
+        // The close is the LAST POST (acquire → submit → poll(GET) → close).
+        let posts = posts.lock().unwrap();
+        let close = posts
+            .iter()
+            .rev()
+            .find(|(url, _)| url.contains("/close"))
+            .expect("a close POST was made");
+        let body: serde_json::Value = serde_json::from_slice(&close.1).expect("close body is JSON");
+        assert!(
+            body.as_object()
+                .expect("close body is an object")
+                .get("cost_usd_micros")
+                .is_none(),
+            "the close body MUST omit cost_usd_micros (honest-zero — no real cost \
+             source at the land altitude); got: {body}"
+        );
+        assert_eq!(
+            body["status"], "succeeded",
+            "close still reports the status"
+        );
+    }
 }

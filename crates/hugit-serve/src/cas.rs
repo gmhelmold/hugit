@@ -1984,6 +1984,14 @@ pub struct CasRw<T: CasTransport = UreqCasTransport> {
     /// the explicit [`flush`](CasRw::flush) closed (a corrupt object must never be
     /// silently dropped from the closure).
     inflate_errors: Vec<String>,
+    /// The existing-closure oids THIS push resolved a delta base from (a thin-pack /
+    /// REF_DELTA base that lives only in the repo's prior closure, not in the pushed
+    /// pack). Recorded on every `get` that hits the `existing` index — the set the
+    /// in-memory hot-swap re-asserts against `live_oid_index` before advancing the
+    /// tip (defence-in-depth: refuse to advertise a tip whose base the read-path
+    /// index can't resolve). Interior mutability is sound because a `CasRw` is a
+    /// per-push LOCAL value, never shared across threads.
+    consumed_existing: std::cell::RefCell<std::collections::HashSet<String>>,
 }
 
 impl<T: CasTransport> CasRw<T> {
@@ -1997,6 +2005,7 @@ impl<T: CasTransport> CasRw<T> {
             pending: HashMap::new(),
             index_add: HashMap::new(),
             inflate_errors: Vec::new(),
+            consumed_existing: std::cell::RefCell::new(std::collections::HashSet::new()),
         }
     }
 
@@ -2025,6 +2034,17 @@ impl<T: CasTransport> CasRw<T> {
     #[must_use]
     pub fn index_additions(&self) -> &HashMap<String, String> {
         &self.index_add
+    }
+
+    /// The existing-closure oids THIS push resolved a delta base from (each is an
+    /// object the pushed pack referenced but did NOT carry — a thin-pack / REF_DELTA
+    /// base served from the repo's prior closure). The in-memory hot-swap
+    /// re-asserts every one is present in the read-path `live_oid_index` before it
+    /// advances the ref tip, so a divergence (HA / stale live index) can never
+    /// advertise a tip whose base the read path can't resolve.
+    #[must_use]
+    pub fn consumed_existing_bases(&self) -> Vec<String> {
+        self.consumed_existing.borrow().iter().cloned().collect()
     }
 
     /// Upload the buffered objects to the CoreLink CAS — the ONLY network step.
@@ -2106,6 +2126,12 @@ impl<T: CasTransport> Cas for CasRw<T> {
             return Some(framing.clone());
         }
         if let Some(blake3) = self.existing.get(oid) {
+            // This push referenced a base from the repo's PRIOR closure (a thin-pack
+            // / REF_DELTA base the pushed pack omitted). Record it on the
+            // resolution-ATTEMPT (regardless of whether the wrapped `cas.get` then
+            // succeeds — the base was referenced) so the in-memory hot-swap can
+            // re-assert it is resolvable on the read path before advancing the tip.
+            self.consumed_existing.borrow_mut().insert(oid.to_string());
             // Fall through to the wrapped CAS read source. A transport error reads
             // as absent here (the anchor's `contains` is the fail-closed gate).
             return self.cas.get(blake3).ok().flatten();
