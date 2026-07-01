@@ -740,6 +740,11 @@ fn handle_receive_pack(state: &AppState, repo: &str, body: &[u8], request: Reque
                     &seam.repo_slug,
                     &cmd.ref_name,
                     &cmd.new_oid,
+                    // The pusher's `expected` tip (`None` for a create) — the SAME value
+                    // the stale-check validated (`req.update.expected`). Threaded so the
+                    // conditional refs.json write RE-VALIDATES it against the fresh base,
+                    // closing the cross-instance same-ref lost-update (FIX-IFMATCH-REMERGE).
+                    req.update.expected.as_deref(),
                     || {
                         state
                             .persist(repo, &log, &token)
