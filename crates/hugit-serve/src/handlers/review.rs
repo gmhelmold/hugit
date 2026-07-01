@@ -7,6 +7,7 @@
 //! seams are P2. Every echoed free-text field passes `crate::fmt::scrub`.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::fmt::{humanize_age, scrub};
 use hugit_cli::pr::{PR_ABANDONED_KIND, PR_LANDED_KIND, PR_QUEUED_KIND, find_pr_opened};
@@ -19,8 +20,6 @@ use hugit_http_contracts::review::{ReviewEventVm, ReviewReplyVm, ReviewThreadVm,
 use hugit_refstore::EventLog;
 use hugit_refstore::intent::intents_from_log;
 use serde_json::Value;
-
-use super::diff::diff_vm;
 
 const PR_COMMENT_KIND: &str = "pr.comment";
 
@@ -107,19 +106,48 @@ pub fn build_review(
     })
 }
 
-/// Max intents whose diffs are summed into one PR diffstat. Each intent diff is a
-/// CAS tree-walk (`tree_diff`, itself wall-clock-bounded); this caps how many of
-/// them ONE request runs so a PR with pathologically many intents can't multiply
-/// the per-diff budget into a single-threaded-engine stall (the diffstat is
-/// informational — a partial sum is acceptable, and `tree_diff`'s own budget is
-/// the load-bearing latency guard).
+/// Max intents whose diffs are summed into one PR diffstat — a RESULT cap (defense
+/// in depth). The LOAD-BEARING latency guard is now the SHARED wall-clock deadline
+/// threaded across every per-intent diff (see [`pr_diffstat`]): on the
+/// single-threaded lazy-git-from-CAS engine each intent diff is a synchronous CAS
+/// tree-walk, and WITHOUT a shared bound N intents would cost N × DIFF_BUDGET and
+/// wedge the accept loop. With the shared deadline the whole diffstat is bounded by
+/// ONE DIFF_BUDGET regardless of N; this count cap just stops the cheap
+/// (pre-fetch) per-id bookkeeping from being unbounded.
 const MAX_REVIEW_DIFF_INTENTS: usize = 64;
 
 /// The PR's aggregate diffstat: `(file_count, added, removed)` over the union of
 /// its intents' commits vs. their parents. Honest `(0, 0, 0)` when there is no
 /// git source or no intent commit resolves. A path touched by ≥2 intents is
 /// counted once (union by path) — `file_count` is the distinct changed-file set.
+///
+/// DoS (single-thread latency): every per-intent diff shares ONE wall-clock
+/// `deadline` (= `now + DIFF_BUDGET`), threaded into [`hugit_proto::tree_diff_until`].
+/// So the WHOLE multi-diff diffstat is bounded by a SINGLE budget, not N × budget —
+/// a PR with pathologically many intents cannot multiply the per-diff budget into a
+/// minutes-long stall. Past the deadline each remaining intent contributes its
+/// honest-empty/partial diff (the walk returns immediately) — an acceptable partial
+/// sum for an informational diffstat, never a fabricated number, never a 500.
 fn pr_diffstat(log: &EventLog, intent_ids: &[String], src: GitSrc<'_>) -> (usize, u32, u32) {
+    // ONE shared wall-clock deadline for the WHOLE diffstat (all N per-intent
+    // diffs), NOT a fresh budget per intent — this is the load-bearing latency bound.
+    pr_diffstat_until(
+        log,
+        intent_ids,
+        src,
+        Instant::now() + hugit_proto::DIFF_BUDGET,
+    )
+}
+
+/// [`pr_diffstat`] with an explicit shared `deadline` — deterministically testable
+/// (a deadline already in the past makes EVERY per-intent tree walk return
+/// immediately, so N intents cost one budget's worth of walk, not N × budget).
+fn pr_diffstat_until(
+    log: &EventLog,
+    intent_ids: &[String],
+    src: GitSrc<'_>,
+    deadline: Instant,
+) -> (usize, u32, u32) {
     let Some(src) = src else {
         return (0, 0, 0);
     };
@@ -133,7 +161,7 @@ fn pr_diffstat(log: &EventLog, intent_ids: &[String], src: GitSrc<'_>) -> (usize
         let Some(intent) = intent_log.by_id(id) else {
             continue;
         };
-        let diff = intent_commit_diff(src, &intent.target);
+        let diff = intent_commit_diff(src, &intent.target, deadline);
         for FileRowVm {
             path,
             added,
@@ -153,9 +181,16 @@ fn pr_diffstat(log: &EventLog, intent_ids: &[String], src: GitSrc<'_>) -> (usize
 
 /// The diff for one intent commit vs. its first parent (the review.rs-local twin
 /// of `intent_detail::intent_diff`; kept here to avoid a cross-handler dep).
+///
+/// The tree walk runs via [`hugit_proto::tree_diff_until`] with the CALLER's SHARED
+/// `deadline` (not a fresh `DIFF_BUDGET`), so a caller running N of these is bounded
+/// by ONE budget total. Past the deadline the walk returns its partial (here empty)
+/// diff — honest-partial, never a fabrication. Paths are SCRUBBED at this read
+/// boundary (parity with `diff::diff_vm`). Honest-empty on any unresolvable leg.
 fn intent_commit_diff(
     src: &Arc<dyn hugit_proto::ObjectSource + Send + Sync>,
     target_hex: &str,
+    deadline: Instant,
 ) -> hugit_http_contracts::common::DiffVm {
     use super::diff::empty_diff;
     let Ok(commit) = gix_hash::ObjectId::from_hex(target_hex.as_bytes()) else {
@@ -183,7 +218,22 @@ fn intent_commit_diff(
     let Some(parent_tree) = parent_tree else {
         return empty_diff();
     };
-    diff_vm(Some(src), Some(&parent_tree), Some(&new_tree))
+    // SHARED-deadline tree walk; fail-closed to honest-empty on a broken walk.
+    match hugit_proto::tree_diff_until(src.as_ref(), &parent_tree, &new_tree, deadline) {
+        Ok(files) => hugit_http_contracts::common::DiffVm {
+            files: files
+                .into_iter()
+                .map(|f| FileRowVm {
+                    // SCRUB at the read boundary (parity with `diff::diff_vm`).
+                    path: scrub(&f.path),
+                    added: f.added,
+                    removed: f.removed,
+                })
+                .collect(),
+            hunks: vec![],
+        },
+        Err(_) => empty_diff(),
+    }
 }
 
 fn pr_state_label(log: &EventLog, pr_id: &str) -> &'static str {
@@ -589,5 +639,58 @@ mod tests {
         );
         let vm = build_review(&log, "hugit", 9, None).expect("present");
         assert_eq!((vm.file_count, vm.added, vm.removed), (0, 0, 0));
+    }
+
+    // ── DoS bound: N per-intent diffs share ONE wall-clock deadline ───────────
+    /// A review over MANY intents is bounded by a SINGLE shared deadline, not
+    /// N × DIFF_BUDGET. Deterministic proof (no flaky wall-clock timing): with a
+    /// deadline already in the PAST, EVERY per-intent tree walk short-circuits at
+    /// the shared deadline → an honest-empty `(0,0,0)` diffstat — no per-intent
+    /// budget is spent walking the (real, non-empty) trees. A LIVE deadline over
+    /// the same N intents still projects the real diffstat (the bound is
+    /// transparent on the happy path). This is the single-thread latency-DoS fix:
+    /// a bundle with pathologically many intents cannot multiply the per-diff
+    /// budget into a minutes-long accept-loop stall.
+    #[test]
+    fn many_intents_are_bounded_by_one_shared_deadline() {
+        use std::time::{Duration, Instant};
+
+        let mut src = CasObjectSource::new();
+        // N intents, each landing a distinct commit that modifies the SAME file
+        // (so a live-budget diffstat unions to exactly one changed file).
+        let n = 40usize;
+        let ids: Vec<String> = (0..n).map(|i| format!("i-{i}")).collect();
+        let mut log = EventLog::new();
+        for (i, id) in ids.iter().enumerate() {
+            let old = blob(&mut src, "a\n");
+            let new = blob(&mut src, &format!("a\nb{i}\n"));
+            let ptree = tree(&mut src, vec![("100644", "f.txt", old)]);
+            let ctree = tree(&mut src, vec![("100644", "f.txt", new)]);
+            let pc = commit(&mut src, ptree, None);
+            let cc = commit(&mut src, ctree, Some(pc));
+            push(
+                &mut log,
+                INTENT_LANDED_KIND,
+                serde_json::json!({"intent_id":id,"ref":"r","target":cc.to_string(),"charter":"x"}),
+                (i as u64) + 1,
+            );
+        }
+        let arc: Arc<dyn ObjectSource + Send + Sync> = Arc::new(src);
+
+        // LIVE shared deadline: the real diffstat (bound is transparent).
+        let live = Instant::now() + Duration::from_secs(60);
+        let (fc, added, _removed) = pr_diffstat_until(&log, &ids, Some(&arc), live);
+        assert_eq!(fc, 1, "all {n} intents touch f.txt → unioned to one file");
+        assert!(added >= 1, "a live shared budget yields the real diffstat");
+
+        // PAST shared deadline: every per-intent walk short-circuits at the SHARED
+        // deadline → honest-empty, NOT N × a fresh budget. Never a 500, never a
+        // fabricated number — the honest-partial (here zero) sum.
+        let past = Instant::now() - Duration::from_secs(1);
+        assert_eq!(
+            pr_diffstat_until(&log, &ids, Some(&arc), past),
+            (0, 0, 0),
+            "a spent shared deadline bounds ALL {n} diffs at once (not N×)"
+        );
     }
 }

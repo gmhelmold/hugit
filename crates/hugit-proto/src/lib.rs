@@ -35,9 +35,9 @@ pub mod write;
 pub use read::history::{BLOB_HISTORY_BUDGET, BlobHistoryEntry, MAX_HISTORY_REVS, blob_history};
 pub use read::negotiate::{Capabilities, NegotiationError, RefAdvertisement, RefView, WantHave};
 pub use read::pack::{
-    CasObjectSource, FileChange, FileDiff, GitObject, ObjectKind, ObjectSource, PackAssembly,
-    PackError, TreeEntry as ProtoTreeEntry, commit_root_tree, list_tree_at_dir,
-    resolve_blob_at_path, tree_diff,
+    CasObjectSource, DIFF_BUDGET, FileChange, FileDiff, GitObject, ObjectKind, ObjectSource,
+    PackAssembly, PackError, TreeEntry as ProtoTreeEntry, commit_root_tree, list_tree_at_dir,
+    resolve_blob_at_path, tree_diff, tree_diff_until,
 };
 pub use read::serve::{ServeError, serve_clone, serve_fetch};
 // WP-D2b — read-path edges: client matrix + jj stacks, CPU/chunked fallback,

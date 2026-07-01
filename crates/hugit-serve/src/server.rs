@@ -9,12 +9,13 @@
 
 use std::io::Read;
 use std::sync::OnceLock;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tiny_http::{Header, Method, Request, Response, Server};
 
 use crate::error::EngineErr;
 use crate::handlers;
+use crate::metrics::{Metrics, RouteClass, ShedGate};
 use crate::state::AppState;
 use crate::writes::{self, LogSink, verbs, with_write};
 use hugit_http_contracts::actions::Accepted;
@@ -32,10 +33,60 @@ pub fn serve(state: AppState, addr: &str) -> std::io::Result<()> {
 
 /// Run the request loop over a PRE-BOUND server (the loop the real binary runs;
 /// split out so a test can bind `:0`, learn the port, and exercise it end-to-end).
+///
+/// W-SHED-METRICS adds two AVAILABILITY-safe things to this single-threaded serial
+/// loop: (A) a fail-safe graceful load-shed ([`ShedGate`] — sheds a fast 503 only
+/// when the loop has been CONTINUOUSLY saturated past a window; any idle gap resets
+/// it, so normal/serviceable load never false-503s) and (B) cheap aggregate
+/// [`Metrics`] + a per-request structured log line. Neither adds meaningful
+/// per-request latency (atomics + one uncontended lock on the single thread).
 pub fn serve_on(state: AppState, server: Server) -> std::io::Result<()> {
-    for mut request in server.incoming_requests() {
+    let metrics = Metrics::new();
+    let mut shed_gate = ShedGate::from_env();
+    let loop_start = Instant::now();
+    eprintln!(
+        "hugit-serve: accept loop up (load-shed={})",
+        if shed_gate.enabled() { "on" } else { "off" }
+    );
+
+    let mut incoming = server.incoming_requests();
+    loop {
+        // Time the BLOCK waiting for the next request: a long wait means the queue
+        // was empty (the engine is keeping up) — the load-shed idle signal.
+        let wait_start = Instant::now();
+        let mut request = match incoming.next() {
+            Some(r) => r,
+            None => break, // server closed → end the loop (matches the prior for-loop)
+        };
+        let waited_ms = wait_start.elapsed().as_millis() as u64;
+        let now_ms = loop_start.elapsed().as_millis() as u64;
+
+        let req_id = metrics.next_request_id();
+        metrics.set_in_flight(1);
+        let started = Instant::now();
         let method = request.method().clone();
         let url = request.url().to_string();
+        let class = classify_route(&method, &url);
+
+        // ---- Part A: graceful load-shed (fail-safe) --------------------------
+        // `should_shed` is pure saturating arithmetic (CANNOT panic); we STILL wrap
+        // it in `catch_unwind` so a hypothetical bug degrades to `false` (SERVE) —
+        // never a false shed, never a crash. Liveness (`/readyz`) + observability
+        // (`/metrics`) are exempt so they stay answerable DURING an overload.
+        let saturated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            shed_gate.should_shed(waited_ms, now_ms)
+        }))
+        .unwrap_or(false);
+        if saturated && !class.shed_exempt() {
+            metrics.record_shed();
+            respond_shed_503(request);
+            let dur = started.elapsed().as_millis() as u64;
+            metrics.record(class, dur);
+            log_request(req_id, class, 503, dur);
+            metrics.set_in_flight(0);
+            continue;
+        }
+
         let headers = request.headers().to_vec();
         // Read the body ONLY for mutating methods (reads ignore it). Bounded read:
         // at most MAX_BODY_BYTES+1 so the door's size cap rejects an oversize body
@@ -45,6 +96,20 @@ pub fn serve_on(state: AppState, server: Server) -> std::io::Result<()> {
         } else {
             Vec::new()
         };
+
+        // GET /metrics — UNAUTHENTICATED aggregate counters (Part B). Handled here
+        // (like SSE/git below) because it renders from the loop-owned `Metrics`. It
+        // exposes NO tenant data: closed-vocabulary route-class labels + integers
+        // only (never a repo slug / principal / id / path).
+        if method == Method::Get && is_metrics_path(&url) {
+            respond_metrics(request, metrics.render_json());
+            let dur = started.elapsed().as_millis() as u64;
+            metrics.record(class, dur);
+            log_request(req_id, class, 200, dur);
+            metrics.set_in_flight(0);
+            continue;
+        }
+
         // SSE replay: GET /v1/repos/{repo}/events?since=<seq>. Handled BEFORE the
         // standard (status, String) path because it needs a different Content-Type
         // and a Vec<u8> body. `respond_sse` consumes `request` in every branch.
@@ -52,7 +117,8 @@ pub fn serve_on(state: AppState, server: Server) -> std::io::Result<()> {
         // drop only THIS request, never unwind the single-threaded accept loop (one
         // panic would otherwise crash the whole engine; on `max_instances:1` that is
         // a full outage / crash-loop). On panic `request` is already consumed, so the
-        // client just gets no response; the server survives.
+        // client just gets no response; the server survives. The sub-handler owns its
+        // own status, so the log records status=0 ("handled internally").
         if method == Method::Get && is_events_path(&url) {
             if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 respond_sse(&state, &url, &headers, request);
@@ -61,6 +127,10 @@ pub fn serve_on(state: AppState, server: Server) -> std::io::Result<()> {
             {
                 eprintln!("hugit-serve: SSE handler panicked — request dropped, server survives");
             }
+            let dur = started.elapsed().as_millis() as u64;
+            metrics.record(class, dur);
+            log_request(req_id, class, 0, dur);
+            metrics.set_in_flight(0);
             continue;
         }
         // Git smart-HTTP (clone/fetch AND push/receive-pack). Handled BEFORE the
@@ -77,6 +147,10 @@ pub fn serve_on(state: AppState, server: Server) -> std::io::Result<()> {
             {
                 eprintln!("hugit-serve: git handler panicked — request dropped, server survives");
             }
+            let dur = started.elapsed().as_millis() as u64;
+            metrics.record(class, dur);
+            log_request(req_id, class, 0, dur);
+            metrics.set_in_flight(0);
             continue;
         }
         // PANIC ISOLATION: a panic inside a handler must degrade to a 503 for THAT
@@ -105,8 +179,96 @@ pub fn serve_on(state: AppState, server: Server) -> std::io::Result<()> {
         {
             eprintln!("hugit-serve: respond error: {e}");
         }
+        let dur = started.elapsed().as_millis() as u64;
+        metrics.record(class, dur);
+        log_request(req_id, class, status, dur);
+        metrics.set_in_flight(0);
     }
     Ok(())
+}
+
+/// Classify a request into a fixed [`RouteClass`] for per-route metrics. Uses ONLY
+/// the method + coarse path SHAPE — never the concrete repo slug / id / query — so a
+/// metric label can never carry tenant data.
+fn classify_route(method: &Method, url: &str) -> RouteClass {
+    // Git (upload-pack GET + receive-pack POST) is matched by path shape first.
+    if crate::git::is_git_path(url) {
+        return RouteClass::Git;
+    }
+    let path = url.split('?').next().unwrap_or("");
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if method == &Method::Post {
+        return match segs.as_slice() {
+            ["v1", "token"] => RouteClass::Token,
+            _ => RouteClass::Write,
+        };
+    }
+    match segs.as_slice() {
+        ["readyz"] => RouteClass::Readyz,
+        ["metrics"] => RouteClass::Metrics,
+        ["v1", "me", "login"] => RouteClass::Login,
+        ["v1", "repos", _, "events"] => RouteClass::Sse,
+        ["v1", "repos", ..] => RouteClass::RepoRead,
+        ["v1", "me", ..] | ["v1", "orgs", ..] => RouteClass::MeRead,
+        _ => RouteClass::Other,
+    }
+}
+
+/// Whether `url`'s path is exactly `/metrics` (query ignored).
+fn is_metrics_path(url: &str) -> bool {
+    let path = url.split('?').next().unwrap_or("");
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    segs.as_slice() == ["metrics"]
+}
+
+/// A per-request structured log line: request-id + route class + status + duration.
+/// `status == 0` means the sub-handler (SSE/git) owns + already sent its own status.
+fn log_request(req_id: u64, class: RouteClass, status: u16, dur_ms: u64) {
+    eprintln!(
+        "hugit-serve req id={req_id} route={} status={status} duration_ms={dur_ms}",
+        class.label()
+    );
+}
+
+/// Respond with a fast `503 Service Unavailable` + `Retry-After` (the load-shed).
+/// The body is the standard `{code, reason}` envelope; marked private/no-store so
+/// no intermediary caches the transient shed.
+fn respond_shed_503(request: Request) {
+    let body = EngineErr::unavailable("overloaded — retry shortly").to_body();
+    let resp = Response::from_string(body)
+        .with_status_code(503)
+        .with_header(json_content_type())
+        .with_header(retry_after_header())
+        .with_header(cache_control_private());
+    if let Err(e) = request.respond(resp)
+        && e.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        eprintln!("hugit-serve: shed respond error: {e}");
+    }
+}
+
+/// Respond with the `/metrics` JSON body (200). Marked private/no-store so no
+/// intermediary caches a point-in-time snapshot.
+fn respond_metrics(request: Request, body: String) {
+    let resp = Response::from_string(body)
+        .with_status_code(200)
+        .with_header(json_content_type())
+        .with_header(cache_control_private());
+    if let Err(e) = request.respond(resp)
+        && e.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        eprintln!("hugit-serve: metrics respond error: {e}");
+    }
+}
+
+/// The `Retry-After: 1` header (seconds) for a load-shed 503 — built once, cloned.
+fn retry_after_header() -> Header {
+    static RA: OnceLock<Header> = OnceLock::new();
+    RA.get_or_init(|| {
+        Header::from_bytes(&b"Retry-After"[..], &b"1"[..])
+            .expect("static retry-after header is valid")
+    })
+    .clone()
 }
 
 /// The `Content-Type: application/json` header — built once, cloned per response
