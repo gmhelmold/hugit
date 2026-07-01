@@ -500,6 +500,19 @@ pub struct AppState {
     pub allow_dev_operator: bool,
 }
 
+/// The hard cap on repos a single tenant may hold in ONE engine lifetime (the boot
+/// [`repos`](AppState::repos) set ∪ the runtime overlay). Generous for a real human
+/// or org, but a HARD bound on an authenticated create-spam DoS: every successful
+/// `POST /v1/repos` permanently leaks a `&'static RepoState`
+/// ([`insert_runtime_repo`](AppState::insert_runtime_repo), never freed) AND writes a
+/// durable genesis object, so an uncapped create-loop by ONE tenant would OOM the
+/// single-instance, single-threaded engine → a full outage. Enforced in the provision
+/// path (see [`crate::writes::verbs::write_provision`]) via
+/// [`count_owned_repos`](AppState::count_owned_repos) BEFORE the leak + the durable
+/// write. The `repos_runtime` doc note ("bounded by rare human-driven provisions") is
+/// now MECHANICALLY enforced by this cap, not merely assumed.
+pub const MAX_REPOS_PER_TENANT: usize = 100;
+
 impl AppState {
     /// The receive-pack flag gate for `hugit_proto::receive_pack` — `self-hosted-alpha`
     /// ON iff [`write_path_enabled`](Self::write_path_enabled).
@@ -939,6 +952,49 @@ impl AppState {
             .into_iter()
             .map(|(slug, _)| slug)
             .collect()
+    }
+
+    /// Count the repos OWNED by `owner_tenant` across the authoritative in-memory
+    /// set — the boot [`repos`](Self::repos) set ∪ the runtime overlay
+    /// ([`repos_runtime`](Self::repos_runtime)). This is the EXACT set whose entries
+    /// leak (a `&'static RepoState`, never freed) and whose genesis objects are
+    /// durable, so it is the right denominator for the per-tenant DoS cap
+    /// ([`MAX_REPOS_PER_TENANT`]) the provision path enforces BEFORE it leaks / writes.
+    ///
+    /// CHEAP: bounded by the loaded-repo count (each candidate log is loaded EXACTLY
+    /// once). It NEVER enumerates the durable/R2 store — a listing scan there would
+    /// itself be a DoS (the anti-pattern this cap exists to prevent).
+    ///
+    /// FAIL-CLOSED: returns `None` if ANY candidate log cannot be loaded/verified. An
+    /// indeterminate count MUST refuse the create (never allow-by-default): an
+    /// unloadable candidate is genuinely ambiguous re: whether it belongs to this
+    /// tenant, so a transient read fault can never be leveraged to slip past the cap.
+    #[must_use]
+    pub fn count_owned_repos(&self, owner_tenant: &str) -> Option<usize> {
+        // Deterministic candidate set: boot repos ∪ runtime overlay (dedup). Same
+        // union `me_repo_logs` walks, but filtered by OWNERSHIP (not read-authz).
+        let mut names: Vec<String> = self.repos.keys().cloned().collect();
+        {
+            let runtime = self.repos_runtime.read().unwrap_or_else(|e| e.into_inner());
+            for k in runtime.keys() {
+                if !self.repos.contains_key(k) {
+                    names.push(k.clone());
+                }
+            }
+        }
+        names.sort();
+        names.dedup();
+
+        let mut count = 0usize;
+        for name in names {
+            // Fail-closed: an unloadable/untrusted candidate ⇒ indeterminate count.
+            let log = self.load_verified(&name).ok()?;
+            let meta = crate::authz::project_repo_meta(&log);
+            if meta.owner_tenant.as_deref() == Some(owner_tenant) {
+                count += 1;
+            }
+        }
+        Some(count)
     }
 
     /// The number of repos whose git content seam is loaded (the `/readyz`
@@ -2476,6 +2532,41 @@ mod me_repos_tests {
             st.repos_for(&operator()),
             vec!["alpha".to_string(), "beta".to_string()],
             "operator (dev/orchestrator) sees every loaded repo"
+        );
+    }
+
+    // ── count_owned_repos (the per-tenant DoS-cap denominator) ───────────────
+
+    #[test]
+    fn count_owned_repos_filters_by_owner_tenant() {
+        // Ownership (not read-authz): a PUBLIC repo still counts toward its OWNER's
+        // cap, and never toward another tenant's.
+        let st = state_with(&[
+            ("alpha", &meta_log("private", "org-a")),
+            ("beta", &meta_log("public", "org-a")),
+            ("gamma", &meta_log("private", "org-b")),
+        ]);
+        assert_eq!(st.count_owned_repos("org-a"), Some(2));
+        assert_eq!(st.count_owned_repos("org-b"), Some(1));
+        assert_eq!(st.count_owned_repos("org-z"), Some(0));
+    }
+
+    #[test]
+    fn count_owned_repos_fails_closed_on_unloadable_candidate() {
+        // A slug wired into the seam set but whose log cannot load/verify makes the
+        // count indeterminate → None (the provision path maps None to a refusal, so a
+        // read fault can never be leveraged to slip past the cap).
+        let mut st = state_with(&[("alpha", &meta_log("private", "org-a"))]);
+        st.set_repo_git(
+            "ghost", // no backing `ghost.json` log → load_verified 404 → indeterminate
+            Arc::new(hugit_proto::CasObjectSource::new()),
+            gix_hash::ObjectId::empty_tree(gix_hash::Kind::Sha1),
+            BTreeMap::new(),
+        );
+        assert_eq!(
+            st.count_owned_repos("org-a"),
+            None,
+            "fail-closed on ambiguity"
         );
     }
 
