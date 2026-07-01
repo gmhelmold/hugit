@@ -716,7 +716,17 @@ fn handle_receive_pack(state: &AppState, repo: &str, body: &[u8], request: Reque
                     return send_report(request, report);
                 }
                 let report = build_report_status(Ok(()), &[RefOutcome::Ok(cmd.ref_name.clone())]);
-                send_report(request, report)
+                send_report(request, report);
+                // POST-DURABLE, POST-`ok`: best-effort KungFu merge event (WP
+                // W-WEBHOOK) — see the CAS arm below for the full rationale.
+                crate::merge_hook::emit_merge_event(
+                    &repo_state.git_source,
+                    repo,
+                    &cmd.ref_name,
+                    &cmd.old_oid,
+                    &cmd.new_oid,
+                    &req.principal_chain,
+                );
             }
             // CAS mode: objects → log → manifests, each fail-closed. The ORDER is the
             // invariant — a manifest never advertises a tip whose closure was not
@@ -760,7 +770,22 @@ fn handle_receive_pack(state: &AppState, repo: &str, body: &[u8], request: Reque
                         }
                         let report =
                             build_report_status(Ok(()), &[RefOutcome::Ok(cmd.ref_name.clone())]);
-                        send_report(request, report)
+                        send_report(request, report);
+                        // POST-DURABLE, POST-`ok`: best-effort KungFu merge event
+                        // (WP W-WEBHOOK). The client ALREADY has its `ok`, so nothing
+                        // below can regress the push. Egress is off the accept loop
+                        // (a bounded queue + a worker thread); the only on-loop cost is
+                        // the wall-clock-bounded touched-paths diff, which runs here
+                        // AFTER the response — it delays at most the next accept, never
+                        // this push, and can never wedge (bounded).
+                        crate::merge_hook::emit_merge_event(
+                            &repo_state.git_source,
+                            repo,
+                            &cmd.ref_name,
+                            &cmd.old_oid,
+                            &cmd.new_oid,
+                            &req.principal_chain,
+                        );
                     }
                     Err(crate::cas::CasPushError::Persist(reason)) => {
                         let report = build_report_status(
@@ -924,7 +949,18 @@ fn handle_delete_ref(
             }
             repo_state.apply_cas_delete_inmemory(&cmd.ref_name);
             let report = build_report_status(Ok(()), &[RefOutcome::Ok(cmd.ref_name.clone())]);
-            send_report(request, report)
+            send_report(request, report);
+            // POST-DURABLE, POST-`ok`: best-effort KungFu merge event (WP W-WEBHOOK).
+            // A delete carries an all-zero `new_oid` → the event is a `ref-delete`
+            // marker (no tree walk). Never regresses the push (`ok` already sent).
+            crate::merge_hook::emit_merge_event(
+                &repo_state.git_source,
+                repo,
+                &cmd.ref_name,
+                &cmd.old_oid,
+                &cmd.new_oid,
+                principal,
+            );
         }
         // CAS mode: log → manifest, each fail-closed (no objects to flush). `ok` ONLY
         // after the durable refs.json rewrite + the recorded `ref.delete` event.
@@ -955,7 +991,17 @@ fn handle_delete_ref(
                     repo_state.apply_cas_delete_inmemory(&cmd.ref_name);
                     let report =
                         build_report_status(Ok(()), &[RefOutcome::Ok(cmd.ref_name.clone())]);
-                    send_report(request, report)
+                    send_report(request, report);
+                    // POST-DURABLE, POST-`ok`: best-effort KungFu merge event (WP
+                    // W-WEBHOOK) — `ref-delete` marker; never regresses the push.
+                    crate::merge_hook::emit_merge_event(
+                        &repo_state.git_source,
+                        repo,
+                        &cmd.ref_name,
+                        &cmd.old_oid,
+                        &cmd.new_oid,
+                        principal,
+                    );
                 }
                 Err(crate::cas::CasPushError::Persist(reason)) => {
                     let report = build_report_status(
