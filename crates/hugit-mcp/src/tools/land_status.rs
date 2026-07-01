@@ -119,9 +119,16 @@ mod tests {
     }
 
     fn tmp_dir() -> std::path::PathBuf {
+        // A per-call ATOMIC counter guarantees a unique dir even when two parallel
+        // test threads read the same coarse clock nanos (the prior flake: a nanos
+        // collision → two tests shared a dir → a write-then-exec race on the same
+        // fake-hugit.sh). process::id() + counter is collision-free within a run.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
         let base = std::env::temp_dir().join(format!(
-            "hugit-mcp-land-{}-{}",
+            "hugit-mcp-land-{}-{}-{}",
             std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
