@@ -54,6 +54,21 @@ impl EngineErr {
         }
     }
 
+    /// 401 — the request AUTHENTICATED, but its principal is NOT entitled to the
+    /// action (e.g. `POST /v1/repos` by the platform operator or an anonymous
+    /// caller — no god-create / anon-create over the public door: a real user
+    /// creates their OWN repo). Distinct from `TOKEN_INVALID` (a bad/missing
+    /// bearer): the bearer is valid, the principal is just not a self-provisioning
+    /// tenant.
+    #[must_use]
+    pub fn unauthorized(reason: impl Into<String>) -> Self {
+        Self {
+            status: 401,
+            code: "UNAUTHORIZED",
+            reason: reason.into(),
+        }
+    }
+
     /// 503 — the engine cannot serve trustworthy data (log unreadable, parse
     /// failure, or a TAMPERED hash chain). Fail-honest: never a fake-empty VM.
     #[must_use]
