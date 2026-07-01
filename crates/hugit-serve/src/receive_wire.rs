@@ -92,6 +92,10 @@ pub enum RecvParseError {
     NoCommands,
     /// A command line was not `<old-oid> SP <new-oid> SP <ref>` with valid oids.
     BadCommand(String),
+    /// The ref name failed git's `check_refname_format` rules (control char,
+    /// space, `..`, overlong, etc.) — rejected fail-closed before it can smear the
+    /// advertise framing or poison the refs manifest.
+    BadRefName(String),
     /// A non-delete push carried no `PACK…` stream after the flush.
     MissingPack,
 }
@@ -103,6 +107,7 @@ impl std::fmt::Display for RecvParseError {
             Self::Truncated => write!(f, "truncated pkt-line stream"),
             Self::NoCommands => write!(f, "no ref commands in the push"),
             Self::BadCommand(s) => write!(f, "malformed ref command: {s}"),
+            Self::BadRefName(s) => write!(f, "invalid ref name: {s:?}"),
             Self::MissingPack => write!(f, "push delivered no packfile for a non-delete update"),
         }
     }
@@ -114,6 +119,60 @@ fn is_sha1_hex(s: &str) -> bool {
     s.len() == 40
         && s.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Upper bound on an accepted ref name. Git imposes no hard limit, but a bounded
+/// name keeps the advertise pkt-lines small and denies an overlong-key DoS on the
+/// refs manifest. 512 is generous for any real branch/tag.
+const MAX_REF_NAME_LEN: usize = 512;
+
+/// Validate a ref name against the subset of git's `check_refname_format(1)` that
+/// matters on the write path (fail-closed). Ref names are attacker-controllable now
+/// that push is live and are re-emitted VERBATIM as `refs.json` JSON keys and as
+/// advertise pkt-line payloads, so a malformed name — an embedded newline/space, a
+/// control char, `..`, an overlong string — MUST be rejected before it can smear the
+/// pkt-line framing a client reads or poison the manifest.
+///
+/// Rejected (mirrors git):
+///   * empty, or longer than [`MAX_REF_NAME_LEN`];
+///   * any ASCII control char `0x00–0x1F` or DEL `0x7F` (covers `\n`, `\r`, NUL);
+///   * any of ` ` `~` `^` `:` `?` `*` `[` `\`;
+///   * a `..` or `@{` or `//` sequence, a leading/trailing `/`, a trailing `.`;
+///   * a slash-separated component that is empty, begins with `.`, or ends `.lock`;
+///   * the single-char name `@`.
+///
+/// The caller separately requires a `refs/` prefix, so a valid ref always contains a
+/// `/` and is never the bare `@`; those rules are checked here too for completeness.
+fn is_valid_refname(name: &str) -> bool {
+    if name.is_empty() || name.len() > MAX_REF_NAME_LEN {
+        return false;
+    }
+    if name == "@" {
+        return false;
+    }
+    if name.starts_with('/') || name.ends_with('/') || name.ends_with('.') {
+        return false;
+    }
+    if name.contains("..") || name.contains("//") || name.contains("@{") {
+        return false;
+    }
+    for b in name.bytes() {
+        // Control chars (incl. NUL, TAB, LF, CR) + DEL, then the git-forbidden set.
+        if b <= 0x1f || b == 0x7f {
+            return false;
+        }
+        if matches!(b, b' ' | b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\') {
+            return false;
+        }
+    }
+    // Per-component rules. An empty component also catches a leading/trailing or
+    // double slash, but those are rejected above for an explicit, cheap early-out.
+    for comp in name.split('/') {
+        if comp.is_empty() || comp.starts_with('.') || comp.ends_with(".lock") {
+            return false;
+        }
+    }
+    true
 }
 
 /// Parse one command payload `<old> SP <new> SP <ref>` (caps already stripped),
@@ -131,10 +190,8 @@ fn parse_command(payload: &[u8]) -> Result<ReceiveCommand, RecvParseError> {
     if !is_sha1_hex(old) || !is_sha1_hex(new) {
         return Err(RecvParseError::BadCommand(format!("bad oid in {text:?}")));
     }
-    if ref_name.is_empty() || !ref_name.starts_with("refs/") {
-        return Err(RecvParseError::BadCommand(format!(
-            "bad ref name in {text:?}"
-        )));
+    if !ref_name.starts_with("refs/") || !is_valid_refname(ref_name) {
+        return Err(RecvParseError::BadRefName(ref_name.to_string()));
     }
     Ok(ReceiveCommand {
         old_oid: old.to_string(),
@@ -388,8 +445,71 @@ mod tests {
         body.extend_from_slice(b"PACKz");
         assert!(matches!(
             parse_receive_pack_body(&body),
-            Err(RecvParseError::BadCommand(_))
+            Err(RecvParseError::BadRefName(_))
         ));
+    }
+
+    /// Build a single-command push body for `ref_name` (create of oid `A`) so a
+    /// test can drive `parse_command` through the real framing.
+    fn body_for_ref(ref_name: &str) -> Vec<u8> {
+        let mut body = Vec::new();
+        let mut first = format!("{ZERO_OID} {A} {ref_name}").into_bytes();
+        first.push(0);
+        first.extend_from_slice(b"report-status");
+        pkt(&mut body, &first);
+        flush(&mut body);
+        body.extend_from_slice(b"PACKz");
+        body
+    }
+
+    #[test]
+    fn well_formed_ref_names_are_accepted() {
+        for name in [
+            "refs/heads/main",
+            "refs/heads/feature/foo-bar_1",
+            "refs/tags/v1.2.3",
+            "refs/heads/a",
+        ] {
+            let got = parse_receive_pack_body(&body_for_ref(name))
+                .unwrap_or_else(|e| panic!("{name} should parse, got {e:?}"));
+            assert_eq!(got.commands[0].ref_name, name);
+        }
+    }
+
+    #[test]
+    fn malformed_ref_names_are_rejected() {
+        // Control chars / space / newline smear the advertise; the rest are the
+        // git check_refname_format forbidden set + structural rules.
+        let long = format!("refs/heads/{}", "a".repeat(600));
+        let cases: &[&str] = &[
+            "refs/heads/a b",      // embedded space
+            "refs/heads/a\tb",     // embedded TAB (control)
+            "refs/heads/a\nb",     // embedded newline (advertise-smear)
+            "refs/heads/a..b",     // ".." sequence
+            "refs/heads/a//b",     // double slash
+            "refs/heads/",         // trailing slash / empty component
+            "refs/heads/.hidden",  // component starts with '.'
+            "refs/heads/foo.lock", // component ends with .lock
+            "refs/heads/a^b",      // '^'
+            "refs/heads/a:b",      // ':'
+            "refs/heads/a?b",      // '?'
+            "refs/heads/a*b",      // '*'
+            "refs/heads/a[b",      // '['
+            "refs/heads/a\\b",     // backslash
+            "refs/heads/a~b",      // '~'
+            "refs/heads/a@{b",     // '@{'
+            "refs/heads/foo.",     // trailing dot
+            &long,                 // overlong (> 512)
+        ];
+        for name in cases {
+            assert!(
+                matches!(
+                    parse_receive_pack_body(&body_for_ref(name)),
+                    Err(RecvParseError::BadRefName(_))
+                ),
+                "{name:?} must be rejected as a bad ref name",
+            );
+        }
     }
 
     #[test]

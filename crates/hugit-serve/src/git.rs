@@ -323,8 +323,21 @@ fn upload_pack(state: &AppState, repo: &str, body: &[u8], principal: &[String]) 
     let pack = if request.wants.is_empty() {
         let adv = hugit_proto::RefAdvertisement::from_view(&refs);
         let clone_req = hugit_proto::WantHave::clone_all(&adv).ok()?;
+        // The full-clone wants are DERIVED from `refs` (every advertised tip), so
+        // they are advertised by construction — no validation needed.
         hugit_proto::serve_fetch(source.as_ref(), &clone_req).ok()?
     } else {
+        // SECURITY (want-validation): every explicit `want` MUST be an advertised
+        // ref tip for THIS principal (the same `refs` the advertise exposed). A
+        // want for a non-advertised oid — an arbitrary interior/unreachable object,
+        // or one hidden by the read-authz gate — is REJECTED (→ 404, no oracle):
+        // the `uploadpack.allowReachableSHA1InWant`-off default. This closes a
+        // client fishing for an unadvertised object AND caps the reachability walk
+        // to a real tip's closure (defence-in-depth for the serve_fetch DoS: a
+        // caller cannot force a walk from an attacker-chosen root).
+        if !wants_all_advertised(&refs, &request.wants) {
+            return None;
+        }
         hugit_proto::serve_fetch(source.as_ref(), &request).ok()?
     };
 
@@ -334,6 +347,22 @@ fn upload_pack(state: &AppState, repo: &str, body: &[u8], principal: &[String]) 
     pkt_line(&mut out, b"NAK\n");
     out.extend_from_slice(&pack.bytes);
     Some(out)
+}
+
+/// Whether EVERY `want` oid is an advertised ref tip in `refs` (the map values).
+///
+/// The `uploadpack.allowReachableSHA1InWant`-OFF default: a client may only fetch
+/// from a tip the advertisement exposed for its principal, NEVER an arbitrary
+/// interior or unadvertised oid. An empty want list is vacuously `true` (a full
+/// clone derives its wants from `refs` upstream, so it never reaches this check).
+/// This both prevents fishing for an unadvertised object and caps the reachability
+/// walk to a real tip's closure (defence-in-depth for the serve_fetch wall-clock
+/// DoS — a caller cannot pick the walk's root).
+fn wants_all_advertised(refs: &BTreeMap<String, String>, wants: &[gix_hash::ObjectId]) -> bool {
+    let advertised: std::collections::BTreeSet<String> = refs.values().cloned().collect();
+    // `ObjectId::to_string` is canonical lowercase 40-hex, matching the `for-each-ref`
+    // oid strings stored as `refs` values — a byte-exact compare with no case drift.
+    wants.iter().all(|w| advertised.contains(&w.to_string()))
 }
 
 /// The refs to advertise for `repo`, or `None` when git serving is not live for
@@ -740,6 +769,11 @@ fn handle_receive_pack(state: &AppState, repo: &str, body: &[u8], request: Reque
                     &seam.repo_slug,
                     &cmd.ref_name,
                     &cmd.new_oid,
+                    // The pusher's `expected` tip (`None` for a create) — the SAME value
+                    // the stale-check validated (`req.update.expected`). Threaded so the
+                    // conditional refs.json write RE-VALIDATES it against the fresh base,
+                    // closing the cross-instance same-ref lost-update (FIX-IFMATCH-REMERGE).
+                    req.update.expected.as_deref(),
                     || {
                         state
                             .persist(repo, &log, &token)
@@ -1551,5 +1585,46 @@ mod live_refs_tests {
         );
         // report-status must also stay (the client reads our ok/ng report).
         assert!(RECEIVE_CAPS.split(' ').any(|c| c == "report-status"));
+    }
+}
+
+#[cfg(test)]
+mod want_validation_tests {
+    use super::*;
+
+    fn oid(hex_char: char) -> gix_hash::ObjectId {
+        gix_hash::ObjectId::from_hex(hex_char.to_string().repeat(40).as_bytes())
+            .expect("valid 40-hex oid")
+    }
+
+    /// Only an advertised ref tip may be `want`ed (allowReachableSHA1InWant-off):
+    /// an advertised tip passes; a non-advertised (interior/arbitrary) oid is
+    /// rejected; a mixed list is rejected if ANY want is non-advertised.
+    #[test]
+    fn wants_must_be_advertised_tips() {
+        let mut refs = BTreeMap::new();
+        let tip = "a".repeat(40);
+        refs.insert("refs/heads/main".to_string(), tip.clone());
+        refs.insert("refs/heads/feature".to_string(), "b".repeat(40));
+
+        let advertised_main = oid('a');
+        let advertised_feature = oid('b');
+        let interior = oid('c'); // reachable-but-not-a-tip / arbitrary oid
+
+        // Advertised tips → accepted.
+        assert!(wants_all_advertised(&refs, &[advertised_main]));
+        assert!(wants_all_advertised(
+            &refs,
+            &[advertised_main, advertised_feature]
+        ));
+
+        // A non-advertised want → rejected.
+        assert!(!wants_all_advertised(&refs, &[interior]));
+        // ANY non-advertised want in a mixed list → the whole request is rejected.
+        assert!(!wants_all_advertised(&refs, &[advertised_main, interior]));
+
+        // Empty wants → vacuously ok (the full-clone path derives wants from refs
+        // and never reaches this check).
+        assert!(wants_all_advertised(&refs, &[]));
     }
 }
