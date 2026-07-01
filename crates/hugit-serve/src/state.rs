@@ -483,6 +483,22 @@ impl AppState {
 
         let write_path_enabled = receive_pack_enabled();
 
+        // Fail-closed multi-instance guard (WP-IFMATCH): a >1-instance deploy that
+        // mutates the shared manifests is safe ONLY with the conditional manifest-PUT
+        // path active. Refuse to boot otherwise (mechanized single-writer invariant).
+        multi_instance_guard(
+            write_path_enabled,
+            allow_multi_instance(),
+            CONDITIONAL_MANIFEST_PUT_ACTIVE,
+        )?;
+        if allow_multi_instance() && write_path_enabled {
+            eprintln!(
+                "[hugit-serve] multi-instance permitted: the conditional (If-Match) \
+                 manifest-PUT path is active — concurrent refs.json/oid-index.json writes \
+                 are compare-and-swap guarded (WP-IFMATCH)."
+            );
+        }
+
         Ok(Self {
             source,
             dev_token,
@@ -1034,6 +1050,63 @@ impl R2Config {
         }
     }
 
+    /// As [`get_object`](Self::get_object), but ALSO captures the object's R2 ETag as
+    /// a [`CasToken`] — the version a conditional (`If-Match`) manifest PUT swaps
+    /// against (WP-IFMATCH). `Ok(None)` = absent (→ a create, `If-None-Match: *`). A
+    /// present object whose GET response carries no ETag yields
+    /// [`CasToken::Unsupported`]; the conditional write path treats that FAIL-CLOSED
+    /// (it never degrades to an unconditional PUT). Mirrors [`fetch`](Self::fetch)'s
+    /// SigV4 + generic-503 discipline (no storage-topology leak to the client).
+    pub fn get_object_etag(&self, key: &str) -> Result<Option<(Vec<u8>, CasToken)>, EngineErr> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let signed = sigv4::sign_s3_get(
+            &self.host,
+            &self.bucket,
+            key,
+            &self.key_id,
+            &self.secret,
+            &self.region,
+            now,
+        );
+        let url = format!("{}/{}/{key}", self.endpoint, self.bucket);
+        let label = format!("r2://{}/{key}", self.bucket);
+        let resp = self
+            .agent
+            .get(&url)
+            .set("Authorization", &signed.authorization)
+            .set("x-amz-date", &signed.amz_date)
+            .set("x-amz-content-sha256", &signed.content_sha256)
+            .call();
+        match resp {
+            Ok(r) => {
+                // Capture the ETag (the CAS version) BEFORE consuming the body — R2
+                // returns it quoted; preserve it verbatim so the `If-Match` we send
+                // back round-trips byte-identically. No ETag ⇒ `Unsupported` (the
+                // conditional writer refuses to degrade to an unconditional PUT).
+                let token = match r.header("etag") {
+                    Some(e) if !e.is_empty() => CasToken::Version(e.to_string()),
+                    _ => CasToken::Unsupported,
+                };
+                let mut buf = Vec::new();
+                r.into_reader().read_to_end(&mut buf).map_err(|e| {
+                    eprintln!("hugit-serve: R2 body read failed for {label}: {e}");
+                    EngineErr::unavailable("engine storage read failed".to_string())
+                })?;
+                Ok(Some((buf, token)))
+            }
+            Err(ureq::Error::Status(404, _)) => Ok(None),
+            Err(e) => {
+                eprintln!("hugit-serve: R2 GET (etag) failed for {label}: {e}");
+                Err(EngineErr::unavailable(
+                    "engine storage temporarily unavailable".to_string(),
+                ))
+            }
+        }
+    }
+
     /// PUT `body` to `<tenant_id>/<repo>.json` UNCONDITIONALLY (the one-shot
     /// snapshot upload — used by the `hugit-snapshot` bin, NOT the engine write
     /// path). The standing engine credential is read-only by design (a PUT 403s);
@@ -1130,6 +1203,108 @@ impl R2Config {
         }
     }
 
+    /// A conditional (compare-and-swap) PUT to an ARBITRARY R2 key — the manifest
+    /// counterpart of [`put_conditional`](Self::put_conditional) (which shapes
+    /// `<tenant>/<repo>.json`) used by the receive-pack finalize for
+    /// `refs.json`/`oid-index.json` (WP-IFMATCH). It sends `If-Match: <etag>` (for
+    /// [`CasToken::Version`]) or `If-None-Match: *` (for [`CasToken::Absent`], a
+    /// create-only); the store's **412** maps to the distinct, retryable
+    /// [`crate::cas::ManifestPutError::Precondition`]. Returns the NEW ETag on success
+    /// (or `Unsupported` if the PUT response carried none).
+    ///
+    /// FAIL-CLOSED: an `Unsupported` EXPECTED token is REFUSED (never an unconditional
+    /// PUT — that would re-open the lost-update race). Reuses the SAME SigV4 signer +
+    /// unsigned-conditional-header approach as [`put_conditional`](Self::put_conditional)
+    /// (the same direct-TLS threat model applies; see its note).
+    pub fn conditional_object_put(
+        &self,
+        key: &str,
+        body: &[u8],
+        expected: &CasToken,
+    ) -> Result<CasToken, crate::cas::ManifestPutError> {
+        use crate::cas::ManifestPutError;
+        // Fail-closed: refuse a non-CAS (unconditional) write outright.
+        if matches!(expected, CasToken::Unsupported) {
+            return Err(ManifestPutError::Other(
+                "manifest storage returned no version token; refusing a non-CAS write".to_string(),
+            ));
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let signed = sigv4::sign_s3_put(
+            &self.host,
+            &self.bucket,
+            key,
+            body,
+            &self.key_id,
+            &self.secret,
+            &self.region,
+            now,
+        );
+        let url = format!("{}/{}/{key}", self.endpoint, self.bucket);
+        let mut req = self
+            .agent
+            .put(&url)
+            .set("Authorization", &signed.authorization)
+            .set("x-amz-date", &signed.amz_date)
+            .set("x-amz-content-sha256", &signed.content_sha256);
+        match expected {
+            CasToken::Version(etag) => req = req.set("If-Match", etag),
+            CasToken::Absent => req = req.set("If-None-Match", "*"),
+            // Refused above — this arm is unreachable but kept explicit (no silent
+            // unconditional PUT).
+            CasToken::Unsupported => {
+                return Err(ManifestPutError::Other(
+                    "refusing an unconditional manifest PUT".to_string(),
+                ));
+            }
+        }
+        let resp = req.send_bytes(body);
+        match resp {
+            Ok(r) if (200..300).contains(&r.status()) => {
+                let new = match r.header("etag") {
+                    Some(e) if !e.is_empty() => CasToken::Version(e.to_string()),
+                    _ => CasToken::Unsupported,
+                };
+                Ok(new)
+            }
+            Ok(r) => {
+                eprintln!(
+                    "[hugit-serve] R2 conditional manifest PUT unexpected status {}",
+                    r.status()
+                );
+                Err(ManifestPutError::Other(
+                    "engine storage write unavailable".to_string(),
+                ))
+            }
+            // The precondition failed: a concurrent writer moved the manifest. The
+            // retry-on-fresh-base signal (NOT a hard failure).
+            Err(ureq::Error::Status(412, _)) => Err(ManifestPutError::Precondition),
+            Err(ureq::Error::Status(403, _)) => {
+                eprintln!(
+                    "[hugit-serve] R2 conditional manifest PUT 403 — credential is not write-scoped"
+                );
+                Err(ManifestPutError::Other(
+                    "engine storage write unavailable".to_string(),
+                ))
+            }
+            Err(ureq::Error::Status(s, _)) => {
+                eprintln!("[hugit-serve] R2 conditional manifest PUT status {s}");
+                Err(ManifestPutError::Other(
+                    "engine storage write unavailable".to_string(),
+                ))
+            }
+            Err(e) => {
+                eprintln!("[hugit-serve] R2 conditional manifest PUT transport error: {e}");
+                Err(ManifestPutError::Other(
+                    "engine storage write unavailable".to_string(),
+                ))
+            }
+        }
+    }
+
     /// PUT `body` to an ARBITRARY R2 key UNCONDITIONALLY — the generic write the
     /// git ingest bin uses to publish `<tenant>/<repo>/refs.json` +
     /// `<tenant>/<repo>/oid-index.json` (the mutable manifests; the immutable git
@@ -1204,6 +1379,29 @@ impl crate::cas::R2Put for R2Config {
     }
 }
 
+/// hugit's R2 as the VERSIONED manifest source for the receive-pack finalize's
+/// conditional (If-Match) writes (WP-IFMATCH): the bytes + ETag base a conditional
+/// PUT swaps against. Maps the `EngineErr` to the loader's `String` error.
+impl crate::cas::R2GetVersioned for R2Config {
+    fn get_object_versioned(&self, key: &str) -> Result<Option<(Vec<u8>, CasToken)>, String> {
+        R2Config::get_object_etag(self, key).map_err(|e| format!("R2 get {key}: {}", e.reason))
+    }
+}
+
+/// hugit's R2 as the CONDITIONAL manifest write target for the receive-pack finalize
+/// (WP-IFMATCH): a compare-and-swap PUT surfacing the store's 412 distinctly so the
+/// finalize can retry-on-fresh-base (never an unconditional clobber).
+impl crate::cas::R2PutConditional for R2Config {
+    fn put_object_conditional(
+        &self,
+        key: &str,
+        body: &[u8],
+        expected: &CasToken,
+    ) -> Result<CasToken, crate::cas::ManifestPutError> {
+        R2Config::conditional_object_put(self, key, body, expected)
+    }
+}
+
 /// Whether `HUGIT_SERVE_RECEIVE_PACK` enables the git-push write path. The single
 /// source of truth for BOTH the [`AppState::write_path_enabled`] flag and whether a
 /// CAS-mode repo is loaded with a [`CasWriteSeam`] — so a stock deploy (the var
@@ -1212,6 +1410,51 @@ fn receive_pack_enabled() -> bool {
     std::env::var("HUGIT_SERVE_RECEIVE_PACK")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+/// Whether the conditional (If-Match) manifest-PUT path is compiled in as the ONLY
+/// steady-state manifest write path. WP-IFMATCH wires it unconditionally, so this is
+/// always `true`; it exists as a concrete predicate the multi-instance boot guard
+/// asserts against (mechanized, not documented-only) — a future escape hatch that
+/// disabled the conditional path would be caught by [`multi_instance_guard`] the
+/// moment a deploy declared `max_instances>1`.
+const CONDITIONAL_MANIFEST_PUT_ACTIVE: bool = true;
+
+/// Whether the operator has DECLARED a multi-instance deploy (`max_instances>1`).
+/// The engine cannot read the Cloudflare instance count in-process, so a >1 deploy
+/// MUST acknowledge it via `HUGIT_SERVE_ALLOW_MULTI_INSTANCE`; the boot guard then
+/// asserts the conditional manifest-PUT path is active before permitting it.
+fn allow_multi_instance() -> bool {
+    std::env::var("HUGIT_SERVE_ALLOW_MULTI_INSTANCE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// The fail-closed multi-instance boot guard (WP-IFMATCH — the HARD pre-condition for
+/// `max_instances>1`). A deploy running more than one engine instance concurrently
+/// mutating the shared `refs.json`/`oid-index.json` manifests is SAFE ONLY if the
+/// conditional (If-Match) manifest-PUT path is active (else the concurrent writes
+/// lost-update). The instance count is not knowable in-process, so the operator
+/// declares it via `HUGIT_SERVE_ALLOW_MULTI_INSTANCE`; this guard REFUSES to boot when
+/// multi-instance is declared AND the git-push write path is enabled AND the conditional
+/// path is NOT active. Single-instance (the default, var unset) is always allowed; a
+/// read-only deploy (`write_path_enabled == false`) never mutates a manifest, so it is
+/// allowed too. Pure (takes the three booleans) so it is unit-tested without env.
+fn multi_instance_guard(
+    write_path_enabled: bool,
+    allow_multi_instance: bool,
+    conditional_manifest_put_active: bool,
+) -> Result<(), String> {
+    if allow_multi_instance && write_path_enabled && !conditional_manifest_put_active {
+        return Err(
+            "HUGIT_SERVE_ALLOW_MULTI_INSTANCE is set with the git-push write path enabled, \
+             but the conditional (If-Match) manifest-PUT path is NOT active — refusing to \
+             boot: >1 instance would lost-update refs.json/oid-index.json. Wire the \
+             conditional manifest PUT (WP-IFMATCH) before running max_instances>1."
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// Split a comma-separated repo/dir list into trimmed, non-empty members. One
@@ -1670,5 +1913,68 @@ mod tests {
         assert!(parse_git_dir_member("/srv/git/..").is_err());
         // An empty path is fail-closed.
         assert!(parse_git_dir_member("hugit=").is_err());
+    }
+
+    // ── WP-IFMATCH: the multi-instance boot guard + conditional-PUT fail-closed ──
+
+    #[test]
+    fn multi_instance_guard_refuses_multi_without_conditional_path() {
+        // The ONE refusal case: >1 instance declared, write path on, conditional PUT
+        // NOT active → refuse to boot (the lost-update race would be open).
+        let err = multi_instance_guard(
+            /* write_path_enabled */ true, /* allow_multi_instance */ true,
+            /* conditional_manifest_put_active */ false,
+        )
+        .expect_err("multi-instance without the conditional path must refuse boot");
+        assert!(
+            err.contains("refusing to boot") && err.contains("max_instances>1"),
+            "the error names the fail-closed refusal, got: {err}"
+        );
+    }
+
+    #[test]
+    fn multi_instance_guard_permits_when_conditional_path_active() {
+        // The live posture (WP-IFMATCH wired): >1 instance + write path + conditional
+        // active → permitted.
+        assert!(multi_instance_guard(true, true, true).is_ok());
+    }
+
+    #[test]
+    fn multi_instance_guard_allows_single_instance_and_readonly() {
+        // Single instance (allow_multi = false) is always fine, even with the (defensive)
+        // conditional-path-off case — no concurrency to race.
+        assert!(multi_instance_guard(true, false, false).is_ok());
+        assert!(multi_instance_guard(true, false, true).is_ok());
+        // A read-only deploy never mutates a manifest → multi-instance is fine even
+        // with the conditional path off.
+        assert!(multi_instance_guard(false, true, false).is_ok());
+    }
+
+    #[test]
+    fn conditional_object_put_refuses_unsupported_token_fails_closed() {
+        // SECURITY: an `Unsupported` EXPECTED token (no ETag to swap against) must be
+        // REFUSED before any network PUT — never a silent unconditional overwrite that
+        // re-opens the lost-update race. Dummy creds; the guard returns first.
+        use crate::cas::ManifestPutError;
+        let cfg = R2Config::from_vars(vars(&[
+            ("HUGIT_SERVE_R2_ACCOUNT_ID", "acct123"),
+            ("HUGIT_SERVE_R2_BUCKET", "example-bucket"),
+            ("HUGIT_SERVE_R2_KEY_ID", "k"),
+            ("HUGIT_SERVE_R2_SECRET", "s"),
+            ("HUGIT_SERVE_R2_TENANT_ID", "test-tenant-1"),
+        ]))
+        .expect("config");
+        let err = cfg
+            .conditional_object_put("t/hugit/refs.json", b"{}", &CasToken::Unsupported)
+            .expect_err("an Unsupported token must fail-closed, not PUT unconditionally");
+        match err {
+            ManifestPutError::Other(msg) => assert!(
+                msg.contains("no version token") || msg.contains("non-CAS"),
+                "the reason must name the refused non-CAS write, got: {msg}"
+            ),
+            ManifestPutError::Precondition => {
+                panic!("expected a fail-closed Other, not a Precondition")
+            }
+        }
     }
 }

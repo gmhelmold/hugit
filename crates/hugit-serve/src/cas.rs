@@ -40,6 +40,8 @@ use std::time::Duration;
 use hugit_proto::{CasObjectSource, GitObject, ObjectKind, PackError};
 use serde::{Deserialize, Serialize};
 
+use crate::writes::CasToken;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // B. The BLAKE3 content-address key.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1721,6 +1723,125 @@ pub trait R2Put {
     fn put_object(&self, key: &str, body: &[u8]) -> Result<(), String>;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// G′. Conditional (If-Match) manifest PUT — WP-IFMATCH (the lost-update race close).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The versioned counterpart of [`R2Get`]: fetch an R2 object together with its
+/// version token (the R2 ETag as [`CasToken`]) — the base a conditional (`If-Match`)
+/// manifest PUT swaps against. Behind a trait so the finalize path is proven
+/// hermetically. `Ok(None)` = absent (→ a create, `If-None-Match: *`).
+/// `Ok(Some((_, CasToken::Unsupported)))` = present but the store returned NO ETag —
+/// the conditional write path treats that FAIL-CLOSED (it must never PUT
+/// unconditionally, which would re-open the very race this WP closes).
+pub trait R2GetVersioned {
+    /// Fetch an R2 object + its version token. `Ok(None)` = absent; `Err` = transport.
+    fn get_object_versioned(&self, key: &str) -> Result<Option<(Vec<u8>, CasToken)>, String>;
+}
+
+/// A conditional (compare-and-swap) PUT for a manifest key, mirroring the event-log
+/// `put_conditional`: it sends `If-Match: <etag>` (for [`CasToken::Version`]) or
+/// `If-None-Match: *` (for [`CasToken::Absent`], a create-only), and surfaces the
+/// store's **412 Precondition Failed** as the distinct, RETRYABLE
+/// [`ManifestPutError::Precondition`]. Returns the NEW ETag on success.
+pub trait R2PutConditional {
+    /// Conditionally PUT `body` to `key`, swapping against `expected`. A store 412 →
+    /// [`ManifestPutError::Precondition`]; any other fault → [`ManifestPutError::Other`].
+    fn put_object_conditional(
+        &self,
+        key: &str,
+        body: &[u8],
+        expected: &CasToken,
+    ) -> Result<CasToken, ManifestPutError>;
+}
+
+/// The outcome of a conditional manifest PUT. `Precondition` (the store's 412) is the
+/// retry-on-fresh-base signal; every other fault is `Other` and is NOT retried on a
+/// fresh base (fail-closed).
+#[derive(Debug)]
+pub enum ManifestPutError {
+    /// The `If-Match`/`If-None-Match` precondition failed (the store answered 412) —
+    /// a concurrent writer advanced/created/deleted the object in the read→PUT gap.
+    /// RETRYABLE: re-read the fresh base, re-apply the delta, re-PUT.
+    Precondition,
+    /// Any other fault (transport, a non-2xx status, or a refused non-CAS write). A
+    /// fresh-base retry cannot help — fail closed with the reason.
+    Other(String),
+}
+
+impl std::fmt::Display for ManifestPutError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ManifestPutError::Precondition => {
+                write!(f, "conditional manifest PUT precondition failed (HTTP 412)")
+            }
+            ManifestPutError::Other(e) => write!(f, "conditional manifest PUT failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ManifestPutError {}
+
+/// Bounded compare-and-swap attempts for a single manifest key before failing closed.
+/// A single-threaded engine — even a small HA fleet — never approaches this; exhaustion
+/// means sustained pathological contention, surfaced as an `Err` (the push stays durable
+/// in CAS, the prior manifest keeps serving, the ref is NOT advanced on a poisoned base),
+/// NEVER an unconditional clobber.
+const MANIFEST_CAS_MAX_ATTEMPTS: u32 = 6;
+
+/// Conditionally (compare-and-swap) rewrite the manifest at `key`: read the current
+/// `(bytes, version)`, run `build` to produce the NEW body from that fresh base, then
+/// conditional-PUT against the read version (`If-Match`, or `If-None-Match: *` when
+/// absent). On a **412** (a concurrent writer moved the manifest in the read→PUT gap)
+/// RE-READ the fresh base and RE-APPLY `build` — so the concurrent write is MERGED,
+/// never clobbered. Bounded by [`MANIFEST_CAS_MAX_ATTEMPTS`]; exhaustion → `Err`
+/// (fail-closed, never an unconditional PUT).
+///
+/// `build` returns `Ok(None)` to signal "no change required" (e.g. deleting a ref that
+/// is already absent) — the PUT is then skipped and the fn returns `Ok(())` WITHOUT
+/// fabricating an object.
+///
+/// FAIL-CLOSED: if the store returns a present object with NO version token
+/// ([`CasToken::Unsupported`]), the fn REFUSES to write — an unconditional PUT would
+/// re-open the lost-update race this whole WP closes.
+fn conditional_manifest_write<R, F>(r2: &R, key: &str, mut build: F) -> Result<(), String>
+where
+    R: R2GetVersioned + R2PutConditional,
+    F: FnMut(Option<&[u8]>) -> Result<Option<Vec<u8>>, String>,
+{
+    for _ in 0..MANIFEST_CAS_MAX_ATTEMPTS {
+        let (current, version) = match r2.get_object_versioned(key)? {
+            // Present but un-versioned: refuse. Writing it would need an unconditional
+            // PUT (the store gave us no ETag to swap against) — exactly the race hole.
+            Some((_, CasToken::Unsupported)) => {
+                return Err(format!(
+                    "manifest {key}: storage returned no version token for an existing \
+                     object — refusing an unconditional PUT (fail-closed against the \
+                     lost-update race)"
+                ));
+            }
+            Some((bytes, token)) => (Some(bytes), token),
+            None => (None, CasToken::Absent),
+        };
+        let new_body = match build(current.as_deref())? {
+            Some(b) => b,
+            None => return Ok(()), // no change required — never fabricate an object.
+        };
+        match r2.put_object_conditional(key, &new_body, &version) {
+            Ok(_new_etag) => return Ok(()),
+            // A concurrent advance in the read→PUT gap: re-read + re-merge (loop).
+            Err(ManifestPutError::Precondition) => continue,
+            Err(ManifestPutError::Other(e)) => return Err(e),
+        }
+    }
+    Err(format!(
+        "manifest {key}: conditional PUT still precondition-failing after \
+         {MANIFEST_CAS_MAX_ATTEMPTS} attempts — failing closed (the push stays durable \
+         in CAS, the prior manifest keeps serving, the ref is NOT advanced on a \
+         poisoned base)"
+    ))
+}
+
 /// Batch-upload `objects`, then RETRY (once) any object the server marked `error`.
 /// A `created`/`exists` status is success. After the single retry, ANY still-`error`
 /// object fails the whole ingest (fail-closed — a half-uploaded closure is unservable).
@@ -2214,7 +2335,7 @@ pub fn finalize_cas_push<T, R, P>(
 ) -> Result<(), CasPushError>
 where
     T: CasTransport,
-    R: R2Get + R2Put,
+    R: R2GetVersioned + R2PutConditional,
     P: FnOnce() -> Result<(), String>,
 {
     // 1. objects FIRST — fail-closed before the log or any manifest.
@@ -2231,20 +2352,21 @@ where
 /// and set `refs[ref_name] = new_oid` in `<tenant>/<repo>/refs.json`, then PUT both
 /// back to hugit's R2 — **oid-index FIRST, the ref tip LAST**.
 ///
-/// ## Concurrency — SINGLE-WRITER assumption (documented deviation)
+/// ## Concurrency — CONDITIONAL (If-Match) compare-and-swap (WP-IFMATCH)
 ///
-/// hugit's R2 surface ([`R2Put`]) exposes only an UNCONDITIONAL `put_object` for an
-/// arbitrary key; a true `If-Match` conditional PUT for the manifest keys is not in
-/// the surface ([`R2Get::get_object`] does not surface the ETag). Per the WP spec's
-/// fallback, this is the **read-modify-CAS** variant: it RE-READS each manifest
-/// immediately before merging, so a concurrent push whose write already landed is
-/// preserved. Two pushes racing INSIDE the read→PUT gap can still lose a ref tip —
-/// acceptable under the `self-hosted-alpha` deploy (single-tenant, single-writer,
-/// `HUGIT_SERVE_RECEIVE_PACK`-gated). No OBJECT closure is ever lost (the CAS is
-/// content-addressed + idempotent); at worst a ref tip regresses, surfaced as a
-/// non-fast-forward on the next push. Wiring a signed conditional PUT (the true
-/// store-side CAS) is the tracked follow-up.
-pub fn commit_cas_push_manifests<R: R2Get + R2Put>(
+/// Each manifest is written through [`conditional_manifest_write`]: read the current
+/// `(bytes, ETag)`, apply the delta on that FRESH base, then PUT with `If-Match:
+/// <etag>` (or `If-None-Match: *` for a create). If a concurrent instance advanced the
+/// manifest in the read→PUT gap the store answers **412**; the write RE-READS the
+/// fresh base and RE-APPLIES the delta (merge, never clobber), bounded by
+/// [`MANIFEST_CAS_MAX_ATTEMPTS`]. On exhaustion it FAILS CLOSED with an `Err` — never
+/// an unconditional fallback PUT. This closes the lost-update race that was previously
+/// safe ONLY by the `max_instances:1` single-writer invariant, making it the HARD
+/// pre-condition for ever running `max_instances>1` (see the boot guard in
+/// `state::multi_instance_guard`). The re-apply is a MERGE (only OUR ref tip / OUR
+/// oid additions are set), so a concurrent push's ref advance / object additions
+/// survive. No OBJECT closure is ever lost (the CAS is content-addressed + idempotent).
+pub fn commit_cas_push_manifests<R: R2GetVersioned + R2PutConditional>(
     r2: &R,
     tenant: &str,
     repo: &str,
@@ -2252,39 +2374,45 @@ pub fn commit_cas_push_manifests<R: R2Get + R2Put>(
     new_oid: &str,
     index_add: &HashMap<String, String>,
 ) -> Result<(), String> {
-    // 1. oid-index.json FIRST: read-merge-write the new objects' oid→blake3 map, so
-    //    the index always covers every object the ref tip (written next) can name.
+    // 1. oid-index.json FIRST (conditional CAS): merge the new objects' oid→blake3 onto
+    //    the FRESH base each attempt, so a concurrent push's additions are preserved
+    //    (re-merge, never clobber). The index always covers every object the ref tip
+    //    (written next) can name.
     let index_key = oid_index_key(tenant, repo);
-    let mut index: OidIndex = match r2.get_object(&index_key)? {
-        Some(bytes) => parse_oid_index(&bytes)?,
-        None => OidIndex::new(),
-    };
-    for (oid, blake3) in index_add {
-        index.insert(oid.clone(), blake3.clone());
-    }
-    let index_bytes =
-        serde_json::to_vec(&index).map_err(|e| format!("push: oid-index.json serialize: {e}"))?;
-    r2.put_object(&index_key, &index_bytes)?;
+    conditional_manifest_write(r2, &index_key, |current| {
+        let mut index: OidIndex = match current {
+            Some(bytes) => parse_oid_index(bytes)?,
+            None => OidIndex::new(),
+        };
+        for (oid, blake3) in index_add {
+            index.insert(oid.clone(), blake3.clone());
+        }
+        serde_json::to_vec(&index)
+            .map(Some)
+            .map_err(|e| format!("push: oid-index.json serialize: {e}"))
+    })?;
 
-    // 2. refs.json LAST: read-merge-write the new tip. Writing it AFTER the index
-    //    guarantees the advertised tip's objects are already indexed (+ uploaded).
+    // 2. refs.json LAST (conditional CAS): set ONLY our ref on the FRESH base, so a
+    //    concurrent push's ref advance survives (re-merge, never clobber). Writing it
+    //    AFTER the index guarantees the advertised tip's objects are already indexed.
     let refs_key = refs_manifest_key(tenant, repo);
-    let mut manifest = match r2.get_object(&refs_key)? {
-        Some(bytes) => parse_refs_manifest(&bytes)?,
-        // A repo with no refs.json yet: seed it with this ref as HEAD (defensive —
-        // CAS-mode repos are seeded at ingest, so this is the empty-repo edge).
-        None => RefsManifest {
-            head: ref_name.to_string(),
-            refs: BTreeMap::new(),
-        },
-    };
-    manifest
-        .refs
-        .insert(ref_name.to_string(), new_oid.to_string());
-    let refs_bytes =
-        serde_json::to_vec(&manifest).map_err(|e| format!("push: refs.json serialize: {e}"))?;
-    r2.put_object(&refs_key, &refs_bytes)?;
-    Ok(())
+    conditional_manifest_write(r2, &refs_key, |current| {
+        let mut manifest = match current {
+            Some(bytes) => parse_refs_manifest(bytes)?,
+            // A repo with no refs.json yet: seed it with this ref as HEAD (defensive —
+            // CAS-mode repos are seeded at ingest, so this is the empty-repo edge).
+            None => RefsManifest {
+                head: ref_name.to_string(),
+                refs: BTreeMap::new(),
+            },
+        };
+        manifest
+            .refs
+            .insert(ref_name.to_string(), new_oid.to_string());
+        serde_json::to_vec(&manifest)
+            .map(Some)
+            .map_err(|e| format!("push: refs.json serialize: {e}"))
+    })
 }
 
 /// Finalize a CAS-mode **delete-ref** push (`git push --delete <branch>`) after the
@@ -2312,7 +2440,7 @@ pub fn finalize_cas_delete<R, P>(
     persist_log: P,
 ) -> Result<(), CasPushError>
 where
-    R: R2Get + R2Put,
+    R: R2GetVersioned + R2PutConditional,
     P: FnOnce() -> Result<(), String>,
 {
     // 1. log FIRST — the compare-and-swap append of the `ref.delete` event. The ref is
@@ -2326,34 +2454,40 @@ where
 /// to hugit's R2. `oid-index.json` is deliberately NOT touched (a delete drops only the
 /// ref pointer, never the objects). Fail-closed on any R2 read/parse/serialize/PUT fault.
 ///
-/// Same SINGLE-WRITER read-modify-CAS caveat as [`commit_cas_push_manifests`] (the
-/// `self-hosted-alpha` single-tenant, `HUGIT_SERVE_RECEIVE_PACK`-gated deploy): it
-/// RE-READS refs.json immediately before the removal so a concurrent push's landed
-/// write is preserved; the unconditional PUT is safe only under the single-writer
-/// invariant. A missing refs.json is treated as nothing-to-remove (idempotent — the
-/// handler already validated presence against the live snapshot).
-pub fn remove_cas_ref_from_manifest<R: R2Get + R2Put>(
+/// CONDITIONAL (If-Match) compare-and-swap — the same discipline as
+/// [`commit_cas_push_manifests`]: read refs.json + its ETag, drop the ref on that fresh
+/// base, conditional-PUT with `If-Match`; a concurrent advance (412) re-reads + re-applies
+/// the removal (merge, never clobber), bounded, fail-closed on exhaustion. A missing
+/// refs.json is nothing-to-remove (idempotent — the helper's `Ok(None)` skips the PUT so
+/// no empty manifest is fabricated; the handler already validated presence against the
+/// live snapshot).
+pub fn remove_cas_ref_from_manifest<R: R2GetVersioned + R2PutConditional>(
     r2: &R,
     tenant: &str,
     repo: &str,
     ref_name: &str,
 ) -> Result<(), String> {
     let refs_key = refs_manifest_key(tenant, repo);
-    let mut manifest = match r2.get_object(&refs_key)? {
-        Some(bytes) => parse_refs_manifest(&bytes)?,
-        // No refs.json yet ⇒ nothing to remove (idempotent). Don't fabricate one.
-        None => return Ok(()),
-    };
-    manifest.refs.remove(ref_name);
-    let refs_bytes =
-        serde_json::to_vec(&manifest).map_err(|e| format!("delete: refs.json serialize: {e}"))?;
-    r2.put_object(&refs_key, &refs_bytes)?;
-    Ok(())
+    conditional_manifest_write(r2, &refs_key, |current| match current {
+        // No refs.json yet ⇒ nothing to remove (idempotent). Return `None` so the helper
+        // skips the PUT — never fabricate an empty manifest.
+        None => Ok(None),
+        Some(bytes) => {
+            let mut manifest = parse_refs_manifest(bytes)?;
+            manifest.refs.remove(ref_name);
+            serde_json::to_vec(&manifest)
+                .map(Some)
+                .map_err(|e| format!("delete: refs.json serialize: {e}"))
+        }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Explicit (the trait signatures use the parent's private `use` alias); harmless
+    // alongside the glob.
+    use crate::writes::CasToken;
 
     // ── B. blake3 key ───────────────────────────────────────────────────────
 
@@ -2813,6 +2947,55 @@ mod tests {
                 .unwrap()
                 .insert(key.to_string(), body.to_vec());
             Ok(())
+        }
+    }
+
+    // The conditional (If-Match) manifest surface (WP-IFMATCH). The double models the
+    // R2 ETag as the content-hash of the stored bytes (`cas_key`) — deterministic and
+    // faithful to R2's semantics: the ETag changes iff the content changes, so an
+    // `If-Match` against a stale version fails exactly when a concurrent writer landed
+    // different bytes.
+    impl R2GetVersioned for MapR2 {
+        fn get_object_versioned(&self, key: &str) -> Result<Option<(Vec<u8>, CasToken)>, String> {
+            Ok(self
+                .objects
+                .lock()
+                .unwrap()
+                .get(key)
+                .map(|b| (b.clone(), CasToken::Version(cas_key(b)))))
+        }
+    }
+
+    impl R2PutConditional for MapR2 {
+        fn put_object_conditional(
+            &self,
+            key: &str,
+            body: &[u8],
+            expected: &CasToken,
+        ) -> Result<CasToken, ManifestPutError> {
+            let mut map = self.objects.lock().unwrap();
+            let current_etag = map.get(key).map(|b| cas_key(b));
+            let allowed = match (expected, &current_etag) {
+                // If-Match: overwrite only if the current ETag still matches.
+                (CasToken::Version(e), Some(cur)) => e == cur,
+                // If-Match on an object that is now GONE → precondition fails.
+                (CasToken::Version(_), None) => false,
+                // If-None-Match: * — create only if still absent.
+                (CasToken::Absent, None) => true,
+                (CasToken::Absent, Some(_)) => false,
+                // The double never opts out of CAS; refuse defensively (never silently
+                // unconditional).
+                (CasToken::Unsupported, _) => {
+                    return Err(ManifestPutError::Other(
+                        "test double refuses an Unsupported (non-CAS) conditional PUT".into(),
+                    ));
+                }
+            };
+            if !allowed {
+                return Err(ManifestPutError::Precondition);
+            }
+            map.insert(key.to_string(), body.to_vec());
+            Ok(CasToken::Version(cas_key(body)))
         }
     }
 
@@ -4618,14 +4801,23 @@ mod tests {
         struct PutFailsR2 {
             inner: MapR2,
         }
-        impl R2Get for PutFailsR2 {
-            fn get_object(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
-                self.inner.get_object(key)
+        impl R2GetVersioned for PutFailsR2 {
+            fn get_object_versioned(
+                &self,
+                key: &str,
+            ) -> Result<Option<(Vec<u8>, CasToken)>, String> {
+                self.inner.get_object_versioned(key)
             }
         }
-        impl R2Put for PutFailsR2 {
-            fn put_object(&self, _key: &str, _body: &[u8]) -> Result<(), String> {
-                Err("injected R2 PUT fault".to_string())
+        impl R2PutConditional for PutFailsR2 {
+            fn put_object_conditional(
+                &self,
+                _key: &str,
+                _body: &[u8],
+                _expected: &CasToken,
+            ) -> Result<CasToken, ManifestPutError> {
+                // A hard (non-412) fault: NOT retryable → surfaces as CasPushError::Manifest.
+                Err(ManifestPutError::Other("injected R2 PUT fault".to_string()))
             }
         }
 
@@ -4667,5 +4859,362 @@ mod tests {
             Some(&stale_tip),
             "refs.json never lost the ref (the PUT was rejected)"
         );
+    }
+
+    // ── K. Conditional (If-Match) manifest PUT — WP-IFMATCH (lost-update race) ──
+
+    #[test]
+    fn map_r2_conditional_put_create_update_and_stale() {
+        // The store-side CAS semantics the finalize path rides on: create-only
+        // (If-None-Match), update-hit (If-Match match), and the two conflict lanes.
+        let r2 = MapR2::default();
+        let key = "t/hugit/refs.json";
+        let body_a = br#"{"head":"refs/heads/main","refs":{"refs/heads/main":"a"}}"#;
+
+        // CREATE (If-None-Match: *): absent → ok; returns the new ETag.
+        let etag_a = match r2.put_object_conditional(key, body_a, &CasToken::Absent) {
+            Ok(CasToken::Version(e)) => e,
+            other => panic!("create-only PUT should return a Version ETag, got {other:?}"),
+        };
+        assert_eq!(etag_a, cas_key(body_a));
+
+        // A SECOND create-only (If-None-Match) now that it exists → precondition fails.
+        assert!(matches!(
+            r2.put_object_conditional(key, b"{}", &CasToken::Absent),
+            Err(ManifestPutError::Precondition)
+        ));
+
+        // UPDATE with a STALE If-Match (wrong ETag) → precondition fails (no clobber).
+        assert!(matches!(
+            r2.put_object_conditional(key, b"{}", &CasToken::Version("stale".into())),
+            Err(ManifestPutError::Precondition)
+        ));
+
+        // UPDATE with the CURRENT If-Match → ok; the bytes changed.
+        let body_b = br#"{"head":"refs/heads/main","refs":{"refs/heads/main":"b"}}"#;
+        let etag_b = match r2.put_object_conditional(key, body_b, &CasToken::Version(etag_a)) {
+            Ok(CasToken::Version(e)) => e,
+            other => panic!("If-Match update should return the new ETag, got {other:?}"),
+        };
+        assert_eq!(etag_b, cas_key(body_b));
+        assert_eq!(
+            r2.get_object(key).unwrap().as_deref(),
+            Some(&body_b[..]),
+            "the update landed"
+        );
+    }
+
+    /// One `git_oid → blake3` addition, keyed by a synthetic oid.
+    fn one_index_add(oid: &str) -> HashMap<String, String> {
+        let mut m = HashMap::new();
+        m.insert(oid.to_string(), cas_key(oid.as_bytes()));
+        m
+    }
+
+    #[test]
+    fn commit_cas_push_manifests_creates_manifests_on_empty_r2() {
+        // A repo with NO manifests yet: the conditional writes take the create
+        // (If-None-Match) lane and seed both objects. Proves the create path.
+        let (tenant, repo) = ("t", "hugit");
+        let r2 = MapR2::default();
+        let new_tip = "bb".repeat(20);
+        let add = one_index_add(&new_tip);
+
+        commit_cas_push_manifests(&r2, tenant, repo, "refs/heads/main", &new_tip, &add)
+            .expect("commit creates both manifests on an empty R2");
+
+        let idx = parse_oid_index(
+            &r2.get_object(&oid_index_key(tenant, repo))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            idx.contains_key(&new_tip),
+            "oid-index created with the new oid"
+        );
+        let m = parse_refs_manifest(
+            &r2.get_object(&refs_manifest_key(tenant, repo))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(m.refs.get("refs/heads/main"), Some(&new_tip));
+        assert_eq!(
+            m.head, "refs/heads/main",
+            "the seeded HEAD is the created ref"
+        );
+    }
+
+    /// A MapR2 that, on the FIRST conditional PUT to `race_key`, injects a competing
+    /// ref (simulating a CONCURRENT instance's landed write — which bumps the object's
+    /// ETag) and returns `Precondition`, forcing the caller to re-read + re-merge. The
+    /// SECOND PUT delegates to the honest conditional check.
+    #[derive(Clone)]
+    struct RaceOnceR2 {
+        inner: MapR2,
+        race_key: String,
+        competitor: (String, String), // (ref_name, oid) the concurrent instance lands
+        fired: std::sync::Arc<std::sync::Mutex<bool>>,
+    }
+    impl R2GetVersioned for RaceOnceR2 {
+        fn get_object_versioned(&self, key: &str) -> Result<Option<(Vec<u8>, CasToken)>, String> {
+            self.inner.get_object_versioned(key)
+        }
+    }
+    impl R2PutConditional for RaceOnceR2 {
+        fn put_object_conditional(
+            &self,
+            key: &str,
+            body: &[u8],
+            expected: &CasToken,
+        ) -> Result<CasToken, ManifestPutError> {
+            if key == self.race_key {
+                let mut fired = self.fired.lock().unwrap();
+                if !*fired {
+                    *fired = true;
+                    // Land the competitor's ref into the CURRENT refs.json (bumps ETag).
+                    let mut manifest = match self.inner.get_object(key).unwrap() {
+                        Some(bytes) => parse_refs_manifest(&bytes).unwrap(),
+                        None => RefsManifest {
+                            head: self.competitor.0.clone(),
+                            refs: BTreeMap::new(),
+                        },
+                    };
+                    manifest
+                        .refs
+                        .insert(self.competitor.0.clone(), self.competitor.1.clone());
+                    self.inner
+                        .put_object(key, &serde_json::to_vec(&manifest).unwrap())
+                        .unwrap();
+                    // The caller's If-Match now targets a stale ETag → 412.
+                    return Err(ManifestPutError::Precondition);
+                }
+            }
+            self.inner.put_object_conditional(key, body, expected)
+        }
+    }
+
+    #[test]
+    fn commit_cas_push_manifests_conflict_retries_and_merges_both_refs() {
+        // THE lost-update-race-closed proof: a concurrent instance advances refs.json
+        // in the read→PUT gap → our stale If-Match gets 412 → we re-read the fresh base
+        // and re-apply → BOTH refs survive (re-merge, never clobber).
+        let (tenant, repo) = ("t", "hugit");
+        let inner = MapR2::default();
+        let main_tip = "aa".repeat(20);
+        let mut existing = OidIndex::new();
+        existing.insert(main_tip.clone(), cas_key(b"main body"));
+        seed_manifests(&inner, tenant, repo, &main_tip, &existing);
+
+        let competitor_ref = "refs/heads/concurrent";
+        let competitor_oid = "cc".repeat(20);
+        let r2 = RaceOnceR2 {
+            inner: inner.clone(),
+            race_key: refs_manifest_key(tenant, repo),
+            competitor: (competitor_ref.to_string(), competitor_oid.clone()),
+            fired: std::sync::Arc::new(std::sync::Mutex::new(false)),
+        };
+
+        let our_tip = "bb".repeat(20);
+        let add = one_index_add(&our_tip);
+        commit_cas_push_manifests(&r2, tenant, repo, "refs/heads/ours", &our_tip, &add)
+            .expect("the 412 is retried on a fresh base, not a hard failure");
+
+        // ALL THREE refs survive: the original, the concurrent instance's, and ours.
+        let m = parse_refs_manifest(
+            &inner
+                .get_object(&refs_manifest_key(tenant, repo))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            m.refs.get("refs/heads/main"),
+            Some(&main_tip),
+            "original preserved"
+        );
+        assert_eq!(
+            m.refs.get(competitor_ref),
+            Some(&competitor_oid),
+            "the concurrent instance's ref was NOT clobbered (re-merged)"
+        );
+        assert_eq!(
+            m.refs.get("refs/heads/ours"),
+            Some(&our_tip),
+            "our ref landed"
+        );
+    }
+
+    /// A MapR2 whose conditional PUT ALWAYS returns `Precondition` (perpetual
+    /// contention) — proves retry-exhaustion fails closed without any unconditional
+    /// fallback clobber.
+    #[derive(Clone, Default)]
+    struct AlwaysConflictR2 {
+        inner: MapR2,
+    }
+    impl R2GetVersioned for AlwaysConflictR2 {
+        fn get_object_versioned(&self, key: &str) -> Result<Option<(Vec<u8>, CasToken)>, String> {
+            self.inner.get_object_versioned(key)
+        }
+    }
+    impl R2PutConditional for AlwaysConflictR2 {
+        fn put_object_conditional(
+            &self,
+            _key: &str,
+            _body: &[u8],
+            _expected: &CasToken,
+        ) -> Result<CasToken, ManifestPutError> {
+            Err(ManifestPutError::Precondition)
+        }
+    }
+
+    #[test]
+    fn commit_cas_push_manifests_retry_exhaustion_fails_closed() {
+        // Perpetual 412 → the bounded retry is EXHAUSTED → an `Err` (fail-closed), and
+        // NOT a single manifest byte is advanced (no unconditional fallback PUT).
+        let (tenant, repo) = ("t", "hugit");
+        let inner = MapR2::default();
+        let main_tip = "aa".repeat(20);
+        let mut existing = OidIndex::new();
+        existing.insert(main_tip.clone(), cas_key(b"main body"));
+        seed_manifests(&inner, tenant, repo, &main_tip, &existing);
+        let before = inner
+            .get_object(&oid_index_key(tenant, repo))
+            .unwrap()
+            .unwrap();
+
+        let r2 = AlwaysConflictR2 {
+            inner: inner.clone(),
+        };
+        let new_tip = "bb".repeat(20);
+        let add = one_index_add(&new_tip);
+        let err = commit_cas_push_manifests(&r2, tenant, repo, "refs/heads/ours", &new_tip, &add)
+            .expect_err("exhausted retries must fail closed, never clobber");
+        assert!(
+            err.contains("after") && err.contains("attempts") && err.contains("fail"),
+            "the error names the fail-closed exhaustion, got: {err}"
+        );
+        // The manifests are UNCHANGED — nothing was advanced on a poisoned base.
+        let after = inner
+            .get_object(&oid_index_key(tenant, repo))
+            .unwrap()
+            .unwrap();
+        assert_eq!(before, after, "oid-index never advanced under exhaustion");
+        let m = parse_refs_manifest(
+            &inner
+                .get_object(&refs_manifest_key(tenant, repo))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !m.refs.contains_key("refs/heads/ours"),
+            "the ref was NOT advanced (fail-closed)"
+        );
+    }
+
+    /// A double whose versioned GET returns a PRESENT object with NO ETag
+    /// (`Unsupported`). The conditional path MUST refuse — an unconditional PUT would
+    /// re-open the lost-update race. The PUT is guarded to prove it never runs.
+    #[derive(Clone, Default)]
+    struct UnsupportedEtagR2 {
+        inner: MapR2,
+    }
+    impl R2GetVersioned for UnsupportedEtagR2 {
+        fn get_object_versioned(&self, key: &str) -> Result<Option<(Vec<u8>, CasToken)>, String> {
+            Ok(self
+                .inner
+                .get_object(key)?
+                .map(|b| (b, CasToken::Unsupported)))
+        }
+    }
+    impl R2PutConditional for UnsupportedEtagR2 {
+        fn put_object_conditional(
+            &self,
+            _key: &str,
+            _body: &[u8],
+            _expected: &CasToken,
+        ) -> Result<CasToken, ManifestPutError> {
+            panic!(
+                "conditional PUT must NOT run when the ETag is Unsupported \
+                 (an unconditional write would re-open the race)"
+            );
+        }
+    }
+
+    #[test]
+    fn commit_cas_push_manifests_fails_closed_on_missing_etag() {
+        // SECURITY: a present-but-unversioned manifest (store returned no ETag) must
+        // fail closed — never silently degrade to an unconditional PUT.
+        let (tenant, repo) = ("t", "hugit");
+        let inner = MapR2::default();
+        let main_tip = "aa".repeat(20);
+        seed_manifests(&inner, tenant, repo, &main_tip, &OidIndex::new());
+        let r2 = UnsupportedEtagR2 { inner };
+
+        let new_tip = "bb".repeat(20);
+        let add = one_index_add(&new_tip);
+        let err = commit_cas_push_manifests(&r2, tenant, repo, "refs/heads/ours", &new_tip, &add)
+            .expect_err("a missing ETag must fail closed, not write unconditionally");
+        assert!(
+            err.contains("no version token") && err.contains("refusing"),
+            "the error names the refused non-CAS write, got: {err}"
+        );
+    }
+
+    #[test]
+    fn remove_cas_ref_from_manifest_absent_is_noop_no_fabrication() {
+        // Deleting a ref when refs.json does not exist yet is an idempotent no-op — and
+        // must NOT fabricate an empty manifest (the `Ok(None)` skip-the-PUT path).
+        let (tenant, repo) = ("t", "hugit");
+        let r2 = MapR2::default();
+        remove_cas_ref_from_manifest(&r2, tenant, repo, "refs/heads/gone")
+            .expect("removing from an absent manifest is Ok");
+        assert!(
+            r2.get_object(&refs_manifest_key(tenant, repo))
+                .unwrap()
+                .is_none(),
+            "no empty refs.json was fabricated"
+        );
+    }
+
+    #[test]
+    fn finalize_cas_delete_conditional_removes_ref_on_fresh_base() {
+        // The delete finalize rides the conditional path end-to-end: the ref is dropped
+        // from refs.json (via If-Match), the other ref + oid-index survive.
+        let (tenant, repo) = ("t", "hugit");
+        let r2 = MapR2::default();
+        let main_tip = "aa".repeat(20);
+        let stale_tip = "bb".repeat(20);
+        let mut existing = OidIndex::new();
+        existing.insert(stale_tip.clone(), cas_key(b"stale body"));
+        seed_two_ref_manifests(&r2, tenant, repo, &main_tip, &stale_tip, &existing);
+
+        finalize_cas_delete(&r2, tenant, repo, "refs/heads/stale", || Ok(()))
+            .expect("conditional delete finalize succeeds");
+
+        let m = parse_refs_manifest(
+            &r2.get_object(&refs_manifest_key(tenant, repo))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !m.refs.contains_key("refs/heads/stale"),
+            "the ref was removed"
+        );
+        assert_eq!(
+            m.refs.get("refs/heads/main"),
+            Some(&main_tip),
+            "other ref survives"
+        );
+        let idx = parse_oid_index(
+            &r2.get_object(&oid_index_key(tenant, repo))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(idx.contains_key(&stale_tip), "oid-index untouched (no GC)");
     }
 }
