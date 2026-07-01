@@ -124,6 +124,13 @@ pub enum PackError {
     /// partial/empty bytes into a clone.
     #[error("object source error: {0}")]
     Source(String),
+    /// A wall-clock deadline was exceeded while assembling the pack. Fail-CLEAN:
+    /// a clone/fetch pack is NEVER truncated to fit a budget (a pack missing a
+    /// reachable object is a CORRUPT clone). The whole assembly aborts with this
+    /// error instead — the serve wall-clock guard against wedging the single-
+    /// threaded engine on a runaway walk (see `serve::SERVE_FETCH_BUDGET`).
+    #[error("pack assembly exceeded its wall-clock budget")]
+    Deadline,
 }
 
 /// The CAS object-get surface the read path consumes.
@@ -239,9 +246,32 @@ pub fn assemble_pack(
     source: &dyn ObjectSource,
     oids: &[ObjectId],
 ) -> Result<PackAssembly, PackError> {
+    assemble_pack_until(source, oids, None)
+}
+
+/// Like [`assemble_pack`] but with an OPTIONAL wall-clock `deadline`. Each object
+/// is a synchronous CAS fetch on the single-threaded engine, so a large `oids`
+/// set against a cold CAS can block the accept loop for minutes; `Some(deadline)`
+/// bounds it. UNLIKE the informational reads (`tree_diff`, code-search) that return
+/// a PARTIAL result at their budget, this FAILS CLEAN — exceeding the deadline
+/// aborts the WHOLE assembly with [`PackError::Deadline`] rather than emit a
+/// truncated (corrupt) pack. `None` = unbounded (the standalone/degradable callers
+/// that already bound their `oids` upstream). Checked before each object's fetch so
+/// the standalone chunked callers stay byte-identical when `None` is passed.
+pub fn assemble_pack_until(
+    source: &dyn ObjectSource,
+    oids: &[ObjectId],
+    deadline: Option<std::time::Instant>,
+) -> Result<PackAssembly, PackError> {
     // Build a pack-output Entry for each requested object, fetched from CAS.
     let mut entries: Vec<Entry> = Vec::with_capacity(oids.len());
     for oid in oids {
+        // WALL-CLOCK guard: abort CLEAN (never a truncated pack) if the shared
+        // fetch budget is spent. Each iteration is one CAS get, so one check per
+        // object bounds the loop.
+        if deadline.is_some_and(|dl| std::time::Instant::now() >= dl) {
+            return Err(PackError::Deadline);
+        }
         let obj = source.get(oid)?.ok_or(PackError::MissingObject(*oid))?;
         let count = Count::from_data(*oid, None);
         let data = Data::new(obj.kind.to_gix(), &obj.data);
