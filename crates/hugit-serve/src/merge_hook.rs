@@ -260,17 +260,49 @@ fn is_global_v6(ip: &Ipv6Addr) -> bool {
     if ip.is_unspecified() || ip.is_loopback() || ip.is_multicast() {
         return false; // ::, ::1, ff00::/8
     }
-    let seg0 = ip.segments()[0];
-    if (seg0 & 0xfe00) == 0xfc00 {
+    let seg = ip.segments();
+    if (seg[0] & 0xfe00) == 0xfc00 {
         return false; // fc00::/7  unique-local
     }
-    if (seg0 & 0xffc0) == 0xfe80 {
+    if (seg[0] & 0xffc0) == 0xfe80 {
         return false; // fe80::/10 link-local
     }
-    if ip.segments()[0] == 0x2001 && ip.segments()[1] == 0x0db8 {
+    if seg[0] == 0x2001 && seg[1] == 0x0db8 {
         return false; // 2001:db8::/32 documentation
     }
+
+    // ── transitional / IPv4-embedding ranges ──────────────────────────────────
+    // A v6 that carries an embedded IPv4 reaches the SAME host as that v4 (e.g.
+    // `::7f00:1` is loopback, a 6to4 wrapper of `192.168.1.1` is that LAN host), so
+    // the embedded v4 MUST be extracted and re-checked under the v4 rules — a strict
+    // SSRF allowlist (like std's unstable `is_global`) rejects all of these.
+
+    // Teredo 2001:0000::/32 — the client v4 lives in the low bits under an XOR
+    // obfuscation; rather than trust a reversible unwrap, reject the whole range.
+    if seg[0] == 0x2001 && seg[1] == 0x0000 {
+        return false;
+    }
+    // 6to4 2002::/16 — the embedded IPv4 is bits 16–48 (`seg[1]:seg[2]`).
+    if seg[0] == 0x2002 {
+        return is_global_v4(&embedded_v4(seg[1], seg[2]));
+    }
+    // NAT64 well-known prefix 64:ff9b::/96 — the embedded IPv4 is the low 32 bits.
+    if seg[0] == 0x0064 && seg[1] == 0xff9b && seg[2..6] == [0, 0, 0, 0] {
+        return is_global_v4(&embedded_v4(seg[6], seg[7]));
+    }
+    // IPv4-compatible (deprecated) `::a.b.c.d` — high 96 bits zero, low 32 = v4.
+    // (`::` and `::1` are already handled by the unspecified/loopback checks.)
+    if seg[..6] == [0, 0, 0, 0, 0, 0] {
+        return is_global_v4(&embedded_v4(seg[6], seg[7]));
+    }
+
     true
+}
+
+/// Reassemble the IPv4 address embedded in two consecutive IPv6 segments
+/// (`hi`=high 16 bits, `lo`=low 16 bits of the v4).
+fn embedded_v4(hi: u16, lo: u16) -> Ipv4Addr {
+    Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8)
 }
 
 /// The SSRF gate, installed as `ureq`'s DNS resolver. `ureq` calls `resolve` with
@@ -847,6 +879,44 @@ mod tests {
             "1.1.1.1",
             "93.184.216.34",
             "2606:4700:4700::1111",
+        ] {
+            let ip: IpAddr = s.parse().unwrap();
+            assert!(is_global_ip(&ip), "{s} must be accepted as public");
+        }
+    }
+
+    #[test]
+    fn is_global_v6_rejects_v4_embedding_and_transitional() {
+        for s in [
+            // NAT64 well-known 64:ff9b::/96 wrapping a private/loopback v4
+            "64:ff9b::7f00:1",    // → 127.0.0.1 (loopback)
+            "64:ff9b::a00:1",     // → 10.0.0.1  (RFC1918)
+            "64:ff9b::a9fe:a9fe", // → 169.254.169.254 (metadata)
+            // 6to4 2002::/16 wrapping a private/loopback v4
+            "2002:7f00:1::",    // → 127.0.0.1
+            "2002:c0a8:101::",  // → 192.168.1.1
+            "2002:a9fe:a9fe::", // → 169.254.169.254 (metadata)
+            // Teredo 2001:0000::/32 — rejected outright
+            "2001:0:4136:e378:8000:63bf:3fff:fdd2",
+            // IPv4-compatible (deprecated) ::a.b.c.d
+            "::7f00:1", // ::127.0.0.1
+            "::a00:1",  // ::10.0.0.1
+        ] {
+            let ip: IpAddr = s.parse().unwrap();
+            assert!(
+                !is_global_ip(&ip),
+                "{s} must be refused (v4-embedding SSRF)"
+            );
+        }
+    }
+
+    #[test]
+    fn is_global_v6_allows_genuine_global() {
+        // A 6to4 wrapper of a GLOBAL v4 stays global; plain global v6 unaffected.
+        for s in [
+            "2606:4700::",          // Cloudflare
+            "2001:4860:4860::8888", // Google DNS (2001: but not Teredo/doc)
+            "2002:808:808::",       // 6to4 of 8.8.8.8 (global v4)
         ] {
             let ip: IpAddr = s.parse().unwrap();
             assert!(is_global_ip(&ip), "{s} must be accepted as public");
