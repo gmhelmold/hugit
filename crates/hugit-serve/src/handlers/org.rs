@@ -116,6 +116,26 @@ pub fn build_org(log: &EventLog, org_name: &str, repo: &str) -> OrgVm {
     }
 }
 
+/// Build the org view AGGREGATED over the CALLER's own repos (W-METENANT). The
+/// header (`name`/`handle`/`avatar_letter`/…) derives purely from the `org_name`
+/// path param; the `repos` list is one row per repo in the caller's authorized
+/// `(slug, verified-log)` set (from `AppState::me_repo_logs`, already
+/// read-authz-filtered) — never a hardcoded default repo. An EMPTY set → an org
+/// view with NO repo rows (honest empty). VM WIRE SHAPE unchanged (`OrgVm`).
+/// Reuses the per-repo [`build_org`] verbatim for both the header shell and each
+/// repo row (no second projection to drift).
+#[must_use]
+pub fn build_me_org(org_name: &str, repos: &[(String, EventLog)]) -> OrgVm {
+    // The header shell: build_org over an empty log yields the org-name-derived
+    // header; its one placeholder repo row is discarded below.
+    let mut vm = build_org(&EventLog::new(), org_name, "");
+    vm.repos = repos
+        .iter()
+        .filter_map(|(slug, log)| build_org(log, org_name, slug).repos.into_iter().next())
+        .collect();
+    vm
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,5 +205,40 @@ mod tests {
         let j = serde_json::to_string(&vm).expect("serializes");
         let reparsed: OrgVm = serde_json::from_str(&j).expect("deserializes");
         assert_eq!(vm, reparsed);
+    }
+
+    // ── W-METENANT: the identity-scoped aggregating org view ──────────────────
+
+    #[test]
+    fn me_org_empty_repo_set_has_no_repo_rows() {
+        let vm = build_me_org("humangr", &[]);
+        assert_eq!(vm.name, "humangr");
+        assert_eq!(vm.handle, "@humangr");
+        assert!(vm.repos.is_empty(), "no caller repos → no repo rows");
+        // Wire shape intact (empty repos vec round-trips).
+        let j = serde_json::to_string(&vm).unwrap();
+        assert_eq!(vm, serde_json::from_str::<OrgVm>(&j).unwrap());
+    }
+
+    #[test]
+    fn me_org_aggregates_the_callers_repos() {
+        let mut a = EventLog::new();
+        open_pr(&mut a, "1", 1000);
+        let mut b = EventLog::new();
+        open_pr(&mut b, "2", 2000);
+        land_pr(&mut b, "2", 2100); // beta has 0 open
+        let vm = build_me_org(
+            "humangr",
+            &[
+                ("humangr/alpha".to_string(), a),
+                ("humangr/beta".to_string(), b),
+            ],
+        );
+        assert_eq!(vm.name, "humangr");
+        assert_eq!(vm.repos.len(), 2, "one row per caller repo");
+        assert_eq!(vm.repos[0].name, "alpha");
+        assert_eq!(vm.repos[0].open_prs, 1);
+        assert_eq!(vm.repos[1].name, "beta");
+        assert_eq!(vm.repos[1].open_prs, 0);
     }
 }

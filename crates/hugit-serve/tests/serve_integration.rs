@@ -259,11 +259,49 @@ fn private_repo_with_no_owner_denies_tenant_allows_operator() {
     assert_eq!(s, 200, "operator bypass on private-no-owner");
 }
 
+/// Seed an `AppState` (Local source) with N repos, each BOTH a `<slug>.json` log
+/// AND an entry in the `repos` map (the git seam the W-METENANT me/* index
+/// iterates). Mirrors the prod shape where every served repo is git-wired.
+fn state_with_repos(repos: &[(&str, &str)]) -> (AppState, PathBuf) {
+    use hugit_proto::CasObjectSource;
+    use std::sync::Arc;
+    let dir = scratch_dir();
+    let mut state = AppState::new(dir.clone(), TOKEN.to_string());
+    for (slug, json) in repos {
+        std::fs::write(dir.join(format!("{slug}.json")), json).unwrap();
+        state.set_repo_git(
+            *slug,
+            Arc::new(CasObjectSource::new()),
+            gix_hash::ObjectId::empty_tree(gix_hash::Kind::Sha1),
+            std::collections::BTreeMap::new(),
+        );
+    }
+    (state, dir)
+}
+
+/// A chain-valid serialized log carrying a single `repo.meta{visibility,owner_tenant}`.
+fn repo_meta_log(visibility: &str, owner_tenant: &str) -> String {
+    let mut log = EventLog::new();
+    log.append_for_test(
+        "repo.meta",
+        vec![],
+        serde_json::json!({"visibility":visibility,"owner_tenant":owner_tenant}).to_string(),
+        0,
+    );
+    serde_json::to_string_pretty(log.records()).unwrap()
+}
+
+/// W-METENANT: a non-owner tenant's `/v1/me/*` view is an honest EMPTY (200 with
+/// no rows) — the launch repo is ABSENT, never leaked, never a 404-vs-200 oracle.
+/// The frozen contract chose empty-not-404: identity-scoped, no default repo.
 #[test]
-fn me_reads_are_tenant_gated_not_a_launch_repo_leak() {
+fn me_reads_are_tenant_scoped_empty_not_a_launch_repo_leak() {
+    use hugit_http_contracts::attention::AttentionVm;
+    use hugit_http_contracts::dashboard::DashboardVm;
     use hugit_serve::token::ClerkPrincipal;
-    // hugit (the launch repo) has no repo.meta → private, no owner.
-    let (state, _d) = state_with_repo("hugit", "[]");
+    // "hugit" (the launch repo) has no repo.meta → private, no owner. It IS loaded
+    // (git-wired) so the index considers it — and excludes it for a non-owner.
+    let (state, _d) = state_with_repos(&[("hugit", "[]")]);
     let tok = state
         .token_store
         .mint(&ClerkPrincipal {
@@ -272,20 +310,69 @@ fn me_reads_are_tenant_gated_not_a_launch_repo_leak() {
             fresh_auth: false,
         })
         .expect("mint");
-    // A non-owner tenant must NOT read the launch repo via /v1/me/* → 404.
-    let (s, _b) = route(&state, &Method::Get, "/v1/me/dashboard", &bearer(&tok));
-    assert_eq!(
-        s, 404,
-        "me/dashboard must not leak the launch repo to a tenant"
+    // A non-owner tenant → 200 with an EMPTY dashboard (the private launch repo is
+    // ABSENT, not leaked).
+    let (s, b) = route(&state, &Method::Get, "/v1/me/dashboard", &bearer(&tok));
+    assert_eq!(s, 200, "me/dashboard is identity-scoped 200, body={b}");
+    let vm: DashboardVm = serde_json::from_str(&b).expect("DashboardVm");
+    assert!(
+        vm.repos.is_empty(),
+        "the private launch repo must NOT appear for a non-owner tenant"
     );
-    let (s, _b) = route(&state, &Method::Get, "/v1/me/attention", &bearer(&tok));
-    assert_eq!(
-        s, 404,
-        "me/attention must not leak the launch repo to a tenant"
-    );
-    // The operator still sees their own me/* view (bypass).
-    let (s, _b) = route(&state, &Method::Get, "/v1/me/dashboard", &bearer(TOKEN));
+    assert!(vm.inbox.is_empty());
+    assert_eq!(vm.attention_count, 0);
+    // Attention likewise empty (no cross-tenant feed leak).
+    let (s, b) = route(&state, &Method::Get, "/v1/me/attention", &bearer(&tok));
+    assert_eq!(s, 200);
+    let av: AttentionVm = serde_json::from_str(&b).expect("AttentionVm");
+    assert!(av.decisions.is_empty(), "no cross-tenant attention leak");
+    // The operator still sees the launch repo (bypass).
+    let (s, b) = route(&state, &Method::Get, "/v1/me/dashboard", &bearer(TOKEN));
     assert_eq!(s, 200, "operator me/dashboard works");
+    let vm: DashboardVm = serde_json::from_str(&b).expect("DashboardVm");
+    assert_eq!(vm.repos.len(), 1, "operator sees the launch repo");
+    assert_eq!(vm.repos[0].name, "hugit");
+}
+
+/// W-METENANT CORE: two tenants with disjoint PRIVATE repos each see ONLY their
+/// own via `/v1/me/dashboard` — the cross-principal isolation proof, end-to-end
+/// through the real route + auth.
+#[test]
+fn me_dashboard_two_tenants_disjoint_private_repos_isolated() {
+    use hugit_http_contracts::dashboard::DashboardVm;
+    use hugit_serve::token::ClerkPrincipal;
+    let (state, _d) = state_with_repos(&[
+        ("alpha", &repo_meta_log("private", "org-a")),
+        ("beta", &repo_meta_log("private", "org-b")),
+    ]);
+    let tok_a = state
+        .token_store
+        .mint(&ClerkPrincipal {
+            user: "ua".into(),
+            org: "org-a".into(),
+            fresh_auth: false,
+        })
+        .expect("mint a");
+    let tok_b = state
+        .token_store
+        .mint(&ClerkPrincipal {
+            user: "ub".into(),
+            org: "org-b".into(),
+            fresh_auth: false,
+        })
+        .expect("mint b");
+
+    let (s, b) = route(&state, &Method::Get, "/v1/me/dashboard", &bearer(&tok_a));
+    assert_eq!(s, 200);
+    let vm: DashboardVm = serde_json::from_str(&b).unwrap();
+    let names_a: Vec<&str> = vm.repos.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names_a, vec!["alpha"], "org-a sees ONLY alpha");
+
+    let (s, b) = route(&state, &Method::Get, "/v1/me/dashboard", &bearer(&tok_b));
+    assert_eq!(s, 200);
+    let vm: DashboardVm = serde_json::from_str(&b).unwrap();
+    let names_b: Vec<&str> = vm.repos.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names_b, vec!["beta"], "org-b sees ONLY beta — never alpha");
 }
 
 #[test]
