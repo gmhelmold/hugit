@@ -709,6 +709,19 @@ fn route_write(state: &AppState, url: &str, headers: &[Header], body: &[u8]) -> 
             Some(c) => crate::token::handle_token_exchange(c, &state.token_store, body),
             None => err(EngineErr::not_found()),
         },
+        // POST /v1/repos — self-service repo CREATE (W-PROVISION, v0 create-empty).
+        // A NEW repo has no head to load/gate on, so it does NOT ride the
+        // `dispatch_repo_write` → `with_write` door (which 404s an absent log +
+        // gates on the loaded meta); the verb seeds the genesis atomically itself.
+        // Auth is the SAME two-tier gate; the verb then derives `owner_tenant` from
+        // the principal and refuses operator/anon (401 — no god-create).
+        ["v1", "repos"] => {
+            let (principal, _fresh_auth) = match two_tier_auth(state, headers) {
+                Ok(pair) => pair,
+                Err(e) => return err(e),
+            };
+            verbs::write_provision::handle_provision(state, body, &principal, now_ms())
+        }
         ["v1", "repos", repo, tail @ ..] => {
             // Two-tier Bearer auth: a Clerk-minted engine token, else the dev token.
             let (principal, fresh_auth) = match two_tier_auth(state, headers) {

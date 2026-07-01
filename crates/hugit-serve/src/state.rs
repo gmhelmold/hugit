@@ -205,6 +205,31 @@ pub struct CasWriteSeam {
     pub r2: R2Config,
 }
 
+/// The boot-derived handles needed to mint a fresh repo's CAS-mode git seam at
+/// runtime (W-PROVISION). Present only when the engine booted in CAS mode. Cloned
+/// per provision into the new repo's [`RepoState`] (its `git_source` +
+/// [`CasWriteSeam`]) so the created repo is immediately push/clone-live with no
+/// redeploy. Carries no per-repo state — it is a pure factory of the shared client
+/// + tenant + manifest store.
+#[derive(Clone)]
+pub struct ProvisionTemplate {
+    /// The CoreLink CAS client (the git-object read/write sink for provisioned repos).
+    pub cas_client: crate::cas::CasClient,
+    /// The CAS tenant provisioned repos' objects + manifests key under.
+    pub tenant: String,
+    /// hugit's R2 — the mutable `refs.json`/`oid-index.json` manifest store.
+    pub r2: R2Config,
+    /// Whether the receive-pack write path is enabled at boot — a provisioned repo
+    /// gets a [`CasWriteSeam`] (so its first push works) ONLY when this is on, exactly
+    /// mirroring the boot-load gate.
+    pub receive_pack_enabled: bool,
+}
+
+/// The well-known git SHA-1 of the EMPTY tree — the `git_root_tree` of a freshly
+/// provisioned EMPTY repo (no commits yet). A path resolve against it finds nothing
+/// (→ an honest 404 for `blob`/`edit`) until the first push adds content.
+pub const EMPTY_TREE_OID_HEX: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
 impl CasWriteSeam {
     /// Open a fresh [`CasRw`](crate::cas::CasRw) for a push: re-read the repo's
     /// current `oid-index.json` from R2 so the receive-pack anchor's
@@ -416,7 +441,40 @@ pub struct AppState {
     /// honest 404 as a not-wired engine), independent of whether the repo's LOG
     /// exists — the read API still works from `source`, only the git content is
     /// absent for un-loaded repos.
+    ///
+    /// This is the IMMUTABLE boot set. A repo created at runtime via
+    /// [`POST /v1/repos`](crate::writes::verbs::write_provision) lands in the
+    /// interior-mutable [`repos_runtime`](Self::repos_runtime) overlay instead;
+    /// [`repo_state`](Self::repo_state) consults both. Keeping the boot set a plain
+    /// map preserves the borrow-returning `repo_state` signature the git wire path
+    /// depends on (a `RwLock` guard cannot hand out a `&RepoState`).
     pub repos: std::collections::HashMap<String, RepoState>,
+    /// The interior-mutable RUNTIME repo overlay (W-PROVISION): repos created via
+    /// `POST /v1/repos` after boot, served with NO redeploy. Disjoint from
+    /// [`repos`](Self::repos) (insert refuses a slug already present in either);
+    /// [`repo_state`](Self::repo_state)/[`me_repo_logs`](Self::me_repo_logs)/
+    /// [`git_serving_count`](Self::git_serving_count) union the two.
+    ///
+    /// The engine is SINGLE-THREADED + single-instance, so the `RwLock` is
+    /// uncontended; it exists only to grant interior mutability behind the shared
+    /// `&AppState` the request handlers hold (the same reason [`LiveRefs`] uses one).
+    /// Entries are `&'static RepoState` (a leaked `Box`): a provisioned forge repo is
+    /// PERMANENT for the process lifetime (there is no runtime de-provision in v0),
+    /// so leaking is semantically exact — and it lets `repo_state` return a
+    /// `&RepoState` (the leaked ref outlives every borrow) WITHOUT changing the
+    /// signature the do-not-touch git wire path relies on. Bounded by the number of
+    /// provisions in one engine lifetime (rare, human-driven). On reboot a
+    /// provisioned repo's LOG re-loads from `source` (durable) but its git seam is
+    /// gone until the `HUGIT_SERVE_CAS_REPO` list is updated — the runtime-repo-set
+    /// PERSISTENCE is the owner/infra-gated follow-up named in the frozen contract.
+    pub repos_runtime: Arc<RwLock<std::collections::HashMap<String, &'static RepoState>>>,
+    /// The CAS-mode provisioning template (`Some` only when the engine booted in CAS
+    /// mode — `HUGIT_SERVE_CAS_URL` set): the handles `POST /v1/repos` mints a new
+    /// empty repo's git seam from (so it is push/clone-live in the same op). `None`
+    /// in Local/dev mode → a provisioned repo's LOG is still created + readable, but
+    /// it gets NO git seam (push/clone need CAS). Never a request field — derived
+    /// from the boot env only.
+    pub provision: Option<ProvisionTemplate>,
     /// Whether the receive-pack (git `push`) write path is enabled — the
     /// `self-hosted-alpha` deploy gate. Default **false** (push → 403), so a stock
     /// deploy never accepts a write. Set by `HUGIT_SERVE_RECEIVE_PACK=1` at boot
@@ -498,6 +556,9 @@ impl AppState {
         // fatal boot error (a misconfigured seam refuses to start); an UN-configured
         // seam (neither var set) is the honest no-git default (empty map).
         let repos = Self::load_repos_from_env()?;
+        // The runtime provisioning template (W-PROVISION): the CAS handles a
+        // `POST /v1/repos` mints a new repo's git seam from. `Some` only in CAS mode.
+        let provision = Self::provision_template_from_env()?;
 
         let write_path_enabled = receive_pack_enabled();
 
@@ -523,11 +584,121 @@ impl AppState {
             exchange,
             token_store,
             repos,
+            repos_runtime: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            provision,
             write_path_enabled,
             // PROD default: OFF. Without `HUGIT_ALLOW_DEV_OPERATOR=1` the dev-token
             // is NOT a god-token — the public door has zero operator god-path.
             allow_dev_operator: dev_operator_allowed(),
         })
+    }
+
+    /// Build the CAS-mode provisioning template from env (W-PROVISION): the CAS
+    /// client + tenant + R2 manifest store a `POST /v1/repos` mints a new repo's git
+    /// seam from. `Ok(None)` when the engine is NOT in CAS mode (`HUGIT_SERVE_CAS_URL`
+    /// unset/empty) — provisioning then still creates the LOG (readable) but no git
+    /// seam. Reuses the SAME env the CAS-mode boot load reads; builds no network
+    /// connection (pure config). Fail-closed: CAS mode configured but a missing
+    /// tenant / R2 manifest cred is a fatal boot error (a half-configured provisioner
+    /// refuses to start rather than silently disabling create).
+    fn provision_template_from_env() -> Result<Option<ProvisionTemplate>, String> {
+        let cas_selected = std::env::var("HUGIT_SERVE_CAS_URL")
+            .ok()
+            .is_some_and(|v| !v.trim().is_empty());
+        if !cas_selected {
+            return Ok(None);
+        }
+        let cas_client = crate::cas::CasClient::from_env()
+            .map_err(|e| format!("provision template: CAS client not configured: {e}"))?;
+        let tenant = std::env::var("HUGIT_SERVE_CAS_TENANT_ID").map_err(|_| {
+            "HUGIT_SERVE_CAS_TENANT_ID is not set (CAS mode; provisioning needs it)".to_string()
+        })?;
+        let r2 = R2Config::from_env()
+            .map_err(|e| format!("provision template needs the R2 manifest store: {e}"))?;
+        Ok(Some(ProvisionTemplate {
+            cas_client,
+            tenant,
+            r2,
+            receive_pack_enabled: receive_pack_enabled(),
+        }))
+    }
+
+    /// Build an EMPTY CAS-mode [`RepoState`] for a freshly provisioned repo — the
+    /// git seam that makes the new repo push/clone-live in the same op (W-PROVISION).
+    /// `None` when the engine has no [`ProvisionTemplate`] (Local/dev mode, no CAS):
+    /// the caller then creates the LOG only (readable), no git seam. The state has NO
+    /// objects and NO refs yet (the empty-tree root, an empty ref map, an empty live
+    /// oid-index) — it gains content on the first `git push`, which the
+    /// [`CasWriteSeam`] (present iff receive-pack is enabled) accepts and finalizes to
+    /// the CAS + R2 manifests, hot-swapping the new tip into `git_refs`.
+    #[must_use]
+    pub fn build_empty_cas_repo_state(&self, slug: &str) -> Option<RepoState> {
+        let t = self.provision.as_ref()?;
+        // A lazy CAS source over an EMPTY index: reads resolve nothing until the first
+        // push merges oid→blake3 entries into the SAME live index the source reads.
+        let cas_src = crate::cas::LazyCasObjectSource::new(BTreeMap::new(), t.cas_client.clone());
+        let live_oid_index = cas_src.live_index_handle();
+        let git_source: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(cas_src);
+        let git_root_tree = gix_hash::ObjectId::from_hex(EMPTY_TREE_OID_HEX.as_bytes())
+            .expect("the well-known empty-tree oid is valid hex");
+        let cas_write = t.receive_pack_enabled.then(|| CasWriteSeam {
+            cas_client: t.cas_client.clone(),
+            tenant: t.tenant.clone(),
+            repo_slug: slug.to_string(),
+            r2: t.r2.clone(),
+        });
+        Some(RepoState {
+            git_source,
+            git_root_tree,
+            git_refs: LiveRefs::new(BTreeMap::new()),
+            git_dir: None,
+            cas_write,
+            live_oid_index: Some(live_oid_index),
+        })
+    }
+
+    /// Insert a freshly provisioned repo's git seam into the interior-mutable RUNTIME
+    /// overlay so it is served (read + receive-pack + clone) with NO engine reboot
+    /// (W-PROVISION). Refuses a slug already present in EITHER the boot
+    /// [`repos`](Self::repos) set or the runtime overlay (fail-closed: never clobber a
+    /// loaded repo's seam) → [`EngineErr::cas_conflict`] (the caller maps it to a 409).
+    ///
+    /// The [`RepoState`] is leaked to `&'static` (a provisioned repo is permanent for
+    /// the process; see [`repos_runtime`](Self::repos_runtime)) so
+    /// [`repo_state`](Self::repo_state) can hand out a `&RepoState`.
+    ///
+    /// # Errors
+    /// `409 CAS_CONFLICT` — the slug already has a loaded seam.
+    pub fn insert_runtime_repo(&self, slug: &str, repo: RepoState) -> Result<(), EngineErr> {
+        if self.repos.contains_key(slug) {
+            return Err(EngineErr::cas_conflict());
+        }
+        let mut guard = self
+            .repos_runtime
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if guard.contains_key(slug) {
+            return Err(EngineErr::cas_conflict());
+        }
+        // Leak: a provisioned forge repo is served for the engine's whole lifetime
+        // (no runtime de-provision in v0), so the box is never freed — this is exact,
+        // not a mistake, and is what lets `repo_state` return a `&RepoState`.
+        let leaked: &'static RepoState = Box::leak(Box::new(repo));
+        guard.insert(slug.to_string(), leaked);
+        Ok(())
+    }
+
+    /// Whether `slug` already names a loaded repo (boot OR runtime) — the fast,
+    /// in-memory duplicate pre-check for provisioning (the authoritative no-clobber
+    /// guard is the create-only [`CasToken::Absent`] genesis persist).
+    #[must_use]
+    pub fn has_repo_seam(&self, slug: &str) -> bool {
+        self.repos.contains_key(slug)
+            || self
+                .repos_runtime
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(slug)
     }
 
     /// Load the per-repo git content seam set from env. Returns an empty map when
@@ -654,6 +825,8 @@ impl AppState {
             exchange: None,
             token_store: Arc::new(TokenStore::new()),
             repos: std::collections::HashMap::new(),
+            repos_runtime: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            provision: None,
             write_path_enabled: false,
             // The explicit dev/test/seed constructor enables the break-glass by
             // default (production boots via `from_env`, which is default-OFF). A
@@ -666,9 +839,24 @@ impl AppState {
     /// Look up the per-repo git content seam for `repo`, or `None` when this repo
     /// has no git seam loaded (not in the map). Callers map `None` to the SAME
     /// honest 404/empty as a not-wired engine — never a 500, never an oracle.
+    ///
+    /// Consults the IMMUTABLE boot [`repos`](Self::repos) first, then the RUNTIME
+    /// overlay ([`repos_runtime`](Self::repos_runtime)) — so a repo provisioned via
+    /// `POST /v1/repos` is served immediately, no reboot. The runtime entry is a
+    /// leaked `&'static RepoState`, so the returned borrow is valid for any lifetime
+    /// (the read lock is released before this returns; nothing borrows the guard).
     #[must_use]
     pub fn repo_state(&self, repo: &str) -> Option<&RepoState> {
-        self.repos.get(repo)
+        if let Some(r) = self.repos.get(repo) {
+            return Some(r);
+        }
+        // The runtime entry is `&'static`, so `.copied()` detaches it from the read
+        // guard (the guard drops at end-of-fn; the returned ref does not borrow it).
+        self.repos_runtime
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(repo)
+            .copied()
     }
 
     /// The identity-scoped (`/v1/me/*`) repo set for `principal`, resolved to the
@@ -695,9 +883,20 @@ impl AppState {
     /// loaded-repo count (small).
     #[must_use]
     pub fn me_repo_logs(&self, principal: &[String]) -> Vec<(String, EventLog)> {
-        // Deterministic, sorted candidate order (stable aggregate output).
+        // Deterministic, sorted candidate order (stable aggregate output). Union the
+        // IMMUTABLE boot set with the RUNTIME overlay so a repo provisioned via
+        // `POST /v1/repos` appears in the caller's `/v1/me/*` views with no reboot.
         let mut names: Vec<String> = self.repos.keys().cloned().collect();
+        {
+            let runtime = self.repos_runtime.read().unwrap_or_else(|e| e.into_inner());
+            for k in runtime.keys() {
+                if !self.repos.contains_key(k) {
+                    names.push(k.clone());
+                }
+            }
+        }
         names.sort();
+        names.dedup();
 
         // Operator: all loaded repos (bypass — no per-repo authz needed). An
         // unloadable log is skipped fail-closed (it cannot be aggregated anyway).
@@ -743,10 +942,17 @@ impl AppState {
     }
 
     /// The number of repos whose git content seam is loaded (the `/readyz`
-    /// capability count). Zero = git serving not live for any repo.
+    /// capability count). Zero = git serving not live for any repo. Counts the boot
+    /// set PLUS the runtime overlay (the two are disjoint by construction — insert
+    /// refuses a duplicate slug).
     #[must_use]
     pub fn git_serving_count(&self) -> usize {
         self.repos.len()
+            + self
+                .repos_runtime
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .len()
     }
 
     /// Wire (or replace) a repo's git content seam — the test/seed entrypoint. The
@@ -1996,6 +2202,89 @@ mod tests {
         let st = AppState::new(PathBuf::from("/tmp/logs"), "tok".to_string());
         assert_eq!(st.git_serving_count(), 0);
         assert!(st.repo_state("hugit").is_none());
+    }
+
+    /// A minimal RUNTIME `RepoState` for the interior-mutable overlay tests — a
+    /// trivial empty object source + a live ref map + a live oid-index (mirrors the
+    /// git.rs test seed; the runtime-insert path never reads objects).
+    fn runtime_repo_state(refs: BTreeMap<String, String>) -> RepoState {
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> =
+            Arc::new(hugit_proto::CasObjectSource::new());
+        RepoState {
+            git_source: src,
+            git_root_tree: gix_hash::ObjectId::from_hex(EMPTY_TREE_OID_HEX.as_bytes()).unwrap(),
+            git_refs: LiveRefs::new(refs),
+            git_dir: None,
+            cas_write: None,
+            live_oid_index: Some(crate::cas::LiveOidIndex::new(BTreeMap::new())),
+        }
+    }
+
+    /// W-PROVISION: a runtime-inserted repo is visible to `repo_state` (the read +
+    /// receive-pack lookup) IMMEDIATELY, no reboot — and counts toward
+    /// `git_serving_count`. The insert goes through the shared `&AppState` (interior
+    /// mutability), exactly as `POST /v1/repos` does.
+    #[test]
+    fn runtime_insert_is_visible_to_repo_state_without_reboot() {
+        let st = AppState::new(PathBuf::from("/tmp/logs"), "tok".to_string());
+        assert!(st.repo_state("fresh").is_none(), "absent before insert");
+        assert_eq!(st.git_serving_count(), 0);
+
+        let mut refs = BTreeMap::new();
+        refs.insert("refs/heads/main".to_string(), "a".repeat(40));
+        st.insert_runtime_repo("fresh", runtime_repo_state(refs))
+            .expect("runtime insert ok");
+
+        // Immediately visible to the SAME state (no reload): repo_state finds it and
+        // its refs advertise (what the receive-pack + clone paths consult).
+        let rs = st.repo_state("fresh").expect("served after runtime insert");
+        assert_eq!(
+            rs.git_refs.snapshot().get("refs/heads/main"),
+            Some(&"a".repeat(40))
+        );
+        assert_eq!(st.git_serving_count(), 1, "runtime repo counts");
+        assert!(st.has_repo_seam("fresh"));
+    }
+
+    /// The runtime insert is FAIL-CLOSED against a duplicate slug (no clobber of a
+    /// loaded seam) — in both the runtime overlay and against a boot-loaded slug.
+    #[test]
+    fn runtime_insert_refuses_duplicate_slug() {
+        let st = AppState::new(PathBuf::from("/tmp/logs"), "tok".to_string());
+        st.insert_runtime_repo("dup", runtime_repo_state(BTreeMap::new()))
+            .expect("first insert ok");
+        // Second insert of the same slug → 409 (never overwrite).
+        let e = st
+            .insert_runtime_repo("dup", runtime_repo_state(BTreeMap::new()))
+            .expect_err("duplicate runtime slug refused");
+        assert_eq!(e.status, 409);
+
+        // And a slug already in the IMMUTABLE boot set is refused too.
+        let mut boot = AppState::new(PathBuf::from("/tmp/logs"), "tok".to_string());
+        boot.repos
+            .insert("bootrepo".to_string(), runtime_repo_state(BTreeMap::new()));
+        let e = boot
+            .insert_runtime_repo("bootrepo", runtime_repo_state(BTreeMap::new()))
+            .expect_err("boot-loaded slug refused");
+        assert_eq!(e.status, 409);
+    }
+
+    /// Boot repos take precedence and both sets are unioned in the me/* index +
+    /// serving count (the overlay is additive, boot path unchanged).
+    #[test]
+    fn runtime_overlay_is_additive_to_boot_set() {
+        let mut st = AppState::new(PathBuf::from("/tmp/logs"), "tok".to_string());
+        st.repos
+            .insert("boot".to_string(), runtime_repo_state(BTreeMap::new()));
+        st.insert_runtime_repo("run", runtime_repo_state(BTreeMap::new()))
+            .expect("insert");
+        assert!(st.repo_state("boot").is_some());
+        assert!(st.repo_state("run").is_some());
+        assert_eq!(
+            st.git_serving_count(),
+            2,
+            "boot + runtime counted once each"
+        );
     }
 
     #[test]
