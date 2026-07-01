@@ -10,6 +10,14 @@
 # Secrets NEVER on the command line or in this file: the bearer token comes from the
 # HUGIT_SMOKE_BEARER env var (out-of-band). Nothing here echoes the token.
 #
+# AUTH NOTE (W-CACHE-GODPATH): the operator god-path is now env-gated on the engine
+# (`HUGIT_ALLOW_DEV_OPERATOR`, default OFF on the public prod deploy). If HUGIT_SMOKE_BEARER
+# is the DEV token, this smoke needs the engine booted with `HUGIT_ALLOW_DEV_OPERATOR=1`
+# (the break-glass) — otherwise the dev-token degrades to an anonymous visitor and the
+# write is denied. Prefer a real Clerk-minted engine token (which authorizes the write via
+# its OWNING tenant, no break-glass needed). The engine-side flag flip / token cutover is
+# the LEAD's deploy coordination, not this script's.
+#
 # Usage:
 #   HUGIT_SMOKE_BEARER='<engine-or-dev-token>' \
 #     scripts/write-smoke.sh https://engine.githugr.com hugit [PR_NUMBER]
