@@ -9,7 +9,7 @@
 
 use std::io::Read;
 use std::sync::OnceLock;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tiny_http::{Header, Method, Request, Response, Server};
 
@@ -43,10 +43,16 @@ pub fn serve(state: AppState, addr: &str) -> std::io::Result<()> {
 pub fn serve_on(state: AppState, server: Server) -> std::io::Result<()> {
     let metrics = Metrics::new();
     let mut shed_gate = ShedGate::from_env();
+    // The single wall-clock deadline that bounds any ONE potentially-socket-blocking
+    // op (reading a POST body, writing a large response) so a slow/dribbling client
+    // can never wedge this single-threaded accept loop INDEFINITELY. Read once here
+    // (not per-request) — env-tunable, clamped. See [`io_deadline`].
+    let io_budget = io_deadline();
     let loop_start = Instant::now();
     eprintln!(
-        "hugit-serve: accept loop up (load-shed={})",
-        if shed_gate.enabled() { "on" } else { "off" }
+        "hugit-serve: accept loop up (load-shed={}, io_deadline={}s)",
+        if shed_gate.enabled() { "on" } else { "off" },
+        io_budget.as_secs()
     );
 
     let mut incoming = server.incoming_requests();
@@ -54,7 +60,7 @@ pub fn serve_on(state: AppState, server: Server) -> std::io::Result<()> {
         // Time the BLOCK waiting for the next request: a long wait means the queue
         // was empty (the engine is keeping up) — the load-shed idle signal.
         let wait_start = Instant::now();
-        let mut request = match incoming.next() {
+        let request = match incoming.next() {
             Some(r) => r,
             None => break, // server closed → end the loop (matches the prior for-loop)
         };
@@ -91,10 +97,37 @@ pub fn serve_on(state: AppState, server: Server) -> std::io::Result<()> {
         // Read the body ONLY for mutating methods (reads ignore it). Bounded read:
         // at most MAX_BODY_BYTES+1 so the door's size cap rejects an oversize body
         // without us buffering it all.
-        let body = if method == Method::Post {
-            read_body_capped(&mut request)
+        //
+        // AVAILABILITY: this read touches the socket on THIS single thread, BEFORE
+        // auth and BEFORE the `catch_unwind` handler-isolation below. A client that
+        // dribbles the body (1 byte / minute) or a stalled TCP window would block the
+        // read INDEFINITELY → starve `/readyz` + every other request → outage. tiny_http
+        // 0.12 exposes no socket read timeout (neither `ServerConfig` nor `Request`
+        // reaches the `TcpStream`), so we bound the read with a wall-clock deadline on a
+        // worker thread instead: on timeout we DROP this connection and return to accept —
+        // never an indefinite wedge. GET/HEAD carry no body, so reads keep the
+        // zero-overhead inline path.
+        let (request, body) = if method == Method::Post {
+            match read_body_bounded(request, io_budget) {
+                Some(pair) => pair,
+                None => {
+                    // Slow-loris body dribble (or thread exhaustion under a flood): the
+                    // connection is abandoned, the accept loop is FREED. Record + move on.
+                    eprintln!(
+                        "hugit-serve: POST body read exceeded the {}s I/O deadline \
+                         (or a worker could not be spawned) — connection dropped, \
+                         accept loop freed",
+                        io_budget.as_secs()
+                    );
+                    let dur = started.elapsed().as_millis() as u64;
+                    metrics.record(class, dur);
+                    log_request(req_id, class, 0, dur);
+                    metrics.set_in_flight(0);
+                    continue;
+                }
+            }
         } else {
-            Vec::new()
+            (request, Vec::new())
         };
 
         // GET /metrics — UNAUTHENTICATED aggregate counters (Part B). Handled here
@@ -121,7 +154,7 @@ pub fn serve_on(state: AppState, server: Server) -> std::io::Result<()> {
         // own status, so the log records status=0 ("handled internally").
         if method == Method::Get && is_events_path(&url) {
             if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                respond_sse(&state, &url, &headers, request);
+                respond_sse(&state, &url, &headers, request, io_budget);
             }))
             .is_err()
             {
@@ -162,6 +195,7 @@ pub fn serve_on(state: AppState, server: Server) -> std::io::Result<()> {
             eprintln!("hugit-serve: handler panicked — degraded to 503");
             (503, EngineErr::unavailable("internal error").to_body())
         });
+        let body_len = body.len();
         let response = Response::from_string(body)
             .with_status_code(status)
             .with_header(json_content_type());
@@ -173,12 +207,12 @@ pub fn serve_on(state: AppState, server: Server) -> std::io::Result<()> {
         } else {
             response
         };
-        // A broken pipe (client hung up) is expected + silent; log other faults.
-        if let Err(e) = request.respond(response)
-            && e.kind() != std::io::ErrorKind::BrokenPipe
-        {
-            eprintln!("hugit-serve: respond error: {e}");
-        }
+        // Write the response under the same wall-clock bound as the body read: a small
+        // reply is sent INLINE (byte-identical to before — it fits the kernel send buffer
+        // and cannot block), a LARGE one is offloaded to a worker so a zero-window /
+        // slow-drain client cannot wedge the loop indefinitely. A broken pipe (client
+        // hung up) is expected + silent; other faults are logged inside `respond_inline`.
+        respond_bounded(request, response, body_len, io_budget, "response");
         let dur = started.elapsed().as_millis() as u64;
         metrics.record(class, dur);
         log_request(req_id, class, status, dur);
@@ -340,7 +374,13 @@ fn parse_since(query: &str) -> u64 {
 /// Serve a replay-then-close SSE response. Consumes `request` in EVERY branch.
 /// Auth + slug + load are validated first, identical to the standard read path;
 /// error cases respond with the JSON `{code, reason}` envelope.
-fn respond_sse(state: &AppState, url: &str, headers: &[Header], request: Request) {
+fn respond_sse(
+    state: &AppState,
+    url: &str,
+    headers: &[Header],
+    request: Request,
+    io_budget: Duration,
+) {
     // A small helper to send a JSON error envelope and return. The events path is
     // ALWAYS authenticated (two_tier_auth runs first), so every response on it —
     // including these error envelopes — is private + uncacheable (githugr seam #18).
@@ -395,17 +435,16 @@ fn respond_sse(state: &AppState, url: &str, headers: &[Header], request: Request
     }
     let since = parse_since(url.split('?').nth(1).unwrap_or(""));
     let bytes = handlers::build_events(&log, repo, since);
+    let body_len = bytes.len();
     // UNCONDITIONALLY private: a private-repo event stream must never be cached by
     // any intermediary (githugr seam #18). The stream is authed + tenant-gated above.
     let resp = Response::from_data(bytes)
         .with_status_code(200)
         .with_header(sse_content_type())
         .with_header(cache_control_private());
-    if let Err(e) = request.respond(resp)
-        && e.kind() != std::io::ErrorKind::BrokenPipe
-    {
-        eprintln!("hugit-serve: sse respond: {e}");
-    }
+    // A long replay stream can be large; bound the write so a stalled reader cannot
+    // wedge the accept loop (small streams stay on the inline path).
+    respond_bounded(request, resp, body_len, io_budget, "sse");
 }
 
 /// Map a load/verify failure to the status the CALLER may see. The operator gets
@@ -657,6 +696,135 @@ fn read_body_capped(request: &mut Request) -> Vec<u8> {
         .take(writes::MAX_BODY_BYTES as u64 + 1)
         .read_to_end(&mut buf);
     buf
+}
+
+/// A response body at or below this size is written INLINE on the accept loop: it
+/// fits inside the kernel TCP send buffer, so `Request::respond` copies it in and
+/// returns even if the peer never reads — it CANNOT wedge the loop. Only a body
+/// LARGER than this can block the write on a zero-window / slow-drain client, so
+/// only those are offloaded to the bounded worker (see [`respond_bounded`]). The
+/// threshold is deliberately conservative (below any realistic `SO_SNDBUF` floor)
+/// so the inline fast path stays provably non-blocking; every small reply
+/// (`/readyz`, `/metrics`, an ordinary JSON view) keeps its pre-change behavior.
+const RESPOND_INLINE_MAX: usize = 16 * 1024;
+
+/// The wall-clock deadline that bounds ONE potentially-socket-blocking operation
+/// (reading a POST body, writing a large response). GENEROUS by design: it must
+/// NEVER fire for a legitimate client — only convert an otherwise-INDEFINITE loop
+/// wedge (a dribbling / stalled peer) into a bounded one. Overridable via
+/// `HUGIT_SERVE_IO_DEADLINE_SECS`, clamped to `[5, 3600]` s so a mis-set env can
+/// neither false-drop a real slow request (floor) nor un-bound the wedge (ceiling).
+///
+/// Default 60 s: the deployed engine sits behind an edge (Cloudflare) that buffers
+/// the client's request body and drains the response over a fast backbone, so the
+/// origin sees I/O at backbone speed — 60 s is orders of magnitude above a real
+/// request's transfer time (the 8 MiB body cap clears 60 s at just ~140 KB/s), while
+/// a 1-byte/60 s slow-loris is caught long before it could ever complete a body.
+fn io_deadline() -> Duration {
+    let raw = std::env::var("HUGIT_SERVE_IO_DEADLINE_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok());
+    Duration::from_secs(clamp_io_deadline_secs(raw))
+}
+
+/// The pure clamp behind [`io_deadline`] (env-free, hermetically testable): an unset
+/// / unparseable value → the 60 s default; any value is clamped to `[5, 3600]` s.
+fn clamp_io_deadline_secs(raw: Option<u64>) -> u64 {
+    const DEFAULT_SECS: u64 = 60;
+    const FLOOR_SECS: u64 = 5;
+    const CEIL_SECS: u64 = 3600;
+    raw.unwrap_or(DEFAULT_SECS).clamp(FLOOR_SECS, CEIL_SECS)
+}
+
+/// Run `f` — a potentially socket-blocking operation — on a detached worker thread,
+/// waiting at most `budget`. Returns `Some(v)` if it finished in time (the worker
+/// joins, nothing leaks); `None` on timeout, on a worker panic, OR when the worker
+/// could not be spawned. In EVERY `None` case the caller (the accept loop) is FREED
+/// and any in-flight work is ABANDONED: a parked worker lingers on its stuck socket
+/// until the OS unblocks its blocking syscall, then drops the `Request` it owns,
+/// closing the peer. This can therefore neither crash nor wedge the loop — a panic
+/// in `f` disconnects the channel, so `recv_timeout` returns `Err` → `None`.
+///
+/// tiny_http 0.12 exposes no per-connection socket timeout (the `TcpStream` is never
+/// reachable from `Server`/`Request`), so this worker-thread + wall-clock deadline is
+/// the available bound. Residual (flagged): a timed-out worker parks one thread per
+/// malicious connection until its syscall unblocks — a bounded cost, NOT an
+/// accept-loop wedge (and a spawn failure under that flood degrades to a shed `None`,
+/// never an inline block).
+fn run_bounded<T, F>(budget: Duration, f: F) -> Option<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::sync_channel::<T>(1);
+    if std::thread::Builder::new()
+        .name("hugit-io".into())
+        .spawn(move || {
+            // The receiver may already be gone (the caller timed out); discard on Err.
+            let _ = tx.send(f());
+        })
+        .is_err()
+    {
+        // Thread exhaustion (an overload / slow-loris flood) — shed this operation
+        // rather than fall back to an unbounded inline block. Fail-safe under load.
+        return None;
+    }
+    rx.recv_timeout(budget).ok()
+}
+
+/// Read a POST body (capped) under `budget` without letting a slow/dribbling client
+/// wedge the single-threaded accept loop. The blocking read runs on a worker via
+/// [`run_bounded`]: `Some((request, body))` when it completes in time (the `Request`
+/// is moved back intact, ready to respond); `None` on timeout — the loop drops the
+/// connection and returns to accept.
+fn read_body_bounded(request: Request, budget: Duration) -> Option<(Request, Vec<u8>)> {
+    run_bounded(budget, move || {
+        let mut request = request;
+        let body = read_body_capped(&mut request);
+        (request, body)
+    })
+}
+
+/// Send `response`, logging any non-`BrokenPipe` fault. INLINE (no worker) — used
+/// directly for small bodies and as the worker body for large ones.
+fn respond_inline<R>(request: Request, response: Response<R>, what: &str)
+where
+    R: Read,
+{
+    if let Err(e) = request.respond(response)
+        && e.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        eprintln!("hugit-serve: {what} respond error: {e}");
+    }
+}
+
+/// Write `response` without letting a stalled / zero-window client wedge the accept
+/// loop. A body `<= RESPOND_INLINE_MAX` is written INLINE (it fits the kernel send
+/// buffer and cannot block — the fast path, unchanged). A LARGER body is offloaded to
+/// a worker bounded by `budget`; the loop waits at most `budget` (so handler execution
+/// stays SERIAL — the next request is not accepted until this write finishes or the
+/// deadline fires) then moves on, abandoning a stuck write to its worker. `what` names
+/// the site for the error log.
+fn respond_bounded<R>(
+    request: Request,
+    response: Response<R>,
+    body_len: usize,
+    budget: Duration,
+    what: &'static str,
+) where
+    R: Read + Send + 'static,
+{
+    if body_len <= RESPOND_INLINE_MAX {
+        respond_inline(request, response, what);
+        return;
+    }
+    if run_bounded(budget, move || respond_inline(request, response, what)).is_none() {
+        eprintln!(
+            "hugit-serve: {what} write exceeded the {}s I/O deadline — connection \
+             abandoned, accept loop freed",
+            budget.as_secs()
+        );
+    }
 }
 
 fn now_ms() -> u64 {
@@ -1378,5 +1546,93 @@ mod godpath_gate_tests {
             );
             assert!(fresh, "fresh_auth propagates from the minted record");
         }
+    }
+}
+
+/// The inbound socket-timeout bound (FIX-SOCKET-TIMEOUT): the wall-clock deadline
+/// that stops a slow-loris body-dribble / slow-response-drain from wedging the
+/// single-threaded accept loop. These prove the load-bearing primitive
+/// ([`run_bounded`]) frees the caller at the deadline (never waits for a stuck op),
+/// passes a completed value through untouched, and cannot be crashed by a worker
+/// panic — plus the deadline clamp. The `read_body_bounded` / `respond_bounded`
+/// call sites are thin, by-construction adapters over this tested primitive.
+#[cfg(test)]
+mod io_timeout_tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// A fast operation returns its value, unchanged, well within the budget.
+    #[test]
+    fn run_bounded_fast_returns_value() {
+        let out = run_bounded(Duration::from_secs(5), || 40 + 2);
+        assert_eq!(out, Some(42), "a fast op returns its value");
+    }
+
+    /// A moved (non-Copy) value round-trips through the worker intact — the shape
+    /// `read_body_bounded` relies on (it moves the `Request` in and back out).
+    #[test]
+    fn run_bounded_moves_value_through() {
+        let payload = vec![1u8, 2, 3, 4];
+        let out = run_bounded(Duration::from_secs(5), move || (payload, "ok"));
+        assert_eq!(out, Some((vec![1u8, 2, 3, 4], "ok")));
+    }
+
+    /// THE anti-wedge property: an operation that runs far longer than the budget
+    /// does NOT block the caller for its full duration — `run_bounded` returns `None`
+    /// at ~the deadline, freeing the loop. The op here sleeps 5 s with a 100 ms
+    /// budget; we assert the call returns in well under the op's 5 s (a loose 2 s
+    /// bound — 20x the budget — so it never flakes on a contended runner) AND that a
+    /// slow op yields `None`. This is exactly the slow-loris body-dribble outcome.
+    #[test]
+    fn run_bounded_slow_op_times_out_without_waiting() {
+        let start = Instant::now();
+        let out = run_bounded(Duration::from_millis(100), || {
+            std::thread::sleep(Duration::from_secs(5));
+            99u32
+        });
+        let elapsed = start.elapsed();
+        assert_eq!(
+            out, None,
+            "a slow op past the deadline yields None (dropped)"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the caller must be freed near the deadline, not wait for the slow op \
+             (elapsed = {elapsed:?}, op = 5s, budget = 100ms)"
+        );
+    }
+
+    /// A panic inside the worker degrades to `None` — it can NEVER unwind into / crash
+    /// the caller (the accept loop). The channel disconnects, `recv_timeout` errs.
+    #[test]
+    fn run_bounded_worker_panic_is_none_not_crash() {
+        let out: Option<u32> = run_bounded(Duration::from_secs(5), || panic!("boom in worker"));
+        assert_eq!(out, None, "a worker panic is a drop, never a caller crash");
+    }
+
+    /// The deadline clamp: unset/unparseable → 60 s default; clamped to `[5, 3600]`
+    /// so a mis-set env can neither false-drop a legit slow request nor un-bound the
+    /// wedge.
+    #[test]
+    fn io_deadline_clamp() {
+        assert_eq!(clamp_io_deadline_secs(None), 60, "default when unset");
+        assert_eq!(clamp_io_deadline_secs(Some(0)), 5, "floor");
+        assert_eq!(clamp_io_deadline_secs(Some(1)), 5, "below floor → floor");
+        assert_eq!(
+            clamp_io_deadline_secs(Some(120)),
+            120,
+            "in-range passes through"
+        );
+        assert_eq!(
+            clamp_io_deadline_secs(Some(9_999)),
+            3600,
+            "above ceiling → ceiling"
+        );
+        // The live default is always inside the safe window.
+        let d = io_deadline().as_secs();
+        assert!(
+            (5..=3600).contains(&d),
+            "io_deadline within [5,3600], got {d}"
+        );
     }
 }
