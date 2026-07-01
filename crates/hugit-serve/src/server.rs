@@ -91,6 +91,14 @@ pub fn serve_on(state: AppState, server: Server) -> std::io::Result<()> {
         let response = Response::from_string(body)
             .with_status_code(status)
             .with_header(json_content_type());
+        // Mark authenticated / private responses uncacheable (a public route —
+        // `/readyz`, `/v1/me/login` — stays cacheable). SSE is handled separately in
+        // `respond_sse` (always private).
+        let response = if response_is_private(&method, &url) {
+            response.with_header(cache_control_private())
+        } else {
+            response
+        };
         // A broken pipe (client hung up) is expected + silent; log other faults.
         if let Err(e) = request.respond(response)
             && e.kind() != std::io::ErrorKind::BrokenPipe
@@ -122,6 +130,39 @@ fn sse_content_type() -> Header {
     .clone()
 }
 
+/// The `Cache-Control: private, no-store` header — built once, cloned per use.
+///
+/// Attached to every AUTHENTICATED `/v1` response and UNCONDITIONALLY to every
+/// private-repo / SSE response (githugr seam #18): a response gated on a caller's
+/// identity must never be cached by ANY intermediary (browser, CDN, the www proxy).
+/// `private` forbids shared-cache storage; `no-store` forbids storage entirely. A
+/// PUBLIC anonymous response (`/readyz`, `/v1/me/login`) is intentionally NOT marked
+/// — it carries identity-independent static content and may stay cacheable.
+fn cache_control_private() -> Header {
+    static CC: OnceLock<Header> = OnceLock::new();
+    CC.get_or_init(|| {
+        Header::from_bytes(&b"Cache-Control"[..], &b"private, no-store"[..])
+            .expect("static cache-control header is valid")
+    })
+    .clone()
+}
+
+/// Whether a response must carry `Cache-Control: private, no-store`. TRUE for every
+/// route that passes through [`two_tier_auth`] (authenticated) — i.e. EVERYTHING
+/// except the two PUBLIC pre-auth routes (`GET /readyz`, `GET /v1/me/login`), which
+/// serve identity-independent static content and may stay cacheable. Classifying by
+/// route keeps the header decision in lock-step with the auth gate and is FAIL-CLOSED
+/// by default: a response is left cacheable ONLY when it is explicitly one of the two
+/// public routes; anything else (incl. auth failures, unknown paths, and the SSE
+/// stream — which is marked directly in `respond_sse`) is treated as private.
+fn response_is_private(method: &Method, url: &str) -> bool {
+    let path = url.split('?').next().unwrap_or("");
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let is_public_route = method == &Method::Get
+        && (segs.as_slice() == ["readyz"] || segs.as_slice() == ["v1", "me", "login"]);
+    !is_public_route
+}
+
 /// Whether `url`'s path is `/v1/repos/{repo}/events` (query ignored).
 fn is_events_path(url: &str) -> bool {
     let path = url.split('?').next().unwrap_or("");
@@ -138,11 +179,14 @@ fn parse_since(query: &str) -> u64 {
 /// Auth + slug + load are validated first, identical to the standard read path;
 /// error cases respond with the JSON `{code, reason}` envelope.
 fn respond_sse(state: &AppState, url: &str, headers: &[Header], request: Request) {
-    // A small helper to send a JSON error envelope and return.
+    // A small helper to send a JSON error envelope and return. The events path is
+    // ALWAYS authenticated (two_tier_auth runs first), so every response on it —
+    // including these error envelopes — is private + uncacheable (githugr seam #18).
     fn send_json(request: Request, status: u16, body: String) {
         let resp = Response::from_string(body)
             .with_status_code(status)
-            .with_header(json_content_type());
+            .with_header(json_content_type())
+            .with_header(cache_control_private());
         if let Err(e) = request.respond(resp)
             && e.kind() != std::io::ErrorKind::BrokenPipe
         {
@@ -189,9 +233,12 @@ fn respond_sse(state: &AppState, url: &str, headers: &[Header], request: Request
     }
     let since = parse_since(url.split('?').nth(1).unwrap_or(""));
     let bytes = handlers::build_events(&log, repo, since);
+    // UNCONDITIONALLY private: a private-repo event stream must never be cached by
+    // any intermediary (githugr seam #18). The stream is authed + tenant-gated above.
     let resp = Response::from_data(bytes)
         .with_status_code(200)
-        .with_header(sse_content_type());
+        .with_header(sse_content_type())
+        .with_header(cache_control_private());
     if let Err(e) = request.respond(resp)
         && e.kind() != std::io::ErrorKind::BrokenPipe
     {
@@ -542,9 +589,26 @@ pub(crate) fn two_tier_auth(
         crate::token::LookupResult::Invalid => {} // fall through to the dev token
     }
 
-    // Tier 2: dev-token fallback (same constant-time SHA-256+XOR as check_bearer).
+    // Tier 2: the dev-token → OPERATOR god-path — GATED behind the break-glass flag
+    // (`HUGIT_ALLOW_DEV_OPERATOR=1`; [`AppState::allow_dev_operator`]). The PUBLIC
+    // prod deploy OMITS the flag, so a Bearer that matches the dev-token confers NO
+    // elevation: it degrades to an ANONYMOUS principal (empty chain) — it reads a
+    // PUBLIC repo exactly like any anonymous visitor and NOTHING private/operator-
+    // gated (fail-closed; the write-door re-checks `authorize_write`, which denies an
+    // anonymous chain). When the flag is ON (documented ops/bootstrap break-glass)
+    // the historical dev-token → operator behavior is preserved.
+    //
+    // GO-LIVE INVARIANT: a real Clerk-minted session token is resolved in Tier 1
+    // above (→ `clerk:{org}:{user}`), so it can NEVER reach this branch and can NEVER
+    // become the operator — flag or no flag. A real user is structurally incapable of
+    // holding a god-token.
     if crate::auth::tokens_match(raw.as_bytes(), state.dev_token.as_bytes()) {
-        return Ok((dev_principal(), false));
+        if state.allow_dev_operator {
+            return Ok((dev_principal(), false));
+        }
+        // Flag OFF: no god-path. The dev-token is worth exactly an anonymous visit —
+        // never operator, never a partial/elevated identity.
+        return Ok((Vec::new(), false));
     }
     Err(EngineErr::token_invalid())
 }
@@ -1002,5 +1066,142 @@ mod search_q_tests {
         assert_eq!(q.len(), 1024, "truncated q must be exactly 1024 bytes");
         // All chars are ASCII 'a', so truncating bytes == truncating chars here.
         assert!(q.chars().all(|c| c == 'a'));
+    }
+}
+
+/// Part A — `Cache-Control: private, no-store` classification (W-CACHE-GODPATH).
+#[cfg(test)]
+mod cache_control_tests {
+    use super::*;
+
+    /// The ONLY cacheable responses are the two PUBLIC pre-auth GET routes.
+    #[test]
+    fn public_routes_stay_cacheable() {
+        assert!(!response_is_private(&Method::Get, "/readyz"));
+        assert!(!response_is_private(&Method::Get, "/v1/me/login"));
+    }
+
+    /// Every authenticated route (and any unknown / error path) is private —
+    /// fail-closed: cacheable ONLY when explicitly one of the public routes.
+    #[test]
+    fn authed_and_unknown_routes_are_private() {
+        assert!(response_is_private(&Method::Get, "/v1/repos/hugit/home"));
+        assert!(response_is_private(
+            &Method::Get,
+            "/v1/repos/hugit/events?since=0"
+        ));
+        assert!(response_is_private(&Method::Get, "/v1/me/dashboard"));
+        assert!(response_is_private(
+            &Method::Post,
+            "/v1/repos/hugit/prs/1/comments"
+        ));
+        // The token-issuance response carries a session token — never cacheable.
+        assert!(response_is_private(&Method::Post, "/v1/token"));
+        // A POST to the login path is NOT the public GET card → private (fail-closed).
+        assert!(response_is_private(&Method::Post, "/v1/me/login"));
+        // An unknown path → private (fail-closed default).
+        assert!(response_is_private(&Method::Get, "/nope"));
+    }
+
+    /// The header value is exactly `private, no-store`.
+    #[test]
+    fn header_value_is_private_no_store() {
+        let h = cache_control_private();
+        assert!(
+            h.field
+                .as_str()
+                .as_str()
+                .eq_ignore_ascii_case("Cache-Control")
+        );
+        assert_eq!(h.value.as_str(), "private, no-store");
+    }
+}
+
+/// Part B — the dev-token → operator god-path gate (W-CACHE-GODPATH). The
+/// NON-NEGOTIABLE invariant: a real Clerk user can NEVER become the operator.
+#[cfg(test)]
+mod godpath_gate_tests {
+    use super::*;
+    use crate::state::AppState;
+    use crate::token::ClerkPrincipal;
+    use std::path::PathBuf;
+
+    const DEV: &str = "dev-token-godpath";
+
+    fn bearer(tok: &str) -> Vec<Header> {
+        vec![Header::from_bytes(&b"Authorization"[..], format!("Bearer {tok}").as_bytes()).unwrap()]
+    }
+
+    fn state() -> AppState {
+        AppState::new(PathBuf::from("/tmp/hugit-godpath-test"), DEV.to_string())
+    }
+
+    /// Break-glass ON (the `AppState::new` dev/test default): the dev-token derives
+    /// the operator principal — the historical behavior, preserved.
+    #[test]
+    fn break_glass_on_dev_token_is_operator() {
+        let s = state();
+        assert!(s.allow_dev_operator, "new() defaults the break-glass ON");
+        let (principal, fresh) = two_tier_auth(&s, &bearer(DEV)).expect("dev-token authenticates");
+        assert_eq!(principal, vec!["orchestrator:hugit".to_string()]);
+        assert!(crate::authz::is_operator(&principal));
+        assert!(!fresh);
+    }
+
+    /// Break-glass OFF (the PUBLIC prod default): a dev-token Bearer degrades to an
+    /// ANONYMOUS principal (empty chain) — NEVER the operator, never a partial
+    /// elevated identity.
+    #[test]
+    fn flag_off_dev_token_degrades_to_anonymous_never_operator() {
+        let mut s = state();
+        s.allow_dev_operator = false;
+        let (principal, fresh) =
+            two_tier_auth(&s, &bearer(DEV)).expect("dev-token resolves as anonymous, not a 401");
+        assert!(
+            principal.is_empty(),
+            "flag-off dev-token → anonymous (empty chain), got {principal:?}"
+        );
+        assert!(
+            !crate::authz::is_operator(&principal),
+            "a dev-token is NEVER operator with the flag off"
+        );
+        assert!(!fresh);
+    }
+
+    /// An unrecognized bearer is a hard 401 regardless of the flag (unchanged).
+    #[test]
+    fn garbage_bearer_is_401_regardless_of_flag() {
+        for allow in [true, false] {
+            let mut s = state();
+            s.allow_dev_operator = allow;
+            let err = two_tier_auth(&s, &bearer("not-the-dev-token")).unwrap_err();
+            assert_eq!(err.status, 401, "unrecognized bearer → 401 (flag={allow})");
+        }
+    }
+
+    /// THE go-live invariant: a real Clerk-minted session token can NEVER become the
+    /// operator — with the break-glass ON or OFF. A real user never holds a god-token.
+    #[test]
+    fn clerk_token_is_never_operator_regardless_of_flag() {
+        for allow in [true, false] {
+            let mut s = state();
+            s.allow_dev_operator = allow;
+            let raw = s
+                .token_store
+                .mint(&ClerkPrincipal {
+                    user: "user-1".to_string(),
+                    org: "org-a".to_string(),
+                    fresh_auth: true,
+                })
+                .expect("mint a clerk engine token");
+            let (principal, fresh) =
+                two_tier_auth(&s, &bearer(&raw)).expect("clerk token authenticates");
+            assert_eq!(principal, vec!["clerk:org-a:user-1".to_string()]);
+            assert!(
+                !crate::authz::is_operator(&principal),
+                "a real Clerk user is NEVER the operator (flag={allow})"
+            );
+            assert!(fresh, "fresh_auth propagates from the minted record");
+        }
     }
 }

@@ -20,6 +20,7 @@
 
 pub mod auth;
 pub mod authz;
+pub mod budgeted_source;
 pub mod cas;
 pub mod error;
 pub mod fmt;

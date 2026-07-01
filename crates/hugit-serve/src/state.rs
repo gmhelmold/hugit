@@ -422,6 +422,24 @@ pub struct AppState {
     /// deploy never accepts a write. Set by `HUGIT_SERVE_RECEIVE_PACK=1` at boot
     /// (and only takes effect where a repo also has a `git_dir` write seam).
     pub write_path_enabled: bool,
+    /// Break-glass: whether a Bearer that matches [`dev_token`](Self::dev_token) may
+    /// be derived into the platform OPERATOR principal (`orchestrator:hugit`, sees
+    /// all). **The PUBLIC prod deploy OMITS this flag → the dev-token confers ZERO
+    /// elevation** (a matching Bearer degrades to an anonymous visitor — public
+    /// reads only, nothing private/operator-gated). It is turned ON ONLY as a
+    /// documented ops/bootstrap break-glass via `HUGIT_ALLOW_DEV_OPERATOR=1`.
+    ///
+    /// A real Clerk-minted session token (`clerk:{org}:{user}`, Tier-1) can NEVER
+    /// become the operator regardless of this flag — the god-path this gates is the
+    /// dev-token derivation ONLY (Tier-2). This is the go-live guarantee: a real
+    /// user never holds a god-token.
+    ///
+    /// Default in [`from_env`](Self::from_env) (the PROD boot) is **false**
+    /// (fail-closed). The explicit non-env dev/test constructor
+    /// [`new`](Self::new) defaults it **true** (it is a dev/seed break-glass by
+    /// nature; production never calls it) — a test that must exercise the
+    /// no-god-path behavior flips the field to `false` directly.
+    pub allow_dev_operator: bool,
 }
 
 impl AppState {
@@ -506,6 +524,9 @@ impl AppState {
             token_store,
             repos,
             write_path_enabled,
+            // PROD default: OFF. Without `HUGIT_ALLOW_DEV_OPERATOR=1` the dev-token
+            // is NOT a god-token — the public door has zero operator god-path.
+            allow_dev_operator: dev_operator_allowed(),
         })
     }
 
@@ -634,6 +655,11 @@ impl AppState {
             token_store: Arc::new(TokenStore::new()),
             repos: std::collections::HashMap::new(),
             write_path_enabled: false,
+            // The explicit dev/test/seed constructor enables the break-glass by
+            // default (production boots via `from_env`, which is default-OFF). A
+            // test asserting the no-god-path (flag-OFF) behavior sets this to
+            // `false` on the returned state.
+            allow_dev_operator: true,
         }
     }
 
@@ -1480,6 +1506,17 @@ impl crate::cas::R2PutConditional for R2Config {
 fn receive_pack_enabled() -> bool {
     std::env::var("HUGIT_SERVE_RECEIVE_PACK")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// The dev-token→operator break-glass gate ([`AppState::allow_dev_operator`]). The
+/// PUBLIC prod deploy OMITS `HUGIT_ALLOW_DEV_OPERATOR`, so this is **false** by
+/// default and the dev-token confers NO operator elevation. Set to `1` ONLY as a
+/// documented ops/bootstrap break-glass. Strict `== "1"` (fail-closed: any other
+/// value, including an empty string or a typo, keeps the god-path OFF).
+fn dev_operator_allowed() -> bool {
+    std::env::var("HUGIT_ALLOW_DEV_OPERATOR")
+        .map(|v| v == "1")
         .unwrap_or(false)
 }
 
