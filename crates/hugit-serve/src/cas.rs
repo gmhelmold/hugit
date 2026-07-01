@@ -2324,6 +2324,16 @@ impl std::error::Error for CasPushError {}
 /// the event is recorded does any manifest advertise the new tip. (The handler
 /// supplies `persist_log` so the log's compare-and-swap stays its responsibility;
 /// this fn owns only the CAS-specific object + manifest steps + the ordering.)
+///
+/// `expected` is the pusher's per-ref old-oid (`None` for a create) — threaded into the
+/// manifest step so the conditional refs.json write RE-VALIDATES it against the fresh
+/// base (FIX-IFMATCH-REMERGE). A cross-instance same-ref advance that landed after this
+/// push's stale-check is caught there and fails closed (`CasPushError::Manifest`, the ref
+/// is NOT advanced) rather than silently overwriting the concurrent update.
+// The 8 args are each a distinct, non-groupable durable-push input (sink, store, the
+// tenant/repo/ref/oid coordinates, the pusher's `expected` precondition, the log closure);
+// bundling them into a struct would only obscure the fail-closed ordering the doc pins.
+#[allow(clippy::too_many_arguments)]
 pub fn finalize_cas_push<T, R, P>(
     cas: &mut CasRw<T>,
     r2: &R,
@@ -2331,6 +2341,7 @@ pub fn finalize_cas_push<T, R, P>(
     repo: &str,
     ref_name: &str,
     new_oid: &str,
+    expected: Option<&str>,
     persist_log: P,
 ) -> Result<(), CasPushError>
 where
@@ -2342,9 +2353,17 @@ where
     cas.flush().map_err(CasPushError::Flush)?;
     // 2. log — the compare-and-swap append; only after the closure is durable.
     persist_log().map_err(CasPushError::Persist)?;
-    // 3. manifests LAST — oid-index then the ref tip.
-    commit_cas_push_manifests(r2, tenant, repo, ref_name, new_oid, cas.index_additions())
-        .map_err(CasPushError::Manifest)
+    // 3. manifests LAST — oid-index then the ref tip (re-validating `expected`).
+    commit_cas_push_manifests(
+        r2,
+        tenant,
+        repo,
+        ref_name,
+        new_oid,
+        expected,
+        cas.index_additions(),
+    )
+    .map_err(CasPushError::Manifest)
 }
 
 /// Read-merge-write the mutable manifests for a CAS-mode push: merge `index_add`
@@ -2366,12 +2385,31 @@ where
 /// `state::multi_instance_guard`). The re-apply is a MERGE (only OUR ref tip / OUR
 /// oid additions are set), so a concurrent push's ref advance / object additions
 /// survive. No OBJECT closure is ever lost (the CAS is content-addressed + idempotent).
+///
+/// ## Re-validating the `expected` precondition on the FRESH base (FIX-IFMATCH-REMERGE)
+///
+/// `expected` is the pusher's per-ref old-oid (the `git_refs` snapshot value the
+/// receive-pack stale-check already validated against) — `None` for a create. The
+/// authoritative stale-check runs against a PER-INSTANCE in-memory snapshot, which can
+/// LAG a concurrent instance's already-landed write. Without re-checking, a 412 re-merge
+/// would re-read the fresh (advanced) base and BLINDLY `insert(ref, new_oid)` on top —
+/// silently accepting a cross-instance same-ref non-fast-forward and LOSING the concurrent
+/// update. So the refs.json build closure RE-VALIDATES `expected` against the fresh base
+/// on EVERY attempt (first PUT and every 412 re-read): if the fresh base's tip for
+/// `ref_name` no longer equals `expected` it is a genuine non-fast-forward → the closure
+/// returns `Err` (StaleRef) and the ref is NOT advanced. Only when the fresh base still
+/// shows `expected` (a create whose ref is still absent, or an update whose tip is
+/// unchanged — including the legitimate concurrent-DIFFERENT-ref merge, where only some
+/// OTHER ref moved) is the tip re-applied. THIS is what makes the If-Match path actually
+/// *sufficient* (not merely necessary) for `max_instances>1` safety — see the
+/// `CONDITIONAL_MANIFEST_PUT_ACTIVE` doc in `state.rs`.
 pub fn commit_cas_push_manifests<R: R2GetVersioned + R2PutConditional>(
     r2: &R,
     tenant: &str,
     repo: &str,
     ref_name: &str,
     new_oid: &str,
+    expected: Option<&str>,
     index_add: &HashMap<String, String>,
 ) -> Result<(), String> {
     // 1. oid-index.json FIRST (conditional CAS): merge the new objects' oid→blake3 onto
@@ -2406,6 +2444,22 @@ pub fn commit_cas_push_manifests<R: R2GetVersioned + R2PutConditional>(
                 refs: BTreeMap::new(),
             },
         };
+        // RE-VALIDATE the pusher's `expected` precondition against THIS fresh base
+        // (re-read on every attempt, incl. after a 412). The receive-pack stale-check
+        // ran against a per-instance in-memory snapshot that can lag a concurrent
+        // instance's landed write; re-checking here — on the authoritative refs.json —
+        // is what closes the cross-instance same-ref lost-update. If the fresh base's
+        // tip for `ref_name` no longer equals `expected`, it is a genuine
+        // non-fast-forward → FAIL CLOSED (StaleRef); the ref is NOT overwritten.
+        let fresh_tip = manifest.refs.get(ref_name).map(String::as_str);
+        if fresh_tip != expected {
+            return Err(format!(
+                "push: non-fast-forward (StaleRef): refs.json base tip for {ref_name} is \
+                 {fresh_tip:?}, but the push expected {expected:?} — a concurrent instance \
+                 advanced this ref between the stale-check and this write; the ref is NOT \
+                 overwritten (fail-closed against the cross-instance lost-update race)"
+            ));
+        }
         manifest
             .refs
             .insert(ref_name.to_string(), new_oid.to_string());
@@ -4489,6 +4543,7 @@ mod tests {
             repo,
             "refs/heads/pushed",
             &new_tip,
+            None, // create: expected = None (the ref is absent on the base)
             || {
                 persisted = true;
                 Ok(())
@@ -4562,6 +4617,7 @@ mod tests {
             repo,
             "refs/heads/pushed",
             &"bb".repeat(20),
+            None, // create: expected = None
             || {
                 persisted = true;
                 Ok(())
@@ -4629,6 +4685,7 @@ mod tests {
             repo,
             "refs/heads/pushed",
             &new_tip,
+            None, // create: expected = None
             || Err("cas-conflict".to_string()),
         )
         .expect_err("a persist failure fails the finalize");
@@ -4920,7 +4977,7 @@ mod tests {
         let new_tip = "bb".repeat(20);
         let add = one_index_add(&new_tip);
 
-        commit_cas_push_manifests(&r2, tenant, repo, "refs/heads/main", &new_tip, &add)
+        commit_cas_push_manifests(&r2, tenant, repo, "refs/heads/main", &new_tip, None, &add)
             .expect("commit creates both manifests on an empty R2");
 
         let idx = parse_oid_index(
@@ -5018,7 +5075,7 @@ mod tests {
 
         let our_tip = "bb".repeat(20);
         let add = one_index_add(&our_tip);
-        commit_cas_push_manifests(&r2, tenant, repo, "refs/heads/ours", &our_tip, &add)
+        commit_cas_push_manifests(&r2, tenant, repo, "refs/heads/ours", &our_tip, None, &add)
             .expect("the 412 is retried on a fresh base, not a hard failure");
 
         // ALL THREE refs survive: the original, the concurrent instance's, and ours.
@@ -5043,6 +5100,125 @@ mod tests {
             m.refs.get("refs/heads/ours"),
             Some(&our_tip),
             "our ref landed"
+        );
+    }
+
+    #[test]
+    fn commit_cas_push_manifests_412_remerge_rejects_stale_expected_no_lost_update() {
+        // FIX-IFMATCH-REMERGE — the lost-update-CLOSED proof. A concurrent instance
+        // advances the SAME ref the pusher is updating (X→A) in the read→PUT gap, AFTER
+        // the pusher's stale-check (which passed against a lagging in-memory snapshot
+        // still showing X). The pusher's push is X→B (expected = X). Its first If-Match
+        // 412s; on the fresh re-read the ref tip is now A, NOT the expected X → the
+        // re-merge RE-VALIDATES `expected`, sees the non-fast-forward, and FAILS CLOSED.
+        // B is NEVER written; A survives. (Before this fix the 412 re-merge blindly
+        // re-applied B on the advanced base — a silent cross-instance lost update.)
+        let (tenant, repo) = ("t", "hugit");
+        let inner = MapR2::default();
+        let x = "aa".repeat(20); // the tip the pusher expects (its old-oid)
+        let mut existing = OidIndex::new();
+        existing.insert(x.clone(), cas_key(b"x body"));
+        // Seed refs/heads/main at X (seed_manifests seeds exactly that ref).
+        seed_manifests(&inner, tenant, repo, &x, &existing);
+
+        // The competitor lands a DIFFERENT tip (A) on the SAME ref → a genuine
+        // concurrent same-ref advance.
+        let a = "cc".repeat(20);
+        let r2 = RaceOnceR2 {
+            inner: inner.clone(),
+            race_key: refs_manifest_key(tenant, repo),
+            competitor: ("refs/heads/main".to_string(), a.clone()),
+            fired: std::sync::Arc::new(std::sync::Mutex::new(false)),
+        };
+
+        let b = "bb".repeat(20); // our proposed new tip
+        let add = one_index_add(&b);
+        let err = commit_cas_push_manifests(
+            &r2,
+            tenant,
+            repo,
+            "refs/heads/main",
+            &b,
+            Some(&x), // expected = X (an UPDATE, not a create)
+            &add,
+        )
+        .expect_err("a concurrent same-ref advance must fail closed, never lost-update");
+        assert!(
+            err.contains("non-fast-forward") && err.contains("StaleRef"),
+            "the error names the non-fast-forward / StaleRef, got: {err}"
+        );
+
+        // The concurrent tip A survives; B was NEVER written (no lost update).
+        let m = parse_refs_manifest(
+            &inner
+                .get_object(&refs_manifest_key(tenant, repo))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            m.refs.get("refs/heads/main"),
+            Some(&a),
+            "the concurrent instance's advance (A) survives — B was rejected, not clobbering"
+        );
+        assert_ne!(
+            m.refs.get("refs/heads/main"),
+            Some(&b),
+            "our proposed tip B was never written on the moved base"
+        );
+    }
+
+    #[test]
+    fn commit_cas_push_manifests_412_remerge_preserves_legit_concurrent_different_ref() {
+        // FIX-IFMATCH-REMERGE — the legitimate-concurrent-merge case is UNCHANGED. The
+        // pusher UPDATES refs/heads/main (X→B, expected = X); a concurrent instance
+        // advances a DIFFERENT ref (refs/heads/other) in the gap → the pusher's first
+        // If-Match 412s. On the fresh re-read, main STILL shows X (only `other` moved) →
+        // `expected` re-validates OK → our update lands AND the concurrent ref survives.
+        let (tenant, repo) = ("t", "hugit");
+        let inner = MapR2::default();
+        let x = "aa".repeat(20);
+        let mut existing = OidIndex::new();
+        existing.insert(x.clone(), cas_key(b"x body"));
+        seed_manifests(&inner, tenant, repo, &x, &existing);
+
+        let other_oid = "dd".repeat(20);
+        let r2 = RaceOnceR2 {
+            inner: inner.clone(),
+            race_key: refs_manifest_key(tenant, repo),
+            competitor: ("refs/heads/other".to_string(), other_oid.clone()),
+            fired: std::sync::Arc::new(std::sync::Mutex::new(false)),
+        };
+
+        let b = "bb".repeat(20);
+        let add = one_index_add(&b);
+        commit_cas_push_manifests(
+            &r2,
+            tenant,
+            repo,
+            "refs/heads/main",
+            &b,
+            Some(&x), // expected = X — still valid on the fresh base (only `other` moved)
+            &add,
+        )
+        .expect("a concurrent DIFFERENT-ref advance is a legitimate merge — must succeed");
+
+        let m = parse_refs_manifest(
+            &inner
+                .get_object(&refs_manifest_key(tenant, repo))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            m.refs.get("refs/heads/main"),
+            Some(&b),
+            "our fast-forward update landed (expected still held on the fresh base)"
+        );
+        assert_eq!(
+            m.refs.get("refs/heads/other"),
+            Some(&other_oid),
+            "the concurrent instance's DIFFERENT ref was re-merged, not clobbered"
         );
     }
 
@@ -5089,8 +5265,9 @@ mod tests {
         };
         let new_tip = "bb".repeat(20);
         let add = one_index_add(&new_tip);
-        let err = commit_cas_push_manifests(&r2, tenant, repo, "refs/heads/ours", &new_tip, &add)
-            .expect_err("exhausted retries must fail closed, never clobber");
+        let err =
+            commit_cas_push_manifests(&r2, tenant, repo, "refs/heads/ours", &new_tip, None, &add)
+                .expect_err("exhausted retries must fail closed, never clobber");
         assert!(
             err.contains("after") && err.contains("attempts") && err.contains("fail"),
             "the error names the fail-closed exhaustion, got: {err}"
@@ -5155,8 +5332,9 @@ mod tests {
 
         let new_tip = "bb".repeat(20);
         let add = one_index_add(&new_tip);
-        let err = commit_cas_push_manifests(&r2, tenant, repo, "refs/heads/ours", &new_tip, &add)
-            .expect_err("a missing ETag must fail closed, not write unconditionally");
+        let err =
+            commit_cas_push_manifests(&r2, tenant, repo, "refs/heads/ours", &new_tip, None, &add)
+                .expect_err("a missing ETag must fail closed, not write unconditionally");
         assert!(
             err.contains("no version token") && err.contains("refusing"),
             "the error names the refused non-CAS write, got: {err}"
