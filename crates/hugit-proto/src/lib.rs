@@ -39,7 +39,9 @@ pub use read::pack::{
     PackAssembly, PackError, TreeEntry as ProtoTreeEntry, commit_root_tree, list_tree_at_dir,
     resolve_blob_at_path, tree_diff, tree_diff_until,
 };
-pub use read::serve::{ServeError, serve_clone, serve_fetch};
+pub use read::serve::{
+    SERVE_FETCH_BUDGET, ServeError, serve_clone, serve_fetch, serve_fetch_until,
+};
 // WP-D2b — read-path edges: client matrix + jj stacks, CPU/chunked fallback,
 // scale ceilings + degradation invariant.
 pub use read::clients::{
