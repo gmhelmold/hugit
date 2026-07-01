@@ -26,11 +26,13 @@
 //! 404, never a fake blank file.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use gix_hash::ObjectId;
 use hugit_http_contracts::blob::{BlobHistoryVm, BlobTreeRowVm, BlobVm};
 use hugit_refstore::EventLog;
 
+use crate::budgeted_source::{BudgetedSource, WALK_BUDGET};
 use crate::fmt::{humanize_age, scrub};
 
 /// Hard WALL-CLOCK ceiling on the per-path history walk — re-exported from the proto
@@ -52,6 +54,14 @@ const MAX_BLOB_BYTES: usize = 10 * 1024 * 1024;
 /// event log — but the parameter is kept for signature uniformity with the other
 /// `build_*` handlers and for the future blame/attribution seam (which WILL read
 /// the log to attribute lines to intents).
+///
+/// DoS: the `path`→blob resolve does one synchronous CAS `get` per path segment
+/// ([`hugit_proto::resolve_blob_at_path`], count-capped at `MAX_PATH_DEPTH`), which
+/// on the single-threaded lazy-CAS engine is NOT a latency cap under a cold cache /
+/// slow R2 — a deep resolve can block the whole accept loop. So the resolve is ALSO
+/// wall-clock bounded by [`WALK_BUDGET`] (mirrors `handlers::edit`): past the
+/// deadline the source stops yielding and the resolve returns an honest `None`
+/// → 404 (never a fabricated file).
 #[must_use]
 pub fn build_blob(
     _log: &EventLog,
@@ -61,13 +71,44 @@ pub fn build_blob(
     root_tree: Option<&ObjectId>,
     head_commit: Option<&ObjectId>,
 ) -> Option<BlobVm> {
+    build_blob_until(
+        _log,
+        repo,
+        path,
+        src,
+        root_tree,
+        head_commit,
+        Instant::now() + WALK_BUDGET,
+    )
+}
+
+/// [`build_blob`] with an explicit wall-clock `deadline` on the CAS path→blob
+/// resolve — deterministically testable (a deadline already in the past stops
+/// before the first fetch → honest `None`). See [`build_blob`] for the DoS
+/// rationale; mirrors `handlers::edit::build_edit_until`.
+#[must_use]
+fn build_blob_until(
+    _log: &EventLog,
+    repo: &str,
+    path: &str,
+    src: Option<&Arc<dyn hugit_proto::ObjectSource + Send + Sync>>,
+    root_tree: Option<&ObjectId>,
+    head_commit: Option<&ObjectId>,
+    deadline: Instant,
+) -> Option<BlobVm> {
     // The content seam: both the source and the root tree must be present.
     let (src, root_tree) = (src?, root_tree?);
 
+    // Wall-clock-bound the per-segment CAS walk (single-thread latency-DoS guard):
+    // past `deadline` every `get` returns `Ok(None)`, so `resolve_blob_at_path`
+    // stops and yields `None` → an honest 404, never a fabricated file. Mirrors
+    // `handlers::edit`.
+    let budgeted = BudgetedSource::new(src.as_ref(), deadline);
+
     // Resolve the path to a blob. Ok(None)/Err/absent → 404 (no content oracle):
-    // a malformed/corrupt tree, a missing object, or a non-blob path all yield
-    // the honest not-found, never a fabricated file.
-    let (_oid, bytes) = match hugit_proto::resolve_blob_at_path(src.as_ref(), root_tree, path) {
+    // a malformed/corrupt tree, a missing object, a non-blob path, OR a budget
+    // cutoff all yield the honest not-found, never a fabricated file.
+    let (_oid, bytes) = match hugit_proto::resolve_blob_at_path(&budgeted, root_tree, path) {
         Ok(Some(found)) => found,
         Ok(None) | Err(_) => return None,
     };
@@ -107,12 +148,16 @@ pub fn build_blob(
         // REAL: the sidebar file tree — entries in the same directory as
         // `path`. Symlinks + gitlinks are excluded (see `list_tree_at_dir`).
         // Fail-closed: any missing object or malformed tree yields an empty
-        // sidebar rather than a 404.
-        tree: build_tree_sidebar(src.as_ref(), root_tree, path),
+        // sidebar rather than a 404. Walked over the SAME `budgeted` source (the
+        // dir-walk is another per-segment CAS walk), so it shares the render's ONE
+        // deadline rather than adding an unbounded latency vector.
+        tree: build_tree_sidebar(&budgeted, root_tree, path),
         // REAL: the per-path revision timeline (the "Histórico" drawer). Bounded
         // (wall-clock + count) so a deep history never wedges the single-threaded
         // engine; empty when no HEAD commit is threaded (honest "seam not live").
-        history: build_history(src.as_ref(), head_commit, path),
+        // Also walked over `budgeted` — the render's shared deadline caps it on top
+        // of its own `BLOB_HISTORY_BUDGET` (whichever trips first).
+        history: build_history(&budgeted, head_commit, path),
     })
 }
 
@@ -1118,6 +1163,46 @@ mod tests {
             vm.history.len(),
             MAX_HISTORY_REVS,
             "history must be count-capped at MAX_HISTORY_REVS"
+        );
+    }
+
+    // ── DoS bound: the path→blob CAS resolve is wall-clock bounded ────────────
+    /// A deadline already in the PAST stops the CAS path→blob resolve before the
+    /// first fetch → an honest `None` (404) EVEN THOUGH the file is present. Proves
+    /// the resolve is `BudgetedSource`-wrapped (wall-clock bounded), not merely
+    /// count-capped, and the truncation is honest-empty (never a fabricated file) —
+    /// the exact mirror of `handlers::edit::past_deadline_bounds_resolve_to_honest_none`.
+    /// The live-budget happy path is covered by every other test (default budget).
+    #[test]
+    fn past_deadline_bounds_blob_resolve_to_honest_none() {
+        use std::time::{Duration, Instant};
+
+        let mut src = CasObjectSource::new();
+        let blob = src.insert_raw(ObjectKind::Blob, b"present\n".to_vec());
+        let root = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_BLOB,
+                name: "here.txt",
+                oid: blob,
+            }],
+        );
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
+
+        // Sanity: with a live budget the present file resolves.
+        let live = Instant::now() + Duration::from_secs(60);
+        assert!(
+            build_blob_until(&log(), "r", "here.txt", Some(&src), Some(&root), None, live)
+                .is_some(),
+            "a present file resolves under a live budget"
+        );
+
+        // Past deadline: the resolve is refused at the first `get` → honest 404.
+        let past = Instant::now() - Duration::from_secs(1);
+        assert!(
+            build_blob_until(&log(), "r", "here.txt", Some(&src), Some(&root), None, past)
+                .is_none(),
+            "a present file is honest-404'd once the walk budget is spent"
         );
     }
 }

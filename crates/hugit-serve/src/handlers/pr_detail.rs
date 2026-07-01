@@ -11,10 +11,12 @@
 //! (no git-ref tracking), reviewers/labels/conversation, mirror (P2).
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::fmt::{CHECKS_CAP, pct_u8, scrub, scrub_all, str_field};
-use crate::handlers::diff::{diff_against_first_parent, diff_totals, empty_diff};
+use crate::handlers::diff::{diff_totals, empty_diff};
 use gix_hash::ObjectId;
+use gix_object::CommitRefIter;
 use hugit_cli::checks::CHECK_RECORDED_KIND;
 use hugit_cli::pr::{
     INTENT_ENVELOPE_KIND, OpenedPr, PR_ABANDONED_KIND, PR_ENVELOPE_KIND, PR_LANDED_KIND,
@@ -22,7 +24,7 @@ use hugit_cli::pr::{
 };
 use hugit_contracts::context_envelope::{Altitude, CiCost, ContextEnvelope, PrRecord};
 use hugit_http_contracts::common::{
-    CampaignChipVm, CheckRowVm, DiffVm, EnvelopeVm, IntentSummaryVm, MirrorVm, UnionVm,
+    CampaignChipVm, CheckRowVm, DiffVm, EnvelopeVm, FileRowVm, IntentSummaryVm, MirrorVm, UnionVm,
 };
 use hugit_http_contracts::{CostSplitVm, ImpactVm, PrDetailVm};
 use hugit_ledger::{Ledger, PrQueueInput, pr_record};
@@ -107,16 +109,29 @@ pub fn build_pr_detail(
         ),
     };
 
+    // ── DoS (single-thread latency): ONE shared wall-clock deadline for the
+    //          WHOLE PR render's diff work (the N per-intent diffs + the PR-level
+    //          tip diff), NOT a fresh per-diff budget. On the single-threaded
+    //          lazy-git-from-CAS engine each tree/blob is a synchronous R2 fetch;
+    //          without a SHARED bound a bundle with N intents would cost
+    //          N × DIFF_BUDGET wall-clock and wedge the accept loop for minutes. A
+    //          shared deadline caps the entire render at ~one DIFF_BUDGET: once it
+    //          passes, remaining intents get an honest-empty/partial diff (never a
+    //          fabricated full diff, never a 500) — the same honest-partial the
+    //          per-diff `tree_diff` already applies at its own budget. ────────────
+    let diff_deadline = Instant::now() + hugit_proto::DIFF_BUDGET;
+
     // ── REAL: intents in this PR's bundle (Ledger projection) — each carries
     //          its own commit-vs-first-parent numstat when a git source is wired ─
-    let intents = build_intents(log, &opened, git_source, &intent_commits);
+    let intents = build_intents(log, &opened, git_source, &intent_commits, diff_deadline);
 
     // ── REAL or honest-EMPTY: the PR-level numstat ───────────────────────────
     // The PR's representative diff is its tip intent's commit vs first parent —
     // the LAST bundle intent with a resolvable commit (bundle order = landing
     // order). No git source / no resolvable commit → an honest-empty diff. The
     // scalar diffstat (file_count/added/removed) is the rollup of that diff.
-    let pr_diff = pr_level_diff(git_source, &opened, &intent_commits);
+    // Shares the render's ONE `diff_deadline` (see above).
+    let pr_diff = pr_level_diff(git_source, &opened, &intent_commits, diff_deadline);
     let (pr_file_count, pr_added, pr_removed) = diff_totals(&pr_diff);
 
     // ── REAL: check_rows from check.recorded events (capped — the VM is the page) ─
@@ -291,11 +306,19 @@ fn envelope_vm(env: &ContextEnvelope) -> EnvelopeVm {
 /// Each intent's `diff` is its landed commit vs first parent (REAL when a git
 /// source is wired AND the intent has a resolvable 40-hex commit; honest-empty
 /// otherwise — never faked).
+///
+/// DoS: every per-intent diff shares the ONE `deadline` established by the caller
+/// (`build_pr_detail`) — so a bundle with N intents is bounded by a SINGLE
+/// wall-clock budget, not N × DIFF_BUDGET. Past the deadline each remaining
+/// intent gets the honest-empty/partial diff (`diff_first_parent_until` → an
+/// already-expired `tree_diff_until` returns immediately) — never a fabricated
+/// full diff, never an unbounded loop.
 fn build_intents(
     log: &EventLog,
     opened: &OpenedPr,
     git_source: Option<&Arc<dyn hugit_proto::ObjectSource + Send + Sync>>,
     intent_commits: &BTreeMap<String, ObjectId>,
+    deadline: Instant,
 ) -> Vec<IntentSummaryVm> {
     let bundle: BTreeSet<&str> = opened.intent_ids.iter().map(String::as_str).collect();
     let ledger = Ledger::from_records(log.records());
@@ -305,10 +328,11 @@ fn build_intents(
         .filter(|e| bundle.contains(e.intent_id.as_str()))
         .map(|e| {
             // REAL: this intent's commit-vs-first-parent numstat (honest-empty
-            // when no git seam or no resolvable commit for the intent).
-            let diff = match intent_commits.get(e.intent_id.as_str()) {
-                Some(commit) => diff_against_first_parent(git_source, Some(commit)),
-                None => empty_diff(),
+            // when no git seam or no resolvable commit for the intent). Bounded by
+            // the render's SHARED `deadline` (not a fresh per-intent budget).
+            let diff = match (git_source, intent_commits.get(e.intent_id.as_str())) {
+                (Some(src), Some(commit)) => diff_first_parent_until(src, commit, deadline),
+                _ => empty_diff(),
             };
             IntentSummaryVm {
                 id: e.intent_id.clone(),
@@ -354,20 +378,80 @@ fn intent_commit_oids(log: &EventLog) -> BTreeMap<String, ObjectId> {
 
 /// The PR's representative numstat: its TIP intent's commit vs first parent —
 /// the last bundle intent (landing order) with a resolvable commit. No git source
-/// / no resolvable commit → the honest-empty diff.
+/// / no resolvable commit → the honest-empty diff. Shares the render's ONE
+/// `deadline` (see [`build_pr_detail`]) so it cannot add another fresh budget on
+/// top of the per-intent diffs.
 fn pr_level_diff(
     git_source: Option<&Arc<dyn hugit_proto::ObjectSource + Send + Sync>>,
     opened: &OpenedPr,
     intent_commits: &BTreeMap<String, ObjectId>,
+    deadline: Instant,
 ) -> DiffVm {
     let tip = opened
         .intent_ids
         .iter()
         .rev()
         .find_map(|id| intent_commits.get(id.as_str()));
-    match tip {
-        Some(commit) => diff_against_first_parent(git_source, Some(commit)),
-        None => empty_diff(),
+    match (git_source, tip) {
+        (Some(src), Some(commit)) => diff_first_parent_until(src, commit, deadline),
+        _ => empty_diff(),
+    }
+}
+
+/// A single COMMIT's numstat against its FIRST parent, bounded by a CALLER-SUPPLIED
+/// wall-clock `deadline` (SHARED across a whole PR render's diffs).
+///
+/// This is the deadline-threading twin of [`crate::handlers::diff::diff_against_first_parent`]:
+/// same honest-default contract (a root commit / an absent-or-non-commit object /
+/// an unresolvable parent tree → the honest-empty diff — never a fabricated
+/// all-added wall against a non-existent before-state), but the tree walk runs via
+/// [`hugit_proto::tree_diff_until`] with the SHARED `deadline` instead of a fresh
+/// per-call `DIFF_BUDGET`. So N intents cost ONE budget total, not N × budget. Past
+/// the deadline `tree_diff_until` returns immediately with its partial (here empty)
+/// diff — the honest-partial, indistinguishable from a real empty change (no oracle).
+///
+/// Paths are SCRUBBED at this read boundary ([`scrub`]) — a repo file literally
+/// named `ghp_….key` must not echo verbatim into the view-model (parity with
+/// `diff::diff_vm`, which scrubs identically).
+fn diff_first_parent_until(
+    src: &Arc<dyn hugit_proto::ObjectSource + Send + Sync>,
+    commit: &ObjectId,
+    deadline: Instant,
+) -> DiffVm {
+    // The commit's own root tree (the "new" side). Absent / not-a-commit → empty.
+    let new_tree = match hugit_proto::commit_root_tree(src.as_ref(), commit) {
+        Ok(Some(t)) => t,
+        _ => return empty_diff(),
+    };
+    // The FIRST parent (`^1`). A ROOT commit (no parent) → honest-empty (no
+    // before-state to diff). Decoded with the canonical `CommitRefIter`.
+    let parent = src
+        .get(commit)
+        .ok()
+        .flatten()
+        .filter(|o| o.kind == hugit_proto::ObjectKind::Commit)
+        .and_then(|o| CommitRefIter::from_bytes(&o.data).parent_ids().next());
+    let Some(parent) = parent else {
+        return empty_diff();
+    };
+    let parent_tree = match hugit_proto::commit_root_tree(src.as_ref(), &parent) {
+        Ok(Some(t)) => t,
+        _ => return empty_diff(),
+    };
+    // The SHARED-deadline tree walk. Fail-closed: a broken walk → honest-empty.
+    match hugit_proto::tree_diff_until(src.as_ref(), &parent_tree, &new_tree, deadline) {
+        Ok(files) => DiffVm {
+            files: files
+                .into_iter()
+                .map(|f| FileRowVm {
+                    path: scrub(&f.path),
+                    added: f.added,
+                    removed: f.removed,
+                })
+                .collect(),
+            hunks: vec![],
+        },
+        Err(_) => empty_diff(),
     }
 }
 
@@ -497,4 +581,125 @@ fn pr_title(opened: &OpenedPr) -> String {
         format!("PR #{} ({}) — {} intents", opened.pr_id, opened.campaign, n)
     };
     scrub(&raw)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hugit_cli::pr::PR_OPENED_KIND;
+    use hugit_proto::{CasObjectSource, GitObject, ObjectKind, ObjectSource};
+    use hugit_refstore::intent::INTENT_LANDED_KIND;
+    use std::time::Duration;
+
+    fn push(log: &mut EventLog, kind: &str, payload: serde_json::Value, seq: u64) {
+        log.append_for_test(kind, vec!["t".to_string()], payload.to_string(), seq);
+    }
+    fn blob(src: &mut CasObjectSource, body: &str) -> ObjectId {
+        src.insert(GitObject::new(ObjectKind::Blob, body.as_bytes().to_vec()))
+    }
+    fn tree(src: &mut CasObjectSource, mut entries: Vec<(&str, &str, ObjectId)>) -> ObjectId {
+        entries.sort_by(|a, b| a.1.as_bytes().cmp(b.1.as_bytes()));
+        let mut out = Vec::new();
+        for (mode, name, oid) in &entries {
+            out.extend_from_slice(mode.as_bytes());
+            out.push(b' ');
+            out.extend_from_slice(name.as_bytes());
+            out.push(0);
+            out.extend_from_slice(oid.as_bytes());
+        }
+        src.insert(GitObject::new(ObjectKind::Tree, out))
+    }
+    fn commit(src: &mut CasObjectSource, tree_oid: ObjectId, parent: Option<ObjectId>) -> ObjectId {
+        let parent_line = parent.map(|p| format!("parent {p}\n")).unwrap_or_default();
+        let body = format!(
+            "tree {tree_oid}\n{parent_line}author a <a@a> 0 +0000\ncommitter a <a@a> 0 +0000\n\nm\n"
+        );
+        src.insert(GitObject::new(ObjectKind::Commit, body.into_bytes()))
+    }
+
+    /// Build a commit that modifies `f.txt` (root parent → child), returning the
+    /// child oid. Distinct per `i` (varied content), so every intent has a real,
+    /// non-empty first-parent diff.
+    fn landed_commit(src: &mut CasObjectSource, i: usize) -> ObjectId {
+        let old = blob(src, "a\n");
+        let new = blob(src, &format!("a\nb{i}\n"));
+        let pt = tree(src, vec![("100644", "f.txt", old)]);
+        let ct = tree(src, vec![("100644", "f.txt", new)]);
+        let pc = commit(src, pt, None);
+        commit(src, ct, Some(pc))
+    }
+
+    /// The shared-deadline diff primitive: a LIVE deadline yields the REAL
+    /// first-parent numstat; a PAST deadline yields the honest-empty diff (the
+    /// tree walk short-circuits at the shared deadline) — never a fabrication.
+    #[test]
+    fn diff_first_parent_until_is_deadline_bounded() {
+        let mut src = CasObjectSource::new();
+        let cc = landed_commit(&mut src, 0);
+        let arc: Arc<dyn ObjectSource + Send + Sync> = Arc::new(src);
+
+        let live = Instant::now() + Duration::from_secs(60);
+        let d = diff_first_parent_until(&arc, &cc, live);
+        assert_eq!(d.files.len(), 1, "live budget → the real diff");
+        assert_eq!((d.files[0].added, d.files[0].removed), (1, 0));
+
+        let past = Instant::now() - Duration::from_secs(1);
+        assert!(
+            diff_first_parent_until(&arc, &cc, past).files.is_empty(),
+            "a spent deadline → honest-empty, never a fabricated diff"
+        );
+    }
+
+    /// The DoS fix: `build_intents` over MANY intents is bounded by ONE shared
+    /// wall-clock deadline, NOT N × DIFF_BUDGET. Deterministic proof (no flaky
+    /// timing): with a PAST shared deadline EVERY per-intent tree walk
+    /// short-circuits → every intent's diff is honest-empty; with a LIVE deadline
+    /// the same N intents each carry their real diff (the bound is transparent on
+    /// the happy path). Never a panic / 500 — the honest-partial answer.
+    #[test]
+    fn build_intents_many_bounded_by_one_shared_deadline() {
+        let n = 40usize;
+        let mut src = CasObjectSource::new();
+        let ids: Vec<String> = (0..n).map(|i| format!("i-{i}")).collect();
+        let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let mut log = EventLog::new();
+        push(
+            &mut log,
+            PR_OPENED_KIND,
+            serde_json::json!({"author_kind":"orchestrator","campaign":"c","intent_ids":id_refs,"pr_id":"1"}),
+            1,
+        );
+        let mut map: BTreeMap<String, ObjectId> = BTreeMap::new();
+        for (i, id) in ids.iter().enumerate() {
+            let cc = landed_commit(&mut src, i);
+            push(
+                &mut log,
+                INTENT_LANDED_KIND,
+                serde_json::json!({"intent_id":id,"charter":"x","ref":"r","target":cc.to_string()}),
+                (i as u64) + 2,
+            );
+            map.insert(id.clone(), cc);
+        }
+        let arc: Arc<dyn ObjectSource + Send + Sync> = Arc::new(src);
+        let opened = find_pr_opened(&log, "1").expect("pr.opened present");
+
+        // LIVE shared deadline: each intent carries its real diff.
+        let live = Instant::now() + Duration::from_secs(60);
+        let intents = build_intents(&log, &opened, Some(&arc), &map, live);
+        assert_eq!(intents.len(), n);
+        assert!(
+            intents.iter().all(|i| i.diff.files.len() == 1),
+            "a live shared budget projects each intent's real diff"
+        );
+
+        // PAST shared deadline: ALL N diffs short-circuit at once → honest-empty,
+        // proving the render is bounded by ONE budget, not N × budget.
+        let past = Instant::now() - Duration::from_secs(1);
+        let intents_past = build_intents(&log, &opened, Some(&arc), &map, past);
+        assert_eq!(intents_past.len(), n);
+        assert!(
+            intents_past.iter().all(|i| i.diff.files.is_empty()),
+            "a spent shared deadline bounds ALL {n} diffs at once (not N×)"
+        );
+    }
 }
