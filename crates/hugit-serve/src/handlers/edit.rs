@@ -13,12 +13,14 @@
 //! honest "content seam not live" answer, never a fake blank file).
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use gix_hash::ObjectId;
 use hugit_http_contracts::common::HunkVm;
 use hugit_http_contracts::edit::{EditLineVm, EditVm};
 use hugit_refstore::EventLog;
 
+use crate::budgeted_source::{BudgetedSource, WALK_BUDGET};
 use crate::fmt::scrub;
 
 /// Build the editor view-model for `path` at HEAD. `Some(EditVm)` when the git
@@ -26,6 +28,14 @@ use crate::fmt::scrub;
 ///
 /// `_log` is unused this wave (the content comes from the git tree, not the event
 /// log); the parameter is kept for signature uniformity with the sibling handlers.
+///
+/// DoS: the `path`→blob resolve does one synchronous CAS `get` per path segment
+/// ([`hugit_proto::resolve_blob_at_path`], count-capped at `MAX_PATH_DEPTH`). On the
+/// single-threaded lazy-CAS engine that count-cap is NOT a latency cap — under a
+/// cold cache / slow R2 a deep resolve can block the whole accept loop. So the walk
+/// is ALSO wall-clock bounded by [`WALK_BUDGET`]: past the deadline the source stops
+/// yielding objects and the resolve returns an honest `None` → 404 (never a
+/// fabricated file).
 #[must_use]
 pub fn build_edit(
     _log: &EventLog,
@@ -34,9 +44,35 @@ pub fn build_edit(
     src: Option<&Arc<dyn hugit_proto::ObjectSource + Send + Sync>>,
     root_tree: Option<&ObjectId>,
 ) -> Option<EditVm> {
+    build_edit_until(
+        _log,
+        repo,
+        path,
+        src,
+        root_tree,
+        Instant::now() + WALK_BUDGET,
+    )
+}
+
+/// [`build_edit`] with an explicit wall-clock `deadline` on the CAS resolve —
+/// deterministically testable (a deadline already in the past stops before the
+/// first fetch → honest `None`). See [`build_edit`] for the DoS rationale.
+#[must_use]
+fn build_edit_until(
+    _log: &EventLog,
+    repo: &str,
+    path: &str,
+    src: Option<&Arc<dyn hugit_proto::ObjectSource + Send + Sync>>,
+    root_tree: Option<&ObjectId>,
+    deadline: Instant,
+) -> Option<EditVm> {
     let (src, root_tree) = (src?, root_tree?);
 
-    let (_oid, bytes) = match hugit_proto::resolve_blob_at_path(src.as_ref(), root_tree, path) {
+    // Wall-clock-bound the per-segment CAS walk (single-thread latency-DoS guard):
+    // past `deadline` every `get` returns `Ok(None)`, so `resolve_blob_at_path`
+    // stops and yields `None` → an honest 404, never a fabricated file.
+    let budgeted = BudgetedSource::new(src.as_ref(), deadline);
+    let (_oid, bytes) = match hugit_proto::resolve_blob_at_path(&budgeted, root_tree, path) {
         Ok(Some(found)) => found,
         Ok(None) | Err(_) => return None,
     };
@@ -168,6 +204,42 @@ mod tests {
     #[test]
     fn absent_git_source_is_none() {
         assert!(build_edit(&log(), "r", "any.rs", None, None).is_none());
+    }
+
+    /// DoS bound: a deadline already in the PAST stops the CAS resolve before the
+    /// first fetch → an honest `None` (404) EVEN THOUGH the file is present. Proves
+    /// the walk is wall-clock-bounded, not merely count-capped, and the truncation
+    /// is honest-empty (never a fabricated file). The mirror far-future case is
+    /// covered by `resolves_real_file_into_editor_lines` (default budget).
+    #[test]
+    fn past_deadline_bounds_resolve_to_honest_none() {
+        use std::time::{Duration, Instant};
+
+        let mut src = CasObjectSource::new();
+        let blob = src.insert_raw(ObjectKind::Blob, b"present\n".to_vec());
+        let root = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_BLOB,
+                name: "here.txt",
+                oid: blob,
+            }],
+        );
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
+
+        // Sanity: with a live budget the present file resolves.
+        let live = Instant::now() + Duration::from_secs(60);
+        assert!(
+            build_edit_until(&log(), "r", "here.txt", Some(&src), Some(&root), live).is_some(),
+            "a present file resolves under a live budget"
+        );
+
+        // Past deadline: the resolve is refused at the first `get` → honest 404.
+        let past = Instant::now() - Duration::from_secs(1);
+        assert!(
+            build_edit_until(&log(), "r", "here.txt", Some(&src), Some(&root), past).is_none(),
+            "a present file is honest-404'd once the walk budget is spent"
+        );
     }
 
     #[test]
