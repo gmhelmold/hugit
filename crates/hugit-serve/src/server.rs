@@ -310,85 +310,45 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
                 git.as_ref(),
             )
         }
-        // Identity-scoped reads (/v1/me/*): no {repo} path param — they bind the
-        // launch repo (`ME_DEFAULT_REPO`) until the P2 per-principal multi-repo
-        // `me` aggregation lands. They STILL run the per-tenant gate against that
-        // repo (audit 2026-06-15): without it, any authenticated tenant could read
-        // the launch repo's operational data here — a cross-tenant leak. Operator
-        // bypass keeps the dev/launch view working; a non-owner tenant → 404.
+        // Identity-scoped reads (/v1/me/*): no {repo} path param — they resolve to
+        // the CALLER's OWN repos (W-METENANT). `AppState::me_repo_logs` returns the
+        // caller's authorized `(slug, verified-log)` set — the SAME read-authz
+        // predicate the per-repo gate runs, so a foreign tenant's private repo is
+        // simply ABSENT (no oracle). The builders aggregate ACROSS the caller's
+        // repos; an operator sees all loaded repos; a caller who owns none → an
+        // honest EMPTY view (never a default repo's data). This CLOSES the prior
+        // cross-principal exposure (every caller used to get the launch repo).
         ["v1", "me", "dashboard"] => {
             let (principal, _) = match two_tier_auth(state, headers) {
                 Ok(p) => p,
                 Err(e) => return err(e),
             };
-            let repo = ME_DEFAULT_REPO;
-            with_log(
-                || {
-                    state
-                        .load_verified(repo)
-                        .map_err(|e| hide_load_err(&principal, e))
-                },
-                |log| {
-                    if !crate::authz::authorize_read(
-                        &principal,
-                        &crate::authz::project_repo_meta(log),
-                    ) {
-                        return err(EngineErr::not_found());
-                    }
-                    ok(&handlers::build_dashboard(log, repo))
-                },
-            )
+            ok(&handlers::build_me_dashboard(
+                &state.me_repo_logs(&principal),
+            ))
         }
         ["v1", "me", "attention"] => {
             let (principal, _) = match two_tier_auth(state, headers) {
                 Ok(p) => p,
                 Err(e) => return err(e),
             };
-            let repo = ME_DEFAULT_REPO;
-            with_log(
-                || {
-                    state
-                        .load_verified(repo)
-                        .map_err(|e| hide_load_err(&principal, e))
-                },
-                |log| {
-                    if !crate::authz::authorize_read(
-                        &principal,
-                        &crate::authz::project_repo_meta(log),
-                    ) {
-                        return err(EngineErr::not_found());
-                    }
-                    ok(&handlers::build_attention(log, repo))
-                },
-            )
+            ok(&handlers::build_me_attention(
+                &state.me_repo_logs(&principal),
+            ))
         }
-        // `GET /v1/orgs/{name}` — thin real org view. `name` is the path param;
-        // the repos list comes from the launch repo's log (the engine's one known
-        // repo). Auth + the per-tenant read gate apply (same as `/v1/me/*`).
-        // Multi-tenant repo enumeration is the P2 seam — we emit exactly the one
-        // loaded row, never fabricate sibling rows.
+        // `GET /v1/orgs/{name}` — thin real org view. `name` is the path param
+        // (the display header); the `repos` list is the CALLER's OWN authorized
+        // repos (W-METENANT — same per-tenant index as `/v1/me/*`), never a
+        // hardcoded default. Cross-tenant repo enumeration stays the P2 seam.
         ["v1", "orgs", org_name] => {
             let (principal, _) = match two_tier_auth(state, headers) {
                 Ok(p) => p,
                 Err(e) => return err(e),
             };
-            let repo = ME_DEFAULT_REPO;
-            with_log(
-                || {
-                    state
-                        .load_verified(repo)
-                        .map_err(|e| hide_load_err(&principal, e))
-                },
-                |log| {
-                    if !crate::authz::authorize_read(
-                        &principal,
-                        &crate::authz::project_repo_meta(log),
-                    ) {
-                        return err(EngineErr::not_found());
-                    }
-                    ok(&handlers::build_org(log, org_name, repo))
-                },
-            )
+            ok(&handlers::build_me_org(
+                org_name,
+                &state.me_repo_logs(&principal),
+            ))
         }
         // Admin control-plane: active engine-token sessions. Reads the in-process
         // token store (not the log), so it does not route through `dispatch_repo`.
@@ -422,10 +382,6 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
         _ => err(EngineErr::not_found()),
     }
 }
-
-/// The default repo context for identity-scoped (`/v1/me/*`) reads until the P2
-/// Clerk identity seam resolves a per-principal repo set: the launch repo.
-const ME_DEFAULT_REPO: &str = "hugit";
 
 /// Extract a percent-decoded query-param value (`+` → space) from a raw query
 /// string (the part after `?`). Returns `""` when absent — the read handlers
@@ -1003,20 +959,6 @@ fn dispatch_repo(
             }
         }
         _ => err(EngineErr::not_found()),
-    }
-}
-
-/// Run `f` over a freshly verified log, mapping the load error to its envelope.
-/// Still used by the identity-scoped `/v1/me/*` reads (fixed launch repo, the
-/// caller's own context — NOT an arbitrary-slug repo read, so the per-tenant
-/// repo-gate does not apply there).
-fn with_log(
-    load: impl FnOnce() -> Result<hugit_refstore::EventLog, EngineErr>,
-    f: impl FnOnce(&hugit_refstore::EventLog) -> (u16, String),
-) -> (u16, String) {
-    match load() {
-        Ok(log) => f(&log),
-        Err(e) => err(e),
     }
 }
 

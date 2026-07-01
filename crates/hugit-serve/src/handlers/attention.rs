@@ -79,6 +79,38 @@ pub fn build_attention(log: &EventLog, repo: &str) -> AttentionVm {
     AttentionVm { decisions }
 }
 
+/// Build the identity-scoped (`/v1/me/attention`) feed AGGREGATED across the
+/// CALLER's own repos (W-METENANT). `repos` is the caller's authorized
+/// `(slug, verified-log)` set (from `AppState::me_repo_logs`) — already
+/// read-authz-filtered, so it holds ONLY repos the caller may read (a foreign
+/// tenant's private repo is simply absent — no oracle).
+///
+/// The VM WIRE SHAPE is UNCHANGED (`AttentionVm`); only the DATA changes — the
+/// decisions of every caller repo, concatenated then TRIAGE-SORTED across the
+/// whole aggregate (severity ladder first, stable within a tier). An EMPTY
+/// `repos` → `decisions: []` (honest empty, never a default repo's feed). Bounded
+/// by `ATTENTION_CAP` over the aggregate. Reuses the per-repo [`build_attention`]
+/// verbatim (each decision already carries its own repo's slug).
+#[must_use]
+pub fn build_me_attention(repos: &[(String, EventLog)]) -> AttentionVm {
+    let mut decisions = Vec::new();
+    for (slug, log) in repos {
+        if decisions.len() >= ATTENTION_CAP {
+            break;
+        }
+        for d in build_attention(log, slug).decisions {
+            if decisions.len() >= ATTENTION_CAP {
+                break;
+            }
+            decisions.push(d);
+        }
+    }
+    // Re-sort the AGGREGATE by the same severity ladder (stable → within a tier the
+    // per-repo, then chain, order is preserved).
+    decisions.sort_by_key(triage_rank);
+    AttentionVm { decisions }
+}
+
 /// The triage rank of a decision (lower = more urgent), derived solely from the
 /// already-computed VM fields (`signal_class` from real verdicts, `kind` from
 /// real state). No fabricated blast score — the rank IS the severity ladder:
@@ -646,5 +678,72 @@ mod tests {
         let kinds: Vec<&str> = vm.decisions.iter().map(|d| d.kind.as_str()).collect();
         assert_eq!(kinds.last().copied(), Some("abandoned"), "abandoned last");
         assert!(order.iter().all(|t| t.starts_with("PR")));
+    }
+
+    // ── W-METENANT: the identity-scoped aggregating feed ──────────────────────
+
+    #[test]
+    fn me_attention_empty_repo_set_is_empty() {
+        let vm = build_me_attention(&[]);
+        assert!(
+            vm.decisions.is_empty(),
+            "no repos → no feed (not a default repo)"
+        );
+    }
+
+    #[test]
+    fn me_attention_aggregates_and_triage_sorts_across_repos() {
+        // repo A carries an APPROVE-ready PR (tier 2); repo B carries a REJECT
+        // (tier 0). The aggregate must sort REJECT (repo B) BEFORE the approve
+        // (repo A) — the global severity ladder, not per-repo order.
+        let mut a = EventLog::new();
+        open_pr(&mut a, "10", "", &["i"], 1000);
+        append(
+            &mut a,
+            VERDICT_RECORDED_KIND,
+            verdict("10", "correctness", "approve", serde_json::json!(["ok"])),
+            1100,
+        );
+        let mut b = EventLog::new();
+        open_pr(&mut b, "20", "", &["i"], 2000);
+        append(
+            &mut b,
+            VERDICT_RECORDED_KIND,
+            verdict("20", "correctness", "reject", serde_json::json!(["bad"])),
+            2100,
+        );
+        let vm = build_me_attention(&[("org/alpha".to_string(), a), ("org/beta".to_string(), b)]);
+        assert_eq!(vm.decisions.len(), 2);
+        // Global triage: the REJECT (repo beta) is first despite being the 2nd repo.
+        assert_eq!(vm.decisions[0].signal_class, "err");
+        assert_eq!(vm.decisions[0].repo, "org/beta");
+        assert_eq!(vm.decisions[1].signal_class, "g");
+        assert_eq!(vm.decisions[1].repo, "org/alpha");
+    }
+
+    #[test]
+    fn me_attention_is_bounded_across_the_aggregate() {
+        let mk = |base: u64| {
+            let mut log = EventLog::new();
+            for i in 0..(ATTENTION_CAP + 10) {
+                open_pr(
+                    &mut log,
+                    &format!("{}", base + i as u64),
+                    "",
+                    &["i"],
+                    base + i as u64,
+                );
+            }
+            log
+        };
+        let vm = build_me_attention(&[
+            ("r/one".to_string(), mk(1_000)),
+            ("r/two".to_string(), mk(900_000)),
+        ]);
+        assert!(
+            vm.decisions.len() <= ATTENTION_CAP,
+            "aggregate feed must stay bounded, got {}",
+            vm.decisions.len()
+        );
     }
 }

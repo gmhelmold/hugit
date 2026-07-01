@@ -219,6 +219,46 @@ pub fn build_dashboard(log: &EventLog, repo: &str) -> DashboardVm {
     }
 }
 
+/// Build the identity-scoped (`/v1/me/dashboard`) view-model AGGREGATED across the
+/// CALLER's own repos (W-METENANT). `repos` is the caller's authorized
+/// `(slug, verified-log)` set (from `AppState::me_repo_logs`) — already filtered by
+/// the read-authz predicate, so this contains ONLY repos the caller may read; a
+/// foreign tenant's private repo is simply absent (no oracle).
+///
+/// The VM WIRE SHAPE is UNCHANGED (`DashboardVm`); only the DATA is now the
+/// caller's repos, aggregated — one repo row per caller repo, the inbox merged
+/// (capped at `PR_CARDS_CAP` total), `attention_count` summed. An EMPTY `repos`
+/// (the caller owns no loaded repo) → an honest EMPTY dashboard (`repos: []`,
+/// `inbox: []`, `attention_count: 0`), NEVER a default repo's data. Reuses the
+/// per-repo [`build_dashboard`] verbatim (no second projection to drift).
+#[must_use]
+pub fn build_me_dashboard(repos: &[(String, EventLog)]) -> DashboardVm {
+    let mut out = DashboardVm {
+        repos: Vec::new(),
+        github_app: GithubAppStripVm {
+            saved_usd: 0.0,
+            saved_ci_minutes: 0,
+        },
+        inbox: Vec::new(),
+        inbox_pending_total: 0,
+        attention_count: 0,
+    };
+    for (slug, log) in repos {
+        let one = build_dashboard(log, slug);
+        out.repos.extend(one.repos); // one real row per caller repo
+        out.attention_count += one.attention_count;
+        // Merge inbox rows, keeping the aggregate bounded by PR_CARDS_CAP.
+        for row in one.inbox {
+            if out.inbox.len() >= PR_CARDS_CAP {
+                break;
+            }
+            out.inbox.push(row);
+        }
+    }
+    out.inbox_pending_total = out.inbox.len();
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,5 +463,86 @@ mod tests {
         let vm = build_dashboard(&log, "humangr/hugit");
         let j = serde_json::to_string(&vm).unwrap();
         assert_eq!(vm, serde_json::from_str::<DashboardVm>(&j).unwrap());
+    }
+
+    // ── W-METENANT: the identity-scoped aggregating builder ───────────────────
+
+    #[test]
+    fn me_dashboard_empty_repo_set_is_honest_empty_not_default() {
+        // A caller who owns no loaded repo → an EMPTY dashboard, NEVER a default.
+        let vm = build_me_dashboard(&[]);
+        assert!(
+            vm.repos.is_empty(),
+            "no repos → no rows (not the default repo)"
+        );
+        assert!(vm.inbox.is_empty());
+        assert_eq!(vm.inbox_pending_total, 0);
+        assert_eq!(vm.attention_count, 0);
+        // Still a valid wire shape (empty vecs serialize + round-trip).
+        let j = serde_json::to_string(&vm).unwrap();
+        assert_eq!(vm, serde_json::from_str::<DashboardVm>(&j).unwrap());
+    }
+
+    #[test]
+    fn me_dashboard_aggregates_across_the_callers_repos() {
+        // repo A: #1 open (no verdict) + #2 approve-not-landed (still proposed) →
+        // 2 open, 1 attention, 1 inbox.
+        let mut a = EventLog::new();
+        open_pr(&mut a, "1", &["i-1"], 1000);
+        open_pr(&mut a, "2", &["i-2"], 1100);
+        verdict(
+            &mut a,
+            "2",
+            "correctness",
+            "approve",
+            serde_json::json!([]),
+            1200,
+        );
+        // repo B: #9 abandoned → 0 open, 1 attention, 1 inbox "bloqueado".
+        let mut b = EventLog::new();
+        open_pr(&mut b, "9", &["i-9"], 2000);
+        abandon(&mut b, "9", 2100);
+
+        let vm = build_me_dashboard(&[
+            ("org-a/alpha".to_string(), a),
+            ("org-a/beta".to_string(), b),
+        ]);
+        // One row per caller repo (aggregated, not a single default row).
+        assert_eq!(vm.repos.len(), 2);
+        assert_eq!(vm.repos[0].name, "alpha");
+        assert_eq!(vm.repos[0].open_prs, 2);
+        assert_eq!(vm.repos[1].name, "beta");
+        assert_eq!(vm.repos[1].open_prs, 0);
+        // attention + inbox summed across both repos.
+        assert_eq!(vm.attention_count, 2);
+        assert_eq!(vm.inbox.len(), 2);
+        assert_eq!(vm.inbox_pending_total, 2);
+        // The inbox rows carry each repo's own slug in the context (no cross-mix).
+        assert!(vm.inbox.iter().any(|r| r.context == "org-a/alpha · #2"));
+        assert!(vm.inbox.iter().any(|r| r.context == "org-a/beta · #9"));
+    }
+
+    #[test]
+    fn me_dashboard_inbox_is_bounded_across_the_aggregate() {
+        // Two repos each producing many inbox rows: the aggregate stays ≤ PR_CARDS_CAP.
+        let mk = |base: u64| {
+            let mut log = EventLog::new();
+            for i in 0..(PR_CARDS_CAP + 5) {
+                let id = format!("{}", base + i as u64);
+                open_pr(&mut log, &id, &["i"], base + i as u64);
+                abandon(&mut log, &id, base + 10_000 + i as u64);
+            }
+            log
+        };
+        let vm = build_me_dashboard(&[
+            ("r/one".to_string(), mk(1_000)),
+            ("r/two".to_string(), mk(500_000)),
+        ]);
+        assert!(
+            vm.inbox.len() <= PR_CARDS_CAP,
+            "aggregate inbox must stay bounded, got {}",
+            vm.inbox.len()
+        );
+        assert_eq!(vm.inbox_pending_total, vm.inbox.len());
     }
 }

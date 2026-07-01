@@ -645,6 +645,77 @@ impl AppState {
         self.repos.get(repo)
     }
 
+    /// The identity-scoped (`/v1/me/*`) repo set for `principal`, resolved to the
+    /// authorized `(slug, verified-log)` pairs the me/* builders aggregate. This is
+    /// the per-tenant repo index (W-METENANT) that CLOSES the cross-principal read
+    /// exposure — the me/* views used to bind a hardcoded default repo and hand
+    /// EVERY caller its data.
+    ///
+    /// It REUSES the SAME predicate the per-repo read gate runs
+    /// ([`authz::authorize_read`](crate::authz::authorize_read)) — there is NO
+    /// second visibility gate to drift:
+    ///
+    /// - **Operator** (`orchestrator:*`) → every loaded repo (the dev/bootstrap view).
+    /// - A **tenant** (`clerk:{org}:{user}`) → each loaded repo it may
+    ///   `authorize_read` (its own private repos + any public repo).
+    /// - **Anonymous / unknown / malformed** principal → EMPTY. me/* is
+    ///   identity-scoped: a caller with no tenant has no "my repos" (fail-closed —
+    ///   never the default repo, never all public repos).
+    ///
+    /// FAIL-CLOSED on ambiguity: a repo in the map whose log cannot load/verify is
+    /// EXCLUDED (never included by default), so no path can surface a repo the
+    /// caller cannot read. Each candidate log is loaded EXACTLY ONCE (the
+    /// single-thread engine must not double-fetch); the work is bounded by the
+    /// loaded-repo count (small).
+    #[must_use]
+    pub fn me_repo_logs(&self, principal: &[String]) -> Vec<(String, EventLog)> {
+        // Deterministic, sorted candidate order (stable aggregate output).
+        let mut names: Vec<String> = self.repos.keys().cloned().collect();
+        names.sort();
+
+        // Operator: all loaded repos (bypass — no per-repo authz needed). An
+        // unloadable log is skipped fail-closed (it cannot be aggregated anyway).
+        if crate::authz::is_operator(principal) {
+            return names
+                .into_iter()
+                .filter_map(|n| self.load_verified(&n).ok().map(|log| (n, log)))
+                .collect();
+        }
+
+        // Only a well-formed TENANT principal has "my repos"; a genuinely
+        // anonymous request, an unknown bearer, or a malformed principal gets NONE
+        // (identity-scoped: no tenant ⇒ no repos — never all-public, never default).
+        if !principal_is_tenant(principal) {
+            return Vec::new();
+        }
+
+        let mut out: Vec<(String, EventLog)> = Vec::new();
+        for name in names {
+            // Fail-closed: an unloadable/untrusted log EXCLUDES the repo.
+            let Ok(log) = self.load_verified(&name) else {
+                continue;
+            };
+            let meta = crate::authz::project_repo_meta(&log);
+            // THE SAME predicate the per-repo read gate runs — no second gate.
+            if crate::authz::authorize_read(principal, &meta) {
+                out.push((name, log));
+            }
+        }
+        out
+    }
+
+    /// The per-tenant repo INDEX — the sorted slug set `principal` may see in the
+    /// identity-scoped views. The authorization decision is
+    /// [`me_repo_logs`](Self::me_repo_logs)'s (this is the slug projection of it),
+    /// so the index and the aggregated data can never diverge.
+    #[must_use]
+    pub fn repos_for(&self, principal: &[String]) -> Vec<String> {
+        self.me_repo_logs(principal)
+            .into_iter()
+            .map(|(slug, _)| slug)
+            .collect()
+    }
+
     /// The number of repos whose git content seam is loaded (the `/readyz`
     /// capability count). Zero = git serving not live for any repo.
     #[must_use]
@@ -1714,6 +1785,22 @@ fn load_git_dir(
     Ok((cas, root_tree, refs))
 }
 
+/// `true` iff `principal` is a well-formed TENANT principal (`clerk:{org}:{user}`
+/// with a NON-EMPTY org). Mirrors the tenant arm of `authz`'s (private) `caller`
+/// classifier — kept minimal + fail-closed (an empty chain, an unknown prefix, or
+/// a malformed `clerk:`/`clerk::user` → NOT a tenant). It exists only to answer
+/// "does this caller have any 'my repos' at all"; the actual per-repo read
+/// decision still routes through [`authz::authorize_read`](crate::authz::authorize_read),
+/// so this never becomes a second visibility gate. Operator is classified
+/// separately via [`authz::is_operator`](crate::authz::is_operator).
+fn principal_is_tenant(principal: &[String]) -> bool {
+    principal
+        .first()
+        .and_then(|p| p.strip_prefix("clerk:"))
+        .map(|rest| !rest.split(':').next().unwrap_or("").is_empty())
+        .unwrap_or(false)
+}
+
 /// A repo slug is a single safe path segment: non-empty, ≤100 chars, ASCII
 /// alnum + `-_.`, never `.`/`..`/containing `..` or a path separator. Blocks URL
 /// path-traversal into arbitrary files / R2 keys.
@@ -1975,6 +2062,199 @@ mod tests {
             ManifestPutError::Precondition => {
                 panic!("expected a fail-closed Other, not a Precondition")
             }
+        }
+    }
+}
+
+/// W-METENANT: the per-tenant repo index (`repos_for` / `me_repo_logs`) that
+/// closes the cross-principal `/v1/me/*` read exposure. These prove the CORE
+/// isolation invariant at the `AppState` layer: a tenant sees ONLY the repos it
+/// may `authorize_read`, anonymous/unknown see NONE, the operator sees all, and
+/// an unloadable repo is EXCLUDED fail-closed.
+#[cfg(test)]
+mod me_repos_tests {
+    use super::*;
+    use hugit_refstore::{Endpoint, PrincipalClass};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// A unique scratch dir per call (parallel-test-safe — mirrors the integration
+    /// harness: pid + nanos + a monotonic counter so two calls never collide).
+    fn scratch_dir() -> PathBuf {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "hugit-metenant-{}-{}-{}",
+            std::process::id(),
+            nanos,
+            seq
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A serialized, chain-valid event log carrying exactly one `repo.meta` record.
+    fn meta_log(visibility: &str, owner_tenant: &str) -> String {
+        let mut log = EventLog::new();
+        let payload =
+            serde_json::json!({"visibility":visibility,"owner_tenant":owner_tenant}).to_string();
+        let body = hugit_refstore::canonical_json(&payload).unwrap_or(payload);
+        log.append_authorized(
+            PrincipalClass::Orchestrator,
+            Endpoint::Push,
+            "repo.meta",
+            vec!["o".into()],
+            body,
+            0,
+        )
+        .expect("append repo.meta");
+        serde_json::to_string(log.records()).unwrap()
+    }
+
+    /// An `AppState` (Local source) with `repos` = `(slug, log_json)`. Each slug is
+    /// BOTH written as a `<slug>.json` log AND inserted into the `repos` map (the
+    /// git seam) — the exact shape the me/* index iterates.
+    fn state_with(repos: &[(&str, &str)]) -> AppState {
+        let dir = scratch_dir();
+        let mut st = AppState::new(dir.clone(), "dev-token".to_string());
+        for (slug, json) in repos {
+            std::fs::write(dir.join(format!("{slug}.json")), json).unwrap();
+            st.set_repo_git(
+                *slug,
+                Arc::new(hugit_proto::CasObjectSource::new()),
+                gix_hash::ObjectId::empty_tree(gix_hash::Kind::Sha1),
+                BTreeMap::new(),
+            );
+        }
+        st
+    }
+
+    fn operator() -> Vec<String> {
+        vec!["orchestrator:hugit".to_string()]
+    }
+    fn tenant(org: &str) -> Vec<String> {
+        vec![format!("clerk:{org}:user-1")]
+    }
+
+    #[test]
+    fn operator_sees_all_loaded_repos() {
+        let st = state_with(&[
+            ("alpha", &meta_log("private", "org-a")),
+            ("beta", &meta_log("private", "org-b")),
+        ]);
+        assert_eq!(
+            st.repos_for(&operator()),
+            vec!["alpha".to_string(), "beta".to_string()],
+            "operator (dev/orchestrator) sees every loaded repo"
+        );
+    }
+
+    #[test]
+    fn two_tenants_disjoint_private_repos_see_only_their_own() {
+        // THE core cross-principal isolation invariant.
+        let st = state_with(&[
+            ("alpha", &meta_log("private", "org-a")),
+            ("beta", &meta_log("private", "org-b")),
+        ]);
+        assert_eq!(
+            st.repos_for(&tenant("org-a")),
+            vec!["alpha".to_string()],
+            "org-a sees ONLY its own private repo"
+        );
+        assert_eq!(
+            st.repos_for(&tenant("org-b")),
+            vec!["beta".to_string()],
+            "org-b sees ONLY its own private repo — never org-a's"
+        );
+    }
+
+    #[test]
+    fn tenant_sees_public_plus_own_private_not_foreign_private() {
+        let st = state_with(&[
+            ("pubrepo", &meta_log("public", "org-a")),
+            ("priv_a", &meta_log("private", "org-a")),
+            ("priv_b", &meta_log("private", "org-b")),
+        ]);
+        // org-b: the public repo + its OWN private; NOT org-a's private.
+        assert_eq!(
+            st.repos_for(&tenant("org-b")),
+            vec!["priv_b".to_string(), "pubrepo".to_string()],
+            "a tenant sees public repos + its own private, never a foreign private"
+        );
+    }
+
+    #[test]
+    fn anonymous_and_unknown_and_malformed_get_empty() {
+        // me/* is identity-scoped: no tenant ⇒ NO repos (never all-public, never
+        // the default). Even a PUBLIC repo present is absent for these callers.
+        let st = state_with(&[("pubrepo", &meta_log("public", "org-a"))]);
+        assert!(
+            st.repos_for(&[]).is_empty(),
+            "anonymous (empty chain) → empty"
+        );
+        assert!(
+            st.repos_for(&["weird:thing".to_string()]).is_empty(),
+            "unknown bearer prefix → empty"
+        );
+        assert!(
+            st.repos_for(&["clerk:".to_string()]).is_empty(),
+            "malformed clerk (empty org) → empty"
+        );
+        assert!(
+            st.repos_for(&["clerk::user".to_string()]).is_empty(),
+            "clerk with empty org → empty"
+        );
+    }
+
+    #[test]
+    fn unloadable_repo_is_excluded_fail_closed() {
+        // "ghost" is in the repos map but has NO <slug>.json → load fails → it must
+        // be EXCLUDED (never included by default), for operator AND tenant.
+        let dir = scratch_dir();
+        let mut st = AppState::new(dir.clone(), "dev-token".to_string());
+        std::fs::write(dir.join("good.json"), meta_log("public", "org-a")).unwrap();
+        for slug in ["good", "ghost"] {
+            st.set_repo_git(
+                slug,
+                Arc::new(hugit_proto::CasObjectSource::new()),
+                gix_hash::ObjectId::empty_tree(gix_hash::Kind::Sha1),
+                BTreeMap::new(),
+            );
+        }
+        assert_eq!(
+            st.repos_for(&operator()),
+            vec!["good".to_string()],
+            "operator: an unloadable repo is excluded fail-closed"
+        );
+        assert_eq!(
+            st.repos_for(&tenant("org-a")),
+            vec!["good".to_string()],
+            "tenant: an unloadable repo is excluded fail-closed"
+        );
+    }
+
+    #[test]
+    fn me_repo_logs_returns_the_verified_logs_for_the_index() {
+        // The (slug, log) pairs match the index — and each carries the repo's real
+        // verified log (so the builders aggregate real data, not a stub).
+        let st = state_with(&[
+            ("alpha", &meta_log("private", "org-a")),
+            ("beta", &meta_log("public", "org-b")),
+        ]);
+        let logs = st.me_repo_logs(&tenant("org-a"));
+        let slugs: Vec<&str> = logs.iter().map(|(s, _)| s.as_str()).collect();
+        // org-a: its own private "alpha" + the public "beta".
+        assert_eq!(slugs, vec!["alpha", "beta"]);
+        // Each log carries the repo.meta record (real verified log, not empty stub).
+        for (_, log) in &logs {
+            assert!(
+                log.records().iter().any(|r| r.kind == "repo.meta"),
+                "each returned log is the repo's real verified log"
+            );
         }
     }
 }
