@@ -39,7 +39,7 @@ use serde_json::json;
 
 use crate::authz::REPO_META_KIND;
 use crate::error::EngineErr;
-use crate::state::AppState;
+use crate::state::{AppState, MAX_REPOS_PER_TENANT};
 use crate::writes::{CasToken, LogSink};
 
 /// The `POST /v1/repos` request body (v0). `import_git_url` is intentionally ABSENT
@@ -191,9 +191,20 @@ fn repo_exists_err() -> EngineErr {
     }
 }
 
-/// The provision core (testable): validate → derive owner → no-clobber pre-check →
-/// build genesis → CREATE-ONLY persist → runtime git-seam insert. Returns the
-/// created repo's identity, or the mapped `EngineErr`.
+/// A `429 TOO_MANY_REPOS` — this tenant is at [`MAX_REPOS_PER_TENANT`] for the current
+/// engine lifetime. A distinct code so the client can present the quota precisely (and
+/// so it never collapses into the generic conflict codes).
+fn too_many_repos_err() -> EngineErr {
+    EngineErr {
+        status: 429,
+        code: "TOO_MANY_REPOS",
+        reason: format!("limite de {MAX_REPOS_PER_TENANT} repositórios por tenant atingido"),
+    }
+}
+
+/// The provision core (testable): validate → derive owner → per-tenant cap →
+/// no-clobber pre-check → build genesis → CREATE-ONLY persist → runtime git-seam
+/// insert. Returns the created repo's identity, or the mapped `EngineErr`.
 ///
 /// Atomicity: the genesis persist ([`CasToken::Absent`]) is the single durable
 /// commit point. Its precondition failure (a duplicate / concurrent create) → 409,
@@ -215,6 +226,21 @@ pub fn provision(
     //    operator/anon/unknown (no god-create / anon-create).
     let owner_tenant = derive_owner_tenant(principal)?;
     let slug = req.name.clone();
+
+    // 2b. Per-tenant repo cap (DoS guard) — refuse BEFORE any durable write or the
+    //     &'static RepoState leak. Every provision permanently leaks a RepoState
+    //     (never freed) + writes a durable genesis object, so an uncapped
+    //     authenticated create-loop by one tenant OOMs the single-instance engine.
+    //     FAIL-CLOSED: an indeterminate count (an unloadable candidate) → 503, never
+    //     allow-by-default (a transient read fault can't be used to slip past the cap).
+    let owned = state.count_owned_repos(&owner_tenant).ok_or_else(|| {
+        EngineErr::unavailable(
+            "não foi possível determinar a contagem de repositórios do tenant (fail-closed)",
+        )
+    })?;
+    if owned >= MAX_REPOS_PER_TENANT {
+        return Err(too_many_repos_err());
+    }
 
     // 3. Fast in-memory no-clobber pre-check (the authoritative guard is the
     //    create-only persist below): refuse if a seam is loaded OR a LOG already
@@ -339,6 +365,30 @@ mod tests {
                 .into_bytes(),
             None => json!({ "name": name }).to_string().into_bytes(),
         }
+    }
+
+    /// A Local `AppState` plus the on-disk log dir it reads (so a test can seed
+    /// durable genesis logs the `count_owned_repos` cap consults).
+    fn state_local_with_dir() -> (AppState, PathBuf) {
+        let dir = tmp_dir();
+        (AppState::new(dir.clone(), "dev-token".to_string()), dir)
+    }
+
+    /// Seed one repo OWNED by `owner`, COUNTABLE by the per-tenant cap: write its
+    /// durable genesis log AND wire a (dummy) git seam into the boot `repos` set — so
+    /// `count_owned_repos` enumerates it (in Local mode a real `provision` writes the
+    /// durable log but registers no runtime seam, so this mirrors what a CAS-mode
+    /// deploy — where every provision DOES leak an overlay entry — would count).
+    fn seed_owned(st: &mut AppState, dir: &std::path::Path, name: &str, owner: &str) {
+        let log = build_genesis_log(owner, "private", &tenant(owner), 1).expect("genesis");
+        let json = serde_json::to_string(log.records()).expect("serialize genesis");
+        std::fs::write(dir.join(format!("{name}.json")), json).expect("write log");
+        st.set_repo_git(
+            name,
+            std::sync::Arc::new(hugit_proto::CasObjectSource::new()),
+            gix_hash::ObjectId::empty_tree(gix_hash::Kind::Sha1),
+            std::collections::BTreeMap::new(),
+        );
     }
 
     // ── name validation ──────────────────────────────────────────────────────
@@ -500,5 +550,72 @@ mod tests {
         assert_eq!(meta.owner_tenant.as_deref(), Some("org-attacker"));
         // The victim tenant cannot read it (it is NOT theirs).
         assert!(!authorize_read(&tenant("org-victim"), &meta));
+    }
+
+    // ── per-tenant repo cap (DoS guard) ──────────────────────────────────────
+
+    #[test]
+    fn under_cap_creates_normally() {
+        // A tenant well under the cap creates without friction (the common case).
+        let (mut st, dir) = state_local_with_dir();
+        for i in 0..(MAX_REPOS_PER_TENANT - 1) {
+            seed_owned(&mut st, &dir, &format!("r{i}"), "org-a");
+        }
+        assert_eq!(
+            st.count_owned_repos("org-a"),
+            Some(MAX_REPOS_PER_TENANT - 1)
+        );
+        // One more (reaching the cap) still succeeds.
+        provision(&st, &body("last", None), &tenant("org-a"), 1).expect("under cap → 201");
+    }
+
+    #[test]
+    fn at_cap_refuses_429_with_no_leak_and_no_write() {
+        // Seed the tenant right up to the cap (durable log + a countable seam each).
+        let (mut st, dir) = state_local_with_dir();
+        for i in 0..MAX_REPOS_PER_TENANT {
+            seed_owned(&mut st, &dir, &format!("r{i}"), "org-a");
+        }
+        assert_eq!(st.count_owned_repos("org-a"), Some(MAX_REPOS_PER_TENANT));
+
+        // The next create for THIS tenant is refused — before any durable write and
+        // before the &'static RepoState leak (the DoS the cap closes).
+        let seams_before = st.git_serving_count();
+        let e = provision(&st, &body("overflow", None), &tenant("org-a"), 1)
+            .expect_err("at cap must refuse");
+        assert_eq!(e.status, 429);
+        assert_eq!(e.code, "TOO_MANY_REPOS");
+        // No genesis written (fail-closed BEFORE the persist) — the slug stays absent.
+        assert_eq!(
+            st.load_verified("overflow").unwrap_err().status,
+            404,
+            "a capped create leaves no durable log"
+        );
+        // No runtime seam leaked (the count is unchanged).
+        assert_eq!(
+            st.git_serving_count(),
+            seams_before,
+            "a capped create leaks no RepoState"
+        );
+    }
+
+    #[test]
+    fn cap_is_per_tenant_not_global() {
+        // org-a is at the cap; a DIFFERENT tenant is unaffected (the cap is scoped by
+        // owner_tenant, derived from the caller — not a global create ceiling).
+        let (mut st, dir) = state_local_with_dir();
+        for i in 0..MAX_REPOS_PER_TENANT {
+            seed_owned(&mut st, &dir, &format!("a{i}"), "org-a");
+        }
+        assert_eq!(st.count_owned_repos("org-a"), Some(MAX_REPOS_PER_TENANT));
+        assert_eq!(st.count_owned_repos("org-b"), Some(0));
+        // org-a refused, org-b creates fine.
+        assert_eq!(
+            provision(&st, &body("nope", None), &tenant("org-a"), 1)
+                .expect_err("org-a at cap")
+                .status,
+            429
+        );
+        provision(&st, &body("fresh", None), &tenant("org-b"), 1).expect("org-b under cap → 201");
     }
 }
