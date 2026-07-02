@@ -48,11 +48,139 @@
 //! only ever holds transcript blobs, of which there are none here.
 
 use hugit_contracts::context_envelope::{Authorship, Spawn, TokenCounts};
+use hugit_contracts::model_price_card::{self, PRICE_CARD_VERSION};
 use hugit_contracts::{Altitude, IntentMetrics};
 use hugit_ledger::envelope::{CaptureLevel, EnvelopeDraft, InMemoryColdStore, close_envelope};
 use hugit_refstore::EventLog;
 
+use crate::ctx::CTX_USAGE_KIND;
+
 use super::{INTENT_ENVELOPE_KIND, OpenedPr, PR_ENVELOPE_KIND, author_authz};
+
+/// The complete-or-nothing priced authoring usage for a PR's target set
+/// (WP-COST-3, Option A: real tokens × EXACT published rate = the invoice).
+///
+/// Returned by [`priced_usage`] ONLY when every contributing `ctx.usage` record
+/// priced to a real figure — see that function's contract for the honesty rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PricedUsage {
+    /// The Σ of the contributing records' token cache-splits (the summed
+    /// [`TokenCounts`] the figure was priced from — recorded for reproducibility).
+    pub(super) tokens: TokenCounts,
+    /// Σ over ALL contributing records of `cost_micros(card, record.model,
+    /// record.tokens)`, in integer micro-USD.
+    pub(super) cost_usd_micros: u64,
+}
+
+/// Fold + price the authoring `ctx.usage` records for a PR's target set
+/// (the PR id itself + each bundled intent id) — WP-COST-3, the cost-killer's
+/// final link.
+///
+/// # The honesty rule — COMPLETE-OR-NOTHING (the load-bearing invariant)
+///
+/// Prices each contributing record by ITS OWN model against the FROZEN
+/// [`model_price_card::CURRENT`] card, and returns:
+///
+/// - `Some(PricedUsage { tokens, cost_usd_micros })` — **only when there is at
+///   least one contributing record AND every one of them priced to `Some`**
+///   (a known model) AND no `u64` overflow occurred anywhere in the accumulation.
+///   `cost_usd_micros` is the EXACT `Σ(usage × published rate)`; `tokens` is the
+///   summed cache-split it was priced from.
+/// - `None` — honest-zero — when there are **no** contributing records, OR **any**
+///   contributing record's model is unknown to the card (`cost_micros → None`),
+///   OR a matching record is malformed, OR the accumulation overflows. NEVER a
+///   partial / under-counted sum, NEVER an estimate, NEVER the modeled
+///   [`IntentMetrics`] COGS (a partial cost would be UNTRUE for the intent — the
+///   #113 per-PR honesty law forbids it).
+///
+/// A record contributes iff it is a `ctx.usage` record whose
+/// `(target_kind, target_id)` is either `("pr", opened.pr_id)` or `("intent",
+/// one of opened.intent_ids)`. Records for other targets are ignored. The
+/// append-only ACCUMULATE rule holds: multiple records for one target each
+/// contribute (WP-COST-2 never dedups; land sums them here).
+pub(super) fn priced_usage(log: &EventLog, opened: &OpenedPr) -> Option<PricedUsage> {
+    use serde_json::Value;
+
+    let intents: std::collections::BTreeSet<&str> =
+        opened.intent_ids.iter().map(String::as_str).collect();
+
+    let mut contributing = 0u64;
+    let mut cost: u64 = 0;
+    let mut sum = TokenCounts {
+        input: 0,
+        output: 0,
+        cache_read: 0,
+        cache_write: 0,
+        total: 0,
+    };
+
+    for r in log.records().iter().filter(|r| r.kind == CTX_USAGE_KIND) {
+        let Ok(v) = serde_json::from_str::<Value>(&r.payload) else {
+            // A malformed ctx.usage payload we cannot even parse is not a
+            // matching contributor — skip it (an id/target we can't read cannot
+            // belong to this PR's target set). Fail-closed happens below for a
+            // record that DOES match but is malformed.
+            continue;
+        };
+        let target_id = v
+            .get("target_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let target_kind = v
+            .get("target_kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let contributes = (target_kind == "pr" && target_id == opened.pr_id)
+            || (target_kind == "intent" && intents.contains(target_id));
+        if !contributes {
+            continue;
+        }
+
+        // A CONTRIBUTING record that is malformed (no tokens block / a missing
+        // component field) → fail-closed to None for the WHOLE total (never a
+        // partial figure). `?` here short-circuits the whole function.
+        let t = v.get("tokens")?;
+        let rec = TokenCounts {
+            input: t.get("input").and_then(Value::as_u64)?,
+            output: t.get("output").and_then(Value::as_u64)?,
+            cache_read: t.get("cache_read").and_then(Value::as_u64)?,
+            cache_write: t.get("cache_write").and_then(Value::as_u64)?,
+            // total is the TokenCounts identity — recomputed (checked) below
+            // rather than trusting a possibly-absent stored field.
+            total: 0,
+        };
+        let model = v.get("model").and_then(Value::as_str).unwrap_or_default();
+
+        // Price by THIS record's OWN model. Unknown model → None → whole None
+        // (honest-zero; NEVER a fallback/nearest rate). Overflow inside
+        // cost_micros is likewise None.
+        let c = model_price_card::cost_micros(&model_price_card::CURRENT, model, &rec)?;
+        cost = cost.checked_add(c)?;
+
+        sum.input = sum.input.checked_add(rec.input)?;
+        sum.output = sum.output.checked_add(rec.output)?;
+        sum.cache_read = sum.cache_read.checked_add(rec.cache_read)?;
+        sum.cache_write = sum.cache_write.checked_add(rec.cache_write)?;
+        contributing += 1;
+    }
+
+    if contributing == 0 {
+        // No contributing records → honest-zero (None), never a fabricated figure.
+        return None;
+    }
+
+    // The summed cache-split total (checked — overflow ⇒ None, never wrong).
+    sum.total = sum
+        .input
+        .checked_add(sum.output)?
+        .checked_add(sum.cache_read)?
+        .checked_add(sum.cache_write)?;
+
+    Some(PricedUsage {
+        tokens: sum,
+        cost_usd_micros: cost,
+    })
+}
 
 /// The agent type that marks a top-level (orchestrator / human) authored unit
 /// — the rollup's D14 gate (`agent_type == "main"`, no `parent_run_id`).
@@ -313,6 +441,52 @@ pub fn capture_on_land(
     let (class, endpoint) = author_authz(opened.author_kind);
     let mut appended: u64 = 0;
 
+    // WP-COST-3 — the non-dispatch land path prices the authoring `ctx.usage`
+    // records (Option A, complete-or-nothing) into the captured envelope so the
+    // land records the REAL measured cost, not honest-zero.
+    //
+    // Gated fail-safe:
+    // - `m.full_metrics.is_none()` — the `--dispatch` path is runner-authoritative
+    //   (the fabric's §13.1 readback rides in via `full_metrics`, and the REAL cost
+    //   is submitted + recorded on the close), so we NEVER re-price or clobber it
+    //   here (that would double-attribute); and
+    // - `m.tokens == 0 && m.cost_usd_micros == 0` — an operator who hand-typed the
+    //   manual `--tokens` / `--cost-usd-micros` dogfood figures keeps them verbatim
+    //   (we only FILL IN the real usage cost when the metrics were left honest-zero).
+    //
+    // When [`priced_usage`] returns `None` (no records / any unknown model /
+    // overflow) the capture is byte-identical to today (honest-zero). When it
+    // returns `Some`, the PR envelope carries the EXACT `Σ(usage × published rate)`
+    // in `cost_usd_micros` (its ADR-0001 "derived COGS" meaning — the REAL figure,
+    // never the modeled COGS) + the summed cache-split, and the price-card snapshot
+    // version is stamped for reproducibility.
+    let priced = if m.full_metrics.is_none() && m.tokens == 0 && m.cost_usd_micros == 0 {
+        priced_usage(log, opened)
+    } else {
+        None
+    };
+    let owned_metrics;
+    let m: &EnvelopeMetricsArgs = match &priced {
+        Some(pu) => {
+            owned_metrics = EnvelopeMetricsArgs {
+                full_metrics: Some(IntentMetrics {
+                    tokens: pu.tokens.clone(),
+                    // No wall-clock at the land confirm; carry the operator's
+                    // (honest-zero) non-cost fields verbatim.
+                    wall_ms: 0,
+                    active_ms: m.active_ms,
+                    tool_calls: m.tool_calls,
+                    tool_breakdown: vec![],
+                    model_turns: m.model_turns,
+                    cost_usd_micros: pu.cost_usd_micros,
+                }),
+                ..m.clone()
+            };
+            &owned_metrics
+        }
+        None => m,
+    };
+
     // 1. one intent.envelope per bundled intent (subagent-authored).
     for intent_id in &opened.intent_ids {
         let draft = intent_draft(opened, intent_id, m);
@@ -338,7 +512,14 @@ pub fn capture_on_land(
     }
 
     // 2. the pr.envelope (top-level / D14-clean — the rollup gate accepts it).
-    let draft = pr_draft(opened, m);
+    let mut draft = pr_draft(opened, m);
+    // WP-COST-3: when the cost is a REAL priced-from-usage figure, stamp the
+    // price-card snapshot version onto the (free-text) env manifest so a rendered
+    // cost is reproducible (which price snapshot produced it). Only when priced —
+    // an honest-zero capture leaves the manifest empty, byte-identical to today.
+    if priced.is_some() {
+        draft.env_manifest = format!("price_card={PRICE_CARD_VERSION}");
+    }
     if let Ok(closed) = close_envelope(&draft, CaptureLevel::Metrics, &store)
         && let Ok(payload) = serde_json::to_string(&closed.envelope)
         && log
@@ -447,6 +628,355 @@ mod tests {
         )
         .expect("settle");
         (log, out)
+    }
+
+    /// Append an authoring `ctx.usage` record onto `log` the SAME way
+    /// `hugit ctx usage` (WP-COST-2) does — Orchestrator/Land, canonical payload.
+    #[allow(clippy::too_many_arguments)]
+    fn append_usage(
+        log: &mut EventLog,
+        target_kind: &str,
+        target_id: &str,
+        model: &str,
+        input: u64,
+        output: u64,
+        cache_read: u64,
+        cache_write: u64,
+    ) {
+        use hugit_refstore::{Endpoint, PrincipalClass};
+        let total = input + output + cache_read + cache_write;
+        let payload = json!({
+            "target_id": target_id,
+            "target_kind": target_kind,
+            "source": "provider_usage",
+            "model": model,
+            "recorded_at": 0,
+            "tokens": {
+                "input": input, "output": output,
+                "cache_read": cache_read, "cache_write": cache_write, "total": total,
+            },
+        })
+        .to_string();
+        log.append_authorized(
+            PrincipalClass::Orchestrator,
+            Endpoint::Land,
+            CTX_USAGE_KIND,
+            vec!["orchestrator:hugit".to_string()],
+            payload,
+            0,
+        )
+        .expect("ctx.usage append (Orchestrator/Land) is authorized");
+    }
+
+    /// The projected `OpenedPr` for the standard "42" bundle used by the
+    /// `priced_usage` unit tests (intents i-a / i-b).
+    fn opened_42(log: &EventLog) -> OpenedPr {
+        crate::pr::find_pr_opened(log, "42").expect("pr.opened for 42")
+    }
+
+    /// WP-COST-3: a non-dispatch land with authoring `ctx.usage` records (all
+    /// models known) captures the REAL priced cost + the summed cache-split in the
+    /// PR envelope, and stamps the price-card version for reproducibility.
+    ///
+    /// - i-a, opus-4-8, 1_000_000 input  → $5.00  = 5_000_000 µ$
+    /// - i-b, sonnet-4-6, 1_000_000 output → $15.00 = 15_000_000 µ$
+    ///
+    /// Σ = 20_000_000 micro-USD; summed tokens input=1M, output=1M, total=2M.
+    #[test]
+    fn non_dispatch_land_prices_ctx_usage_into_envelope() {
+        let mut log = EventLog::new();
+        open(
+            &mut log,
+            &OpenArgs {
+                pr_id: "42".to_string(),
+                campaign: "camp-f2".to_string(),
+                author_kind: crate::pr::AuthorKind::Orchestrator,
+                run_id: Some("run-orq".to_string()),
+                principal: None,
+                intent_ids: vec!["i-a".to_string(), "i-b".to_string()],
+                recorded_at: 1000,
+            },
+        )
+        .expect("open");
+        land(
+            &mut log,
+            &LandArgs {
+                pr_id: "42".to_string(),
+                recorded_at: 2000,
+            },
+        )
+        .expect("queue");
+        append_usage(
+            &mut log,
+            "intent",
+            "i-a",
+            "claude-opus-4-8",
+            1_000_000,
+            0,
+            0,
+            0,
+        );
+        append_usage(
+            &mut log,
+            "intent",
+            "i-b",
+            "claude-sonnet-4-6",
+            0,
+            1_000_000,
+            0,
+            0,
+        );
+        // Honest-zero metrics args (no manual flags) — the usage pricing fills in.
+        settle(
+            &mut log,
+            &SettleArgs {
+                pr_id: "42".to_string(),
+                recorded_at: 3000,
+                envelope_metrics: EnvelopeMetricsArgs::default(),
+            },
+        )
+        .expect("settle");
+
+        let pr_env = captured_pr_envelope(&log, "42").expect("pr.envelope on log");
+        assert_eq!(
+            pr_env.metrics.cost_usd_micros, 20_000_000,
+            "the REAL Σ(usage × published rate) is captured, not honest-zero"
+        );
+        // The summed cache-split rides in (reproducibility of the figure).
+        assert_eq!(pr_env.metrics.tokens.input, 1_000_000);
+        assert_eq!(pr_env.metrics.tokens.output, 1_000_000);
+        assert_eq!(pr_env.metrics.tokens.total, 2_000_000);
+        // The price-card snapshot version is stamped for reproducibility.
+        assert_eq!(
+            pr_env.snapshot.env_manifest,
+            format!("price_card={PRICE_CARD_VERSION}")
+        );
+    }
+
+    /// WP-COST-3 COMPLETE-OR-NOTHING (non-dispatch): ANY unknown model ⇒ the
+    /// captured envelope is honest-zero (never the partial known-model sum), and
+    /// the capture is byte-identical to today (no price-card stamp).
+    #[test]
+    fn non_dispatch_land_unknown_model_is_honest_zero() {
+        let mut log = EventLog::new();
+        open(
+            &mut log,
+            &OpenArgs {
+                pr_id: "42".to_string(),
+                campaign: "camp-f2".to_string(),
+                author_kind: crate::pr::AuthorKind::Orchestrator,
+                run_id: Some("run-orq".to_string()),
+                principal: None,
+                intent_ids: vec!["i-a".to_string(), "i-b".to_string()],
+                recorded_at: 1000,
+            },
+        )
+        .expect("open");
+        land(
+            &mut log,
+            &LandArgs {
+                pr_id: "42".to_string(),
+                recorded_at: 2000,
+            },
+        )
+        .expect("queue");
+        append_usage(
+            &mut log,
+            "intent",
+            "i-a",
+            "claude-opus-4-8",
+            1_000_000,
+            0,
+            0,
+            0,
+        );
+        append_usage(&mut log, "intent", "i-b", "gpt-4o", 1_000_000, 0, 0, 0);
+        settle(
+            &mut log,
+            &SettleArgs {
+                pr_id: "42".to_string(),
+                recorded_at: 3000,
+                envelope_metrics: EnvelopeMetricsArgs::default(),
+            },
+        )
+        .expect("settle");
+
+        let pr_env = captured_pr_envelope(&log, "42").expect("pr.envelope on log");
+        assert_eq!(
+            pr_env.metrics.cost_usd_micros, 0,
+            "unknown model → honest-zero WHOLE, never the partial known sum"
+        );
+        assert_eq!(pr_env.metrics.tokens.total, 0, "honest-zero tokens");
+        assert_eq!(
+            pr_env.snapshot.env_manifest, "",
+            "no price-card stamp on an honest-zero capture (byte-identical to today)"
+        );
+    }
+
+    /// WP-COST-3: a manual `--cost-usd-micros` / `--tokens` figure is NEVER
+    /// overridden by usage pricing (the operator's explicit dogfood figure wins;
+    /// usage pricing only FILLS IN a left-honest-zero capture).
+    #[test]
+    fn non_dispatch_manual_cost_flag_is_not_overridden_by_usage() {
+        let mut log = EventLog::new();
+        open(
+            &mut log,
+            &OpenArgs {
+                pr_id: "42".to_string(),
+                campaign: "camp-f2".to_string(),
+                author_kind: crate::pr::AuthorKind::Orchestrator,
+                run_id: Some("run-orq".to_string()),
+                principal: None,
+                intent_ids: vec!["i-a".to_string()],
+                recorded_at: 1000,
+            },
+        )
+        .expect("open");
+        land(
+            &mut log,
+            &LandArgs {
+                pr_id: "42".to_string(),
+                recorded_at: 2000,
+            },
+        )
+        .expect("queue");
+        append_usage(
+            &mut log,
+            "intent",
+            "i-a",
+            "claude-opus-4-8",
+            1_000_000,
+            0,
+            0,
+            0,
+        );
+        settle(
+            &mut log,
+            &SettleArgs {
+                pr_id: "42".to_string(),
+                recorded_at: 3000,
+                envelope_metrics: EnvelopeMetricsArgs {
+                    cost_usd_micros: 777,
+                    tokens: 42,
+                    ..Default::default()
+                },
+            },
+        )
+        .expect("settle");
+
+        let pr_env = captured_pr_envelope(&log, "42").expect("pr.envelope on log");
+        assert_eq!(
+            pr_env.metrics.cost_usd_micros, 777,
+            "the explicit manual cost flag wins over usage pricing"
+        );
+        assert_eq!(pr_env.metrics.tokens.total, 42, "the manual --tokens wins");
+        assert_eq!(
+            pr_env.snapshot.env_manifest, "",
+            "no price-card stamp when the manual path was used"
+        );
+    }
+
+    /// WP-COST-3 `priced_usage` unit: no contributing records → None (honest-zero).
+    #[test]
+    fn priced_usage_no_records_is_none() {
+        let (log, _out) = open_queue_settle(EnvelopeMetricsArgs::default());
+        assert_eq!(priced_usage(&log, &opened_42(&log)), None);
+    }
+
+    /// WP-COST-3 `priced_usage` unit: overflow in the Σ → None (never a panic,
+    /// never a wrong number). Two opus records each at u64::MAX input tokens
+    /// overflow the checked accumulation.
+    #[test]
+    fn priced_usage_overflow_is_none_not_panic() {
+        let mut log = EventLog::new();
+        open(
+            &mut log,
+            &OpenArgs {
+                pr_id: "42".to_string(),
+                campaign: "camp-f2".to_string(),
+                author_kind: crate::pr::AuthorKind::Orchestrator,
+                run_id: Some("run-orq".to_string()),
+                principal: None,
+                intent_ids: vec!["i-a".to_string(), "i-b".to_string()],
+                recorded_at: 1000,
+            },
+        )
+        .expect("open");
+        append_usage(
+            &mut log,
+            "intent",
+            "i-a",
+            "claude-opus-4-8",
+            u64::MAX,
+            0,
+            0,
+            0,
+        );
+        append_usage(
+            &mut log,
+            "intent",
+            "i-b",
+            "claude-opus-4-8",
+            u64::MAX,
+            0,
+            0,
+            0,
+        );
+        assert_eq!(
+            priced_usage(&log, &opened_42(&log)),
+            None,
+            "overflow → None, never a panic or a wrong number"
+        );
+    }
+
+    /// WP-COST-3 `priced_usage` unit: records for OTHER targets are ignored (they
+    /// do not contribute to this PR's priced cost).
+    #[test]
+    fn priced_usage_ignores_foreign_targets() {
+        let mut log = EventLog::new();
+        open(
+            &mut log,
+            &OpenArgs {
+                pr_id: "42".to_string(),
+                campaign: "camp-f2".to_string(),
+                author_kind: crate::pr::AuthorKind::Orchestrator,
+                run_id: Some("run-orq".to_string()),
+                principal: None,
+                intent_ids: vec!["i-a".to_string()],
+                recorded_at: 1000,
+            },
+        )
+        .expect("open");
+        // A record for an intent NOT in this PR's bundle → ignored.
+        append_usage(
+            &mut log,
+            "intent",
+            "other",
+            "claude-opus-4-8",
+            1_000_000,
+            0,
+            0,
+            0,
+        );
+        assert_eq!(
+            priced_usage(&log, &opened_42(&log)),
+            None,
+            "a foreign target contributes nothing (no in-bundle records → None)"
+        );
+        // Add an in-bundle record → now Some, counting ONLY the in-bundle one.
+        append_usage(
+            &mut log,
+            "intent",
+            "i-a",
+            "claude-opus-4-8",
+            1_000_000,
+            0,
+            0,
+            0,
+        );
+        let priced = priced_usage(&log, &opened_42(&log)).expect("an in-bundle record prices");
+        assert_eq!(priced.cost_usd_micros, 5_000_000);
+        assert_eq!(priced.tokens.input, 1_000_000, "only the in-bundle tokens");
     }
 
     /// (a) Landing WITH the metric flags appends an `intent.envelope` /
