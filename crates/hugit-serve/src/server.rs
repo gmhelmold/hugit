@@ -489,8 +489,19 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
             .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | ':'))
             .take(128)
             .collect();
+        // JSON-escape the health string defensively: it is engine-produced but may
+        // carry a quote or backslash from an error message (e.g. `err:...`).
+        let cas_batch_read: String = state
+            .cas_batch_read_health
+            .chars()
+            .flat_map(|c| match c {
+                '"' => vec!['\''],
+                '\\' => vec!['/'],
+                other => vec![other],
+            })
+            .collect();
         let body = format!(
-            r#"{{"ready":true,"git_serving":{git_serving},"git_repos":{git_repos},"version":"{version}"}}"#
+            r#"{{"ready":true,"git_serving":{git_serving},"git_repos":{git_repos},"version":"{version}","cas_batch_read":"{cas_batch_read}"}}"#
         );
         return (200, body);
     }

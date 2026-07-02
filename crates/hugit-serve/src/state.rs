@@ -498,6 +498,14 @@ pub struct AppState {
     /// nature; production never calls it) — a test that must exercise the
     /// no-god-path behavior flips the field to `false` directly.
     pub allow_dev_operator: bool,
+    /// Boot-time CAS `batch_read` self-check result for the first CAS-backed repo.
+    /// Populated once at boot by [`crate::cas::LazyCasObjectSource::batch_read_selfcheck`]
+    /// and surfaced on `/readyz` as `"cas_batch_read"`. Values: `"ok"` (healthy),
+    /// `"absent"` (batch_read succeeded but the probed object was missing),
+    /// `"empty-index"` (no objects indexed — newly provisioned repo),
+    /// `"err:<detail>"` (batch_read failed — the failure the `/readyz` surfaces),
+    /// or `"unprobed"` (no CAS-backed repo loaded at boot, Local/git-dir mode).
+    pub cas_batch_read_health: String,
 }
 
 /// The hard cap on repos a single tenant may hold in ONE engine lifetime (the boot
@@ -568,7 +576,7 @@ impl AppState {
         // at boot. Fail-closed: a content seam configured but loading NO repo is a
         // fatal boot error (a misconfigured seam refuses to start); an UN-configured
         // seam (neither var set) is the honest no-git default (empty map).
-        let repos = Self::load_repos_from_env()?;
+        let (repos, cas_batch_read_health) = Self::load_repos_from_env()?;
         // The runtime provisioning template (W-PROVISION): the CAS handles a
         // `POST /v1/repos` mints a new repo's git seam from. `Some` only in CAS mode.
         let provision = Self::provision_template_from_env()?;
@@ -603,6 +611,7 @@ impl AppState {
             // PROD default: OFF. Without `HUGIT_ALLOW_DEV_OPERATOR=1` the dev-token
             // is NOT a god-token — the public door has zero operator god-path.
             allow_dev_operator: dev_operator_allowed(),
+            cas_batch_read_health,
         })
     }
 
@@ -718,8 +727,15 @@ impl AppState {
     /// no content seam is configured (the honest no-git default). Fail-closed: a
     /// CONFIGURED seam (either var set, non-empty) that loads no repo, or any
     /// per-repo load error, is a fatal boot error.
-    fn load_repos_from_env() -> Result<std::collections::HashMap<String, RepoState>, String> {
+    ///
+    /// Also returns a short CAS `batch_read` health string for the FIRST CAS-backed
+    /// repo (via [`crate::cas::LazyCasObjectSource::batch_read_selfcheck`]), or
+    /// `"unprobed"` when no CAS-backed repo is loaded (Local/git-dir mode). The
+    /// check makes at most one extra network call at boot; an error never fails boot.
+    fn load_repos_from_env()
+    -> Result<(std::collections::HashMap<String, RepoState>, String), String> {
         let mut repos = std::collections::HashMap::new();
+        let mut cas_health: Option<String> = None;
 
         let cas_repos = std::env::var("HUGIT_SERVE_CAS_URL")
             .ok()
@@ -749,6 +765,13 @@ impl AppState {
                 // are fetched from the CAS on demand at serve time.
                 let (cas_src, root, refs) =
                     crate::cas::load_manifests_from_cas(cas.clone(), &r2, &tenant, repo)?;
+                // Boot-time CAS connectivity self-check — ONE batch_read for the
+                // first oid in the live index. Runs only for the FIRST CAS repo;
+                // additional repos share the same CAS client so a second check would
+                // be redundant. Never fails boot — records the result for /readyz.
+                if cas_health.is_none() {
+                    cas_health = Some(cas_src.batch_read_selfcheck());
+                }
                 // A shared handle to the lazy source's live oid→blake3 index, so a
                 // successful push can merge new entries into the SAME cell it reads.
                 let live_oid_index = cas_src.live_index_handle();
@@ -783,7 +806,8 @@ impl AppState {
             if repos.is_empty() {
                 return Err("HUGIT_SERVE_CAS_REPO is empty (CAS source selected)".to_string());
             }
-            return Ok(repos);
+            let health = cas_health.unwrap_or_else(|| "unprobed".to_string());
+            return Ok((repos, health));
         }
 
         match std::env::var("HUGIT_SERVE_GIT_DIR") {
@@ -815,10 +839,10 @@ impl AppState {
                 if repos.is_empty() {
                     return Err("HUGIT_SERVE_GIT_DIR is empty".to_string());
                 }
-                Ok(repos)
+                Ok((repos, "unprobed".to_string()))
             }
             // No content seam configured → the honest no-git default.
-            _ => Ok(repos),
+            _ => Ok((repos, "unprobed".to_string())),
         }
     }
 
@@ -846,6 +870,7 @@ impl AppState {
             // test asserting the no-god-path (flag-OFF) behavior sets this to
             // `false` on the returned state.
             allow_dev_operator: true,
+            cas_batch_read_health: "unprobed".to_string(),
         }
     }
 
