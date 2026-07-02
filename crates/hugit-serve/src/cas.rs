@@ -1521,6 +1521,34 @@ impl<T: CasTransport> LazyCasObjectSource<T> {
     pub fn is_empty(&self) -> bool {
         self.index.is_empty()
     }
+
+    /// Boot-time diagnostic: pick the FIRST oid in the live index, resolve its
+    /// blake3, and issue ONE real `batch_read` for it against the CoreLink CAS.
+    /// Returns a short status string for `/readyz`:
+    /// - `"ok"` — batch_read succeeded and the object bytes were present,
+    /// - `"absent"` — batch_read succeeded but the object was missing (unexpected),
+    /// - `"empty-index"` — no oids in the live index (nothing to probe),
+    /// - `"err:<detail>"` — batch_read returned an error (the failure we are hunting).
+    ///
+    /// Never panics; makes at most one network call.
+    pub fn batch_read_selfcheck(&self) -> String {
+        // Pick the first blake3 from the live index.
+        let first = {
+            let guard = self.index.0.read().unwrap_or_else(|e| e.into_inner());
+            guard.iter().next().map(|(_oid, blake3)| blake3.clone())
+        };
+        let blake3 = match first {
+            None => return "empty-index".to_string(),
+            Some(b) => b,
+        };
+        match self.cas.batch_read(&[blake3]) {
+            Err(e) => format!("err:{e}"),
+            Ok(result) => match result.into_iter().next() {
+                Some((_hash, Some(_bytes))) => "ok".to_string(),
+                _ => "absent".to_string(),
+            },
+        }
+    }
 }
 
 /// An interior-mutable, shared `git-oid → blake3` index — the live counterpart of
@@ -1691,7 +1719,10 @@ impl<T: CasTransport + Send + Sync> hugit_proto::ObjectSource for LazyCasObjectS
         // the authoritative, fail-closed path for every object.
         let read = match self.cas.batch_read(&hashes) {
             Ok(r) => r,
-            Err(_) => return,
+            Err(e) => {
+                eprintln!("[cas] batch_read failed (batch={}): {e}", hashes.len());
+                return;
+            }
         };
         // `batch_read` returns (blake3, Option<bytes>) in INPUT order == `want` order.
         let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
