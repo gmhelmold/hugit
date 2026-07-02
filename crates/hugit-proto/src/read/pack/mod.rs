@@ -148,6 +148,29 @@ pub trait ObjectSource {
     fn contains(&self, oid: &ObjectId) -> bool {
         matches!(self.get(oid), Ok(Some(_)))
     }
+
+    /// Batch-warm `oids` into any internal cache in as few backing round-trips as
+    /// possible, so a subsequent [`ObjectSource::get`] of each is served locally.
+    ///
+    /// Default: a **no-op** — an in-memory source is already "warm", so there is
+    /// nothing to prefetch. A lazy, network-backed source (the CoreLink CAS reader)
+    /// OVERRIDES this to **bulk-fetch** the objects in batches instead of one HTTP
+    /// round-trip per object. That is the whole clone-perf win: a clone's reachability
+    /// walk + pack assembly touch every reachable object, which against a per-object
+    /// CAS is O(objects) sequential GETs (~40 ms each → minutes for a large repo);
+    /// prefetching each walk frontier + the final closure collapses that to
+    /// O(objects / chunk) batch reads.
+    ///
+    /// PURELY an optimization — it NEVER changes what a later `get` returns:
+    /// - a prefetched object is still content-address **double-verified** (BLAKE3 +
+    ///   git SHA-1) before it is cached, exactly as `get` verifies it;
+    /// - any object a prefetch could not warm (absent, transport error, mismatch)
+    ///   simply takes the cold `get` path later, which fetches + fail-closes it
+    ///   authoritatively.
+    ///
+    /// Best-effort and infallible by contract: a prefetch transport error is
+    /// swallowed (never surfaced), because correctness rides entirely on `get`.
+    fn prefetch(&self, _oids: &[ObjectId]) {}
 }
 
 /// An in-process, content-addressed [`ObjectSource`].

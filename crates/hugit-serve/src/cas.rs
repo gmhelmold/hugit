@@ -1647,6 +1647,74 @@ impl<T: CasTransport + Send + Sync> hugit_proto::ObjectSource for LazyCasObjectS
     fn contains(&self, oid: &gix_hash::ObjectId) -> bool {
         self.index.contains(oid)
     }
+
+    /// Batch-warm `oids` into the decoded-object cache with ONE bulk CAS read
+    /// (internally chunked) instead of a synchronous per-object GET. This is the
+    /// clone-perf lever: the reachability walk prefetches each frontier and the
+    /// serve path prefetches the whole closure before pack assembly, so a large
+    /// clone resolves in O(objects / [`BATCH_REQUEST_CHUNK`]) batch reads rather than
+    /// O(objects) blocking round-trips.
+    ///
+    /// CONTENT-ADDRESSING IS UNCHANGED — batching alters only the TRANSPORT. Every
+    /// object is still fail-closed **double-verified** here before it is cached,
+    /// EXACTLY as [`Self::get`] does (a cache hit is served without re-verification,
+    /// so an unverified object must never enter the cache): (1) the returned bytes
+    /// must hash to the BLAKE3 the index asked for, and (2) the decoded object's git
+    /// SHA-1 must re-derive to the asked git oid.
+    ///
+    /// A batch element that is absent, mismatched, or malformed is simply NOT cached
+    /// — the later `get` takes the cold path and fail-closes it authoritatively. The
+    /// whole method is best-effort: a batch transport error is swallowed (a cold
+    /// per-object `get` still serves every object correctly).
+    fn prefetch(&self, oids: &[gix_hash::ObjectId]) {
+        // Gather the (oid, blake3) pairs we still need: not already cached AND present
+        // in the live index. Anything else needs no round-trip.
+        let mut want: Vec<(gix_hash::ObjectId, String)> = Vec::new();
+        let mut hashes: Vec<String> = Vec::new();
+        {
+            let cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+            for oid in oids {
+                if cache.get(oid).is_some() {
+                    continue; // already warm — no fetch.
+                }
+                if let Some(blake3) = self.index.get(oid) {
+                    hashes.push(blake3.clone());
+                    want.push((*oid, blake3));
+                }
+            }
+        }
+        if hashes.is_empty() {
+            return;
+        }
+        // ONE bulk read for the whole set (the client chunks it to BATCH_REQUEST_CHUNK
+        // per request + splits on 413). Best-effort: on ANY error, return — `get` is
+        // the authoritative, fail-closed path for every object.
+        let read = match self.cas.batch_read(&hashes) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        // `batch_read` returns (blake3, Option<bytes>) in INPUT order == `want` order.
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        for ((oid, expected_blake3), (_returned_hash, bytes)) in want.into_iter().zip(read) {
+            let Some(framed) = bytes else {
+                continue; // absent/gone → let `get` fail-close authoritatively.
+            };
+            // (1) BLAKE3 content-address: the bytes MUST hash to the key we asked for.
+            if cas_key(&framed) != expected_blake3 {
+                continue; // mislabeled store bytes — never cache; `get` will fail closed.
+            }
+            let Ok((kind, body)) = decode_loose(&framed) else {
+                continue; // malformed loose framing.
+            };
+            let obj = GitObject::new(kind, body);
+            // (2) git SHA-1 double-integrity: the object MUST re-derive to the asked oid.
+            match obj.try_oid() {
+                Ok(derived) if derived == oid => {}
+                _ => continue,
+            }
+            cache.insert(oid, obj);
+        }
+    }
 }
 
 /// Manifest-only boot loader: the LAZY counterpart of [`load_from_cas`].
@@ -2710,6 +2778,12 @@ mod tests {
         /// plane is NOT deployed — while single-object GET/PUT keep serving. Drives
         /// the per-object auto-fallback.
         batch_absent_status: Option<u16>,
+        /// Count of single-object `GET`s served — the clone-perf assertion asserts a
+        /// clone-sized fetch does ZERO of these (everything rides the batch plane).
+        get_calls: std::sync::atomic::AtomicUsize,
+        /// Count of `POST`s served (the batch plane) — the clone-perf assertion bounds
+        /// this to O(objects / BATCH_REQUEST_CHUNK), not O(objects).
+        post_calls: std::sync::atomic::AtomicUsize,
     }
 
     impl MapCasTransport {
@@ -2883,6 +2957,8 @@ mod tests {
 
     impl CasTransport for MapCasTransport {
         fn get(&self, url: &str, bearer: &str) -> Result<(u16, Vec<u8>), CasError> {
+            self.get_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             *self.last_get_bearer.lock().unwrap() = Some(bearer.to_string());
             let key = Self::key_from_url(url);
             match self.objects.lock().unwrap().get(&key) {
@@ -2915,6 +2991,8 @@ mod tests {
             content_type: &str,
             body: &[u8],
         ) -> Result<(u16, Vec<u8>), CasError> {
+            self.post_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // Bulk plane NOT deployed: the batch route answers 405/404 (regardless
             // of content type — the route simply does not exist).
             if let Some(code) = self.batch_absent_status {
@@ -3987,6 +4065,241 @@ mod tests {
             again.oid(),
             oids[0],
             "miss-after-evict re-serves the exact bytes (byte-identical)"
+        );
+    }
+
+    // ── W-CLONE-PERF: batch-prefetch clone-fetch path ─────────────────────────
+
+    /// Add one object to the CAS seed + oid→blake3 index, also recording it in
+    /// `objects` so the SAME closure can be inserted into a per-object
+    /// `CasObjectSource` for the byte-identical cross-check. Returns its git oid.
+    fn add_obj(
+        kind: ObjectKind,
+        body: Vec<u8>,
+        seeded: &mut BTreeMap<String, Vec<u8>>,
+        index: &mut BTreeMap<gix_hash::ObjectId, String>,
+        objects: &mut Vec<(ObjectKind, Vec<u8>)>,
+    ) -> gix_hash::ObjectId {
+        let framing = encode_loose(kind, &body);
+        let blake3 = cas_key(&framing);
+        let oid = git_oid(kind, &body);
+        seeded.insert(blake3.clone(), framing);
+        index.insert(oid, blake3);
+        objects.push((kind, body));
+        oid
+    }
+
+    /// Build a WIDE-FLAT git closure (1 commit → 1 root tree → `n_blobs` blobs).
+    /// Returns the CAS seed map, the oid→blake3 index, the commit tip, and the flat
+    /// object list (for a per-object `CasObjectSource` mirror). Wide-flat so the BFS
+    /// walk resolves the bulk of the closure in ONE frontier (the blobs) → the batch
+    /// count is ≈ `n_blobs / BATCH_REQUEST_CHUNK`, provable and deterministic.
+    #[allow(clippy::type_complexity)]
+    fn build_wide_closure(
+        n_blobs: usize,
+    ) -> (
+        BTreeMap<String, Vec<u8>>,
+        BTreeMap<gix_hash::ObjectId, String>,
+        gix_hash::ObjectId,
+        Vec<(ObjectKind, Vec<u8>)>,
+    ) {
+        let mut seeded = BTreeMap::new();
+        let mut index = BTreeMap::new();
+        let mut objects = Vec::new();
+
+        // The blobs, plus their (name, oid) for the root tree (git-canonical order).
+        let mut entries: Vec<(String, gix_hash::ObjectId)> = Vec::with_capacity(n_blobs);
+        for i in 0..n_blobs {
+            let body = format!("clone-perf blob #{i}\n").into_bytes();
+            let oid = add_obj(
+                ObjectKind::Blob,
+                body,
+                &mut seeded,
+                &mut index,
+                &mut objects,
+            );
+            entries.push((format!("f{i:06}"), oid));
+        }
+        entries.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        let mut tree_body = Vec::new();
+        for (name, oid) in &entries {
+            tree_body.extend_from_slice(b"100644 ");
+            tree_body.extend_from_slice(name.as_bytes());
+            tree_body.push(0);
+            tree_body.extend_from_slice(oid.as_bytes());
+        }
+        let tree_oid = add_obj(
+            ObjectKind::Tree,
+            tree_body,
+            &mut seeded,
+            &mut index,
+            &mut objects,
+        );
+
+        let commit_body = format!(
+            "tree {tree_oid}\n\
+             author a <a@a> 0 +0000\n\
+             committer a <a@a> 0 +0000\n\
+             \n\
+             clone-perf\n"
+        )
+        .into_bytes();
+        let commit_oid = add_obj(
+            ObjectKind::Commit,
+            commit_body,
+            &mut seeded,
+            &mut index,
+            &mut objects,
+        );
+        (seeded, index, commit_oid, objects)
+    }
+
+    /// ACCEPTANCE (W-CLONE-PERF ①): a clone-sized fetch over the lazy CAS source
+    /// issues `O(objects / BATCH_REQUEST_CHUNK)` BATCH reads and ZERO per-object
+    /// GETs — proving the walk + assembly ride the bulk plane, not one blocking HTTP
+    /// GET per object (the ~300 s wedge this WP fixes).
+    #[test]
+    fn clone_sized_fetch_batches_reads_and_does_no_per_object_gets() {
+        use hugit_proto::{WantHave, serve_fetch};
+        use std::sync::atomic::Ordering;
+
+        // ≈6862 objects (the real hugit clone size): 6860 blobs + root tree + commit.
+        const N_BLOBS: usize = 6860;
+        let (seeded, index, commit_oid, _objects) = build_wide_closure(N_BLOBS);
+        let transport = MapCasTransport {
+            objects: std::sync::Mutex::new(seeded),
+            ..MapCasTransport::default()
+        };
+        let source = LazyCasObjectSource::new(index, client_with(transport));
+
+        let request = WantHave {
+            wants: vec![commit_oid],
+            haves: Vec::new(),
+            done: true,
+        };
+        let pack = serve_fetch(&source, &request).expect("clone-sized fetch succeeds");
+        assert_eq!(
+            pack.object_count(),
+            N_BLOBS + 2,
+            "the whole closure (blobs + tree + commit) is packed"
+        );
+
+        // Fetch accounting on the transport itself.
+        let gets = source.cas.transport.get_calls.load(Ordering::Relaxed);
+        let posts = source.cas.transport.post_calls.load(Ordering::Relaxed);
+        assert_eq!(
+            gets, 0,
+            "a batched clone must do ZERO single-object GETs (got {gets})"
+        );
+        // Frontier prefetches: [commit] (1) + [tree] (1) + [6860 blobs] → ceil(6860/256)=27,
+        // and the assembly prefetch finds everything warm → 0. So ≈29 POSTs, and
+        // ALWAYS O(objects/chunk), never O(objects).
+        let ceil_chunks = N_BLOBS.div_ceil(BATCH_REQUEST_CHUNK);
+        assert!(
+            posts <= ceil_chunks + 3,
+            "batch POSTs must be O(objects/{BATCH_REQUEST_CHUNK}): got {posts}, \
+             expected ≤ {} (= {ceil_chunks} + 3)",
+            ceil_chunks + 3
+        );
+        assert!(
+            posts < N_BLOBS,
+            "batching, not per-object: {posts} POSTs ≪ {N_BLOBS} objects"
+        );
+    }
+
+    /// ACCEPTANCE (W-CLONE-PERF ②): the batched lazy fetch assembles a BYTE-IDENTICAL
+    /// pack to the per-object `CasObjectSource` path — batching changes the transport,
+    /// never the produced closure or its bytes.
+    #[test]
+    fn batched_lazy_fetch_assembles_same_pack_as_per_object() {
+        use hugit_proto::{WantHave, serve_fetch};
+
+        const N_BLOBS: usize = 400;
+        let (seeded, index, commit_oid, objects) = build_wide_closure(N_BLOBS);
+
+        // Per-object reference source.
+        let mut per_object = hugit_proto::CasObjectSource::new();
+        for (kind, body) in &objects {
+            per_object.insert_raw(*kind, body.clone());
+        }
+
+        // Batched lazy source over the same closure.
+        let transport = MapCasTransport {
+            objects: std::sync::Mutex::new(seeded),
+            ..MapCasTransport::default()
+        };
+        let lazy = LazyCasObjectSource::new(index, client_with(transport));
+
+        let request = WantHave {
+            wants: vec![commit_oid],
+            haves: Vec::new(),
+            done: true,
+        };
+        let ref_pack = serve_fetch(&per_object, &request).expect("per-object fetch");
+        let lazy_pack = serve_fetch(&lazy, &request).expect("batched lazy fetch");
+
+        assert_eq!(
+            ref_pack.object_ids, lazy_pack.object_ids,
+            "same closure, same pack order"
+        );
+        assert_eq!(
+            ref_pack.bytes, lazy_pack.bytes,
+            "the batched path produces byte-identical pack bytes"
+        );
+    }
+
+    /// ACCEPTANCE (W-CLONE-PERF ③): content-addressing is UNCHANGED by batching — a
+    /// mislabeled (poisoned) object in a batch is NEVER cached by `prefetch`, so the
+    /// subsequent `get` takes the cold path and FAILS CLOSED (never serves the
+    /// mislabeled bytes). The good object in the same batch still serves warm.
+    #[test]
+    fn prefetch_batch_poison_still_fails_closed() {
+        use hugit_proto::ObjectSource as _;
+
+        // A good object.
+        let good_body = b"good\n";
+        let good_framing = encode_loose(ObjectKind::Blob, good_body);
+        let good_blake3 = cas_key(&good_framing);
+        let good_oid = git_oid(ObjectKind::Blob, good_body);
+
+        // A poisoned entry: the index CLAIMS `claimed_blake3` for `poison_oid`, but the
+        // CAS stores bytes under that key which do NOT hash to it (a corrupt store).
+        let poison_body = b"poison\n";
+        let poison_oid = git_oid(ObjectKind::Blob, poison_body);
+        let claimed_blake3 = cas_key(&encode_loose(ObjectKind::Blob, poison_body));
+        let tampered = encode_loose(ObjectKind::Blob, b"tampered bytes\n");
+        assert_ne!(
+            cas_key(&tampered),
+            claimed_blake3,
+            "the store entry is mislabeled"
+        );
+
+        let mut seeded = BTreeMap::new();
+        seeded.insert(good_blake3.clone(), good_framing);
+        seeded.insert(claimed_blake3.clone(), tampered);
+        let mut index = BTreeMap::new();
+        index.insert(good_oid, good_blake3);
+        index.insert(poison_oid, claimed_blake3);
+        let transport = MapCasTransport {
+            objects: std::sync::Mutex::new(seeded),
+            ..MapCasTransport::default()
+        };
+        let source = LazyCasObjectSource::new(index, client_with(transport));
+
+        // Prefetch BOTH in one batch: warms the good one, must NOT cache the poison.
+        source.prefetch(&[good_oid, poison_oid]);
+
+        // The good object serves (from the warm cache), byte-identical.
+        assert_eq!(
+            source.get(&good_oid).unwrap().unwrap().oid(),
+            good_oid,
+            "the good object in the batch serves correctly"
+        );
+        // The poisoned object was NOT cached → `get` cold-fetches + FAILS CLOSED.
+        let err = source.get(&poison_oid).unwrap_err();
+        assert!(
+            matches!(err, PackError::Source(_)),
+            "a poisoned batch object must fail closed on get, got {err:?}"
         );
     }
 
