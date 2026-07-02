@@ -82,6 +82,7 @@
 //! git-served).
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tiny_http::{Header, Method, Request, Response};
@@ -170,16 +171,20 @@ pub fn respond_git(
             // POST must 404 for every case the advertise hides (no split-route
             // bypass where a pack is served for a repo the advertise concealed).
             let principal = clone_principal(state, request.headers());
-            match upload_pack(state, repo, body, &principal) {
-                Some(out) => {
-                    // The clone/fetch PACK — the one git response that can be large.
-                    // `send` routes it through `respond_bounded`, so a stalled drainer
-                    // is abandoned at the deadline instead of wedging the accept loop.
-                    let body_len = out.len();
-                    let resp = Response::from_data(out)
-                        .with_status_code(200)
-                        .with_header(git_content_type("application/x-git-upload-pack-result"));
-                    send(request, resp, body_len, io_budget);
+            // Do the CHEAP work INLINE on the accept loop — principal, read-authz +
+            // ref snapshot, want parse + want-validation (which caps the walk ROOT
+            // before any worker exists). On any failure → 404 inline, no worker.
+            match prepare_upload_pack(state, repo, body, &principal) {
+                Some((source, want)) => {
+                    // Then HAND the whole heavy job OFF to a detached worker that OWNS
+                    // this connection and RESPONDS itself (the reachability walk + pack
+                    // assembly are one synchronous CAS fetch PER object — seconds on a
+                    // real repo). The accept loop returns to accept IMMEDIATELY — it is
+                    // NOT blocked for the clone's duration, so `/readyz` + other
+                    // requests stay answerable while the clone builds. A spawn failure
+                    // under a clone flood sheds a fast inline 503 (never a runaway walk
+                    // inline). See `spawn_upload_pack_worker`.
+                    spawn_upload_pack_worker(source, want, request, io_budget);
                 }
                 None => respond_not_found(request, io_budget),
             }
@@ -318,12 +323,34 @@ pub(crate) fn pick_default_branch(refs: &BTreeMap<String, String>) -> Option<Str
         .cloned()
 }
 
-/// Handle a `git-upload-pack` POST: parse the want/have negotiation, assemble the
-/// pack, and frame the v1 result (`NAK` + raw packfile). `None` (→ 404) on the
-/// same not-live / unsafe / not-public / malformed conditions as the advertisement.
-fn upload_pack(state: &AppState, repo: &str, body: &[u8], principal: &[String]) -> Option<Vec<u8>> {
+/// A shorthand for the object source shared with a detached clone worker: an owned
+/// `Arc` over the repo's `Send + Sync` [`hugit_proto::ObjectSource`]. Cloning the
+/// `Arc` gives the worker a `'static` handle that borrows nothing from the accept
+/// loop; `Sync` makes concurrent clone workers reading the same CAS safe.
+type SharedSource = Arc<dyn hugit_proto::ObjectSource + Send + Sync>;
+
+/// The CHEAP, INLINE half of a `git-upload-pack` POST: derive the read-gated ref
+/// view, clone the object source, parse the want/have negotiation, and VALIDATE the
+/// wants — all fast, all on the accept loop, BEFORE any worker is spawned. Returns
+/// the `(source, effective_want)` a worker needs to assemble the pack, or `None`
+/// (→ 404) on the SAME not-live / unsafe / not-public / malformed / unadvertised-want
+/// conditions as the advertisement (no split-route bypass, no existence oracle).
+///
+/// Keeping the want-validation ([`wants_all_advertised`]) here — on the loop, before
+/// the hand-off — is deliberate: it caps the reachability walk's ROOT to a real,
+/// read-authorized tip, so a client can NEVER make a worker walk from an
+/// attacker-chosen oid. The heavy walk itself runs OFF the loop
+/// ([`spawn_upload_pack_worker`]).
+fn prepare_upload_pack(
+    state: &AppState,
+    repo: &str,
+    body: &[u8],
+    principal: &[String],
+) -> Option<(SharedSource, hugit_proto::WantHave)> {
     let refs = git_refs_for(state, repo, principal)?;
-    let source = &state.repo_state(repo)?.git_source;
+    // CLONE the Arc object source (it is `Send + Sync + 'static`) so an owned handle
+    // can move into the detached worker without borrowing `state`.
+    let source: SharedSource = Arc::clone(&state.repo_state(repo)?.git_source);
 
     // Real git appends a capability list to the FIRST `want` line of a v1/v0
     // upload-pack request (`want <oid> multi_ack side-band-64k …`). The proto's
@@ -334,17 +361,16 @@ fn upload_pack(state: &AppState, repo: &str, body: &[u8], principal: &[String]) 
     let cleaned = strip_want_have_caps(body);
     let request = hugit_proto::WantHave::parse(&cleaned).ok()?;
 
-    // A clone sends wants but no haves; a fetch sends both. When the client sent
-    // no wants at all (e.g. an ls-refs-only probe in a v2 attempt, or an empty
-    // body) treat it as "want every advertised tip" — a full clone — using the
-    // SAME ref view the advertisement was built from, so wants always resolve in
-    // the CAS.
-    let pack = if request.wants.is_empty() {
+    // Resolve the effective, OWNED request to hand the worker. A clone sends wants
+    // but no haves; a fetch sends both. When the client sent no wants at all (e.g.
+    // an ls-refs-only probe in a v2 attempt, or an empty body) treat it as "want
+    // every advertised tip" — a full clone — using the SAME ref view the advertise
+    // was built from, so wants always resolve in the CAS.
+    let effective_req = if request.wants.is_empty() {
         let adv = hugit_proto::RefAdvertisement::from_view(&refs);
-        let clone_req = hugit_proto::WantHave::clone_all(&adv).ok()?;
         // The full-clone wants are DERIVED from `refs` (every advertised tip), so
         // they are advertised by construction — no validation needed.
-        hugit_proto::serve_fetch(source.as_ref(), &clone_req).ok()?
+        hugit_proto::WantHave::clone_all(&adv).ok()?
     } else {
         // SECURITY (want-validation): every explicit `want` MUST be an advertised
         // ref tip for THIS principal (the same `refs` the advertise exposed). A
@@ -353,19 +379,143 @@ fn upload_pack(state: &AppState, repo: &str, body: &[u8], principal: &[String]) 
         // the `uploadpack.allowReachableSHA1InWant`-off default. This closes a
         // client fishing for an unadvertised object AND caps the reachability walk
         // to a real tip's closure (defence-in-depth for the serve_fetch DoS: a
-        // caller cannot force a walk from an attacker-chosen root).
+        // caller cannot force a walk from an attacker-chosen root). UNCHANGED — the
+        // validation stays INLINE on the loop, BEFORE the worker is spawned.
         if !wants_all_advertised(&refs, &request.wants) {
             return None;
         }
-        hugit_proto::serve_fetch(source.as_ref(), &request).ok()?
+        request
     };
 
+    Some((source, effective_req))
+}
+
+/// Assemble the clone/fetch pack and frame the v1 upload-pack result (the `NAK`
+/// pkt-line then the raw packfile). `None` (→ 404) when [`hugit_proto::serve_fetch`]
+/// fails — incomplete closure, decode error, or its own internal
+/// [`hugit_proto::SERVE_FETCH_BUDGET`] (300 s, the sole runaway bound now the loop
+/// never waits). Every failure is fail-CLOSED to no-pack, NEVER a truncated one.
+///
+/// Pure + `state`-free (an `&dyn ObjectSource` + an owned request in, bytes out), so
+/// it is directly unit-testable AND safe to run on a detached worker: it holds no
+/// lock and mutates no shared state.
+fn build_upload_pack_bytes(
+    source: &dyn hugit_proto::ObjectSource,
+    request: &hugit_proto::WantHave,
+) -> Option<Vec<u8>> {
+    let pack = hugit_proto::serve_fetch(source, request).ok()?;
     // Smart-HTTP v1 upload-pack result: the NAK pkt-line (we run no multi-ack
     // negotiation — single round, "done"), then the raw packfile bytes.
     let mut out = Vec::new();
     pkt_line(&mut out, b"NAK\n");
     out.extend_from_slice(&pack.bytes);
     Some(out)
+}
+
+/// The DETACHED-worker half of a `git-upload-pack` POST: assemble the pack (the heavy
+/// per-object CAS walk) and WRITE the response to `request` itself. Runs entirely on
+/// the worker thread — the accept loop has already returned to accept. On any assembly
+/// failure it responds a clean 404 (fail-closed, never a truncated pack). The PACK
+/// write rides [`send`] → `respond_bounded`, so a stalled/zero-window drainer is
+/// abandoned at `io_budget` on THIS worker (not the loop), never a thread wedged
+/// forever on the socket.
+fn serve_upload_pack_response(
+    source: SharedSource,
+    want: hugit_proto::WantHave,
+    request: Request,
+    io_budget: Duration,
+) {
+    match build_upload_pack_bytes(source.as_ref(), &want) {
+        Some(out) => {
+            let body_len = out.len();
+            let resp = Response::from_data(out)
+                .with_status_code(200)
+                .with_header(git_content_type("application/x-git-upload-pack-result"));
+            send(request, resp, body_len, io_budget);
+        }
+        None => respond_not_found(request, io_budget),
+    }
+}
+
+/// Hand the upload-pack RESPONSE to a DETACHED worker that OWNS `request` and writes
+/// the reply itself, FREEING the accept loop immediately: it returns to accept without
+/// waiting for the ~seconds-long clone, so `/readyz` + other requests stay answerable
+/// while the pack builds. This is the property the plain `run_bounded` (which BLOCKS
+/// the caller up to its budget) could not give.
+///
+/// AVAILABILITY / DoS: a spawn failure (thread exhaustion under a clone flood) SHEDS a
+/// fast inline 503 — it NEVER runs the heavy walk inline (which would wedge the single
+/// accept thread). So a flood ties up bounded, shed-able WORKER threads (each capped by
+/// the proto's [`hugit_proto::SERVE_FETCH_BUDGET`]), and the accept loop stays free.
+/// The `request` is never lost on a spawn failure: [`spawn_with_payload`] returns the
+/// payload back so we can respond a real 503.
+fn spawn_upload_pack_worker(
+    source: SharedSource,
+    want: hugit_proto::WantHave,
+    request: Request,
+    io_budget: Duration,
+) {
+    let payload = (source, want, request, io_budget);
+    if let Err((_source, _want, request, io_budget)) = spawn_with_payload(payload, |p| {
+        let (source, want, request, io_budget) = p;
+        serve_upload_pack_response(source, want, request, io_budget);
+    }) {
+        // Spawn failed (thread exhaustion) — shed inline, do NOT walk inline.
+        respond_git_overloaded(request, io_budget);
+    }
+}
+
+/// Run `job(payload)` on a DETACHED worker thread, freeing the caller IMMEDIATELY —
+/// it does NOT wait for `job`. Returns `Ok(())` when the worker was spawned (the
+/// payload, including any owned `Request`, now lives on the worker), or `Err(payload)`
+/// when the worker could NOT be spawned (thread exhaustion) so the caller can recover
+/// — the payload is HANDED BACK, never lost/dropped, so an owned connection can be
+/// shed cleanly rather than silently closed.
+///
+/// The payload rides a one-slot [`std::sync::mpsc::sync_channel`]: the worker `recv`s
+/// it once and runs `job`. The `send` is non-blocking (capacity 1, exactly one send),
+/// so the caller returns at once. `P: Send + 'static` because it crosses the thread;
+/// `Request` is `Send`, so an owned connection is a valid payload.
+fn spawn_with_payload<P, F>(payload: P, job: F) -> Result<(), P>
+where
+    P: Send + 'static,
+    F: FnOnce(P) + Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::sync_channel::<P>(1);
+    match std::thread::Builder::new()
+        .name("hugit-clone".into())
+        .spawn(move || {
+            if let Ok(p) = rx.recv() {
+                job(p);
+            }
+        }) {
+        Ok(_) => {
+            // Capacity-1 buffer, single send, receiver alive → never blocks.
+            let _ = tx.send(payload);
+            Ok(())
+        }
+        // Spawn failed: `rx` (and the un-run `job`) drop; the payload was never moved
+        // into the closure, so hand it back to the caller intact.
+        Err(_) => Err(payload),
+    }
+}
+
+/// Shed a fast `503` for a git request the engine cannot service right now (a clone
+/// worker could not be spawned under load). Plain text so `git` surfaces it; small, so
+/// the [`send`] write stays on the inline (non-blocking) path — the loop is never
+/// blocked by the shed itself.
+fn respond_git_overloaded(request: Request, io_budget: Duration) {
+    let body = b"engine overloaded serving clones; retry shortly\n".to_vec();
+    let body_len = body.len();
+    send(
+        request,
+        Response::from_data(body).with_status_code(503).with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..])
+                .expect("static content-type"),
+        ),
+        body_len,
+        io_budget,
+    );
 }
 
 /// Whether EVERY `want` oid is an advertised ref tip in `refs` (the map values).
@@ -1679,5 +1829,155 @@ mod want_validation_tests {
         // Empty wants → vacuously ok (the full-clone path derives wants from refs
         // and never reaches this check).
         assert!(wants_all_advertised(&refs, &[]));
+    }
+}
+
+/// The off-loop clone contract (FIX-CLONE-OFFLOOP, worker-responds shape): a real
+/// (multi-object) clone ASSEMBLES byte-complete; a failing source is fail-closed to
+/// no-pack (never truncated); and, crucially, the hand-off FREES the caller
+/// IMMEDIATELY — a slow clone runs out-of-band on the detached worker while the
+/// accept-loop side returns at once, so `/readyz` stays answerable. That last is the
+/// property the earlier blocking (`run_bounded`) shape did NOT have.
+#[cfg(test)]
+mod offloop_tests {
+    use super::*;
+    use hugit_proto::{CasObjectSource, GitObject, ObjectKind, WantHave};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    fn blob(src: &mut CasObjectSource, body: &str) -> gix_hash::ObjectId {
+        src.insert(GitObject::new(ObjectKind::Blob, body.as_bytes().to_vec()))
+    }
+    fn tree(src: &mut CasObjectSource, name: &str, oid: gix_hash::ObjectId) -> gix_hash::ObjectId {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"100644");
+        out.push(b' ');
+        out.extend_from_slice(name.as_bytes());
+        out.push(0);
+        out.extend_from_slice(oid.as_bytes());
+        src.insert(GitObject::new(ObjectKind::Tree, out))
+    }
+    fn commit(src: &mut CasObjectSource, tree_oid: gix_hash::ObjectId) -> gix_hash::ObjectId {
+        let body =
+            format!("tree {tree_oid}\nauthor a <a@a> 0 +0000\ncommitter a <a@a> 0 +0000\n\nmsg\n");
+        src.insert(GitObject::new(ObjectKind::Commit, body.into_bytes()))
+    }
+
+    /// A trivial commit→tree→blob graph plus the commit tip.
+    fn sample() -> (CasObjectSource, gix_hash::ObjectId) {
+        let mut src = CasObjectSource::new();
+        let b = blob(&mut src, "hello\n");
+        let t = tree(&mut src, "f.txt", b);
+        let c = commit(&mut src, t);
+        (src, c)
+    }
+
+    fn want(tip: gix_hash::ObjectId) -> WantHave {
+        WantHave {
+            wants: vec![tip],
+            haves: Vec::new(),
+            done: true,
+        }
+    }
+
+    /// A real (multi-object) clone ASSEMBLES byte-complete: the v1 `NAK` pkt-line +
+    /// a `PACK` stream carrying the full commit→tree→blob closure. This is the heavy
+    /// step the worker runs; it has NO tight outer cutoff (the loop never waits), so
+    /// a real ~50 s clone that used to 404 at the old 45 s budget now completes (only
+    /// the generous 300 s proto runaway-bound applies).
+    #[test]
+    fn multiobject_clone_assembles_byte_complete() {
+        let (src, c) = sample();
+        let out = build_upload_pack_bytes(&src, &want(c))
+            .expect("a multi-object clone must assemble a complete pack");
+        assert!(
+            out.starts_with(b"0008NAK\n"),
+            "the v1 upload-pack result must open with the NAK pkt-line"
+        );
+        assert!(
+            out.windows(4).any(|w| w == b"PACK"),
+            "the framed result must carry a real PACK stream (no truncation)"
+        );
+    }
+
+    /// A `want` for an object the source does not hold → `serve_fetch` errors →
+    /// `None` — fail-CLOSED to no-pack (→ 404), NEVER a truncated/partial pack.
+    #[test]
+    fn missing_closure_is_fail_closed_no_pack() {
+        let (src, _c) = sample();
+        let bogus = gix_hash::ObjectId::from_hex("a".repeat(40).as_bytes()).unwrap();
+        assert!(
+            build_upload_pack_bytes(&src, &want(bogus)).is_none(),
+            "an unresolvable want must fail closed (no pack), never a truncated one"
+        );
+    }
+
+    /// THE availability property: the hand-off FREES the caller IMMEDIATELY while the
+    /// job runs out-of-band on the detached worker. We spawn a job that SLEEPS ~400 ms
+    /// before flipping a flag; `spawn_with_payload` must return in well under that
+    /// (the caller is not blocked on the job), and the flag must still be UNSET right
+    /// after it returns (the job is genuinely still running elsewhere). This is the
+    /// exact accept-loop-not-wedged guarantee the clone POST now has — a slow clone
+    /// no longer blocks the loop for its duration.
+    #[test]
+    fn handoff_frees_the_caller_immediately_job_runs_out_of_band() {
+        let done = Arc::new(AtomicBool::new(false));
+        let done_worker = Arc::clone(&done);
+
+        let started = Instant::now();
+        let res = spawn_with_payload(done_worker, |flag| {
+            std::thread::sleep(Duration::from_millis(400));
+            flag.store(true, Ordering::SeqCst);
+        });
+        let handoff = started.elapsed();
+
+        assert!(res.is_ok(), "the worker must spawn");
+        assert!(
+            handoff < Duration::from_millis(100),
+            "the caller must be FREED at hand-off, not blocked for the ~400ms job \
+             (hand-off took {handoff:?})"
+        );
+        assert!(
+            !done.load(Ordering::SeqCst),
+            "the job must still be running out-of-band on the worker right after \
+             hand-off — the caller did NOT wait for it"
+        );
+
+        // Sanity: the worker DOES complete the job out-of-band (the response is not
+        // silently dropped). Poll rather than a fixed sleep to avoid flake.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done.load(Ordering::SeqCst) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            done.load(Ordering::SeqCst),
+            "the detached worker must complete the job out-of-band"
+        );
+    }
+
+    /// The payload (an owned value the real path uses to carry the `Request`) is
+    /// delivered INTACT to the worker across the hand-off channel — proving the
+    /// response is served from the moved-in connection, not lost.
+    #[test]
+    fn handoff_delivers_the_payload_to_the_worker() {
+        let seen = Arc::new(std::sync::Mutex::new(None::<u64>));
+        let seen_worker = Arc::clone(&seen);
+        spawn_with_payload(4242u64, move |v| {
+            *seen_worker.lock().unwrap() = Some(v);
+        })
+        .expect("spawn");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(v) = *seen.lock().unwrap() {
+                assert_eq!(v, 4242, "the worker must receive the exact payload");
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the worker never received the payload"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }

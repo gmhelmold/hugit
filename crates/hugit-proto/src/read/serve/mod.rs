@@ -25,24 +25,33 @@ use crate::read::pack::{ObjectKind, ObjectSource, PackAssembly, PackError, assem
 /// [`serve_clone`]).
 ///
 /// The reachability walk + pack assembly each issue one synchronous CAS (R2)
-/// fetch PER object, on the engine's single accept thread. A full clone of a large
-/// repo (or any repo against a cold CAS) is therefore up to `2 × #objects`
-/// sequential fetches that block the WHOLE accept loop — including `/readyz` — for
-/// minutes: the same single-thread latency-DoS class as the code-search / tree-diff
-/// wedges. This deadline bounds that.
+/// fetch PER object. A full clone of a large repo (or any repo against a cold CAS)
+/// is therefore up to `2 × #objects` sequential fetches.
 ///
-/// FAIL-CLEAN, NOT truncate — the crucial distinction from the informational reads
-/// (`tree_diff`, code-search) whose budget yields a PARTIAL result: a clone/fetch
-/// pack MUST be complete. A packfile missing an object reachable from a `want` is a
-/// CORRUPT clone — git aborts mid-checkout on the broken object, or (worse) the
-/// client believes it holds a complete history it does not. So exceeding this
-/// deadline ABORTS the whole fetch with [`ServeError::DeadlineExceeded`] (the
-/// upload_pack handler maps it to no-pack, never a half-written one). A legitimate
-/// clone that finishes under the budget is byte-identical and unaffected; only a
-/// pathologically large or cold-CAS-slow walk is bounded. Chosen GENEROUS (30–60s
-/// ballpark; the current repos clone well under it) so it trips ONLY a runaway,
-/// never a real clone.
-pub const SERVE_FETCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(45);
+/// **This budget bounds the WORKER, not the accept loop.** The `hugit-serve`
+/// upload-pack handler runs the whole [`serve_fetch`] OFF the single accept thread
+/// on a DETACHED worker that owns the client connection and responds itself; the
+/// accept loop hands off and returns to accept IMMEDIATELY (it keeps serving
+/// `/readyz` + other requests) and NEVER waits on this budget. So this deadline is
+/// the worker's SOLE bound, and it plays exactly one role:
+///
+/// * It caps a truly runaway / cold-CAS walk so the detached worker eventually
+///   gives up (fail-clean → the client gets no pack) instead of walking forever and
+///   leaking a thread. Because the loop no longer imposes any shorter outer cutoff,
+///   this is the ONLY thing that lets a real, legitimately slow clone COMPLETE — so
+///   it is chosen GENEROUS (300 s), far above a real clone's transfer time (a real
+///   hugit clone, ~6862 objects, is ~50 s), and it must never trip a legitimate
+///   clone (the exact regression a too-tight 45 s budget caused: it 404'd at 45 s).
+///
+/// FAIL-CLEAN, NOT truncate — a clone/fetch pack MUST be complete. A packfile
+/// missing an object reachable from a `want` is a CORRUPT clone (git aborts
+/// mid-checkout, or the client believes it holds a history it does not). So
+/// exceeding this deadline ABORTS the whole fetch with
+/// [`ServeError::DeadlineExceeded`] (the handler maps it to no-pack, never a
+/// half-written one). A legitimate clone that finishes under the budget is
+/// byte-identical and unaffected; only a pathologically large or cold-CAS-slow walk
+/// is bounded.
+pub const SERVE_FETCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Errors raised while serving a clone or fetch.
 #[derive(Debug, thiserror::Error)]
