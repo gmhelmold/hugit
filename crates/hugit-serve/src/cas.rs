@@ -2483,6 +2483,14 @@ pub fn commit_cas_push_manifests<R: R2GetVersioned + R2PutConditional>(
 ///    git delete-ref drops only the ref pointer, never the objects (no GC), so the
 ///    deleted tip's closure stays resolvable for any other ref that names it.
 ///
+/// `expected` is the deleter's per-ref old-oid (the value `handle_delete_ref`'s
+/// stale-check already validated against the live `git_refs` snapshot) — threaded into
+/// the manifest step so the conditional refs.json write RE-VALIDATES it against the
+/// FRESH base on every attempt (the SYMMETRIC counterpart of [`finalize_cas_push`]'s
+/// FIX-IFMATCH-REMERGE). A cross-instance same-ref UPDATE that landed after this
+/// delete's stale-check is caught there and fails closed (`CasPushError::Manifest`, the
+/// ref is NOT removed) rather than blindly deleting the concurrent update.
+///
 /// Each step is fail-closed → a distinct [`CasPushError`] on fault. Returns `Ok(())`
 /// ONLY when the event is durably appended AND `refs.json` is durably rewritten without
 /// the ref. NO objects are flushed (a delete uploads nothing).
@@ -2491,6 +2499,7 @@ pub fn finalize_cas_delete<R, P>(
     tenant: &str,
     repo: &str,
     ref_name: &str,
+    expected: &str,
     persist_log: P,
 ) -> Result<(), CasPushError>
 where
@@ -2500,8 +2509,10 @@ where
     // 1. log FIRST — the compare-and-swap append of the `ref.delete` event. The ref is
     //    never dropped from refs.json without the removal recorded on the log.
     persist_log().map_err(CasPushError::Persist)?;
-    // 2. manifest — drop the ref pointer; oid-index untouched (objects stay in CAS).
-    remove_cas_ref_from_manifest(r2, tenant, repo, ref_name).map_err(CasPushError::Manifest)
+    // 2. manifest — drop the ref pointer (re-validating `expected` on the fresh base);
+    //    oid-index untouched (objects stay in CAS).
+    remove_cas_ref_from_manifest(r2, tenant, repo, ref_name, expected)
+        .map_err(CasPushError::Manifest)
 }
 
 /// Read-modify-write `<tenant>/<repo>/refs.json` to REMOVE `ref_name`, then PUT it back
@@ -2515,11 +2526,34 @@ where
 /// refs.json is nothing-to-remove (idempotent — the helper's `Ok(None)` skips the PUT so
 /// no empty manifest is fabricated; the handler already validated presence against the
 /// live snapshot).
+///
+/// ## Re-validating the `expected` precondition on the FRESH base (the delete SYMMETRY)
+///
+/// `expected` is the deleter's per-ref old-oid — the tip `handle_delete_ref`'s
+/// stale-check validated against the (per-instance, possibly-lagging) live `git_refs`
+/// snapshot. Without re-checking, a 412 re-read would re-read the FRESH (advanced) base
+/// and BLINDLY `remove(ref)` on top — silently deleting a concurrent same-ref UPDATE
+/// that landed after the stale-check (the delete 412s, re-reads the updated tip, then
+/// clobbers it → the update is LOST). So on EVERY attempt (first PUT and every 412
+/// re-read) this RE-VALIDATES `expected` against the fresh base's tip for `ref_name`:
+/// * fresh tip **== `expected`** → remove it (a legitimate delete; incl. the concurrent
+///   DIFFERENT-ref merge, where only some OTHER ref moved and `ref_name` still holds
+///   `expected`);
+/// * fresh tip **!= `expected`** (a concurrent same-ref advance) → FAIL CLOSED
+///   (`Err`, a non-fast-forward StaleRef) — the ref is NOT removed, the update survives;
+/// * fresh tip **absent** (already deleted by a concurrent instance) → idempotent no-op
+///   (`Ok(None)` skips the PUT — the desired end-state is already reached, nothing to
+///   clobber);
+/// * refs.json **absent** → idempotent no-op (nothing to remove).
+///
+/// This makes the delete path safe for `max_instances>1` for the SAME reason the update
+/// path is — see the `CONDITIONAL_MANIFEST_PUT_ACTIVE` doc in `state.rs`.
 pub fn remove_cas_ref_from_manifest<R: R2GetVersioned + R2PutConditional>(
     r2: &R,
     tenant: &str,
     repo: &str,
     ref_name: &str,
+    expected: &str,
 ) -> Result<(), String> {
     let refs_key = refs_manifest_key(tenant, repo);
     conditional_manifest_write(r2, &refs_key, |current| match current {
@@ -2528,10 +2562,30 @@ pub fn remove_cas_ref_from_manifest<R: R2GetVersioned + R2PutConditional>(
         None => Ok(None),
         Some(bytes) => {
             let mut manifest = parse_refs_manifest(bytes)?;
-            manifest.refs.remove(ref_name);
-            serde_json::to_vec(&manifest)
-                .map(Some)
-                .map_err(|e| format!("delete: refs.json serialize: {e}"))
+            // RE-VALIDATE the deleter's `expected` precondition against THIS fresh base
+            // (re-read on every attempt, incl. after a 412). The stale-check ran against
+            // a per-instance in-memory snapshot that can lag a concurrent instance's
+            // landed UPDATE; re-checking here — on the authoritative refs.json — is what
+            // closes the cross-instance delete-clobbers-update lost-update race.
+            match manifest.refs.get(ref_name).map(String::as_str) {
+                // Already gone on the fresh base ⇒ idempotent no-op (nothing to clobber).
+                None => Ok(None),
+                // A concurrent instance advanced this ref to a DIFFERENT tip after the
+                // deleter's stale-check → FAIL CLOSED; the update is NOT deleted.
+                Some(tip) if tip != expected => Err(format!(
+                    "delete: non-fast-forward (StaleRef): refs.json base tip for {ref_name} is \
+                     {tip:?}, but the delete expected {expected:?} — a concurrent instance \
+                     advanced this ref between the stale-check and this write; the ref is NOT \
+                     removed (fail-closed against the cross-instance lost-update race)"
+                )),
+                // The fresh base still shows the expected tip → remove it.
+                Some(_) => {
+                    manifest.refs.remove(ref_name);
+                    serde_json::to_vec(&manifest)
+                        .map(Some)
+                        .map_err(|e| format!("delete: refs.json serialize: {e}"))
+                }
+            }
         }
     })
 }
@@ -4784,7 +4838,7 @@ mod tests {
         seed_two_ref_manifests(&r2, tenant, repo, &main_tip, &stale_tip, &existing);
 
         let mut persisted = false;
-        finalize_cas_delete(&r2, tenant, repo, "refs/heads/stale", || {
+        finalize_cas_delete(&r2, tenant, repo, "refs/heads/stale", &stale_tip, || {
             persisted = true;
             Ok(())
         })
@@ -4831,7 +4885,7 @@ mod tests {
         let stale_tip = "bb".repeat(20);
         seed_two_ref_manifests(&r2, tenant, repo, &main_tip, &stale_tip, &OidIndex::new());
 
-        let err = finalize_cas_delete(&r2, tenant, repo, "refs/heads/stale", || {
+        let err = finalize_cas_delete(&r2, tenant, repo, "refs/heads/stale", &stale_tip, || {
             Err("cas-conflict".to_string())
         })
         .expect_err("a persist fault fails the finalize");
@@ -4892,7 +4946,7 @@ mod tests {
         );
 
         let mut persisted = false;
-        let err = finalize_cas_delete(&r2, tenant, repo, "refs/heads/stale", || {
+        let err = finalize_cas_delete(&r2, tenant, repo, "refs/heads/stale", &stale_tip, || {
             persisted = true;
             Ok(())
         })
@@ -5347,7 +5401,7 @@ mod tests {
         // must NOT fabricate an empty manifest (the `Ok(None)` skip-the-PUT path).
         let (tenant, repo) = ("t", "hugit");
         let r2 = MapR2::default();
-        remove_cas_ref_from_manifest(&r2, tenant, repo, "refs/heads/gone")
+        remove_cas_ref_from_manifest(&r2, tenant, repo, "refs/heads/gone", &"aa".repeat(20))
             .expect("removing from an absent manifest is Ok");
         assert!(
             r2.get_object(&refs_manifest_key(tenant, repo))
@@ -5369,7 +5423,7 @@ mod tests {
         existing.insert(stale_tip.clone(), cas_key(b"stale body"));
         seed_two_ref_manifests(&r2, tenant, repo, &main_tip, &stale_tip, &existing);
 
-        finalize_cas_delete(&r2, tenant, repo, "refs/heads/stale", || Ok(()))
+        finalize_cas_delete(&r2, tenant, repo, "refs/heads/stale", &stale_tip, || Ok(()))
             .expect("conditional delete finalize succeeds");
 
         let m = parse_refs_manifest(
@@ -5394,5 +5448,114 @@ mod tests {
         )
         .unwrap();
         assert!(idx.contains_key(&stale_tip), "oid-index untouched (no GC)");
+    }
+
+    #[test]
+    fn remove_cas_ref_412_remerge_rejects_concurrent_same_ref_update_no_lost_update() {
+        // The DELETE symmetry of FIX-IFMATCH-REMERGE — the lost-update-CLOSED proof. A
+        // concurrent instance ADVANCES the SAME ref the deleter is removing (stale→C) in
+        // the read→PUT gap, AFTER the deleter's stale-check (which passed against a lagging
+        // in-memory snapshot still showing B). The deleter's first If-Match 412s; on the
+        // fresh re-read the tip is now C, NOT the expected B → the re-validate sees the
+        // non-fast-forward and FAILS CLOSED. The ref is NEVER removed; the concurrent
+        // UPDATE (C) survives. (Before this fix the 412 re-merge blindly re-removed the ref
+        // on the advanced base — a silent cross-instance lost update: the update deleted.)
+        let (tenant, repo) = ("t", "hugit");
+        let inner = MapR2::default();
+        let main_tip = "aa".repeat(20);
+        let stale_tip = "bb".repeat(20); // the tip the deleter expects (its old-oid)
+        seed_two_ref_manifests(
+            &inner,
+            tenant,
+            repo,
+            &main_tip,
+            &stale_tip,
+            &OidIndex::new(),
+        );
+
+        // The competitor advances the SAME ref (stale) to a DIFFERENT tip (C).
+        let c = "cc".repeat(20);
+        let r2 = RaceOnceR2 {
+            inner: inner.clone(),
+            race_key: refs_manifest_key(tenant, repo),
+            competitor: ("refs/heads/stale".to_string(), c.clone()),
+            fired: std::sync::Arc::new(std::sync::Mutex::new(false)),
+        };
+
+        let err = remove_cas_ref_from_manifest(&r2, tenant, repo, "refs/heads/stale", &stale_tip)
+            .expect_err("a concurrent same-ref advance must fail closed, never lost-update");
+        assert!(
+            err.contains("non-fast-forward") && err.contains("StaleRef"),
+            "the error names the non-fast-forward / StaleRef, got: {err}"
+        );
+
+        // The concurrent UPDATE (C) survives; the ref was NEVER removed (no lost update).
+        let m = parse_refs_manifest(
+            &inner
+                .get_object(&refs_manifest_key(tenant, repo))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            m.refs.get("refs/heads/stale"),
+            Some(&c),
+            "the concurrent instance's advance (C) survives — the delete was rejected, not clobbering"
+        );
+    }
+
+    #[test]
+    fn remove_cas_ref_412_remerge_preserves_legit_delete_on_concurrent_different_ref() {
+        // The DELETE symmetry — the legitimate case is UNCHANGED. The deleter removes
+        // refs/heads/stale (expected = B); a concurrent instance advances a DIFFERENT ref
+        // (refs/heads/other) in the gap → the deleter's first If-Match 412s. On the fresh
+        // re-read, stale STILL shows B (only `other` moved) → `expected` re-validates OK →
+        // the delete lands AND the concurrent ref survives.
+        let (tenant, repo) = ("t", "hugit");
+        let inner = MapR2::default();
+        let main_tip = "aa".repeat(20);
+        let stale_tip = "bb".repeat(20);
+        seed_two_ref_manifests(
+            &inner,
+            tenant,
+            repo,
+            &main_tip,
+            &stale_tip,
+            &OidIndex::new(),
+        );
+
+        let other_oid = "dd".repeat(20);
+        let r2 = RaceOnceR2 {
+            inner: inner.clone(),
+            race_key: refs_manifest_key(tenant, repo),
+            competitor: ("refs/heads/other".to_string(), other_oid.clone()),
+            fired: std::sync::Arc::new(std::sync::Mutex::new(false)),
+        };
+
+        remove_cas_ref_from_manifest(&r2, tenant, repo, "refs/heads/stale", &stale_tip).expect(
+            "a concurrent DIFFERENT-ref advance is a legitimate merge — the delete must land",
+        );
+
+        let m = parse_refs_manifest(
+            &inner
+                .get_object(&refs_manifest_key(tenant, repo))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !m.refs.contains_key("refs/heads/stale"),
+            "the delete landed (expected still held on the fresh base)"
+        );
+        assert_eq!(
+            m.refs.get("refs/heads/other"),
+            Some(&other_oid),
+            "the concurrent instance's DIFFERENT ref was re-merged, not clobbered"
+        );
+        assert_eq!(
+            m.refs.get("refs/heads/main"),
+            Some(&main_tip),
+            "the untouched ref survives"
+        );
     }
 }

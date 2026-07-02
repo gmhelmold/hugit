@@ -953,12 +953,22 @@ mod tests {
     fn mint_with_ttl_zero_clamps_to_one_second() {
         let store = TokenStore::new();
         let p = make_principal(false);
-        let raw = store.mint_with_ttl(&p, 0).expect("mint OK");
-        // ttl clamped to ≥1 → the token is briefly valid, not instantly dead.
-        match store.lookup(&raw) {
-            LookupResult::Ok(rec) => assert!(rec.expires_at >= now_secs()),
-            _ => panic!("expected Ok (ttl clamped to 1s)"),
-        }
+        let t0 = now_secs();
+        let _raw = store.mint_with_ttl(&p, 0).expect("mint OK");
+        // Verify the CLAMP directly from the stored record — NOT via `lookup`,
+        // which rejects an expired token: a ttl-0 clamp yields a 1-SECOND token,
+        // and on a contended runner the mint→lookup gap can cross that 1s boundary,
+        // so the token expires mid-test → a spurious failure (the flake this
+        // replaces). The clamp guarantee is `expires_at = mint_now + 1 >= t0 + 1`,
+        // which holds regardless of elapsed time — a race-free assertion.
+        let guard = store.tokens.lock().expect("token store lock");
+        let rec = guard.values().next().expect("exactly one minted record");
+        // `> t0` ⟺ `>= t0 + 1` for integers (clippy::int_plus_one): a ttl-0 mint
+        // clamps to a ≥1s token, so expires_at (= mint_now + 1) is strictly after t0.
+        assert!(
+            rec.expires_at > t0,
+            "ttl 0 must clamp to ≥1s (not instantly dead)"
+        );
     }
 
     #[test]
