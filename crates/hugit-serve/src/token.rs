@@ -963,8 +963,10 @@ mod tests {
         // which holds regardless of elapsed time — a race-free assertion.
         let guard = store.tokens.lock().expect("token store lock");
         let rec = guard.values().next().expect("exactly one minted record");
+        // `> t0` ⟺ `>= t0 + 1` for integers (clippy::int_plus_one): a ttl-0 mint
+        // clamps to a ≥1s token, so expires_at (= mint_now + 1) is strictly after t0.
         assert!(
-            rec.expires_at >= t0 + 1,
+            rec.expires_at > t0,
             "ttl 0 must clamp to ≥1s (not instantly dead)"
         );
     }
