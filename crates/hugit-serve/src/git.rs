@@ -82,6 +82,7 @@
 //! git-served).
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use tiny_http::{Header, Method, Request, Response};
 
@@ -118,7 +119,20 @@ pub fn is_git_path(url: &str) -> bool {
 /// packfile is a `Vec<u8>` body with a git-specific Content-Type. `body` is the
 /// already-read (capped) request body — empty for the GET advertisement, the
 /// want/have pkt-lines for the upload-pack POST.
-pub fn respond_git(state: &AppState, method: &Method, url: &str, body: &[u8], request: Request) {
+///
+/// `io_budget` is the accept-loop's wall-clock I/O deadline (FIX-SOCKET-TIMEOUT),
+/// threaded in like `respond_sse`: every response write here rides [`send`] →
+/// `crate::server::respond_bounded`, so a small body (advertise, report) is written
+/// INLINE while a LARGE clone/fetch PACK write is offloaded to a bounded worker — a
+/// client that stops draining a big pack can NOT wedge the single-threaded loop.
+pub fn respond_git(
+    state: &AppState,
+    method: &Method,
+    url: &str,
+    body: &[u8],
+    request: Request,
+    io_budget: Duration,
+) {
     let path = url.split('?').next().unwrap_or("");
     let query = url.split('?').nth(1).unwrap_or("");
     let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
@@ -131,10 +145,10 @@ pub fn respond_git(state: &AppState, method: &Method, url: &str, body: &[u8], re
             // Any other/absent service is a 404 (no oracle for unknown services).
             let svc = query_param(query, "service");
             if svc == Some("git-receive-pack") {
-                return handle_receive_advertise(state, repo, request);
+                return handle_receive_advertise(state, repo, request, io_budget);
             }
             if svc != Some(UPLOAD_PACK) {
-                return respond_not_found(request);
+                return respond_not_found(request, io_budget);
             }
             // Derive the clone principal from an OPTIONAL Bearer (anonymous on
             // absent/invalid/expired — fail-closed), then gate on authorize_read.
@@ -142,12 +156,13 @@ pub fn respond_git(state: &AppState, method: &Method, url: &str, body: &[u8], re
             let principal = clone_principal(state, request.headers());
             match advertise_refs(state, repo, &principal) {
                 Some(body) => {
+                    let body_len = body.len();
                     let resp = Response::from_data(body).with_status_code(200).with_header(
                         git_content_type("application/x-git-upload-pack-advertisement"),
                     );
-                    send(request, resp);
+                    send(request, resp, body_len, io_budget);
                 }
-                None => respond_not_found(request),
+                None => respond_not_found(request, io_budget),
             }
         }
         (Method::Post, [repo, "git-upload-pack"]) => {
@@ -157,22 +172,26 @@ pub fn respond_git(state: &AppState, method: &Method, url: &str, body: &[u8], re
             let principal = clone_principal(state, request.headers());
             match upload_pack(state, repo, body, &principal) {
                 Some(out) => {
+                    // The clone/fetch PACK — the one git response that can be large.
+                    // `send` routes it through `respond_bounded`, so a stalled drainer
+                    // is abandoned at the deadline instead of wedging the accept loop.
+                    let body_len = out.len();
                     let resp = Response::from_data(out)
                         .with_status_code(200)
                         .with_header(git_content_type("application/x-git-upload-pack-result"));
-                    send(request, resp);
+                    send(request, resp, body_len, io_budget);
                 }
-                None => respond_not_found(request),
+                None => respond_not_found(request, io_budget),
             }
         }
         // POST git-receive-pack (push) → the write path (gated). Other methods on
         // the receive-pack route → the clear 403 (not a silent 404).
         (Method::Post, [repo, "git-receive-pack"]) => {
-            handle_receive_pack(state, repo, body, request)
+            handle_receive_pack(state, repo, body, request, io_budget)
         }
-        (_, [_repo, "git-receive-pack"]) => respond_push_forbidden(request),
+        (_, [_repo, "git-receive-pack"]) => respond_push_forbidden(request, io_budget),
         // Any other method/shape on a git-looking path → 404, no oracle.
-        _ => respond_not_found(request),
+        _ => respond_not_found(request, io_budget),
     }
 }
 
@@ -520,30 +539,30 @@ const RECEIVE_CAPS: &str = "report-status delete-refs object-format=sha1 agent=h
 /// Gated identically to the push itself (flag + write seam + write-authz), so a
 /// caller who couldn't push never even sees the advertisement (403/401/404, no
 /// oracle). Disabled deploy → the honest 403 ("push not supported here").
-fn handle_receive_advertise(state: &AppState, repo: &str, request: Request) {
+fn handle_receive_advertise(state: &AppState, repo: &str, request: Request, io_budget: Duration) {
     if !state.write_path_enabled {
-        return respond_push_forbidden(request);
+        return respond_push_forbidden(request, io_budget);
     }
     let headers: Vec<tiny_http::Header> = request.headers().to_vec();
     let principal = match crate::server::two_tier_auth(state, &headers) {
         Ok((p, _)) => p,
-        Err(_) => return respond_push_unauth(request),
+        Err(_) => return respond_push_unauth(request, io_budget),
     };
     if !crate::state::is_safe_repo_slug(repo) {
-        return respond_not_found(request);
+        return respond_not_found(request, io_budget);
     }
     let Some(repo_state) = state.repo_state(repo) else {
-        return respond_not_found(request);
+        return respond_not_found(request, io_budget);
     };
     if !repo_state.has_write_seam() {
-        return respond_not_found(request); // no write seam (GIT_DIR or CAS) → 404
+        return respond_not_found(request, io_budget); // no write seam (GIT_DIR or CAS) → 404
     }
     let Ok(log) = state.load_verified(repo) else {
-        return respond_not_found(request);
+        return respond_not_found(request, io_budget);
     };
     let meta = crate::authz::project_repo_meta(&log);
     if !crate::authz::authorize_write(&principal, &meta) {
-        return respond_not_found(request); // not the owner → 404, no oracle
+        return respond_not_found(request, io_budget); // not the owner → 404, no oracle
     }
 
     let mut out = Vec::new();
@@ -569,12 +588,13 @@ fn handle_receive_advertise(state: &AppState, repo: &str, request: Request) {
         }
     }
     pkt_flush(&mut out);
+    let body_len = out.len();
     let resp = Response::from_data(out)
         .with_status_code(200)
         .with_header(git_content_type(
             "application/x-git-receive-pack-advertisement",
         ));
-    send(request, resp);
+    send(request, resp, body_len, io_budget);
 }
 
 /// Handle a `POST /<repo>/git-receive-pack` (push). The WRITE side of the git wire.
@@ -587,7 +607,13 @@ fn handle_receive_advertise(state: &AppState, repo: &str, request: Request) {
 /// git-dir ref so the wire advertises the new tip → emit the `report-status`.
 ///
 /// v0 scope: a single non-delete ref per push (`docs/plan/2026-06-22-receive-pack-wave-design.md`).
-fn handle_receive_pack(state: &AppState, repo: &str, body: &[u8], request: Request) {
+fn handle_receive_pack(
+    state: &AppState,
+    repo: &str,
+    body: &[u8],
+    request: Request,
+    io_budget: Duration,
+) {
     use crate::receive_wire::{RefOutcome, build_report_status, parse_receive_pack_body};
     use crate::state::RepoWriter;
     use crate::writes::LogSink; // brings AppState::persist (the compare-and-swap) into scope
@@ -598,7 +624,7 @@ fn handle_receive_pack(state: &AppState, repo: &str, body: &[u8], request: Reque
     // Off → the honest 403 ("push not supported here"), BEFORE auth, so a stock
     // deploy answers the same clear message to any client (authed or not).
     if !state.write_path_enabled {
-        return respond_push_forbidden(request);
+        return respond_push_forbidden(request, io_budget);
     }
 
     // Authenticate — a push is a WRITE, so it MUST carry a valid bearer (unlike an
@@ -606,48 +632,52 @@ fn handle_receive_pack(state: &AppState, repo: &str, body: &[u8], request: Reque
     let headers: Vec<tiny_http::Header> = request.headers().to_vec();
     let principal = match crate::server::two_tier_auth(state, &headers) {
         Ok((p, _)) => p,
-        Err(_) => return respond_push_unauth(request),
+        Err(_) => return respond_push_unauth(request, io_budget),
     };
 
     // A write seam is required (GIT_DIR mode). No seam (CAS mode / unknown repo) →
     // 404, no oracle. Everything past here is gated behind a successful authz.
     if !crate::state::is_safe_repo_slug(repo) {
-        return respond_not_found(request);
+        return respond_not_found(request, io_budget);
     }
     let Some(repo_state) = state.repo_state(repo) else {
-        return respond_not_found(request);
+        return respond_not_found(request, io_budget);
     };
     // A write seam is required (GIT_DIR or CAS mode). None → 404, no oracle. The
     // sink itself is OPENED below (after authz + parse), so an open fault is a
     // per-ref ng rather than a pre-auth 404.
     if !repo_state.has_write_seam() {
-        return respond_not_found(request);
+        return respond_not_found(request, io_budget);
     }
 
     // Load the repo's log (the authz meta source + the append target), pinned to the
     // head we compare-and-swap against.
     let (mut log, token) = match state.load_verified_with_token(repo) {
         Ok(lt) => lt,
-        Err(_) => return respond_not_found(request),
+        Err(_) => return respond_not_found(request, io_budget),
     };
 
     // WRITE-authz: OWNERSHIP, never the read-visibility predicate (a public repo
     // opens reads, NEVER writes). Denial → 404 (no oracle).
     let meta = crate::authz::project_repo_meta(&log);
     if !crate::authz::authorize_write(&principal, &meta) {
-        return respond_not_found(request);
+        return respond_not_found(request, io_budget);
     }
 
     // Parse the wire. A framing/command error → 400 (a malformed push).
     let wire = match parse_receive_pack_body(body) {
         Ok(w) => w,
-        Err(e) => return respond_push_bad_request(request, &e.to_string()),
+        Err(e) => return respond_push_bad_request(request, &e.to_string(), io_budget),
     };
     if let Err(e) = wire.require_pack() {
-        return respond_push_bad_request(request, &e.to_string());
+        return respond_push_bad_request(request, &e.to_string(), io_budget);
     }
     if wire.commands.len() != 1 {
-        return respond_push_bad_request(request, "v0 accepts exactly one ref update per push");
+        return respond_push_bad_request(
+            request,
+            "v0 accepts exactly one ref update per push",
+            io_budget,
+        );
     }
     let cmd = wire.commands[0].clone();
     if cmd.is_delete() {
@@ -659,7 +689,7 @@ fn handle_receive_pack(state: &AppState, repo: &str, body: &[u8], request: Reque
         // durable finalize (refs.json rewrite + `ref.delete` event) and the in-memory
         // hot-swap. `ok` ONLY after a durable removal (fail-closed).
         return handle_delete_ref(
-            state, repo, repo_state, &cmd, &principal, &mut log, &token, request,
+            state, repo, repo_state, &cmd, &principal, &mut log, &token, request, io_budget,
         );
     }
 
@@ -683,7 +713,7 @@ fn handle_receive_pack(state: &AppState, repo: &str, body: &[u8], request: Reque
     // for the CAS writer) → a transient per-ref `ng`, never a fake success.
     let mut writer = match repo_state.open_writer() {
         Ok(Some(w)) => w,
-        Ok(None) => return respond_not_found(request),
+        Ok(None) => return respond_not_found(request, io_budget),
         Err(_) => {
             let report = build_report_status(
                 Ok(()),
@@ -692,7 +722,7 @@ fn handle_receive_pack(state: &AppState, repo: &str, body: &[u8], request: Reque
                     reason: "write-seam-unavailable".into(),
                 }],
             );
-            return send_report(request, report);
+            return send_report(request, report, io_budget);
         }
     };
 
@@ -730,7 +760,7 @@ fn handle_receive_pack(state: &AppState, repo: &str, body: &[u8], request: Reque
                             reason: format!("persist:{}", e.status),
                         }],
                     );
-                    return send_report(request, report);
+                    return send_report(request, report, io_budget);
                 }
                 if let Err(reason) =
                     update_git_ref(git_dir, &cmd.ref_name, &cmd.new_oid, &cmd.old_oid)
@@ -742,10 +772,10 @@ fn handle_receive_pack(state: &AppState, repo: &str, body: &[u8], request: Reque
                             reason,
                         }],
                     );
-                    return send_report(request, report);
+                    return send_report(request, report, io_budget);
                 }
                 let report = build_report_status(Ok(()), &[RefOutcome::Ok(cmd.ref_name.clone())]);
-                send_report(request, report);
+                send_report(request, report, io_budget);
                 // POST-DURABLE, POST-`ok`: best-effort KungFu merge event (WP
                 // W-WEBHOOK) — see the CAS arm below for the full rationale.
                 crate::merge_hook::emit_merge_event(
@@ -804,7 +834,7 @@ fn handle_receive_pack(state: &AppState, repo: &str, body: &[u8], request: Reque
                         }
                         let report =
                             build_report_status(Ok(()), &[RefOutcome::Ok(cmd.ref_name.clone())]);
-                        send_report(request, report);
+                        send_report(request, report, io_budget);
                         // POST-DURABLE, POST-`ok`: best-effort KungFu merge event
                         // (WP W-WEBHOOK). The client ALREADY has its `ok`, so nothing
                         // below can regress the push. Egress is off the accept loop
@@ -829,7 +859,7 @@ fn handle_receive_pack(state: &AppState, repo: &str, body: &[u8], request: Reque
                                 reason,
                             }],
                         );
-                        send_report(request, report)
+                        send_report(request, report, io_budget)
                     }
                     // A flush (object upload) fault: nothing advertised, objects are
                     // idempotent — the client retries. A manifest fault: closure +
@@ -842,7 +872,7 @@ fn handle_receive_pack(state: &AppState, repo: &str, body: &[u8], request: Reque
                                 reason: "cas-upload-failed".into(),
                             }],
                         );
-                        send_report(request, report)
+                        send_report(request, report, io_budget)
                     }
                     Err(crate::cas::CasPushError::Manifest(_)) => {
                         let report = build_report_status(
@@ -852,7 +882,7 @@ fn handle_receive_pack(state: &AppState, repo: &str, body: &[u8], request: Reque
                                 reason: "manifest-write-failed".into(),
                             }],
                         );
-                        send_report(request, report)
+                        send_report(request, report, io_budget)
                     }
                 }
             }
@@ -867,7 +897,7 @@ fn handle_receive_pack(state: &AppState, repo: &str, body: &[u8], request: Reque
                     reason: receive_err_reason(&e),
                 }],
             );
-            send_report(request, report)
+            send_report(request, report, io_budget)
         }
     }
 }
@@ -930,6 +960,7 @@ fn handle_delete_ref(
     log: &mut hugit_refstore::log::EventLog,
     token: &crate::writes::CasToken,
     request: Request,
+    io_budget: Duration,
 ) {
     use crate::receive_wire::{RefOutcome, build_report_status};
     use crate::state::RepoWriter;
@@ -943,7 +974,7 @@ fn handle_delete_ref(
                 reason: reason.to_string(),
             }],
         );
-        send_report(request, report);
+        send_report(request, report, io_budget);
     };
 
     // The AUTHORITATIVE current ref view — the SAME live `git_refs` projection the
@@ -961,7 +992,7 @@ fn handle_delete_ref(
     //    durable removal to the right backend. A delete never enters the unpack path.
     let writer = match repo_state.open_writer() {
         Ok(Some(w)) => w,
-        Ok(None) => return respond_not_found(request),
+        Ok(None) => return respond_not_found(request, io_budget),
         Err(_) => return ng(request, "write-seam-unavailable"),
     };
 
@@ -983,7 +1014,7 @@ fn handle_delete_ref(
             }
             repo_state.apply_cas_delete_inmemory(&cmd.ref_name);
             let report = build_report_status(Ok(()), &[RefOutcome::Ok(cmd.ref_name.clone())]);
-            send_report(request, report);
+            send_report(request, report, io_budget);
             // POST-DURABLE, POST-`ok`: best-effort KungFu merge event (WP W-WEBHOOK).
             // A delete carries an all-zero `new_oid` → the event is a `ref-delete`
             // marker (no tree walk). Never regresses the push (`ok` already sent).
@@ -1004,6 +1035,12 @@ fn handle_delete_ref(
                 &seam.tenant,
                 &seam.repo_slug,
                 &cmd.ref_name,
+                // The deleter's `expected` tip — the SAME value the stale-check
+                // (`delete_ref_decision`) validated against the live snapshot. Threaded so
+                // the conditional refs.json write RE-VALIDATES it on the fresh base: a
+                // concurrent same-ref UPDATE that landed after the stale-check fails closed
+                // (StaleRef, the ref is NOT removed) rather than clobbering the update.
+                &cmd.old_oid,
                 || {
                     hugit_proto::write::store::record_ref_delete(
                         log,
@@ -1025,7 +1062,7 @@ fn handle_delete_ref(
                     repo_state.apply_cas_delete_inmemory(&cmd.ref_name);
                     let report =
                         build_report_status(Ok(()), &[RefOutcome::Ok(cmd.ref_name.clone())]);
-                    send_report(request, report);
+                    send_report(request, report, io_budget);
                     // POST-DURABLE, POST-`ok`: best-effort KungFu merge event (WP
                     // W-WEBHOOK) — `ref-delete` marker; never regresses the push.
                     crate::merge_hook::emit_merge_event(
@@ -1045,7 +1082,7 @@ fn handle_delete_ref(
                             reason,
                         }],
                     );
-                    send_report(request, report)
+                    send_report(request, report, io_budget)
                 }
                 // A manifest fault AFTER the event recorded: the removal event is durable
                 // but refs.json still names the tip — `ng`, the client retries (idempotent).
@@ -1121,68 +1158,84 @@ fn receive_err_reason(e: &hugit_proto::write::receive::ReceiveError) -> String {
 }
 
 /// Send a `report-status` body (HTTP 200, the git receive-pack result media type).
-fn send_report(request: Request, body: Vec<u8>) {
+fn send_report(request: Request, body: Vec<u8>, io_budget: Duration) {
+    let body_len = body.len();
     let resp = Response::from_data(body)
         .with_status_code(200)
         .with_header(git_content_type("application/x-git-receive-pack-result"));
-    send(request, resp);
+    send(request, resp, body_len, io_budget);
 }
 
 /// 401 for a push with no/invalid bearer (a write must be authenticated).
-fn respond_push_unauth(request: Request) {
+fn respond_push_unauth(request: Request, io_budget: Duration) {
+    let body = b"git push requires authentication\n".to_vec();
+    let body_len = body.len();
     send(
         request,
-        Response::from_data(b"git push requires authentication\n".to_vec())
-            .with_status_code(401)
-            .with_header(
-                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..])
-                    .expect("static content-type"),
-            ),
+        Response::from_data(body).with_status_code(401).with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..])
+                .expect("static content-type"),
+        ),
+        body_len,
+        io_budget,
     );
 }
 
 /// 400 for a malformed push body (bad pkt-line framing / command / missing pack).
-fn respond_push_bad_request(request: Request, detail: &str) {
+fn respond_push_bad_request(request: Request, detail: &str, io_budget: Duration) {
+    let body = format!("malformed receive-pack request: {detail}\n").into_bytes();
+    let body_len = body.len();
     send(
         request,
-        Response::from_data(format!("malformed receive-pack request: {detail}\n").into_bytes())
-            .with_status_code(400)
-            .with_header(
-                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..])
-                    .expect("static content-type"),
-            ),
+        Response::from_data(body).with_status_code(400).with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..])
+                .expect("static content-type"),
+        ),
+        body_len,
+        io_budget,
     );
 }
 
-fn respond_push_forbidden(request: Request) {
+fn respond_push_forbidden(request: Request, io_budget: Duration) {
+    let body = PUSH_FORBIDDEN_BODY.as_bytes().to_vec();
+    let body_len = body.len();
     send(
         request,
-        Response::from_data(PUSH_FORBIDDEN_BODY.as_bytes().to_vec())
-            .with_status_code(403)
-            .with_header(
-                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..])
-                    .expect("static content-type"),
-            ),
+        Response::from_data(body).with_status_code(403).with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..])
+                .expect("static content-type"),
+        ),
+        body_len,
+        io_budget,
     );
 }
 
 /// Respond 404 with no body — the uniform "git serving not live / not found"
 /// answer (no existence oracle).
-fn respond_not_found(request: Request) {
+fn respond_not_found(request: Request, io_budget: Duration) {
     send(
         request,
         Response::from_data(Vec::new()).with_status_code(404),
+        0,
+        io_budget,
     );
 }
 
-/// Send a response, swallowing a broken-pipe (client hung up) like the rest of
-/// the server loop; log other faults.
-fn send<R: std::io::Read>(request: Request, response: Response<R>) {
-    if let Err(e) = request.respond(response)
-        && e.kind() != std::io::ErrorKind::BrokenPipe
-    {
-        eprintln!("hugit-serve: git respond error: {e}");
-    }
+/// Send a git response under the accept-loop's wall-clock I/O bound (FIX-SOCKET-TIMEOUT).
+/// A small body (advertise, report-status, error, 404) is `<= RESPOND_INLINE_MAX`, so it
+/// is written INLINE — byte-identical to a plain `request.respond` (it fits the kernel send
+/// buffer and cannot block). A LARGE body (a clone/fetch PACK) is offloaded to a bounded
+/// worker via the SAME [`crate::server::respond_bounded`] the `/v1` + SSE writes ride, so a
+/// stalled / zero-window / slow-drain client cannot wedge the single-threaded accept loop
+/// indefinitely — its connection is abandoned at the deadline, the loop freed. A broken
+/// pipe (client hung up) is swallowed silently inside `respond_bounded`.
+fn send<R: std::io::Read + Send + 'static>(
+    request: Request,
+    response: Response<R>,
+    body_len: usize,
+    io_budget: Duration,
+) {
+    crate::server::respond_bounded(request, response, body_len, io_budget, "git");
 }
 
 #[cfg(test)]

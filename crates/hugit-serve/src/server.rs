@@ -174,7 +174,7 @@ pub fn serve_on(state: AppState, server: Server) -> std::io::Result<()> {
         // processes attacker-controlled pack bytes — a panic must not crash the loop).
         if crate::git::is_git_path(&url) {
             if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                crate::git::respond_git(&state, &method, &url, &body, request);
+                crate::git::respond_git(&state, &method, &url, &body, request, io_budget);
             }))
             .is_err()
             {
@@ -805,7 +805,7 @@ where
 /// stays SERIAL — the next request is not accepted until this write finishes or the
 /// deadline fires) then moves on, abandoning a stuck write to its worker. `what` names
 /// the site for the error log.
-fn respond_bounded<R>(
+pub(crate) fn respond_bounded<R>(
     request: Request,
     response: Response<R>,
     body_len: usize,

@@ -1790,14 +1790,19 @@ fn dev_operator_allowed() -> bool {
 /// moment a deploy declared `max_instances>1`.
 ///
 /// This `true` is HONEST only because the conditional path is now *sufficient*, not
-/// merely necessary: the refs.json compare-and-swap RE-VALIDATES the pusher's per-ref
-/// `expected` precondition against the FRESH base on every attempt
-/// ([`crate::cas::commit_cas_push_manifests`], FIX-IFMATCH-REMERGE). Before that fix a
-/// 412 re-merge blindly re-applied the ref tip on the advanced base — a cross-instance
-/// same-ref force-push silently lost-updated, so the guard green-lit `max_instances>1`
-/// with a safety the code did not provide. With the re-validate, a concurrent same-ref
-/// advance now fails closed (StaleRef, the ref is not overwritten), so the guard's claim
-/// matches what the write path actually enforces.
+/// merely necessary — for BOTH the UPDATE and the DELETE write paths. The refs.json
+/// compare-and-swap RE-VALIDATES the pusher's/deleter's per-ref `expected` precondition
+/// against the FRESH base on every attempt:
+/// * UPDATE — [`crate::cas::commit_cas_push_manifests`] (FIX-IFMATCH-REMERGE). Before
+///   that fix a 412 re-merge blindly re-applied the ref tip on the advanced base — a
+///   cross-instance same-ref force-push silently lost-updated.
+/// * DELETE — [`crate::cas::remove_cas_ref_from_manifest`] (the symmetric fix). Before
+///   it a 412 re-merge blindly re-removed the ref on the advanced base — a delete that
+///   raced a concurrent same-ref UPDATE silently deleted the update (a lost update).
+///
+/// With BOTH re-validates, a concurrent same-ref advance now fails closed (StaleRef, the
+/// ref is neither overwritten NOR removed), so the guard's claim matches what the update
+/// AND delete write paths actually enforce.
 const CONDITIONAL_MANIFEST_PUT_ACTIVE: bool = true;
 
 /// Whether the operator has DECLARED a multi-instance deploy (`max_instances>1`).
