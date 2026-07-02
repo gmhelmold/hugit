@@ -518,6 +518,25 @@ fn respond_git_overloaded(request: Request, io_budget: Duration) {
     );
 }
 
+/// Shed a fast `503` for a `git push` the engine cannot service right now (a receive-pack
+/// worker could not be spawned under load). The push is NEVER unpacked inline — this shed
+/// is the ONLY inline work, and it is small so the [`send`] write stays on the inline
+/// (non-blocking) path — the accept loop is never blocked by the shed itself. The pusher
+/// (authed) retries; nothing was written (no `ok` without a durable finalize).
+fn respond_push_overloaded(request: Request, io_budget: Duration) {
+    let body = b"engine overloaded accepting pushes; retry shortly\n".to_vec();
+    let body_len = body.len();
+    send(
+        request,
+        Response::from_data(body).with_status_code(503).with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..])
+                .expect("static content-type"),
+        ),
+        body_len,
+        io_budget,
+    );
+}
+
 /// Whether EVERY `want` oid is an advertised ref tip in `refs` (the map values).
 ///
 /// The `uploadpack.allowReachableSHA1InWant`-OFF default: a client may only fetch
@@ -764,11 +783,7 @@ fn handle_receive_pack(
     request: Request,
     io_budget: Duration,
 ) {
-    use crate::receive_wire::{RefOutcome, build_report_status, parse_receive_pack_body};
-    use crate::state::RepoWriter;
-    use crate::writes::LogSink; // brings AppState::persist (the compare-and-swap) into scope
-    use hugit_proto::write::receive::{ReceiveRequest, RecvLimits, RefUpdate, receive_pack};
-    use hugit_proto::write::store::Cas; // the &mut dyn Cas sink coercion
+    use crate::receive_wire::parse_receive_pack_body;
 
     // The deploy gate FIRST: receive-pack is OFF unless `HUGIT_SERVE_RECEIVE_PACK=1`.
     // Off → the honest 403 ("push not supported here"), BEFORE auth, so a stock
@@ -801,8 +816,9 @@ fn handle_receive_pack(
     }
 
     // Load the repo's log (the authz meta source + the append target), pinned to the
-    // head we compare-and-swap against.
-    let (mut log, token) = match state.load_verified_with_token(repo) {
+    // head we compare-and-swap against. `log` moves into the worker's `ReceivePlan`
+    // (the append + persist happen off-loop), so it is not mutated here.
+    let (log, token) = match state.load_verified_with_token(repo) {
         Ok(lt) => lt,
         Err(_) => return respond_not_found(request, io_budget),
     };
@@ -830,21 +846,166 @@ fn handle_receive_pack(
         );
     }
     let cmd = wire.commands[0].clone();
+
+    // ── CHEAP INLINE HALF DONE — HAND THE HEAVY TAIL TO A DETACHED WORKER ──────
+    // Everything above ran on the accept loop: the deploy-gate, the pusher auth, the
+    // write-authz (OWNERSHIP), the log load + chain-verify (the authz meta + append
+    // target), and the wire parse (framing + the single-command shape). What REMAINS
+    // is HEAVY and I/O-bound and MUST NOT run here: opening the write sink (a CAS-mode
+    // open re-reads `oid-index.json` from R2), the pure-Rust gix-pack UNPACK
+    // (bound→verify→store→anchor — seconds-to-minutes on a large pack), the durable
+    // finalize (objects→CAS, the log compare-and-swap, the conditional If-Match
+    // refs.json/oid-index manifest PUTs), the in-memory ref hot-swap, and the
+    // report-status write. Running it inline would wedge the single accept thread
+    // (incl. `/readyz`) for the whole push — the same latency-DoS the clone path had.
+    //
+    // So HAND it to a DETACHED worker that OWNS the connection and RESPONDS itself,
+    // freeing the loop IMMEDIATELY — the exact mirror of `spawn_upload_pack_worker`.
+    // The durability ordering + security are UNCHANGED — only WHERE they run moves.
+    // A spawn failure sheds a fast inline 503 (the `Request` is handed BACK), NEVER a
+    // heavy unpack inline. See `serve_receive_pack_response` / `ReceivePlan`.
+    let plan = ReceivePlan {
+        state: state.clone(),
+        repo: repo.to_string(),
+        principal,
+        log,
+        token,
+        cmd,
+        pack: wire.pack,
+    };
+    spawn_receive_pack_worker(plan, request, io_budget);
+}
+
+/// The owned, `Send + 'static` payload for the heavy receive-pack tail, handed to a
+/// DETACHED worker so the accept loop is freed the instant the cheap inline validation
+/// passes (the exact mirror of the clone's `(SharedSource, WantHave)` hand-off).
+///
+/// ## Why this is `Send + 'static` AND why the in-memory hot-swap is still visible
+///
+/// `AppState` is `Clone + Send + Sync + 'static`. Its per-repo `RepoState`s live in a
+/// `HashMap` that the clone duplicates — BUT each `RepoState`'s interior-mutable state
+/// (`git_refs: LiveRefs(Arc<RwLock<…>>)` and `live_oid_index: LiveOidIndex(Arc<RwLock<…>>)`)
+/// is `Arc`-shared, so the clone's maps ARE THE SAME maps the accept-loop's state reads.
+/// The worker resolves `state.repo_state(&repo)` from THIS clone and applies the ref
+/// hot-swap (`apply_cas_push_inmemory` / `apply_cas_delete_inmemory`) through it — the
+/// mutation lands in the shared `Arc<RwLock>`, so the loop's very next advertise reflects
+/// the new/removed tip with no reboot, exactly as before, only now off-loop. The
+/// `RwLock` makes the now-possible concurrency (a worker writing while the loop
+/// advertises, or two push workers) memory-safe; the DURABLE correctness of concurrent
+/// same-ref pushes is guarded — as it already was — by the log persist compare-and-swap
+/// and the conditional If-Match manifest PUTs (`conditional_manifest_write`, WP-IFMATCH),
+/// NOT by the single-threaded accept loop. So moving the unpack off-loop needs no
+/// `state.rs` change and introduces no race.
+struct ReceivePlan {
+    /// A clone of the engine state — carries `persist` (the log compare-and-swap) + the
+    /// receive-pack flag gate, and (via the shared `Arc`s described above) the live
+    /// ref/oid-index maps the hot-swap advances.
+    state: AppState,
+    repo: String,
+    principal: Vec<String>,
+    log: hugit_refstore::log::EventLog,
+    token: crate::writes::CasToken,
+    cmd: crate::receive_wire::ReceiveCommand,
+    /// The uploaded pack bytes (empty for a delete, which carries no objects).
+    pack: Vec<u8>,
+}
+
+/// Hand the receive-pack RESPONSE to a DETACHED worker that OWNS `request` and writes
+/// the report-status itself, FREEING the accept loop immediately — it returns to accept
+/// without waiting for the ~seconds-to-minutes unpack + durable finalize, so `/readyz`
+/// and other requests stay answerable throughout. The exact mirror of
+/// `spawn_upload_pack_worker`.
+///
+/// AVAILABILITY / DoS: a spawn failure (thread exhaustion under a push flood) SHEDS a
+/// fast inline 503 — it NEVER runs the heavy unpack inline (which would wedge the single
+/// accept thread). `spawn_with_payload` hands the `Request` BACK on spawn-Err so the
+/// connection is shed cleanly (a real 503), never silently lost. Pushes are authed +
+/// ownership-gated + rare, so the worker pool is not an anon amplification surface.
+fn spawn_receive_pack_worker(plan: ReceivePlan, request: Request, io_budget: Duration) {
+    let payload = (plan, request, io_budget);
+    if let Err((_plan, request, io_budget)) = spawn_with_payload(payload, |p| {
+        let (plan, request, io_budget) = p;
+        serve_receive_pack_response(plan, request, io_budget);
+    }) {
+        // Spawn failed (thread exhaustion) — shed inline, do NOT unpack inline.
+        respond_push_overloaded(request, io_budget);
+    }
+}
+
+/// The DETACHED-worker half of a `POST /<repo>/git-receive-pack`: open the write sink,
+/// run the gix-pack unpack (create/update) or the durable delete, apply the in-memory
+/// ref hot-swap, and WRITE the report-status — all off the accept loop, which has
+/// already returned to accept. `ok` is still emitted ONLY after the durable finalize
+/// succeeds (the ordering is UNCHANGED); a rejected/failed push answers a clean per-ref
+/// `ng`; a panic here is isolated by the accept loop's `catch_unwind` and drops only
+/// THIS connection (the worker owns nothing shared beyond the `Arc<RwLock>` maps, whose
+/// locks are never held across the unpack).
+fn serve_receive_pack_response(plan: ReceivePlan, request: Request, io_budget: Duration) {
+    let ReceivePlan {
+        state,
+        repo,
+        principal,
+        mut log,
+        token,
+        cmd,
+        pack,
+    } = plan;
+
+    // Re-resolve the repo's live seam from the CLONED (Arc-sharing) state. Existence +
+    // the write seam were already validated inline; this is a defensive re-check
+    // (never an oracle) — a `None` here can only mean a concurrent teardown, → 404.
+    let Some(repo_state) = state.repo_state(&repo) else {
+        return respond_not_found(request, io_budget);
+    };
+
     if cmd.is_delete() {
-        // DELETE-ref path. A delete is a WRITE — it has already cleared the same
-        // deploy-gate + auth + write-authz (ownership) gates above as any push (do NOT
-        // weaken that). It carries NO pack / no target / no reachability, so it never
-        // touches the proto `receive_pack` unpack path. Below: the default-branch guard
-        // + the stale-check against the AUTHORITATIVE live `git_refs` snapshot, then the
-        // durable finalize (refs.json rewrite + `ref.delete` event) and the in-memory
-        // hot-swap. `ok` ONLY after a durable removal (fail-closed).
+        // DELETE-ref path. A delete is a WRITE — it already cleared the same deploy-gate
+        // + auth + write-authz (ownership) gates inline (do NOT weaken that). It carries
+        // NO pack / no target / no reachability, so it never touches the proto
+        // `receive_pack` unpack path. `handle_delete_ref` does the default-branch guard
+        // + the stale-check against the AUTHORITATIVE live `git_refs` snapshot, the
+        // durable finalize (refs.json rewrite + `ref.delete` event), and the in-memory
+        // hot-swap. `ok` ONLY after a durable removal (fail-closed). Off-loop now: its
+        // conditional-manifest R2 writes no longer block the accept thread either.
         return handle_delete_ref(
-            state, repo, repo_state, &cmd, &principal, &mut log, &token, request, io_budget,
+            &state, &repo, repo_state, &cmd, &principal, &mut log, &token, request, io_budget,
         );
     }
 
+    finish_receive_pack(
+        &state, &repo, repo_state, cmd, principal, log, token, pack, request, io_budget,
+    );
+}
+
+/// The create/update tail of a receive-pack, run on the detached worker: build the
+/// `ReceiveRequest`, open the write sink, run the gix-pack UNPACK
+/// (bound→verify→store→anchor), then the mode-specific durable finalize + the in-memory
+/// ref hot-swap, and answer the report-status. `ok` is emitted ONLY after the durable
+/// finalize (objects → log compare-and-swap → conditional manifest PUTs) succeeds — the
+/// durability ordering + every security check (bomb caps, stale-check against the live
+/// `git_refs`, If-Match manifest CAS, no CAS poisoning) are BYTE-IDENTICAL to the prior
+/// inline path; only the thread they run on changed.
+#[allow(clippy::too_many_arguments)]
+fn finish_receive_pack(
+    state: &AppState,
+    repo: &str,
+    repo_state: &crate::state::RepoState,
+    cmd: crate::receive_wire::ReceiveCommand,
+    principal: Vec<String>,
+    mut log: hugit_refstore::log::EventLog,
+    token: crate::writes::CasToken,
+    pack: Vec<u8>,
+    request: Request,
+    io_budget: Duration,
+) {
+    use crate::receive_wire::{RefOutcome, build_report_status};
+    use crate::state::RepoWriter;
+    use crate::writes::LogSink; // brings AppState::persist (the compare-and-swap) into scope
+    use hugit_proto::write::receive::{ReceiveRequest, RecvLimits, RefUpdate, receive_pack};
+    use hugit_proto::write::store::Cas; // the &mut dyn Cas sink coercion
+
     let req = ReceiveRequest {
-        pack: wire.pack,
+        pack,
         update: RefUpdate {
             ref_name: cmd.ref_name.clone(),
             expected: if cmd.is_create() {
@@ -1953,6 +2114,52 @@ mod offloop_tests {
         assert!(
             done.load(Ordering::SeqCst),
             "the detached worker must complete the job out-of-band"
+        );
+    }
+
+    /// THE receive-pack (push) availability property (WP W-RECEIVE-OFFLOOP): the push
+    /// unpack + durable finalize is handed to a DETACHED worker via the SAME
+    /// `spawn_with_payload` primitive `spawn_receive_pack_worker` uses, so a SLOW unpack
+    /// (here a ~400 ms fake) runs out-of-band while the accept-loop side returns at once
+    /// — `/readyz` + other requests stay answerable during a large push. This is the
+    /// exact accept-loop-not-wedged guarantee the receive-pack POST now has (previously
+    /// the gix-pack unpack ran INLINE on the single accept thread, wedging it for the
+    /// push's whole duration). We can't build a `tiny_http::Request` in a unit test, so
+    /// we exercise the hand-off mechanism directly (the real path moves a
+    /// `(ReceivePlan, Request, io_budget)` through it identically).
+    #[test]
+    fn receive_pack_handoff_frees_loop_during_slow_unpack() {
+        let unpacked = Arc::new(AtomicBool::new(false));
+        let unpacked_worker = Arc::clone(&unpacked);
+
+        let started = Instant::now();
+        // Stand-in for `serve_receive_pack_response`: a slow unpack + finalize.
+        let res = spawn_with_payload(unpacked_worker, |flag| {
+            std::thread::sleep(Duration::from_millis(400)); // the "unpack"
+            flag.store(true, Ordering::SeqCst);
+        });
+        let handoff = started.elapsed();
+
+        assert!(res.is_ok(), "the receive-pack worker must spawn");
+        assert!(
+            handoff < Duration::from_millis(100),
+            "the accept loop must be FREED at hand-off, not blocked for the ~400ms \
+             unpack (hand-off took {handoff:?})"
+        );
+        assert!(
+            !unpacked.load(Ordering::SeqCst),
+            "the unpack must still be running out-of-band on the worker right after \
+             hand-off — the accept loop did NOT wait for it (so /readyz stays answerable)"
+        );
+
+        // The worker DOES complete the unpack out-of-band (the response is not dropped).
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !unpacked.load(Ordering::SeqCst) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            unpacked.load(Ordering::SeqCst),
+            "the detached worker must complete the unpack out-of-band"
         );
     }
 
