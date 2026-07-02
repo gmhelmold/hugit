@@ -24,9 +24,11 @@ use crate::read::pack::{ObjectKind, ObjectSource, PackAssembly, PackError, assem
 /// Generous wall-clock ceiling on a single clone/fetch ([`serve_fetch`] /
 /// [`serve_clone`]).
 ///
-/// The reachability walk + pack assembly each issue one synchronous CAS (R2)
-/// fetch PER object. A full clone of a large repo (or any repo against a cold CAS)
-/// is therefore up to `2 × #objects` sequential fetches.
+/// The reachability walk + pack assembly touch every reachable object. Against a
+/// per-object CAS that was up to `2 × #objects` synchronous (R2) GETs; the walk now
+/// [`ObjectSource::prefetch`]es each frontier and the closure is prefetched before
+/// assembly, so a lazy CAS source resolves them in O(objects / chunk) BATCH reads —
+/// a large clone finishes in seconds, not minutes.
 ///
 /// **This budget bounds the WORKER, not the accept loop.** The `hugit-serve`
 /// upload-pack handler runs the whole [`serve_fetch`] OFF the single accept thread
@@ -39,9 +41,10 @@ use crate::read::pack::{ObjectKind, ObjectSource, PackAssembly, PackError, assem
 ///   gives up (fail-clean → the client gets no pack) instead of walking forever and
 ///   leaking a thread. Because the loop no longer imposes any shorter outer cutoff,
 ///   this is the ONLY thing that lets a real, legitimately slow clone COMPLETE — so
-///   it is chosen GENEROUS (300 s), far above a real clone's transfer time (a real
-///   hugit clone, ~6862 objects, is ~50 s), and it must never trip a legitimate
-///   clone (the exact regression a too-tight 45 s budget caused: it 404'd at 45 s).
+///   it is chosen GENEROUS (300 s). With the batch-prefetch walk a real hugit clone
+///   (~6862 objects) transfers in a few SECONDS — two orders of magnitude under this
+///   budget — so it can never trip a legitimate clone (the batching is what closed
+///   the earlier per-object regression that 404'd a large clone at a too-tight 45 s).
 ///
 /// FAIL-CLEAN, NOT truncate — a clone/fetch pack MUST be complete. A packfile
 /// missing an object reachable from a `want` is a CORRUPT clone (git aborts
@@ -154,6 +157,12 @@ fn serve_request(
     //    SAME deadline bounds assembly — a fetch that spent its budget on the walk
     //    fails clean here rather than start emitting a pack it can't finish.
     let oids: Vec<ObjectId> = included.into_iter().collect();
+    // Batch-warm the WHOLE closure before assembly. The walk already cached most of
+    // it, but a byte-bounded lazy cache may have evicted early frontiers on a large
+    // closure — one final batch prefetch keeps assembly's re-reads O(objects/chunk)
+    // rather than O(objects) cold GETs. Best-effort: correctness is in `assemble`'s
+    // per-object `get` (a not-warmed object simply takes the cold, fail-closed path).
+    source.prefetch(&oids);
     let pack = assemble_pack_until(source, &oids, Some(deadline))?;
     Ok(pack)
 }
@@ -184,7 +193,7 @@ fn collect_reachable_excluding(
     collect_inner(source, root, excluded, out, /*strict=*/ true, deadline)
 }
 
-/// Iterative DFS over the git object graph from `root`.
+/// Level-batched BFS over the git object graph from `root`.
 ///
 /// - commit → its tree + parents
 /// - tree → its (non-gitlink) entries
@@ -193,6 +202,14 @@ fn collect_reachable_excluding(
 ///
 /// Objects in `excluded` (and their subgraphs) are pruned. Visiting stops at
 /// objects already in `out` so shared subgraphs are walked once.
+///
+/// The walk proceeds by **frontier** (breadth-first), not depth-first: every
+/// object in the current frontier is [`ObjectSource::prefetch`]ed in ONE batch
+/// before any is read, so a lazy CAS source resolves a whole level in a handful of
+/// bulk reads instead of one blocking HTTP GET per object. The reachable SET this
+/// produces is IDENTICAL to a depth-first walk (the caller sorts `out` by oid before
+/// packing), so the assembled pack stays byte-for-byte unchanged — only the fetch
+/// *batching* differs.
 fn collect_inner(
     source: &dyn ObjectSource,
     root: &ObjectId,
@@ -201,74 +218,100 @@ fn collect_inner(
     strict: bool,
     deadline: Instant,
 ) -> Result<(), ServeError> {
-    let mut stack = vec![*root];
-    while let Some(oid) = stack.pop() {
-        // WALL-CLOCK guard: abort CLEAN (Err, never a partial closure that would
-        // assemble into a truncated/corrupt pack) if the shared budget is spent.
-        // Each iteration is one CAS get, so one check per iteration bounds the DFS.
+    let mut frontier = vec![*root];
+    while !frontier.is_empty() {
+        // WALL-CLOCK guard BEFORE the batch prefetch/reads: abort CLEAN (Err, never a
+        // partial closure that would assemble into a truncated/corrupt pack) if the
+        // shared budget is spent. Checked once per frontier AND once per object below,
+        // so a deadline already in the past aborts before ANY fetch (unchanged
+        // invariant).
         if Instant::now() >= deadline {
             return Err(ServeError::DeadlineExceeded);
         }
-        if excluded.contains(&oid) || out.contains(&oid) {
-            continue;
-        }
-        let object = match source.get(&oid)? {
-            Some(o) => o,
-            None => {
-                if strict {
-                    return Err(ServeError::IncompleteClosure(oid));
-                }
+        // Dedupe this frontier against what is already excluded/collected (and against
+        // itself) so the prefetch batch — and the reads — touch each oid at most once.
+        let mut wave_seen = BTreeSet::new();
+        let batch: Vec<ObjectId> = frontier
+            .iter()
+            .copied()
+            .filter(|oid| !excluded.contains(oid) && !out.contains(oid) && wave_seen.insert(*oid))
+            .collect();
+
+        // Batch-warm the whole frontier in one (internally chunked) round-trip; a
+        // lazy CAS source turns this into O(frontier/chunk) bulk reads. No-op for an
+        // in-memory source. Purely a warm-up — every `get` below is still authoritative.
+        source.prefetch(&batch);
+
+        let mut next: Vec<ObjectId> = Vec::new();
+        for oid in batch {
+            // Per-object wall-clock guard (parity with the original per-`get` check).
+            if Instant::now() >= deadline {
+                return Err(ServeError::DeadlineExceeded);
+            }
+            // A sibling earlier in THIS frontier may already have collected `oid`.
+            if excluded.contains(&oid) || out.contains(&oid) {
                 continue;
             }
-        };
-        out.insert(oid);
-        match object.kind {
-            ObjectKind::Blob => {}
-            ObjectKind::Commit => {
-                let mut iter = CommitRefIter::from_bytes(&object.data);
-                let tree = iter
-                    .tree_id()
-                    .map_err(|source| ServeError::Decode { oid, source })?;
-                push_unseen(tree, excluded, out, &mut stack);
-                // `parent_ids` consumes the iterator; re-create for the walk.
-                let parents = CommitRefIter::from_bytes(&object.data).parent_ids();
-                for parent in parents {
-                    push_unseen(parent, excluded, out, &mut stack);
-                }
-            }
-            ObjectKind::Tree => {
-                let entries = TreeRefIter::from_bytes(&object.data)
-                    .entries()
-                    .map_err(|source| ServeError::Decode { oid, source })?;
-                for entry in entries {
-                    // Gitlinks (submodule commits) live in another repo's CAS —
-                    // never part of this repo's closure.
-                    if entry.mode.is_commit() {
-                        continue;
+            let object = match source.get(&oid)? {
+                Some(o) => o,
+                None => {
+                    if strict {
+                        return Err(ServeError::IncompleteClosure(oid));
                     }
-                    push_unseen(entry.oid.to_owned(), excluded, out, &mut stack);
+                    continue;
                 }
-            }
-            ObjectKind::Tag => {
-                let target = TagRefIter::from_bytes(&object.data)
-                    .target_id()
-                    .map_err(|source| ServeError::Decode { oid, source })?;
-                push_unseen(target, excluded, out, &mut stack);
+            };
+            out.insert(oid);
+            match object.kind {
+                ObjectKind::Blob => {}
+                ObjectKind::Commit => {
+                    let mut iter = CommitRefIter::from_bytes(&object.data);
+                    let tree = iter
+                        .tree_id()
+                        .map_err(|source| ServeError::Decode { oid, source })?;
+                    push_unseen(tree, excluded, out, &mut next);
+                    // `parent_ids` consumes the iterator; re-create for the walk.
+                    let parents = CommitRefIter::from_bytes(&object.data).parent_ids();
+                    for parent in parents {
+                        push_unseen(parent, excluded, out, &mut next);
+                    }
+                }
+                ObjectKind::Tree => {
+                    let entries = TreeRefIter::from_bytes(&object.data)
+                        .entries()
+                        .map_err(|source| ServeError::Decode { oid, source })?;
+                    for entry in entries {
+                        // Gitlinks (submodule commits) live in another repo's CAS —
+                        // never part of this repo's closure.
+                        if entry.mode.is_commit() {
+                            continue;
+                        }
+                        push_unseen(entry.oid.to_owned(), excluded, out, &mut next);
+                    }
+                }
+                ObjectKind::Tag => {
+                    let target = TagRefIter::from_bytes(&object.data)
+                        .target_id()
+                        .map_err(|source| ServeError::Decode { oid, source })?;
+                    push_unseen(target, excluded, out, &mut next);
+                }
             }
         }
+        frontier = next;
     }
     Ok(())
 }
 
-/// Push `oid` onto the DFS stack unless it's excluded or already collected.
+/// Push `oid` onto the next BFS frontier unless it's excluded or already collected.
+/// Duplicates within a frontier are re-deduped when that frontier is processed.
 fn push_unseen(
     oid: ObjectId,
     excluded: &BTreeSet<ObjectId>,
     out: &BTreeSet<ObjectId>,
-    stack: &mut Vec<ObjectId>,
+    next: &mut Vec<ObjectId>,
 ) {
     if !excluded.contains(&oid) && !out.contains(&oid) {
-        stack.push(oid);
+        next.push(oid);
     }
 }
 
