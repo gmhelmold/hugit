@@ -139,8 +139,10 @@ pub fn land_with_dispatch<T: RunnerTransport>(
     })?;
 
     // Run the PR's check on the fabric — REAL §13.1 metrics, or a FATAL error
-    // (never a fabricated / honest-zero fall-back under --dispatch).
-    let metrics = dispatch_pr_metrics(client, &opened).map_err(DispatchLandError::Runner)?;
+    // (never a fabricated / honest-zero fall-back under --dispatch). The log is
+    // read (immutably) for the authoring `ctx.usage` records the close cost is
+    // priced from (WP-COST-3); the borrow ends before `settle` mutates it below.
+    let metrics = dispatch_pr_metrics(log, client, &opened).map_err(DispatchLandError::Runner)?;
 
     // Settle with the measured metrics carried through as the full IntentMetrics
     // (cache split preserved, never flattened). Capture fires inside `settle`.
@@ -171,10 +173,21 @@ pub fn land_with_dispatch<T: RunnerTransport>(
 /// Only the metrics are consumed; the stamped `CheckResult` is discarded (see the
 /// module-level disclosed-seam note — there is no real tree / CI definition at
 /// the porcelain land altitude). At this altitude there is no live OFF-BOX agent
-/// loop either, so the SUBMITTED trajectory is honest-zero (the disclosed P2
-/// seam); the CAPTURED cost is the fabric's signed readback — the runner is the
-/// source of truth, never a hand-stamp.
+/// loop either, so the SUBMITTED trajectory (the token cache-split) is honest-zero
+/// (the disclosed P2 seam).
+///
+/// # WP-COST-3 — the REAL cost submitted on the close
+///
+/// The `cost_usd_micros` submitted on the close is NOT honest-zero: it is the
+/// EXACT `Σ(authoring ctx.usage × EXACT published rate)` priced from the log's
+/// `ctx.usage` records ([`super::capture::priced_usage`], Option A). The fabric
+/// records the submitted figure verbatim (submit→record→attest), so it rides back
+/// in the close readback. COMPLETE-OR-NOTHING: `None` (honest-zero — the fabric
+/// keeps its derived floor) when there are no `ctx.usage` records OR any model is
+/// unknown OR the sum overflows — NEVER a partial / estimated figure, NEVER the
+/// modeled COGS.
 fn dispatch_pr_metrics<T: RunnerTransport>(
+    log: &EventLog,
     client: &LeaseClient<T>,
     opened: &OpenedPr,
 ) -> Result<IntentMetrics, RunnerExecError> {
@@ -190,13 +203,22 @@ fn dispatch_pr_metrics<T: RunnerTransport>(
     let def = land_check_def(opened);
     let def_digest = def.def_digest.clone();
     let memo_key = land_memo_key(opened, &def_digest);
+
+    // WP-COST-3 (the cost-killer's final link): price the authoring `ctx.usage`
+    // records for this PR's targets (Option A, complete-or-nothing) and submit the
+    // REAL cost on the close. `None` (honest-zero — the fabric keeps its derived
+    // floor) when no records exist / any model is unknown / the sum overflows;
+    // NEVER a partial or estimated figure, NEVER the modeled COGS (the #113
+    // per-PR honesty law). The fabric records the submitted figure verbatim.
+    let cost_usd_micros = super::capture::priced_usage(log, opened).map(|pu| pu.cost_usd_micros);
+
     let outcome = dispatch_attest_offbox(
         client,
         &acquire,
-        // The off-box-measured §13.1 metrics submitted as the trajectory. At the
-        // porcelain land altitude there is no live off-box agent loop (the P2
-        // seam), so this is honest-zero; the captured figure is the fabric's
-        // signed readback, not this submission.
+        // The off-box-measured §13.1 token cache-split submitted as the trajectory.
+        // At the porcelain land altitude there is no live off-box agent loop (the
+        // P2 seam), so the token split is honest-zero; the CACHED cost figure is
+        // priced separately from the authoring `ctx.usage` records (below).
         &zero_intent_metrics(),
         &memo_key,
         // tree_root: honestly empty — no materialized tree at this altitude (the
@@ -206,14 +228,8 @@ fn dispatch_pr_metrics<T: RunnerTransport>(
         &def_digest,
         // toolchain_digest: unknown at the porcelain land altitude → empty.
         "",
-        // TODO(#64): real provider-billed cost from the agent run's /usage — None
-        // ⇒ honest-zero until the off-box agent-loop source exists. There is NO
-        // real provider-cost source at the porcelain land altitude today (no live
-        // off-box agent loop — the disclosed P2 seam above), so we submit None: the
-        // fabric keeps its honest-zero derived floor. Threading a derived figure
-        // here would be a misattribution (the per-PR honesty law). When the off-box
-        // agent loop lands, read its provider `/usage` and pass `Some(micros)`.
-        None,
+        // WP-COST-3: the REAL priced-from-usage cost (Some) or honest-zero (None).
+        cost_usd_micros,
     )?;
     Ok(outcome.metrics)
 }
@@ -731,13 +747,163 @@ mod tests {
         }
     }
 
-    /// HONESTY GUARD (per-PR honesty law, LOW finding #6): the `pr land --dispatch`
-    /// close path MUST submit `cost_usd_micros: None` today — there is NO real
-    /// provider-/usage cost source at the porcelain land altitude (the disclosed P2
-    /// seam), so the fabric keeps its honest-zero derived floor. A future caller
-    /// change that threaded a derived/non-real figure into the close body would be a
-    /// misattribution — this test (the close POST body carries NO `cost_usd_micros`
-    /// key) catches it first.
+    /// Append an authoring `ctx.usage` record onto the log the SAME way
+    /// `hugit ctx usage` (WP-COST-2) does — an orchestrator-authored
+    /// `ctx.usage` record (Orchestrator/Land cell), canonical payload. Used by
+    /// the WP-COST-3 close-cost tests to seed the priced-from-usage source.
+    #[allow(clippy::too_many_arguments)]
+    fn append_usage(
+        log: &mut EventLog,
+        target_kind: &str,
+        target_id: &str,
+        model: &str,
+        input: u64,
+        output: u64,
+        cache_read: u64,
+        cache_write: u64,
+    ) {
+        use hugit_refstore::{Endpoint, PrincipalClass};
+        let total = input + output + cache_read + cache_write;
+        let payload = serde_json::json!({
+            "target_id": target_id,
+            "target_kind": target_kind,
+            "source": "provider_usage",
+            "model": model,
+            "recorded_at": 0,
+            "tokens": {
+                "input": input, "output": output,
+                "cache_read": cache_read, "cache_write": cache_write, "total": total,
+            },
+        })
+        .to_string();
+        log.append_authorized(
+            PrincipalClass::Orchestrator,
+            Endpoint::Land,
+            crate::ctx::CTX_USAGE_KIND,
+            vec!["orchestrator:hugit".to_string()],
+            payload,
+            0,
+        )
+        .expect("ctx.usage append (Orchestrator/Land) is authorized");
+    }
+
+    /// Read the `cost_usd_micros` the close POST body carries (or `None` when the
+    /// key is absent) — the exact figure the fabric records verbatim (WP-COST-3).
+    fn close_cost_submitted(posts: &PostLog) -> Option<u64> {
+        let posts = posts.lock().unwrap();
+        let close = posts
+            .iter()
+            .rev()
+            .find(|(url, _)| url.contains("/close"))
+            .expect("a close POST was made");
+        let body: serde_json::Value = serde_json::from_slice(&close.1).expect("close body is JSON");
+        assert_eq!(
+            body["status"], "succeeded",
+            "close still reports the status"
+        );
+        body.get("cost_usd_micros")
+            .and_then(serde_json::Value::as_u64)
+    }
+
+    /// WP-COST-3 GOLDEN: with authoring `ctx.usage` records present and EVERY
+    /// model known, `land --dispatch` submits the EXACT `Σ(usage × published
+    /// rate)` on the close (the fabric records it verbatim). Hand-computed:
+    ///
+    /// - i-a, opus-4-8, 1_000_000 input → 1M × $5/MTok  = $5.00  = 5_000_000 µ$
+    /// - i-b, sonnet-4-6, 1_000_000 output → 1M × $15/MTok = $15.00 = 15_000_000 µ$
+    ///
+    /// Σ = 20_000_000 micro-USD.
+    #[test]
+    fn land_dispatch_close_submits_exact_priced_usage_sum() {
+        let mut log = open_and_queue();
+        append_usage(
+            &mut log,
+            "intent",
+            "i-a",
+            "claude-opus-4-8",
+            1_000_000,
+            0,
+            0,
+            0,
+        );
+        append_usage(
+            &mut log,
+            "intent",
+            "i-b",
+            "claude-sonnet-4-6",
+            0,
+            1_000_000,
+            0,
+            0,
+        );
+
+        let posts = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let transport = CapturingTransport::with(happy_responses(), std::sync::Arc::clone(&posts));
+        let config = RunnerConfig::new("https://runner.example/", SENTINEL_PAT).unwrap();
+        let client = LeaseClient::with_transport(config, transport);
+
+        land_with_dispatch(&mut log, &client, "42", 3000).expect("dispatch land");
+
+        assert_eq!(
+            close_cost_submitted(&posts),
+            Some(20_000_000),
+            "the close body carries the EXACT Σ(usage × published rate)"
+        );
+    }
+
+    /// WP-COST-3: a `ctx.usage` record naming the PR id itself (`target_kind:pr`)
+    /// also contributes to the priced close cost.
+    #[test]
+    fn land_dispatch_prices_pr_targeted_usage_record() {
+        let mut log = open_and_queue();
+        // haiku-4-5: input $1/MTok → 2M × $1 = $2.00 = 2_000_000 micro-USD.
+        append_usage(&mut log, "pr", "42", "claude-haiku-4-5", 2_000_000, 0, 0, 0);
+
+        let posts = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let transport = CapturingTransport::with(happy_responses(), std::sync::Arc::clone(&posts));
+        let config = RunnerConfig::new("https://runner.example/", SENTINEL_PAT).unwrap();
+        let client = LeaseClient::with_transport(config, transport);
+        land_with_dispatch(&mut log, &client, "42", 3000).expect("dispatch land");
+
+        assert_eq!(close_cost_submitted(&posts), Some(2_000_000));
+    }
+
+    /// WP-COST-3 COMPLETE-OR-NOTHING: if ANY contributing record's model is
+    /// unknown to the price card, the WHOLE close cost is honest-zero (None) —
+    /// never the partial known-model sum. Here i-a (opus, known, $5) + i-b
+    /// (unknown model) ⇒ the close omits `cost_usd_micros` entirely.
+    #[test]
+    fn land_dispatch_unknown_model_makes_whole_cost_honest_zero() {
+        let mut log = open_and_queue();
+        append_usage(
+            &mut log,
+            "intent",
+            "i-a",
+            "claude-opus-4-8",
+            1_000_000,
+            0,
+            0,
+            0,
+        );
+        append_usage(&mut log, "intent", "i-b", "gpt-4o", 1_000_000, 0, 0, 0);
+
+        let posts = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let transport = CapturingTransport::with(happy_responses(), std::sync::Arc::clone(&posts));
+        let config = RunnerConfig::new("https://runner.example/", SENTINEL_PAT).unwrap();
+        let client = LeaseClient::with_transport(config, transport);
+        land_with_dispatch(&mut log, &client, "42", 3000).expect("dispatch land");
+
+        assert_eq!(
+            close_cost_submitted(&posts),
+            None,
+            "an unknown model → the WHOLE cost is honest-zero, never the partial sum"
+        );
+    }
+
+    /// WP-COST-3 HONESTY GUARD (per-PR honesty law): with NO authoring `ctx.usage`
+    /// records on the log, the `pr land --dispatch` close submits `cost_usd_micros:
+    /// None` (honest-zero — the fabric keeps its derived floor). The complete-or-
+    /// nothing rule: absent records → None, never a fabricated / estimated figure.
     #[test]
     fn land_dispatch_close_submits_no_cost_honest_zero() {
         let mut log = open_and_queue();
@@ -748,25 +914,11 @@ mod tests {
 
         land_with_dispatch(&mut log, &client, "42", 3000).expect("dispatch land");
 
-        // The close is the LAST POST (acquire → submit → poll(GET) → close).
-        let posts = posts.lock().unwrap();
-        let close = posts
-            .iter()
-            .rev()
-            .find(|(url, _)| url.contains("/close"))
-            .expect("a close POST was made");
-        let body: serde_json::Value = serde_json::from_slice(&close.1).expect("close body is JSON");
-        assert!(
-            body.as_object()
-                .expect("close body is an object")
-                .get("cost_usd_micros")
-                .is_none(),
-            "the close body MUST omit cost_usd_micros (honest-zero — no real cost \
-             source at the land altitude); got: {body}"
-        );
+        // No ctx.usage records → priced_usage is None → the close omits the key.
         assert_eq!(
-            body["status"], "succeeded",
-            "close still reports the status"
+            close_cost_submitted(&posts),
+            None,
+            "the close body MUST omit cost_usd_micros when there are no ctx.usage records"
         );
     }
 }

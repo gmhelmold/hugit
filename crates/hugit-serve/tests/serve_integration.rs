@@ -2,8 +2,11 @@
 //! socket-free [`hugit_serve::server::route`] (deterministic — no port binding).
 //!
 //! Proves the transport law end-to-end over real handlers + a real on-disk log:
-//! `/readyz` unauth → 200; `/v1/*` requires Bearer (401 without / wrong);
-//! a present repo → 200 + a contract-valid VM; an absent repo or PR → 404
+//! `/readyz` unauth → 200; a repo READ derives the anonymous principal on a
+//! missing/invalid Bearer (W-ANON-V1) and is gated by `authorize_read` — a PUBLIC
+//! repo serves anon (200), a PRIVATE/absent one → 404 (no oracle), never a 401 on the
+//! credential; the 401 stays on the WRITE door, `/v1/me/*`, `/v1/admin/*`, `/v1/token`;
+//! a present readable repo → 200 + a contract-valid VM; an absent repo or PR → 404
 //! (`{code:"NOT_FOUND"}`, no existence leak); path-traversal → 404; non-GET → 404;
 //! a TAMPERED log → 503 (`ENGINE_UNAVAILABLE`, fail-honest).
 
@@ -160,9 +163,17 @@ fn admin_control_plane_reads_are_wired_and_contract_valid() {
     assert_eq!(ov.log_depth, 0);
     assert_eq!(ov.last_activity_age, "—");
 
-    // admin reads require Bearer like every other /v1 read.
-    let (s, _b) = route(&state, &Method::Get, "/v1/repos/hugit/audit", &[]);
-    assert_eq!(s, 401);
+    // A no-Bearer admin read degrades to anon (W-ANON-V1). This repo is PRIVATE
+    // (default meta), so `authorize_read` denies the anon read → 404 BEFORE the
+    // operator gate is even reached (no existence oracle). (On a PUBLIC repo the
+    // read-gate passes but the operator-gate then 404s anon — proven in
+    // `admin_control_plane_is_operator_only_even_on_a_public_repo`.)
+    let (s, b) = route(&state, &Method::Get, "/v1/repos/hugit/audit", &[]);
+    assert_eq!(
+        s, 404,
+        "no-Bearer admin read on a PRIVATE repo → anon → 404"
+    );
+    assert!(b.contains("NOT_FOUND"), "uniform no-oracle 404 body: {b}");
 
     // admin tokens — active engine-token sessions (account-level, store-backed).
     use hugit_http_contracts::admin::AdminTokensVm;
@@ -447,9 +458,19 @@ fn admin_control_plane_is_operator_only_even_on_a_public_repo() {
     ];
 
     for url in admin_routes {
-        // (a) ANONYMOUS (no Bearer) → 401 BEFORE any resource work (auth-first).
-        let (s, _b) = route(&state, &Method::Get, url, &[]);
-        assert_eq!(s, 401, "anonymous needs a Bearer first: {url}");
+        // (a) ANONYMOUS (no Bearer, W-ANON-V1) → the anon principal PASSES the
+        // read-gate on this PUBLIC repo, but the control-plane OPERATOR gate then
+        // denies → uniform 404 (never the admin plane, no oracle). The key security
+        // property holds: anon on a public repo can NEVER reach the control plane.
+        let (s, b) = route(&state, &Method::Get, url, &[]);
+        assert_eq!(
+            s, 404,
+            "anonymous is NOT the operator → 404 on public admin: {url}"
+        );
+        assert!(
+            b.contains("NOT_FOUND"),
+            "uniform 404 body for anon admin: {url}"
+        );
 
         // (a) A normal tenant — owner AND a different tenant — gets the uniform
         // 404 on the control plane even though the repo is PUBLIC (no oracle).
@@ -475,24 +496,40 @@ fn admin_control_plane_is_operator_only_even_on_a_public_repo() {
     assert_eq!(s, 200, "public home still readable cross-tenant");
 }
 
+// W-ANON-V1: a repo READ no longer 401s on the credential — a missing/invalid Bearer
+// degrades to the ANONYMOUS principal (empty chain), the JSON twin of the anon `git
+// clone` door. The repo here (`hugit`, log `[]`) defaults to PRIVATE, so the anon
+// read is denied by `authorize_read` → a uniform 404 (no existence oracle). The 401
+// still guards the WRITE door, `/v1/me/*`, `/v1/admin/*`, and `/v1/token` (proven
+// elsewhere). Both cases are a DENY — the change is only 401→404 on a private read.
 #[test]
-fn missing_bearer_is_401() {
+fn missing_bearer_private_read_is_404_no_oracle() {
     let (state, _d) = state_with_repo("hugit", "[]");
     let (status, body) = route(&state, &Method::Get, "/v1/repos/hugit/home", &[]);
-    assert_eq!(status, 401);
-    assert!(body.contains("TOKEN_INVALID"));
+    assert_eq!(status, 404, "no-Bearer read of a PRIVATE repo → anon → 404");
+    assert!(
+        body.contains("NOT_FOUND"),
+        "uniform no-oracle 404 body: {body}"
+    );
 }
 
 #[test]
-fn wrong_bearer_is_401() {
+fn wrong_bearer_private_read_is_404() {
     let (state, _d) = state_with_repo("hugit", "[]");
-    let (status, _b) = route(
+    let (status, body) = route(
         &state,
         &Method::Get,
         "/v1/repos/hugit/home",
         &bearer("WRONG"),
     );
-    assert_eq!(status, 401);
+    assert_eq!(
+        status, 404,
+        "a garbage Bearer degrades to anon (never a 401 on a read); PRIVATE → 404"
+    );
+    assert!(
+        body.contains("NOT_FOUND"),
+        "uniform no-oracle 404 body: {body}"
+    );
 }
 
 #[test]
@@ -657,10 +694,13 @@ fn live_socket_serves_readyz_and_authed_read() {
     let vm: RepoHomeVm = serde_json::from_str(body).expect("home body parses as RepoHomeVm");
     assert_eq!(vm.repo, "hugit");
 
-    // No token over the real socket → 401.
+    // No token over the real socket → the read degrades to anon (W-ANON-V1); this
+    // repo is PRIVATE (log `[]`), so the anon read is denied → 404 (no oracle), not a
+    // 401. A read never 401s on the credential; the 401 stays on the write/me/token
+    // doors.
     let r3 = http_get(&addr, "/v1/repos/hugit/home", None);
     assert!(
-        r3.starts_with("HTTP/1.1 401"),
-        "missing-bearer response: {r3}"
+        r3.starts_with("HTTP/1.1 404"),
+        "missing-bearer PRIVATE read → anon → 404: {r3}"
     );
 }
