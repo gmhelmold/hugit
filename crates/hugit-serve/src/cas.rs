@@ -1522,31 +1522,45 @@ impl<T: CasTransport> LazyCasObjectSource<T> {
         self.index.is_empty()
     }
 
-    /// Boot-time diagnostic: pick the FIRST oid in the live index, resolve its
-    /// blake3, and issue ONE real `batch_read` for it against the CoreLink CAS.
-    /// Returns a short status string for `/readyz`:
-    /// - `"ok"` — batch_read succeeded and the object bytes were present,
-    /// - `"absent"` — batch_read succeeded but the object was missing (unexpected),
-    /// - `"empty-index"` — no oids in the live index (nothing to probe),
-    /// - `"err:<detail>"` — batch_read returned an error (the failure we are hunting).
+    /// Boot-time diagnostic surfaced on `/readyz`: measure the REAL multi-chunk
+    /// `batch_read` path the clone uses (a slow anon clone is the bug we are hunting).
+    /// Takes the first up-to-`PROBE_N` blake3s from the live index and issues ONE
+    /// `batch_read` for the whole set — which `CasClient::batch_read` splits into
+    /// `BATCH_REQUEST_CHUNK`-sized (256) HTTP requests internally, so this exercises
+    /// the exact big-batch path (transport read-timeout, 429 concurrency, size caps).
+    /// Reports a compact string:
+    /// - `"empty-index"` — no oids to probe,
+    /// - `"err:<detail> <ms>ms n=<req>"` — the failure (the batch-plane is NOT usable),
+    /// - `"ok <found>/<req> <ms>ms"` — the batch-plane WORKS; `<ms>` over `<req>` objects
+    ///   is the throughput floor (extrapolate ×total/req for the whole-repo warm cost).
     ///
-    /// Never panics; makes at most one network call.
+    /// Never panics; makes at most `ceil(req/256)` network calls at boot.
     pub fn batch_read_selfcheck(&self) -> String {
-        // Pick the first blake3 from the live index.
-        let first = {
+        /// How many oids to probe at boot (4 full 256-chunks — enough to measure the
+        /// multi-request path without a costly full-repo warm on every boot).
+        const PROBE_N: usize = 1024;
+        // Snapshot the first PROBE_N blake3s, then DROP the lock before the network call.
+        let hashes: Vec<String> = {
             let guard = self.index.0.read().unwrap_or_else(|e| e.into_inner());
-            guard.iter().next().map(|(_oid, blake3)| blake3.clone())
+            guard
+                .iter()
+                .take(PROBE_N)
+                .map(|(_oid, blake3)| blake3.clone())
+                .collect()
         };
-        let blake3 = match first {
-            None => return "empty-index".to_string(),
-            Some(b) => b,
-        };
-        match self.cas.batch_read(&[blake3]) {
-            Err(e) => format!("err:{e}"),
-            Ok(result) => match result.into_iter().next() {
-                Some((_hash, Some(_bytes))) => "ok".to_string(),
-                _ => "absent".to_string(),
-            },
+        if hashes.is_empty() {
+            return "empty-index".to_string();
+        }
+        let req = hashes.len();
+        let t0 = std::time::Instant::now();
+        let outcome = self.cas.batch_read(&hashes);
+        let ms = t0.elapsed().as_millis();
+        match outcome {
+            Err(e) => format!("err:{e} {ms}ms n={req}"),
+            Ok(result) => {
+                let found = result.iter().filter(|(_h, bytes)| bytes.is_some()).count();
+                format!("ok {found}/{req} {ms}ms")
+            }
         }
     }
 }
