@@ -396,15 +396,15 @@ fn respond_sse(
         }
     }
 
-    // Auth BEFORE any resource work (the SAME two-tier gate as every other read:
-    // a Clerk-minted engine token, else the dev-token fallback).
-    let principal = match two_tier_auth(state, headers) {
-        Ok((p, _)) => p,
-        Err(e) => {
-            let (status, body) = err(e);
-            return send_json(request, status, body);
-        }
-    };
+    // Principal BEFORE any resource work — anonymous-safe (W-ANON-V1), the SAME
+    // fail-closed derivation as the standard read path (`read_principal`): a
+    // missing/invalid/expired Bearer degrades to the ANONYMOUS empty chain, NEVER a
+    // 401 on the credential. The per-tenant `authorize_read` gate below then serves a
+    // PUBLIC repo's event stream to anon (200) and 404s a PRIVATE/absent one (no
+    // oracle) — mirroring the `git clone` wire. A public event stream stays cacheable
+    // only via the standard read path; this SSE replay is UNCONDITIONALLY private (it
+    // is a live stream), so no anon read is ever cached here.
+    let principal = read_principal(state, headers);
     let path = url.split('?').next().unwrap_or("");
     let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     let repo = match segs.as_slice() {
@@ -507,14 +507,16 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
         return err(EngineErr::not_found());
     }
 
-    // /v1/repos/{repo}/... — every read is Bearer-authenticated (auth BEFORE any
-    // repo/resource work, so 401 never depends on whether the repo exists).
+    // /v1/repos/{repo}/... — an anonymous-safe READ (W-ANON-V1): the acting principal
+    // is derived fail-CLOSED to the ANONYMOUS empty chain on a missing/invalid/expired
+    // Bearer (NEVER a 401 on the credential) — the JSON twin of the `git clone` wire's
+    // `clone_principal`. The read is then gated by `authorize_read` below: a PUBLIC
+    // repo serves any principal incl. anon (200); a PRIVATE/absent one is a uniform
+    // 404 (no existence oracle). A write is never anonymous — the POST door
+    // (`route_post`) still calls `two_tier_auth` directly and 401s on a bad principal.
     match segs.as_slice() {
         ["v1", "repos", repo, tail @ ..] => {
-            let (principal, _) = match two_tier_auth(state, headers) {
-                Ok(p) => p,
-                Err(e) => return err(e),
-            };
+            let principal = read_principal(state, headers);
             // Load + verify the repo log ONCE (404 absent/unsafe-slug, 503
             // tampered) BEFORE gating — and reuse it for the handler (no
             // double-verify).
@@ -954,6 +956,34 @@ pub(crate) fn two_tier_auth(
         return Ok((Vec::new(), false));
     }
     Err(EngineErr::token_invalid())
+}
+
+/// Derive the acting principal for a `GET /v1/repos/{repo}/...` READ, fail-CLOSED to
+/// the ANONYMOUS empty chain (`vec![]`) on every credential failure — the JSON-read
+/// twin of git.rs's `clone_principal`, so the `/v1` read door and the `git clone`
+/// wire open a PUBLIC repo to an anonymous visitor IDENTICALLY.
+///
+/// A read NEVER 401s on the credential: a missing `Authorization: Bearer`, a garbage
+/// or unknown token, and an EXPIRED engine token all degrade to anonymous (empty
+/// chain) — the caller then runs the EXISTING `authorize_read` gate, so a PUBLIC repo
+/// serves (200) and a PRIVATE/absent one is a uniform 404 (no existence oracle). A
+/// bad credential can therefore only ever DROP privilege to anon, NEVER authenticate
+/// "as someone".
+///
+/// Unlike `clone_principal`, this DELEGATES to `two_tier_auth`, so the documented
+/// dev-operator break-glass (`HUGIT_ALLOW_DEV_OPERATOR=1` + the dev-token) is
+/// preserved on the read path exactly as before — `two_tier_auth` yields the operator
+/// principal only when the flag is ON; with the flag OFF the dev-token is already
+/// worth exactly an anonymous visit. This path introduces NO new elevation: the ONLY
+/// behavior change vs the prior code is that a credential FAILURE becomes anon instead
+/// of a `401`. Reads only; the WRITE door keeps calling `two_tier_auth` directly and
+/// still errors (401) on a missing/invalid principal — a write is never anonymous.
+fn read_principal(state: &AppState, headers: &[Header]) -> Vec<String> {
+    match two_tier_auth(state, headers) {
+        Ok((principal, _fresh)) => principal,
+        // No / invalid / expired Bearer → anonymous (public-read gate), NOT a 401.
+        Err(_) => Vec::new(),
+    }
 }
 
 /// Dispatch an authenticated `/v1/repos/{repo}/<tail...>` POST through the
@@ -1633,6 +1663,206 @@ mod io_timeout_tests {
         assert!(
             (5..=3600).contains(&d),
             "io_deadline within [5,3600], got {d}"
+        );
+    }
+}
+
+/// W-ANON-V1 — a PUBLIC repo is readable over `/v1` with NO Bearer (the JSON twin of
+/// the anonymous `git clone` door). The invariants: a missing/garbage Bearer degrades
+/// to the ANONYMOUS empty chain (never a 401 on the credential, never "authenticated
+/// as someone"); `authorize_read` then serves a public repo (200) and 404s a
+/// private/absent one (no existence oracle); a WRITE is NEVER anonymous.
+#[cfg(test)]
+mod anon_v1_read_tests {
+    use super::*;
+    use crate::state::AppState;
+    use crate::token::ClerkPrincipal;
+    use hugit_refstore::EventLog;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    const DEV: &str = "dev-token-anon-v1";
+
+    fn bearer(tok: &str) -> Vec<Header> {
+        vec![Header::from_bytes(&b"Authorization"[..], format!("Bearer {tok}").as_bytes()).unwrap()]
+    }
+
+    /// A unique scratch dir (no tempfile dep — mirrors the git.rs live-refs tests).
+    fn scratch_dir() -> PathBuf {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let p = std::env::temp_dir().join(format!(
+            "hugit-serve-anonv1-{}-{}-{}",
+            std::process::id(),
+            nanos,
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&p).expect("scratch dir");
+        p
+    }
+
+    /// Seed a `<repo>.json` event log on disk with the given visibility (+ `org-a`
+    /// owner) and return an `AppState` rooted at its dir. The dev-operator break-glass
+    /// is forced OFF — the PUBLIC prod posture, so the dev-token confers no elevation.
+    fn state_with_repo(repo: &str, visibility: &str) -> AppState {
+        let dir = scratch_dir();
+        let mut log = EventLog::new();
+        log.append_for_test(
+            "repo.meta",
+            vec![],
+            serde_json::json!({"visibility": visibility, "owner_tenant": "org-a"}).to_string(),
+            0,
+        );
+        std::fs::write(
+            dir.join(format!("{repo}.json")),
+            serde_json::to_string_pretty(log.records()).unwrap(),
+        )
+        .unwrap();
+        let mut state = AppState::new(dir, DEV.to_string());
+        state.allow_dev_operator = false;
+        state
+    }
+
+    /// A PUBLIC repo `home` read with NO Bearer → 200 (real data), the anonymous door.
+    #[test]
+    fn anon_public_read_is_200() {
+        let state = state_with_repo("hugit", "public");
+        let (status, _body) = route(&state, &Method::Get, "/v1/repos/hugit/home", &[]);
+        assert_eq!(status, 200, "anon read of a PUBLIC repo serves (no 401)");
+    }
+
+    /// A PRIVATE repo read with NO Bearer → 404 (denied == absent, no existence oracle).
+    #[test]
+    fn anon_private_read_is_404_no_oracle() {
+        let state = state_with_repo("hugit", "private");
+        let (status, _body) = route(&state, &Method::Get, "/v1/repos/hugit/home", &[]);
+        assert_eq!(status, 404, "anon read of a PRIVATE repo is a uniform 404");
+    }
+
+    /// An ABSENT repo (no log) and a private-unauthorized one BOTH 404, byte-identical
+    /// — no existence oracle distinguishes "does not exist" from "you may not read it".
+    #[test]
+    fn absent_and_private_are_identical_404() {
+        let private = state_with_repo("hugit", "private");
+        let (ps, pb) = route(&private, &Method::Get, "/v1/repos/hugit/home", &[]);
+        let absent = state_with_repo("hugit", "public"); // seeded repo is "hugit"…
+        let (as_, ab) = route(&absent, &Method::Get, "/v1/repos/nope/home", &[]); // …ask a different one
+        assert_eq!(ps, 404);
+        assert_eq!(as_, 404);
+        assert_eq!(
+            pb, ab,
+            "private-denied and absent bodies are identical (no oracle)"
+        );
+    }
+
+    /// A GARBAGE Bearer on a PUBLIC repo → 200: the bad credential degrades to anon
+    /// (fail-closed), it never 401s and never authenticates "as someone".
+    #[test]
+    fn garbage_bearer_public_read_degrades_to_anon_200() {
+        let state = state_with_repo("hugit", "public");
+        let (status, _body) = route(
+            &state,
+            &Method::Get,
+            "/v1/repos/hugit/home",
+            &bearer("not-a-real-token"),
+        );
+        assert_eq!(status, 200, "garbage Bearer → anon → PUBLIC serves (200)");
+    }
+
+    /// A GARBAGE Bearer on a PRIVATE repo → 404 (degrades to anon, then denied — no
+    /// oracle, and a bad credential can only DROP privilege, never gain it).
+    #[test]
+    fn garbage_bearer_private_read_is_404() {
+        let state = state_with_repo("hugit", "private");
+        let (status, _body) = route(
+            &state,
+            &Method::Get,
+            "/v1/repos/hugit/home",
+            &bearer("not-a-real-token"),
+        );
+        assert_eq!(status, 404, "garbage Bearer on PRIVATE → anon → 404");
+    }
+
+    /// A FOREIGN-tenant (valid Clerk) Bearer on another org's PRIVATE repo → 404
+    /// (unchanged): a real token authenticates the wrong tenant, `authorize_read`
+    /// denies, uniform 404 — no cross-tenant read, no oracle.
+    #[test]
+    fn foreign_tenant_bearer_private_read_is_404() {
+        let state = state_with_repo("hugit", "private"); // owned by org-a
+        let raw = state
+            .token_store
+            .mint(&ClerkPrincipal {
+                user: "user-1".to_string(),
+                org: "org-b".to_string(), // a DIFFERENT tenant
+                fresh_auth: true,
+            })
+            .expect("mint a foreign-tenant clerk token");
+        let (status, _body) = route(&state, &Method::Get, "/v1/repos/hugit/home", &bearer(&raw));
+        assert_eq!(
+            status, 404,
+            "foreign tenant cannot read another org's PRIVATE repo"
+        );
+    }
+
+    /// A WRITE (POST) with NO Bearer is STILL 401 — a write is NEVER anonymous, even to
+    /// a PUBLIC repo. The anon door is READ-only; the write path keeps its hard gate.
+    #[test]
+    fn write_without_bearer_is_still_401() {
+        let state = state_with_repo("hugit", "public");
+        let (status, _body) = route_write(
+            &state,
+            "/v1/repos/hugit/prs/1/comments",
+            &[],
+            br#"{"body":"x"}"#,
+        );
+        assert_eq!(
+            status, 401,
+            "a POST write with no principal is 401 (never anonymous-authorized)"
+        );
+    }
+
+    /// The `read_principal` derivation (shared by the standard read path AND the SSE
+    /// stream): no/garbage/expired Bearer → anonymous empty chain, NEVER an error; the
+    /// dev-operator break-glass is preserved only when explicitly flagged ON.
+    #[test]
+    fn read_principal_derivation_is_fail_closed_anon() {
+        let mut state = state_with_repo("hugit", "public"); // break-glass OFF by default here
+        // No Bearer → anon.
+        assert!(
+            read_principal(&state, &[]).is_empty(),
+            "no Bearer → anonymous empty chain"
+        );
+        // Garbage Bearer → anon (never 401, never operator).
+        let anon = read_principal(&state, &bearer("garbage"));
+        assert!(anon.is_empty(), "garbage Bearer → anonymous");
+        assert!(!crate::authz::is_operator(&anon));
+        // Dev-token with the break-glass OFF → anon (no god-path on prod posture).
+        assert!(
+            read_principal(&state, &bearer(DEV)).is_empty(),
+            "dev-token with flag OFF → anonymous (never operator)"
+        );
+        // Dev-token with the break-glass ON → the operator principal is preserved.
+        state.allow_dev_operator = true;
+        assert!(
+            crate::authz::is_operator(&read_principal(&state, &bearer(DEV))),
+            "the dev-operator break-glass read path is preserved when flagged ON"
+        );
+        // A valid Clerk token → its real tenant principal (never dropped to anon).
+        let raw = state
+            .token_store
+            .mint(&ClerkPrincipal {
+                user: "u".to_string(),
+                org: "org-a".to_string(),
+                fresh_auth: false,
+            })
+            .expect("mint");
+        assert_eq!(
+            read_principal(&state, &bearer(&raw)),
+            vec!["clerk:org-a:u".to_string()],
+            "a valid Clerk token derives its real tenant principal"
         );
     }
 }
