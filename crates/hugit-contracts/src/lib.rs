@@ -27,6 +27,7 @@ pub mod event_record;
 pub mod export_schema;
 pub mod fence_manifest;
 pub mod intent_sidecar;
+pub mod model_price_card;
 pub mod queue_api;
 pub mod regen_gate;
 pub mod runner_lease;
@@ -49,6 +50,9 @@ pub use event_record::EventRecord;
 pub use export_schema::ExportSchema;
 pub use fence_manifest::FenceManifest;
 pub use intent_sidecar::IntentSidecar;
+pub use model_price_card::{
+    CURRENT as CURRENT_PRICE_CARD, ModelPriceCard, PRICE_CARD_VERSION, PerTokenMicros, cost_micros,
+};
 pub use queue_api::{BatchSeal, LandableEntry, MinimalFailingPair, QueueApi, UnionResult};
 pub use regen_gate::RegenGate;
 pub use runner_lease::{RunnerLease, RunnerState};
