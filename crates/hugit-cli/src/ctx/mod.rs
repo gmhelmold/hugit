@@ -32,9 +32,15 @@
 //! live runner/serve path), the wall-clock default is the right one. The verb
 //! enforces the horizon faithfully either way — it never fabricates recency.
 //!
+//! # `ctx usage` — the authoring-`/usage` capture verb (WP-COST-2)
+//! `ctx usage` records an authoring run's REAL token usage onto the canonical
+//! log at authoring finish (a `ctx.usage` record), so land can price it
+//! (`tokens × rate`) + submit on close. hugit records VERBATIM — it prices
+//! nothing and calls no provider. See [`usage`] for the full contract.
+//!
 //! # Scope
-//! Only `resume` is REAL. `ctx snap` (the writer that persists a snapshot) is
-//! GATED on the P2 DO/R2-backed `JournalStore` and is deliberately NOT offered
+//! `resume` + `usage` are REAL. `ctx snap` (the writer that persists a snapshot)
+//! is GATED on the P2 DO/R2-backed `JournalStore` and is deliberately NOT offered
 //! here (an honest partial surface, not a stub).
 
 use std::path::PathBuf;
@@ -51,6 +57,10 @@ use crate::journal::note::JOURNAL_NOTE_KIND;
 use crate::porcelain::PorcelainError;
 use crate::redaction::scrub;
 
+pub mod usage;
+
+pub use usage::{CTX_USAGE_KIND, UsageArgs};
+
 /// `hugit ctx <subcommand>`.
 #[derive(clap::Args, Debug)]
 pub struct CtxArgs {
@@ -58,11 +68,15 @@ pub struct CtxArgs {
     pub command: CtxCommand,
 }
 
-/// Context subcommand surface (D11). Only `resume` this wave — `snap` is P2-gated.
+/// Context subcommand surface (D11). `resume` + `usage` this wave — `snap` is
+/// P2-gated.
 #[derive(Subcommand, Debug)]
 pub enum CtxCommand {
     /// Reconstruct a crashed/replaced session from its journal within the horizon.
     Resume(ResumeArgs),
+    /// Record an authoring run's REAL token usage onto the canonical log
+    /// (`ctx.usage`) at authoring finish — recorded verbatim, priced nowhere.
+    Usage(UsageArgs),
 }
 
 /// `hugit ctx resume` — reconstruct a session from the log's `journal.note`s.
@@ -91,6 +105,7 @@ pub struct ResumeArgs {
 pub fn run(args: CtxArgs) -> ExitCode {
     match args.command {
         CtxCommand::Resume(a) => resume_run(a),
+        CtxCommand::Usage(a) => usage::run(a),
     }
 }
 
