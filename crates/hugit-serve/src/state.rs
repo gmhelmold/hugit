@@ -17,10 +17,10 @@
 //!   real Clerk auth (the P2 identity seam) the tenant is the configured
 //!   `HUGIT_SERVE_R2_TENANT_ID` (the single dev tenant) — disclosed, not faked.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hugit_refstore::EventLog;
@@ -106,6 +106,15 @@ pub struct RepoState {
     /// hot-swap and advanced BEFORE the ref tip (fail-closed: the tip is never
     /// observable before its objects are resolvable in-memory).
     pub live_oid_index: Option<LiveOidIndex>,
+    /// The cached-clone-pack seam (WP-BC): where a pre-assembled full-clone pack is
+    /// stored/read so an anonymous full `git clone` streams ONE R2 object instead of
+    /// walking the whole object closure per request. `Some` ONLY for a CAS-backed repo
+    /// whose receive-pack write seam is present (the build PUTs the pack + pointer, so
+    /// it needs the SAME write-scoped [`R2Config`] the [`CasWriteSeam`] uses). `None`
+    /// for GIT_DIR mode, a CAS repo with receive-pack OFF (no write cred → the build
+    /// would 403 on PUT), and test seeds — the clone then falls back to the slow walk
+    /// (never a wrong pack; the serve side re-checks `refset_sha`).
+    pub clone_cache: Option<crate::clone_pack::CloneCacheSeam>,
 }
 
 /// An interior-mutable, shared `ref name → tip oid hex` map — the live counterpart
@@ -231,6 +240,20 @@ pub struct ProvisionTemplate {
 pub const EMPTY_TREE_OID_HEX: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 impl CasWriteSeam {
+    /// Derive the [`clone_pack::CloneCacheSeam`](crate::clone_pack::CloneCacheSeam)
+    /// for this repo from the SAME write-scoped [`R2Config`] + tenant/slug the push
+    /// finalize uses. A clone-pack BUILD PUTs the pack object + `current.json`
+    /// pointer, so it MUST ride the write-scoped credential (a read-only cred 403s on
+    /// PUT); reusing the receive-pack seam's `r2` guarantees that by construction.
+    #[must_use]
+    pub fn clone_cache_seam(&self) -> crate::clone_pack::CloneCacheSeam {
+        crate::clone_pack::CloneCacheSeam {
+            r2: self.r2.clone(),
+            tenant: self.tenant.clone(),
+            repo_slug: self.repo_slug.clone(),
+        }
+    }
+
     /// Open a fresh [`CasRw`](crate::cas::CasRw) for a push: re-read the repo's
     /// current `oid-index.json` from R2 so the receive-pack anchor's
     /// "already-live-in-CAS" leg reflects the latest committed closure (not a
@@ -506,6 +529,14 @@ pub struct AppState {
     /// `"err:<detail>"` (batch_read failed — the failure the `/readyz` surfaces),
     /// or `"unprobed"` (no CAS-backed repo loaded at boot, Local/git-dir mode).
     pub cas_batch_read_health: String,
+    /// The per-repo clone-pack BUILD in-progress guard (WP-BC): the set of repo slugs
+    /// whose background full-clone-pack assembly is currently running. Prevents two
+    /// concurrent builds of one repo (a boot bootstrap + a post-push rebuild, or two
+    /// pushes). A slug is inserted before the detached build thread spawns and removed
+    /// when it ends (in ALL paths — success, error, panic). Interior-mutable behind the
+    /// shared `&AppState` the handlers hold; the `Mutex` is near-uncontended (a build is
+    /// rare + the critical section is a set insert/remove).
+    pub clone_pack_building: Arc<Mutex<HashSet<String>>>,
 }
 
 /// The hard cap on repos a single tenant may hold in ONE engine lifetime (the boot
@@ -612,6 +643,7 @@ impl AppState {
             // is NOT a god-token — the public door has zero operator god-path.
             allow_dev_operator: dev_operator_allowed(),
             cas_batch_read_health,
+            clone_pack_building: Arc::new(Mutex::new(HashSet::new())),
         })
     }
 
@@ -669,6 +701,9 @@ impl AppState {
             repo_slug: slug.to_string(),
             r2: t.r2.clone(),
         });
+        // The clone-pack cache rides the SAME write-scoped seam (absent when
+        // receive-pack is off → no write cred → no cache, slow-walk fallback).
+        let clone_cache = cas_write.as_ref().map(CasWriteSeam::clone_cache_seam);
         Some(RepoState {
             git_source,
             git_root_tree,
@@ -676,6 +711,7 @@ impl AppState {
             git_dir: None,
             cas_write,
             live_oid_index: Some(live_oid_index),
+            clone_cache,
         })
     }
 
@@ -791,6 +827,10 @@ impl AppState {
                 } else {
                     None
                 };
+                // The clone-pack cache (WP-BC) rides the SAME write-scoped seam a CAS
+                // push finalizes through — so it exists exactly when a build CAN PUT
+                // (receive-pack on). Receive-pack off → `None` → the clone slow-walks.
+                let clone_cache = cas_write.as_ref().map(CasWriteSeam::clone_cache_seam);
                 repos.insert(
                     repo.to_string(),
                     RepoState {
@@ -800,6 +840,7 @@ impl AppState {
                         git_dir: None, // CAS mode: no local dir; push sink is cas_write
                         cas_write,
                         live_oid_index: Some(live_oid_index),
+                        clone_cache,
                     },
                 );
             }
@@ -833,6 +874,9 @@ impl AppState {
                             // GitDir push is unchanged (durable ref via `git update-ref`,
                             // re-read on the next boot): no in-memory oid-index hot-swap.
                             live_oid_index: None,
+                            // GIT_DIR mode has no CAS/R2 write seam → no clone-pack cache
+                            // (a clone slow-walks the on-disk git objects, which is fast).
+                            clone_cache: None,
                         },
                     );
                 }
@@ -871,6 +915,7 @@ impl AppState {
             // `false` on the returned state.
             allow_dev_operator: true,
             cas_batch_read_health: "unprobed".to_string(),
+            clone_pack_building: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -1055,8 +1100,21 @@ impl AppState {
                 git_dir: None,
                 cas_write: None,
                 live_oid_index: None,
+                clone_cache: None,
             },
         );
+    }
+
+    /// TEST-SUPPORT: attach a clone-pack cache seam to an already-seeded boot repo
+    /// (the wire test seeds a repo via [`set_repo_git`](Self::set_repo_git), then
+    /// points its clone cache at a mock R2). `#[doc(hidden)]`; a no-op for an unknown
+    /// slug. Not used by any production path (boot/provision populate `clone_cache`
+    /// from the receive-pack write seam).
+    #[doc(hidden)]
+    pub fn set_repo_clone_cache(&mut self, repo: &str, seam: crate::clone_pack::CloneCacheSeam) {
+        if let Some(rs) = self.repos.get_mut(repo) {
+            rs.clone_cache = Some(seam);
+        }
     }
 
     /// Wire a repo's git seam from an on-disk git dir — like the `HUGIT_SERVE_GIT_DIR`
@@ -1079,6 +1137,7 @@ impl AppState {
                 git_dir: Some(PathBuf::from(dir)),
                 cas_write: None,
                 live_oid_index: None,
+                clone_cache: None,
             },
         );
         Ok(())
@@ -1320,6 +1379,28 @@ impl R2Config {
             tenant_id: req("HUGIT_SERVE_R2_TENANT_ID")?,
             agent,
         })
+    }
+
+    /// TEST-SUPPORT: build an [`R2Config`] pointing at a LOCAL `http://` endpoint
+    /// (a mock R2 the wire test spins up), with a short timeout + dummy credentials.
+    /// `#[doc(hidden)]` + `pub` because integration tests are a separate crate that
+    /// cannot construct a [`ureq::Agent`] (ureq is not a dev-dependency); this keeps
+    /// the ureq surface inside the crate. NOT reachable from any production path.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn for_test_endpoint(endpoint: String, bucket: String) -> Self {
+        R2Config {
+            host: "mock-r2.local".to_string(),
+            endpoint,
+            bucket,
+            region: "auto".to_string(),
+            key_id: "test-key".to_string(),
+            secret: "test-secret".to_string(),
+            tenant_id: "test-tenant".to_string(),
+            agent: ureq::AgentBuilder::new()
+                .timeout(Duration::from_secs(5))
+                .build(),
+        }
     }
 
     /// Fetch the raw object + head [`CasToken`] (the GET ETag). `pub` so the live
@@ -2313,6 +2394,7 @@ mod tests {
             git_dir: None,
             cas_write: None,
             live_oid_index: Some(crate::cas::LiveOidIndex::new(BTreeMap::new())),
+            clone_cache: None,
         }
     }
 
