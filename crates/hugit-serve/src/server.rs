@@ -55,6 +55,12 @@ pub fn serve_on(state: AppState, server: Server) -> std::io::Result<()> {
         io_budget.as_secs()
     );
 
+    // WP-BC: warm each CAS repo's cached full-clone pack in the background so a full
+    // `git clone` streams one R2 object instead of walking the whole object closure.
+    // Absent/stale caches are (re)built on detached threads; clones slow-walk until
+    // the first build lands. Never blocks the loop (one `load_current` GET per repo).
+    crate::git::bootstrap_clone_packs(&state);
+
     let mut incoming = server.incoming_requests();
     loop {
         // Time the BLOCK waiting for the next request: a long wait means the queue
