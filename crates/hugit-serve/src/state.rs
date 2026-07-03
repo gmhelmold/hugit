@@ -521,14 +521,18 @@ pub struct AppState {
     /// nature; production never calls it) — a test that must exercise the
     /// no-god-path behavior flips the field to `false` directly.
     pub allow_dev_operator: bool,
-    /// Boot-time CAS `batch_read` self-check result for the first CAS-backed repo.
-    /// Populated once at boot by [`crate::cas::LazyCasObjectSource::batch_read_selfcheck`]
-    /// and surfaced on `/readyz` as `"cas_batch_read"`. Values: `"ok"` (healthy),
-    /// `"absent"` (batch_read succeeded but the probed object was missing),
-    /// `"empty-index"` (no objects indexed — newly provisioned repo),
-    /// `"err:<detail>"` (batch_read failed — the failure the `/readyz` surfaces),
-    /// or `"unprobed"` (no CAS-backed repo loaded at boot, Local/git-dir mode).
-    pub cas_batch_read_health: String,
+    /// CAS `batch_read` self-check result for the first CAS-backed repo, surfaced on
+    /// `/readyz` as `"cas_batch_read"`. **Interior-mutable + shared** (`Arc<RwLock>`)
+    /// because the probe is run OFF the boot path on a detached thread that writes the
+    /// result here when it lands — boot NEVER blocks on it (FIX: the synchronous
+    /// ~18s probe with [`crate::cas::BATCH_REQUEST_CHUNK`] = 256 blew the container
+    /// startup deadline → crash-loop outage). Values: `"probing"` (a CAS-backed repo
+    /// loaded, the detached probe has not finished yet — the initial value after a
+    /// deploy), `"ok <found>/<req> <ms>ms"` (the batch-plane works), `"empty-index"`
+    /// (no objects indexed — newly provisioned repo), `"err:<detail>"` (batch_read
+    /// failed — the failure `/readyz` surfaces, incl. a spawn/panic guard), or
+    /// `"unprobed"` (no CAS-backed repo loaded at boot, Local/git-dir mode).
+    pub cas_batch_read_health: Arc<RwLock<String>>,
     /// The per-repo clone-pack BUILD in-progress guard (WP-BC): the set of repo slugs
     /// whose background full-clone-pack assembly is currently running. Prevents two
     /// concurrent builds of one repo (a boot bootstrap + a post-push rebuild, or two
@@ -607,7 +611,43 @@ impl AppState {
         // at boot. Fail-closed: a content seam configured but loading NO repo is a
         // fatal boot error (a misconfigured seam refuses to start); an UN-configured
         // seam (neither var set) is the honest no-git default (empty map).
-        let (repos, cas_batch_read_health) = Self::load_repos_from_env()?;
+        let (repos, selfcheck_probe) = Self::load_repos_from_env()?;
+        // FIX: the CAS `batch_read` self-probe runs OFF the boot path. The shared
+        // health cell starts at `"probing"` when a CAS repo is loaded (a detached
+        // thread overwrites it when the probe lands), else `"unprobed"`. The probe
+        // once ran SYNCHRONOUSLY here (~18s at chunk 256) and blew the Cloudflare
+        // Container startup deadline → crash-loop → outage; boot now NEVER blocks on it.
+        let cas_batch_read_health = Arc::new(RwLock::new(
+            if selfcheck_probe.is_some() {
+                "probing"
+            } else {
+                "unprobed"
+            }
+            .to_string(),
+        ));
+        if let Some(probe) = selfcheck_probe {
+            let health = Arc::clone(&cas_batch_read_health);
+            let spawn = std::thread::Builder::new()
+                .name("hugit-cas-selfprobe".into())
+                .spawn(move || {
+                    // A probe panic is ISOLATED to this thread (never crashes boot):
+                    // run under catch_unwind → an unwind records an honest err string
+                    // rather than propagating. The detached thread outlives boot; the
+                    // shared `Arc` keeps the health cell alive.
+                    let result =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| probe.run()))
+                            .unwrap_or_else(|_| "err:selfprobe-panicked".to_string());
+                    *health.write().unwrap_or_else(|e| e.into_inner()) = result;
+                });
+            if spawn.is_err() {
+                // Thread exhaustion: record an honest err (the cell would otherwise stay
+                // "probing" forever). The un-run closure + its `Arc` clone were dropped.
+                *cas_batch_read_health
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner()) = "err:selfprobe-spawn-failed".to_string();
+                eprintln!("hugit-serve: CAS batch_read self-probe thread spawn failed");
+            }
+        }
         // The runtime provisioning template (W-PROVISION): the CAS handles a
         // `POST /v1/repos` mints a new repo's git seam from. `Some` only in CAS mode.
         let provision = Self::provision_template_from_env()?;
@@ -764,14 +804,21 @@ impl AppState {
     /// CONFIGURED seam (either var set, non-empty) that loads no repo, or any
     /// per-repo load error, is a fatal boot error.
     ///
-    /// Also returns a short CAS `batch_read` health string for the FIRST CAS-backed
-    /// repo (via [`crate::cas::LazyCasObjectSource::batch_read_selfcheck`]), or
-    /// `"unprobed"` when no CAS-backed repo is loaded (Local/git-dir mode). The
-    /// check makes at most one extra network call at boot; an error never fails boot.
-    fn load_repos_from_env()
-    -> Result<(std::collections::HashMap<String, RepoState>, String), String> {
+    /// Also returns a DETACHABLE CAS `batch_read` self-probe for the FIRST CAS-backed
+    /// repo ([`crate::cas::CasSelfcheckProbe`]), or `None` when no CAS-backed repo is
+    /// loaded (Local/git-dir mode). The caller ([`Self::from_env`]) runs it on a
+    /// detached thread OFF the boot path (FIX: the synchronous probe blew the container
+    /// startup deadline). This function itself makes NO probe network call — it only
+    /// captures the handle; boot is never blocked by it.
+    fn load_repos_from_env() -> Result<
+        (
+            std::collections::HashMap<String, RepoState>,
+            Option<crate::cas::CasSelfcheckProbe>,
+        ),
+        String,
+    > {
         let mut repos = std::collections::HashMap::new();
-        let mut cas_health: Option<String> = None;
+        let mut selfcheck_probe: Option<crate::cas::CasSelfcheckProbe> = None;
 
         let cas_repos = std::env::var("HUGIT_SERVE_CAS_URL")
             .ok()
@@ -801,12 +848,13 @@ impl AppState {
                 // are fetched from the CAS on demand at serve time.
                 let (cas_src, root, refs) =
                     crate::cas::load_manifests_from_cas(cas.clone(), &r2, &tenant, repo)?;
-                // Boot-time CAS connectivity self-check — ONE batch_read for the
-                // first oid in the live index. Runs only for the FIRST CAS repo;
-                // additional repos share the same CAS client so a second check would
-                // be redundant. Never fails boot — records the result for /readyz.
-                if cas_health.is_none() {
-                    cas_health = Some(cas_src.batch_read_selfcheck());
+                // Capture the boot CAS connectivity self-probe for the FIRST CAS repo
+                // ONLY (additional repos share the same CAS client → a second probe is
+                // redundant). It is NOT run here — the caller spawns it on a detached
+                // thread OFF the boot path (FIX: the synchronous probe blew the
+                // container startup deadline). Never fails boot.
+                if selfcheck_probe.is_none() {
+                    selfcheck_probe = Some(cas_src.selfcheck_probe());
                 }
                 // A shared handle to the lazy source's live oid→blake3 index, so a
                 // successful push can merge new entries into the SAME cell it reads.
@@ -847,8 +895,7 @@ impl AppState {
             if repos.is_empty() {
                 return Err("HUGIT_SERVE_CAS_REPO is empty (CAS source selected)".to_string());
             }
-            let health = cas_health.unwrap_or_else(|| "unprobed".to_string());
-            return Ok((repos, health));
+            return Ok((repos, selfcheck_probe));
         }
 
         match std::env::var("HUGIT_SERVE_GIT_DIR") {
@@ -883,10 +930,12 @@ impl AppState {
                 if repos.is_empty() {
                     return Err("HUGIT_SERVE_GIT_DIR is empty".to_string());
                 }
-                Ok((repos, "unprobed".to_string()))
+                // GIT_DIR mode has no CAS batch-read plane → no probe (`/readyz` shows
+                // "unprobed"). `selfcheck_probe` stays `None`.
+                Ok((repos, None))
             }
-            // No content seam configured → the honest no-git default.
-            _ => Ok((repos, "unprobed".to_string())),
+            // No content seam configured → the honest no-git default (no probe).
+            _ => Ok((repos, None)),
         }
     }
 
@@ -914,7 +963,7 @@ impl AppState {
             // test asserting the no-god-path (flag-OFF) behavior sets this to
             // `false` on the returned state.
             allow_dev_operator: true,
-            cas_batch_read_health: "unprobed".to_string(),
+            cas_batch_read_health: Arc::new(RwLock::new("unprobed".to_string())),
             clone_pack_building: Arc::new(Mutex::new(HashSet::new())),
         }
     }
