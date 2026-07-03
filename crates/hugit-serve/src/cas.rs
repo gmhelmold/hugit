@@ -202,13 +202,16 @@ pub const BATCH_MAX_BYTES: usize = 8 * 1024 * 1024;
 /// AND the edge's ~100s request ceiling (observed: 2026-06-20 engine boot +
 /// git-ingest dedup both timed out at 2000).
 ///
-/// STOPGAP lowered 256 → 128 (WP-BC): CoreLink root-caused the batch-read **500** as
-/// a SERIAL server-side fan-out tripping the edge's ~21s deadline at 256×~80ms/object
-/// (~20.5s); 128×~80ms ≈ 10.2s is ~2× under. Revert to 256 once CoreLink parallelizes
-/// the fan-out. NOTE: this only stops the batch-read 500 — it does NOT make a full
-/// clone fast (each object is still a round-trip). The cached clone-pack
-/// ([`crate::clone_pack`]) is what makes clone fast (ONE R2 read of a pre-assembled pack).
-pub const BATCH_REQUEST_CHUNK: usize = 128;
+/// Set to 256 (raised back from the interim 128): CoreLink **#594 parallelized the
+/// batch-read server-side fan-out** (live in prod), so the SERIAL 256×~80ms/object
+/// (~20.5s) that used to trip the edge's ~21s deadline no longer applies — 256 is
+/// deadline-safe again AND halves the round-trips (helps the clone-pack background
+/// build). The frozen [`BATCH_MAX_OBJECTS`] = 2000 remains the hard per-request cap;
+/// this client-sizing stays well under it. NOTE: this only sizes the batch-read/exists
+/// probes — it does NOT make a full clone fast (each object is still a round-trip). The
+/// cached clone-pack ([`crate::clone_pack`]) is what makes clone fast (ONE R2 read of a
+/// pre-assembled pack).
+pub const BATCH_REQUEST_CHUNK: usize = 256;
 
 /// The production default PAT secret-file path, relative to `$HOME`
 /// (`~/.hugit/secrets/corelink/pat` — the same handoff path the AC client uses).
@@ -575,7 +578,7 @@ impl<T: CasTransport> CasClient<T> {
     pub fn batch_read(&self, hashes: &[String]) -> Result<BatchReadResult, CasError> {
         let mut out: BatchReadResult = Vec::with_capacity(hashes.len());
         // Read is bounded by RETURNED bytes (unknown here), so chunk by count only
-        // — and by BATCH_REQUEST_CHUNK (128), NOT the frozen 2000 cap: a 2000-object
+        // — and by BATCH_REQUEST_CHUNK (256), NOT the frozen 2000 cap: a 2000-object
         // read makes the server do ~2000 R2 fetches in one request → boot timeout.
         // and let the 413-split handle an oversized return.
         for chunk in hashes.chunks(BATCH_REQUEST_CHUNK) {
@@ -1532,7 +1535,7 @@ impl<T: CasTransport> LazyCasObjectSource<T> {
     /// `batch_read` path the clone uses (a slow anon clone is the bug we are hunting).
     /// Takes the first up-to-`PROBE_N` blake3s from the live index and issues ONE
     /// `batch_read` for the whole set — which `CasClient::batch_read` splits into
-    /// `BATCH_REQUEST_CHUNK`-sized (128) HTTP requests internally, so this exercises
+    /// `BATCH_REQUEST_CHUNK`-sized (256) HTTP requests internally, so this exercises
     /// the exact big-batch path (transport read-timeout, 429 concurrency, size caps).
     /// Reports a compact string:
     /// - `"empty-index"` — no oids to probe,
@@ -4243,8 +4246,8 @@ mod tests {
             gets, 0,
             "a batched clone must do ZERO single-object GETs (got {gets})"
         );
-        // Frontier prefetches: [commit] (1) + [tree] (1) + [6860 blobs] → ceil(6860/128)=54,
-        // and the assembly prefetch finds everything warm → 0. So ≈56 POSTs, and
+        // Frontier prefetches: [commit] (1) + [tree] (1) + [6860 blobs] → ceil(6860/256)=27,
+        // and the assembly prefetch finds everything warm → 0. So ≈29 POSTs, and
         // ALWAYS O(objects/chunk), never O(objects).
         let ceil_chunks = N_BLOBS.div_ceil(BATCH_REQUEST_CHUNK);
         assert!(

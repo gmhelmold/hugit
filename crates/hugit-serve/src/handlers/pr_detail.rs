@@ -486,12 +486,25 @@ fn build_check_rows(log: &EventLog) -> Vec<CheckRowVm> {
 /// captured, honest ZERO otherwise (all `*_usd` 0.0, notes ""). NEVER faked.
 fn build_cost(log: &EventLog, opened: &OpenedPr, pr_env: Option<&ContextEnvelope>) -> CostSplitVm {
     let record = pr_env.and_then(|env| {
-        let intents = intent_altitude_envelopes(log, opened);
+        // WP-COST read-time fold: augment each envelope's honest-zero cost from
+        // its raw `ctx.usage` records BEFORE the rollup, so a posted usage record
+        // lights the PR cost split with no re-land. Shares the helper with the
+        // `/insights` cost X-ray (site C). Each ctx.usage targets an intent XOR a
+        // pr, so work (intents) + orchestration (pr) never fold the same record.
+        // Double-count guard + complete-or-nothing live in `envelope_with_usage`.
+        let env = super::usage_fold::envelope_with_usage(env.clone(), log, "pr", &opened.pr_id);
+        let intents: Vec<ContextEnvelope> = intent_altitude_envelopes(log, opened)
+            .into_iter()
+            .map(|e| {
+                let id = e.intent_id.clone();
+                super::usage_fold::envelope_with_usage(e, log, "intent", &id)
+            })
+            .collect();
         // No CI / queue / verdict seam at this altitude (P2 disclosed) — passed
         // zero/default exactly as the engine's `pr_record_for` does; the rollup
         // computes work/orchestration/waste/first-pass-yield from the envelopes.
         pr_record(
-            env,
+            &env,
             "", // no CAS binding at this altitude — threaded empty, not faked
             &intents,
             &opened.intent_ids,

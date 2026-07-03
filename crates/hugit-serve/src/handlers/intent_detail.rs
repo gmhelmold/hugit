@@ -187,7 +187,7 @@ pub fn build_intent_detail(
         }
     };
 
-    let metrics = match &env {
+    let mut metrics = match &env {
         Some(e) => MetricsVm {
             tokens: e.metrics.tokens.total,
             wall_ms: e.metrics.wall_ms,
@@ -205,6 +205,18 @@ pub fn build_intent_detail(
             model_turns: 0,
         },
     };
+    // WP-COST read-time fold: when the envelope cost is honest-zero (no captured
+    // envelope, or an envelope that carries no priced cost), price this intent's
+    // raw `ctx.usage` records so a posted usage record lights the cost + token
+    // rows with no re-land. Double-count guard: fold ONLY when the metric is 0 —
+    // a non-zero (fabric-attested) cost is never stacked on. Complete-or-nothing:
+    // any unknown model / malformed record ⇒ None ⇒ the row stays honest-zero.
+    if metrics.cost_usd_micros == 0
+        && let Some(priced) = super::usage_fold::priced_usage_for(log, "intent", id)
+    {
+        metrics.cost_usd_micros = priced.cost_usd_micros;
+        metrics.tokens = priced.tokens.total;
+    }
 
     let snapshot = match &env {
         Some(e) => SnapshotVm {
@@ -536,6 +548,42 @@ mod tests {
             "no git source → empty diff, not error"
         );
         assert!(vm.task_transcript.is_none());
+    }
+
+    #[test]
+    fn ctx_usage_record_lights_the_cost_and_tokens() {
+        // WP-COST read-time fold: a hand-appended `ctx.usage` record on a landed
+        // intent lights the intent-detail cost + tokens with NO re-land.
+        use hugit_cli::ctx::CTX_USAGE_KIND;
+        let mut log = EventLog::new();
+        land_intent(&mut log, "a31", &"0".repeat(40), 1);
+        push(
+            &mut log,
+            CTX_USAGE_KIND,
+            serde_json::json!({
+                "target_id": "a31",
+                "target_kind": "intent",
+                "source": "provider_usage",
+                "model": "claude-opus-4-8",
+                "recorded_at": 0,
+                "tokens": {"input": 1000, "output": 200, "cache_read": 0, "cache_write": 0, "total": 1200},
+            }),
+            2,
+        );
+        let vm = build_intent_detail(&log, "hugit", "a31", None).expect("present");
+        // opus-4-8: $5/MTok input + $25/MTok output = 5000 + 5000 = 10_000 micro-USD.
+        assert_eq!(vm.metrics.cost_usd_micros, 10_000);
+        assert_eq!(vm.metrics.tokens, 1200);
+    }
+
+    #[test]
+    fn no_ctx_usage_keeps_cost_honest_zero() {
+        // A landed intent with no `ctx.usage` record stays honest-zero.
+        let mut log = EventLog::new();
+        land_intent(&mut log, "a31", &"0".repeat(40), 1);
+        let vm = build_intent_detail(&log, "hugit", "a31", None).expect("present");
+        assert_eq!(vm.metrics.cost_usd_micros, 0);
+        assert_eq!(vm.metrics.tokens, 0);
     }
 
     #[test]

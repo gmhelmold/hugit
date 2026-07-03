@@ -1117,6 +1117,24 @@ fn dispatch_repo_write(
             }
             Err(_) => Err(EngineErr::not_found()),
         },
+        // The engine mirror of `hugit ctx usage`: record provider token usage
+        // against a landed intent (the cost-killer's capture seam over the wire).
+        ["intents", id, "usage"] => {
+            let id = (*id).to_string();
+            let req = parse!(wr::UsageReq);
+            with_write(
+                sink,
+                repo,
+                "usage",
+                &resource,
+                &idem,
+                body,
+                step_up,
+                p,
+                at,
+                |log, p, at| verbs::write_usage::write_usage(log, repo, &id, &req, p, at),
+            )
+        }
         ["dispatch"] => {
             let req = parse!(wr::DispatchReq);
             with_write(

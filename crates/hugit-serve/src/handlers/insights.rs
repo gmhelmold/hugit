@@ -154,7 +154,19 @@ fn envelopes_for_pr(
         .filter(|r| r.kind == INTENT_ENVELOPE_KIND)
         .filter_map(|r| serde_json::from_str::<ContextEnvelope>(&r.payload).ok())
         .filter(|e| e.altitude == Altitude::Intent && bundle.contains(e.intent_id.as_str()))
+        // WP-COST read-time fold: an intent envelope whose cost is honest-zero is
+        // augmented from its raw `ctx.usage` records BEFORE it reaches `pr_record`,
+        // so the cost X-ray + spend_proof rows light with no re-land. The rollup
+        // then rolls work (intents) + orchestration (pr) up naturally. Each
+        // ctx.usage targets an intent XOR a pr, so the two never double-count the
+        // same record. Double-count guard + complete-or-nothing live in the helper.
+        .map(|e| {
+            let id = e.intent_id.clone();
+            super::usage_fold::envelope_with_usage(e, log, "intent", &id)
+        })
         .collect();
+    // The PR-altitude (orchestration) envelope gets the same zero-guarded augment.
+    let pr = super::usage_fold::envelope_with_usage(pr, log, "pr", &opened.pr_id);
     Some((pr, raw_payload, intents))
 }
 
@@ -311,6 +323,7 @@ fn build_cost_xray(log: &EventLog, chips: &[CampaignChipVm]) -> XrayOut {
 // ── ledger view ───────────────────────────────────────────────────────────────
 
 fn ledger_row_from_entry(
+    log: &EventLog,
     entry: &LedgerEntry,
     intent_spend_map: &std::collections::HashMap<String, String>,
 ) -> LedgerRowVm {
@@ -334,6 +347,12 @@ fn ledger_row_from_entry(
         .iter()
         .map(|v| scrub(&format!("{} {}", v.lens, v.outcome)))
         .collect();
+    // WP-COST read-time fold — see the cost_micros/tokens_count fields below.
+    let (cost_micros, tokens_count) =
+        match super::usage_fold::priced_usage_for(log, "intent", &entry.intent_id) {
+            Some(priced) => (priced.cost_usd_micros, priced.tokens.total),
+            None => (0, 0),
+        };
     LedgerRowVm {
         intent_id: entry.intent_id.clone(),
         asked: scrub(&entry.charter),
@@ -350,17 +369,21 @@ fn ledger_row_from_entry(
         cost: String::new(),
         savings: String::new(),
         // F4a — raw integer cost fields.
-        // HONEST-ZERO: the ledger view (`intent.landed` / `verdict.recorded`)
-        // carries no cost figures — cost lives in the PR-altitude envelope, not
-        // the per-intent ledger entry. Populate with zeroes rather than invent.
-        cost_micros: 0,
+        // The ledger view (`intent.landed` / `verdict.recorded`) carries no cost
+        // figures of its own — cost lives in the PR-altitude envelope. WP-COST
+        // read-time fold: price this intent's raw `ctx.usage` records so a posted
+        // usage record lights the per-intent cost + token columns with no re-land.
+        // Complete-or-nothing (any unknown model / malformed ⇒ None ⇒ stays 0);
+        // this row is always honest-zero pre-fold, so there is nothing to stack on.
+        cost_micros,
         savings_micros: 0,
-        tokens_count: 0,
+        tokens_count,
         spend_proof: intent_spend_map.get(&entry.intent_id).cloned(), // REAL — cas: ref from matching intent.envelope record
     }
 }
 
 fn build_ledger_view(
+    log: &EventLog,
     ledger: &Ledger,
     chips: &[CampaignChipVm],
     intent_spend_map: &std::collections::HashMap<String, String>,
@@ -382,7 +405,7 @@ fn build_ledger_view(
             });
         let rows: Vec<LedgerRowVm> = ledger
             .by_campaign(&campaign_id)
-            .map(|e| ledger_row_from_entry(e, intent_spend_map))
+            .map(|e| ledger_row_from_entry(log, e, intent_spend_map))
             .collect();
         campaigns.push(LedgerCampaignVm {
             campaign: chip,
@@ -486,6 +509,94 @@ pub fn build_insights(log: &EventLog, repo: &str) -> InsightsVm {
         contrib: vec![],               // HONEST-DEFAULT — no contributor seam
         landing_times: None,           // HONEST-DEFAULT — no timing seam
         ci_checks: None,               // HONEST-DEFAULT — no CI-card seam
-        ledger: build_ledger_view(&ledger, &chips, &intent_spend_map),
+        ledger: build_ledger_view(log, &ledger, &chips, &intent_spend_map),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hugit_cli::ctx::CTX_USAGE_KIND;
+
+    fn push(log: &mut EventLog, kind: &str, payload: serde_json::Value, seq: u64) {
+        log.append_for_test(kind, vec!["t".to_string()], payload.to_string(), seq);
+    }
+
+    fn land(log: &mut EventLog, id: &str, seq: u64) {
+        push(
+            log,
+            "intent.landed",
+            serde_json::json!({"intent_id": id, "campaign": "c3", "charter": "do it", "ref": "refs/heads/x", "target": "0".repeat(40)}),
+            seq,
+        );
+    }
+
+    fn ledger_row<'a>(vm: &'a InsightsVm, id: &str) -> &'a LedgerRowVm {
+        vm.ledger
+            .campaigns
+            .iter()
+            .flat_map(|c| c.rows.iter())
+            .find(|r| r.intent_id == id)
+            .expect("row present")
+    }
+
+    #[test]
+    fn ctx_usage_lights_the_ledger_row_cost_and_tokens() {
+        // WP-COST read-time fold (site B): a hand-appended `ctx.usage` record on a
+        // landed intent lights the ledger row's cost_micros + tokens_count — no re-land.
+        let mut log = EventLog::new();
+        land(&mut log, "a31", 1);
+        push(
+            &mut log,
+            CTX_USAGE_KIND,
+            serde_json::json!({
+                "target_id": "a31",
+                "target_kind": "intent",
+                "source": "provider_usage",
+                "model": "claude-opus-4-8",
+                "recorded_at": 0,
+                "tokens": {"input": 1000, "output": 200, "cache_read": 0, "cache_write": 0, "total": 1200},
+            }),
+            2,
+        );
+        let vm = build_insights(&log, "hugit");
+        let row = ledger_row(&vm, "a31");
+        // opus-4-8: $5/MTok input + $25/MTok output = 5000 + 5000 = 10_000 micro-USD.
+        assert_eq!(row.cost_micros, 10_000);
+        assert_eq!(row.tokens_count, 1200);
+    }
+
+    #[test]
+    fn no_ctx_usage_keeps_ledger_row_honest_zero() {
+        let mut log = EventLog::new();
+        land(&mut log, "a31", 1);
+        let vm = build_insights(&log, "hugit");
+        let row = ledger_row(&vm, "a31");
+        assert_eq!(row.cost_micros, 0);
+        assert_eq!(row.tokens_count, 0);
+    }
+
+    #[test]
+    fn foreign_target_ctx_usage_does_not_leak_into_row() {
+        // A ctx.usage for a DIFFERENT intent must not attribute cost to this row.
+        let mut log = EventLog::new();
+        land(&mut log, "a31", 1);
+        push(
+            &mut log,
+            CTX_USAGE_KIND,
+            serde_json::json!({
+                "target_id": "OTHER",
+                "target_kind": "intent",
+                "source": "provider_usage",
+                "model": "claude-opus-4-8",
+                "recorded_at": 0,
+                "tokens": {"input": 9999, "output": 9999, "cache_read": 0, "cache_write": 0, "total": 19998},
+            }),
+            2,
+        );
+        let vm = build_insights(&log, "hugit");
+        let row = ledger_row(&vm, "a31");
+        assert_eq!(row.cost_micros, 0);
+        assert_eq!(row.tokens_count, 0);
     }
 }
