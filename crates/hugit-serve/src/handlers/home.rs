@@ -307,14 +307,6 @@ fn list_root_files(src: &dyn hugit_proto::ObjectSource, root_tree: &ObjectId) ->
 /// the `.readme` prose markup). The wire field is still named `readme_html` (a
 /// non-breaking migration — a coordinated rename to `readme_raw` is a tracked
 /// follow-up), but it now carries RAW markdown, which githugr treats as UNTRUSTED.
-///
-/// REDACTION IS LINE-SCOPED: [`scrub`] ([`hugit_ledger::redact::apply`]) replaces its
-/// WHOLE input with the `[REDACTED]` sentinel when ANY detector fires, so scrubbing the
-/// entire README at once nuked a perfectly normal README to a bare `[REDACTED]` the
-/// moment ONE span looked secret-shaped (a real UX bug — fail-safe, but hides the whole
-/// file). We instead scrub LINE-BY-LINE: only the offending line(s) redact and every
-/// other line survives verbatim as prose/markdown. The read-boundary guarantee is
-/// preserved (a real secret in the README STILL redacts — just its line, not the file).
 fn render_root_readme(src: &dyn hugit_proto::ObjectSource, root_tree: &ObjectId) -> String {
     for candidate in README_CANDIDATES {
         let bytes = match hugit_proto::resolve_blob_at_path(src, root_tree, candidate) {
@@ -326,13 +318,10 @@ fn render_root_readme(src: &dyn hugit_proto::ObjectSource, root_tree: &ObjectId)
         if bytes.len() > MAX_README_BYTES {
             return String::new();
         }
-        // Scrub at the read boundary, LINE-BY-LINE, so one secret-shaped span redacts
-        // only its own line (not the whole file — `scrub` is a whole-input redactor).
-        // Split on '\n' + re-join with '\n' preserves the exact line structure incl. a
-        // trailing newline. Return the RAW scrubbed markdown — githugr sanitizes +
-        // renders it (never trusted HTML here); the engine does no escaping/rendering.
-        let text = String::from_utf8_lossy(&bytes);
-        return text.split('\n').map(scrub).collect::<Vec<_>>().join("\n");
+        // Scrub at the read boundary (a secret in the README redacts). Return the RAW
+        // scrubbed markdown verbatim — githugr sanitizes + renders it (never trusted
+        // HTML here); the engine does no escaping/rendering of its own.
+        return scrub(&String::from_utf8_lossy(&bytes));
     }
     String::new()
 }
@@ -593,66 +582,5 @@ mod tests {
         let vm = build_home(&EventLog::new(), "hugit", Some(&src), Some(&root));
         // Raw markdown verbatim — no &lt;/&amp; escaping, no <pre> wrap. githugr sanitizes.
         assert_eq!(vm.readme_html, "# Title\n<script>alert(1)</script>\n");
-    }
-
-    /// LINE-SCOPED REDACTION: a README with ONE secret-shaped line + several normal
-    /// markdown lines must redact ONLY the offending line — every other line survives
-    /// verbatim. Regression for the whole-file `[REDACTED]` UX bug (`scrub` is a
-    /// whole-INPUT redactor; scrubbing the entire README nuked normal prose the moment
-    /// any span looked secret-shaped). The raw secret must still not appear.
-    #[test]
-    fn secret_line_redacts_only_its_line_normal_lines_survive() {
-        use hugit_ledger::redact::REDACTED;
-
-        let secret = "ghp_16C7e42F292c6912E7710c838347Ae178B4a";
-        let mut src = CasObjectSource::new();
-        // A realistic README: heading + prose + a config snippet whose ONE line embeds
-        // a secret + more prose after it.
-        let body = format!(
-            "# hugit\n\nThe git-native forge.\n\n## Setup\n\ntoken = {secret}\n\nRun it locally.\n"
-        );
-        let readme = src.insert_raw(ObjectKind::Blob, body.into_bytes());
-        let root = insert_tree(
-            &mut src,
-            vec![TreeEntry {
-                mode: MODE_BLOB,
-                name: "README.md",
-                oid: readme,
-            }],
-        );
-        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
-
-        let vm = build_home(&EventLog::new(), "hugit", Some(&src), Some(&root));
-
-        // The raw secret never survives.
-        assert!(
-            !vm.readme_html.contains(secret),
-            "raw secret must not survive: {}",
-            vm.readme_html
-        );
-        // Only the offending line redacted (exactly one REDACTED sentinel line).
-        let lines: Vec<&str> = vm.readme_html.split('\n').collect();
-        assert!(
-            lines.contains(&REDACTED),
-            "the secret line must redact to the sentinel: {}",
-            vm.readme_html
-        );
-        // Every NORMAL line survives verbatim — the whole file was NOT redacted.
-        for expected in [
-            "# hugit",
-            "The git-native forge.",
-            "## Setup",
-            "Run it locally.",
-        ] {
-            assert!(
-                lines.contains(&expected),
-                "normal line {expected:?} must survive verbatim, got: {}",
-                vm.readme_html
-            );
-        }
-        assert_ne!(
-            vm.readme_html, REDACTED,
-            "the WHOLE README must NOT collapse to a bare sentinel"
-        );
     }
 }
