@@ -11,6 +11,7 @@ pub mod write_erasure_decide;
 pub mod write_issue_transition;
 pub mod write_land;
 pub mod write_policy;
+pub mod write_pr_create;
 pub mod write_provision;
 pub mod write_repo_meta;
 pub mod write_undo;
