@@ -562,11 +562,19 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
             // commit), bundled so the dispatcher takes one param not three. The HEAD
             // commit (default-branch tip) is the start of the blob "Histórico"
             // per-path history walk; `None` for a refless repo.
-            let git = repo_git.map(|r| RepoGit {
-                source: &r.git_source,
-                root_tree: &r.git_root_tree,
-                head_commit: r.head_commit(),
-                refs: r.git_refs.snapshot(),
+            let git = repo_git.map(|r| {
+                // Resolve root_tree from the LIVE HEAD commit (a push hot-swaps the
+                // ref but NOT `git_root_tree`). Fall back to the boot snapshot only
+                // when there is no tip or the commit isn't resolvable (empty repo →
+                // EMPTY_TREE → honest `files:[]`). One (cached) commit read.
+                let head = r.head_commit();
+                let root_tree = live_root_tree(r.git_source.as_ref(), head, r.git_root_tree);
+                RepoGit {
+                    source: &r.git_source,
+                    root_tree,
+                    head_commit: head,
+                    refs: r.git_refs.snapshot(),
+                }
             });
             dispatch_repo(
                 repo,
@@ -1241,9 +1249,33 @@ fn dispatch_repo_write(
 /// walk). Bundled into one struct so [`dispatch_repo`] takes a single git param
 /// rather than three positional ones (clippy `too_many_arguments`). `None` for a
 /// repo with no content seam loaded → the git-backed reads 404 honestly.
+/// Resolve the root-tree oid a repo's tree/blob reads should use: the tree of the
+/// LIVE HEAD commit (`head_commit`, derived from the hot-swapped `git_refs`), read
+/// from the object source. Falls back to `fallback` (the boot-time
+/// `RepoState::git_root_tree`) when there is no tip or the commit is unresolvable —
+/// e.g. a freshly-created empty repo (→ `EMPTY_TREE` → honest `files:[]`). This is
+/// what makes a freshly-PUSHED repo's files visible: a push hot-swaps the ref but
+/// does NOT refresh the stored `git_root_tree`, so reading the stored snapshot would
+/// show an empty/stale tree. One (then-cached) commit read; fail-soft (never panics).
+fn live_root_tree(
+    source: &dyn hugit_proto::ObjectSource,
+    head_commit: Option<gix_hash::ObjectId>,
+    fallback: gix_hash::ObjectId,
+) -> gix_hash::ObjectId {
+    head_commit
+        .and_then(|c| hugit_proto::commit_root_tree(source, &c).ok().flatten())
+        .unwrap_or(fallback)
+}
+
 struct RepoGit<'a> {
     source: &'a std::sync::Arc<dyn hugit_proto::ObjectSource + Send + Sync>,
-    root_tree: &'a gix_hash::ObjectId,
+    /// The root-tree oid at the LIVE HEAD — resolved from `head_commit` at request
+    /// time (OWNED, not a `&`), NOT the boot-time `RepoState::git_root_tree` snapshot.
+    /// A receive-pack push hot-swaps `git_refs`/`live_oid_index` but does NOT refresh
+    /// the stored `git_root_tree`, so a freshly-pushed (or freshly-created-then-pushed)
+    /// repo's tree/blob reads MUST derive the tree from the live tip or they read the
+    /// stale (often EMPTY_TREE) snapshot → `files:[]`/`readme:""` for a real user push.
+    root_tree: gix_hash::ObjectId,
     head_commit: Option<gix_hash::ObjectId>,
     /// The LIVE ref snapshot (ref-name → oid hex) — the compare base/head resolver.
     /// Owned (a `snapshot()`), so a just-pushed tip is reflected without a reboot.
@@ -1265,7 +1297,7 @@ fn dispatch_repo(
 ) -> (u16, String) {
     // Unpack the bundled git seam (or `None` legs for a repo with no content seam).
     let git_source = git.map(|g| g.source);
-    let root_tree = git.map(|g| g.root_tree);
+    let root_tree = git.map(|g| &g.root_tree);
     let head_commit = git.and_then(|g| g.head_commit);
     // The live ref snapshot for the compare base/head resolver (empty for a repo
     // with no content seam → an honest-empty compare diff).
@@ -1456,6 +1488,48 @@ mod search_q_tests {
         assert_eq!(q.len(), 1024, "truncated q must be exactly 1024 bytes");
         // All chars are ASCII 'a', so truncating bytes == truncating chars here.
         assert!(q.chars().all(|c| c == 'a'));
+    }
+}
+
+/// The live-HEAD root-tree resolver — the fix that makes a freshly-PUSHED repo's
+/// files/README visible (a push hot-swaps the ref but not `git_root_tree`).
+#[cfg(test)]
+mod live_root_tree_tests {
+    use super::*;
+    use hugit_proto::{CasObjectSource, GitObject, ObjectKind};
+
+    fn oid_hex(h: &str) -> gix_hash::ObjectId {
+        gix_hash::ObjectId::from_hex(h.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn resolves_root_tree_from_live_head_commit_not_the_stale_fallback() {
+        // A commit → tree → blob graph in the object source.
+        let mut src = CasObjectSource::new();
+        let blob = src.insert(GitObject::new(ObjectKind::Blob, b"hi\n".to_vec()));
+        let mut tree_bytes = Vec::new();
+        tree_bytes.extend_from_slice(b"100644 README.md\0");
+        tree_bytes.extend_from_slice(blob.as_bytes());
+        let tree = src.insert(GitObject::new(ObjectKind::Tree, tree_bytes));
+        let commit_body =
+            format!("tree {tree}\nauthor a <a@a> 0 +0000\ncommitter a <a@a> 0 +0000\n\nmsg\n");
+        let commit = src.insert(GitObject::new(ObjectKind::Commit, commit_body.into_bytes()));
+
+        // The STALE boot snapshot (a freshly-created repo's `git_root_tree` = EMPTY_TREE).
+        let stale = oid_hex("4b825dc642cb6eb9a060e54bf8d69288fbee4904");
+
+        // A fresh push: the live HEAD points at `commit`; root_tree MUST be the
+        // commit's tree, NOT the stale snapshot (the bug that showed `files:[]`).
+        assert_eq!(
+            live_root_tree(&src, Some(commit), stale),
+            tree,
+            "root_tree must come from the LIVE head commit's tree, not the stale snapshot"
+        );
+        // No tip (empty repo) → fallback (honest empty tree → files:[]).
+        assert_eq!(live_root_tree(&src, None, stale), stale);
+        // Unresolvable tip (object absent) → fail-soft to fallback, never a panic.
+        let absent = oid_hex("0000000000000000000000000000000000000001");
+        assert_eq!(live_root_tree(&src, Some(absent), stale), stale);
     }
 }
 
