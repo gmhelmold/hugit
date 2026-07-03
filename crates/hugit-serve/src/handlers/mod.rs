@@ -35,6 +35,7 @@ pub mod review;
 pub mod review_qa;
 pub mod search;
 pub mod security;
+pub mod usage_fold;
 pub mod viewer_can;
 
 pub use admin::{build_admin_overview, build_admin_tokens, build_audit, build_erasure};
