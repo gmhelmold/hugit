@@ -29,6 +29,36 @@ pub struct VerdictReq {
     pub note: Option<String>,
 }
 
+/// `POST /v1/repos/{repo}/intents/{id}/usage` — record an authoring run's REAL
+/// provider token usage against an intent (the engine mirror of `hugit ctx usage`).
+///
+/// The engine appends a canonical `ctx.usage` record byte-identical to the CLI's;
+/// the cost read-fold parses it back, so the field names below are FROZEN. hugit
+/// records verbatim + prices nowhere: the figures land as-submitted (checked only
+/// for the trivially-consistent `total = input+output+cache_read+cache_write`,
+/// fail-closed on overflow).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageReq {
+    /// The model id the usage was measured on (e.g. `claude-opus-4-8`). Scrubbed
+    /// at the write boundary (a secret-shaped value redacts, a real slug survives).
+    pub model: String,
+    /// Input tokens (non-cached), read from the provider's `/usage`.
+    pub input: u64,
+    /// Output tokens, read from the provider's `/usage`.
+    pub output: u64,
+    /// Tokens read from the prompt cache.
+    pub cache_read: u64,
+    /// Tokens written to the prompt cache.
+    pub cache_write: u64,
+    /// Optional content-address digest pinning the exact model build (scrubbed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_digest: Option<String>,
+    /// Optional authoring-finish timestamp (unix ms) stamped on the payload.
+    /// Defaults to `0` — the canonical forever-log is clock-untrusted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_at: Option<u64>,
+}
+
 /// `POST /v1/repos/{repo}/prs/{n}/comments` — a PR comment, optionally anchored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommentReq {
@@ -133,6 +163,31 @@ mod tests {
         assert_eq!(s, r#"{"verdict":"approve"}"#);
         let back: VerdictReq = serde_json::from_str(r#"{"verdict":"approve"}"#).unwrap();
         assert_eq!(back.note, None);
+    }
+
+    #[test]
+    fn usage_req_round_trips_and_omits_optionals() {
+        let v = UsageReq {
+            model: "claude-opus-4-8".into(),
+            input: 1,
+            output: 2,
+            cache_read: 3,
+            cache_write: 4,
+            model_digest: None,
+            recorded_at: None,
+        };
+        let s = serde_json::to_string(&v).unwrap();
+        // Optionals absent when None (clean wire) and round-trip back.
+        assert!(!s.contains("model_digest"));
+        assert!(!s.contains("recorded_at"));
+        assert_eq!(serde_json::from_str::<UsageReq>(&s).unwrap(), v);
+        // A body carrying the optionals parses them back.
+        let with: UsageReq = serde_json::from_str(
+            r#"{"model":"m","input":0,"output":0,"cache_read":0,"cache_write":0,"model_digest":"d","recorded_at":9}"#,
+        )
+        .unwrap();
+        assert_eq!(with.model_digest.as_deref(), Some("d"));
+        assert_eq!(with.recorded_at, Some(9));
     }
 
     #[test]
