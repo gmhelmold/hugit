@@ -496,9 +496,13 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
             .take(128)
             .collect();
         // JSON-escape the health string defensively: it is engine-produced but may
-        // carry a quote or backslash from an error message (e.g. `err:...`).
+        // carry a quote or backslash from an error message (e.g. `err:...`). Read the
+        // shared cell (the detached self-probe writes it when it lands; "probing" until
+        // then) under the lock, then release before the char-filter.
         let cas_batch_read: String = state
             .cas_batch_read_health
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
             .chars()
             .flat_map(|c| match c {
                 '"' => vec!['\''],

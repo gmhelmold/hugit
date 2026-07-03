@@ -205,12 +205,21 @@ pub const BATCH_MAX_BYTES: usize = 8 * 1024 * 1024;
 /// Set to 256 (raised back from the interim 128): CoreLink **#594 parallelized the
 /// batch-read server-side fan-out** (live in prod), so the SERIAL 256×~80ms/object
 /// (~20.5s) that used to trip the edge's ~21s deadline no longer applies — 256 is
-/// deadline-safe again AND halves the round-trips (helps the clone-pack background
-/// build). The frozen [`BATCH_MAX_OBJECTS`] = 2000 remains the hard per-request cap;
-/// this client-sizing stays well under it. NOTE: this only sizes the batch-read/exists
-/// probes — it does NOT make a full clone fast (each object is still a round-trip). The
-/// cached clone-pack ([`crate::clone_pack`]) is what makes clone fast (ONE R2 read of a
-/// pre-assembled pack).
+/// deadline-safe on the REQUEST path again AND halves the round-trips (helps the
+/// clone-pack background build). The frozen [`BATCH_MAX_OBJECTS`] = 2000 remains the
+/// hard per-request cap; this client-sizing stays well under it.
+///
+/// DEADLINE-SAFE AT BOOT TOO: the 128→256 raise had also blown the Cloudflare
+/// **Container STARTUP** deadline — because the boot CAS `batch_read` self-probe
+/// (`~18s` at 1024 objects) ran SYNCHRONOUSLY on the boot path, and 256-object chunks
+/// made it slow enough to crash-loop the container. That probe is now NON-BLOCKING: it
+/// runs on a detached thread ([`CasSelfcheckProbe`], spawned by
+/// [`crate::state::AppState::from_env`]) and boot returns immediately, so a larger
+/// chunk can never blow the startup deadline again.
+///
+/// NOTE: this only sizes the batch-read/exists probes — it does NOT make a full clone
+/// fast (each object is still a round-trip). The cached clone-pack
+/// ([`crate::clone_pack`]) is what makes clone fast (ONE R2 read of a pre-assembled pack).
 pub const BATCH_REQUEST_CHUNK: usize = 256;
 
 /// The production default PAT secret-file path, relative to `$HOME`
@@ -1544,34 +1553,92 @@ impl<T: CasTransport> LazyCasObjectSource<T> {
     ///   is the throughput floor (extrapolate ×total/req for the whole-repo warm cost).
     ///
     /// Never panics; makes at most `ceil(req/BATCH_REQUEST_CHUNK)` network calls at boot.
+    ///
+    /// NON-BLOCKING BOOT: this probe is NO LONGER run synchronously on the boot path.
+    /// The whole batch-read (~18s at 1024 objects) once ran inline in
+    /// [`crate::state::AppState::from_env`] → `load_repos_from_env`, which — with
+    /// [`BATCH_REQUEST_CHUNK`] raised to 256 — made boot slow enough to blow the
+    /// Cloudflare Container startup deadline → crash-loop → outage. Boot now spawns a
+    /// detached [`CasSelfcheckProbe`] (see [`Self::selfcheck_probe`]) that runs this
+    /// same measurement OFF the boot path and writes the result into the shared
+    /// `/readyz` health cell. This method stays for direct/synchronous callers (tests).
+    #[must_use]
     pub fn batch_read_selfcheck(&self) -> String {
-        /// How many oids to probe at boot (several full `BATCH_REQUEST_CHUNK`-chunks —
-        /// enough to measure the multi-request path without a costly full-repo warm on
-        /// every boot).
-        const PROBE_N: usize = 1024;
-        // Snapshot the first PROBE_N blake3s, then DROP the lock before the network call.
-        let hashes: Vec<String> = {
-            let guard = self.index.0.read().unwrap_or_else(|e| e.into_inner());
-            guard
-                .iter()
-                .take(PROBE_N)
-                .map(|(_oid, blake3)| blake3.clone())
-                .collect()
-        };
-        if hashes.is_empty() {
-            return "empty-index".to_string();
+        run_batch_read_selfcheck(&self.index, &self.cas)
+    }
+
+    /// A DETACHED, `Send + 'static` handle that runs [`Self::batch_read_selfcheck`]
+    /// OFF the boot path (FIX: the synchronous boot probe blew the container startup
+    /// deadline → crash-loop). It holds only cheap `Arc`-backed clones of the live
+    /// index + CAS client, so it measures the SAME index this source serves; boot can
+    /// hand it to a `std::thread` and return immediately.
+    ///
+    /// `T: Clone` — the probe owns a clone of the CAS client (the production
+    /// `UreqCasTransport` is `Clone`); it must be owned, not borrowed, to outlive boot
+    /// on a detached thread.
+    #[must_use]
+    pub fn selfcheck_probe(&self) -> CasSelfcheckProbe<T>
+    where
+        T: Clone,
+    {
+        CasSelfcheckProbe {
+            index: self.index.clone(),
+            cas: self.cas.clone(),
         }
-        let req = hashes.len();
-        let t0 = std::time::Instant::now();
-        let outcome = self.cas.batch_read(&hashes);
-        let ms = t0.elapsed().as_millis();
-        match outcome {
-            Err(e) => format!("err:{e} {ms}ms n={req}"),
-            Ok(result) => {
-                let found = result.iter().filter(|(_h, bytes)| bytes.is_some()).count();
-                format!("ok {found}/{req} {ms}ms")
-            }
+    }
+}
+
+/// The shared body of the boot CAS `batch_read` self-check — used both by the
+/// synchronous [`LazyCasObjectSource::batch_read_selfcheck`] and the detached
+/// [`CasSelfcheckProbe::run`]. See [`LazyCasObjectSource::batch_read_selfcheck`] for
+/// the returned-string vocabulary. Never panics.
+fn run_batch_read_selfcheck<T: CasTransport>(index: &LiveOidIndex, cas: &CasClient<T>) -> String {
+    /// How many oids to probe at boot (several full `BATCH_REQUEST_CHUNK`-chunks —
+    /// enough to measure the multi-request path without a costly full-repo warm on
+    /// every boot).
+    const PROBE_N: usize = 1024;
+    // Snapshot the first PROBE_N blake3s, then DROP the lock before the network call.
+    let hashes: Vec<String> = {
+        let guard = index.0.read().unwrap_or_else(|e| e.into_inner());
+        guard
+            .iter()
+            .take(PROBE_N)
+            .map(|(_oid, blake3)| blake3.clone())
+            .collect()
+    };
+    if hashes.is_empty() {
+        return "empty-index".to_string();
+    }
+    let req = hashes.len();
+    let t0 = std::time::Instant::now();
+    let outcome = cas.batch_read(&hashes);
+    let ms = t0.elapsed().as_millis();
+    match outcome {
+        Err(e) => format!("err:{e} {ms}ms n={req}"),
+        Ok(result) => {
+            let found = result.iter().filter(|(_h, bytes)| bytes.is_some()).count();
+            format!("ok {found}/{req} {ms}ms")
         }
+    }
+}
+
+/// A detached, `Send + 'static` handle to run the boot CAS `batch_read` self-probe
+/// OFF the boot path (FIX: the synchronous probe — ~18s at 1024 objects with
+/// [`BATCH_REQUEST_CHUNK`] = 256 — blew the Cloudflare Container startup deadline →
+/// crash-loop outage). Holds cheap `Arc`-backed clones of the live index + CAS
+/// client, so it reads the SAME index the source serves. Built by
+/// [`LazyCasObjectSource::selfcheck_probe`].
+pub struct CasSelfcheckProbe<T: CasTransport = UreqCasTransport> {
+    index: LiveOidIndex,
+    cas: CasClient<T>,
+}
+
+impl<T: CasTransport> CasSelfcheckProbe<T> {
+    /// Run the batch-read self-check; see
+    /// [`LazyCasObjectSource::batch_read_selfcheck`] for the returned-string format.
+    #[must_use]
+    pub fn run(&self) -> String {
+        run_batch_read_selfcheck(&self.index, &self.cas)
     }
 }
 
@@ -3074,6 +3141,38 @@ mod tests {
         CasClient::with_transport(cfg, transport)
     }
 
+    /// A `Clone`-able CAS transport: shares ONE `MapCasTransport` behind an `Arc` so a
+    /// clone (what `LazyCasObjectSource::selfcheck_probe` does when it clones the CAS
+    /// client) serves the SAME seeded objects. `MapCasTransport` itself is not `Clone`
+    /// (it holds a `Mutex`), so the detached-probe test needs this shareable wrapper —
+    /// the production `UreqCasTransport` is directly `Clone`.
+    #[derive(Clone)]
+    struct SharedMapTransport(std::sync::Arc<MapCasTransport>);
+
+    impl CasTransport for SharedMapTransport {
+        fn get(&self, url: &str, bearer: &str) -> Result<(u16, Vec<u8>), CasError> {
+            self.0.get(url, bearer)
+        }
+        fn put(&self, url: &str, bearer: &str, body: &[u8]) -> Result<u16, CasError> {
+            self.0.put(url, bearer, body)
+        }
+        fn post(
+            &self,
+            url: &str,
+            bearer: &str,
+            scope: &str,
+            content_type: &str,
+            body: &[u8],
+        ) -> Result<(u16, Vec<u8>), CasError> {
+            self.0.post(url, bearer, scope, content_type, body)
+        }
+    }
+
+    fn shared_client(transport: MapCasTransport) -> CasClient<SharedMapTransport> {
+        let cfg = CasConfig::new("https://cas.example", "tenant-1", "secret-pat").unwrap();
+        CasClient::with_transport(cfg, SharedMapTransport(std::sync::Arc::new(transport)))
+    }
+
     #[test]
     fn endpoint_route_and_auth_are_the_confirmed_contract() {
         let cfg = CasConfig::new("https://cas.example/", "test-tenant-1", "p").unwrap();
@@ -4064,6 +4163,68 @@ mod tests {
             obj.oid(),
             oid,
             "resolved bytes re-derive to the asked git oid (byte-identical)"
+        );
+    }
+
+    /// FIX (non-blocking boot probe): `selfcheck_probe()` yields a `Send + 'static`
+    /// handle that runs the SAME measurement as `batch_read_selfcheck()` and can be
+    /// MOVED onto a detached thread that writes the result into a shared cell — the
+    /// exact shape boot uses so the ~18s probe never blocks the container startup
+    /// deadline. Proves: (a) an empty index → `"empty-index"` with NO probe network
+    /// call; (b) a seeded index → the off-thread probe writes `"ok 1/1 …"` into the
+    /// shared `Arc<RwLock<String>>`, equal in shape to the synchronous baseline.
+    #[test]
+    fn selfcheck_probe_runs_off_thread_into_shared_cell() {
+        use std::sync::{Arc, RwLock};
+
+        // (a) An empty index → the probe short-circuits to "empty-index".
+        let empty =
+            LazyCasObjectSource::new(BTreeMap::new(), shared_client(MapCasTransport::default()));
+        assert_eq!(
+            empty.selfcheck_probe().run(),
+            "empty-index",
+            "an empty index probes to empty-index with no network call"
+        );
+
+        // (b) Seed the CAS + index with one real object so the batch-plane is healthy.
+        let body = b"probe object\n";
+        let framing = encode_loose(ObjectKind::Blob, body);
+        let blake3 = cas_key(&framing);
+        let oid = git_oid(ObjectKind::Blob, body);
+        let mut seeded = BTreeMap::new();
+        seeded.insert(blake3.clone(), framing);
+        let mut index = BTreeMap::new();
+        index.insert(oid, blake3);
+        let transport = MapCasTransport {
+            objects: std::sync::Mutex::new(seeded),
+            ..MapCasTransport::default()
+        };
+        let source = LazyCasObjectSource::new(index, shared_client(transport));
+
+        // The synchronous baseline: a healthy batch-plane → "ok 1/1 …".
+        let direct = source.batch_read_selfcheck();
+        assert!(
+            direct.starts_with("ok 1/1 "),
+            "healthy synchronous probe reports ok: {direct}"
+        );
+
+        // The detached handle: MOVED onto a thread (proves Send + 'static), writing the
+        // result into the shared health cell exactly as boot's detached thread does.
+        let probe = source.selfcheck_probe();
+        let health: Arc<RwLock<String>> = Arc::new(RwLock::new("probing".to_string()));
+        let cell = Arc::clone(&health);
+        std::thread::spawn(move || {
+            *cell.write().unwrap_or_else(|e| e.into_inner()) = probe.run();
+        })
+        .join()
+        .expect("probe thread joins cleanly");
+        assert!(
+            health
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .starts_with("ok 1/1 "),
+            "the off-thread probe wrote the ok result into the shared cell: {}",
+            health.read().unwrap_or_else(|e| e.into_inner())
         );
     }
 
