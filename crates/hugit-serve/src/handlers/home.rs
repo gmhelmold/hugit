@@ -231,7 +231,7 @@ fn build_home_until(
         last_commit,
         branches,
         files,       // REAL — root-tree listing (dirs-first, scrubbed) or [] no-seam
-        readme_html, // REAL — rendered root README (escaped-<pre>) or "" no-README
+        readme_html, // REAL — RAW scrubbed root-README markdown (githugr renders) or ""
         about: AboutVm {
             description: String::new(),         // STUB — GitHub-mirror P2
             topics: vec![],                     // STUB — GitHub-mirror P2
@@ -297,13 +297,16 @@ fn list_root_files(src: &dyn hugit_proto::ObjectSource, root_tree: &ObjectId) ->
 ///
 /// The README is resolved via [`hugit_proto::resolve_blob_at_path`] over the SAME
 /// budgeted source (path-traversal-guarded, wall-clock-bounded). Its bytes are
-/// SCRUBBED at the read boundary (a README may embed a secret) THEN rendered.
+/// SCRUBBED at the read boundary (a README may embed a secret).
 ///
-/// RENDERER: the workspace carries NO markdown→HTML crate, and this wave does not
-/// add a dependency. So the (scrubbed) README text is HTML-ESCAPED and wrapped in a
-/// single `<pre>` block — safe (no HTML/script injection from repo content) and
-/// honest (the raw text is shown verbatim, never a fake render). A real markdown
-/// renderer is a tracked additive follow-up; the wire field is unchanged.
+/// RENDERING IS THE WINDOW'S JOB (headless-engine doctrine): the engine returns the
+/// RAW (scrubbed, size-bounded) markdown; githugr renders + SANITIZES it through its
+/// single audited `render_markdown` (comrak → ammonia strict-allowlist) sink. No
+/// markdown renderer AND no HTML sanitizer engine-side — one sink, not two (avoids a
+/// second mXSS surface + version skew, and keeps 1/1 mock fidelity: only githugr owns
+/// the `.readme` prose markup). The wire field is still named `readme_html` (a
+/// non-breaking migration — a coordinated rename to `readme_raw` is a tracked
+/// follow-up), but it now carries RAW markdown, which githugr treats as UNTRUSTED.
 fn render_root_readme(src: &dyn hugit_proto::ObjectSource, root_tree: &ObjectId) -> String {
     for candidate in README_CANDIDATES {
         let bytes = match hugit_proto::resolve_blob_at_path(src, root_tree, candidate) {
@@ -315,22 +318,12 @@ fn render_root_readme(src: &dyn hugit_proto::ObjectSource, root_tree: &ObjectId)
         if bytes.len() > MAX_README_BYTES {
             return String::new();
         }
-        // Scrub at the read boundary (secret in the README redacts), THEN escape.
-        let text = scrub(&String::from_utf8_lossy(&bytes));
-        return format!("<pre>{}</pre>", html_escape(&text));
+        // Scrub at the read boundary (a secret in the README redacts). Return the RAW
+        // scrubbed markdown verbatim — githugr sanitizes + renders it (never trusted
+        // HTML here); the engine does no escaping/rendering of its own.
+        return scrub(&String::from_utf8_lossy(&bytes));
     }
     String::new()
-}
-
-/// Minimal HTML-escape for the `<pre>` README fallback: neutralise the five
-/// characters that could break out of the text context (`&`,`<`,`>`,`"`,`'`).
-/// `&` MUST be replaced first so the entity ampersands it emits are not re-escaped.
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
 }
 
 #[cfg(test)]
@@ -465,11 +458,16 @@ mod tests {
         assert!(vm.files[0].intent_id.is_none());
         assert!(vm.files[0].message.is_empty());
         assert!(vm.files[0].age.is_empty());
-        // README rendered into the escaped-<pre> fallback (content preserved).
-        assert!(vm.readme_html.starts_with("<pre>"), "README rendered");
+        // README returned RAW (scrubbed markdown) — githugr renders + sanitizes it,
+        // the engine does NOT escape/wrap it.
+        assert!(
+            !vm.readme_html.contains("<pre>"),
+            "raw markdown, not an escaped-<pre> blob: {}",
+            vm.readme_html
+        );
         assert!(
             vm.readme_html.contains("# hugit"),
-            "README body preserved: {}",
+            "README body preserved verbatim: {}",
             vm.readme_html
         );
     }
@@ -561,13 +559,28 @@ mod tests {
         );
     }
 
-    /// HTML-escape neutralises the break-out characters (no script injection from
-    /// repo README content), `&` first so its entities are not double-escaped.
+    /// A README that itself contains HTML/script is returned RAW (NOT escaped) — the
+    /// engine never renders/sanitizes; githugr's audited `render_markdown` (comrak →
+    /// ammonia) is the single trusted sink. Proves the engine does no HTML handling.
     #[test]
-    fn html_escape_neutralises_breakout_characters() {
-        assert_eq!(
-            html_escape("<script>a & b\"'</script>"),
-            "&lt;script&gt;a &amp; b&quot;&#39;&lt;/script&gt;"
+    fn readme_html_field_carries_raw_markdown_not_escaped() {
+        let mut src = CasObjectSource::new();
+        let readme_oid = src.insert_raw(
+            ObjectKind::Blob,
+            b"# Title\n<script>alert(1)</script>\n".to_vec(),
         );
+        let root = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_BLOB,
+                name: "README.md",
+                oid: readme_oid,
+            }],
+        );
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
+
+        let vm = build_home(&EventLog::new(), "hugit", Some(&src), Some(&root));
+        // Raw markdown verbatim — no &lt;/&amp; escaping, no <pre> wrap. githugr sanitizes.
+        assert_eq!(vm.readme_html, "# Title\n<script>alert(1)</script>\n");
     }
 }
