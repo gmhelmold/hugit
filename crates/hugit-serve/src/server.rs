@@ -1271,7 +1271,7 @@ fn dispatch_repo(
     // with no content seam → an honest-empty compare diff).
     let git_refs = git.map(|g| g.refs.clone()).unwrap_or_default();
     match tail {
-        ["home"] => ok(&handlers::build_home(log, repo)),
+        ["home"] => ok(&handlers::build_home(log, repo, git_source, root_tree)),
         ["new-pr"] => ok(&handlers::build_new_pr(log, repo)),
         ["knowledge"] => ok(&handlers::build_knowledge(log, repo)),
         ["compare", base, head] => ok(&handlers::build_compare(
