@@ -42,6 +42,7 @@ use crate::writes::CasToken;
 /// `r2` is expected to be a **write-scoped** [`R2Config`] at build time (it
 /// PUTs the pack + the pointer); a read-scoped one suffices for the serve-side
 /// lookup ([`try_serve_cached_clone_pack`], which only GETs).
+#[derive(Clone)]
 pub struct CloneCacheSeam {
     /// The R2 config used to read/write the pack object + `current.json`.
     pub r2: R2Config,
@@ -146,14 +147,11 @@ pub fn load_current<R: R2Get>(r2: &R, tenant: &str, repo: &str) -> Option<Curren
 /// Returns `Err(String)` — never panics — on any R2 failure; the caller treats a
 /// failed build as "no cache".
 ///
-/// The `<R: R2Put + R2PutConditional>` bound is part of the FROZEN signature
-/// WP-BC codes against: it documents the R2 write capabilities this call needs.
-/// The writes go through the concrete [`CloneCacheSeam::r2`] (a real `R2Config`,
-/// which implements both traits), so `R` is not otherwise referenced — hence the
-/// targeted allow. A caller supplies it by turbofish (`::<R2Config>`) or lets the
-/// wiring site name it.
-#[allow(clippy::extra_unused_type_parameters)]
-pub fn store_pack_and_flip<R: R2Put + R2PutConditional>(
+/// Operates on the CONCRETE [`CloneCacheSeam::r2`] (a real `R2Config`, which
+/// implements both [`R2Put`] and [`R2PutConditional`]). The vestigial generic the
+/// frozen bound once carried is dropped now that WP-BC wires the real call site —
+/// the writes always go through `seam.r2`, so there was never a second `R` to name.
+pub fn store_pack_and_flip(
     seam: &CloneCacheSeam,
     refset_sha: &str,
     pack_bytes: &[u8],
@@ -202,8 +200,8 @@ pub fn store_pack_and_flip<R: R2Put + R2PutConditional>(
 ///
 /// Any assembly error (incomplete closure, decode failure, budget) maps to
 /// `Err(String)` — the caller treats a failed build as "no cache".
-pub fn build_clone_pack<S: hugit_proto::ObjectSource>(
-    source: &S,
+pub fn build_clone_pack(
+    source: &dyn hugit_proto::ObjectSource,
     refs: &BTreeMap<String, String>,
 ) -> Result<(Vec<u8>, u64), String> {
     // Want every advertised tip, have nothing — the SAME construction as
@@ -346,14 +344,14 @@ mod tests {
         }
     }
 
-    /// Compile-time proof that the frozen `store_pack_and_flip` signature is the
-    /// one WP-BC codes against (never called — a mismatch would fail to compile).
+    /// Compile-time proof that the `store_pack_and_flip` signature is the one
+    /// WP-BC codes against (never called — a mismatch would fail to compile).
     #[allow(dead_code)]
     fn _signature() {
-        // Referencing the turbofished fn item proves the frozen signature +
-        // `R2Config: R2Put + R2PutConditional` bound resolve (a mismatch would
-        // fail to compile).
-        let _ = store_pack_and_flip::<R2Config>;
+        // Referencing the (now generic-free) fn item proves it resolves under the
+        // frozen name/arity WP-BC codes against (a mismatch fails to compile); the
+        // real call site in `git.rs` pins the exact argument types.
+        let _ = store_pack_and_flip;
     }
 
     fn refs(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {

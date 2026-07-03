@@ -87,6 +87,7 @@ use std::time::Duration;
 
 use tiny_http::{Header, Method, Request, Response};
 
+use crate::clone_pack::{self, CloneCacheSeam};
 use crate::state::AppState;
 
 /// The `git-upload-pack` service name (clone + fetch). `git-receive-pack` (push)
@@ -175,7 +176,7 @@ pub fn respond_git(
             // ref snapshot, want parse + want-validation (which caps the walk ROOT
             // before any worker exists). On any failure → 404 inline, no worker.
             match prepare_upload_pack(state, repo, body, &principal) {
-                Some((source, want)) => {
+                Some((source, want, plan, seam)) => {
                     // Then HAND the whole heavy job OFF to a detached worker that OWNS
                     // this connection and RESPONDS itself (the reachability walk + pack
                     // assembly are one synchronous CAS fetch PER object — seconds on a
@@ -183,8 +184,9 @@ pub fn respond_git(
                     // NOT blocked for the clone's duration, so `/readyz` + other
                     // requests stay answerable while the clone builds. A spawn failure
                     // under a clone flood sheds a fast inline 503 (never a runaway walk
-                    // inline). See `spawn_upload_pack_worker`.
-                    spawn_upload_pack_worker(source, want, request, io_budget);
+                    // inline). See `spawn_upload_pack_worker`. The `plan` + `seam` let
+                    // the worker serve the cached full-clone pack (WP-BC) when it matches.
+                    spawn_upload_pack_worker(source, want, plan, seam, request, io_budget);
                 }
                 None => respond_not_found(request, io_budget),
             }
@@ -329,6 +331,33 @@ pub(crate) fn pick_default_branch(refs: &BTreeMap<String, String>) -> Option<Str
 /// loop; `Sync` makes concurrent clone workers reading the same CAS safe.
 type SharedSource = Arc<dyn hugit_proto::ObjectSource + Send + Sync>;
 
+/// The clone-cache decision (WP-BC) carried from the INLINE `prepare_upload_pack`
+/// to the DETACHED worker. `full_clone` is the strict predicate that gates the
+/// cached-pack fast path: `true` ONLY when the client asked for EXACTLY the full
+/// advertised tip-set with no `have`s (an initial `git clone`), so the cached pack
+/// — assembled for that same tip-set — is a byte-correct answer. `refs` is the
+/// read-gated ref snapshot the wants were validated against; the serve side
+/// recomputes [`clone_pack::refset_sha`] from it and refuses any cache whose pointer
+/// disagrees (fail-open to the slow walk — never a wrong pack). A false positive here
+/// would serve a wrong pack, so the predicate is set-EQUALITY strict; a false
+/// negative merely slow-walks (safe).
+struct ClonePlan {
+    full_clone: bool,
+    refs: BTreeMap<String, String>,
+}
+
+/// Whether the explicit `want` set is EXACTLY the full advertised tip-set (every
+/// tip requested, nothing extra). This is the tip⊆wants half of the full-clone
+/// predicate; combined with an empty `have` list it means an initial clone. Strict
+/// set-equality: a want for a non-tip (already rejected by [`wants_all_advertised`])
+/// or a missing tip → NOT a full clone → the slow walk (safe). Order-independent.
+fn wants_equal_all_tips(refs: &BTreeMap<String, String>, wants: &[gix_hash::ObjectId]) -> bool {
+    let tips: std::collections::BTreeSet<String> = refs.values().cloned().collect();
+    let want_set: std::collections::BTreeSet<String> =
+        wants.iter().map(|w| w.to_string()).collect();
+    want_set == tips
+}
+
 /// The CHEAP, INLINE half of a `git-upload-pack` POST: derive the read-gated ref
 /// view, clone the object source, parse the want/have negotiation, and VALIDATE the
 /// wants — all fast, all on the accept loop, BEFORE any worker is spawned. Returns
@@ -346,11 +375,20 @@ fn prepare_upload_pack(
     repo: &str,
     body: &[u8],
     principal: &[String],
-) -> Option<(SharedSource, hugit_proto::WantHave)> {
+) -> Option<(
+    SharedSource,
+    hugit_proto::WantHave,
+    ClonePlan,
+    Option<CloneCacheSeam>,
+)> {
     let refs = git_refs_for(state, repo, principal)?;
     // CLONE the Arc object source (it is `Send + Sync + 'static`) so an owned handle
-    // can move into the detached worker without borrowing `state`.
-    let source: SharedSource = Arc::clone(&state.repo_state(repo)?.git_source);
+    // can move into the detached worker without borrowing `state`. Also snapshot the
+    // repo's clone-pack cache seam (WP-BC) — `None` for a repo with no cache (GIT_DIR /
+    // receive-pack off), which just means the worker slow-walks.
+    let repo_state = state.repo_state(repo)?;
+    let source: SharedSource = Arc::clone(&repo_state.git_source);
+    let clone_cache = repo_state.clone_cache.clone();
 
     // Real git appends a capability list to the FIRST `want` line of a v1/v0
     // upload-pack request (`want <oid> multi_ack side-band-64k …`). The proto's
@@ -366,11 +404,12 @@ fn prepare_upload_pack(
     // an ls-refs-only probe in a v2 attempt, or an empty body) treat it as "want
     // every advertised tip" — a full clone — using the SAME ref view the advertise
     // was built from, so wants always resolve in the CAS.
-    let effective_req = if request.wants.is_empty() {
+    let (effective_req, full_clone) = if request.wants.is_empty() {
         let adv = hugit_proto::RefAdvertisement::from_view(&refs);
         // The full-clone wants are DERIVED from `refs` (every advertised tip), so
-        // they are advertised by construction — no validation needed.
-        hugit_proto::WantHave::clone_all(&adv).ok()?
+        // they are advertised by construction — no validation needed. An empty want
+        // set IS a full clone (the whole advertised tip-set, no haves).
+        (hugit_proto::WantHave::clone_all(&adv).ok()?, true)
     } else {
         // SECURITY (want-validation): every explicit `want` MUST be an advertised
         // ref tip for THIS principal (the same `refs` the advertise exposed). A
@@ -384,10 +423,16 @@ fn prepare_upload_pack(
         if !wants_all_advertised(&refs, &request.wants) {
             return None;
         }
-        request
+        // A full clone iff the client wants EXACTLY the advertised tip-set with no
+        // `have`s (strict set-equality — a false positive would serve a wrong pack;
+        // a false negative merely slow-walks, which is safe). A fetch (haves present,
+        // or a partial want-set) is NEVER a full clone → never the cached pack.
+        let full = request.haves.is_empty() && wants_equal_all_tips(&refs, &request.wants);
+        (request, full)
     };
 
-    Some((source, effective_req))
+    let plan = ClonePlan { full_clone, refs };
+    Some((source, effective_req, plan, clone_cache))
 }
 
 /// Assemble the clone/fetch pack and frame the v1 upload-pack result (the `NAK`
@@ -422,9 +467,45 @@ fn build_upload_pack_bytes(
 fn serve_upload_pack_response(
     source: SharedSource,
     want: hugit_proto::WantHave,
+    plan: ClonePlan,
+    seam: Option<CloneCacheSeam>,
     request: Request,
     io_budget: Duration,
 ) {
+    // WP-BC — the cached full-clone fast path. For a FULL clone (the strict
+    // `plan.full_clone` predicate) of a repo WITH a clone-pack cache, try the
+    // pre-assembled pack: ONE R2 GET vs walking the whole object closure. The
+    // R2 GET runs on THIS worker (never the accept loop), so it is fine here.
+    //
+    // CORRECTNESS: `try_serve_cached_clone_pack` recomputes `refset_sha` from
+    // `plan.refs` (the SAME read-gated snapshot the wants were validated against +
+    // the advertise was built from) and refuses any cached pointer whose `refset_sha`
+    // disagrees → a moved ref, an absent/garbage pointer, or a GET error all yield
+    // `None` and FALL OPEN to the slow walk below. So the cache serves a byte-correct
+    // pack for the advertised refs, or nothing — never a wrong/truncated pack.
+    if plan.full_clone
+        && let Some(seam) = &seam
+        && let Some(pack_bytes) = clone_pack::try_serve_cached_clone_pack(
+            &seam.r2,
+            &seam.tenant,
+            &seam.repo_slug,
+            &plan.refs,
+        )
+    {
+        // Frame IDENTICALLY to `build_upload_pack_bytes`: the `NAK` pkt-line
+        // (`0008NAK\n`) then the RAW cached pack bytes, same media type. The cached
+        // bytes are the raw packfile the walk would have produced for this tip-set.
+        let mut out = Vec::with_capacity(8 + pack_bytes.len());
+        pkt_line(&mut out, b"NAK\n");
+        out.extend_from_slice(&pack_bytes);
+        let body_len = out.len();
+        let resp = Response::from_data(out)
+            .with_status_code(200)
+            .with_header(git_content_type("application/x-git-upload-pack-result"));
+        return send(request, resp, body_len, io_budget);
+    }
+
+    // Cache miss / stale / not-a-full-clone / no cache → the existing slow walk.
     match build_upload_pack_bytes(source.as_ref(), &want) {
         Some(out) => {
             let body_len = out.len();
@@ -452,14 +533,18 @@ fn serve_upload_pack_response(
 fn spawn_upload_pack_worker(
     source: SharedSource,
     want: hugit_proto::WantHave,
+    plan: ClonePlan,
+    seam: Option<CloneCacheSeam>,
     request: Request,
     io_budget: Duration,
 ) {
-    let payload = (source, want, request, io_budget);
-    if let Err((_source, _want, request, io_budget)) = spawn_with_payload(payload, |p| {
-        let (source, want, request, io_budget) = p;
-        serve_upload_pack_response(source, want, request, io_budget);
-    }) {
+    let payload = (source, want, plan, seam, request, io_budget);
+    if let Err((_source, _want, _plan, _seam, request, io_budget)) =
+        spawn_with_payload(payload, |p| {
+            let (source, want, plan, seam, request, io_budget) = p;
+            serve_upload_pack_response(source, want, plan, seam, request, io_budget);
+        })
+    {
         // Spawn failed (thread exhaustion) — shed inline, do NOT walk inline.
         respond_git_overloaded(request, io_budget);
     }
@@ -1161,6 +1246,13 @@ fn finish_receive_pack(
                             &cmd.new_oid,
                             &req.principal_chain,
                         );
+                        // WP-BC: the push moved the tips → the cached clone pack is now
+                        // stale for the new refset. Rebuild it in the background (best-
+                        // effort, off this worker's response path — the client already
+                        // has its `ok`). Until it lands a full clone falls back to the
+                        // slow walk (never a wrong pack: the serve side re-checks
+                        // `refset_sha`). A no-op if this repo has no clone cache.
+                        spawn_clone_pack_rebuild(state, repo);
                     }
                     Err(crate::cas::CasPushError::Persist(reason)) => {
                         let report = build_report_status(
@@ -1384,6 +1476,10 @@ fn handle_delete_ref(
                         &cmd.new_oid,
                         principal,
                     );
+                    // WP-BC: the delete changed the refset → rebuild the cached clone
+                    // pack in the background (best-effort; a stale cache would just
+                    // fail the `refset_sha` re-check and slow-walk). No-op without a cache.
+                    spawn_clone_pack_rebuild(state, repo);
                 }
                 Err(crate::cas::CasPushError::Persist(reason)) => {
                     let report = build_report_status(
@@ -1430,6 +1526,128 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Releases a repo's clone-pack BUILD slot on drop — so the per-repo
+/// `clone_pack_building` guard is cleared in EVERY exit path (success, error, AND a
+/// panic in the build), never leaking the slot (which would wedge all future
+/// rebuilds of that repo). Constructed BEFORE the thread spawn and moved INTO the
+/// build closure, so even a spawn failure (the closure is dropped un-run) releases it.
+struct BuildSlotGuard {
+    set: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    slug: String,
+}
+
+impl Drop for BuildSlotGuard {
+    fn drop(&mut self) {
+        self.set
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.slug);
+    }
+}
+
+/// Spawn a DETACHED background thread that (re)assembles this repo's cached
+/// full-clone pack (WP-BC) and flips the `current.json` pointer to it — so the next
+/// anonymous full `git clone` streams ONE R2 object instead of walking the whole
+/// object closure. Best-effort + fail-open: a repo with no clone cache (GIT_DIR mode
+/// / receive-pack off) is a NO-OP, and ANY build/store error is logged and dropped (a
+/// failed build = no cache = the slow-walk fallback; the serve side re-checks
+/// `refset_sha`, so a partial/stale pack is never served).
+///
+/// CONCURRENCY: the per-repo `clone_pack_building` guard admits at most ONE build per
+/// repo at a time (a boot bootstrap racing a post-push rebuild, or two pushes) — a
+/// second call for a repo already building returns immediately. The slot is released
+/// in every path via [`BuildSlotGuard`]. NEVER blocks the caller: the heavy
+/// `build_clone_pack` closure walk + the R2 PUTs run on the detached thread, so this
+/// is safe to call from the accept-loop bootstrap AND post-`ok` on a push worker.
+fn spawn_clone_pack_rebuild(state: &AppState, repo_slug: &str) {
+    let Some(repo_state) = state.repo_state(repo_slug) else {
+        return;
+    };
+    let Some(seam) = repo_state.clone_cache.clone() else {
+        return; // no cache for this repo → the clone slow-walks (no-op)
+    };
+    // Reserve the per-repo build slot; bail if a build for this repo is already running.
+    {
+        let mut building = state
+            .clone_pack_building
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !building.insert(repo_slug.to_string()) {
+            return; // already building this repo — never a double build
+        }
+    }
+    // The build inputs: the repo's object source (Arc) + the LIVE ref snapshot — the
+    // SAME `git_refs` projection the advertise/serve uses, so the built pack's
+    // `refset_sha` matches what a full clone recomputes. Owned/Arc handles → nothing
+    // borrows `state`, so the thread is `'static`.
+    let source: SharedSource = Arc::clone(&repo_state.git_source);
+    let refs = repo_state.git_refs.snapshot();
+    let slug = repo_slug.to_string();
+    // Constructed HERE (before the spawn) so a spawn failure still releases the slot.
+    let guard = BuildSlotGuard {
+        set: Arc::clone(&state.clone_pack_building),
+        slug: slug.clone(),
+    };
+
+    let spawned = std::thread::Builder::new()
+        .name("hugit-clone-pack-build".into())
+        .spawn(move || {
+            // Move the guard in; it releases the slot at thread end OR on a panic
+            // (unwind), so the per-repo slot can never leak.
+            let _guard = guard;
+            match clone_pack::build_clone_pack(source.as_ref(), &refs) {
+                Ok((bytes, count)) => {
+                    let sha = clone_pack::refset_sha(&refs);
+                    if let Err(e) =
+                        clone_pack::store_pack_and_flip(&seam, &sha, &bytes, count, now_ms())
+                    {
+                        eprintln!("hugit-serve: clone-pack rebuild for {slug} store failed: {e}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("hugit-serve: clone-pack rebuild for {slug} build failed: {e}");
+                }
+            }
+        });
+    if spawned.is_err() {
+        // Thread exhaustion: the un-run closure (and its `guard`) was dropped, which
+        // already released the slot — nothing more to do (no cache built this time).
+        eprintln!("hugit-serve: clone-pack rebuild thread spawn failed for {repo_slug}");
+    }
+}
+
+/// At engine start (WP-BC), ensure each CAS-backed repo with a clone cache has a
+/// CURRENT cached full-clone pack. For each boot repo whose `current.json` pointer is
+/// ABSENT or whose `refset_sha` != the live refs' `refset_sha`, kick a background
+/// [`spawn_clone_pack_rebuild`]. Clones fall back to the slow walk until the first
+/// build lands (~one background build per repo at boot — acceptable v0). Runs on the
+/// serve thread BEFORE the accept loop; the only on-thread cost is one `load_current`
+/// R2 GET per CAS repo (boot already does CAS reads). A repo with no cache is skipped.
+pub(crate) fn bootstrap_clone_packs(state: &AppState) {
+    // Only the boot repo set exists at serve start (the runtime overlay is empty).
+    let slugs: Vec<String> = state.repos.keys().cloned().collect();
+    for slug in slugs {
+        let Some(rs) = state.repo_state(&slug) else {
+            continue;
+        };
+        let Some(seam) = rs.clone_cache.as_ref() else {
+            continue; // no cache → nothing to warm (the clone slow-walks)
+        };
+        let want_sha = clone_pack::refset_sha(&rs.git_refs.snapshot());
+        // Absent/garbage pointer → `None` → treat as stale (build). A matching pointer
+        // → already warm → skip. (A moved-ref pointer is stale → rebuild.)
+        let fresh = clone_pack::load_current(&seam.r2, &seam.tenant, &seam.repo_slug)
+            .is_some_and(|c| c.refset_sha == want_sha);
+        if !fresh {
+            eprintln!(
+                "hugit-serve: clone-pack cache for {slug} absent/stale at boot — \
+                 building in background"
+            );
+            spawn_clone_pack_rebuild(state, &slug);
+        }
+    }
 }
 
 /// Write the pushed ref into the git dir via `git update-ref`, compare-and-swap on
@@ -1610,6 +1828,7 @@ mod live_refs_tests {
             git_dir: None,
             cas_write: None,
             live_oid_index: Some(LiveOidIndex::new(std::collections::BTreeMap::new())),
+            clone_cache: None,
         }
     }
 
@@ -1749,6 +1968,7 @@ mod live_refs_tests {
             git_dir: None,
             cas_write: None,
             live_oid_index: Some(LiveOidIndex::new(index)),
+            clone_cache: None,
         }
     }
 

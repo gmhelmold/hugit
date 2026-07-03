@@ -31,9 +31,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use gix_hash::ObjectId;
 use hugit_proto::{CasObjectSource, GitObject, ObjectKind};
 use hugit_refstore::EventLog;
+use hugit_serve::clone_pack::{
+    CloneCacheSeam, CurrentPointer, clone_pack_current_key, clone_pack_key, refset_sha,
+};
 use hugit_serve::server::serve_on;
-use hugit_serve::state::AppState;
-use tiny_http::Server;
+use hugit_serve::state::{AppState, R2Config};
+use tiny_http::{Method, Response, Server};
 
 const TOKEN: &str = "dev-token-git";
 
@@ -1138,6 +1141,223 @@ fn post_receive_delete(addr: &str, repo: &str, old_oid: &str, ref_name: &str) ->
         b = &b[len..];
     }
     out
+}
+
+// ── WP-BC: the cached full-clone pack served over the wire ───────────────────
+//
+// A pre-assembled full-clone pack is stored as ONE R2 object; a FULL clone streams
+// it instead of walking the whole object closure. These tests spin a MOCK R2 (a
+// tiny_http server that serves seeded keys and REJECTS PUTs) and point a seeded
+// repo's `clone_cache` at it. The mock rejecting PUTs makes a background bootstrap
+// rebuild inert (it cannot populate the served map), so the fall-open cases stay
+// deterministic. The clone-cache seam's `tenant`/`repo_slug` match the seeded keys.
+
+const CACHE_TENANT: &str = "test-tenant";
+const CACHE_BUCKET: &str = "b";
+
+/// A recognizable SENTINEL pack blob — impossible to produce by walking the 7-object
+/// seed graph, so a response carrying it PROVES the cached bytes were served (a
+/// cache HIT), not a re-walk. Starts with `PACK` for realism (never parsed here).
+const SENTINEL_PACK: &[u8] = b"PACK\x00\x00\x00\x02SENTINEL-CACHED-CLONE-PACK";
+
+/// Spawn a MOCK R2 HTTP server that answers `GET /<bucket>/<key>` from `objects`
+/// (keyed by R2 KEY) and returns **403** for any PUT (so a background clone-pack
+/// rebuild can never populate the served map → the fall-open tests are
+/// deterministic). Returns the bound `127.0.0.1:<port>`.
+fn spawn_mock_r2(objects: std::collections::BTreeMap<String, Vec<u8>>) -> String {
+    let server = Server::http("127.0.0.1:0").expect("bind mock R2");
+    let addr = server
+        .server_addr()
+        .to_ip()
+        .expect("mock R2 ip addr")
+        .to_string();
+    let prefix = format!("/{CACHE_BUCKET}/");
+    std::thread::spawn(move || {
+        for request in server.incoming_requests() {
+            let is_put = *request.method() == Method::Put;
+            let path = request.url().split('?').next().unwrap_or("").to_string();
+            if is_put {
+                // Reject writes: a rebuild's `store_pack_and_flip` PUT 403s (like a
+                // read-only cred), so the served map is immutable for the test.
+                let _ = request.respond(Response::from_string("").with_status_code(403));
+                continue;
+            }
+            let key = path.strip_prefix(&prefix).unwrap_or("");
+            match objects.get(key) {
+                Some(bytes) => {
+                    let _ = request.respond(Response::from_data(bytes.clone()));
+                }
+                None => {
+                    let _ = request.respond(Response::from_string("").with_status_code(404));
+                }
+            }
+        }
+    });
+    addr
+}
+
+/// Build the clone-cache seam pointing at a mock R2 at `mock_addr`, scoped to
+/// `CACHE_TENANT`/`repo` (matching the keys the tests seed).
+fn cache_seam(mock_addr: &str, repo: &str) -> CloneCacheSeam {
+    CloneCacheSeam {
+        r2: R2Config::for_test_endpoint(format!("http://{mock_addr}"), CACHE_BUCKET.to_string()),
+        tenant: CACHE_TENANT.to_string(),
+        repo_slug: repo.to_string(),
+    }
+}
+
+/// Serialize a `current.json` pointer for `refset_sha` naming a pack at `pack_key`.
+fn current_json(refset: &str, pack_key: &str) -> Vec<u8> {
+    serde_json::to_vec(&CurrentPointer {
+        refset_sha: refset.to_string(),
+        pack_key: pack_key.to_string(),
+        object_count: 1,
+        built_at_ms: 0,
+    })
+    .unwrap()
+}
+
+#[test]
+fn full_clone_serves_cached_pack_bytes() {
+    // A FULL clone (wants == the whole advertised tip-set, no haves) of a repo with a
+    // MATCHING cached pack streams the cached bytes, framed `0008NAK\n` + raw pack —
+    // byte-identical framing to the walk path, but ONE R2 GET instead of a closure walk.
+    let (mut state, _d, seed) = state_with_git("acme", "public");
+    let sha = refset_sha(&seed.refs);
+    let pack_key = clone_pack_key(CACHE_TENANT, "acme", &sha);
+    let current_key = clone_pack_current_key(CACHE_TENANT, "acme");
+    let mut objects = std::collections::BTreeMap::new();
+    objects.insert(current_key, current_json(&sha, &pack_key));
+    objects.insert(pack_key, SENTINEL_PACK.to_vec());
+    let mock = spawn_mock_r2(objects);
+    state.set_repo_clone_cache("acme", cache_seam(&mock, "acme"));
+    let addr = spawn(state);
+
+    // Full clone: want BOTH advertised tips, no haves.
+    let body = clone_want_body(&[seed.c2, seed.cf]);
+    let resp = http_post_raw(
+        &addr,
+        "/acme/git-upload-pack",
+        "application/x-git-upload-pack-request",
+        &body,
+    );
+    let (status, head, out) = split_response(&resp);
+    assert!(status.starts_with("HTTP/1.1 200"), "status: {status}");
+    assert!(
+        head.contains("application/x-git-upload-pack-result"),
+        "Content-Type (same as the walk path): {head}"
+    );
+    // The response is EXACTLY the NAK pkt-line + the cached (sentinel) pack bytes.
+    let mut expected = b"0008NAK\n".to_vec();
+    expected.extend_from_slice(SENTINEL_PACK);
+    assert_eq!(
+        out, expected,
+        "a full clone streams the cached pack verbatim after the NAK pkt-line"
+    );
+}
+
+#[test]
+fn full_clone_absent_cache_falls_open_to_walk() {
+    // No `current.json` in R2 → the cache lookup returns None → the serve FALLS OPEN
+    // to the slow walk, which still produces a correct full 7-object clone.
+    let (mut state, _d, seed) = state_with_git("acme", "public");
+    let mock = spawn_mock_r2(std::collections::BTreeMap::new()); // empty: GET 404, PUT 403
+    state.set_repo_clone_cache("acme", cache_seam(&mock, "acme"));
+    let addr = spawn(state);
+
+    let body = clone_want_body(&[seed.c2, seed.cf]);
+    let resp = http_post_raw(
+        &addr,
+        "/acme/git-upload-pack",
+        "application/x-git-upload-pack-request",
+        &body,
+    );
+    let (status, _h, out) = split_response(&resp);
+    assert!(status.starts_with("HTTP/1.1 200"), "status: {status}");
+    assert!(out.starts_with(b"0008NAK\n"), "NAK then a real walked pack");
+    assert_eq!(&out[8..12], b"PACK", "a real packfile from the walk");
+    let count = u32::from_be_bytes(out[16..20].try_into().unwrap());
+    assert_eq!(count, 7, "the full 7-object closure (walk, not the cache)");
+}
+
+#[test]
+fn full_clone_stale_cache_falls_open_to_walk() {
+    // A `current.json` whose `refset_sha` does NOT match the live refs (a moved ref)
+    // is REFUSED — the serve recomputes refset_sha and falls open to the walk. Even
+    // though a (sentinel) pack object is present, it is NEVER served on a mismatch.
+    let (mut state, _d, seed) = state_with_git("acme", "public");
+    let wrong_sha = "0".repeat(64); // deliberately != refset_sha(live refs)
+    let pack_key = clone_pack_key(CACHE_TENANT, "acme", &wrong_sha);
+    let current_key = clone_pack_current_key(CACHE_TENANT, "acme");
+    let mut objects = std::collections::BTreeMap::new();
+    objects.insert(current_key, current_json(&wrong_sha, &pack_key));
+    objects.insert(pack_key, SENTINEL_PACK.to_vec());
+    let mock = spawn_mock_r2(objects);
+    state.set_repo_clone_cache("acme", cache_seam(&mock, "acme"));
+    let addr = spawn(state);
+
+    let body = clone_want_body(&[seed.c2, seed.cf]);
+    let resp = http_post_raw(
+        &addr,
+        "/acme/git-upload-pack",
+        "application/x-git-upload-pack-request",
+        &body,
+    );
+    let (_s, _h, out) = split_response(&resp);
+    assert!(out.starts_with(b"0008NAK\n"), "NAK prefix");
+    assert_ne!(
+        &out[8..],
+        SENTINEL_PACK,
+        "a refset_sha mismatch must NEVER serve the stale cached pack"
+    );
+    assert_eq!(
+        &out[8..12],
+        b"PACK",
+        "the fall-open walk produced a real pack"
+    );
+    let count = u32::from_be_bytes(out[16..20].try_into().unwrap());
+    assert_eq!(
+        count, 7,
+        "the full closure from the walk, not the stale cache"
+    );
+}
+
+#[test]
+fn fetch_with_haves_never_serves_cached_pack() {
+    // A fetch (NON-empty `have` list) is NOT a full clone → the cached pack is NEVER
+    // consulted, even though a matching cache is present. It walks (want-minus-have).
+    let (mut state, _d, seed) = state_with_git("acme", "public");
+    let sha = refset_sha(&seed.refs);
+    let pack_key = clone_pack_key(CACHE_TENANT, "acme", &sha);
+    let current_key = clone_pack_current_key(CACHE_TENANT, "acme");
+    let mut objects = std::collections::BTreeMap::new();
+    objects.insert(current_key, current_json(&sha, &pack_key)); // a MATCHING cache
+    objects.insert(pack_key, SENTINEL_PACK.to_vec());
+    let mock = spawn_mock_r2(objects);
+    state.set_repo_clone_cache("acme", cache_seam(&mock, "acme"));
+    let addr = spawn(state);
+
+    // want both tips, but HAVE one of them (c2) → a fetch, not a full clone.
+    let mut body = Vec::new();
+    pkt(&mut body, format!("want {}\n", seed.c2).as_bytes());
+    pkt(&mut body, format!("want {}\n", seed.cf).as_bytes());
+    body.extend_from_slice(b"0000");
+    pkt(&mut body, format!("have {}\n", seed.c2).as_bytes());
+    pkt(&mut body, b"done\n");
+    let resp = http_post_raw(
+        &addr,
+        "/acme/git-upload-pack",
+        "application/x-git-upload-pack-request",
+        &body,
+    );
+    let (_s, _h, out) = split_response(&resp);
+    assert!(out.starts_with(b"0008NAK\n"), "NAK prefix");
+    assert_ne!(
+        &out[8..],
+        SENTINEL_PACK,
+        "a fetch WITH haves must never serve the cached full-clone pack"
+    );
+    assert_eq!(&out[8..12], b"PACK", "a real walked delta pack");
 }
 
 fn have_git() -> bool {
