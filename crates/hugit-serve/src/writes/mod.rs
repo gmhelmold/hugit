@@ -32,6 +32,7 @@
 //! [`EventLog`]; the door persists ONCE on success (atomic — both the verb record
 //! and the `idem.recorded` land together, or neither does).
 
+pub mod erasure;
 pub mod verbs;
 
 use hugit_http_contracts::actions::Accepted;
