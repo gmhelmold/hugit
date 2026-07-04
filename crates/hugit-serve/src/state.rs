@@ -1130,6 +1130,45 @@ impl AppState {
         Some(count)
     }
 
+    /// Enumerate the `(slug, EventLog)` of every repo OWNED by `owner_tenant` — the
+    /// authoritative candidate set (boot [`repos`] ∪ runtime overlay) filtered by the
+    /// genesis `repo.meta{owner_tenant}` projection. The `(slug, log)`-returning twin
+    /// of [`count_owned_repos`](Self::count_owned_repos), for the GDPR1 erasure PLANNER
+    /// (it needs each owned repo's slug + head to build the tombstone plan).
+    ///
+    /// FAIL-CLOSED (same as `count_owned_repos`): returns `None` if ANY candidate log
+    /// cannot be loaded/verified — an indeterminate ownership enumeration MUST NOT
+    /// silently under-report the erasure set (a subject's repo must never be missed
+    /// because of a transient read fault). The caller treats `None` as "cannot plan
+    /// safely → refuse", never "no repos".
+    ///
+    /// Read-only; enumerates only the in-memory loaded set (never an R2 listing scan).
+    #[must_use]
+    pub fn owned_repo_logs(&self, owner_tenant: &str) -> Option<Vec<(String, EventLog)>> {
+        let mut names: Vec<String> = self.repos.keys().cloned().collect();
+        {
+            let runtime = self.repos_runtime.read().unwrap_or_else(|e| e.into_inner());
+            for k in runtime.keys() {
+                if !self.repos.contains_key(k) {
+                    names.push(k.clone());
+                }
+            }
+        }
+        names.sort();
+        names.dedup();
+
+        let mut out: Vec<(String, EventLog)> = Vec::new();
+        for name in names {
+            // Fail-closed: an unloadable/untrusted candidate ⇒ indeterminate set.
+            let log = self.load_verified(&name).ok()?;
+            let meta = crate::authz::project_repo_meta(&log);
+            if meta.owner_tenant.as_deref() == Some(owner_tenant) {
+                out.push((name, log));
+            }
+        }
+        Some(out)
+    }
+
     /// The number of repos whose git content seam is loaded (the `/readyz`
     /// capability count). Zero = git serving not live for any repo. Counts the boot
     /// set PLUS the runtime overlay (the two are disjoint by construction — insert
