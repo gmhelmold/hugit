@@ -23,7 +23,7 @@ BOOTSTRAP_DIR="$CRATE_ROOT/src/bootstrap"
 DR_DIR="$CRATE_ROOT/src/dr"
 ACCEPTANCE_FILE="$CRATE_ROOT/tests/acceptance_e1c.rs"
 
-export HUGIT_GH_TEST_REPO="humangr-labs/hugit-fleet-syn-1"
+export HUGIT_GH_TEST_REPO="HumanGuardrail/hugit-fleet-syn-1"
 
 # ── crate presence ────────────────────────────────────────────────────────────
 check "hugit-mirror crate directory present" \

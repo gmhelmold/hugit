@@ -105,7 +105,7 @@ community + billing-backlash threads) — the calendar clock begins.
 including D3's write path — the source-of-truth bar), docs current, CHANGELOG,
 and the shipped-state demo:
 
-> `git clone https://hugit.humangr.com/humangr-labs/hugit` works (read path) ·
+> `git clone https://hugit.humangr.com/HumanGuardrail/hugit` works (read path) ·
 > the hugit repo lands its own fleet waves through its own union queue on its
 > own runners · the ledger narrates it · the mirror keeps GitHub perfectly in
 > sync · the experiment harness is accumulating the data that decides claims

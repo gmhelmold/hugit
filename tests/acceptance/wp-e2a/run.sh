@@ -30,7 +30,7 @@ RESUME_DIR="$IMPORT_DIR/resume"
 AUTH_FILE="$IMPORT_DIR/auth.rs"
 ACCEPTANCE_FILE="$CRATE_ROOT/tests/acceptance_e2a.rs"
 
-export HUGIT_GH_TEST_REPO="humangr-labs/hugit-fleet-syn-1"
+export HUGIT_GH_TEST_REPO="HumanGuardrail/hugit-fleet-syn-1"
 
 # ── crate presence ────────────────────────────────────────────────────────────
 check "hugit-mirror crate directory present" \

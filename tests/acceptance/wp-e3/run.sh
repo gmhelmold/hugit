@@ -10,7 +10,7 @@
 # Oracle: crates/hugit-mirror/tests/acceptance_e3.rs — one #[test] item_<n>_<slug>
 #   per owned acceptance item.
 # Claims: crates/hugit-mirror/src/status/ — disjoint from other mirror modules.
-# GitHub-status items require HUGIT_GH_TEST_REPO (suite exports humangr-labs/hugit-fleet-syn-1);
+# GitHub-status items require HUGIT_GH_TEST_REPO (suite exports HumanGuardrail/hugit-fleet-syn-1);
 #   checks FAIL — not skip — when HUGIT_GH_TEST_REPO is set but the env is empty.
 # RED on current tree (status/ subtree not yet built).
 
@@ -23,7 +23,7 @@ CRATE_NAME="hugit-mirror"
 STATUS_DIR="$CRATE_ROOT/src/status"
 ACCEPTANCE_FILE="$CRATE_ROOT/tests/acceptance_e3.rs"
 
-export HUGIT_GH_TEST_REPO="humangr-labs/hugit-fleet-syn-1"
+export HUGIT_GH_TEST_REPO="HumanGuardrail/hugit-fleet-syn-1"
 
 # ── crate presence ────────────────────────────────────────────────────────────
 check "hugit-mirror crate directory present" \

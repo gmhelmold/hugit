@@ -8,7 +8,7 @@
 # Oracle: crates/hugit-mirror/tests/acceptance_e1a.rs — one #[test] item_<n>_<slug>
 #   per owned acceptance item.
 # Claims: crates/hugit-mirror/src/outbound/, src/verify/, src/queue/ — disjoint from other modules.
-# Live-GitHub items (①) require HUGIT_GH_TEST_REPO (suite exports humangr-labs/hugit-fleet-syn-1);
+# Live-GitHub items (①) require HUGIT_GH_TEST_REPO (suite exports HumanGuardrail/hugit-fleet-syn-1);
 #   checks FAIL — not skip — when HUGIT_GH_TEST_REPO is set but the env lacks the installation.
 # Hash-verify/queue-capacity items are local fixture proofs over mirror logic.
 # RED on current tree (outbound/ verify/ queue/ subtrees not yet built).
@@ -24,7 +24,7 @@ VERIFY_DIR="$CRATE_ROOT/src/verify"
 QUEUE_DIR="$CRATE_ROOT/src/queue"
 ACCEPTANCE_FILE="$CRATE_ROOT/tests/acceptance_e1a.rs"
 
-export HUGIT_GH_TEST_REPO="humangr-labs/hugit-fleet-syn-1"
+export HUGIT_GH_TEST_REPO="HumanGuardrail/hugit-fleet-syn-1"
 
 # ── crate presence ────────────────────────────────────────────────────────────
 check "hugit-mirror crate directory present" \

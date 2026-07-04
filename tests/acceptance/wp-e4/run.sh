@@ -17,7 +17,7 @@
 # Box env: HUGIT_RUNNER_HOST=203.0.113.10 (exported before cargo invocations);
 #   box-dependent tests FAIL — not skip — when env is set but box unreachable.
 # GitHub-Actions-equivalence item reads HUGIT_GH_TEST_REPO
-#   (suite exports humangr-labs/hugit-fleet-syn-1);
+#   (suite exports HumanGuardrail/hugit-fleet-syn-1);
 #   equivalence check FAILs when HUGIT_GH_TEST_REPO is needed but empty.
 # RED on current tree (shim/ subtree not yet built).
 
@@ -32,7 +32,7 @@ ACCEPTANCE_FILE="$CRATE_ROOT/tests/acceptance_e4.rs"
 SUPPORTED_SUBSET_DOC="crates/hugit-runner/src/shim/supported-subset.md"
 
 export HUGIT_RUNNER_HOST=203.0.113.10
-export HUGIT_GH_TEST_REPO="humangr-labs/hugit-fleet-syn-1"
+export HUGIT_GH_TEST_REPO="HumanGuardrail/hugit-fleet-syn-1"
 
 # ── crate presence ────────────────────────────────────────────────────────────
 check "hugit-runner crate directory present" \
