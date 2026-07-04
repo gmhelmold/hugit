@@ -449,6 +449,11 @@ pub struct AppState {
     pub source: LogSource,
     /// The Wave-1 dev Bearer token (the P2-Clerk stub). Fail-closed: required.
     pub dev_token: String,
+    /// An OPTIONAL SECOND operator Bearer (`HUGIT_ENGINE_DEV_TOKEN_EXTRA`), validated
+    /// ALONGSIDE `dev_token`. Enables adding a new ops credential with ZERO downtime —
+    /// the primary `dev_token` a sibling (githugr) already sends is left untouched, so
+    /// there is no rotation window. `None` when the env var is unset/whitespace.
+    pub dev_token_extra: Option<String>,
     /// CoreLink session-exchange client for `POST /v1/token` (Option B). `None` →
     /// dev-token-only; the endpoint 404s without it (presence not disclosed). The
     /// P2 Clerk identity seam: hugit forwards the Clerk JWT, CoreLink verifies it.
@@ -583,6 +588,13 @@ impl AppState {
         if dev_token.trim().is_empty() {
             return Err("HUGIT_ENGINE_DEV_TOKEN is empty (fail-closed)".to_string());
         }
+        // OPTIONAL second operator token — ADDITIVE, never replaces `dev_token`, so a
+        // new ops credential can be introduced with zero downtime to the sibling that
+        // shares the primary. Absent / whitespace-only → None (no phantom empty token
+        // that would match a blank Bearer).
+        let dev_token_extra = std::env::var("HUGIT_ENGINE_DEV_TOKEN_EXTRA")
+            .ok()
+            .filter(|t| !t.trim().is_empty());
 
         // R2 is selected by EITHER the native ACCOUNT_ID or the S3-standard ENDPOINT
         // (so a standard cred file, which carries _ENDPOINT not _ACCOUNT_ID, selects R2).
@@ -673,6 +685,7 @@ impl AppState {
         Ok(Self {
             source,
             dev_token,
+            dev_token_extra,
             exchange,
             token_store,
             repos,
@@ -952,6 +965,7 @@ impl AppState {
         Self {
             source: LogSource::Local { dir: log_dir },
             dev_token,
+            dev_token_extra: None,
             exchange: None,
             token_store: Arc::new(TokenStore::new()),
             repos: std::collections::HashMap::new(),
