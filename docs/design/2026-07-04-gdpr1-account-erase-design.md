@@ -11,13 +11,26 @@
 The engine's event logs are **per-repo** (`<r2_tenant>/<repo>.json`); an `erasure.requested` is **account-scoped**
 (keyed by the caller's account = its `clerk:{org}` slug). There is no per-account log today.
 
-**Decision:** persist the account erasure lifecycle to a **reserved per-account log** at the WriteStore key
-**`_erasure/{account_slug}`** → R2 object `<r2_tenant>/_erasure/{account_slug}.json`.
-- **Non-colliding by construction:** the key contains `/`, and `is_safe_repo_slug` REJECTS any slug containing `/`
-  — so this key can NEVER be a real repo, is never served over `/v1/repos/{repo}` or the git wire, and cannot be
-  clobbered by / clobber a repo. (`account_slug` itself is validated `[a-z0-9-]`, the clerk org shape.)
-- **One log per account**, not per-engine — so an account's erasure history is self-contained + the Part-2 cascade
-  reads exactly one log to drive one account's tombstone.
+> **⚠️ CORRECTION (2026-07-04, caught during the handler build — before it became a bug):** the FIRST cut of this
+> decision — reuse the repo `LogSink` at key `_erasure/{account_slug}` (relying on the `/` to make `is_safe_repo_slug`
+> reject it → never served) — is **internally inconsistent**: `AppState::persist` ALSO gates on `is_safe_repo_slug`
+> (`state.rs`), so the very property that makes the key non-SERVABLE makes it non-PERSISTABLE through the LogSink.
+> Reusing the repo store is therefore impossible. Also: `idem_lookup`/`idem_record` are private to `writes/mod.rs`
+> (not reusable), and `with_write`'s `authorize_write` gate expects repo ownership. So the account log needs a
+> **dedicated persistence seam**, below.
+
+**Decision (revised):** persist the account erasure lifecycle to a **dedicated per-account event log** via a NEW,
+account-scoped store seam — NOT the repo `LogSink`:
+- **Key:** `<r2_tenant>/_accounts/{account_slug}.json` (a reserved R2 sub-prefix). Structurally OUTSIDE the repo
+  namespace: the repo read/clone/`/v1/repos` paths resolve `<r2_tenant>/{repo}.json` for a single-segment
+  `is_safe_repo_slug` — they NEVER consult the `_accounts/` sub-prefix, so the erasure log can never be served as a
+  repo. (`account_slug` = the validated clerk-org shape `[a-z0-9-]`.)
+- **Seam:** add `load_account_log(account) / persist_account_log(account, log, expected)` to the store (mirroring
+  the repo `load_verified_with_token` + create-only/CAS `persist`, but keyed under `_accounts/` and NOT gated on
+  `is_safe_repo_slug` — the account slug has its own validation). Load-or-create-append: create-genesis
+  (`CasToken::Absent`) on the first request, CAS-append on subsequent (its own retry loop; the private idem helpers
+  are re-implemented account-scoped OR promoted to `pub(crate)`).
+- **One log per account**, self-contained → the Part-2 cascade reads exactly one log to drive one account's tombstone.
 
 ### D2 — the request verb (Part 1b, STAGING — no deletion)
 `write_account_erase(sink, req, principal_chain, at)`:
