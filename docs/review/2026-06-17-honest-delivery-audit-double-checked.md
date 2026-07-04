@@ -8,12 +8,17 @@
 > engine). **Caveat (a) "one push per ref per engine lifetime" is now CLOSED** by the live ref
 > hot-swap (#201, deployed + verified — a pushed ref is advertised immediately, no reboot). Remaining
 > push caveats: v0 = self-contained packs (an *incremental* push on server-side history is rejected
-> fail-closed — thin-pack/CAS-base reachability is the tracked follow-up), and clone-back is gated on
-> the public-flag. STILL open: anonymous-clone public-flag, live runner exec,
-> multi-tenant, and the killer-data **render** is verified only to "route serves (401)" from here —
-> the githugr TL's authed www smoke is pending. **The "~15–20% live" figure in the body below is
-> superseded: with read+WRITE (git push) now live, CLAUDE.md's current estimate is ~25–30% of a
-> single-tenant forge (still single-digit % for a full multi-tenant forge).** See CLAUDE.md's
+> fail-closed — thin-pack/CAS-base reachability is the tracked follow-up), and clone-back *exposure*
+> is the forge/owner **visibility decision** (`repo.meta{visibility}`), not hugit code. STILL open on
+> the WEDGE: live runner exec, multi-tenant hosting/identity, and the killer-data **render** is
+> verified only to "route serves (401)" from here — the githugr TL's authed www smoke is pending.
+> **⚠️ RULER CORRECTION (owner, 2026-07-03): retire the "% of a forge" framing entirely.** The
+> "~15–20% live" / "~25–30% of a single-tenant forge" / "single-digit % multi-tenant" numbers below and
+> in prior CLAUDE.md were the **WRONG ruler** — they grade hugit against a rebuilt GitHub (parity),
+> which contradicts the symbiosis thesis (*hugit rides git with zero conflict and only complements it
+> where git doesn't solve*). Grade the **wedge** (landing + cost-attribution + orchestration), never a
+> forge clone. See CLAUDE.md Principles ("Measure completeness against the wedge, NEVER git parity" +
+> "Visibility is the forge's decision"). See CLAUDE.md's
 > **Update 2026-06-22 / 2026-06-26** blocks for the current honest state; the per-capability analysis
 > below remains the deep reference for everything not touched this round.
 
@@ -119,12 +124,18 @@ merge-as-re-execution, the live UI, multi-tenant identity — is **not delivered
 
 ## Honest magnitude
 
-- **~15–20% live** for the deployed `/v1` read+write API against the `hugit` launch repo.
-- **single-digit %** for a full multi-tenant end-to-end forge experience.
-- The hermetic CLI layer + the standing Squad X invariants are substantially more
-  built engineering than a naive "single-digit %" conveys — but **none of the
-  whitepaper's headline forge experience runs live for a second tenant or a real
-  pushed repo.**
+> **⚠️ These percentages are the WRONG ruler — retired 2026-07-03 (owner).** They grade hugit as a
+> fraction of a rebuilt forge (parity), which contradicts the symbiosis thesis. Kept below only as the
+> historical record of the drift; the correct axis is the **wedge** (does the landing/cost/orchestration
+> complement run live, and does it ride git clean?). See CLAUDE.md Principles.
+
+- ~~**~15–20% live** for the deployed `/v1` read+write API against the `hugit` launch repo.~~ *(wrong ruler)*
+- ~~**single-digit %** for a full multi-tenant end-to-end forge experience.~~ *(wrong ruler — parity)*
+- The hermetic CLI layer + the standing Squad X invariants are substantial built engineering. The
+  **wedge-axis** read: the git-native surface (clone/fetch/push) rides git and is LIVE; the cost-killer
+  is LIT live ($20.34 real on `/insights`); the honest wedge gaps are live runner exec, multi-tenant
+  hosting/identity, and killer-data render-verification. Anonymous clone is a forge/owner visibility
+  decision, not a hugit build gap.
 
 ## What "100% delivered, reviewed, audited" actually requires (biggest → smallest)
 

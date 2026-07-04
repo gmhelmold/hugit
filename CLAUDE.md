@@ -31,8 +31,11 @@ adversarial round (1–13) + a SOTA sweep. The integrity spine is genuinely soli
 - **Git wire serving: clone/fetch BUILT + the engine boots git-from-CAS, push NOT.** `hugit-serve`
   speaks the git smart-HTTP upload-pack wire over `hugit-proto`'s clone/fetch logic (CI-proven e2e).
   The DEPLOYED engine boots git-from-CAS and loads both repos (`/readyz git_serving:true,git_repos:2`,
-  2026-06-22). ANONYMOUS `git clone` of either repo is still `404` — gated on a per-repo public-flag
-  (a deferred feature), not the wire. `git push` (receive-pack) is **LIVE** (2026-06-26, #198 —
+  2026-06-22). The wire itself is git-native + done; whether ANONYMOUS `git clone` is *exposed* is the
+  forge/owner **visibility decision** (`repo.meta{visibility}`) — NOT a wire or code gap, and never a
+  hugit "build" item (see Principles: visibility is the forge's, not hugit's). Verify the deployed
+  read-exposure posture live before asserting anon-open OR authed-only — it's owner-set. `git push`
+  (receive-pack) is **LIVE** (2026-06-26, #198 —
   git-free gix-pack unpack on the distroless engine; first real push returned `unpack ok` +
   `ok refs/heads/_pushsmoke`). The **live ref hot-swap is DONE** (#201, deployed 2026-06-26 —
   verified: a ref pushed post-deploy appears in the receive-pack advertise immediately, same engine
@@ -41,8 +44,8 @@ adversarial round (1–13) + a SOTA sweep. The integrity spine is genuinely soli
   CAS-base reachability — the resolver + reachability walk consult the CAS for an ancestor/REF_DELTA base
   the pack omits; deployed + prod-verified 2026-06-26: a real fast-forward `0886fda..abb77f0` on a
   server-side ancestor landed, reads stayed 200). So CREATE, UPDATE, and INCREMENTAL push all work live.
-  Remaining caveat: **(b)** clone-back over the wire is still blocked by the private read-gate
-  (public-flag deferred).
+  Remaining item: **(b)** clone-back *exposure* is the forge/owner **visibility decision**
+  (`repo.meta{visibility}`), not hugit code — the engine enforces whatever flag it's handed.
 - **Substrate — AC LIVE (2026-06-22), runner still transferred.** The CoreLink AC
   (memoization) is now LIVE: `check run` + `land queue` prefer `HttpAcClient::from_runtime`
   (#182), smoke-proven MISS→remote-HIT against tenant `3560e213`; the hot-CAS git tenant
@@ -121,7 +124,7 @@ adversarial review caught + we fixed a BLOCKER (aggregate delta-expansion bomb) 
 CAS handler emits `ok` only after the fail-closed `finalize_cas_push` (objects→CAS + D1 log +
 refs.json/oid-index.json rewrite), so `ok` ⇒ durable. **Honest caveats:** (a) a pushed ref serves only
 after the next engine reboot (in-memory snapshot not live-refreshed — a tracked follow-up); (b)
-clone-back over the wire is blocked by the private read-gate (public-flag deferred). v0 = self-contained
+clone-back *exposure* is the forge/owner visibility decision (`repo.meta{visibility}`), not hugit code. v0 = self-contained
 packs only (thin-pack bases + incremental pushes on server-side ancestry rejected fail-closed). Reads
 stayed 200 throughout (no outage). Lesson: any distroless-runtime path MUST be git-binary-free.
 Follow-ups shipped the same day: **#199** panic-isolated the git/SSE handlers (a handler panic no longer
@@ -174,13 +177,21 @@ a default-branch guard, deployed+verified 2026-06-28 — 3 test refs deleted liv
 advertise — deployed+verified 2026-06-28 — so **`git push --delete` works via the REAL git client**, proven
 live: `git push --delete _clidel` → ` - [deleted]` and the ref dropped from the advertise. The earlier
 "remote rejected" was the client refusing to send a zero-id delete because the v0 advertise omitted
-`delete-refs`; the server handler always worked); remaining caveat — clone-back blocked by the private
-read-gate. **The single-tenant WRITE path is fully client-usable via standard git: create + update +
+`delete-refs`; the server handler always worked); remaining item — clone-back *exposure* is the
+forge/owner visibility decision (`repo.meta{visibility}`), not hugit code. **The single-tenant WRITE path is fully client-usable via standard git: create + update +
 incremental + delete, all proven live end-to-end.** (Op note: the engine is behind Cloudflare bot-protection —
-a non-git/non-browser UA gets `403 error 1010`; probe with a `git/`/browser UA.) Call it ~30% of a single-tenant forge (the remaining single-tenant gap is the read side: anonymous
-clone, owner-gated on the public-flag). Still single-digit % for a full
-MULTI-TENANT end-to-end forge: no live runner exec (dispatch waits on the runners-TL fabricd spawn
-fix), no multi-tenant identity, no anonymous clone, killer-data render unverified-from-here.**
+a non-git/non-browser UA gets `403 error 1010`; probe with a `git/`/browser UA.)
+**Magnitude — measured against the WEDGE, not forge-parity (git parity is a NON-GOAL; see Principles):**
+the git-native surface (clone/fetch/push over the standard git wire) **rides git and is LIVE** — a stock
+`git` client works, no custom client, no account to read a public repo. The wedge that ONLY hugit builds —
+the landing layer, **per-intent cost-attribution (now LIT live: $20.34 real on `/insights`, first attested
+non-zero cost)**, and the orchestration primitives — is largely built, with the cost-killer now rendering
+real data on the live door. The honest **wedge** gaps still open: **live runner exec** (dispatch waits on
+the runners-TL fabricd spawn fix), **multi-tenant hosting/identity** (bring-your-own-repo — an account
+concern, *downstream* of the wedge, not the wedge itself), and the killer-data **render unverified-from-here**
+(the githugr TL's authed www smoke). **Anonymous clone is NOT a hugit build gap** — it's the forge/owner
+**visibility/exposure decision** (`repo.meta{visibility}`; the engine already enforces whatever flag it's
+handed — see Principles). Do NOT re-grade this as "% of a forge".
 
 **Critical path to a usable single-tenant forge (biggest → smallest) — updated 2026-06-22:**
 ~~deploy current `main`~~ DONE (multi-repo + killer-data + AC live) → githugr TL render-verifies
@@ -188,8 +199,8 @@ the killer-data with a token + runs the www → ~~git `push`/receive-pack~~ **DO
 2026-06-26 with caveats a+b)** → ~~live-snapshot refresh~~ **DONE (#201, live ref hot-swap — a pushed
 ref reflects in the advertise immediately, no reboot)** → ~~thin-pack / CAS-base reachability~~ **DONE
 (#206, deployed + prod-verified 2026-06-26 — incremental push on server-side history lands; the
-single-tenant WRITE path is now functionally complete)** → **anonymous-clone public-flag** (unblocks
-clone-back — the remaining single-tenant gap, owner-gated) → identity
+single-tenant WRITE path is now functionally complete)** → **anonymous-read exposure** (a forge/owner
+**visibility decision**, NOT a hugit build step — the engine already enforces `repo.meta{visibility}`) → identity
 Clerk exchange (still gated on `HUGIT_SESSION_EXCHANGE_URL` + `hugit-prod-d1`) → runner fabric live →
 GitHub App + live mirror → multi-tenant. The non-code ones are owner/infra-gated. Per-capability
 status table + tracked seams: the audit doc above.
@@ -226,6 +237,27 @@ not a delivery claim) · `docs/strategy/campaign-3-llm-native-forge.md` (foundin
   broken bridge kills trust instantly; never naive symmetric sync.
 - **The wedge is the landing problem** (integration/merge for agent fleets),
   not authoring, not review prose.
+- **Measure completeness against the wedge, NEVER git parity.** hugit is
+  git-native **symbiosis**, not a forge rebuilt from scratch. What git already
+  does well — clone/fetch/push, diff, branch, merge-mechanics, history — git
+  keeps doing; hugit rides the git wire with **zero conflict** and adds value
+  ONLY where git doesn't solve (landing, cost-attribution, orchestration). So
+  "% of a forge", "git feature parity", "single-digit % multi-tenant" are the
+  **WRONG ruler** — grading against them contradicts this very thesis. This was
+  the recurring drift the owner killed 2026-07-03: *"não temos que fazer
+  paridade… o hugit funciona em simbiose com o git… entra onde o git não
+  resolve."* Grade the **complement** (is the wedge live + does it ride git
+  clean?), never a GitHub clone.
+- **Visibility (public/private) is the forge's decision, not hugit's.** Reading/
+  cloning a *public* repo is git-native — stock `git clone`, **no account**,
+  exactly like any git remote. WHERE "public vs private" is decided belongs to
+  the forge surface (githugr) or to GitHub when riding on it; **hugit-serve only
+  ENFORCES** the `repo.meta{visibility}` flag it is handed — it builds no
+  visibility product. So "anonymous clone" is never framed as a hugit *build*
+  gap; it's an owner/forge **exposure decision** (verify the deployed posture
+  live before asserting anon-open OR authed-only — it's owner-set). Hard
+  invariant that never bends: **read-authz ≠ write-authz** — open reads never
+  open writes; `git push` always needs a credential (like git/GitHub).
 - **Memoize by content, price flat.** Never usage-billing whiplash; never
   charge for the customer's own compute.
 - **Zero debt, no loose ends, impeccable repo** (same owner mandate as
