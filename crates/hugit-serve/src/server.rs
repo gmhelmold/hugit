@@ -976,7 +976,15 @@ pub(crate) fn two_tier_auth(
     // above (→ `clerk:{org}:{user}`), so it can NEVER reach this branch and can NEVER
     // become the operator — flag or no flag. A real user is structurally incapable of
     // holding a god-token.
-    if crate::auth::tokens_match(raw.as_bytes(), state.dev_token.as_bytes()) {
+    // Match the primary dev-token OR the OPTIONAL second operator token
+    // (`dev_token_extra`) — both are equivalent operator credentials. Each comparison
+    // is the constant-time `tokens_match`; a `raw` that matches NEITHER is invalid.
+    let dev_match = crate::auth::tokens_match(raw.as_bytes(), state.dev_token.as_bytes())
+        || state
+            .dev_token_extra
+            .as_deref()
+            .is_some_and(|extra| crate::auth::tokens_match(raw.as_bytes(), extra.as_bytes()));
+    if dev_match {
         if state.allow_dev_operator {
             return Ok((dev_principal(), false));
         }
@@ -1656,6 +1664,30 @@ mod godpath_gate_tests {
         assert_eq!(principal, vec!["orchestrator:hugit".to_string()]);
         assert!(crate::authz::is_operator(&principal));
         assert!(!fresh);
+    }
+
+    /// The OPTIONAL second operator token (`dev_token_extra`) authenticates as the
+    /// operator EXACTLY like the primary — enabling a NEW ops credential with zero
+    /// downtime — while the primary `dev_token` (the one a sibling already sends)
+    /// keeps working untouched, and a Bearer matching NEITHER is still a hard 401.
+    #[test]
+    fn second_operator_token_authenticates_alongside_the_primary() {
+        let mut s = state();
+        s.dev_token_extra = Some("the-extra-operator-token".to_string());
+        // The EXTRA token → operator (break-glass on by default in `state()`).
+        let (p_extra, _) = two_tier_auth(&s, &bearer("the-extra-operator-token"))
+            .expect("the second operator token authenticates");
+        assert!(
+            crate::authz::is_operator(&p_extra),
+            "the extra token is an equivalent operator credential"
+        );
+        // The PRIMARY token STILL works, untouched — no rotation window.
+        let (p_primary, _) =
+            two_tier_auth(&s, &bearer(DEV)).expect("the primary dev-token still authenticates");
+        assert!(crate::authz::is_operator(&p_primary));
+        // A Bearer matching NEITHER token is still a hard 401.
+        let err = two_tier_auth(&s, &bearer("neither-token")).unwrap_err();
+        assert_eq!(err.status, 401);
     }
 
     /// Break-glass OFF (the PUBLIC prod default): a dev-token Bearer degrades to an
