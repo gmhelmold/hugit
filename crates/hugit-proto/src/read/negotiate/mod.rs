@@ -152,6 +152,35 @@ pub fn parse_deepen(bytes: &[u8]) -> Option<u32> {
     None
 }
 
+/// Extract the client's `shallow <oid>` lines from an upload-pack request — the
+/// shallow boundary the client already holds. In stateless HTTP, a `git clone --depth N`
+/// is a TWO-round negotiation: round 1 sends `deepen N` (no `done`) and the server
+/// replies with the `shallow` boundary; **round 2 re-sends the boundary as `shallow <oid>`
+/// lines plus `done` and NO `deepen`** — so the server must recognise a shallow request by
+/// these lines too (not just `deepen`) or it skips the required `shallow` section and the
+/// client dies `expected shallow list`. Returns the parsed oids (empty for a normal
+/// request); a malformed oid is skipped (a spurious line must never fail a clone).
+pub fn parse_client_shallow(bytes: &[u8]) -> Vec<ObjectId> {
+    let Ok(lines) = decode_lines(bytes) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for line in &lines {
+        let Some(data) = line_data(line) else {
+            continue;
+        };
+        let text = std::str::from_utf8(data)
+            .unwrap_or("")
+            .trim_end_matches('\n');
+        if let Some(oid) = text.strip_prefix("shallow ")
+            && let Ok(parsed) = parse_oid(oid.trim())
+        {
+            out.push(parsed);
+        }
+    }
+    out
+}
+
 /// The parsed `want`/`have` sets of a protocol-v2 `fetch` request.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WantHave {

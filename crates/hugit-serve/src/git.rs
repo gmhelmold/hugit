@@ -347,11 +347,28 @@ type SharedSource = Arc<dyn hugit_proto::ObjectSource + Send + Sync>;
 struct ClonePlan {
     full_clone: bool,
     refs: BTreeMap<String, String>,
-    /// `Some(depth)` when the client sent `deepen <depth>` (`git clone --depth N`):
-    /// serve a depth-bounded pack + a `shallow` section instead of the full closure.
-    /// Mutually exclusive with `full_clone` (a shallow request never uses the cached
-    /// full-clone pack — that pack carries the WHOLE history).
+    /// `Some(depth)` when the client sent `deepen <depth>` (`git clone --depth N`,
+    /// round 1): serve a depth-bounded pack + a `shallow` section. Mutually exclusive
+    /// with `full_clone` (a shallow request never uses the cached full-clone pack —
+    /// that pack carries the WHOLE history).
     shallow_depth: Option<u32>,
+    /// The client's declared shallow boundary (`shallow <oid>` lines) — round 2 of a
+    /// stateless HTTP shallow clone carries the boundary instead of `deepen`. Non-empty
+    /// ALSO marks a shallow request (or the server skips the `shallow` section git
+    /// requires each round → `expected shallow list`).
+    shallow_client: Vec<hugit_proto::ObjectId>,
+    /// Whether the client sent `done`. A shallow request WITHOUT `done` is round-1
+    /// negotiation: reply with the `shallow` section ONLY (no pack); the pack rides the
+    /// round-2 request that carries `done`.
+    done: bool,
+}
+
+impl ClonePlan {
+    /// A shallow (`--depth`) request — detected by `deepen` (round 1) OR the client's
+    /// `shallow` lines (round 2). Both must take the shallow serve path.
+    fn is_shallow(&self) -> bool {
+        self.shallow_depth.is_some() || !self.shallow_client.is_empty()
+    }
 }
 
 /// Whether the explicit `want` set is EXACTLY the full advertised tip-set (every
@@ -439,16 +456,21 @@ fn prepare_upload_pack(
         (request, full)
     };
 
-    // `git clone --depth N` sends `deepen N` (enabled by the `shallow` capability we
-    // now advertise). Parse it from the raw body. Its presence forces a depth-bounded
-    // pack and DISABLES the cached full-clone fast path — that pack carries the WHOLE
-    // history, which a shallow client must NOT receive.
+    // `git clone --depth N` is a TWO-round stateless-HTTP negotiation: round 1 sends
+    // `deepen N` (no `done`) and the server replies with the `shallow` boundary; round 2
+    // re-sends that boundary as `shallow <oid>` lines PLUS `done` and NO `deepen`. So a
+    // shallow request is detected by EITHER, and the pack is gated on `done`. Either
+    // marker DISABLES the cached full-clone fast path (that pack carries the WHOLE history).
     let shallow_depth = hugit_proto::parse_deepen(body);
-    let full_clone = full_clone && shallow_depth.is_none();
+    let shallow_client = hugit_proto::parse_client_shallow(body);
+    let is_shallow = shallow_depth.is_some() || !shallow_client.is_empty();
+    let full_clone = full_clone && !is_shallow;
     let plan = ClonePlan {
         full_clone,
         refs,
         shallow_depth,
+        shallow_client,
+        done: effective_req.done,
     };
     Some((source, effective_req, plan, clone_cache))
 }
@@ -475,27 +497,44 @@ fn build_upload_pack_bytes(
     Some(out)
 }
 
-/// Assemble a DEPTH-BOUNDED (shallow) upload-pack result — the response to a
-/// `git clone --depth N`. `None` (→ 404) on any assembly failure: fail-CLOSED to
+/// Assemble a DEPTH-BOUNDED (shallow) upload-pack result — the response to one round
+/// of a `git clone --depth N`. `None` (→ 404) on any assembly failure: fail-CLOSED to
 /// no-pack, NEVER a truncated one (same contract as [`build_upload_pack_bytes`]).
 ///
-/// Wire (smart-HTTP v1 shallow response): the `shallow` section (one
-/// `shallow <oid>` pkt-line per boundary commit, then a flush-pkt that ends the
-/// section — emitted even when empty, since the client requested a `deepen`), then
-/// the `NAK` pkt-line, then the raw depth-bounded packfile.
+/// TWO-round stateless-HTTP shallow protocol (both handled here):
+/// * **Round 1** — the client sent `deepen N` and NO `done`. Reply with the `shallow`
+///   section (the boundary computed from the depth) + a flush, and NOTHING ELSE — this
+///   is pure negotiation; the pack rides round 2.
+/// * **Round 2** — the client re-sent the boundary as `shallow <oid>` lines PLUS `done`.
+///   Reply with the `shallow` section (echoing the client's boundary) + flush + `NAK` +
+///   the pack cut at that boundary.
+///
+/// Every shallow round MUST begin with the `shallow` section or git dies
+/// `expected shallow list` (the multi-round bug the hermetic single-round tests missed).
 fn build_shallow_pack_bytes(
     source: &dyn hugit_proto::ObjectSource,
     request: &hugit_proto::WantHave,
-    depth: u32,
+    plan: &ClonePlan,
 ) -> Option<Vec<u8>> {
-    let (pack, boundary) = hugit_proto::serve_shallow(source, &request.wants, depth).ok()?;
+    // Compute the pack + the shallow boundary — from the depth (round 1 / single-round
+    // clients that send `deepen`+`done`) or the client-declared boundary (round 2).
+    let (pack, boundary) = if let Some(depth) = plan.shallow_depth {
+        hugit_proto::serve_shallow(source, &request.wants, depth).ok()?
+    } else {
+        hugit_proto::serve_shallow_at(source, &request.wants, &plan.shallow_client).ok()?
+    };
     let mut out = Vec::new();
     for oid in &boundary {
         pkt_line(&mut out, format!("shallow {oid}\n").as_bytes());
     }
     pkt_flush(&mut out); // ends the shallow section (empty section = bare flush)
-    pkt_line(&mut out, b"NAK\n");
-    out.extend_from_slice(&pack.bytes);
+    // Gate the pack on `done`: a shallow request WITHOUT `done` is round-1 negotiation —
+    // the client wants ONLY the boundary and will send `done` in round 2 for the pack.
+    // Sending the pack now makes the client die on the follow-up round.
+    if plan.done {
+        pkt_line(&mut out, b"NAK\n");
+        out.extend_from_slice(&pack.bytes);
+    }
     Some(out)
 }
 
@@ -514,11 +553,11 @@ fn serve_upload_pack_response(
     request: Request,
     io_budget: Duration,
 ) {
-    // SHALLOW (`git clone --depth N`) — a depth-bounded pack preceded by the
-    // `shallow` section. NEVER uses the cached full pack (`prepare_upload_pack` forces
-    // `full_clone` off whenever `shallow_depth` is set, since the cache is full history).
-    if let Some(depth) = plan.shallow_depth {
-        match build_shallow_pack_bytes(source.as_ref(), &want, depth) {
+    // SHALLOW (`git clone --depth N`) — a depth-bounded pack preceded by the `shallow`
+    // section, over the two-round stateless protocol. NEVER uses the cached full pack
+    // (`prepare_upload_pack` forces `full_clone` off for any shallow request).
+    if plan.is_shallow() {
+        match build_shallow_pack_bytes(source.as_ref(), &want, &plan) {
             Some(out) => {
                 let body_len = out.len();
                 let resp = Response::from_data(out)
@@ -2310,6 +2349,73 @@ mod offloop_tests {
         let t = tree(&mut src, "f.txt", b);
         let c = commit(&mut src, t);
         (src, c)
+    }
+
+    /// The multi-round stateless shallow wire (the bug the live clone caught, that the
+    /// single-round hermetic tests missed): ROUND 1 (`deepen`, no `done`) must reply with
+    /// the `shallow` section ONLY (no `NAK`, no pack); ROUND 2 (client `shallow` lines +
+    /// `done`) must reply with the `shallow` section AGAIN, then `NAK`, then the pack.
+    #[test]
+    fn shallow_round1_is_negotiation_only_round2_carries_the_pack() {
+        // A 2-commit chain: `root` ← `tip`. Depth 1 cuts `root`, so `tip` IS shallow
+        // (a single root commit is never shallow — nothing to cut).
+        let (mut src, root) = sample();
+        let b2 = blob(&mut src, "world\n");
+        let t2 = tree(&mut src, "g.txt", b2);
+        let tip_body = format!(
+            "tree {t2}\nparent {root}\nauthor a <a@a> 0 +0000\ncommitter a <a@a> 0 +0000\n\nmsg\n"
+        );
+        let tip = src.insert(GitObject::new(ObjectKind::Commit, tip_body.into_bytes()));
+        let refs = std::collections::BTreeMap::new();
+
+        // ROUND 1: `deepen 1`, NO done → shallow boundary + flush, and NOTHING else.
+        let plan1 = ClonePlan {
+            full_clone: false,
+            refs: refs.clone(),
+            shallow_depth: Some(1),
+            shallow_client: Vec::new(),
+            done: false,
+        };
+        let want1 = WantHave {
+            wants: vec![tip],
+            haves: Vec::new(),
+            done: false,
+        };
+        let out1 = build_shallow_pack_bytes(&src, &want1, &plan1).expect("round 1 builds");
+        let s1 = String::from_utf8_lossy(&out1);
+        assert!(
+            s1.contains(&format!("shallow {tip}")),
+            "round 1 sends the shallow boundary: {s1:?}"
+        );
+        assert!(
+            !s1.contains("NAK"),
+            "round 1 is negotiation-only — NO NAK: {s1:?}"
+        );
+        assert!(
+            !out1.windows(4).any(|w| w == b"PACK"),
+            "round 1 sends NO pack (it rides round 2)"
+        );
+
+        // ROUND 2: client re-sends `shallow <tip>` + `done`, no `deepen` → shallow
+        // boundary + flush + NAK + the pack cut at that boundary.
+        let plan2 = ClonePlan {
+            full_clone: false,
+            refs,
+            shallow_depth: None,
+            shallow_client: vec![tip],
+            done: true,
+        };
+        let out2 = build_shallow_pack_bytes(&src, &want(tip), &plan2).expect("round 2 builds");
+        let s2 = String::from_utf8_lossy(&out2);
+        assert!(
+            s2.contains(&format!("shallow {tip}")),
+            "round 2 RE-sends the shallow boundary (or git dies `expected shallow list`)"
+        );
+        assert!(s2.contains("NAK"), "round 2 sends NAK before the pack");
+        assert!(
+            out2.windows(4).any(|w| w == b"PACK"),
+            "round 2 sends the depth-bounded pack"
+        );
     }
 
     fn want(tip: gix_hash::ObjectId) -> WantHave {

@@ -169,6 +169,25 @@ pub fn serve_shallow(
     Ok((pack, boundary))
 }
 
+/// The depth-bounded pack for a request that carries an EXPLICIT shallow boundary
+/// (the client's `shallow <oid>` lines) instead of a `deepen` — round 2 of a stateless
+/// HTTP shallow clone. The commit walk from `wants` is cut at any commit in `boundary`
+/// (that commit + its tree are packed; its parents are NOT). Returns the pack and the
+/// EFFECTIVE boundary (the boundary commits actually reached), which the serve layer
+/// echoes back as the `shallow` section. See [`parse_client_shallow`](crate::parse_client_shallow).
+pub fn serve_shallow_at(
+    source: &dyn ObjectSource,
+    wants: &[ObjectId],
+    boundary: &[ObjectId],
+) -> Result<(PackAssembly, Vec<ObjectId>), ServeError> {
+    let deadline = Instant::now() + SERVE_FETCH_BUDGET;
+    let bset: BTreeSet<ObjectId> = boundary.iter().copied().collect();
+    let (oids, effective) = collect_shallow_at(source, wants, &bset, deadline)?;
+    source.prefetch(&oids);
+    let pack = assemble_pack_until(source, &oids, Some(deadline))?;
+    Ok((pack, effective))
+}
+
 /// Depth-bounded object closure for a shallow clone. Two phases:
 ///
 /// 1. **Commit BFS bounded by `depth`** — from each want (a tip; a tag is peeled
@@ -274,6 +293,92 @@ fn collect_shallow(
     Ok((
         included.into_iter().collect(),
         boundary.into_iter().collect(),
+    ))
+}
+
+/// Like [`collect_shallow`] but the commit walk is cut at an EXPLICIT `boundary`
+/// (the client's `shallow <oid>` set from round 2) instead of a depth: a commit in
+/// `boundary` is packed WITH its tree closure but its parents are NOT walked. Returns
+/// `(all_object_oids_sorted, effective_boundary_sorted)` where the effective boundary
+/// is the boundary commits actually reached from `wants` (echoed back as `shallow`).
+fn collect_shallow_at(
+    source: &dyn ObjectSource,
+    wants: &[ObjectId],
+    boundary: &BTreeSet<ObjectId>,
+    deadline: Instant,
+) -> Result<(Vec<ObjectId>, Vec<ObjectId>), ServeError> {
+    let mut commit_parents: BTreeMap<ObjectId, Vec<ObjectId>> = BTreeMap::new();
+    let mut commit_trees: Vec<ObjectId> = Vec::new();
+    let mut tag_objects: Vec<ObjectId> = Vec::new();
+    let mut extra_roots: Vec<ObjectId> = Vec::new();
+    let mut effective_boundary: BTreeSet<ObjectId> = BTreeSet::new();
+    let mut frontier: Vec<ObjectId> = wants.to_vec();
+    while !frontier.is_empty() {
+        if Instant::now() >= deadline {
+            return Err(ServeError::DeadlineExceeded);
+        }
+        source.prefetch(&frontier);
+        let mut next: Vec<ObjectId> = Vec::new();
+        for oid in std::mem::take(&mut frontier) {
+            if Instant::now() >= deadline {
+                return Err(ServeError::DeadlineExceeded);
+            }
+            let object = match source.get(&oid)? {
+                Some(o) => o,
+                None => return Err(ServeError::IncompleteClosure(oid)),
+            };
+            match object.kind {
+                ObjectKind::Commit => {
+                    if commit_parents.contains_key(&oid) {
+                        continue;
+                    }
+                    let tree = CommitRefIter::from_bytes(&object.data)
+                        .tree_id()
+                        .map_err(|source| ServeError::Decode { oid, source })?;
+                    commit_trees.push(tree);
+                    let parents: Vec<ObjectId> = CommitRefIter::from_bytes(&object.data)
+                        .parent_ids()
+                        .collect();
+                    if boundary.contains(&oid) {
+                        // A client-declared shallow cut: pack this commit, stop at its parents.
+                        effective_boundary.insert(oid);
+                    } else {
+                        for p in &parents {
+                            next.push(*p);
+                        }
+                    }
+                    commit_parents.insert(oid, parents);
+                }
+                ObjectKind::Tag => {
+                    tag_objects.push(oid);
+                    let target = TagRefIter::from_bytes(&object.data)
+                        .target_id()
+                        .map_err(|source| ServeError::Decode { oid, source })?;
+                    next.push(target);
+                }
+                ObjectKind::Tree | ObjectKind::Blob => extra_roots.push(oid),
+            }
+        }
+        frontier = next;
+    }
+
+    let mut included: BTreeSet<ObjectId> = BTreeSet::new();
+    for c in commit_parents.keys() {
+        included.insert(*c);
+    }
+    for t in &tag_objects {
+        included.insert(*t);
+    }
+    for tree in &commit_trees {
+        collect_reachable(source, tree, &mut included, /*strict=*/ true, deadline)?;
+    }
+    for root in &extra_roots {
+        collect_reachable(source, root, &mut included, /*strict=*/ true, deadline)?;
+    }
+
+    Ok((
+        included.into_iter().collect(),
+        effective_boundary.into_iter().collect(),
     ))
 }
 
@@ -661,5 +766,24 @@ mod budget_tests {
             serve_clone_shallow(&refs_for(c2), &src, 0).expect("depth 0 → 1");
         assert_eq!(pack.object_count(), 3);
         assert_eq!(boundary, vec![c2]);
+    }
+
+    /// `serve_shallow_at` (the round-2 path) cuts the walk at the CLIENT-declared
+    /// boundary instead of a depth: a client shallow at the tip → the pack is only the
+    /// tip snapshot, and the tip is echoed back as the effective boundary.
+    #[test]
+    fn serve_shallow_at_cuts_at_the_client_declared_boundary() {
+        let (src, _c0, _c1, c2) = chain3();
+        let (pack, eff) = serve_shallow_at(&src, &[c2], &[c2]).expect("a boundary serve succeeds");
+        assert_eq!(
+            pack.object_count(),
+            3,
+            "cut at the tip → only the tip commit + its tree + blob"
+        );
+        assert_eq!(
+            eff,
+            vec![c2],
+            "the reached client-shallow commit is the boundary"
+        );
     }
 }
