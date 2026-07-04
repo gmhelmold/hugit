@@ -127,6 +127,16 @@ pub struct ErasureDecideReq {
     pub approve: bool,
 }
 
+/// `POST /v1/account/erase` — a user requests erasure of THEIR OWN account (GDPR1).
+/// STEP-UP gated + Idempotency-Key required. `confirm` MUST equal the caller's own
+/// account slug (its `clerk:{org}` tenant), a typed guard against an accidental erase —
+/// validated against the principal-derived account BEFORE any record is written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountEraseReq {
+    /// The typed confirmation — must exactly match the caller's own account slug.
+    pub confirm: String,
+}
+
 /// `POST /v1/repos/{repo}/edit/{path}/propose` — a web edit → signed branch + PR.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EditProposeReq {
@@ -170,6 +180,15 @@ mod tests {
         };
         let s = serde_json::to_string(&v).unwrap();
         assert_eq!(serde_json::from_str::<LandReq>(&s).unwrap(), v);
+    }
+
+    #[test]
+    fn account_erase_req_round_trips() {
+        let v = AccountEraseReq {
+            confirm: "org-a".into(),
+        };
+        let s = serde_json::to_string(&v).unwrap();
+        assert_eq!(serde_json::from_str::<AccountEraseReq>(&s).unwrap(), v);
     }
 
     #[test]
