@@ -1,0 +1,190 @@
+{
+  "events": [
+    {
+      "seq": 0,
+      "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "this_hash": "b5195f6aba8cfc4a00dfcc0900ed81ca6ca4594d4b734adf75e2b77f795f9e66",
+      "kind": "intent.landed",
+      "principal_chain": [
+        "campaign:githugr-spine",
+        "agent:main"
+      ],
+      "payload": "{\"charter\":\"feat(contracts): Phase 2 wire freeze — 26 read VMs + Accepted write shape\",\"intent_id\":\"pr-112\",\"ref\":\"refs/hugit/intents\",\"target\":\"authored:pr-112\"}",
+      "recorded_at": 1781621935017
+    },
+    {
+      "seq": 1,
+      "prev_hash": "b5195f6aba8cfc4a00dfcc0900ed81ca6ca4594d4b734adf75e2b77f795f9e66",
+      "this_hash": "067b9311b5cdf703d9e69b63f2dee7f39267ff4fe5b3ee206112ff3f5c81501f",
+      "kind": "intent.landed",
+      "principal_chain": [
+        "campaign:githugr-spine",
+        "agent:main"
+      ],
+      "payload": "{\"charter\":\"feat: hugit-serve — the /v1 HTTP engine port (Wave 1, githugr read-path)\",\"intent_id\":\"pr-111\",\"ref\":\"refs/hugit/intents\",\"target\":\"authored:pr-111\"}",
+      "recorded_at": 1781621935384
+    },
+    {
+      "seq": 2,
+      "prev_hash": "067b9311b5cdf703d9e69b63f2dee7f39267ff4fe5b3ee206112ff3f5c81501f",
+      "this_hash": "0fccd32b3c9731b6ea608e0382f1ce53e00840207ad6e5dc72435813bd7d609b",
+      "kind": "intent.landed",
+      "principal_chain": [
+        "campaign:pendencias-sweep",
+        "agent:main"
+      ],
+      "payload": "{\"charter\":\"feat(checks): PS-11 — hugit check --env-axis declares a custom env dependency\",\"intent_id\":\"pr-110\",\"ref\":\"refs/hugit/intents\",\"target\":\"authored:pr-110\"}",
+      "recorded_at": 1781621935725
+    },
+    {
+      "seq": 3,
+      "prev_hash": "0fccd32b3c9731b6ea608e0382f1ce53e00840207ad6e5dc72435813bd7d609b",
+      "this_hash": "43490d4bb7b221dfd7d533ca9c75478f36399a1485a4af37a6783c01f52337fc",
+      "kind": "intent.landed",
+      "principal_chain": [
+        "campaign:pendencias-sweep",
+        "agent:main"
+      ],
+      "payload": "{\"charter\":\"feat(intent): PS-9 — truthful per-source-log list/show + --log scope filter\",\"intent_id\":\"pr-109\",\"ref\":\"refs/hugit/intents\",\"target\":\"authored:pr-109\"}",
+      "recorded_at": 1781621936053
+    },
+    {
+      "seq": 4,
+      "prev_hash": "43490d4bb7b221dfd7d533ca9c75478f36399a1485a4af37a6783c01f52337fc",
+      "this_hash": "b6df1e03c35a0d4dd71fa471c7bb4b59831556ac1b6759c182f1998efa38e570",
+      "kind": "intent.landed",
+      "principal_chain": [
+        "campaign:pendencias-sweep",
+        "agent:main"
+      ],
+      "payload": "{\"charter\":\"fix(checks): PS-17 — bound peak memory on the memo-key snapshot read\",\"intent_id\":\"pr-108\",\"ref\":\"refs/hugit/intents\",\"target\":\"authored:pr-108\"}",
+      "recorded_at": 1781621936397
+    },
+    {
+      "seq": 5,
+      "prev_hash": "b6df1e03c35a0d4dd71fa471c7bb4b59831556ac1b6759c182f1998efa38e570",
+      "this_hash": "378cbb32491535adee1d984ee43939b18a8927f8b33aacb20c60e9ecf2681b38",
+      "kind": "intent.landed",
+      "principal_chain": [
+        "campaign:pendencias-sweep",
+        "agent:main"
+      ],
+      "payload": "{\"charter\":\"feat(conformance): land IntentMetrics vector (§13.4) — hugit twin\",\"intent_id\":\"pr-107\",\"ref\":\"refs/hugit/intents\",\"target\":\"authored:pr-107\"}",
+      "recorded_at": 1781621936970
+    },
+    {
+      "seq": 6,
+      "prev_hash": "378cbb32491535adee1d984ee43939b18a8927f8b33aacb20c60e9ecf2681b38",
+      "this_hash": "a0b92c6ef2c008cd786a8a6ffd4ee5ccf8700703f3cf10757c35c455c8db2570",
+      "kind": "intent.landed",
+      "principal_chain": [
+        "campaign:githugr-spine",
+        "agent:main"
+      ],
+      "payload": "{\"charter\":\"feat(serve): Phase 2 reads — 6 real-backbone handlers + parity/secret-matrix tests\",\"intent_id\":\"pr-113\",\"ref\":\"refs/hugit/intents\",\"target\":\"authored:pr-113\"}",
+      "recorded_at": 1781621937823
+    },
+    {
+      "seq": 7,
+      "prev_hash": "a0b92c6ef2c008cd786a8a6ffd4ee5ccf8700703f3cf10757c35c455c8db2570",
+      "this_hash": "5bc37e6ea18f8082b83c548a2a258f03e372032931a0361a10ed832e243b6417",
+      "kind": "intent.landed",
+      "principal_chain": [
+        "campaign:githugr-spine",
+        "agent:main"
+      ],
+      "payload": "{\"charter\":\"feat(serve): R2 read source — SigV4-signed, AWS-vector-proven + Passo-4 snapshot uploader\",\"intent_id\":\"pr-114\",\"ref\":\"refs/hugit/intents\",\"target\":\"authored:pr-114\"}",
+      "recorded_at": 1781621938515
+    },
+    {
+      "seq": 8,
+      "prev_hash": "5bc37e6ea18f8082b83c548a2a258f03e372032931a0361a10ed832e243b6417",
+      "this_hash": "9abdd4f5e45779cb527294d940aa90e90e6d4d019be2663738f7c4b3f11c392a",
+      "kind": "intent.landed",
+      "principal_chain": [
+        "campaign:githugr-spine",
+        "agent:main"
+      ],
+      "payload": "{\"charter\":\"PR-create-from-branch verb: POST /v1/repos/{repo}/prs opens a PR from a pushed branch (head vs base, real diff)\",\"intent_id\":\"pr-248\",\"ref\":\"refs/hugit/intents\",\"target\":\"authored:pr-248\"}",
+      "recorded_at": 1783123961768
+    }
+  ],
+  "sidecars": [
+    {
+      "intent_id": "pr-107",
+      "charter": "feat(conformance): land IntentMetrics vector (§13.4) — hugit twin",
+      "acceptance": [],
+      "context_ref": "",
+      "authoritative": false
+    },
+    {
+      "intent_id": "pr-108",
+      "charter": "fix(checks): PS-17 — bound peak memory on the memo-key snapshot read",
+      "acceptance": [],
+      "context_ref": "",
+      "authoritative": false
+    },
+    {
+      "intent_id": "pr-109",
+      "charter": "feat(intent): PS-9 — truthful per-source-log list/show + --log scope filter",
+      "acceptance": [],
+      "context_ref": "",
+      "authoritative": false
+    },
+    {
+      "intent_id": "pr-110",
+      "charter": "feat(checks): PS-11 — hugit check --env-axis declares a custom env dependency",
+      "acceptance": [],
+      "context_ref": "",
+      "authoritative": false
+    },
+    {
+      "intent_id": "pr-111",
+      "charter": "feat: hugit-serve — the /v1 HTTP engine port (Wave 1, githugr read-path)",
+      "acceptance": [],
+      "context_ref": "",
+      "authoritative": false
+    },
+    {
+      "intent_id": "pr-112",
+      "charter": "feat(contracts): Phase 2 wire freeze — 26 read VMs + Accepted write shape",
+      "acceptance": [],
+      "context_ref": "",
+      "authoritative": false
+    },
+    {
+      "intent_id": "pr-113",
+      "charter": "feat(serve): Phase 2 reads — 6 real-backbone handlers + parity/secret-matrix tests",
+      "acceptance": [],
+      "context_ref": "",
+      "authoritative": false
+    },
+    {
+      "intent_id": "pr-114",
+      "charter": "feat(serve): R2 read source — SigV4-signed, AWS-vector-proven + Passo-4 snapshot uploader",
+      "acceptance": [],
+      "context_ref": "",
+      "authoritative": false
+    },
+    {
+      "intent_id": "pr-248",
+      "charter": "PR-create-from-branch verb: POST /v1/repos/{repo}/prs opens a PR from a pushed branch (head vs base, real diff)",
+      "acceptance": [],
+      "context_ref": "",
+      "authoritative": false
+    }
+  ],
+  "envelopes": {},
+  "verdicts": {},
+  "source_logs": {
+    "pr-107": "/private/tmp/dogfood-log.json",
+    "pr-108": "/private/tmp/dogfood-log.json",
+    "pr-109": "/private/tmp/dogfood-log.json",
+    "pr-110": "/private/tmp/dogfood-log.json",
+    "pr-111": "/private/tmp/dogfood-log.json",
+    "pr-112": "/private/tmp/dogfood-log.json",
+    "pr-113": "/private/tmp/dogfood-log.json",
+    "pr-114": "/private/tmp/dogfood-log.json",
+    "pr-248": "/private/tmp/dogfood-log.json"
+  }
+}
