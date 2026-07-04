@@ -1154,6 +1154,30 @@ fn dispatch_repo_write(
                 |log, p, at| verbs::write_dispatch::write_dispatch(log, repo, &req, p, at),
             )
         }
+        // Open a PR from a pushed branch (head vs base) — the GitHub-faithful loop
+        // (push → open PR on its diff → review → land). The verb resolves head/base
+        // against the LIVE refs snapshot (the advertise projection); a repo with no
+        // git seam has an empty map, so no branch resolves → an honest 404 (no
+        // existence oracle, identical to an unknown branch).
+        ["prs"] => {
+            let req = parse!(wr::PrCreateReq);
+            let refs = state
+                .repo_state(repo)
+                .map(|r| r.git_refs.snapshot())
+                .unwrap_or_default();
+            with_write(
+                sink,
+                repo,
+                "pr_create",
+                &resource,
+                &idem,
+                body,
+                step_up,
+                p,
+                at,
+                |log, p, at| verbs::write_pr_create::write_pr_create(log, repo, &req, &refs, p, at),
+            )
+        }
         ["issues", n, "transition"] => match n.parse::<u32>() {
             Ok(num) => {
                 let req = parse!(wr::IssueTransitionReq);
@@ -1934,6 +1958,24 @@ mod anon_v1_read_tests {
         assert_eq!(
             status, 401,
             "a POST write with no principal is 401 (never anonymous-authorized)"
+        );
+    }
+
+    /// `POST /v1/repos/{repo}/prs` (open a PR from a branch) with NO Bearer is 401 —
+    /// the new create verb rides the same hard write gate; a PR is never opened
+    /// anonymously, even against a PUBLIC repo.
+    #[test]
+    fn open_pr_from_branch_without_bearer_is_401() {
+        let state = state_with_repo("hugit", "public");
+        let (status, _body) = route_write(
+            &state,
+            "/v1/repos/hugit/prs",
+            &[],
+            br#"{"head":"feat/x","base":"main","title":"t"}"#,
+        );
+        assert_eq!(
+            status, 401,
+            "opening a PR requires an authenticated principal"
         );
     }
 

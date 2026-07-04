@@ -120,7 +120,11 @@ fn first_parent(src: &dyn hugit_proto::ObjectSource, commit: &ObjectId) -> Optio
 /// `None` when none resolves to a syntactically valid oid — the caller serves the
 /// honest-empty diff (no existence oracle; an unknown ref looks like an empty
 /// change, never an error).
-fn resolve_refish(
+///
+/// Shared with the `prs`-create write verb (`write_pr_create`), which resolves the
+/// `head`/`base` ref-ish to their tip oids against the live refs at open time — so
+/// the PR's pinned SHAs use the SAME resolution rules as the compare diff.
+pub(crate) fn resolve_refish(
     refs: &std::collections::BTreeMap<String, String>,
     refish: &str,
 ) -> Option<ObjectId> {

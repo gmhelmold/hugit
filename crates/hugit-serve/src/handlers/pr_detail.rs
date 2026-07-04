@@ -1,14 +1,17 @@
 //! `GET /v1/repos/{repo}/prs/{n}` → [`PrDetailVm`] (None = 404). FROZEN signature;
 //! body filled by the fleet per master-plan §5 (REAL: PR projection + cost split
-//! via ledger + intents + check_rows + envelope; STUB: diff/added/removed,
-//! impact, reviewers, labels, mirror, branches).
+//! via ledger + intents + check_rows + envelope + the REAL diffstat; STUB:
+//! impact, reviewers, labels, mirror).
 //!
-//! Data-readiness (master-plan §0, the prs/{n} row): cost-real, structurally
-//! sparse. REAL = number/title/state/author/session, campaign, cost split
-//! (ledger `pr_record`), intents, check_rows, envelope/CAS, why/acceptance (from
-//! envelope). STUB (honest defaults, never faked) = diff/added/removed/file_count
-//! (no diffstat seam), impact (blast-radius not wired), source/target_branch
-//! (no git-ref tracking), reviewers/labels/conversation, mirror (P2).
+//! Data-readiness (master-plan §0, the prs/{n} row): cost-real, diff-real. REAL =
+//! number/title/state/author/session, campaign, cost split (ledger `pr_record`),
+//! intents, check_rows, envelope/CAS, why/acceptance (from envelope), and the
+//! diff/added/removed/file_count (the tip intent's commit-vs-first-parent numstat,
+//! or — for a branch PR opened via `POST …/prs` — the pinned head-vs-base compare;
+//! `source_branch`/`target_branch` are then the pinned branch names). STUB (honest
+//! defaults, never faked) = impact (blast-radius not wired), reviewers/labels/
+//! conversation, mirror (P2); `source/target_branch` stay empty for a
+//! dispatch/edit PR (no pinned branch names).
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -20,7 +23,7 @@ use gix_object::CommitRefIter;
 use hugit_cli::checks::CHECK_RECORDED_KIND;
 use hugit_cli::pr::{
     INTENT_ENVELOPE_KIND, OpenedPr, PR_ABANDONED_KIND, PR_ENVELOPE_KIND, PR_LANDED_KIND,
-    PR_QUEUED_KIND, find_pr_opened,
+    PR_OPENED_KIND, PR_QUEUED_KIND, find_pr_opened,
 };
 use hugit_contracts::context_envelope::{Altitude, CiCost, ContextEnvelope, PrRecord};
 use hugit_http_contracts::common::{
@@ -53,6 +56,14 @@ pub fn build_pr_detail(
 
     // ── REAL: the PR must exist on the log (else 404, no existence leak) ─────
     let opened = find_pr_opened(log, &pr_id)?;
+
+    // ── REAL: a branch PR (opened from head vs base via `POST …/prs`) pins both
+    //          tip SHAs + the branch names + title/body on its `pr.opened`. When
+    //          present, the PR-level diff is the head-vs-base compare (below) and
+    //          the source/target branches + title come from these pinned fields —
+    //          not the intent-bundle projection. `None` for a dispatch/edit PR
+    //          (keeps the existing intent-commit diff path). ───────────────────
+    let branch_pr = find_branch_pr(log, &pr_id);
 
     // ── REAL: map each intent_id → its landed commit oid (machine projection) ─
     // Used to compute the per-intent and PR-level numstats (commit vs first
@@ -131,7 +142,16 @@ pub fn build_pr_detail(
     // order). No git source / no resolvable commit → an honest-empty diff. The
     // scalar diffstat (file_count/added/removed) is the rollup of that diff.
     // Shares the render's ONE `diff_deadline` (see above).
-    let pr_diff = pr_level_diff(git_source, &opened, &intent_commits, diff_deadline);
+    // A branch PR's representative diff is its pinned head-vs-base compare (ONE
+    // bounded `diff_commits`, the same primitive the `compare` handler serves);
+    // otherwise the tip intent's commit vs first parent (the bundle path). Both are
+    // honest-empty without a git seam / resolvable tips — never fabricated.
+    let pr_diff = match (&branch_pr, git_source) {
+        (Some(bp), Some(src)) => {
+            crate::handlers::diff::diff_commits(Some(src), Some(&bp.base_oid), Some(&bp.head_oid))
+        }
+        _ => pr_level_diff(git_source, &opened, &intent_commits, diff_deadline),
+    };
     let (pr_file_count, pr_added, pr_removed) = diff_totals(&pr_diff);
 
     // ── REAL: check_rows from check.recorded events (capped — the VM is the page) ─
@@ -144,8 +164,26 @@ pub fn build_pr_detail(
     // ZERO (all *_usd 0.0, notes "") otherwise — NEVER faked.
     let cost = build_cost(log, &opened, pr_env.as_ref());
 
-    // ── REAL: title from the PR's campaign + bundle (presentation) ──────────
-    let title = pr_title(&opened);
+    // ── REAL: title — a branch PR carries the author-supplied title (scrubbed at
+    //          the read boundary); a dispatch/edit PR composes it from the bundle. ─
+    let title = match &branch_pr {
+        Some(bp) if !bp.title.is_empty() => scrub(&bp.title),
+        _ => pr_title(&opened),
+    };
+
+    // ── REAL: a branch PR's description (`body`) surfaces as `why` when there is
+    //          no PR-altitude envelope (the branch PR has no authored envelope). ──
+    let why = match (&branch_pr, &pr_env) {
+        (Some(bp), None) if !bp.body.is_empty() => scrub(&bp.body),
+        _ => why,
+    };
+
+    // ── REAL: source/target branches — the pinned head/base names for a branch PR
+    //          (scrubbed at the read boundary), honest-empty otherwise. ──────────
+    let (source_branch, target_branch) = match &branch_pr {
+        Some(bp) => (scrub(&bp.head_branch), scrub(&bp.base_branch)),
+        None => (String::new(), String::new()),
+    };
 
     // ── Assemble ────────────────────────────────────────────────────────────
     Some(PrDetailVm {
@@ -155,9 +193,9 @@ pub fn build_pr_detail(
         state_label,
         author,
         session,
-        // STUB — no git-ref tracking seam
-        source_branch: String::new(),
-        target_branch: String::new(),
+        // REAL for a branch PR (pinned head/base names); honest-empty otherwise.
+        source_branch,
+        target_branch,
         models_note: String::new(), // STUB — no models seam at this altitude
         // REAL — rollup of the PR-level numstat (0/0/0 honestly when no git seam)
         file_count: pr_file_count,
@@ -220,6 +258,59 @@ pub fn build_pr_detail(
 // Projections (replicate the documented engine folds; the engine fns are
 // private, so the logic is transcribed, never re-designed).
 // ---------------------------------------------------------------------------
+
+/// The branch-PR fields pinned on a `pr.opened` opened via `POST …/prs`
+/// (`write_pr_create`): both tip SHAs (resolved at open time) + the branch names +
+/// the author-supplied title/body. A dispatch/edit PR carries none of these.
+struct BranchPr {
+    /// The base (target) branch tip commit — the "before" side of the compare.
+    base_oid: ObjectId,
+    /// The head (source) branch tip commit — the "after" side of the compare.
+    head_oid: ObjectId,
+    /// The head (source) branch name (free text — scrubbed at the read boundary).
+    head_branch: String,
+    /// The base (target) branch name (free text — scrubbed at the read boundary).
+    base_branch: String,
+    /// The author-supplied PR title (already scrubbed at write; re-scrubbed on read).
+    title: String,
+    /// The author-supplied PR description/body (surfaced as `why`; scrubbed on read).
+    body: String,
+}
+
+/// Project the branch-PR fields for `pr_id`, if the latest `pr.opened` for it pins
+/// BOTH a valid 40-hex `head_sha` and `base_sha` (the `POST …/prs` shape). Returns
+/// `None` for a dispatch/edit PR (no pinned SHAs) → the caller keeps the
+/// intent-bundle diff path. Never fabricates: a malformed/absent SHA → `None`.
+fn find_branch_pr(log: &EventLog, pr_id: &str) -> Option<BranchPr> {
+    // The LATEST pr.opened for this id wins (robust to a re-open), mirroring
+    // `find_pr_opened`'s rfind-latest semantics.
+    let rec = log.records().iter().rfind(|r| {
+        r.kind == PR_OPENED_KIND
+            && serde_json::from_str::<Value>(&r.payload)
+                .ok()
+                .and_then(|v| v.get("pr_id").and_then(Value::as_str).map(|s| s == pr_id))
+                .unwrap_or(false)
+    })?;
+    let v: Value = serde_json::from_str(&rec.payload).ok()?;
+    let head_oid =
+        ObjectId::from_hex(v.get("head_sha").and_then(Value::as_str)?.as_bytes()).ok()?;
+    let base_oid =
+        ObjectId::from_hex(v.get("base_sha").and_then(Value::as_str)?.as_bytes()).ok()?;
+    let field = |k: &str| {
+        v.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    Some(BranchPr {
+        base_oid,
+        head_oid,
+        head_branch: field("head"),
+        base_branch: field("base"),
+        title: field("title"),
+        body: field("body"),
+    })
+}
 
 /// PR lifecycle state, projected off the log (mirrors `pr::pr_state`):
 /// `landed` ≻ `abandoned` ≻ `queued` ≻ `proposed` (most-settled wins).

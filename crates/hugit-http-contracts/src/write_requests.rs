@@ -80,6 +80,27 @@ pub struct DispatchReq {
     pub draft: bool,
 }
 
+/// `POST /v1/repos/{repo}/prs` — open a PR from a pushed branch (head vs base).
+///
+/// The GitHub-faithful "open a PR on a branch's diff" verb: `head` and `base` are
+/// ref-ish names (a short branch/tag, a full `refs/heads/…`, or a raw 40-hex oid)
+/// resolved against the repo's LIVE refs at open time; the engine pins each tip's
+/// SHA into the `pr.opened` event so the PR renders a REAL head-vs-base diff on
+/// read-back. `title`/`body` are free text (scrubbed at the write boundary). The
+/// success body is [`crate::actions::Accepted`] carrying the fresh `pr_number`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrCreateReq {
+    /// The source (feature) branch/ref-ish the change lives on, e.g. `"feat/x"`.
+    pub head: String,
+    /// The target branch/ref-ish to open the PR against, e.g. `"main"`.
+    pub base: String,
+    /// The PR title (scrubbed at the write boundary).
+    pub title: String,
+    /// Optional PR description/body (scrubbed at the write boundary).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+}
+
 /// `POST /v1/repos/{repo}/issues/{n}/transition` — move an issue's state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueTransitionReq {
@@ -188,6 +209,25 @@ mod tests {
         .unwrap();
         assert_eq!(with.model_digest.as_deref(), Some("d"));
         assert_eq!(with.recorded_at, Some(9));
+    }
+
+    #[test]
+    fn pr_create_req_round_trips_and_omits_optional_body() {
+        let v = PrCreateReq {
+            head: "feat/x".into(),
+            base: "main".into(),
+            title: "add x".into(),
+            body: None,
+        };
+        let s = serde_json::to_string(&v).unwrap();
+        // The optional body is absent from the wire when None, and round-trips back.
+        assert!(!s.contains("body"));
+        assert_eq!(serde_json::from_str::<PrCreateReq>(&s).unwrap(), v);
+        // A body-carrying request parses the description back.
+        let with: PrCreateReq =
+            serde_json::from_str(r#"{"head":"feat/x","base":"main","title":"t","body":"why"}"#)
+                .unwrap();
+        assert_eq!(with.body.as_deref(), Some("why"));
     }
 
     #[test]
