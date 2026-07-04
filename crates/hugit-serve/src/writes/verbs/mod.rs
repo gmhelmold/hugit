@@ -4,6 +4,7 @@
 //! mutates the in-memory log (via `append_authorized`) and returns the success
 //! body; it owns NO idempotency, HTTP, or I/O.
 
+pub mod write_account_erase;
 pub mod write_comment;
 pub mod write_dispatch;
 pub mod write_edit_propose;
