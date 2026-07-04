@@ -440,3 +440,39 @@ fn idempotency_key_over_cap_is_rejected() {
     );
     assert_eq!(status2, 200, "a 256-byte key must be accepted: {body2}");
 }
+
+// ── GDPR1 POST /v1/account/erase — top-level route wiring ────────────────────
+
+#[test]
+fn account_erase_operator_is_refused_no_god_erase() {
+    // The dev-token resolves to the OPERATOR (allow_dev_operator default-on in the
+    // test constructor). The top-level erase route reaches the handler, which derives
+    // the subject from the principal and REFUSES the operator → 401 (no god-erase).
+    let (state, _dir) = state_with_open_pr();
+    let headers = vec![
+        hdr("Authorization", &format!("Bearer {TOKEN}")),
+        hdr("Idempotency-Key", "E1"),
+        hdr("X-Step-Up", "true"),
+    ];
+    let (status, body) = post(
+        &state,
+        "/v1/account/erase",
+        &headers,
+        br#"{"confirm":"hugit"}"#,
+    );
+    assert_eq!(status, 401, "operator cannot erase an account: {body}");
+    assert!(
+        body.contains("UNAUTHORIZED"),
+        "code must be UNAUTHORIZED: {body}"
+    );
+}
+
+#[test]
+fn account_erase_anonymous_is_refused() {
+    // No Bearer → the write path 401s at auth, before any effect (a write is never
+    // anonymous; there is no anon-erase).
+    let (state, _dir) = state_with_open_pr();
+    let headers = vec![hdr("Idempotency-Key", "E2")];
+    let (status, _body) = post(&state, "/v1/account/erase", &headers, br#"{"confirm":"x"}"#);
+    assert_eq!(status, 401, "anonymous cannot erase an account");
+}

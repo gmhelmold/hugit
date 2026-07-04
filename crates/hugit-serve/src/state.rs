@@ -1241,6 +1241,52 @@ impl AppState {
         )?;
         Ok((log, token))
     }
+
+    /// Load-or-create a per-account event log (GDPR1) + its head [`CasToken`], from
+    /// the reserved `_accounts/{account}.json` store (NOT the repo namespace). Unlike
+    /// [`load_verified_with_token`] (absent → 404), an ABSENT account log is the
+    /// EMPTY world with a create-only [`CasToken::Absent`] token — the first erasure
+    /// request seeds the genesis. A present log is chain-verified by the SAME PS-13
+    /// chokepoint (a tamper/parse fault → 503, never a fake-empty world).
+    ///
+    /// # Errors
+    /// - `404 NOT_FOUND` — an unsafe account slug (traversal-safe fail-closed; never
+    ///   builds an `_accounts/../…` key).
+    /// - `503 ENGINE_UNAVAILABLE` — a store transport fault or a chain-verify failure.
+    pub fn load_account_log(&self, account: &str) -> Result<(EventLog, CasToken), EngineErr> {
+        if !is_safe_account_slug(account) {
+            return Err(EngineErr::not_found());
+        }
+        match self.source.fetch_account(account)? {
+            // Present: chain-verify (same gate as a repo log).
+            Some((bytes, label, token)) => {
+                let log = hugit_cli::checks::load_event_log_from_bytes(&bytes, Path::new(&label))
+                    .map_err(|e| {
+                    EngineErr::unavailable(format!("account log read/verify failed ({})", e.kind()))
+                })?;
+                Ok((log, token))
+            }
+            // Absent: the empty world — create-only on the first request.
+            None => Ok((EventLog::new(), CasToken::Absent)),
+        }
+    }
+
+    /// Durably persist a per-account event log (GDPR1) back to `_accounts/{account}.json`
+    /// as a COMPARE-AND-SWAP against `expected`. Fail-closed on an unsafe slug (404) —
+    /// the write can never reach a traversal key.
+    pub fn persist_account_log(
+        &self,
+        account: &str,
+        log: &EventLog,
+        expected: &CasToken,
+    ) -> Result<(), EngineErr> {
+        if !is_safe_account_slug(account) {
+            return Err(EngineErr::not_found());
+        }
+        let bytes = serde_json::to_vec(log.records())
+            .map_err(|e| EngineErr::unavailable(format!("account log serialize failed: {e}")))?;
+        self.source.persist_account(account, &bytes, expected)
+    }
 }
 
 impl LogSource {
@@ -1326,6 +1372,98 @@ impl LogSource {
             }
         }
     }
+
+    /// Fetch a per-account event log's raw bytes + head [`CasToken`] under the
+    /// reserved `_accounts/{account}.json` sub-prefix (GDPR1). `Ok(None)` = absent
+    /// (the first erasure request → a create-genesis); `Ok(Some(..))` = present;
+    /// `Err` = a transport/IO fault (→ 503). Structurally OUTSIDE the repo namespace
+    /// (the `_accounts/` prefix + the `/` in the key are unreachable by
+    /// [`is_safe_repo_slug`]), so an account log can never be served/cloned as a repo.
+    fn fetch_account(
+        &self,
+        account: &str,
+    ) -> Result<Option<(Vec<u8>, String, CasToken)>, EngineErr> {
+        match self {
+            LogSource::Local { dir } => {
+                let path = dir.join("_accounts").join(format!("{account}.json"));
+                match std::fs::read(&path) {
+                    Ok(b) => {
+                        let token = CasToken::Version(content_hash(&b));
+                        Ok(Some((b, path.display().to_string(), token)))
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(e) => Err(EngineErr::unavailable(format!(
+                        "local account log read failed: {e}"
+                    ))),
+                }
+            }
+            LogSource::R2(c) => {
+                let key = format!("{}/_accounts/{account}.json", c.tenant_id);
+                let label = format!("r2://{}/{key}", c.bucket);
+                Ok(c.get_object_etag(&key)?
+                    .map(|(bytes, token)| (bytes, label, token)))
+            }
+        }
+    }
+
+    /// Durably persist a per-account event log back to the reserved
+    /// `_accounts/{account}.json`, as a COMPARE-AND-SWAP against `expected` (the token
+    /// the matching [`fetch_account`] returned). Mirrors [`persist`]'s discipline:
+    /// Local = re-read content-hash compare + atomic temp-write/rename; R2 = a
+    /// conditional (`If-Match`/`If-None-Match`) PUT via [`R2Config::conditional_object_put`].
+    /// A concurrent head move → [`EngineErr::cas_conflict`] (the door reloads + retries),
+    /// NEVER last-writer-wins.
+    fn persist_account(
+        &self,
+        account: &str,
+        bytes: &[u8],
+        expected: &CasToken,
+    ) -> Result<(), EngineErr> {
+        match self {
+            LogSource::Local { dir } => {
+                let adir = dir.join("_accounts");
+                std::fs::create_dir_all(&adir).map_err(|e| {
+                    EngineErr::unavailable(format!("local account dir create failed: {e}"))
+                })?;
+                let path = adir.join(format!("{account}.json"));
+                let current = match std::fs::read(&path) {
+                    Ok(b) => CasToken::Version(content_hash(&b)),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => CasToken::Absent,
+                    Err(e) => {
+                        return Err(EngineErr::unavailable(format!(
+                            "local account log re-read failed: {e}"
+                        )));
+                    }
+                };
+                if !cas_matches(expected, &current) {
+                    return Err(EngineErr::cas_conflict());
+                }
+                let tmp = adir.join(format!("{account}.json.tmp.{}", std::process::id()));
+                std::fs::write(&tmp, bytes).map_err(|e| {
+                    EngineErr::unavailable(format!("local account log write failed: {e}"))
+                })?;
+                std::fs::rename(&tmp, &path).map_err(|e| {
+                    let _ = std::fs::remove_file(&tmp);
+                    EngineErr::unavailable(format!("local account log rename failed: {e}"))
+                })
+            }
+            LogSource::R2(c) => {
+                // FAIL-CLOSED (same as the repo persist): an `Unsupported` token would
+                // downgrade to an unconditional PUT (last-writer-wins). `conditional_object_put`
+                // refuses it; map its outcome onto the door's EngineErr signals.
+                let key = format!("{}/_accounts/{account}.json", c.tenant_id);
+                c.conditional_object_put(&key, bytes, expected)
+                    .map(|_| ())
+                    .map_err(|e| match e {
+                        crate::cas::ManifestPutError::Precondition => EngineErr::cas_conflict(),
+                        crate::cas::ManifestPutError::Other(m) => {
+                            eprintln!("[hugit-serve] account log PUT failed: {m}");
+                            EngineErr::unavailable("engine storage write unavailable")
+                        }
+                    })
+            }
+        }
+    }
 }
 
 /// The content-hash version of a raw log object — the local CAS token (a stand-in
@@ -1368,6 +1506,26 @@ impl crate::writes::LogSink for AppState {
         let bytes = serde_json::to_vec(log.records())
             .map_err(|e| EngineErr::unavailable(format!("log serialize failed: {e}")))?;
         self.source.persist(repo, &bytes, expected)
+    }
+}
+
+impl crate::writes::AccountLogSink for AppState {
+    /// Load-or-create + chain-verify a per-account log (GDPR1) + its head token — the
+    /// account-scoped twin of [`LogSink::load`], but keyed under `_accounts/` and NOT
+    /// gated on `is_safe_repo_slug` (its own [`is_safe_account_slug`] runs inside).
+    fn load_account(&self, account: &str) -> Result<(EventLog, CasToken), EngineErr> {
+        self.load_account_log(account)
+    }
+
+    /// Persist a per-account log as a compare-and-swap — the account-scoped twin of
+    /// [`LogSink::persist`].
+    fn persist_account(
+        &self,
+        account: &str,
+        log: &EventLog,
+        expected: &CasToken,
+    ) -> Result<(), EngineErr> {
+        self.persist_account_log(account, log, expected)
     }
 }
 
@@ -2301,6 +2459,23 @@ pub fn is_safe_repo_slug(repo: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
 
+/// Whether `account` is a safe account slug for the reserved `_accounts/{slug}` store
+/// key (GDPR1). STRICTER than [`is_safe_repo_slug`]: the Clerk-org shape `[a-z0-9-]`,
+/// 1..=64, NO dot (so a slug can never be `.`/`..` or embed a traversal), no path
+/// separator. The account slug is DERIVED from a Clerk-minted principal
+/// (`clerk:{org}:...`) so it is already this shape; this is the traversal-safe
+/// defense-in-depth gate that runs before the slug is ever spliced into an R2 key —
+/// a malformed org can NEVER produce a `_accounts/../evil.json` key (it fails here
+/// first, → 404, no store touch).
+#[must_use]
+pub fn is_safe_account_slug(account: &str) -> bool {
+    !account.is_empty()
+        && account.len() <= 64
+        && account
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2705,6 +2880,101 @@ mod me_repos_tests {
     }
     fn tenant(org: &str) -> Vec<String> {
         vec![format!("clerk:{org}:user-1")]
+    }
+
+    // ── GDPR1 account store seam (_accounts/{slug}) ──────────────────────────
+
+    #[test]
+    fn is_safe_account_slug_accepts_clerk_org_shape_rejects_traversal() {
+        for ok in ["org-a", "acme", "team-42", "x", &"a".repeat(64)] {
+            assert!(is_safe_account_slug(ok), "{ok:?} is a valid account slug");
+        }
+        for bad in [
+            "",              // empty
+            &"a".repeat(65), // too long
+            "Org-A",         // uppercase
+            "a.b",           // dot (would allow `.`/`..` shapes)
+            "..",            // traversal
+            "../evil",       // traversal + sep
+            "a/b",           // path sep
+            "a\\b",          // backslash
+            "org_a",         // underscore not in the clerk-org charset
+            "org a",         // space
+        ] {
+            assert!(!is_safe_account_slug(bad), "{bad:?} must be rejected");
+        }
+    }
+
+    /// Append one `erasure.requested` to a fresh log (the account genesis shape).
+    fn erasure_log(account: &str) -> EventLog {
+        let mut log = EventLog::new();
+        let payload = serde_json::json!({"account":account,"subject":account,"state":"requested"})
+            .to_string();
+        let body = hugit_refstore::canonical_json(&payload).unwrap_or(payload);
+        log.append_authorized(
+            PrincipalClass::Orchestrator,
+            Endpoint::Land,
+            "erasure.requested",
+            tenant(account),
+            body,
+            1,
+        )
+        .expect("append erasure.requested");
+        log
+    }
+
+    #[test]
+    fn account_log_load_or_create_then_cas_roundtrip() {
+        let st = AppState::new(scratch_dir(), "dev-token".to_string());
+        // Absent → the empty world with a create-only token (NOT a 404).
+        let (log0, tok0) = st.load_account_log("org-a").expect("absent → empty world");
+        assert!(log0.records().is_empty());
+        assert_eq!(tok0, CasToken::Absent);
+
+        // Create-only persist seeds the genesis.
+        let log = erasure_log("org-a");
+        st.persist_account_log("org-a", &log, &CasToken::Absent)
+            .expect("create-genesis persists");
+
+        // Reload: present + chain-verified, now with a Version token.
+        let (log1, tok1) = st.load_account_log("org-a").expect("present");
+        assert_eq!(log1.records().len(), 1);
+        assert_eq!(log1.records()[0].kind, "erasure.requested");
+        assert!(matches!(tok1, CasToken::Version(_)));
+
+        // A stale create-only persist (Absent, but it now exists) fails the CAS.
+        let e = st
+            .persist_account_log("org-a", &log, &CasToken::Absent)
+            .expect_err("create-only over an existing log must conflict");
+        assert!(e.is_cas_conflict(), "stale Absent → cas_conflict");
+    }
+
+    #[test]
+    fn account_log_is_scoped_and_not_a_repo() {
+        // The account log lives under `_accounts/` — it is NOT reachable as a repo,
+        // and an unsafe slug never touches the store (404, no traversal key built).
+        let st = AppState::new(scratch_dir(), "dev-token".to_string());
+        st.persist_account_log("org-a", &erasure_log("org-a"), &CasToken::Absent)
+            .expect("genesis");
+        // `_accounts/org-a` is not a servable repo slug (contains `/` conceptually /
+        // the reserved prefix); a repo read for "org-a" is a plain absent 404.
+        assert_eq!(
+            st.load_verified("org-a").unwrap_err().status,
+            404,
+            "the account is not addressable as a repo"
+        );
+        // A traversal slug is refused before any store touch.
+        assert_eq!(
+            st.load_account_log("../evil").unwrap_err().status,
+            404,
+            "an unsafe account slug → 404, never a traversal key"
+        );
+        assert_eq!(
+            st.persist_account_log("../evil", &erasure_log("x"), &CasToken::Absent)
+                .unwrap_err()
+                .status,
+            404,
+        );
     }
 
     #[test]

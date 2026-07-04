@@ -149,6 +149,28 @@ pub trait LogSink: Send + Sync {
     fn persist(&self, repo: &str, log: &EventLog, expected: &CasToken) -> Result<(), EngineErr>;
 }
 
+/// Durable persistence for a per-ACCOUNT event log (GDPR1) — the account-scoped twin
+/// of [`LogSink`], keyed under the reserved `_accounts/{slug}` store (structurally
+/// outside the repo namespace, never served/clone-able as a repo). Unlike [`LogSink`],
+/// [`load_account`](AccountLogSink::load_account) is LOAD-OR-CREATE: an absent log is
+/// the empty world (`CasToken::Absent`) so the first erasure request seeds the genesis
+/// — there is no "repo 404" for an account that has never requested erasure.
+pub trait AccountLogSink: Send + Sync {
+    /// Load-or-create + chain-verify the `account`'s event log AND capture its head
+    /// [`CasToken`]. Absent → `(EventLog::new(), CasToken::Absent)` (create-genesis).
+    fn load_account(&self, account: &str) -> Result<(EventLog, CasToken), EngineErr>;
+
+    /// Durably persist `log` as the account's new head, a COMPARE-AND-SWAP against
+    /// `expected`. A concurrent head move → [`EngineErr::cas_conflict`] (reload+retry),
+    /// NEVER last-writer-wins.
+    fn persist_account(
+        &self,
+        account: &str,
+        log: &EventLog,
+        expected: &CasToken,
+    ) -> Result<(), EngineErr>;
+}
+
 /// Hex SHA-256 of the raw request body — the idempotency body fingerprint.
 fn body_sha256(body: &[u8]) -> String {
     let mut h = Sha256::new();
@@ -355,6 +377,88 @@ where
 
     // Exhausted the retry budget: sustained contention. Fail honest + transient —
     // nothing was persisted on the losing attempts (each was a rejected CAS).
+    Err(EngineErr::unavailable(
+        "escrita sob contenção concorrente — tente novamente",
+    ))
+}
+
+/// The ACCOUNT write-door (GDPR1) — the account-scoped analogue of [`with_write`]
+/// over an [`AccountLogSink`]. It shares the SAME idempotency ledger + body-hash
+/// replay guard + bounded CAS retry loop, so the account path can never drift from the
+/// repo path on the cross-cutting law.
+///
+/// TWO deliberate differences from [`with_write`], each a security decision:
+/// 1. **No `authorize_write` repo gate.** An account-erase is NOT a repo mutation;
+///    there is no `repo.meta` to own. The SUBJECT is the caller's OWN account, derived
+///    by the verb from the verified principal (`derive_owner_tenant` refuses
+///    operator/anon) — a caller can only ever erase itself. Ownership is therefore
+///    intrinsic to the verb, not a separate gate here.
+/// 2. **Load-or-create, never 404.** [`AccountLogSink::load_account`] returns the empty
+///    world (`Absent`) for an account with no prior erasure log, so the first request
+///    seeds the genesis via a create-only persist.
+///
+/// STEP-UP is still enforced HERE (identical gate): `"erasure"` ∈ [`STEP_UP_VERBS`], so
+/// a request without a fresh-auth proof is refused `403` before any load/effect. The
+/// top-level route skips the repo door, so this is the ONLY step-up chokepoint — it
+/// must not be bypassed.
+#[allow(clippy::too_many_arguments)]
+pub fn with_account_write<F>(
+    sink: &dyn AccountLogSink,
+    account: &str,
+    verb: &str,
+    resource: &str,
+    idem_key: &str,
+    body: &[u8],
+    step_up_presented: bool,
+    principal_chain: Vec<String>,
+    at: u64,
+    run: F,
+) -> Result<Accepted, EngineErr>
+where
+    F: Fn(&mut EventLog, Vec<String>, u64) -> Result<Accepted, EngineErr>,
+{
+    // STEP-UP gate (the only chokepoint on the top-level route): refused BEFORE any
+    // load/effect. `"erasure"` is a step-up verb.
+    if STEP_UP_VERBS.contains(&verb) && !step_up_presented {
+        return Err(EngineErr::step_up_required());
+    }
+    if body.len() > MAX_BODY_BYTES {
+        return Err(EngineErr::invalid_request(
+            "corpo da requisição excede o limite",
+        ));
+    }
+    if idem_key.trim().is_empty() {
+        return Err(EngineErr::idempotency_required());
+    }
+    let principal = principal_chain.last().cloned().unwrap_or_default();
+    let body_hash = body_sha256(body);
+
+    for _attempt in 0..MAX_CAS_ATTEMPTS {
+        // Load-or-create the account head + its CAS token (absent → empty world).
+        let (mut log, token) = sink.load_account(account)?;
+
+        // Replay guard (identical to the repo door): a seen key returns the stored
+        // outcome (or 409 on a body change) BEFORE the verb runs.
+        if let Some(prior) = idem_lookup(&log, &principal, verb, resource, idem_key)? {
+            if prior.body_sha256 != body_hash {
+                return Err(EngineErr::idem_mismatch());
+            }
+            return Ok(prior.accepted);
+        }
+
+        // First time for this key on this head: run the verb (which itself derives +
+        // authorizes the subject), record the idempotent outcome, then CAS-persist ONCE.
+        let accepted = run(&mut log, principal_chain.clone(), at)?;
+        idem_record(
+            &mut log, &principal, verb, resource, idem_key, &body_hash, &accepted, at,
+        )?;
+        match sink.persist_account(account, &log, &token) {
+            Ok(()) => return Ok(accepted),
+            Err(e) if e.is_cas_conflict() => continue,
+            Err(e) => return Err(e),
+        }
+    }
+
     Err(EngineErr::unavailable(
         "escrita sob contenção concorrente — tente novamente",
     ))
@@ -950,5 +1054,274 @@ mod tests {
         );
         // It did try the full budget (each churns the head once).
         assert_eq!(*sink.version.borrow(), u64::from(MAX_CAS_ATTEMPTS));
+    }
+
+    // ── the ACCOUNT write-door (GDPR1) ───────────────────────────────────────
+
+    use hugit_http_contracts::write_requests::AccountEraseReq;
+
+    /// A CAS-enforcing in-memory account sink (load-or-create): an absent log is the
+    /// empty world (`Absent`); a present one carries a monotonic `Version`. Mirrors
+    /// `CasSink` but with account load-or-create semantics + optional perpetual churn.
+    struct AcctSink {
+        log: RefCell<Option<EventLog>>,
+        version: RefCell<u64>,
+        winner: RefCell<Option<EventLog>>, // a same-key concurrent winner injected once
+        always_bump: bool,
+    }
+    impl AcctSink {
+        fn empty() -> Self {
+            AcctSink {
+                log: RefCell::new(None),
+                version: RefCell::new(0),
+                winner: RefCell::new(None),
+                always_bump: false,
+            }
+        }
+    }
+    impl AccountLogSink for AcctSink {
+        fn load_account(&self, _account: &str) -> Result<(EventLog, CasToken), EngineErr> {
+            match &*self.log.borrow() {
+                None => Ok((EventLog::new(), CasToken::Absent)),
+                Some(l) => Ok((
+                    l.clone(),
+                    CasToken::Version(self.version.borrow().to_string()),
+                )),
+            }
+        }
+        fn persist_account(
+            &self,
+            _account: &str,
+            log: &EventLog,
+            expected: &CasToken,
+        ) -> Result<(), EngineErr> {
+            // A same-key concurrent winner commits first (once) → head moves.
+            if let Some(w) = self.winner.borrow_mut().take() {
+                *self.log.borrow_mut() = Some(w);
+                *self.version.borrow_mut() += 1;
+            }
+            if self.always_bump {
+                let mut cur = self.log.borrow_mut().take().unwrap_or_default();
+                let at = cur.records().len() as u64 + 1;
+                cur.append_for_test("other.churn", vec!["orchestrator:x".into()], "{}", at);
+                *self.log.borrow_mut() = Some(cur);
+                *self.version.borrow_mut() += 1;
+            }
+            let head = match &*self.log.borrow() {
+                None => CasToken::Absent,
+                Some(_) => CasToken::Version(self.version.borrow().to_string()),
+            };
+            if *expected != head {
+                return Err(EngineErr::cas_conflict());
+            }
+            *self.log.borrow_mut() = Some(log.clone());
+            *self.version.borrow_mut() += 1;
+            Ok(())
+        }
+    }
+    // SAFETY: single-threaded tests only (same as MemSink/CasSink).
+    unsafe impl Sync for AcctSink {}
+
+    fn erase(account: &str) -> AccountEraseReq {
+        AccountEraseReq {
+            confirm: account.into(),
+        }
+    }
+    fn tenant(org: &str) -> Vec<String> {
+        vec![format!("clerk:{org}:user-1")]
+    }
+    /// Run the account door with the REAL `write_account_erase` verb (end-to-end).
+    fn run_erase(
+        sink: &AcctSink,
+        account: &str,
+        req: &AccountEraseReq,
+        key: &str,
+        step_up: bool,
+        principal: Vec<String>,
+        at: u64,
+    ) -> Result<Accepted, EngineErr> {
+        let body = serde_json::to_vec(req).unwrap();
+        with_account_write(
+            sink,
+            account,
+            "erasure",
+            "account/erase",
+            key,
+            &body,
+            step_up,
+            principal,
+            at,
+            |log, p, at| verbs::write_account_erase::write_account_erase(log, req, p, at),
+        )
+    }
+
+    #[test]
+    fn account_erase_first_request_seeds_genesis() {
+        let sink = AcctSink::empty();
+        let acc = run_erase(
+            &sink,
+            "org-a",
+            &erase("org-a"),
+            "K1",
+            true,
+            tenant("org-a"),
+            1,
+        )
+        .expect("first erase stages a request");
+        assert_eq!(acc.state.as_deref(), Some("requested"));
+        let log = sink.log.borrow();
+        let recs = log.as_ref().expect("genesis persisted").records();
+        // Exactly the erasure.requested + its idem.recorded — nothing else.
+        assert_eq!(
+            recs.iter()
+                .filter(|r| r.kind == verbs::write_account_erase::ERASURE_REQUESTED_KIND)
+                .count(),
+            1
+        );
+        assert_eq!(
+            recs.iter().filter(|r| r.kind == IDEM_RECORDED_KIND).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn account_erase_step_up_required() {
+        let sink = AcctSink::empty();
+        let e = run_erase(
+            &sink,
+            "org-a",
+            &erase("org-a"),
+            "K1",
+            false,
+            tenant("org-a"),
+            1,
+        )
+        .expect_err("erasure without step-up must 403");
+        assert_eq!(e.status, 403);
+        assert_eq!(e.code, "STEP_UP_REQUIRED");
+        assert!(sink.log.borrow().is_none(), "no state written on a 403");
+    }
+
+    #[test]
+    fn account_erase_replay_is_idempotent_no_double_request() {
+        let sink = AcctSink::empty();
+        let first = run_erase(
+            &sink,
+            "org-a",
+            &erase("org-a"),
+            "K1",
+            true,
+            tenant("org-a"),
+            1,
+        )
+        .unwrap();
+        let replay = run_erase(
+            &sink,
+            "org-a",
+            &erase("org-a"),
+            "K1",
+            true,
+            tenant("org-a"),
+            2,
+        )
+        .unwrap();
+        assert_eq!(first.seq, replay.seq, "replay returns the original outcome");
+        let log = sink.log.borrow();
+        assert_eq!(
+            log.as_ref()
+                .unwrap()
+                .records()
+                .iter()
+                .filter(|r| r.kind == verbs::write_account_erase::ERASURE_REQUESTED_KIND)
+                .count(),
+            1,
+            "exactly ONE erasure.requested despite the replay"
+        );
+    }
+
+    #[test]
+    fn account_erase_missing_idem_key_is_400() {
+        let sink = AcctSink::empty();
+        let e = run_erase(
+            &sink,
+            "org-a",
+            &erase("org-a"),
+            "",
+            true,
+            tenant("org-a"),
+            1,
+        )
+        .expect_err("empty idem key must 400");
+        assert_eq!(e.status, 400);
+        assert_eq!(e.code, "IDEMPOTENCY_REQUIRED");
+    }
+
+    #[test]
+    fn account_erase_wrong_confirm_is_400_no_state() {
+        let sink = AcctSink::empty();
+        let e = run_erase(
+            &sink,
+            "org-a",
+            &erase("WRONG"),
+            "K1",
+            true,
+            tenant("org-a"),
+            1,
+        )
+        .expect_err("mismatched confirm must 400");
+        assert_eq!(e.status, 400);
+        assert!(
+            sink.log.borrow().is_none(),
+            "a rejected verb writes nothing"
+        );
+    }
+
+    #[test]
+    fn account_erase_same_key_race_collapses_to_replay() {
+        // A same-key concurrent winner commits its (erasure.requested + idem.recorded)
+        // first; our persist loses the CAS; on reload we replay — exactly one request.
+        let sink = AcctSink::empty();
+        // Build the winner's log by running the door against a throwaway sink.
+        let winner_sink = AcctSink::empty();
+        run_erase(
+            &winner_sink,
+            "org-a",
+            &erase("org-a"),
+            "SAME",
+            true,
+            tenant("org-a"),
+            1,
+        )
+        .unwrap();
+        *sink.winner.borrow_mut() = winner_sink.log.borrow().clone();
+        let acc = run_erase(
+            &sink,
+            "org-a",
+            &erase("org-a"),
+            "SAME",
+            true,
+            tenant("org-a"),
+            2,
+        )
+        .expect("same-key race resolves to a replay");
+        let log = sink.log.borrow();
+        assert_eq!(
+            log.as_ref()
+                .unwrap()
+                .records()
+                .iter()
+                .filter(|r| r.kind == verbs::write_account_erase::ERASURE_REQUESTED_KIND)
+                .count(),
+            1,
+            "the race collapses to ONE erasure.requested (the winner's)"
+        );
+        assert!(
+            log.as_ref()
+                .unwrap()
+                .records()
+                .iter()
+                .any(|r| r.seq == acc.seq),
+            "we returned the winner's recorded outcome (replay)"
+        );
     }
 }
