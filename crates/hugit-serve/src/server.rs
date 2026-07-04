@@ -17,7 +17,7 @@ use crate::error::EngineErr;
 use crate::handlers;
 use crate::metrics::{Metrics, RouteClass, ShedGate};
 use crate::state::AppState;
-use crate::writes::{self, LogSink, verbs, with_write};
+use crate::writes::{self, AccountLogSink, LogSink, verbs, with_account_write, with_write};
 use hugit_http_contracts::actions::Accepted;
 use hugit_http_contracts::write_requests as wr;
 
@@ -921,6 +921,18 @@ fn route_write(state: &AppState, url: &str, headers: &[Header], body: &[u8]) -> 
             };
             verbs::write_provision::handle_provision(state, body, &principal, now_ms())
         }
+        // POST /v1/account/erase — GDPR1: a user requests erasure of THEIR OWN
+        // account. Top-level (NOT under `/v1/repos`), so it bypasses the repo-head
+        // gate: the subject is the caller's own account (derived from the principal),
+        // there is no repo to own. STEP-UP is REQUIRED and enforced by the account
+        // write-door (`"erasure"` ∈ STEP_UP_VERBS) — the only step-up chokepoint here.
+        ["v1", "account", "erase"] => {
+            let (principal, fresh_auth) = match two_tier_auth(state, headers) {
+                Ok(pair) => pair,
+                Err(e) => return err(e),
+            };
+            dispatch_account_erase(state, headers, body, principal, fresh_auth)
+        }
         ["v1", "repos", repo, tail @ ..] => {
             // Two-tier Bearer auth: a Clerk-minted engine token, else the dev token.
             let (principal, fresh_auth) = match two_tier_auth(state, headers) {
@@ -930,6 +942,65 @@ fn route_write(state: &AppState, url: &str, headers: &[Header], body: &[u8]) -> 
             dispatch_repo_write(state, repo, tail, headers, body, principal, fresh_auth)
         }
         _ => err(EngineErr::not_found()),
+    }
+}
+
+/// Dispatch `POST /v1/account/erase` (GDPR1) through the ACCOUNT write-door
+/// ([`with_account_write`]): step-up + idempotency + a create-or-append persist to the
+/// reserved `_accounts/{slug}` store. The subject account is DERIVED from the caller
+/// (`derive_owner_tenant` refuses operator/anon → 401, no god-erase / anon-erase) — a
+/// caller can only ever erase itself; the store key is never a request field.
+fn dispatch_account_erase(
+    state: &AppState,
+    headers: &[Header],
+    body: &[u8],
+    principal: Vec<String>,
+    fresh_auth: bool,
+) -> (u16, String) {
+    // Idempotency-Key cap (DoS / log-bloat guard) — identical to the repo door.
+    const MAX_IDEM_KEY_BYTES: usize = 256;
+    let idem = header_val(headers, "Idempotency-Key").unwrap_or_default();
+    if idem.len() > MAX_IDEM_KEY_BYTES {
+        return err(EngineErr::invalid_request(
+            "Idempotency-Key excede o limite de 256 bytes",
+        ));
+    }
+    // The subject account = the caller's OWN account (never the body). Operator/anon
+    // are refused HERE (401) — before any store touch — mirroring the verb's own guard.
+    let account = match verbs::write_provision::derive_owner_tenant(&principal) {
+        Ok(a) => a,
+        Err(e) => return err(e),
+    };
+    // Step-up: a fresh Clerk session (Tier-1 `fresh_auth`) OR the dev-only `X-Step-Up`
+    // header — identical to `dispatch_repo_write`, so a Clerk principal can never
+    // self-assert step-up via a header (its step-up MUST be a re-authenticated session).
+    let is_dev_principal = principal.first().map(String::as_str) == Some("orchestrator:hugit");
+    let step_up_header = is_dev_principal
+        && header_val(headers, "X-Step-Up")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+    let step_up = fresh_auth || step_up_header;
+
+    let req = match serde_json::from_slice::<wr::AccountEraseReq>(body) {
+        Ok(v) => v,
+        Err(e) => return err(EngineErr::invalid_request(format!("corpo inválido: {e}"))),
+    };
+    let sink: &dyn AccountLogSink = state;
+    let result = with_account_write(
+        sink,
+        &account,
+        "erasure",
+        "account/erase",
+        &idem,
+        body,
+        step_up,
+        principal,
+        now_ms(),
+        |log, p, at| verbs::write_account_erase::write_account_erase(log, &req, p, at),
+    );
+    match result {
+        Ok(a) => ok_accepted(&a),
+        Err(e) => err(e),
     }
 }
 
