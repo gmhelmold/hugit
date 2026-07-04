@@ -97,8 +97,11 @@ const UPLOAD_PACK: &str = "git-upload-pack";
 /// The v1 capabilities we advertise. Deliberately minimal + side-band-FREE: the
 /// proto serves a bare packfile (no side-band-64k multiplexing), so advertising
 /// side-band would make the client await framing that never arrives. `agent` is
-/// informational; `object-format=sha1` matches the proto's hash.
-const ADVERTISED_CAPS: &str = "object-format=sha1 agent=hugit-serve";
+/// informational; `object-format=sha1` matches the proto's hash. `shallow` opts the
+/// client into sending `deepen <N>` for `git clone --depth N` — the server answers
+/// with a `shallow <oid>` section + a depth-bounded pack (see `build_shallow_pack_bytes`);
+/// WITHOUT it git refuses `--depth` outright ("Server does not support shallow clients").
+const ADVERTISED_CAPS: &str = "object-format=sha1 agent=hugit-serve shallow";
 
 /// Whether `url`'s path is a git smart-HTTP route this module owns
 /// (`/<repo>/info/refs`, `/<repo>/git-upload-pack`, OR `/<repo>/git-receive-pack`).
@@ -344,6 +347,11 @@ type SharedSource = Arc<dyn hugit_proto::ObjectSource + Send + Sync>;
 struct ClonePlan {
     full_clone: bool,
     refs: BTreeMap<String, String>,
+    /// `Some(depth)` when the client sent `deepen <depth>` (`git clone --depth N`):
+    /// serve a depth-bounded pack + a `shallow` section instead of the full closure.
+    /// Mutually exclusive with `full_clone` (a shallow request never uses the cached
+    /// full-clone pack — that pack carries the WHOLE history).
+    shallow_depth: Option<u32>,
 }
 
 /// Whether the explicit `want` set is EXACTLY the full advertised tip-set (every
@@ -431,7 +439,17 @@ fn prepare_upload_pack(
         (request, full)
     };
 
-    let plan = ClonePlan { full_clone, refs };
+    // `git clone --depth N` sends `deepen N` (enabled by the `shallow` capability we
+    // now advertise). Parse it from the raw body. Its presence forces a depth-bounded
+    // pack and DISABLES the cached full-clone fast path — that pack carries the WHOLE
+    // history, which a shallow client must NOT receive.
+    let shallow_depth = hugit_proto::parse_deepen(body);
+    let full_clone = full_clone && shallow_depth.is_none();
+    let plan = ClonePlan {
+        full_clone,
+        refs,
+        shallow_depth,
+    };
     Some((source, effective_req, plan, clone_cache))
 }
 
@@ -457,6 +475,30 @@ fn build_upload_pack_bytes(
     Some(out)
 }
 
+/// Assemble a DEPTH-BOUNDED (shallow) upload-pack result — the response to a
+/// `git clone --depth N`. `None` (→ 404) on any assembly failure: fail-CLOSED to
+/// no-pack, NEVER a truncated one (same contract as [`build_upload_pack_bytes`]).
+///
+/// Wire (smart-HTTP v1 shallow response): the `shallow` section (one
+/// `shallow <oid>` pkt-line per boundary commit, then a flush-pkt that ends the
+/// section — emitted even when empty, since the client requested a `deepen`), then
+/// the `NAK` pkt-line, then the raw depth-bounded packfile.
+fn build_shallow_pack_bytes(
+    source: &dyn hugit_proto::ObjectSource,
+    request: &hugit_proto::WantHave,
+    depth: u32,
+) -> Option<Vec<u8>> {
+    let (pack, boundary) = hugit_proto::serve_shallow(source, &request.wants, depth).ok()?;
+    let mut out = Vec::new();
+    for oid in &boundary {
+        pkt_line(&mut out, format!("shallow {oid}\n").as_bytes());
+    }
+    pkt_flush(&mut out); // ends the shallow section (empty section = bare flush)
+    pkt_line(&mut out, b"NAK\n");
+    out.extend_from_slice(&pack.bytes);
+    Some(out)
+}
+
 /// The DETACHED-worker half of a `git-upload-pack` POST: assemble the pack (the heavy
 /// per-object CAS walk) and WRITE the response to `request` itself. Runs entirely on
 /// the worker thread — the accept loop has already returned to accept. On any assembly
@@ -472,6 +514,22 @@ fn serve_upload_pack_response(
     request: Request,
     io_budget: Duration,
 ) {
+    // SHALLOW (`git clone --depth N`) — a depth-bounded pack preceded by the
+    // `shallow` section. NEVER uses the cached full pack (`prepare_upload_pack` forces
+    // `full_clone` off whenever `shallow_depth` is set, since the cache is full history).
+    if let Some(depth) = plan.shallow_depth {
+        match build_shallow_pack_bytes(source.as_ref(), &want, depth) {
+            Some(out) => {
+                let body_len = out.len();
+                let resp = Response::from_data(out)
+                    .with_status_code(200)
+                    .with_header(git_content_type("application/x-git-upload-pack-result"));
+                return send(request, resp, body_len, io_budget);
+            }
+            None => return respond_not_found(request, io_budget),
+        }
+    }
+
     // WP-BC — the cached full-clone fast path. For a FULL clone (the strict
     // `plan.full_clone` predicate) of a repo WITH a clone-pack cache, try the
     // pre-assembled pack: ONE R2 GET vs walking the whole object closure. The
