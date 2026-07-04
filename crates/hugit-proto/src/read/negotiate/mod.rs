@@ -124,6 +124,34 @@ impl RefAdvertisement {
     }
 }
 
+/// Extract the `deepen <N>` depth from an upload-pack request body — the depth a
+/// `git clone --depth N` requests (the client sends it once the server advertises the
+/// `shallow` capability). Returns the positive depth, or `None` when no valid `deepen`
+/// line is present (a normal full clone/fetch).
+///
+/// v0 scope: only `deepen <N>` (`--depth`) is honoured; `deepen-since` / `deepen-not`
+/// (the rarer `--shallow-since` / `--shallow-exclude`) are not parsed — a client using
+/// ONLY those receives a full clone (a valid superset, never a corrupt pack). A
+/// malformed or non-positive depth is ignored (treated as no-deepen).
+pub fn parse_deepen(bytes: &[u8]) -> Option<u32> {
+    let lines = decode_lines(bytes).ok()?;
+    for line in &lines {
+        let Some(data) = line_data(line) else {
+            continue; // flush / delim / response-end
+        };
+        let text = std::str::from_utf8(data)
+            .unwrap_or("")
+            .trim_end_matches('\n');
+        if let Some(n) = text.strip_prefix("deepen ")
+            && let Ok(depth) = n.trim().parse::<u32>()
+            && depth > 0
+        {
+            return Some(depth);
+        }
+    }
+    None
+}
+
 /// The parsed `want`/`have` sets of a protocol-v2 `fetch` request.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WantHave {
@@ -264,4 +292,56 @@ fn decode_lines(mut bytes: &[u8]) -> Result<Vec<OwnedLine>, NegotiationError> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod deepen_tests {
+    use super::*;
+
+    /// Frame `lines` as text pkt-lines followed by a flush — a v1 upload-pack body.
+    fn body(lines: &[&str]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for l in lines {
+            write_text(&mut out, l).unwrap();
+        }
+        encode::flush_to_write(&mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn parses_deepen_depth_from_a_real_request_body() {
+        let one = body(&["want 1111111111111111111111111111111111111111", "deepen 1"]);
+        assert_eq!(
+            parse_deepen(&one),
+            Some(1),
+            "`deepen 1` → depth 1 (`--depth 1`)"
+        );
+        let seven = body(&["want 2222222222222222222222222222222222222222", "deepen 7"]);
+        assert_eq!(parse_deepen(&seven), Some(7));
+    }
+
+    #[test]
+    fn a_normal_clone_body_has_no_deepen() {
+        let b = body(&[
+            "want 3333333333333333333333333333333333333333",
+            "have 4444444444444444444444444444444444444444",
+            "done",
+        ]);
+        assert_eq!(
+            parse_deepen(&b),
+            None,
+            "no `deepen` line → a full (non-shallow) clone"
+        );
+    }
+
+    #[test]
+    fn zero_or_malformed_deepen_is_ignored_never_a_bad_depth() {
+        assert_eq!(
+            parse_deepen(&body(&["deepen 0"])),
+            None,
+            "git rejects --depth 0"
+        );
+        assert_eq!(parse_deepen(&body(&["deepen abc"])), None, "non-numeric");
+        assert_eq!(parse_deepen(&body(&["deepen"])), None, "no depth token");
+    }
 }

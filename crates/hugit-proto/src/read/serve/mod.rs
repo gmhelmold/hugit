@@ -12,7 +12,7 @@
 //! Reachability is walked with the git library's streaming object decoders
 //! (`gix-object`); the object graph traversal is standard git, not reinvented.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 use gix_hash::ObjectId;
@@ -122,6 +122,159 @@ pub fn serve_fetch_until(
     deadline: Instant,
 ) -> Result<PackAssembly, ServeError> {
     serve_request(source, request, deadline)
+}
+
+/// Serve a **shallow** (depth-bounded) clone — a client's `git clone --depth N`.
+///
+/// Like [`serve_clone`] but the commit ancestry reachable from each tip is
+/// truncated at `depth` commits. Returns the advertisement, the depth-bounded
+/// pack, AND the set of SHALLOW boundary commits (an included commit that has a
+/// parent cut from the pack). The serve layer emits one `shallow <oid>` pkt-line
+/// per boundary commit before the pack (the v1 shallow-info section) so the client
+/// records its shallow frontier.
+///
+/// Depth semantics (git `--depth N`, N ≥ 1): the tips are depth 1; commits are
+/// included through depth N. A commit is shallow iff at least one of its parents
+/// is NOT in the included set — git-correct across merges, and a root commit (no
+/// parents) is never shallow. `depth == 0` is treated as `1` (git rejects it).
+///
+/// The tree/blob closure of EVERY included commit is packed in full (a shallow
+/// clone still checks out a complete working tree); only the *ancestry* is bounded.
+pub fn serve_clone_shallow(
+    view: &dyn RefView,
+    source: &dyn ObjectSource,
+    depth: u32,
+) -> Result<(RefAdvertisement, PackAssembly, Vec<ObjectId>), ServeError> {
+    let adv = RefAdvertisement::from_view(view);
+    let wants = adv.tip_oids()?;
+    let (pack, boundary) = serve_shallow(source, &wants, depth)?;
+    Ok((adv, pack, boundary))
+}
+
+/// The depth-bounded pack for an EXPLICIT want-set (the serve layer's path).
+///
+/// `git clone --depth N` implies `--single-branch`, so the client sends `want` for
+/// only the branch(es) it tracks — this assembles the shallow pack from exactly
+/// those validated wants (NOT every advertised tip). Returns the pack and the
+/// shallow boundary commits (see [`serve_clone_shallow`]).
+pub fn serve_shallow(
+    source: &dyn ObjectSource,
+    wants: &[ObjectId],
+    depth: u32,
+) -> Result<(PackAssembly, Vec<ObjectId>), ServeError> {
+    let deadline = Instant::now() + SERVE_FETCH_BUDGET;
+    let (oids, boundary) = collect_shallow(source, wants, depth, deadline)?;
+    source.prefetch(&oids);
+    let pack = assemble_pack_until(source, &oids, Some(deadline))?;
+    Ok((pack, boundary))
+}
+
+/// Depth-bounded object closure for a shallow clone. Two phases:
+///
+/// 1. **Commit BFS bounded by `depth`** — from each want (a tip; a tag is peeled
+///    to its target at the SAME depth), walk parents breadth-first, enqueuing a
+///    commit's parents only while its depth `< depth`. Yields the INCLUDED commit
+///    set (depths `1..=depth`) and each included commit's parent list.
+/// 2. **Boundary + closure** — a commit is SHALLOW iff a parent is not included
+///    (git-correct across merges; a root commit is never shallow). Every included
+///    commit's full tree/blob closure (+ any peeled tag objects) is collected.
+///
+/// Returns `(all_object_oids_sorted, shallow_boundary_commits_sorted)`. Bounded by
+/// `deadline`, fail-CLEAN (never a partial closure — same invariant as the full walk).
+fn collect_shallow(
+    source: &dyn ObjectSource,
+    wants: &[ObjectId],
+    depth: u32,
+    deadline: Instant,
+) -> Result<(Vec<ObjectId>, Vec<ObjectId>), ServeError> {
+    let depth = depth.max(1);
+
+    // Phase 1: depth-bounded commit BFS. `commit_parents` records ancestry so
+    // phase 2 decides shallow-ness with no extra fetch.
+    let mut commit_parents: BTreeMap<ObjectId, Vec<ObjectId>> = BTreeMap::new();
+    let mut commit_trees: Vec<ObjectId> = Vec::new();
+    let mut tag_objects: Vec<ObjectId> = Vec::new();
+    let mut extra_roots: Vec<ObjectId> = Vec::new();
+    // frontier of (oid, depth-from-tip). A tag peels to its target at the same depth.
+    let mut frontier: Vec<(ObjectId, u32)> = wants.iter().map(|w| (*w, 1)).collect();
+    while !frontier.is_empty() {
+        if Instant::now() >= deadline {
+            return Err(ServeError::DeadlineExceeded);
+        }
+        let batch: Vec<ObjectId> = frontier.iter().map(|(o, _)| *o).collect();
+        source.prefetch(&batch);
+        let mut next: Vec<(ObjectId, u32)> = Vec::new();
+        for (oid, d) in std::mem::take(&mut frontier) {
+            if Instant::now() >= deadline {
+                return Err(ServeError::DeadlineExceeded);
+            }
+            let object = match source.get(&oid)? {
+                Some(o) => o,
+                None => return Err(ServeError::IncompleteClosure(oid)),
+            };
+            match object.kind {
+                ObjectKind::Commit => {
+                    if commit_parents.contains_key(&oid) {
+                        continue; // already walked (merge / shared ancestor)
+                    }
+                    let tree = CommitRefIter::from_bytes(&object.data)
+                        .tree_id()
+                        .map_err(|source| ServeError::Decode { oid, source })?;
+                    commit_trees.push(tree);
+                    let parents: Vec<ObjectId> = CommitRefIter::from_bytes(&object.data)
+                        .parent_ids()
+                        .collect();
+                    if d < depth {
+                        for p in &parents {
+                            next.push((*p, d + 1));
+                        }
+                    }
+                    commit_parents.insert(oid, parents);
+                }
+                ObjectKind::Tag => {
+                    // A tag is not a commit level: pack the tag object, peel to its
+                    // target, and continue at the SAME depth.
+                    tag_objects.push(oid);
+                    let target = TagRefIter::from_bytes(&object.data)
+                        .target_id()
+                        .map_err(|source| ServeError::Decode { oid, source })?;
+                    next.push((target, d));
+                }
+                // A want pointing straight at a tree/blob (unusual for a clone) — its
+                // closure is collected wholesale in phase 2.
+                ObjectKind::Tree | ObjectKind::Blob => extra_roots.push(oid),
+            }
+        }
+        frontier = next;
+    }
+
+    // Phase 2: object closure.
+    let mut included: BTreeSet<ObjectId> = BTreeSet::new();
+    for c in commit_parents.keys() {
+        included.insert(*c);
+    }
+    for t in &tag_objects {
+        included.insert(*t);
+    }
+    for tree in &commit_trees {
+        collect_reachable(source, tree, &mut included, /*strict=*/ true, deadline)?;
+    }
+    for root in &extra_roots {
+        collect_reachable(source, root, &mut included, /*strict=*/ true, deadline)?;
+    }
+
+    // Shallow boundary: an included commit with a parent NOT in the included set.
+    let mut boundary: BTreeSet<ObjectId> = BTreeSet::new();
+    for (commit, parents) in &commit_parents {
+        if parents.iter().any(|p| !commit_parents.contains_key(p)) {
+            boundary.insert(*commit);
+        }
+    }
+
+    Ok((
+        included.into_iter().collect(),
+        boundary.into_iter().collect(),
+    ))
 }
 
 /// The shared core: compute the want-minus-have object closure and assemble it,
@@ -406,5 +559,107 @@ mod budget_tests {
         refs.insert("refs/heads/main".to_string(), c.to_string());
         let (_adv, pack) = serve_clone(&refs, &src).expect("a small clone under budget succeeds");
         assert_eq!(pack.object_count(), 3);
+    }
+
+    // ── shallow (depth-bounded) clone ────────────────────────────────────────
+
+    fn commit_p(src: &mut CasObjectSource, tree_oid: ObjectId, parents: &[ObjectId]) -> ObjectId {
+        let mut body = format!("tree {tree_oid}\n");
+        for p in parents {
+            body.push_str(&format!("parent {p}\n"));
+        }
+        body.push_str("author a <a@a> 0 +0000\ncommitter a <a@a> 0 +0000\n\nmsg\n");
+        src.insert(GitObject::new(ObjectKind::Commit, body.into_bytes()))
+    }
+
+    /// A linear 3-commit chain `c0`(root) ← `c1` ← `c2`(tip), each carrying its own
+    /// distinct tree + blob (so a depth-N pack has exactly `3 × N` objects).
+    fn chain3() -> (CasObjectSource, ObjectId, ObjectId, ObjectId) {
+        let mut src = CasObjectSource::new();
+        let b0 = blob(&mut src, "v0\n");
+        let t0 = tree(&mut src, &[("100644", "f.txt", b0)]);
+        let c0 = commit_p(&mut src, t0, &[]);
+        let b1 = blob(&mut src, "v1\n");
+        let t1 = tree(&mut src, &[("100644", "f.txt", b1)]);
+        let c1 = commit_p(&mut src, t1, &[c0]);
+        let b2 = blob(&mut src, "v2\n");
+        let t2 = tree(&mut src, &[("100644", "f.txt", b2)]);
+        let c2 = commit_p(&mut src, t2, &[c1]);
+        (src, c0, c1, c2)
+    }
+
+    fn refs_for(tip: ObjectId) -> std::collections::BTreeMap<String, String> {
+        let mut r = std::collections::BTreeMap::new();
+        r.insert("refs/heads/main".to_string(), tip.to_string());
+        r
+    }
+
+    /// `--depth 1`: pack ONLY the tip's snapshot (commit + its tree + blob), and
+    /// mark the tip as the shallow boundary (its parent is cut).
+    #[test]
+    fn shallow_depth_1_packs_only_tip_snapshot_and_marks_boundary() {
+        let (src, _c0, _c1, c2) = chain3();
+        let (_adv, pack, boundary) =
+            serve_clone_shallow(&refs_for(c2), &src, 1).expect("a depth-1 clone succeeds");
+        assert_eq!(
+            pack.object_count(),
+            3,
+            "depth 1 packs only the tip commit + its tree + blob (no ancestry)"
+        );
+        assert_eq!(
+            boundary,
+            vec![c2],
+            "the tip is shallow — its parent is cut from the pack"
+        );
+    }
+
+    /// `--depth 2`: two commits deep; the boundary moves back to `c1` (whose parent
+    /// `c0` is cut), and `c2` is NOT a boundary (its parent `c1` is included).
+    #[test]
+    fn shallow_depth_2_includes_two_commits_boundary_moves_back() {
+        let (src, _c0, c1, c2) = chain3();
+        let (_adv, pack, boundary) =
+            serve_clone_shallow(&refs_for(c2), &src, 2).expect("a depth-2 clone succeeds");
+        assert_eq!(
+            pack.object_count(),
+            6,
+            "two commits, each with its tree + blob"
+        );
+        assert_eq!(
+            boundary,
+            vec![c1],
+            "c1's parent (c0) is cut → c1 shallow; c2's parent (c1) is included → not shallow"
+        );
+    }
+
+    /// A depth covering the whole history has NO shallow boundary, and its object
+    /// set is byte-identical to a full clone (the root commit is never shallow).
+    #[test]
+    fn shallow_depth_covering_full_history_equals_full_clone_no_boundary() {
+        let (src, _c0, _c1, c2) = chain3();
+        let (_adv, pack, boundary) =
+            serve_clone_shallow(&refs_for(c2), &src, 5).expect("a deep clone succeeds");
+        assert!(
+            boundary.is_empty(),
+            "the whole history is reached → nothing is shallow: {boundary:?}"
+        );
+        let (_a, full) = serve_clone(&refs_for(c2), &src).expect("a full clone succeeds");
+        assert_eq!(
+            pack.object_count(),
+            full.object_count(),
+            "a depth ≥ history is the full closure (9 objects: 3 commits × tree+blob)"
+        );
+        assert_eq!(pack.object_count(), 9);
+    }
+
+    /// `--depth 0` is rejected by git; the server treats it as depth 1 (never an
+    /// empty or unbounded pack).
+    #[test]
+    fn shallow_depth_0_is_treated_as_depth_1() {
+        let (src, _c0, _c1, c2) = chain3();
+        let (_adv, pack, boundary) =
+            serve_clone_shallow(&refs_for(c2), &src, 0).expect("depth 0 → 1");
+        assert_eq!(pack.object_count(), 3);
+        assert_eq!(boundary, vec![c2]);
     }
 }
