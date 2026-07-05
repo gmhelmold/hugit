@@ -55,12 +55,14 @@ mod tests {
         RepoMeta {
             visibility: Visibility::Private,
             owner_tenant: owner.map(str::to_string),
+            erased: false,
         }
     }
     fn public() -> RepoMeta {
         RepoMeta {
             visibility: Visibility::Public,
             owner_tenant: Some("org-a".into()),
+            erased: false,
         }
     }
     fn op() -> Vec<String> {
