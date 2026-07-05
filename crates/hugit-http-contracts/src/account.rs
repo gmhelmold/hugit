@@ -77,14 +77,22 @@ mod tests {
             pats: vec![PatMetaVm {
                 id: "pat_abc".into(),
                 name: "ci-runner".into(),
-                created_at: 1_720_000_000,
-                last_used_at: 1_720_100_000,
+                // Unix MILLISECONDS (13-digit), not seconds — the engine is ms-native.
+                created_at: 1_751_700_000_000,
+                last_used_at: 1_751_700_100_000,
                 scopes: vec!["repo:read".into(), "repo:write".into()],
             }],
         };
         let json = serde_json::to_string(&vm).expect("serialize");
         let reparsed: MeAccountVm = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(vm, reparsed, "MeAccountVm round-trip is lossless");
+        // Contract pin: the PAT timestamps are Unix MILLISECONDS (the engine is
+        // ms-native), NOT seconds — a ms value is 13 digits (>= 1e12). Guards the
+        // unit drift the contract doc used to carry (created_at was doc'd "seconds").
+        assert!(
+            vm.pats[0].created_at >= 1_000_000_000_000,
+            "created_at is Unix ms (13-digit), not seconds — render as ms"
+        );
     }
 }
 
@@ -119,9 +127,11 @@ pub struct PatMetaVm {
     pub id: String,
     /// The user-chosen label.
     pub name: String,
-    /// Unix seconds when the PAT was minted.
+    /// Unix **milliseconds** when the PAT was minted (the engine is ms-native —
+    /// `now_ms()`; matches [`CreatedTokenVm::expires_at`]). Render as ms (JS
+    /// `new Date(ms)`), NOT seconds.
     pub created_at: u64,
-    /// Unix seconds of last use; `0` = never used.
+    /// Unix **milliseconds** of last use; `0` = never used.
     pub last_used_at: u64,
     /// The granted scopes (machine values, e.g. `repo:read`).
     pub scopes: Vec<String>,
@@ -156,7 +166,8 @@ pub struct CreatedTokenVm {
     /// The raw secret — shown ONCE, never recoverable. The client MUST capture it now.
     pub secret: String,
     pub scopes: Vec<String>,
+    /// Unix **milliseconds** when the PAT was minted (ms-native, same as `expires_at`).
     pub created_at: u64,
-    /// Unix ms when it expires; `0` = never.
+    /// Unix **milliseconds** when it expires; `0` = never.
     pub expires_at: u64,
 }
