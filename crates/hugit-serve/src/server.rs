@@ -615,6 +615,17 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
                 &state.me_repo_logs(&principal),
             ))
         }
+        // The caller's OWN structured account data (usage + PAT metadata) — the
+        // per-principal read githugr's account page consumes (owner-decided PATs=yes).
+        // Same identity gate + isolation as `me/dashboard`; `pats` is empty until the
+        // engine PAT store lands (a fresh caller has none).
+        ["v1", "me", "account"] => {
+            let (principal, _) = match two_tier_auth(state, headers) {
+                Ok(p) => p,
+                Err(e) => return err(e),
+            };
+            ok(&handlers::build_me_account(&state.me_repo_logs(&principal)))
+        }
         // `GET /v1/orgs/{name}` — thin real org view. `name` is the path param
         // (the display header); the `repos` list is the CALLER's OWN authorized
         // repos (W-METENANT — same per-tenant index as `/v1/me/*`), never a

@@ -704,3 +704,28 @@ fn live_socket_serves_readyz_and_authed_read() {
         "missing-bearer PRIVATE read → anon → 404: {r3}"
     );
 }
+
+#[test]
+fn me_account_requires_auth_and_returns_usage_shape() {
+    // The per-principal account read (githugr's account page consumes it).
+    let (state, _d) = state_with_repo("hugit", "[]");
+    // No Bearer → 401 (a private identity read is never anonymous).
+    let (s, _b) = route(&state, &Method::Get, "/v1/me/account", &[]);
+    assert_eq!(s, 401, "me/account requires a session Bearer");
+    // With a Bearer (operator dev-token) → 200 + the structured usage/pats shape.
+    let (s, b) = route(&state, &Method::Get, "/v1/me/account", &bearer(TOKEN));
+    assert_eq!(s, 200, "authed me/account is 200: {b}");
+    let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+    assert!(
+        v["usage"]["repos_count"].is_u64(),
+        "usage.repos_count present: {b}"
+    );
+    assert!(
+        v["usage"]["log_footprint_bytes"].is_u64(),
+        "usage.log_footprint_bytes present"
+    );
+    assert!(
+        v["pats"].as_array().unwrap().is_empty(),
+        "pats empty until the PAT store lands"
+    );
+}
