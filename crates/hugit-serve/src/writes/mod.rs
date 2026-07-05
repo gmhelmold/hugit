@@ -1126,6 +1126,7 @@ mod tests {
     fn erase(account: &str) -> AccountEraseReq {
         AccountEraseReq {
             confirm: account.into(),
+            dsr_id: None,
         }
     }
     fn tenant(org: &str) -> Vec<String> {
