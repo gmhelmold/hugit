@@ -476,3 +476,26 @@ fn account_erase_anonymous_is_refused() {
     let (status, _body) = post(&state, "/v1/account/erase", &headers, br#"{"confirm":"x"}"#);
     assert_eq!(status, 401, "anonymous cannot erase an account");
 }
+
+// ── PAT routes (POST /v1/me/tokens create · DELETE /v1/me/tokens/{id} revoke) ──
+
+#[test]
+fn pat_routes_are_wired_and_refuse_the_operator_no_god_token() {
+    // The dev-token is the OPERATOR (allow_dev_operator default-on); a PAT belongs to a
+    // real tenant USER, so the operator is refused at both routes — proving the routes
+    // reach the verbs (401, not a 404 method-not-found).
+    let (state, _dir) = state_with_open_pr();
+    let auth = vec![hdr("Authorization", &format!("Bearer {TOKEN}"))];
+    // POST create → 401 (operator has no own account to mint under).
+    let (s, b) = post(&state, "/v1/me/tokens", &auth, br#"{"name":"ci"}"#);
+    assert_eq!(s, 401, "operator cannot mint a PAT: {b}");
+    // DELETE revoke → 401 (route wired through route_with_body's DELETE arm).
+    let (s2, _b2) = route_with_body(&state, &Method::Delete, "/v1/me/tokens/pat_abc", &auth, &[]);
+    assert_eq!(
+        s2, 401,
+        "DELETE /v1/me/tokens/{{id}} is wired + refuses the operator"
+    );
+    // No Bearer → 401 (a PAT mint is never anonymous).
+    let (s3, _b3) = post(&state, "/v1/me/tokens", &[], br#"{"name":"x"}"#);
+    assert_eq!(s3, 401);
+}

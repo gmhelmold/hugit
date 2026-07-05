@@ -15,6 +15,7 @@ pub mod write_policy;
 pub mod write_pr_create;
 pub mod write_provision;
 pub mod write_repo_meta;
+pub mod write_token;
 pub mod write_undo;
 pub mod write_usage;
 pub mod write_verdict;

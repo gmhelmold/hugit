@@ -624,7 +624,19 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
                 Ok(p) => p,
                 Err(e) => return err(e),
             };
-            ok(&handlers::build_me_account(&state.me_repo_logs(&principal)))
+            let user = principal.last().cloned().unwrap_or_default();
+            // Load the caller's account log for PAT metadata (operator/anon derives no
+            // account → None → empty pats). A load fault degrades to None (usage still
+            // serves) rather than failing the whole read.
+            let account_log = verbs::write_provision::derive_owner_tenant(&principal)
+                .ok()
+                .and_then(|org| state.load_account_log(&org).ok())
+                .map(|(log, _)| log);
+            ok(&handlers::build_me_account(
+                &state.me_repo_logs(&principal),
+                account_log.as_ref(),
+                &user,
+            ))
         }
         // `GET /v1/orgs/{name}` — thin real org view. `name` is the path param
         // (the display header); the `repos` list is the CALLER's OWN authorized
@@ -726,7 +738,31 @@ pub fn route_with_body(
     if method == &Method::Post {
         return route_write(state, url, headers, body);
     }
+    if method == &Method::Delete {
+        return route_delete(state, url, headers);
+    }
     route(state, method, url, headers)
+}
+
+/// DELETE routing — the small set of resource-deletion verbs. Currently: revoke a PAT.
+fn route_delete(state: &AppState, url: &str, headers: &[Header]) -> (u16, String) {
+    let path = url.split('?').next().unwrap_or("");
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    match segs.as_slice() {
+        // DELETE /v1/me/tokens/{id} — revoke the caller's OWN PAT (idempotent; a
+        // foreign/unknown id → 404, no cross-user oracle).
+        ["v1", "me", "tokens", id] => {
+            let (principal, _) = match two_tier_auth(state, headers) {
+                Ok(pair) => pair,
+                Err(e) => return err(e),
+            };
+            match verbs::write_token::token_revoke(state, id, &principal, now_ms()) {
+                Ok(()) => (200, r#"{"revoked":true}"#.to_string()),
+                Err(e) => err(e),
+            }
+        }
+        _ => err(EngineErr::not_found()),
+    }
 }
 
 /// Read a request body, capped at the door's `MAX_BODY_BYTES` (+1 byte so the
@@ -943,6 +979,22 @@ fn route_write(state: &AppState, url: &str, headers: &[Header], body: &[u8]) -> 
                 Err(e) => return err(e),
             };
             dispatch_account_erase(state, headers, body, principal, fresh_auth)
+        }
+        // POST /v1/me/tokens — mint a PAT (secret returned ONCE, 201). Per-principal;
+        // the subject is derived from the Bearer (operator/anon refused 401). The
+        // git-auth WIRE that ACCEPTS a PAT as a credential is the next slice.
+        ["v1", "me", "tokens"] => {
+            let (principal, _) = match two_tier_auth(state, headers) {
+                Ok(pair) => pair,
+                Err(e) => return err(e),
+            };
+            match verbs::write_token::token_create(state, body, &principal, now_ms()) {
+                Ok(created) => match serde_json::to_value(&created) {
+                    Ok(v) => (201, v.to_string()),
+                    Err(e) => err(EngineErr::unavailable(format!("serialize: {e}"))),
+                },
+                Err(e) => err(e),
+            }
         }
         ["v1", "repos", repo, tail @ ..] => {
             // Two-tier Bearer auth: a Clerk-minted engine token, else the dev token.

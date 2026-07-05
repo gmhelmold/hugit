@@ -135,3 +135,28 @@ pub struct MeAccountVm {
     pub usage: AccountUsageVm,
     pub pats: Vec<PatMetaVm>,
 }
+
+/// `POST /v1/me/tokens` request — mint a PAT. `scopes` empty → the engine default
+/// (`repo:read`); `ttl_secs` `0` → never expires.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateTokenReq {
+    pub name: String,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    #[serde(default)]
+    pub ttl_secs: u64,
+}
+
+/// `POST /v1/me/tokens` response — the created token. **`secret` is returned EXACTLY
+/// ONCE** (the engine stores only its hash; it can never be shown again — ADR-0002).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreatedTokenVm {
+    pub id: String,
+    pub name: String,
+    /// The raw secret — shown ONCE, never recoverable. The client MUST capture it now.
+    pub secret: String,
+    pub scopes: Vec<String>,
+    pub created_at: u64,
+    /// Unix ms when it expires; `0` = never.
+    pub expires_at: u64,
+}
