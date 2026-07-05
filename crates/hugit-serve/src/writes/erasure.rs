@@ -254,6 +254,65 @@ pub fn plan_account_erasure(state: &AppState, account: &str) -> Result<ErasurePl
     Ok(plan)
 }
 
+// ── the exclusive-digest PARTITION (slice 2 — the physical-GC blast-radius) ────
+//
+// The premise-corrected model: git-CAS content lands under a SINGLE shared tenant
+// (`HUGIT_SERVE_CAS_TENANT_ID` = `d863fafb`; verified from the write path), so multiple
+// hugit users' objects coexist, content-deduped. Erasing an account is therefore NOT a
+// whole-tenant wipe — the executor may physically erase ONLY the account-EXCLUSIVE
+// digests (referenced by the subject but by NO surviving user); a shared digest is a
+// legitimate retention. Getting this partition wrong deletes a surviving user's data —
+// it is slice-2's #1 blast-radius, so it is pure + fail-closed + hermetically tested here.
+
+/// Enumerates the set of CAS content digests (blake3, 64-hex) a repo REFERENCES — the
+/// VALUES of its `<tenant>/<repo>/oid-index.json` map. Abstracted so the exclusive-digest
+/// partition is HERMETICALLY testable; the real impl reads the R2 oid-index (slice-2
+/// wiring). MUST be authoritative + complete for a repo, or the partition below is unsafe.
+pub trait RepoDigestSource {
+    /// The blake3 digests `slug` references under `tenant`. `Err` on ANY fault — the
+    /// partition treats an indeterminate read as fail-closed (never a partial set).
+    fn repo_digests(
+        &self,
+        tenant: &str,
+        slug: &str,
+    ) -> Result<std::collections::BTreeSet<String>, EngineErr>;
+}
+
+/// Compute the subject-EXCLUSIVE CAS digests: referenced by the erased account's repos
+/// but by **NO surviving (non-subject) repo**. This is the ONLY set the executor may
+/// physically erase — a digest a surviving user still references is a legitimate
+/// retention (the premise-corrected model: intra-hugit dedup in the SHARED tenant).
+///
+/// FAIL-CLOSED, and the fail-closed DIRECTION matters: an enumeration fault on ANY repo
+/// (subject OR surviving) → `Err` (abort, erase NOTHING). A missing SURVIVING repo's
+/// digests would shrink the surviving set → wrongly classify a shared digest as exclusive
+/// → **delete a retained object** — the worst outcome, so we never proceed on a partial
+/// surviving set. (A missing SUBJECT repo only shrinks the exclusive set — a safe
+/// under-erase — but we still abort for a clean all-or-nothing contract.) The CALLER owns
+/// passing a COMPLETE + authoritative `surviving_repos` = EVERY repo owned by a non-subject
+/// account (the durable enumeration, like the planner's B1 fix); under-reporting THAT list
+/// is the real blast-radius, upstream of this function.
+///
+/// # Errors
+/// `503` — any `repo_digests` fault (fail-closed; nothing erased).
+pub fn partition_exclusive_digests(
+    src: &dyn RepoDigestSource,
+    cas_tenant: &str,
+    subject_repos: &[String],
+    surviving_repos: &[String],
+) -> Result<std::collections::BTreeSet<String>, EngineErr> {
+    let mut subject = std::collections::BTreeSet::new();
+    for slug in subject_repos {
+        subject.extend(src.repo_digests(cas_tenant, slug)?);
+    }
+    // The surviving set MUST be complete — a fault here aborts (see the fail-closed note).
+    let mut surviving = std::collections::BTreeSet::new();
+    for slug in surviving_repos {
+        surviving.extend(src.repo_digests(cas_tenant, slug)?);
+    }
+    Ok(subject.difference(&surviving).cloned().collect())
+}
+
 // ── the EXECUTOR (slice 2 — the irreversible legs; NOT route-wired) ───────────
 //
 // This drives the plan against the REAL stores. It is deliberately NOT reachable from
@@ -645,6 +704,89 @@ mod tests {
 
     fn operator() -> Vec<String> {
         vec!["orchestrator:hugit".to_string()]
+    }
+
+    // ── the exclusive-digest partition ────────────────────────────────────────────
+
+    /// A hermetic [`RepoDigestSource`]: slug → its digest set; `fault_on` forces an `Err`
+    /// for one slug (the fail-closed branch).
+    struct MockDigests {
+        map: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+        fault_on: Option<String>,
+    }
+    impl MockDigests {
+        fn new(entries: &[(&str, &[&str])]) -> Self {
+            let mut map = std::collections::BTreeMap::new();
+            for (slug, digs) in entries {
+                map.insert(
+                    (*slug).to_string(),
+                    digs.iter().map(|d| (*d).to_string()).collect(),
+                );
+            }
+            Self {
+                map,
+                fault_on: None,
+            }
+        }
+    }
+    impl RepoDigestSource for MockDigests {
+        fn repo_digests(
+            &self,
+            _t: &str,
+            slug: &str,
+        ) -> Result<std::collections::BTreeSet<String>, EngineErr> {
+            if self.fault_on.as_deref() == Some(slug) {
+                return Err(EngineErr::unavailable("mock oid-index read fault"));
+            }
+            Ok(self.map.get(slug).cloned().unwrap_or_default())
+        }
+    }
+
+    #[test]
+    fn partition_keeps_only_subject_exclusive_digests() {
+        // subject repo references {d1,d2,shared}; a surviving repo references {shared,dv}.
+        // Exclusive = {d1,d2} (shared is a legitimate retention, NEVER erased).
+        let src = MockDigests::new(&[
+            ("subj", &["d1", "d2", "shared"]),
+            ("surv", &["shared", "dv"]),
+        ]);
+        let ex = partition_exclusive_digests(&src, "d863fafb", &["subj".into()], &["surv".into()])
+            .expect("partition");
+        assert_eq!(ex, ["d1", "d2"].iter().map(|s| s.to_string()).collect());
+        assert!(
+            !ex.contains("shared"),
+            "a surviving-referenced digest is NEVER exclusive"
+        );
+    }
+
+    #[test]
+    fn partition_no_surviving_repo_makes_all_subject_digests_exclusive() {
+        let src = MockDigests::new(&[("subj", &["d1", "d2"])]);
+        let ex = partition_exclusive_digests(&src, "t", &["subj".into()], &[]).expect("partition");
+        assert_eq!(ex, ["d1", "d2"].iter().map(|s| s.to_string()).collect());
+    }
+
+    #[test]
+    fn partition_fault_on_a_surviving_repo_aborts_never_over_erases() {
+        // THE critical fail-closed: a fault reading a SURVIVING repo must abort — else a
+        // shared digest would be mis-classified exclusive → a retained object deleted.
+        let mut src = MockDigests::new(&[("subj", &["d1", "shared"]), ("surv", &["shared"])]);
+        src.fault_on = Some("surv".into());
+        let err = partition_exclusive_digests(&src, "t", &["subj".into()], &["surv".into()])
+            .expect_err("a surviving-repo read fault aborts");
+        assert_eq!(
+            err.status, 503,
+            "fail-closed: nothing is classified exclusive on a partial surviving set"
+        );
+    }
+
+    #[test]
+    fn partition_fault_on_a_subject_repo_also_aborts() {
+        let mut src = MockDigests::new(&[("subj", &["d1"])]);
+        src.fault_on = Some("subj".into());
+        let err =
+            partition_exclusive_digests(&src, "t", &["subj".into()], &[]).expect_err("aborts");
+        assert_eq!(err.status, 503);
     }
 
     #[test]
