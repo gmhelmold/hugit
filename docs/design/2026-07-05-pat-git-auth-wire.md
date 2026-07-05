@@ -94,11 +94,12 @@ fetch per account → the chunk-256 startup-deadline class as accounts grow). No
 (mirrors the CAS self-probe): the engine starts with an empty index (PATs 401 until warm — fail-closed)
 and the thread MERGES the scan in (insert-only, so a create during warm-up survives).
 
-**Tracked low notes for the clw review (defensible, NOT fixed here):**
-- *Write-PAT self-proliferation:* a `repo:write` PAT passes the mint route, so it can spawn sibling
-  tokens (same-or-lesser scope) that survive revocation of the original. Within its authority (mirrors
-  GitHub classic PATs); an operational hardening candidate = exclude PAT-authenticated callers from
-  `POST /v1/me/tokens`. Owner/clw call.
+**Tracked low notes for the clw review:**
+- *Write-PAT self-proliferation — CLOSED (hardened).* A `repo:write` PAT used to pass the mint route,
+  so it could spawn sibling tokens surviving revocation of the original. Now `AuthCtx.is_pat` flags a
+  PAT credential and `POST /v1/me/tokens` refuses it with 403 `PAT_CANNOT_MINT` — token creation
+  requires a session (browser/Clerk) credential, GitHub-style. (Revoke stays open to a PAT — it only
+  reduces access.) Test: `a_pat_cannot_mint_another_token`.
 - *Revoke rests on in-memory eviction:* the hot path checks prefix + index-hit + expiry, not the durable
   `pat.revoked` tombstone. Safe under the single-instance invariant + the create-always-writes-`secret_hash`
   guarantee; a non-expiring token whose eviction is skipped (crash window, or the warm-up revoke race)

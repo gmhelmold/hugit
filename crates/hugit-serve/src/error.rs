@@ -138,6 +138,20 @@ impl EngineErr {
         }
     }
 
+    /// 403 — a PAT tried to MINT another token. Token creation requires a session
+    /// (browser/Clerk) credential, GitHub-style — a PAT is a git/API credential, not a
+    /// session, so it cannot spawn survivor tokens that would outlive its own
+    /// revocation. Distinct from `SCOPE_INSUFFICIENT` (that is about write scope; this
+    /// is about the credential TYPE).
+    #[must_use]
+    pub fn pat_cannot_mint() -> Self {
+        Self {
+            status: 403,
+            code: "PAT_CANNOT_MINT",
+            reason: "um PAT não pode criar tokens — use uma sessão de navegador".to_string(),
+        }
+    }
+
     /// 400 — a malformed/invalid request body (e.g. an unknown `mode`/`verdict`
     /// enum value). Distinct from the auth/idempotency/policy refusals.
     #[must_use]

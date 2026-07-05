@@ -987,12 +987,17 @@ fn route_write(state: &AppState, url: &str, headers: &[Header], body: &[u8]) -> 
         // the subject is derived from the Bearer (operator/anon refused 401). The
         // git-auth WIRE that ACCEPTS a PAT as a credential is the next slice.
         ["v1", "me", "tokens"] => {
-            // A read-only PAT is refused here too — it must not MINT a (potentially
-            // write-scoped) token (privilege-escalation guard). `write_auth` 403s it.
+            // A read-only PAT is refused here (write_auth 403s it). A WRITE PAT
+            // authenticates but STILL cannot mint: token creation requires a session
+            // credential (GitHub-style), so a leaked write PAT cannot spawn survivor
+            // tokens that outlive its own revocation (revocation-evasion guard).
             let ctx = match write_auth(state, headers) {
                 Ok(c) => c,
                 Err(e) => return err(e),
             };
+            if ctx.is_pat {
+                return err(EngineErr::pat_cannot_mint());
+            }
             match verbs::write_token::token_create(state, body, &ctx.principal, now_ms()) {
                 Ok(created) => match serde_json::to_value(&created) {
                     Ok(v) => (201, v.to_string()),
@@ -1103,6 +1108,11 @@ pub(crate) struct AuthCtx {
     pub principal: Vec<String>,
     pub fresh_auth: bool,
     pub write_ok: bool,
+    /// Whether the credential was a PAT (resolved at Tier-1.5). A PAT is a git/API
+    /// credential, NOT a session — it must not MINT other tokens (the mint route
+    /// requires a browser/session credential, GitHub-style), so a leaked write PAT
+    /// cannot spawn survivor tokens that outlive its own revocation.
+    pub is_pat: bool,
 }
 
 /// Two-tier(+PAT) auth (Wave-5b token seam + slice 2b):
@@ -1134,6 +1144,7 @@ pub(crate) fn two_tier_auth_ctx(
                     principal: vec![format!("clerk:{}:{}", rec.org, rec.user)],
                     fresh_auth: rec.fresh_auth,
                     write_ok: true,
+                    is_pat: false,
                 });
             }
             crate::token::LookupResult::Expired => return Err(EngineErr::token_expired()),
@@ -1153,6 +1164,7 @@ pub(crate) fn two_tier_auth_ctx(
             principal: pat.principal_chain(),
             fresh_auth: false,
             write_ok: pat.can_write(),
+            is_pat: true,
         });
     }
 
@@ -1214,6 +1226,7 @@ fn two_tier_dev_token(state: &AppState, raw: &str) -> Result<AuthCtx, EngineErr>
                 principal: dev_principal(),
                 fresh_auth: false,
                 write_ok: true,
+                is_pat: false,
             });
         }
         // Flag OFF: no god-path. The dev-token is worth exactly an anonymous visit —
@@ -1223,6 +1236,7 @@ fn two_tier_dev_token(state: &AppState, raw: &str) -> Result<AuthCtx, EngineErr>
             principal: Vec::new(),
             fresh_auth: false,
             write_ok: true,
+            is_pat: false,
         });
     }
     Err(EngineErr::token_invalid())
@@ -2053,6 +2067,39 @@ mod godpath_gate_tests {
         s.pat_auth_enabled = false;
         let err = two_tier_auth_ctx(&s, &bearer(&secret)).unwrap_err();
         assert_eq!(err.status, 401, "a PAT is inert while the flag is off");
+    }
+
+    /// A WRITE PAT authenticates the write door but CANNOT mint another token (the
+    /// revocation-evasion guard): `POST /v1/me/tokens` with a PAT → 403 PAT_CANNOT_MINT.
+    /// A session credential mints normally.
+    #[test]
+    fn a_pat_cannot_mint_another_token() {
+        let mut s = unique_state();
+        s.pat_auth_enabled = true;
+        let write_pat = mint_pat(&s, "clerk:org-a:u1", &["repo:write"]);
+        // The write PAT DOES pass the write door (write_ok) — but is flagged is_pat.
+        let ctx = two_tier_auth_ctx(&s, &bearer(&write_pat)).unwrap();
+        assert!(ctx.write_ok && ctx.is_pat);
+        let body = serde_json::json!({"name":"x","scopes":["repo:read"],"ttl_secs":0})
+            .to_string()
+            .into_bytes();
+        let (code, resp) = route_write(&s, "/v1/me/tokens", &bearer(&write_pat), &body);
+        assert_eq!(code, 403, "a PAT cannot mint tokens");
+        assert!(
+            resp.contains("PAT_CANNOT_MINT"),
+            "the reason names the guard"
+        );
+        // A real Clerk SESSION token (is_pat=false) mints normally (201).
+        let raw = s
+            .token_store
+            .mint(&ClerkPrincipal {
+                user: "u9".to_string(),
+                org: "org-z".to_string(),
+                fresh_auth: true,
+            })
+            .expect("mint a clerk engine token");
+        let (code2, _) = route_write(&s, "/v1/me/tokens", &bearer(&raw), &body);
+        assert_eq!(code2, 201, "a session credential mints normally");
     }
 }
 
