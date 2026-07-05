@@ -18,12 +18,24 @@
 //! Erasure operates on the OBJECT/content store (tombstone by content hash), NEVER on
 //! the append-only provenance chain. A repo is tombstoned by appending a TERMINAL
 //! [`REPO_ERASED_KIND`] record to its log (never a rewrite) — the projection is
-//! terminal, so the read/authz gate serves 404 and the git wire serves nothing. The
-//! CoreLink CAS is cross-tenant DEDUPLICATED, so a shared object cannot be physically
-//! deleted unilaterally — the honest v0 posture is manifest/repo tombstone + a
-//! non-empty RESIDUAL-RISK disclosure for the shared-object CAS leg (the X7/X12
-//! mirror-leg discipline). The disclosure IS the deliverable where physical delete is
-//! not unilaterally provable.
+//! terminal, so the read/authz gate serves 404 and the git wire serves nothing.
+//!
+//! ## CAS erasure — premise CORRECTED 2026-07-05 (corelink-server TL)
+//!
+//! An earlier model here assumed the CoreLink CAS was cross-tenant content-deduplicated,
+//! so a "shared" object could not be physically deleted → a residual-risk disclosure.
+//! **That premise was WRONG.** CoreLink CAS is keyed PER-TENANT
+//! (`<region>/HMAC(TDK,tenant)/<digest>`), so cross-CoreLink-tenant physical sharing is
+//! impossible by construction — a delete under hugit's tenant can never touch another
+//! CoreLink tenant. Two consequences:
+//! - **Exclusivity is INTRA-hugit + ours:** the only sharing is two of hugit's OWN users
+//!   deduping to one object, answerable ONLY from hugit's manifest graph. An object
+//!   referenced by a SURVIVING user is a **legitimate retention** (that user still owns
+//!   it) — NOT a residual-risk disclosure.
+//! - **Account-EXCLUSIVE objects are physically deletable** via corelink-server's LIVE
+//!   seam `POST /_internal/cas/<tenant>/<hash>/erase` → 410 Gone (see [`CasEraseTransport`]).
+//!   The executor erases each exclusive digest + asserts the 410, then claims `executed`;
+//!   until a transport is wired it claims `partial` (never over-claims).
 
 use hugit_refstore::{Endpoint, EventLog};
 
@@ -380,30 +392,108 @@ fn append_account_claim(
     ))
 }
 
+/// The physical CAS-erase seam — corelink-server's LIVE internal route
+/// `POST /_internal/cas/<tenant>/<hash>/erase` (physically deletes the R2 bytes + writes
+/// a `cas_tombstone`, so a subsequent fetch-by-digest returns **410 Gone**). Abstracted
+/// so the executor is HERMETICALLY testable against a mock; the REAL HTTP impl + the
+/// least-privilege `CORELINK_ERASE_AUTH_KEY` + the DSR legitimacy step are slice-2 (built
+/// behind clw's re-audit before any live enablement).
+///
+/// Every method is FAIL-CLOSED: an uncertain erase/verify is an `Err`, NEVER a false
+/// "gone" — the executor must never claim `executed` on an unproven physical delete.
+pub trait CasEraseTransport {
+    /// Physically erase `digest` under `tenant`, authorized by the DSR `dsr_id`.
+    /// IDEMPOTENT (an already-erased digest → `Ok`, mirrors the seam's `AlreadyErased`).
+    /// `Err` on any uncertain outcome (never a silent success).
+    fn erase(
+        &self,
+        tenant: &str,
+        digest: &str,
+        dsr_id: &str,
+        reason: &str,
+    ) -> Result<(), EngineErr>;
+
+    /// Verify `digest` is physically GONE (a fetch-by-digest returns 410, not 200). The
+    /// executor asserts this PER digest before claiming `executed` — 410-not-404 is the
+    /// affirmative physical-GC proof, distinct from an unreachable-named-path.
+    fn is_gone(&self, tenant: &str, digest: &str) -> Result<bool, EngineErr>;
+}
+
 /// EXECUTE an account erasure (GDPR1 Part 2 — the irreversible legs). NOT route-wired;
-/// gated behind clw's re-audit before any live enablement.
-///
-/// Ordering (fail-closed `executed ⇒ durable`, the receive-pack discipline):
-/// 1. Plan (fail-closed on an indeterminate durable enumeration — never under-erase).
-/// 2. If the account already `erasure.executed` → NO-OP (idempotent + irreversible).
-/// 3. Tombstone EVERY pending owned repo durably (append-only terminal `repo.erased`;
-///    each a CAS-guarded, idempotent persist). ANY failure aborts BEFORE the claim.
-/// 4. The terminal claim on the account log, LAST:
-///    - the plan is **launch-blocked** (account-exclusive CAS physical GC unmet) →
-///      `erasure.partial` (records progress + the outstanding obligation; NEVER an
-///      over-claim of full erasure);
-///    - otherwise → `erasure.executed` (the cascade is complete).
-///
-/// The append-only tombstones keep every repo's provenance chain verifiable (X7/X12).
-///
-/// # Errors
-/// `503` — an indeterminate enumeration, any repo-tombstone durable fault, or the claim
-/// append fault (fail-closed; nothing over-claimed). `401` — an unclassifiable principal.
+/// gated behind clw's re-audit before any live enablement. NO CAS erase transport → the
+/// account-exclusive physical GC is unmet, so the claim is `partial` (never over-claims).
+/// The transport path is [`execute_account_erasure_with_erase`].
 pub fn execute_account_erasure(
     state: &AppState,
     account: &str,
     principal_chain: Vec<String>,
     at: u64,
+) -> Result<ErasureOutcome, EngineErr> {
+    execute_account_erasure_inner(state, account, principal_chain, at, None, "", &[], "")
+}
+
+/// EXECUTE an account erasure WITH the physical CAS-erase transport (the completed
+/// cost-of-erasure path). After tombstoning the owned repos, it erases EACH
+/// account-exclusive digest via `erase` and asserts each is 410-GONE; ONLY when every
+/// exclusive digest is erased + verified does it claim `erasure.executed`. Any un-erased
+/// or un-verified digest → `erasure.partial` (records progress, never over-claims).
+///
+/// `cas_tenant` is the CoreLink CAS tenant the digests live under (hugit's git tenant).
+/// `exclusive_digests` MUST be the subject-EXCLUSIVE set (referenced ONLY by the erased
+/// account — a surviving user's object is a legitimate retention, NEVER passed here); its
+/// computation from the manifest graph + the real HTTP transport + the DSR `dsr_id`
+/// origin are slice-2 (behind clw's re-audit). Passing a surviving-user digest here would
+/// delete a retained object — so the CALLER owns that partition's correctness.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_account_erasure_with_erase(
+    state: &AppState,
+    account: &str,
+    principal_chain: Vec<String>,
+    at: u64,
+    erase: &dyn CasEraseTransport,
+    cas_tenant: &str,
+    exclusive_digests: &[String],
+    dsr_id: &str,
+) -> Result<ErasureOutcome, EngineErr> {
+    execute_account_erasure_inner(
+        state,
+        account,
+        principal_chain,
+        at,
+        Some(erase),
+        cas_tenant,
+        exclusive_digests,
+        dsr_id,
+    )
+}
+
+/// The shared executor drive (fail-closed `executed ⇒ every leg durable + physically GC'd`,
+/// the receive-pack discipline):
+/// 1. Plan (fail-closed on an indeterminate durable enumeration — never under-erase).
+/// 2. Already `erasure.executed` → NO-OP (idempotent + irreversible).
+/// 3. Tombstone EVERY pending owned repo durably (append-only terminal `repo.erased`,
+///    CAS-guarded + idempotent). ANY failure aborts BEFORE the claim (503).
+/// 4. The account-exclusive CAS physical GC:
+///    - no transport → the obligation is unmet → NOT complete (→ `partial`);
+///    - transport → erase EACH exclusive digest + assert 410-gone; ALL gone → complete;
+///      an erase fault propagates (503, retry converges — idempotent); a post-erase
+///      not-gone → NOT complete (→ `partial`, never a silent over-claim).
+/// 5. The terminal claim on the account log, LAST: `erasure.executed` iff complete, else
+///    `erasure.partial` (progress + the outstanding obligation).
+///
+/// # Errors
+/// `503` — indeterminate enumeration, any repo-tombstone or erase durable fault, or the
+/// claim append fault (fail-closed; nothing over-claimed). `401` — unclassifiable principal.
+#[allow(clippy::too_many_arguments)]
+fn execute_account_erasure_inner(
+    state: &AppState,
+    account: &str,
+    principal_chain: Vec<String>,
+    at: u64,
+    erase: Option<&dyn CasEraseTransport>,
+    cas_tenant: &str,
+    exclusive_digests: &[String],
+    dsr_id: &str,
 ) -> Result<ErasureOutcome, EngineErr> {
     let plan = plan_account_erasure(state, account)?;
 
@@ -424,13 +514,36 @@ pub fn execute_account_erasure(
         tombstoned += 1;
     }
 
-    // The terminal claim, LAST. Launch-blocked → partial (never over-claim `executed`).
+    // The account-exclusive CAS physical GC. `gc_complete` gates `executed`.
+    let (gc_complete, digests_erased) =
+        drive_cas_gc(&plan, erase, cas_tenant, exclusive_digests, dsr_id)?;
+
+    // The terminal claim, LAST. Not complete → partial (never over-claim `executed`).
     let acct_sink: &dyn AccountLogSink = state;
-    if plan.is_launch_blocked() {
+    if gc_complete {
+        let payload = serde_json::json!({
+            "account": account,
+            "state": "executed",
+            "repos_tombstoned": tombstoned,
+            "digests_erased": digests_erased,
+        });
+        append_account_claim(
+            acct_sink,
+            account,
+            ERASURE_EXECUTED_KIND,
+            &principal_chain,
+            at,
+            &payload,
+        )?;
+        Ok(ErasureOutcome::Executed {
+            repos_tombstoned: tombstoned,
+        })
+    } else {
         let payload = serde_json::json!({
             "account": account,
             "state": "partial",
             "repos_tombstoned": tombstoned,
+            "digests_erased": digests_erased,
             "outstanding": "cas-exclusive-physical-gc",
         });
         append_account_claim(
@@ -445,24 +558,38 @@ pub fn execute_account_erasure(
             repos_tombstoned: tombstoned,
             blocked_reason: plan.cas_gc.note.clone(),
         })
-    } else {
-        let payload = serde_json::json!({
-            "account": account,
-            "state": "executed",
-            "repos_tombstoned": tombstoned,
-        });
-        append_account_claim(
-            acct_sink,
-            account,
-            ERASURE_EXECUTED_KIND,
-            &principal_chain,
-            at,
-            &payload,
-        )?;
-        Ok(ErasureOutcome::Executed {
-            repos_tombstoned: tombstoned,
-        })
     }
+}
+
+/// Drive the account-exclusive CAS physical GC. Returns `(gc_complete, digests_erased)`.
+/// FAIL-CLOSED: `gc_complete` is true ONLY when the obligation is not required, or every
+/// exclusive digest is erased AND 410-verified. An erase fault propagates (`Err` → 503,
+/// idempotent retry converges); a post-erase not-gone yields `gc_complete=false` (→
+/// `partial`, never a silent over-claim).
+fn drive_cas_gc(
+    plan: &ErasurePlan,
+    erase: Option<&dyn CasEraseTransport>,
+    cas_tenant: &str,
+    exclusive_digests: &[String],
+    dsr_id: &str,
+) -> Result<(bool, usize), EngineErr> {
+    if !plan.cas_gc.required {
+        return Ok((true, 0)); // no owned objects → nothing to physically GC
+    }
+    let Some(erase) = erase else {
+        return Ok((false, 0)); // obligation required but no transport → unmet → partial
+    };
+    let mut erased = 0usize;
+    let mut all_gone = true;
+    for digest in exclusive_digests {
+        erase.erase(cas_tenant, digest, dsr_id, "erasure")?; // hard fault → 503, retry
+        if erase.is_gone(cas_tenant, digest)? {
+            erased += 1;
+        } else {
+            all_gone = false; // erased but not 410-verified → do NOT over-claim
+        }
+    }
+    Ok((all_gone, erased))
 }
 
 #[cfg(test)]
@@ -750,6 +877,173 @@ mod tests {
         // And a replay of a completed account is a NO-OP (irreversible + idempotent).
         let replay = execute_account_erasure(&st, "org-a", operator(), 11).expect("replay");
         assert_eq!(replay, ErasureOutcome::AlreadyExecuted);
+    }
+
+    // ── the CAS-erase transport path (premise-corrected: exclusive digests ARE
+    //    physically deletable via the live seam) ───────────────────────────────────
+
+    /// A hermetic [`CasEraseTransport`]: records erased digests; `is_gone` reflects the
+    /// record. `verify_gone=false` forces the anomalous post-erase not-gone branch;
+    /// `fail_erase=true` forces the 503 hard-fault branch.
+    struct MockErase {
+        erased: std::cell::RefCell<std::collections::BTreeSet<String>>,
+        verify_gone: bool,
+        fail_erase: bool,
+    }
+    impl MockErase {
+        fn new() -> Self {
+            Self {
+                erased: std::cell::RefCell::new(std::collections::BTreeSet::new()),
+                verify_gone: true,
+                fail_erase: false,
+            }
+        }
+    }
+    impl CasEraseTransport for MockErase {
+        fn erase(&self, _t: &str, digest: &str, _d: &str, _r: &str) -> Result<(), EngineErr> {
+            if self.fail_erase {
+                return Err(EngineErr::unavailable("mock erase fault"));
+            }
+            self.erased.borrow_mut().insert(digest.to_string());
+            Ok(())
+        }
+        fn is_gone(&self, _t: &str, digest: &str) -> Result<bool, EngineErr> {
+            Ok(self.verify_gone && self.erased.borrow().contains(digest))
+        }
+    }
+
+    #[test]
+    fn execute_with_erase_erases_exclusive_digests_and_records_executed() {
+        // A transport present + every exclusive digest erased + 410-verified → the
+        // cascade COMPLETES → `erasure.executed` (the premise-corrected happy path).
+        let st = state_with(&[("alpha", "org-a", false)]);
+        let mock = MockErase::new();
+        let digests = vec!["deadbeef01".to_string(), "deadbeef02".to_string()];
+        let outcome = execute_account_erasure_with_erase(
+            &st,
+            "org-a",
+            operator(),
+            10,
+            &mock,
+            "d863fafb",
+            &digests,
+            "dsr-1",
+        )
+        .expect("execute");
+        assert_eq!(
+            outcome,
+            ErasureOutcome::Executed {
+                repos_tombstoned: 1
+            }
+        );
+        assert_eq!(
+            mock.erased.borrow().len(),
+            2,
+            "both exclusive digests erased"
+        );
+        let (alog, _) = st.load_account_log("org-a").unwrap();
+        assert!(
+            alog.records()
+                .iter()
+                .any(|r| r.kind == ERASURE_EXECUTED_KIND)
+        );
+    }
+
+    #[test]
+    fn execute_with_erase_no_exclusive_digests_is_executed_legitimate_retention() {
+        // The account owns a repo but ALL its objects are shared with a SURVIVING user
+        // (exclusive set empty) → nothing to physically delete → complete (legitimate
+        // retention, NOT a residual-risk). `erasure.executed`.
+        let st = state_with(&[("alpha", "org-a", false)]);
+        let mock = MockErase::new();
+        let outcome = execute_account_erasure_with_erase(
+            &st,
+            "org-a",
+            operator(),
+            10,
+            &mock,
+            "d863fafb",
+            &[],
+            "dsr-1",
+        )
+        .expect("execute");
+        assert_eq!(
+            outcome,
+            ErasureOutcome::Executed {
+                repos_tombstoned: 1
+            }
+        );
+        assert!(
+            mock.erased.borrow().is_empty(),
+            "no exclusive digest to erase"
+        );
+    }
+
+    #[test]
+    fn execute_with_erase_is_partial_when_a_digest_is_not_410_verified() {
+        // FAIL-CLOSED: a digest erased but NOT 410-verified → the cascade does NOT
+        // over-claim `executed` → `erasure.partial`.
+        let st = state_with(&[("alpha", "org-a", false)]);
+        let mut mock = MockErase::new();
+        mock.verify_gone = false;
+        let digests = vec!["deadbeef01".to_string()];
+        let outcome = execute_account_erasure_with_erase(
+            &st,
+            "org-a",
+            operator(),
+            10,
+            &mock,
+            "d863fafb",
+            &digests,
+            "dsr-1",
+        )
+        .expect("execute");
+        assert!(
+            matches!(outcome, ErasureOutcome::Partial { .. }),
+            "not 410-verified → partial, never over-claim"
+        );
+        let (alog, _) = st.load_account_log("org-a").unwrap();
+        assert!(
+            alog.records()
+                .iter()
+                .any(|r| r.kind == ERASURE_PARTIAL_KIND)
+        );
+        assert!(
+            !alog
+                .records()
+                .iter()
+                .any(|r| r.kind == ERASURE_EXECUTED_KIND)
+        );
+    }
+
+    #[test]
+    fn execute_with_erase_503_on_erase_fault_never_claims() {
+        // A hard erase fault propagates (503) BEFORE any claim — fail-closed, idempotent
+        // retry converges (nothing over-claimed).
+        let st = state_with(&[("alpha", "org-a", false)]);
+        let mut mock = MockErase::new();
+        mock.fail_erase = true;
+        let digests = vec!["deadbeef01".to_string()];
+        let err = execute_account_erasure_with_erase(
+            &st,
+            "org-a",
+            operator(),
+            10,
+            &mock,
+            "d863fafb",
+            &digests,
+            "dsr-1",
+        )
+        .expect_err("a hard erase fault is a 503");
+        assert_eq!(err.status, 503);
+        let (alog, _) = st.load_account_log("org-a").unwrap();
+        assert!(
+            !alog
+                .records()
+                .iter()
+                .any(|r| r.kind == ERASURE_EXECUTED_KIND || r.kind == ERASURE_PARTIAL_KIND),
+            "no terminal claim on a mid-erase fault (repos tombstoned, retry converges)"
+        );
     }
 
     #[test]
