@@ -1,10 +1,16 @@
 # PAT git-auth wire — the decided design (slice 2b of WP-#90)
 
-> **Status:** DECIDED design. Slice 2a (store + create/revoke + `me/account.pats`) is live on `main`
-> (#259). Slice 2b's PURE FOUNDATION (the `PatAuth` resolver + `index_account_log` + `resolve_pat`,
-> adversarially unit-tested) is landed alongside this doc. This doc is the plan for the HOT-PATH
-> WIRING — the one remaining step, which changes the live auth surface and so ships behind an
-> adversarial review (treated like the GDPR execution cascade: build → review → enable).
+> **Status:** DECIDED design + WIRING BUILT (behind the `HUGIT_SERVE_PAT_AUTH` flag, default
+> OFF — awaiting the adversarial review before live enable). Slice 2a (store + create/revoke +
+> `me/account.pats`) is live on `main` (#259). Slice 2b's PURE FOUNDATION (the `PatAuth` resolver +
+> `index_account_log` + `resolve_pat`) landed in #260. **The HOT-PATH WIRING is now built** (this
+> branch): the `AppState` index field + boot-scan of `_accounts/*` + create/revoke refresh + the
+> Bearer AND HTTP-Basic credential extraction + Tier-1.5 in `two_tier_auth`/`clone_principal`/
+> receive-pack + the `can_write` scope gate (403 `SCOPE_INSUFFICIENT`) + the multi-instance
+> fail-closed boot guard. Gate-green (626 lib tests + the new wiring tests, clippy `-D warnings`,
+> fmt). It changes the live auth surface, so it stays behind `HUGIT_SERVE_PAT_AUTH=1` (OFF on prod)
+> until the adversarial review below signs off — the same discipline as the GDPR execution cascade:
+> build → review → enable.
 > **Why gated:** accepting a PAT as a git/API credential is a NEW AUTH SURFACE. A subtle bug (a
 > revoked/expired token accepted, a PAT conferring operator, cross-user leakage, a read-only PAT
 > writing) is a security incident. It gets the same discipline as any security-surface go-live.
@@ -88,9 +94,15 @@ never/unknown) — honest, flagged to githugr.
 
 1. ✅ Store + create/revoke + `me/account.pats` (#259, slice 2a).
 2. ✅ The PURE resolver foundation (`PatAuth` + `index_account_log` + `resolve_pat`) + adversarial
-   unit tests (this PR).
-3. **[clw / adversarial review of THIS design + the wiring PR]** — the gate before live.
-4. The hot-path WIRING: the `AppState` index field + boot scan + create/revoke refresh + the
-   Bearer/Basic extraction + Tier-1.5 in `two_tier_auth`/`clone_principal`/receive-pack + the
-   `can_write` scope gate. Behind the review; NOT enabled on `max_instances>1`.
-5. Deploy (a redeploy) + live-verify: `git clone`/`git push` with a real PAT as-tenant; revoke → 401.
+   unit tests (#260).
+3. ✅ **The hot-path WIRING (built, behind the flag):** the `AppState` `pat_index` field + boot-scan
+   of `_accounts/*` (fail-closed-DENY on a fault) + create/revoke index refresh (immediate mint/
+   revoke, no reboot) + the Bearer AND HTTP-Basic credential extraction (`candidate_pat_secrets` +
+   the hand-rolled panic-safe base64 decoder) + Tier-1.5 in `two_tier_auth_ctx`/`clone_principal`/
+   receive-pack (before the dev-token → never operator) + the `can_write` scope gate (`write_auth`
+   → 403 `SCOPE_INSUFFICIENT` on `/v1` writes + receive-pack) + the multi-instance fail-closed boot
+   guard. Gated on `HUGIT_SERVE_PAT_AUTH` (default OFF). Tests cover every checklist item below.
+4. **[clw / adversarial review of THIS design + the wiring — the gate before live enable]** ← HERE.
+5. Enable (`HUGIT_SERVE_PAT_AUTH=1`) + redeploy + live-verify: `git clone`/`git push` with a real
+   PAT as-tenant; a read-only PAT is refused push (403); revoke → the token stops authenticating.
+   NOT enabled on `max_instances>1` until the B5 read-after-write seam.

@@ -231,9 +231,10 @@ pub fn respond_git(
 /// bypass stays confined to the `/v1` POST write door + receive-pack, which call
 /// `two_tier_auth` directly — it is NOT entangled here.
 fn clone_principal(state: &AppState, headers: &[tiny_http::Header]) -> Vec<String> {
-    // Extract `Authorization: Bearer <token>` (case-insensitive header name); absent
-    // → anonymous. Mirrors `two_tier_auth`'s extraction exactly.
-    let raw = headers
+    // The full `Authorization` value (case-insensitive header name); absent →
+    // anonymous. Handles Bearer AND the git-CLI HTTP-Basic (a PAT clone puts the token
+    // in the Basic PASSWORD).
+    let auth_value = headers
         .iter()
         .find(|h| {
             h.field
@@ -241,20 +242,28 @@ fn clone_principal(state: &AppState, headers: &[tiny_http::Header]) -> Vec<Strin
                 .as_str()
                 .eq_ignore_ascii_case("Authorization")
         })
-        .and_then(|h| h.value.as_str().strip_prefix("Bearer ").map(str::to_string));
-    let Some(raw) = raw else {
-        return Vec::new(); // no Bearer → anonymous (public-clone gate)
+        .map(|h| h.value.as_str().to_string());
+    let Some(auth_value) = auth_value else {
+        return Vec::new(); // no credential → anonymous (public-clone gate)
     };
 
-    // Tier-1 ONLY: the engine-token store (a Clerk session exchange minted it). A
-    // valid, unexpired record → the real tenant principal. Anything else (Invalid /
-    // Expired / lock fault) → anonymous, NOT an error and NOT the operator path.
-    match state.token_store.lookup(&raw) {
-        crate::token::LookupResult::Ok(rec) => {
-            vec![format!("clerk:{}:{}", rec.org, rec.user)]
-        }
-        _ => Vec::new(), // invalid/expired token → fail-closed to anonymous (public only)
+    // Tier-1: the engine-token store (Bearer only — a Clerk session exchange minted
+    // it). A valid, unexpired record → the real tenant principal.
+    if let Some(raw) = auth_value.strip_prefix("Bearer ")
+        && let crate::token::LookupResult::Ok(rec) = state.token_store.lookup(raw)
+    {
+        return vec![format!("clerk:{}:{}", rec.org, rec.user)];
     }
+
+    // Tier-1.5: a hugit PAT (Bearer or the Basic password). Resolves to the token
+    // OWNER's real tenant principal — NEVER the operator (the resolver stores only
+    // clerk owners; the dev-token god-path is deliberately still NOT consulted here). A
+    // read-only PAT authenticates a clone (a read needs no write scope). No-op when PAT
+    // auth is off. Anything unknown/expired/revoked → anonymous (public only).
+    if let Some(pat) = state.resolve_pat_from_auth(&auth_value, now_ms()) {
+        return pat.principal_chain();
+    }
+    Vec::new() // invalid/expired/unknown → fail-closed to anonymous (public only)
 }
 
 /// Build the v1 `info/refs` advertisement body for `repo`, or `None` (→ 404) when
@@ -895,10 +904,17 @@ fn handle_receive_advertise(state: &AppState, repo: &str, request: Request, io_b
         return respond_push_forbidden(request, io_budget);
     }
     let headers: Vec<tiny_http::Header> = request.headers().to_vec();
-    let principal = match crate::server::two_tier_auth(state, &headers) {
-        Ok((p, _)) => p,
+    let ctx = match crate::server::two_tier_auth_ctx(state, &headers) {
+        Ok(c) => c,
         Err(_) => return respond_push_unauth(request, io_budget),
     };
+    // A push is a WRITE: a `repo:read`-only PAT is refused at the handshake with a
+    // clear scope 403 (it can clone/fetch, never push). A session/dev credential or a
+    // `repo:write` PAT passes (`write_ok`).
+    if !ctx.write_ok {
+        return respond_push_scope_forbidden(request, io_budget);
+    }
+    let principal = ctx.principal;
     if !crate::state::is_safe_repo_slug(repo) {
         return respond_not_found(request, io_budget);
     }
@@ -977,10 +993,17 @@ fn handle_receive_pack(
     // Authenticate — a push is a WRITE, so it MUST carry a valid bearer (unlike an
     // anonymous clone). An invalid/absent token → 401.
     let headers: Vec<tiny_http::Header> = request.headers().to_vec();
-    let principal = match crate::server::two_tier_auth(state, &headers) {
-        Ok((p, _)) => p,
+    let ctx = match crate::server::two_tier_auth_ctx(state, &headers) {
+        Ok(c) => c,
         Err(_) => return respond_push_unauth(request, io_budget),
     };
+    // A push is a WRITE: a `repo:read`-only PAT is refused at the handshake with a
+    // clear scope 403 (it can clone/fetch, never push). A session/dev credential or a
+    // `repo:write` PAT passes (`write_ok`).
+    if !ctx.write_ok {
+        return respond_push_scope_forbidden(request, io_budget);
+    }
+    let principal = ctx.principal;
 
     // A write seam is required (GIT_DIR mode). No seam (CAS mode / unknown repo) →
     // 404, no oracle. Everything past here is gated behind a successful authz.
@@ -1824,6 +1847,23 @@ fn respond_push_bad_request(request: Request, detail: &str, io_budget: Duration)
 
 fn respond_push_forbidden(request: Request, io_budget: Duration) {
     let body = PUSH_FORBIDDEN_BODY.as_bytes().to_vec();
+    let body_len = body.len();
+    send(
+        request,
+        Response::from_data(body).with_status_code(403).with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..])
+                .expect("static content-type"),
+        ),
+        body_len,
+        io_budget,
+    );
+}
+
+/// 403 for a WRITE attempted with a read-only credential (a `repo:read`-only PAT). A
+/// distinct, clear message from the deploy-disabled 403 above — the caller CAN read,
+/// the TOKEN just lacks `repo:write`.
+fn respond_push_scope_forbidden(request: Request, io_budget: Duration) {
+    let body = b"git push requires a token with repo:write scope\n".to_vec();
     let body_len = body.len();
     send(
         request,

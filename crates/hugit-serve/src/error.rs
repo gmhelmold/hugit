@@ -124,6 +124,20 @@ impl EngineErr {
         }
     }
 
+    /// 403 — the credential AUTHENTICATED but its SCOPE is insufficient for a
+    /// mutation: a `repo:read`-only PAT attempting a write/push. This is the
+    /// read-authz ≠ write-authz law at the TOKEN layer — the caller may well OWN the
+    /// target (so this is NOT the ownership 404, which hides existence), the token
+    /// simply lacks `repo:write`. Distinct from 401 (authN) and the ownership 404.
+    #[must_use]
+    pub fn scope_insufficient() -> Self {
+        Self {
+            status: 403,
+            code: "SCOPE_INSUFFICIENT",
+            reason: "este token não tem escopo de escrita (repo:write)".to_string(),
+        }
+    }
+
     /// 400 — a malformed/invalid request body (e.g. an unknown `mode`/`verdict`
     /// enum value). Distinct from the auth/idempotency/policy refusals.
     #[must_use]
