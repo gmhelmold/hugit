@@ -157,6 +157,61 @@ pub fn sign_s3_get(
     }
 }
 
+/// URI-encode a single query-string parameter VALUE (RFC-3986, no kept slash — so a
+/// prefix like `<tenant>/` encodes its `/` as `%2F`, exactly what the SigV4 canonical
+/// query and the wire URL both require). Exposed so the list caller builds the ONE
+/// canonical query string that is both signed and sent (they MUST match byte-for-byte).
+#[must_use]
+pub fn encode_query_value(v: &str) -> String {
+    uri_encode(v, false)
+}
+
+/// Sign a path-style R2 **bucket LIST** (ListObjectsV2): a bodyless GET on the bucket
+/// resource `/<bucket>` carrying `canonical_query` (the caller's pre-built, RFC-3986-
+/// encoded, ASCII-sorted `k=v&k=v` string — e.g.
+/// `continuation-token=...&list-type=2&prefix=...`). Same proven SigV4 core as
+/// [`sign_s3_get`], differing only in the canonical URI (the bucket, no object key) and
+/// the non-empty canonical query. The caller MUST send the IDENTICAL query on the wire.
+pub fn sign_s3_list(
+    host: &str,
+    bucket: &str,
+    canonical_query: &str,
+    key_id: &str,
+    secret: &str,
+    region: &str,
+    epoch_secs: u64,
+) -> SignedHeaders {
+    let (amz_date, date_stamp) = format_amz_date(epoch_secs);
+    // The LIST resource is the bucket root: `/<bucket>` (no object key).
+    let canonical_uri = format!("/{}", uri_encode(bucket, false));
+    let headers = vec![
+        ("host".to_string(), host.to_string()),
+        (
+            "x-amz-content-sha256".to_string(),
+            EMPTY_PAYLOAD_SHA256.to_string(),
+        ),
+        ("x-amz-date".to_string(), amz_date.clone()),
+    ];
+    let authorization = authorization(
+        "GET",
+        &canonical_uri,
+        canonical_query,
+        &headers,
+        EMPTY_PAYLOAD_SHA256,
+        &amz_date,
+        &date_stamp,
+        region,
+        "s3",
+        key_id,
+        secret,
+    );
+    SignedHeaders {
+        authorization,
+        amz_date,
+        content_sha256: EMPTY_PAYLOAD_SHA256.to_string(),
+    }
+}
+
 /// Sign a path-style R2 PUT of `body` to `bucket`/`key`. Identical SigV4 algorithm
 /// to [`sign_s3_get`] (same proven [`authorization`] core), differing only in the
 /// method (`PUT`) and — the one PUT-specific bit — the `x-amz-content-sha256` /

@@ -1169,6 +1169,55 @@ impl AppState {
         Some(out)
     }
 
+    /// The DURABLE authoritative `(slug, EventLog)` of every repo owned by
+    /// `owner_tenant` — the completeness-correct enumeration for GDPR1 erasure (the B1
+    /// audit fix). Unlike [`owned_repo_logs`](Self::owned_repo_logs) (in-memory loaded
+    /// set only), this UNIONS the durable store listing ([`LogSource::list_repo_slugs`])
+    /// with the in-memory loaded set, so it can NEVER miss:
+    /// - a **durable-but-unloaded** repo (provisioned, then dropped from the boot env —
+    ///   its R2 log survives, its git seam is gone) — caught by the durable listing;
+    /// - a **just-provisioned** repo not yet visible to an eventually-consistent listing
+    ///   — caught by the in-memory union.
+    ///
+    /// FAIL-CLOSED: any listing fault OR any candidate log that will not load/verify →
+    /// `Err(503)`. A subject must NEVER be told "erased" while a durable repo of theirs
+    /// survives because the enumeration was silently incomplete (the worst erasure bug).
+    ///
+    /// Cost: one bounded durable listing + one verified load per candidate — acceptable
+    /// on the rare, authorized erasure path (NOT a hot read).
+    pub fn authoritative_owned_repo_logs(
+        &self,
+        owner_tenant: &str,
+    ) -> Result<Vec<(String, EventLog)>, EngineErr> {
+        // Durable listing ∪ in-memory loaded set (dedup) — the complete candidate set.
+        let mut names: Vec<String> = self.source.list_repo_slugs()?;
+        names.extend(self.repos.keys().cloned());
+        {
+            let runtime = self.repos_runtime.read().unwrap_or_else(|e| e.into_inner());
+            names.extend(runtime.keys().cloned());
+        }
+        names.sort();
+        names.dedup();
+
+        let mut out = Vec::new();
+        for name in names {
+            // Fail-closed: an unloadable candidate is indeterminate — refuse the whole
+            // plan (never under-report). An absent log (a listing/runtime race where the
+            // object vanished) is a genuine 404 → skip; a 5xx propagates.
+            match self.load_verified(&name) {
+                Ok(log) => {
+                    let meta = crate::authz::project_repo_meta(&log);
+                    if meta.owner_tenant.as_deref() == Some(owner_tenant) {
+                        out.push((name, log));
+                    }
+                }
+                Err(e) if e.status == 404 => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(out)
+    }
+
     /// The number of repos whose git content seam is loaded (the `/readyz`
     /// capability count). Zero = git serving not live for any repo. Counts the boot
     /// set PLUS the runtime overlay (the two are disjoint by construction — insert
@@ -1503,6 +1552,70 @@ impl LogSource {
             }
         }
     }
+
+    /// Enumerate the DURABLE repo slugs in the store — the authoritative owned-set
+    /// source the GDPR1 erasure planner needs (the B1 completeness fix; the in-memory
+    /// loaded set can MISS a durable-but-unloaded repo — one provisioned then dropped
+    /// from the boot env, whose R2 log survives). A repo log is a SINGLE-segment
+    /// `<slug>.json` object; the reserved `_accounts/`/`_erasure/` sub-prefixes and the
+    /// per-repo `<slug>/refs.json`/`oid-index.json` manifests (extra `/`) are EXCLUDED —
+    /// only top-level repo logs count. FAIL-CLOSED (`Err` → 503) on any listing fault:
+    /// an indeterminate enumeration must never silently under-report the erasure set.
+    fn list_repo_slugs(&self) -> Result<Vec<String>, EngineErr> {
+        match self {
+            LogSource::Local { dir } => {
+                let rd = match std::fs::read_dir(dir) {
+                    Ok(rd) => rd,
+                    // A not-yet-created dir is an empty world (no durable repos), not a
+                    // fault — the boot loader creates it on first write.
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+                    Err(e) => {
+                        return Err(EngineErr::unavailable(format!(
+                            "local repo listing failed: {e}"
+                        )));
+                    }
+                };
+                let mut slugs = Vec::new();
+                for entry in rd {
+                    let entry = entry.map_err(|e| {
+                        EngineErr::unavailable(format!("local repo listing entry failed: {e}"))
+                    })?;
+                    // Only top-level `<slug>.json` FILES (the `_accounts` account logs
+                    // live in a SUBDIR, so they are never top-level files here).
+                    if entry.file_type().map(|t| t.is_file()).unwrap_or(false)
+                        && let Some(name) = entry.file_name().to_str()
+                        && let Some(slug) = name.strip_suffix(".json")
+                        && is_safe_repo_slug(slug)
+                    {
+                        slugs.push(slug.to_string());
+                    }
+                }
+                Ok(slugs)
+            }
+            LogSource::R2(c) => {
+                let prefix = format!("{}/", c.tenant_id);
+                let keys = c.list_keys(&prefix)?;
+                let mut slugs = Vec::new();
+                for key in keys {
+                    // Strip `<tenant>/`; keep only a single-segment `<slug>.json` (no
+                    // further `/`, not a reserved `_`-prefixed key). The manifests
+                    // (`<slug>/refs.json`) + account logs (`_accounts/…`) are excluded.
+                    let Some(rest) = key.strip_prefix(&prefix) else {
+                        continue;
+                    };
+                    if rest.contains('/') || rest.starts_with('_') {
+                        continue;
+                    }
+                    if let Some(slug) = rest.strip_suffix(".json")
+                        && is_safe_repo_slug(slug)
+                    {
+                        slugs.push(slug.to_string());
+                    }
+                }
+                Ok(slugs)
+            }
+        }
+    }
 }
 
 /// The content-hash version of a raw log object — the local CAS token (a stand-in
@@ -1512,6 +1625,51 @@ fn content_hash(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
     hex::encode(h.finalize())
+}
+
+/// The hard cap on ListObjectsV2 pages the durable-owned enumeration will follow — a
+/// bounded scan (each page is up to 1000 keys, so 32 pages ≈ 32k objects, far beyond
+/// any real tenant's repo count). Hitting it is treated FAIL-CLOSED by the caller (an
+/// unbounded listing would be a DoS, and a silently-truncated one would UNDER-report
+/// the erasure set — the GDPR1-B1 hole; so an over-cap listing is an explicit error).
+const MAX_LIST_PAGES: usize = 32;
+
+/// Extract the `<Key>…</Key>` values + the `<NextContinuationToken>` (when
+/// `<IsTruncated>true</IsTruncated>`) from an S3/R2 ListObjectsV2 XML body — a tiny
+/// hand parser (no XML dependency, consistent with the SigV4 signer's zero-dep stance).
+/// Pure + testable: the durable-enumeration correctness (the B1 completeness fix) is
+/// proven on this without a live R2.
+fn parse_listv2_xml(xml: &str) -> (Vec<String>, Option<String>) {
+    // Keys: every <Key>…</Key> (element content is not entity-escaped for our
+    // slug/`.json` keys, which are RFC-3986-unreserved).
+    let mut keys = Vec::new();
+    let mut rest = xml;
+    while let Some(open) = rest.find("<Key>") {
+        let after = &rest[open + "<Key>".len()..];
+        let Some(close) = after.find("</Key>") else {
+            break;
+        };
+        keys.push(after[..close].to_string());
+        rest = &after[close + "</Key>".len()..];
+    }
+    // Continuation token ONLY when the result is truncated (else a stale token would
+    // loop). Both tags are single-valued at the ListBucketResult root.
+    let truncated = extract_tag(xml, "IsTruncated").as_deref() == Some("true");
+    let next = if truncated {
+        extract_tag(xml, "NextContinuationToken")
+    } else {
+        None
+    };
+    (keys, next)
+}
+
+/// Extract the first `<tag>…</tag>` element's content, or `None`.
+fn extract_tag(xml: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = xml.find(&open)? + open.len();
+    let end = xml[start..].find(&close)? + start;
+    Some(xml[start..end].to_string())
 }
 
 /// Whether the head a write swaps against (`expected`) still equals what is durably
@@ -1830,6 +1988,82 @@ impl R2Config {
                 ))
             }
         }
+    }
+
+    /// List every object key under `prefix` via ListObjectsV2 (the DURABLE
+    /// authoritative enumeration the GDPR1 erasure planner needs — the B1 completeness
+    /// fix). Follows continuation-token pagination up to [`MAX_LIST_PAGES`]; a still-
+    /// truncated listing at the cap is a FAIL-CLOSED error (never a silent truncation
+    /// that would UNDER-report the subject's owned set). Generic-503 on any transport/
+    /// non-2xx fault (no storage-topology leak to the client). Used only on the rare,
+    /// authorized erasure path — NOT a hot read.
+    pub fn list_keys(&self, prefix: &str) -> Result<Vec<String>, EngineErr> {
+        let mut out = Vec::new();
+        let mut token: Option<String> = None;
+        for _page in 0..MAX_LIST_PAGES {
+            // Canonical query: ASCII-sorted `k=v`, each value RFC-3986-encoded. Sorted
+            // order is `continuation-token` < `list-type` < `prefix`.
+            let mut params: Vec<(String, String)> = vec![
+                ("list-type".to_string(), "2".to_string()),
+                ("prefix".to_string(), sigv4::encode_query_value(prefix)),
+            ];
+            if let Some(t) = &token {
+                params.push((
+                    "continuation-token".to_string(),
+                    sigv4::encode_query_value(t),
+                ));
+            }
+            params.sort();
+            let canonical_query = params
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join("&");
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let signed = sigv4::sign_s3_list(
+                &self.host,
+                &self.bucket,
+                &canonical_query,
+                &self.key_id,
+                &self.secret,
+                &self.region,
+                now,
+            );
+            // The wire URL MUST carry the byte-identical canonical query that was signed.
+            let url = format!("{}/{}?{canonical_query}", self.endpoint, self.bucket);
+            let resp = self
+                .agent
+                .get(&url)
+                .set("Authorization", &signed.authorization)
+                .set("x-amz-date", &signed.amz_date)
+                .set("x-amz-content-sha256", &signed.content_sha256)
+                .call();
+            let body = match resp {
+                Ok(r) => r.into_string().map_err(|e| {
+                    eprintln!("hugit-serve: R2 LIST body read failed: {e}");
+                    EngineErr::unavailable("engine storage read failed".to_string())
+                })?,
+                Err(e) => {
+                    eprintln!("hugit-serve: R2 LIST failed for prefix {prefix:?}: {e}");
+                    return Err(EngineErr::unavailable(
+                        "engine storage temporarily unavailable".to_string(),
+                    ));
+                }
+            };
+            let (keys, next) = parse_listv2_xml(&body);
+            out.extend(keys);
+            match next {
+                Some(t) => token = Some(t),
+                None => return Ok(out), // not truncated → complete
+            }
+        }
+        // Still truncated at the page cap: FAIL-CLOSED (never under-report the set).
+        Err(EngineErr::unavailable(
+            "listagem durável excedeu o limite de páginas (fail-closed)".to_string(),
+        ))
     }
 
     /// PUT `body` to `<tenant_id>/<repo>.json` UNCONDITIONALLY (the one-shot
@@ -3167,5 +3401,54 @@ mod me_repos_tests {
                 "each returned log is the repo's real verified log"
             );
         }
+    }
+
+    // ── ListObjectsV2 XML parsing (the durable-enumeration B1 fix) ────────────
+
+    #[test]
+    fn parse_listv2_extracts_keys_and_no_token_when_complete() {
+        let xml = "<?xml version=\"1.0\"?><ListBucketResult>\
+            <Contents><Key>t/hugit.json</Key><Size>10</Size></Contents>\
+            <Contents><Key>t/githugr.json</Key></Contents>\
+            <IsTruncated>false</IsTruncated></ListBucketResult>";
+        let (keys, next) = parse_listv2_xml(xml);
+        assert_eq!(keys, vec!["t/hugit.json", "t/githugr.json"]);
+        assert!(
+            next.is_none(),
+            "a complete listing yields no continuation token"
+        );
+    }
+
+    #[test]
+    fn parse_listv2_returns_the_token_only_when_truncated() {
+        let truncated = "<ListBucketResult><Contents><Key>t/a.json</Key></Contents>\
+            <IsTruncated>true</IsTruncated><NextContinuationToken>TOK123</NextContinuationToken>\
+            </ListBucketResult>";
+        let (keys, next) = parse_listv2_xml(truncated);
+        assert_eq!(keys, vec!["t/a.json"]);
+        assert_eq!(
+            next.as_deref(),
+            Some("TOK123"),
+            "truncated → follow the token"
+        );
+        // A token present but NOT truncated must be ignored (no infinite loop).
+        let not_truncated = "<ListBucketResult><IsTruncated>false</IsTruncated>\
+            <NextContinuationToken>STALE</NextContinuationToken></ListBucketResult>";
+        assert!(parse_listv2_xml(not_truncated).1.is_none());
+    }
+
+    #[test]
+    fn list_repo_slugs_local_excludes_account_logs_and_manifests() {
+        // Local mode: only top-level `<slug>.json` files are repo logs; the `_accounts`
+        // subdir (account logs) is structurally excluded (it is a dir, not a top file).
+        let dir = scratch_dir();
+        std::fs::write(dir.join("alpha.json"), meta_log("private", "org-a")).unwrap();
+        std::fs::write(dir.join("beta.json"), meta_log("public", "org-b")).unwrap();
+        std::fs::create_dir_all(dir.join("_accounts")).unwrap();
+        std::fs::write(dir.join("_accounts").join("org-a.json"), "[]").unwrap();
+        let src = LogSource::Local { dir };
+        let mut slugs = src.list_repo_slugs().expect("list");
+        slugs.sort();
+        assert_eq!(slugs, vec!["alpha", "beta"], "account logs are not repos");
     }
 }

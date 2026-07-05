@@ -122,8 +122,22 @@ fn resolve_visibility(req: &CreateRepoReq) -> Result<&'static str, EngineErr> {
 /// the platform operator (`orchestrator:*`), an anonymous request (empty chain), and
 /// any unrecognized/malformed principal are refused (no god-create / anon-create).
 ///
+/// **ONE identity definition (GDPR1 audit B2 — the divergence fix).** The derived org
+/// MUST be a valid [`is_safe_account_slug`](crate::state::is_safe_account_slug) — the
+/// SAME predicate the account-erase store keys on. This closes a right-to-erasure DoS:
+/// without it an org like `Org_A`/`acme.co`/>64-chars could OWN repos (creation/authz/
+/// enumeration key on the raw string) but could NEVER stage/persist an erasure (404 on
+/// the unsafe slug) — an ownable-but-unerasable class, with the enumeration identity
+/// (raw org) and the store-key identity (`[a-z0-9-]`) diverging. Enforcing it HERE — the
+/// one place both provision AND account-erase derive the tenant — makes ownership and
+/// erasability share a single, traversal-safe identity by construction. A non-conforming
+/// org can own NOTHING (fail-closed in the safe direction), so it can never be stranded
+/// with un-erasable data.
+///
 /// # Errors
-/// `401 UNAUTHORIZED` for a non-tenant principal.
+/// - `401 UNAUTHORIZED` — a non-tenant principal (operator/anon/unknown/malformed).
+/// - `400 INVALID_REQUEST` — a tenant whose org is not a safe account slug (the identity
+///   divergence guard; a well-behaved Clerk org slug is `[a-z0-9-]` and always passes).
 pub fn derive_owner_tenant(principal: &[String]) -> Result<String, EngineErr> {
     let refuse = || {
         Err(EngineErr::unauthorized(
@@ -137,10 +151,18 @@ pub fn derive_owner_tenant(principal: &[String]) -> Result<String, EngineErr> {
     let Some(rest) = first.strip_prefix("clerk:") else {
         return refuse(); // operator (orchestrator:) or any non-clerk prefix
     };
-    match rest.split(':').next().unwrap_or("") {
-        "" => refuse(), // "clerk:" / "clerk::user" — malformed, no org
-        org => Ok(org.to_string()),
+    let org = match rest.split(':').next().unwrap_or("") {
+        "" => return refuse(), // "clerk:" / "clerk::user" — malformed, no org
+        org => org,
+    };
+    // ONE identity: the org must be a store-safe account slug, or ownership AND
+    // erasability would diverge (audit B2). Fail-closed in the safe direction.
+    if !crate::state::is_safe_account_slug(org) {
+        return Err(EngineErr::invalid_request(
+            "identidade de tenant inválida: o org do Clerk deve ser [a-z0-9-] (≤64)",
+        ));
     }
+    Ok(org.to_string())
 }
 
 /// Build the genesis event-log: one chain-anchored `repo.meta{visibility,
@@ -440,6 +462,27 @@ mod tests {
             assert_eq!(e.status, 401, "chain {chain:?} → 401");
             assert_eq!(e.code, "UNAUTHORIZED");
         }
+    }
+
+    #[test]
+    fn derive_owner_rejects_org_that_is_not_a_safe_account_slug() {
+        // Audit B2: ONE identity. An org that cannot be a store-safe account slug
+        // cannot own anything (fail-closed 400) — so it can never be stranded
+        // ownable-but-unerasable (the right-to-erasure DoS the divergence created).
+        for bad_org in ["Org_A", "acme.co", "a_b", &"x".repeat(65), "UPPER"] {
+            let chain = vec![format!("clerk:{bad_org}:user-1")];
+            let e = derive_owner_tenant(&chain).expect_err("unsafe org must be refused");
+            assert_eq!(
+                e.status, 400,
+                "org {bad_org:?} → 400 (identity divergence guard)"
+            );
+            assert_eq!(e.code, "INVALID_REQUEST");
+        }
+        // A conforming Clerk org slug still derives cleanly (the common case).
+        assert_eq!(
+            derive_owner_tenant(&tenant("acme-labs")).unwrap(),
+            "acme-labs"
+        );
     }
 
     // ── end-to-end provision (Local mode) ────────────────────────────────────
