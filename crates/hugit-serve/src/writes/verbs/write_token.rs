@@ -1,6 +1,11 @@
-//! Personal Access Tokens (PATs) — the durable per-account store + create/revoke.
-//! (WP-#90 slice 2a. The git-auth WIRE — accepting a PAT as the git credential — is
-//! slice 2b, the hot-path/latency-sensitive follow-on; NOT here.)
+//! Personal Access Tokens (PATs) — the durable per-account store + create/revoke,
+//! PLUS the git-auth resolution primitives (slice 2b): the [`PatAuth`] resolver
+//! ([`index_account_log`]/[`resolve_pat`]) and the wire credential-extraction
+//! ([`candidate_pat_secrets`] — Bearer AND the git-CLI HTTP-Basic password). The
+//! hot-path WIRING that consults these ([`AppState::resolve_pat_from_auth`] +
+//! Tier-1.5 in `two_tier_auth`/`clone_principal`/receive-pack) is gated behind
+//! `HUGIT_SERVE_PAT_AUTH` (default OFF) and an adversarial review before live enable
+//! — see `docs/design/2026-07-05-pat-git-auth-wire.md`.
 //!
 //! ## Storage (reuses the GDPR account seam)
 //!
@@ -40,6 +45,15 @@ pub const VALID_SCOPES: &[&str] = &["repo:read", "repo:write"];
 
 /// Max PATs one account may hold (a DoS / log-bloat bound). Over-cap create → 429.
 pub const MAX_PATS_PER_ACCOUNT: usize = 50;
+
+/// The HARD server-side maximum token TTL, in ms — a ceiling so NO PAT is ever
+/// never-expiring (clw #261 must-fix). Every token self-heals: `expires_at` is ALWAYS
+/// non-zero, so the boot-warm-up / crash eviction-skip window (a revoked token the
+/// insert-only index scan could re-add) is ALWAYS time-bounded — closing the otherwise
+/// unbounded revocation-evasion. 90 days mirrors GitHub's fine-grained-PAT max posture
+/// (no infinite tokens). A `ttl_secs == 0` request ("never") is clamped to this; any
+/// larger request is capped here.
+pub const MAX_TTL_MS: u64 = 90 * 86_400 * 1000;
 
 /// Hex SHA-256 of the raw secret — the ONLY form stored.
 fn hash_secret(secret: &str) -> String {
@@ -260,6 +274,68 @@ pub fn resolve_pat(
     Some(auth.clone())
 }
 
+/// Decode a standard base64 string (RFC 4648 standard alphabet, `=` padding tolerated).
+/// UNTRUSTED-input safe: any invalid character or an impossible length returns `None`,
+/// NEVER a panic (this parses the git-CLI `Authorization: Basic` header from the wire).
+pub(crate) fn decode_base64_std(s: &str) -> Option<Vec<u8>> {
+    fn sextet(c: u8) -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some(u32::from(c - b'A')),
+            b'a'..=b'z' => Some(u32::from(c - b'a') + 26),
+            b'0'..=b'9' => Some(u32::from(c - b'0') + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    // Strip trailing padding; the remaining length mod 4 == 1 is impossible for valid
+    // base64 (a single leftover sextet can't encode a byte) → reject.
+    let body = s.trim_end_matches('=');
+    if body.len() % 4 == 1 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(body.len() / 4 * 3 + 3);
+    let mut acc = 0u32;
+    let mut bits = 0u32;
+    for &c in body.as_bytes() {
+        acc = (acc << 6) | sextet(c)?;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// Extract the candidate PAT secret(s) an `Authorization` header VALUE could carry:
+/// - `Bearer <secret>` — the `/v1` API + `http.extraHeader` git.
+/// - `Basic base64(user:secret)` — the DEFAULT git CLI, which puts the PAT in the
+///   PASSWORD field (the username is ignored, GitHub-style).
+///
+/// The scheme match is case-insensitive (RFC 7235). Every malformed shape (no scheme,
+/// bad base64, missing `:`, non-UTF-8) yields an EMPTY vec — never a panic, never a
+/// spurious credential. Returned secrets are pre-filter candidates; [`resolve_pat`]
+/// applies the `ghgr_pat_` fast-reject, so feeding a session/dev Bearer here is inert.
+#[must_use]
+pub fn candidate_pat_secrets(auth_value: &str) -> Vec<String> {
+    let Some((scheme, rest)) = auth_value.split_once(' ') else {
+        return Vec::new();
+    };
+    let rest = rest.trim();
+    if scheme.eq_ignore_ascii_case("Bearer") {
+        return vec![rest.to_string()];
+    }
+    if scheme.eq_ignore_ascii_case("Basic")
+        && let Some(bytes) = decode_base64_std(rest)
+        && let Ok(text) = std::str::from_utf8(&bytes)
+        && let Some((_user, secret)) = text.split_once(':')
+    {
+        return vec![secret.to_string()];
+    }
+    Vec::new()
+}
+
 /// Append one record to the account log via a bounded compare-and-swap (mirrors the
 /// account-door CAS loop). Fail-closed on a durable fault.
 fn append_account(
@@ -334,11 +410,17 @@ pub fn token_create(
         ));
     }
     let scopes = resolve_scopes(&req)?;
-    let expires_at = if req.ttl_secs == 0 {
-        0
+    // Clamp the TTL to the server ceiling ([`MAX_TTL_MS`]): `ttl_secs == 0` ("never")
+    // becomes the ceiling, and any larger request is capped. So `expires_at` is ALWAYS
+    // non-zero → EVERY token expires → the boot-warm-up/crash eviction-skip window is
+    // time-bounded (no never-expiring PAT; closes the unbounded revocation-evasion —
+    // clw #261 must-fix).
+    let ttl_ms = if req.ttl_secs == 0 {
+        MAX_TTL_MS
     } else {
-        at.saturating_add(req.ttl_secs.saturating_mul(1000))
+        req.ttl_secs.saturating_mul(1000).min(MAX_TTL_MS)
     };
+    let expires_at = at.saturating_add(ttl_ms);
 
     let secret = mint_secret()?;
     let secret_hash = hash_secret(&secret);
@@ -375,6 +457,20 @@ pub fn token_create(
             Ok(())
         },
     )?;
+
+    // Keep the live in-memory PAT auth index warm (the hot-path resolver) — insert the
+    // freshly-minted token so it authenticates immediately, no reboot (mirrors the ref
+    // hot-swap). A no-op when `HUGIT_SERVE_PAT_AUTH` is off (the index is never
+    // consulted then). Done AFTER the durable append succeeds → the index never leads
+    // the log.
+    state.pat_index_insert_if_enabled(
+        secret_hash.clone(),
+        PatAuth {
+            principal: user.clone(),
+            scopes: scopes.clone(),
+            expires_at,
+        },
+    );
 
     Ok(CreatedTokenVm {
         id,
@@ -431,6 +527,23 @@ pub fn token_revoke(
         };
     }
 
+    // The secret_hash for the revoked id (from its `pat.created` record) — needed to
+    // DROP the entry from the in-memory PAT index so the token stops authenticating
+    // IMMEDIATELY (no reboot). Captured from the pre-check load before the append.
+    let revoked_hash = log0.records().iter().find_map(|r| {
+        if r.kind != PAT_CREATED_KIND {
+            return None;
+        }
+        let v = serde_json::from_str::<serde_json::Value>(&r.payload).ok()?;
+        if v.get("id").and_then(|x| x.as_str()) == Some(id) {
+            v.get("secret_hash")
+                .and_then(|x| x.as_str())
+                .map(str::to_string)
+        } else {
+            None
+        }
+    });
+
     let payload_value = serde_json::json!({ "id": id, "user": user });
     let payload = hugit_refstore::canonical_json(&payload_value.to_string())
         .unwrap_or_else(|| payload_value.to_string());
@@ -447,7 +560,15 @@ pub fn token_revoke(
             let _ = log;
             Ok(())
         },
-    )
+    )?;
+
+    // Durable revoke landed → drop the live index entry (immediate deny; a no-op when
+    // PAT auth is off). Ordered AFTER the append so the index never lags toward MORE
+    // access than the log grants.
+    if let Some(h) = revoked_hash {
+        state.pat_index_remove_if_enabled(&h);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -514,6 +635,39 @@ mod tests {
         assert_eq!(mine.len(), 1);
         assert_eq!(mine[0].id, created.id);
         assert_eq!(mine[0].last_used_at, 0);
+    }
+
+    #[test]
+    fn ttl_is_capped_no_never_expiring_token() {
+        let st = state();
+        // ttl_secs = 0 ("never") → CLAMPED to the ceiling, NOT 0. Every token self-heals.
+        let never =
+            token_create(&st, &body("n", &["repo:read"]), &user("org-a", "u1"), 1000).unwrap();
+        assert_eq!(
+            never.expires_at,
+            1000 + MAX_TTL_MS,
+            "ttl=0 is clamped to the server ceiling, never a never-expiring token"
+        );
+        assert_ne!(
+            never.expires_at, 0,
+            "no PAT is ever never-expiring (revoke-evasion fix)"
+        );
+        // A ludicrous ttl_secs → capped to the ceiling (no overflow via saturating).
+        let huge = serde_json::json!({"name":"h","scopes":["repo:read"],"ttl_secs": u64::MAX})
+            .to_string()
+            .into_bytes();
+        let capped = token_create(&st, &huge, &user("org-a", "u2"), 2000).unwrap();
+        assert_eq!(
+            capped.expires_at,
+            2000 + MAX_TTL_MS,
+            "an over-cap ttl is clamped to the ceiling"
+        );
+        // A within-cap ttl is honored verbatim (5s = 5000ms).
+        let small = serde_json::json!({"name":"s","scopes":["repo:read"],"ttl_secs": 5})
+            .to_string()
+            .into_bytes();
+        let ok = token_create(&st, &small, &user("org-a", "u3"), 3000).unwrap();
+        assert_eq!(ok.expires_at, 3000 + 5000, "a within-cap ttl is honored");
     }
 
     #[test]
@@ -695,6 +849,123 @@ mod tests {
         assert!(
             !idx.keys().any(|k| k.contains(&sa)),
             "the index stores hashes, not secrets"
+        );
+    }
+
+    // ── slice-2b wiring: base64 + credential extraction + AppState maintenance ──
+
+    #[test]
+    fn base64_decodes_known_vectors_and_rejects_garbage() {
+        // Authoritative vectors (python base64).
+        assert_eq!(
+            decode_base64_std("dXNlcjpnaGdyX3BhdF9zZWNyZXQxMjM=").unwrap(),
+            b"user:ghgr_pat_secret123"
+        );
+        assert_eq!(
+            decode_base64_std("AP8QIEA=").unwrap(),
+            vec![0, 255, 16, 32, 64]
+        );
+        assert_eq!(decode_base64_std("").unwrap(), Vec::<u8>::new());
+        // Invalid character / impossible length → None, never a panic.
+        assert!(decode_base64_std("not base64!!").is_none());
+        assert!(decode_base64_std("A").is_none()); // len%4==1 is impossible
+        assert!(decode_base64_std("====").unwrap().is_empty());
+    }
+
+    #[test]
+    fn candidate_secrets_from_bearer_and_basic() {
+        // Bearer → the token verbatim.
+        assert_eq!(
+            candidate_pat_secrets("Bearer ghgr_pat_xyz"),
+            vec!["ghgr_pat_xyz".to_string()]
+        );
+        // Basic → the PASSWORD (git puts the PAT there; username ignored).
+        assert_eq!(
+            candidate_pat_secrets("Basic dXNlcjpnaGdyX3BhdF9zZWNyZXQxMjM="),
+            vec!["ghgr_pat_secret123".to_string()]
+        );
+        // Basic with an EMPTY username still yields the password.
+        assert_eq!(
+            candidate_pat_secrets("Basic OmdoZ3JfcGF0X25vdXNlcg=="),
+            vec!["ghgr_pat_nouser".to_string()]
+        );
+        // Case-insensitive scheme (RFC 7235).
+        assert_eq!(
+            candidate_pat_secrets("bearer ghgr_pat_x"),
+            vec!["ghgr_pat_x".to_string()]
+        );
+    }
+
+    #[test]
+    fn candidate_secrets_malformed_inputs_are_panic_safe_and_empty() {
+        // No scheme, bad base64, missing colon, non-UTF-8 → empty, never a panic.
+        assert!(candidate_pat_secrets("").is_empty());
+        assert!(candidate_pat_secrets("Bearer").is_empty()); // no space
+        assert!(candidate_pat_secrets("Basic !!!notbase64").is_empty());
+        assert!(candidate_pat_secrets("Basic bm9Db2xvbkhlcmU=").is_empty()); // "noColonHere"
+        assert!(candidate_pat_secrets("Digest abc").is_empty()); // unsupported scheme
+    }
+
+    /// A state with PAT auth ENABLED (the flag flip a test needs; prod is env-gated).
+    fn state_pat_on() -> AppState {
+        let mut st = state();
+        st.pat_auth_enabled = true;
+        st
+    }
+
+    #[test]
+    fn resolve_from_auth_returns_none_when_pat_auth_disabled() {
+        let st = state(); // pat_auth_enabled == false
+        let created =
+            token_create(&st, &body("ci", &["repo:write"]), &user("org-a", "u1"), 10).unwrap();
+        // Even a REAL, valid secret does not authenticate while the flag is off.
+        assert!(
+            st.resolve_pat_from_auth(&format!("Bearer {}", created.secret), 20)
+                .is_none(),
+            "PAT auth disabled → no resolution (a ghgr_pat_ credential authenticates nothing)"
+        );
+    }
+
+    #[test]
+    fn create_warms_the_index_and_revoke_evicts_it_immediately() {
+        let st = state_pat_on();
+        let created =
+            token_create(&st, &body("ci", &["repo:write"]), &user("org-a", "u1"), 10).unwrap();
+        let bearer = format!("Bearer {}", created.secret);
+        // Minted → authenticates immediately, no reboot (insert-on-create).
+        let auth = st
+            .resolve_pat_from_auth(&bearer, 20)
+            .expect("a freshly-minted PAT authenticates via the live index");
+        assert_eq!(auth.principal, "clerk:org-a:u1");
+        assert!(auth.can_write());
+        // (The git-CLI Basic form — password = the PAT — is covered by
+        // `candidate_secrets_from_bearer_and_basic`, which `resolve_pat_from_auth`
+        // funnels through; here we exercise the create/revoke index maintenance.)
+        // Revoke → evicted from the live index immediately (remove-on-revoke).
+        token_revoke(&st, &created.id, &user("org-a", "u1"), 30).unwrap();
+        assert!(
+            st.resolve_pat_from_auth(&bearer, 40).is_none(),
+            "a revoked PAT stops authenticating immediately (index eviction)"
+        );
+    }
+
+    #[test]
+    fn expired_pat_does_not_resolve_via_auth_header() {
+        let st = state_pat_on();
+        let created = token_create(
+            &st,
+            &serde_json::json!({"name":"t","scopes":["repo:read"],"ttl_secs":5})
+                .to_string()
+                .into_bytes(),
+            &user("org-a", "u1"),
+            1000,
+        )
+        .unwrap();
+        let bearer = format!("Bearer {}", created.secret);
+        assert!(st.resolve_pat_from_auth(&bearer, 5999).is_some());
+        assert!(
+            st.resolve_pat_from_auth(&bearer, 6000).is_none(),
+            "expired at expires_at → no credential"
         );
     }
 }

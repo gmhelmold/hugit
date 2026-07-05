@@ -124,6 +124,34 @@ impl EngineErr {
         }
     }
 
+    /// 403 — the credential AUTHENTICATED but its SCOPE is insufficient for a
+    /// mutation: a `repo:read`-only PAT attempting a write/push. This is the
+    /// read-authz ≠ write-authz law at the TOKEN layer — the caller may well OWN the
+    /// target (so this is NOT the ownership 404, which hides existence), the token
+    /// simply lacks `repo:write`. Distinct from 401 (authN) and the ownership 404.
+    #[must_use]
+    pub fn scope_insufficient() -> Self {
+        Self {
+            status: 403,
+            code: "SCOPE_INSUFFICIENT",
+            reason: "este token não tem escopo de escrita (repo:write)".to_string(),
+        }
+    }
+
+    /// 403 — a PAT tried to MINT another token. Token creation requires a session
+    /// (browser/Clerk) credential, GitHub-style — a PAT is a git/API credential, not a
+    /// session, so it cannot spawn survivor tokens that would outlive its own
+    /// revocation. Distinct from `SCOPE_INSUFFICIENT` (that is about write scope; this
+    /// is about the credential TYPE).
+    #[must_use]
+    pub fn pat_cannot_mint() -> Self {
+        Self {
+            status: 403,
+            code: "PAT_CANNOT_MINT",
+            reason: "um PAT não pode criar tokens — use uma sessão de navegador".to_string(),
+        }
+    }
+
     /// 400 — a malformed/invalid request body (e.g. an unknown `mode`/`verdict`
     /// enum value). Distinct from the auth/idempotency/policy refusals.
     #[must_use]

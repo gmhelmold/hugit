@@ -761,7 +761,10 @@ fn route_delete(state: &AppState, url: &str, headers: &[Header]) -> (u16, String
     let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     match segs.as_slice() {
         // DELETE /v1/me/tokens/{id} — revoke the caller's OWN PAT (idempotent; a
-        // foreign/unknown id → 404, no cross-user oracle).
+        // foreign/unknown id → 404, no cross-user oracle). DELIBERATELY NOT scope-gated
+        // (uses `two_tier_auth`, not `write_auth`): revoke only ever REDUCES access, so
+        // even a `repo:read`-only PAT must be able to revoke a leaked token (self-
+        // hygiene). Cross-user isolation still holds — a caller can only revoke its own.
         ["v1", "me", "tokens", id] => {
             let (principal, _) = match two_tier_auth(state, headers) {
                 Ok(pair) => pair,
@@ -973,11 +976,11 @@ fn route_write(state: &AppState, url: &str, headers: &[Header], body: &[u8]) -> 
         // Auth is the SAME two-tier gate; the verb then derives `owner_tenant` from
         // the principal and refuses operator/anon (401 — no god-create).
         ["v1", "repos"] => {
-            let (principal, _fresh_auth) = match two_tier_auth(state, headers) {
-                Ok(pair) => pair,
+            let ctx = match write_auth(state, headers) {
+                Ok(c) => c,
                 Err(e) => return err(e),
             };
-            verbs::write_provision::handle_provision(state, body, &principal, now_ms())
+            verbs::write_provision::handle_provision(state, body, &ctx.principal, now_ms())
         }
         // POST /v1/account/erase — GDPR1: a user requests erasure of THEIR OWN
         // account. Top-level (NOT under `/v1/repos`), so it bypasses the repo-head
@@ -985,21 +988,28 @@ fn route_write(state: &AppState, url: &str, headers: &[Header], body: &[u8]) -> 
         // there is no repo to own. STEP-UP is REQUIRED and enforced by the account
         // write-door (`"erasure"` ∈ STEP_UP_VERBS) — the only step-up chokepoint here.
         ["v1", "account", "erase"] => {
-            let (principal, fresh_auth) = match two_tier_auth(state, headers) {
-                Ok(pair) => pair,
+            let ctx = match write_auth(state, headers) {
+                Ok(c) => c,
                 Err(e) => return err(e),
             };
-            dispatch_account_erase(state, headers, body, principal, fresh_auth)
+            dispatch_account_erase(state, headers, body, ctx.principal, ctx.fresh_auth)
         }
         // POST /v1/me/tokens — mint a PAT (secret returned ONCE, 201). Per-principal;
         // the subject is derived from the Bearer (operator/anon refused 401). The
         // git-auth WIRE that ACCEPTS a PAT as a credential is the next slice.
         ["v1", "me", "tokens"] => {
-            let (principal, _) = match two_tier_auth(state, headers) {
-                Ok(pair) => pair,
+            // A read-only PAT is refused here (write_auth 403s it). A WRITE PAT
+            // authenticates but STILL cannot mint: token creation requires a session
+            // credential (GitHub-style), so a leaked write PAT cannot spawn survivor
+            // tokens that outlive its own revocation (revocation-evasion guard).
+            let ctx = match write_auth(state, headers) {
+                Ok(c) => c,
                 Err(e) => return err(e),
             };
-            match verbs::write_token::token_create(state, body, &principal, now_ms()) {
+            if ctx.is_pat {
+                return err(EngineErr::pat_cannot_mint());
+            }
+            match verbs::write_token::token_create(state, body, &ctx.principal, now_ms()) {
                 Ok(created) => match serde_json::to_value(&created) {
                     Ok(v) => (201, v.to_string()),
                     Err(e) => err(EngineErr::unavailable(format!("serialize: {e}"))),
@@ -1008,12 +1018,21 @@ fn route_write(state: &AppState, url: &str, headers: &[Header], body: &[u8]) -> 
             }
         }
         ["v1", "repos", repo, tail @ ..] => {
-            // Two-tier Bearer auth: a Clerk-minted engine token, else the dev token.
-            let (principal, fresh_auth) = match two_tier_auth(state, headers) {
-                Ok(pair) => pair,
+            // Two-tier(+PAT) auth with the write-scope gate: a Clerk engine token, a
+            // `repo:write` PAT, or the dev token. A `repo:read`-only PAT → 403.
+            let ctx = match write_auth(state, headers) {
+                Ok(c) => c,
                 Err(e) => return err(e),
             };
-            dispatch_repo_write(state, repo, tail, headers, body, principal, fresh_auth)
+            dispatch_repo_write(
+                state,
+                repo,
+                tail,
+                headers,
+                body,
+                ctx.principal,
+                ctx.fresh_auth,
+            )
         }
         _ => err(EngineErr::not_found()),
     }
@@ -1090,36 +1109,107 @@ fn dispatch_account_erase(
     }
 }
 
-/// Two-tier Bearer auth (Wave-5b token seam):
-///   Tier 1 — `token_store.lookup(raw)`: a real Clerk-minted engine token →
-///            `(clerk principal, fresh_auth from the minted record)`.
-///   Tier 2 — the dev-token fallback (constant-time, mirrors `check_bearer`) →
-///            `(dev principal, fresh_auth=false)`.
-/// An in-store-but-EXPIRED engine token is `TOKEN_EXPIRED` (client renews + retries);
-/// anything else is `TOKEN_INVALID`. Returns `(principal_chain, fresh_auth)`.
+/// The resolved auth context of a request: the acting principal, whether the session
+/// is freshly re-authenticated (step-up), and whether the credential carries WRITE
+/// authority. `write_ok` is `true` for a session/dev credential and a `repo:write`
+/// PAT; it is `false` ONLY for a `repo:read`-only PAT — the write door refuses a
+/// mutation (403 `SCOPE_INSUFFICIENT`) when it is false.
+#[derive(Debug)]
+pub(crate) struct AuthCtx {
+    pub principal: Vec<String>,
+    pub fresh_auth: bool,
+    pub write_ok: bool,
+    /// Whether the credential was a PAT (resolved at Tier-1.5). A PAT is a git/API
+    /// credential, NOT a session — it must not MINT other tokens (the mint route
+    /// requires a browser/session credential, GitHub-style), so a leaked write PAT
+    /// cannot spawn survivor tokens that outlive its own revocation.
+    pub is_pat: bool,
+}
+
+/// Two-tier(+PAT) auth (Wave-5b token seam + slice 2b):
+///   Tier 1   — `token_store.lookup(raw)`: a real Clerk-minted engine token →
+///              the clerk principal + its `fresh_auth`, `write_ok=true`.
+///   Tier 1.5 — a hugit PAT (`ghgr_pat_…`) via `Bearer` OR the git-CLI HTTP-`Basic`
+///              password → the token OWNER's clerk principal (NEVER the operator —
+///              structurally, the resolver stores clerk owners), `write_ok` = the
+///              PAT's `repo:write` scope. GATED behind `HUGIT_SERVE_PAT_AUTH` (a no-op
+///              when off). Placed BEFORE Tier 2 so a PAT can never reach the god-path.
+///   Tier 2   — the dev-token fallback (constant-time) → the operator principal only
+///              when the break-glass flag is on, else an anonymous chain. `write_ok=true`.
+/// An in-store-but-EXPIRED engine token is `TOKEN_EXPIRED`; a total miss is
+/// `TOKEN_INVALID`.
+pub(crate) fn two_tier_auth_ctx(
+    state: &AppState,
+    headers: &[Header],
+) -> Result<AuthCtx, EngineErr> {
+    let auth_value = header_val(headers, "Authorization");
+    let bearer = auth_value
+        .as_deref()
+        .and_then(|v| v.strip_prefix("Bearer ").map(str::to_string));
+
+    // Tier 1: the engine-token store (a Clerk exchange minted this) — Bearer only.
+    if let Some(raw) = &bearer {
+        match state.token_store.lookup(raw) {
+            crate::token::LookupResult::Ok(rec) => {
+                return Ok(AuthCtx {
+                    principal: vec![format!("clerk:{}:{}", rec.org, rec.user)],
+                    fresh_auth: rec.fresh_auth,
+                    write_ok: true,
+                    is_pat: false,
+                });
+            }
+            crate::token::LookupResult::Expired => return Err(EngineErr::token_expired()),
+            crate::token::LookupResult::Invalid => {} // fall through to Tier 1.5 / Tier 2
+        }
+    }
+
+    // Tier 1.5: a hugit PAT (Bearer or the git-CLI Basic password). Resolves to the
+    // token OWNER's `clerk:{org}:{user}` — a real tenant, NEVER the operator (the
+    // resolver is before Tier 2 and stores only clerk owners). No-op when PAT auth is
+    // off. `write_ok` follows the PAT's scope, so a read-only PAT is denied at the
+    // write door.
+    if let Some(v) = &auth_value
+        && let Some(pat) = state.resolve_pat_from_auth(v, now_ms())
+    {
+        return Ok(AuthCtx {
+            principal: pat.principal_chain(),
+            fresh_auth: false,
+            write_ok: pat.can_write(),
+            is_pat: true,
+        });
+    }
+
+    let raw = match bearer {
+        Some(r) => r,
+        None => return Err(EngineErr::token_invalid()),
+    };
+    two_tier_dev_token(state, &raw)
+}
+
+/// A thin back-compat wrapper: `(principal_chain, fresh_auth)`, dropping the scope.
+/// Read paths + login use this; the WRITE door uses [`write_auth`] to enforce scope.
 pub(crate) fn two_tier_auth(
     state: &AppState,
     headers: &[Header],
 ) -> Result<(Vec<String>, bool), EngineErr> {
-    let raw = header_val(headers, "Authorization")
-        .and_then(|v| v.strip_prefix("Bearer ").map(str::to_string));
-    let raw = match raw {
-        Some(r) => r,
-        None => return Err(EngineErr::token_invalid()),
-    };
+    two_tier_auth_ctx(state, headers).map(|c| (c.principal, c.fresh_auth))
+}
 
-    // Tier 1: the engine-token store (a Clerk exchange minted this).
-    match state.token_store.lookup(&raw) {
-        crate::token::LookupResult::Ok(rec) => {
-            return Ok((
-                vec![format!("clerk:{}:{}", rec.org, rec.user)],
-                rec.fresh_auth,
-            ));
-        }
-        crate::token::LookupResult::Expired => return Err(EngineErr::token_expired()),
-        crate::token::LookupResult::Invalid => {} // fall through to the dev token
+/// Authenticate a MUTATING request: the full two-tier(+PAT) resolution PLUS the scope
+/// gate — a `repo:read`-only PAT is refused 403 `SCOPE_INSUFFICIENT` (the read-authz ≠
+/// write-authz law at the token layer). A session/dev credential or a `repo:write` PAT
+/// passes. Every `/v1` POST verb routes through this.
+fn write_auth(state: &AppState, headers: &[Header]) -> Result<AuthCtx, EngineErr> {
+    let ctx = two_tier_auth_ctx(state, headers)?;
+    if !ctx.write_ok {
+        return Err(EngineErr::scope_insufficient());
     }
+    Ok(ctx)
+}
 
+/// Tier 2 — the dev-token → OPERATOR god-path resolution (constant-time), extracted so
+/// [`two_tier_auth_ctx`] stays legible.
+fn two_tier_dev_token(state: &AppState, raw: &str) -> Result<AuthCtx, EngineErr> {
     // Tier 2: the dev-token → OPERATOR god-path — GATED behind the break-glass flag
     // (`HUGIT_ALLOW_DEV_OPERATOR=1`; [`AppState::allow_dev_operator`]). The PUBLIC
     // prod deploy OMITS the flag, so a Bearer that matches the dev-token confers NO
@@ -1143,11 +1233,22 @@ pub(crate) fn two_tier_auth(
             .is_some_and(|extra| crate::auth::tokens_match(raw.as_bytes(), extra.as_bytes()));
     if dev_match {
         if state.allow_dev_operator {
-            return Ok((dev_principal(), false));
+            return Ok(AuthCtx {
+                principal: dev_principal(),
+                fresh_auth: false,
+                write_ok: true,
+                is_pat: false,
+            });
         }
         // Flag OFF: no god-path. The dev-token is worth exactly an anonymous visit —
-        // never operator, never a partial/elevated identity.
-        return Ok((Vec::new(), false));
+        // never operator, never a partial/elevated identity. `write_ok=true` is inert
+        // here (the empty chain fails `authorize_write` downstream regardless).
+        return Ok(AuthCtx {
+            principal: Vec::new(),
+            fresh_auth: false,
+            write_ok: true,
+            is_pat: false,
+        });
     }
     Err(EngineErr::token_invalid())
 }
@@ -1902,6 +2003,118 @@ mod godpath_gate_tests {
             );
             assert!(fresh, "fresh_auth propagates from the minted record");
         }
+    }
+
+    // ── slice-2b: PAT Tier-1.5 wiring + the write-scope gate ─────────────────────
+
+    /// A unique-dir state (account-log writes need isolation across test runs).
+    fn unique_state() -> AppState {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("hugit-pat-srv-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        AppState::new(dir, DEV.to_string())
+    }
+
+    fn mint_pat(s: &AppState, user: &str, scopes: &[&str]) -> String {
+        let body = serde_json::json!({"name":"t","scopes":scopes,"ttl_secs":0})
+            .to_string()
+            .into_bytes();
+        // Mint at the REAL current time: with the server max-TTL cap, `ttl_secs=0` →
+        // `expires_at = at + MAX_TTL_MS`, and `two_tier_auth` resolves against the real
+        // `now_ms()`. A fixture `at` (e.g. 10) would put `expires_at` ~1970 → the token
+        // reads as expired vs the real clock. `now_ms()` keeps it 90 days in the future.
+        verbs::write_token::token_create(s, &body, &[user.to_string()], now_ms())
+            .expect("mint a PAT")
+            .secret
+    }
+
+    /// A PAT Bearer resolves to its clerk OWNER — NEVER the operator — even with the
+    /// break-glass ON (Tier-1.5 is inserted BEFORE the dev-token tier). The core
+    /// go-live invariant, extended to the new credential type.
+    #[test]
+    fn pat_bearer_is_never_operator_even_with_break_glass_on() {
+        let mut s = unique_state();
+        s.pat_auth_enabled = true;
+        assert!(s.allow_dev_operator, "break-glass on by default");
+        let secret = mint_pat(&s, "clerk:org-a:u1", &["repo:write"]);
+        let ctx = two_tier_auth_ctx(&s, &bearer(&secret)).expect("a PAT authenticates");
+        assert_eq!(ctx.principal, vec!["clerk:org-a:u1".to_string()]);
+        assert!(
+            !crate::authz::is_operator(&ctx.principal),
+            "a PAT is NEVER the operator (resolver is before the dev-token)"
+        );
+        assert!(ctx.write_ok, "a repo:write PAT carries write authority");
+    }
+
+    /// A `repo:read`-only PAT authenticates a READ but is refused at the WRITE door
+    /// (403 `SCOPE_INSUFFICIENT`); a `repo:write` PAT passes. The read-authz ≠
+    /// write-authz law at the token layer.
+    #[test]
+    fn read_only_pat_reads_but_is_refused_at_the_write_door() {
+        let mut s = unique_state();
+        s.pat_auth_enabled = true;
+        let ro = mint_pat(&s, "clerk:org-a:u1", &["repo:read"]);
+        // Read door: resolves (a read-only PAT CAN read).
+        let (p, _) = two_tier_auth(&s, &bearer(&ro)).expect("read-only PAT authenticates a read");
+        assert_eq!(p, vec!["clerk:org-a:u1".to_string()]);
+        // Write door: 403 SCOPE_INSUFFICIENT.
+        let err = write_auth(&s, &bearer(&ro)).unwrap_err();
+        assert_eq!(err.status, 403);
+        assert_eq!(err.code, "SCOPE_INSUFFICIENT");
+        // A write-scoped PAT passes the write door.
+        let rw = mint_pat(&s, "clerk:org-a:u2", &["repo:write"]);
+        assert!(write_auth(&s, &bearer(&rw)).is_ok());
+    }
+
+    /// With PAT auth DISABLED (the prod default), a `ghgr_pat_` Bearer authenticates
+    /// NOTHING — it is not a session token, matches no dev-token, so it 401s (write
+    /// door) / degrades to anon (read door). No new surface until the flag is flipped.
+    #[test]
+    fn pat_bearer_is_inert_when_pat_auth_disabled() {
+        let mut s = unique_state();
+        s.pat_auth_enabled = true;
+        let secret = mint_pat(&s, "clerk:org-a:u1", &["repo:write"]);
+        // Now disable the flag (as if the deploy never set HUGIT_SERVE_PAT_AUTH).
+        s.pat_auth_enabled = false;
+        let err = two_tier_auth_ctx(&s, &bearer(&secret)).unwrap_err();
+        assert_eq!(err.status, 401, "a PAT is inert while the flag is off");
+    }
+
+    /// A WRITE PAT authenticates the write door but CANNOT mint another token (the
+    /// revocation-evasion guard): `POST /v1/me/tokens` with a PAT → 403 PAT_CANNOT_MINT.
+    /// A session credential mints normally.
+    #[test]
+    fn a_pat_cannot_mint_another_token() {
+        let mut s = unique_state();
+        s.pat_auth_enabled = true;
+        let write_pat = mint_pat(&s, "clerk:org-a:u1", &["repo:write"]);
+        // The write PAT DOES pass the write door (write_ok) — but is flagged is_pat.
+        let ctx = two_tier_auth_ctx(&s, &bearer(&write_pat)).unwrap();
+        assert!(ctx.write_ok && ctx.is_pat);
+        let body = serde_json::json!({"name":"x","scopes":["repo:read"],"ttl_secs":0})
+            .to_string()
+            .into_bytes();
+        let (code, resp) = route_write(&s, "/v1/me/tokens", &bearer(&write_pat), &body);
+        assert_eq!(code, 403, "a PAT cannot mint tokens");
+        assert!(
+            resp.contains("PAT_CANNOT_MINT"),
+            "the reason names the guard"
+        );
+        // A real Clerk SESSION token (is_pat=false) mints normally (201).
+        let raw = s
+            .token_store
+            .mint(&ClerkPrincipal {
+                user: "u9".to_string(),
+                org: "org-z".to_string(),
+                fresh_auth: true,
+            })
+            .expect("mint a clerk engine token");
+        let (code2, _) = route_write(&s, "/v1/me/tokens", &bearer(&raw), &body);
+        assert_eq!(code2, 201, "a session credential mints normally");
     }
 }
 

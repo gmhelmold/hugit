@@ -546,6 +546,31 @@ pub struct AppState {
     /// shared `&AppState` the handlers hold; the `Mutex` is near-uncontended (a build is
     /// rare + the critical section is a set insert/remove).
     pub clone_pack_building: Arc<Mutex<HashSet<String>>>,
+    /// Whether PAT (Personal Access Token) git/API auth is ENABLED — the
+    /// `HUGIT_SERVE_PAT_AUTH=1` gate (default **false**). A NEW auth surface, so it
+    /// ships DISABLED behind an adversarial review; when off, [`pat_index`](Self::pat_index)
+    /// is never built or consulted and a `ghgr_pat_` credential authenticates NOTHING
+    /// (falls through to the existing tiers → anonymous/401). See
+    /// `docs/design/2026-07-05-pat-git-auth-wire.md`.
+    ///
+    /// **Fail-closed on multi-instance:** [`from_env`](Self::from_env) REFUSES to boot
+    /// with this on AND `>1` instances permitted — the in-memory index is
+    /// single-instance-authoritative (a PAT minted on A is absent from B until B
+    /// reboots), the same cross-instance staleness class as the ref hot-swap, gated on
+    /// the B5 read-after-write seam.
+    pub pat_auth_enabled: bool,
+    /// The in-memory PAT auth index: `sha256(secret) → PatAuth` (owner principal +
+    /// scopes + expiry). Built at boot from every `_accounts/*` log (when
+    /// [`pat_auth_enabled`](Self::pat_auth_enabled)); refreshed on create/revoke
+    /// ([`pat_index_insert_if_enabled`](Self::pat_index_insert_if_enabled) /
+    /// [`pat_index_remove_if_enabled`](Self::pat_index_remove_if_enabled)) so a
+    /// mint/revoke takes effect immediately, no reboot. Hot-path lookup is O(1)
+    /// in-memory (NO R2 read per auth — a per-request R2 GET would be a latency DoS on
+    /// the single-threaded engine). Interior-mutable behind the shared `&AppState`
+    /// (same pattern as [`LiveRefs`]/`repos_runtime`). The key is the SECRET hash, so a
+    /// leaked index/hash cannot forge a token (resolution hashes the presented secret).
+    pub pat_index:
+        Arc<RwLock<std::collections::HashMap<String, crate::writes::verbs::write_token::PatAuth>>>,
 }
 
 /// The hard cap on repos a single tenant may hold in ONE engine lifetime (the boot
@@ -682,7 +707,15 @@ impl AppState {
             );
         }
 
-        Ok(Self {
+        // PAT git/API auth (slice 2b) — DISABLED by default (`HUGIT_SERVE_PAT_AUTH=1`
+        // to enable). Fail-closed on multi-instance: the in-memory index is
+        // single-instance-authoritative, so refuse to boot with PAT auth on AND >1
+        // instances permitted (a PAT minted on A would be absent from B until B
+        // reboots — gated on the B5 read-after-write seam).
+        let pat_auth_enabled = pat_auth_enabled_env();
+        pat_auth_multi_instance_guard(pat_auth_enabled, allow_multi_instance())?;
+
+        let state = Self {
             source,
             dev_token,
             dev_token_extra,
@@ -697,7 +730,17 @@ impl AppState {
             allow_dev_operator: dev_operator_allowed(),
             cas_batch_read_health,
             clone_pack_building: Arc::new(Mutex::new(HashSet::new())),
-        })
+            pat_auth_enabled,
+            pat_index: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        };
+        // Populate the PAT index from the durable `_accounts/*` logs (only when
+        // enabled). Boot-scan faults are fail-closed-DENY (the affected PATs simply
+        // won't authenticate → 401) and NEVER crash boot — PAT auth is an additive,
+        // flag-gated surface, not a boot prerequisite.
+        if pat_auth_enabled {
+            state.boot_build_pat_index();
+        }
+        Ok(state)
     }
 
     /// Build the CAS-mode provisioning template from env (W-PROVISION): the CAS
@@ -979,6 +1022,10 @@ impl AppState {
             allow_dev_operator: true,
             cas_batch_read_health: Arc::new(RwLock::new("unprobed".to_string())),
             clone_pack_building: Arc::new(Mutex::new(HashSet::new())),
+            // PAT auth OFF by default even in the dev/test constructor — a test that
+            // exercises the PAT path flips `pat_auth_enabled` on the returned state.
+            pat_auth_enabled: false,
+            pat_index: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
     }
 
@@ -1376,6 +1423,111 @@ impl AppState {
         self.source.persist_account(account, &bytes, expected)
     }
 
+    // ── PAT auth index (slice 2b) ────────────────────────────────────────────
+    // The in-memory `sha256(secret) → PatAuth` index the hot-path resolver consults.
+    // All three methods are NO-OPS when `pat_auth_enabled` is false.
+
+    /// Kick off the PAT index build on a DETACHED thread — boot NEVER blocks on it.
+    /// Called once at boot (from `from_env`) when PAT auth is enabled. The engine
+    /// starts with an EMPTY index (a PAT 401s — fail-closed-DENY — until the warm-up
+    /// lands, typically sub-second), then the thread MERGES the scanned tokens in.
+    ///
+    /// **Why detached (not synchronous):** the scan does one verified R2 fetch PER
+    /// account, sequentially — synchronous at boot it would blow the Cloudflare
+    /// Container startup deadline as accounts grow (the chunk-256 boot-crash class).
+    /// This mirrors the CAS `batch_read` self-probe, moved off-boot for the SAME reason
+    /// (see [`from_env`]). A build fault logs + leaves whatever merged (those PATs 401),
+    /// never a crash; a panic is isolated by `catch_unwind`.
+    ///
+    /// **Merge, not overwrite:** the thread INSERTS each scanned entry into the live
+    /// index without clearing it, so a `token_create` that lands DURING the warm-up
+    /// (its `pat_index_insert_if_enabled` key is absent from the scan) survives. The
+    /// only residual is a `token_revoke` in the same one-time warm-up window whose
+    /// `pat.revoked` post-dates the scan's read: the scanned (still-live) entry is
+    /// re-merged and authenticates until the next reboot — the SAME self-healing,
+    /// single-instance in-memory-eviction property already reviewed for the steady
+    /// state (and strictly narrower: a one-time boot window).
+    fn boot_build_pat_index(&self) {
+        let source = self.source.clone();
+        let index = Arc::clone(&self.pat_index);
+        let spawn = std::thread::Builder::new()
+            .name("hugit-pat-index".into())
+            .spawn(move || {
+                let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    build_pat_index_from_source(&source)
+                }))
+                .unwrap_or_else(|_| {
+                    eprintln!("[hugit-serve] PAT index build panicked — leaving an empty index");
+                    std::collections::HashMap::new()
+                });
+                let n = built.len();
+                // Merge (insert-only, never clear) so a create during warm-up survives.
+                let mut idx = index.write().unwrap_or_else(|e| e.into_inner());
+                for (hash, pat) in built {
+                    idx.insert(hash, pat);
+                }
+                eprintln!("[hugit-serve] PAT auth: indexed {n} live token(s) (warm)");
+            });
+        if spawn.is_err() {
+            eprintln!(
+                "[hugit-serve] PAT index build thread spawn failed — PAT auth starts with an \
+                 EMPTY index (those tokens will 401 until a reboot)"
+            );
+        }
+    }
+
+    /// Insert a freshly-minted token into the live index (immediate authentication, no
+    /// reboot). No-op when PAT auth is off.
+    pub fn pat_index_insert_if_enabled(
+        &self,
+        secret_hash: String,
+        pat: crate::writes::verbs::write_token::PatAuth,
+    ) {
+        if !self.pat_auth_enabled {
+            return;
+        }
+        self.pat_index
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(secret_hash, pat);
+    }
+
+    /// Drop a revoked token from the live index (immediate deny, no reboot). No-op when
+    /// PAT auth is off.
+    pub fn pat_index_remove_if_enabled(&self, secret_hash: &str) {
+        if !self.pat_auth_enabled {
+            return;
+        }
+        self.pat_index
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(secret_hash);
+    }
+
+    /// Resolve an `Authorization` header VALUE to its owning [`PatAuth`] via the live
+    /// index, or `None`. Accepts BOTH `Bearer <secret>` and the git-CLI
+    /// `Basic base64(user:secret)` (the PAT is the password). Returns `None` when PAT
+    /// auth is disabled, the header carries no `ghgr_pat_` candidate, or the token is
+    /// unknown/revoked/expired — an O(1) in-memory lookup, NO per-request R2 read.
+    #[must_use]
+    pub fn resolve_pat_from_auth(
+        &self,
+        auth_value: &str,
+        now_ms: u64,
+    ) -> Option<crate::writes::verbs::write_token::PatAuth> {
+        if !self.pat_auth_enabled {
+            return None;
+        }
+        let candidates = crate::writes::verbs::write_token::candidate_pat_secrets(auth_value);
+        if candidates.is_empty() {
+            return None;
+        }
+        let idx = self.pat_index.read().unwrap_or_else(|e| e.into_inner());
+        candidates
+            .iter()
+            .find_map(|cand| crate::writes::verbs::write_token::resolve_pat(&idx, cand, now_ms))
+    }
+
     /// A cheap, in-memory snapshot of which repos have a clone-pack build in progress —
     /// surfaced on `/readyz` as `clonepack` (clone-pack legibility). NO R2 read (the
     /// liveness probe must stay fast): reads only the in-process `clone_pack_building`
@@ -1636,6 +1788,65 @@ impl LogSource {
             }
         }
     }
+
+    /// Enumerate the account slugs in the reserved `_accounts/` sub-prefix — the PAT
+    /// boot-scan source (slice 2b). Mirrors [`list_repo_slugs`] but for the account
+    /// namespace: Local = the `_accounts/` SUBDIR's `<slug>.json` files; R2 = the
+    /// `<tenant>/_accounts/` prefix's single-segment `<slug>.json` keys. Only
+    /// [`is_safe_account_slug`] names count. A not-yet-created store is an empty world
+    /// (`Ok(vec![])`), not a fault; a listing IO error is `Err` (the caller logs +
+    /// starts with an empty index — fail-closed-DENY, never a crash).
+    fn list_account_slugs(&self) -> Result<Vec<String>, EngineErr> {
+        match self {
+            LogSource::Local { dir } => {
+                let adir = dir.join("_accounts");
+                let rd = match std::fs::read_dir(&adir) {
+                    Ok(rd) => rd,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+                    Err(e) => {
+                        return Err(EngineErr::unavailable(format!(
+                            "local account listing failed: {e}"
+                        )));
+                    }
+                };
+                let mut slugs = Vec::new();
+                for entry in rd {
+                    let entry = entry.map_err(|e| {
+                        EngineErr::unavailable(format!("local account listing entry failed: {e}"))
+                    })?;
+                    if entry.file_type().map(|t| t.is_file()).unwrap_or(false)
+                        && let Some(name) = entry.file_name().to_str()
+                        && let Some(slug) = name.strip_suffix(".json")
+                        && is_safe_account_slug(slug)
+                    {
+                        slugs.push(slug.to_string());
+                    }
+                }
+                Ok(slugs)
+            }
+            LogSource::R2(c) => {
+                let prefix = format!("{}/_accounts/", c.tenant_id);
+                let keys = c.list_keys(&prefix)?;
+                let mut slugs = Vec::new();
+                for key in keys {
+                    let Some(rest) = key.strip_prefix(&prefix) else {
+                        continue;
+                    };
+                    // Single-segment `<slug>.json` only (no nested `/`); the account
+                    // namespace is flat.
+                    if rest.contains('/') {
+                        continue;
+                    }
+                    if let Some(slug) = rest.strip_suffix(".json")
+                        && is_safe_account_slug(slug)
+                    {
+                        slugs.push(slug.to_string());
+                    }
+                }
+                Ok(slugs)
+            }
+        }
+    }
 }
 
 /// The content-hash version of a raw log object — the local CAS token (a stand-in
@@ -1645,6 +1856,56 @@ fn content_hash(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
     hex::encode(h.finalize())
+}
+
+/// Scan every `_accounts/*` log via `source` and build the `sha256(secret) → PatAuth`
+/// index — the PURE, thread-movable scan the detached boot builder
+/// ([`AppState::boot_build_pat_index`]) runs OFF the boot path (so a synchronous
+/// per-account verified R2 fetch never blows the container startup deadline).
+/// Fail-closed-DENY: a list fault → an empty index; a per-account fetch/verify fault →
+/// that account skipped (its PATs 401). Chain-verifies each log exactly like
+/// [`AppState::load_account_log`]. Never panics on a data fault.
+fn build_pat_index_from_source(
+    source: &LogSource,
+) -> std::collections::HashMap<String, crate::writes::verbs::write_token::PatAuth> {
+    let mut idx = std::collections::HashMap::new();
+    let slugs = match source.list_account_slugs() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "[hugit-serve] PAT index scan: account listing failed ({}) — empty index",
+                e.reason
+            );
+            return idx;
+        }
+    };
+    for slug in slugs {
+        match source.fetch_account(&slug) {
+            Ok(Some((bytes, label, _token))) => {
+                match hugit_cli::checks::load_event_log_from_bytes(&bytes, Path::new(&label)) {
+                    Ok(log) => {
+                        for (hash, pat) in
+                            crate::writes::verbs::write_token::index_account_log(&log)
+                        {
+                            idx.insert(hash, pat);
+                        }
+                    }
+                    Err(e) => eprintln!(
+                        "[hugit-serve] PAT index scan: skipping account {slug} (verify failed: \
+                         {}) — its tokens 401",
+                        e.kind()
+                    ),
+                }
+            }
+            Ok(None) => {} // absent account log — nothing to index
+            Err(e) => eprintln!(
+                "[hugit-serve] PAT index scan: skipping account {slug} (fetch failed: {}) — its \
+                 tokens 401",
+                e.reason
+            ),
+        }
+    }
+    idx
 }
 
 /// The hard cap on ListObjectsV2 pages the durable-owned enumeration will follow — a
@@ -2462,6 +2723,37 @@ fn multi_instance_guard(
     Ok(())
 }
 
+/// Whether PAT git/API auth (slice 2b) is enabled — `HUGIT_SERVE_PAT_AUTH=1`/`true`.
+/// Default **false** (a NEW auth surface ships disabled behind an adversarial review).
+fn pat_auth_enabled_env() -> bool {
+    std::env::var("HUGIT_SERVE_PAT_AUTH")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// The fail-closed boot guard for PAT auth on a multi-instance deploy. The in-memory
+/// PAT index is SINGLE-INSTANCE-authoritative (a token minted on instance A is absent
+/// from B's index until B reboots — the same cross-instance staleness class as the ref
+/// hot-swap). So refuse to boot when PAT auth is enabled AND `>1` instances are
+/// permitted: enabling it there would make a freshly-minted token intermittently 401
+/// depending on which instance served the request. Gated on the B5 read-after-write
+/// seam. Pure (takes the two booleans) → unit-tested without env.
+fn pat_auth_multi_instance_guard(
+    pat_auth_enabled: bool,
+    allow_multi_instance: bool,
+) -> Result<(), String> {
+    if pat_auth_enabled && allow_multi_instance {
+        return Err(
+            "HUGIT_SERVE_PAT_AUTH is set with HUGIT_SERVE_ALLOW_MULTI_INSTANCE — refusing \
+             to boot: the in-memory PAT index is single-instance-authoritative, so a \
+             minted/revoked token would be inconsistent across instances. Land the B5 \
+             read-after-write seam before running PAT auth on max_instances>1."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Split a comma-separated repo/dir list into trimmed, non-empty members. One
 /// member = the unchanged single-repo config; many = the multi-repo forge set.
 fn split_repo_list(list: &str) -> Vec<&str> {
@@ -3084,6 +3376,19 @@ mod tests {
         // A read-only deploy never mutates a manifest → multi-instance is fine even
         // with the conditional path off.
         assert!(multi_instance_guard(false, true, false).is_ok());
+    }
+
+    #[test]
+    fn pat_auth_multi_instance_guard_fail_closed() {
+        // PAT auth ON + multi-instance permitted → REFUSE boot (the in-memory index is
+        // single-instance-authoritative; a mint on A would be absent from B).
+        let err = pat_auth_multi_instance_guard(true, true).unwrap_err();
+        assert!(err.contains("PAT index") && err.contains("single-instance"));
+        // PAT auth ON, single instance → fine (the pinned prod posture).
+        assert!(pat_auth_multi_instance_guard(true, false).is_ok());
+        // PAT auth OFF → fine regardless of instance count.
+        assert!(pat_auth_multi_instance_guard(false, true).is_ok());
+        assert!(pat_auth_multi_instance_guard(false, false).is_ok());
     }
 
     #[test]
