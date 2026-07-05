@@ -1427,44 +1427,53 @@ impl AppState {
     // The in-memory `sha256(secret) → PatAuth` index the hot-path resolver consults.
     // All three methods are NO-OPS when `pat_auth_enabled` is false.
 
-    /// Boot-scan every `_accounts/*` log and union its live PATs into the index. Called
-    /// once at boot (from `from_env`) when PAT auth is enabled. Fail-closed-DENY: a
-    /// list/load fault logs + skips (those PATs won't authenticate — a 401, never a
-    /// crash), so one corrupt account never disables the whole engine.
+    /// Kick off the PAT index build on a DETACHED thread — boot NEVER blocks on it.
+    /// Called once at boot (from `from_env`) when PAT auth is enabled. The engine
+    /// starts with an EMPTY index (a PAT 401s — fail-closed-DENY — until the warm-up
+    /// lands, typically sub-second), then the thread MERGES the scanned tokens in.
+    ///
+    /// **Why detached (not synchronous):** the scan does one verified R2 fetch PER
+    /// account, sequentially — synchronous at boot it would blow the Cloudflare
+    /// Container startup deadline as accounts grow (the chunk-256 boot-crash class).
+    /// This mirrors the CAS `batch_read` self-probe, moved off-boot for the SAME reason
+    /// (see [`from_env`]). A build fault logs + leaves whatever merged (those PATs 401),
+    /// never a crash; a panic is isolated by `catch_unwind`.
+    ///
+    /// **Merge, not overwrite:** the thread INSERTS each scanned entry into the live
+    /// index without clearing it, so a `token_create` that lands DURING the warm-up
+    /// (its `pat_index_insert_if_enabled` key is absent from the scan) survives. The
+    /// only residual is a `token_revoke` in the same one-time warm-up window whose
+    /// `pat.revoked` post-dates the scan's read: the scanned (still-live) entry is
+    /// re-merged and authenticates until the next reboot — the SAME self-healing,
+    /// single-instance in-memory-eviction property already reviewed for the steady
+    /// state (and strictly narrower: a one-time boot window).
     fn boot_build_pat_index(&self) {
-        let slugs = match self.source.list_account_slugs() {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!(
-                    "[hugit-serve] PAT index boot scan failed ({}) — PAT auth starts \
-                     with an EMPTY index (those tokens will 401 until a reboot)",
-                    e.reason
-                );
-                return;
-            }
-        };
-        let mut idx = self.pat_index.write().unwrap_or_else(|e| e.into_inner());
-        let mut accounts = 0usize;
-        for slug in slugs {
-            match self.load_account_log(&slug) {
-                Ok((log, _)) => {
-                    for (hash, pat) in crate::writes::verbs::write_token::index_account_log(&log) {
-                        idx.insert(hash, pat);
-                    }
-                    accounts += 1;
+        let source = self.source.clone();
+        let index = Arc::clone(&self.pat_index);
+        let spawn = std::thread::Builder::new()
+            .name("hugit-pat-index".into())
+            .spawn(move || {
+                let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    build_pat_index_from_source(&source)
+                }))
+                .unwrap_or_else(|_| {
+                    eprintln!("[hugit-serve] PAT index build panicked — leaving an empty index");
+                    std::collections::HashMap::new()
+                });
+                let n = built.len();
+                // Merge (insert-only, never clear) so a create during warm-up survives.
+                let mut idx = index.write().unwrap_or_else(|e| e.into_inner());
+                for (hash, pat) in built {
+                    idx.insert(hash, pat);
                 }
-                Err(e) => eprintln!(
-                    "[hugit-serve] PAT index: skipping account (load failed: {}) — its \
-                     tokens will 401",
-                    e.reason
-                ),
-            }
+                eprintln!("[hugit-serve] PAT auth: indexed {n} live token(s) (warm)");
+            });
+        if spawn.is_err() {
+            eprintln!(
+                "[hugit-serve] PAT index build thread spawn failed — PAT auth starts with an \
+                 EMPTY index (those tokens will 401 until a reboot)"
+            );
         }
-        eprintln!(
-            "[hugit-serve] PAT auth ENABLED: indexed {} live token(s) across {} account(s)",
-            idx.len(),
-            accounts
-        );
     }
 
     /// Insert a freshly-minted token into the live index (immediate authentication, no
@@ -1827,6 +1836,56 @@ fn content_hash(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
     hex::encode(h.finalize())
+}
+
+/// Scan every `_accounts/*` log via `source` and build the `sha256(secret) → PatAuth`
+/// index — the PURE, thread-movable scan the detached boot builder
+/// ([`AppState::boot_build_pat_index`]) runs OFF the boot path (so a synchronous
+/// per-account verified R2 fetch never blows the container startup deadline).
+/// Fail-closed-DENY: a list fault → an empty index; a per-account fetch/verify fault →
+/// that account skipped (its PATs 401). Chain-verifies each log exactly like
+/// [`AppState::load_account_log`]. Never panics on a data fault.
+fn build_pat_index_from_source(
+    source: &LogSource,
+) -> std::collections::HashMap<String, crate::writes::verbs::write_token::PatAuth> {
+    let mut idx = std::collections::HashMap::new();
+    let slugs = match source.list_account_slugs() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "[hugit-serve] PAT index scan: account listing failed ({}) — empty index",
+                e.reason
+            );
+            return idx;
+        }
+    };
+    for slug in slugs {
+        match source.fetch_account(&slug) {
+            Ok(Some((bytes, label, _token))) => {
+                match hugit_cli::checks::load_event_log_from_bytes(&bytes, Path::new(&label)) {
+                    Ok(log) => {
+                        for (hash, pat) in
+                            crate::writes::verbs::write_token::index_account_log(&log)
+                        {
+                            idx.insert(hash, pat);
+                        }
+                    }
+                    Err(e) => eprintln!(
+                        "[hugit-serve] PAT index scan: skipping account {slug} (verify failed: \
+                         {}) — its tokens 401",
+                        e.kind()
+                    ),
+                }
+            }
+            Ok(None) => {} // absent account log — nothing to index
+            Err(e) => eprintln!(
+                "[hugit-serve] PAT index scan: skipping account {slug} (fetch failed: {}) — its \
+                 tokens 401",
+                e.reason
+            ),
+        }
+    }
+    idx
 }
 
 /// The hard cap on ListObjectsV2 pages the durable-owned enumeration will follow — a

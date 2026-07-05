@@ -76,6 +76,36 @@ engine. Options for later: update an in-memory `last_used` on the index entry + 
 next create/revoke, or a periodic flush). Until then `me/account.pats[].last_used_at` stays `0` (=
 never/unknown) — honest, flagged to githugr.
 
+## Self-run adversarial audit (2026-07-05, 3 parallel read-only auditors)
+
+Before handing to clw, a 3-dimension adversarial sweep of the built wiring — all **SOUND**:
+- **Auth-bypass / escalation:** NO holes. PAT never reaches operator (Tier-1.5 before the dev-token;
+  `principal_chain` is structurally `clerk:*`); a `repo:read` PAT is 403'd on every `/v1` write +
+  push + the mint route; no cross-user/org leak; Basic-decode username inert; disabled ⇒ inert.
+- **Index lifecycle / durability:** SOUND. Boot-scan key-contract matches `persist_account` exactly
+  (no missed accounts, no non-account keys); insert-after-append + remove-after-append never lead the
+  log toward more access; lock discipline poison-safe.
+- **Panic / DoS:** SOUND. `decode_base64_std`, `candidate_pat_secrets`, `resolve_pat`, `token_id` are
+  all total (never unwind on any adversarial `Authorization`); resolve is O(1) in-memory with a working
+  `ghgr_pat_` fast-reject (no per-request hash of a random Bearer, no R2 read).
+
+**Fixed from the audit:** the boot index build was synchronous on the boot path (one verified R2
+fetch per account → the chunk-256 startup-deadline class as accounts grow). Now DETACHED off-boot
+(mirrors the CAS self-probe): the engine starts with an empty index (PATs 401 until warm — fail-closed)
+and the thread MERGES the scan in (insert-only, so a create during warm-up survives).
+
+**Tracked low notes for the clw review (defensible, NOT fixed here):**
+- *Write-PAT self-proliferation:* a `repo:write` PAT passes the mint route, so it can spawn sibling
+  tokens (same-or-lesser scope) that survive revocation of the original. Within its authority (mirrors
+  GitHub classic PATs); an operational hardening candidate = exclude PAT-authenticated callers from
+  `POST /v1/me/tokens`. Owner/clw call.
+- *Revoke rests on in-memory eviction:* the hot path checks prefix + index-hit + expiry, not the durable
+  `pat.revoked` tombstone. Safe under the single-instance invariant + the create-always-writes-`secret_hash`
+  guarantee; a non-expiring token whose eviction is skipped (crash window, or the warm-up revoke race)
+  authenticates until reboot (self-healing). Backstop idea: default a non-zero max TTL.
+- *base64 non-canonical acceptance:* `len%4 ∈ {2,3}` doesn't validate trailing zero bits — benign (no
+  forgery; still needs the secret to sha256-match), noted for completeness.
+
 ## The adversarial checklist (clw / a fresh reviewer runs it before live enablement)
 
 1. A `ghgr_pat_` bearer NEVER yields the operator (Tier-1.5 is before the dev-token; assert a PAT
