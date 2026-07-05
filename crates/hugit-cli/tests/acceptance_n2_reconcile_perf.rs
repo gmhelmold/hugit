@@ -198,20 +198,37 @@ fn timed_run_in_sync(tag: &str, n: usize) -> Duration {
 ///  a regression). The ratio carries the real signal; an absolute ceiling carried
 ///  only flakiness (the prior `t5k < 12 s` flaked at 16 s under contention —
 ///  PS-12b runner contention, not an algorithmic regression).
+/// The MIN of `runs` timed probes at size `n` — the least-contended estimate. The min
+/// (not the mean) is the robustness mechanism: on a shared, contended runner a probe is
+/// only ever SLOWED (never sped up) by a scheduling/IO spike, so the fastest of a few
+/// runs is the closest to the true algorithmic cost and filters the transient spikes.
+fn min_timed_in_sync(tag: &str, n: usize, runs: usize) -> Duration {
+    (0..runs)
+        .map(|i| timed_run_in_sync(&format!("{tag}-{i}"), n))
+        .min()
+        .expect("at least one run")
+}
+
 #[test]
 fn reconcile_in_sync_scales_linearly_not_quadratically() {
-    let t_lo = timed_run_in_sync("perf3k", 3_000);
-    let t_hi = timed_run_in_sync("perf7k5", 7_500);
+    // MIN-OF-N per size (the real contention fix — #88): the earlier code took a SINGLE
+    // probe per size and asserted the ratio, on the theory that contention "slows both
+    // proportionally, so the ratio is invariant to load". That theory is FALSE: a probe
+    // is slowed INDEPENDENTLY, so a fast baseline + a spike-hit larger run inflates the
+    // ratio past the band on a busy runner (it flaked at 4.19×, 5.79×, 7.87× — pure
+    // machine noise, never an algorithmic regression). Taking the MIN of a few runs per
+    // size filters the spikes: the fastest run at each size is the closest to the true
+    // cost, so the ratio-of-mins reflects the algorithm, not the scheduler.
+    const RUNS: usize = 3;
+    let t_lo = min_timed_in_sync("perf3k", 3_000, RUNS);
+    let t_hi = min_timed_in_sync("perf7k5", 7_500, RUNS);
     eprintln!(
-        "N-2 perf: in-sync run @ 3k = {t_lo:?}, @ 7.5k = {t_hi:?} (old O(n²): 3.64 s / 18.2 s)"
+        "N-2 perf: in-sync MIN-of-{RUNS} @ 3k = {t_lo:?}, @ 7.5k = {t_hi:?} (old O(n²): 3.64 s / 18.2 s)"
     );
 
-    // Sub-quadratic SCALING (the contention-robust proof): 2.5× the events must NOT
-    // cost ~6.25× the time. Allow a generous 5× band for linear growth + fixed
-    // per-run overhead; the quadratic 6.25× is excluded. Because contention slows
-    // both probes proportionally, the ratio is invariant to machine load. The 3k
-    // base amortizes fixed overhead so the ratio sits near the true 2.5× (a smaller
-    // base + tighter 4× band flaked at 4.19× — machine noise, not a regression).
+    // Sub-quadratic SCALING: 2.5× the events must NOT cost ~6.25× the time. A generous
+    // 5× band admits linear growth + fixed per-run overhead; the quadratic 6.25× is
+    // excluded. The 3k base amortizes fixed overhead so the true ratio sits near 2.5×.
     let ratio = t_hi.as_secs_f64() / t_lo.as_secs_f64().max(1e-6);
     assert!(
         ratio < 5.0,
