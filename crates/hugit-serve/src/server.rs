@@ -999,7 +999,19 @@ fn dispatch_account_erase(
         |log, p, at| verbs::write_account_erase::write_account_erase(log, &req, p, at),
     );
     match result {
-        Ok(a) => ok_accepted(&a),
+        // 202 ACCEPTED (not 200): the erasure is STAGED (`requested`), executed
+        // asynchronously later (the gated Part-2 cascade) — the semantically-correct
+        // "accepted, not yet completed" status, and the contract githugr's danger-zone
+        // consumes. The body carries `{accepted:true, state:"requested", …}`.
+        Ok(a) => match serde_json::to_value(&a) {
+            Ok(mut v) => {
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("accepted".to_string(), serde_json::Value::Bool(true));
+                }
+                (202, v.to_string())
+            }
+            Err(e) => err(EngineErr::unavailable(format!("serialize: {e}"))),
+        },
         Err(e) => err(e),
     }
 }
