@@ -510,8 +510,19 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
                 other => vec![other],
             })
             .collect();
+        // Clone-pack build state (clone-pack legibility): `"idle"` or
+        // `"building:<slug>,…"` from the in-memory guard set — cheap, NO R2 read, so the
+        // liveness probe stays fast. Lets a consumer see WHY a full clone is 503ing
+        // during the ~minutes boot pack-assembly window (a retry signal, not a silent
+        // empty clone). Char-filtered defensively (engine-produced, slug-safe).
+        let clonepack: String = state
+            .clone_pack_building_snapshot()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | ':' | ','))
+            .take(256)
+            .collect();
         let body = format!(
-            r#"{{"ready":true,"git_serving":{git_serving},"git_repos":{git_repos},"version":"{version}","cas_batch_read":"{cas_batch_read}"}}"#
+            r#"{{"ready":true,"git_serving":{git_serving},"git_repos":{git_repos},"version":"{version}","cas_batch_read":"{cas_batch_read}","clonepack":"{clonepack}"}}"#
         );
         return (200, body);
     }
