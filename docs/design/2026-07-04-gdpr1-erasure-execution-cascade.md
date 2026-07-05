@@ -129,6 +129,33 @@ outcome (tombstoned / purged / residual-risk-disclosed) so the claim is auditabl
 10. **Secret-scrub at every emitted record boundary** (the account slug / reason are structural, but
     the guard runs).
 
+## Audit response — clw FIX-FIRST verdict (2026-07-04), all 3 must-fixes landed in the planner
+
+clw ran the independent cold audit against #254 (design + planner) + #253 staging, verdict
+**FIX-FIRST** (kernel sound; completeness + CAS legs needed fixing). All three land in the
+design/planner BEFORE the executor, as required:
+
+- **B1 (under-erasure — the worst class):** the planner enumerated only the in-memory loaded set,
+  so a durable-but-unloaded repo (provisioned then dropped from the boot env) could survive while
+  the subject was told "erased." **Fixed:** `AppState::authoritative_owned_repo_logs` now anchors on
+  the **DURABLE** store listing (`LogSource::list_repo_slugs` → R2 ListObjectsV2 / Local dir) ∪ the
+  in-memory set, fail-closed (503) on any listing/load fault. A durable-but-unloaded repo is now
+  never missed (regression-tested).
+- **B2 (identity divergence → right-to-erasure DoS):** `derive_owner_tenant` returned the raw Clerk
+  org with no charset validation, while the account store keys on `is_safe_account_slug` — so an org
+  like `Org_A` could OWN repos but never ERASE (ownable-but-unerasable). **Fixed:** `derive_owner_tenant`
+  now enforces `is_safe_account_slug` (400) — ONE identity: ownership and erasability share a single
+  traversal-safe slug by construction (a non-conforming org owns nothing, the safe direction).
+- **#4 (CAS leg — account-exclusive is not erasure):** the v0 posture collapsed all CAS objects into
+  one disclosure, so an **account-exclusive** object (pure subject data) survived physically. **Fixed
+  (planner model):** the CAS leg is SPLIT — `DisclosureLeg::CasShared` (shared objects, defensible
+  disclose) vs `CasGcObligation` (account-exclusive, physical GC REQUIRED). With the CAS-GC seam not
+  wired in v0, `ErasurePlan::is_launch_blocked()` fires LOUDLY — a separately-tracked go-live blocker,
+  never a soft disclosure. **The physical GC of account-exclusive objects is a CoreLink server/CAS-TL
+  cross-repo seam (relayed by clw) and a HARD pre-launch blocker under the no-waiver bar.**
+- **Nits:** the planner self-refuses a `!is_honest()` plan; `ResidualDisclosure.leg` is a closed
+  `DisclosureLeg` enum (no planner/executor drift).
+
 ## Build order (each slice its own PR, gate-green)
 
 1. ✅ **Part 1 — staging** (`erasure.requested`, the seam + door + route). #252 + #253, on `main`.

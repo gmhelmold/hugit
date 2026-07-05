@@ -48,28 +48,87 @@ pub struct RepoErasureLeg {
     pub already_erased: bool,
 }
 
+/// Which non-repo leg a [`ResidualDisclosure`] covers. A closed enum (not a bare
+/// `&'static str`) so the planner and the future executor can never drift on the leg
+/// set (audit nit) — `cas-shared` is the SHARED-object CAS leg (defensible disclose),
+/// distinct from the account-EXCLUSIVE CAS leg (a [`CasGcObligation`], which must be
+/// physically GC'd, never disclosed away).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisclosureLeg {
+    /// SHARED (cross-tenant-deduplicated) CAS objects — cannot be unilaterally deleted
+    /// (would erase another tenant's data); tombstone + disclose is the honest maximum.
+    CasShared,
+    /// The GitHub mirror (out of hugit's physical control) — the P2 mirror-erase seam.
+    GithubMirror,
+    /// Account-scoped context/journal bytes — purged where an engine API exists.
+    ContextStore,
+}
+
+impl DisclosureLeg {
+    /// The stable wire label.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DisclosureLeg::CasShared => "cas-shared",
+            DisclosureLeg::GithubMirror => "github-mirror",
+            DisclosureLeg::ContextStore => "context-store",
+        }
+    }
+}
+
 /// A non-repo leg whose erasure the engine cannot UNILATERALLY prove-complete in v0,
 /// surfaced as an honest, NON-EMPTY residual-risk disclosure (the X7/X12 mirror-leg
 /// discipline — an empty disclosure is an omission masquerading as one, so the plan
 /// invariant [`ErasurePlan::is_honest`] rejects it).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResidualDisclosure {
-    /// Which leg (`"cas-dedup"` | `"github-mirror"` | `"context-store"`).
-    pub leg: &'static str,
+    /// Which leg.
+    pub leg: DisclosureLeg,
     /// The honest, non-empty statement of what may persist and why it cannot be
     /// unilaterally guaranteed erased in v0.
     pub disclosure: String,
 }
 
-/// The full, read-only plan for erasing `account`: the repo legs to tombstone + the
-/// per-non-repo-leg honest residual-risk disclosures. MUTATES NOTHING.
+/// The **account-EXCLUSIVE** CAS objects obligation (GDPR1 audit #4 — the CAS-leg
+/// split). An object referenced by NO other tenant is pure subject data with zero
+/// cross-tenant collateral: it MUST be physically GC'd (a manifest tombstone leaves the
+/// raw content-addressed object fetchable by digest — a real Art.17 gap, NOT closed by
+/// disclosure). This is DISTINCT from the shared-object leg ([`DisclosureLeg::CasShared`],
+/// legitimately disclose-only). The read-only planner cannot run the reachability check
+/// (that needs the CAS) — it EMITS the obligation so the executor drives the correct
+/// behavior; `seam_wired=false` means the CoreLink CAS reachability+GC seam is not yet
+/// available, so this is a LOUD, separately-tracked go-live blocker (never folded into
+/// the soft disclosure).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CasGcObligation {
+    /// The account owns content-addressed objects that require the exclusive-vs-shared
+    /// partition + physical GC of the exclusive ones (true iff it owns ≥1 repo).
+    pub required: bool,
+    /// Whether the CoreLink CAS reachability + physical-GC seam is available to the
+    /// executor. `false` in v0 → the required physical GC cannot be performed →
+    /// [`ErasurePlan::is_launch_blocked`].
+    pub seam_wired: bool,
+    /// The tracked-blocker note (named owner / cross-repo seam).
+    pub note: String,
+}
+
+/// Whether the CoreLink CAS reachability + physical-GC seam is wired (v0: NOT — it is a
+/// cross-repo obligation on the server/CAS TL, relayed by clw). Flip to a real
+/// capability probe when the seam lands.
+const CAS_GC_SEAM_WIRED: bool = false;
+
+/// The full, read-only plan for erasing `account`: the repo legs to tombstone, the
+/// account-exclusive CAS physical-GC obligation, and the per-non-repo-leg honest
+/// residual-risk disclosures. MUTATES NOTHING.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ErasurePlan {
     /// The subject account slug.
     pub account: String,
     /// Every owned repo the executor would tombstone (with idempotency state).
     pub repos: Vec<RepoErasureLeg>,
-    /// The v0 residual-risk disclosures (cas-dedup, github-mirror, context-store).
+    /// The account-exclusive CAS physical-GC obligation (split from the shared disclose).
+    pub cas_gc: CasGcObligation,
+    /// The v0 residual-risk disclosures (cas-SHARED, github-mirror, context-store).
     pub disclosures: Vec<ResidualDisclosure>,
 }
 
@@ -89,6 +148,15 @@ impl ErasurePlan {
             .iter()
             .all(|d| !d.disclosure.trim().is_empty())
     }
+
+    /// True iff a go-live blocker stands: the account owns content-addressed objects
+    /// whose account-EXCLUSIVE subset MUST be physically GC'd, but the CAS reachability
+    /// and GC seam is not wired (audit #4). The executor MUST NOT claim full erasure
+    /// while this holds — a loud, separately-tracked blocker, never a soft disclosure.
+    #[must_use]
+    pub fn is_launch_blocked(&self) -> bool {
+        self.cas_gc.required && !self.cas_gc.seam_wired
+    }
 }
 
 /// Whether `log` is a repo already TOMBSTONED — it carries a terminal
@@ -101,28 +169,31 @@ pub fn repo_is_erased(log: &EventLog) -> bool {
 
 /// The v0 honest residual-risk disclosures for the non-repo legs. Each is NON-EMPTY
 /// by construction (the plan's honesty invariant). These name the CoreLink-owned /
-/// P2 seams the engine cannot unilaterally prove-complete today.
+/// P2 seams the engine cannot unilaterally prove-complete today. NOTE the CAS leg here
+/// is the **SHARED** (cross-tenant-deduplicated) objects ONLY — the account-EXCLUSIVE
+/// objects are a physical-GC obligation ([`CasGcObligation`]), never disclosed away.
 fn v0_residual_disclosures() -> Vec<ResidualDisclosure> {
     vec![
         ResidualDisclosure {
-            leg: "cas-dedup",
-            disclosure: "CoreLink CAS objects are content-addressed and cross-tenant \
-                         deduplicated; an object also referenced by another tenant cannot be \
-                         physically deleted without erasing that tenant's data. The subject's \
-                         repos are manifest/repo tombstoned (content unreachable + unserved); \
-                         physical GC of account-exclusive objects is a CoreLink-owned obligation \
-                         (the interop seam). Shared objects persist in the CAS by design."
+            leg: DisclosureLeg::CasShared,
+            disclosure: "SHARED (cross-tenant-deduplicated) CAS objects — content also \
+                         referenced by another tenant — cannot be physically deleted without \
+                         erasing that tenant's data. The subject's repos are manifest/repo \
+                         tombstoned (content unreachable + unserved); the shared objects persist \
+                         in the CAS by design (unreachable via the subject's severed manifests). \
+                         Account-EXCLUSIVE objects are NOT covered here — they are a physical-GC \
+                         obligation, not a disclosure."
                 .to_string(),
         },
         ResidualDisclosure {
-            leg: "github-mirror",
+            leg: DisclosureLeg::GithubMirror,
             disclosure: "Data replicated to the GitHub mirror is outside hugit's physical \
                          control; a live mirror-side erase is the documented P2 seam. Until \
                          wired, any mirrored copy is disclosed residual risk, not proven erased."
                 .to_string(),
         },
         ResidualDisclosure {
-            leg: "context-store",
+            leg: DisclosureLeg::ContextStore,
             disclosure: "Account-scoped context/journal bytes are purged where an engine \
                          context-store erasure API exists; absent that API in v0, any residual \
                          context datum is disclosed residual risk, not proven purged."
@@ -133,34 +204,53 @@ fn v0_residual_disclosures() -> Vec<ResidualDisclosure> {
 
 /// Compute the read-only erasure plan for `account`. MUTATES NOTHING.
 ///
-/// Enumerates every repo owned by `account` (the authoritative in-memory set via
-/// [`AppState::owned_repo_logs`]) and marks each `already_erased` or pending; attaches
-/// the v0 honest residual-risk disclosures. FAIL-CLOSED: if the ownership enumeration
-/// is indeterminate (any candidate log unloadable → `owned_repo_logs` returns `None`),
-/// this returns `503` — the executor must NEVER erase from an under-reported set (a
-/// subject's repo must never be missed because of a transient read fault).
+/// Enumerates every repo owned by `account` via the DURABLE authoritative set
+/// ([`AppState::authoritative_owned_repo_logs`] — the durable store listing ∪ the
+/// in-memory loaded set), so a durable-but-unloaded repo can NEVER be missed (audit B1).
+/// Marks each `already_erased` or pending; splits the CAS leg into the account-exclusive
+/// physical-GC obligation (audit #4) + the shared-object disclosure; attaches the v0
+/// honest residual disclosures. Self-checks honesty: a plan that would ship an empty
+/// disclosure is REFUSED (fail-closed, audit nit).
 ///
 /// # Errors
-/// `503 ENGINE_UNAVAILABLE` — the ownership enumeration could not be determined
-/// (fail-closed; the plan would be incomplete).
+/// `503 ENGINE_UNAVAILABLE` — the durable ownership enumeration could not be determined
+/// (any listing/load fault → fail-closed; the executor must NEVER erase from an
+/// under-reported set), or the constructed plan is not honest (defense-in-depth).
 pub fn plan_account_erasure(state: &AppState, account: &str) -> Result<ErasurePlan, EngineErr> {
-    let owned = state.owned_repo_logs(account).ok_or_else(|| {
-        EngineErr::unavailable(
-            "não foi possível enumerar os repositórios da conta com segurança (fail-closed)",
-        )
-    })?;
-    let repos = owned
+    let owned = state.authoritative_owned_repo_logs(account)?;
+    let repos: Vec<RepoErasureLeg> = owned
         .into_iter()
         .map(|(repo, log)| RepoErasureLeg {
             repo,
             already_erased: repo_is_erased(&log),
         })
         .collect();
-    Ok(ErasurePlan {
+    // The account-exclusive CAS physical-GC obligation is REQUIRED iff the account owns
+    // content-addressed objects (i.e. owns ≥1 repo). The read-only planner cannot run
+    // the reachability partition (needs the CAS) — it emits the obligation for the
+    // executor + surfaces `seam_wired` so `is_launch_blocked` fires loudly in v0.
+    let cas_gc = CasGcObligation {
+        required: !repos.is_empty(),
+        seam_wired: CAS_GC_SEAM_WIRED,
+        note: "account-exclusive CAS objects require the reachability partition + physical GC \
+               (a CoreLink server/CAS-TL cross-repo seam, relayed by clw); until wired this is a \
+               tracked go-live blocker, NOT a disclosure"
+            .to_string(),
+    };
+    let plan = ErasurePlan {
         account: account.to_string(),
         repos,
+        cas_gc,
         disclosures: v0_residual_disclosures(),
-    })
+    };
+    // Defense-in-depth (audit nit): never return a plan an executor could drive with an
+    // empty disclosure.
+    if !plan.is_honest() {
+        return Err(EngineErr::unavailable(
+            "plano de apagamento com disclosure vazio — recusado (fail-closed)",
+        ));
+    }
+    Ok(plan)
 }
 
 #[cfg(test)]
@@ -215,7 +305,7 @@ mod tests {
     }
 
     /// An `AppState` (Local) seeding `(slug, owner, erased)` repos as durable logs +
-    /// countable git seams (the exact shape `owned_repo_logs` enumerates).
+    /// countable git seams (a fully loaded repo — durable log AND in-memory seam).
     fn state_with(repos: &[(&str, &str, bool)]) -> AppState {
         let dir = scratch_dir();
         let mut st = AppState::new(dir.clone(), "dev-token".to_string());
@@ -233,6 +323,21 @@ mod tests {
             );
         }
         st
+    }
+
+    /// Write a DURABLE repo log to the store dir WITHOUT wiring an in-memory git seam —
+    /// the exact shape of a repo provisioned then dropped from the boot env: its log
+    /// survives in the store, but it is absent from the loaded set. The B1 fixture.
+    fn seed_durable_only(st: &AppState, slug: &str, owner: &str) {
+        let dir = match &st.source {
+            crate::state::LogSource::Local { dir } => dir.clone(),
+            crate::state::LogSource::R2(_) => unreachable!("test is Local-mode"),
+        };
+        std::fs::write(
+            dir.join(format!("{slug}.json")),
+            repo_log_json(owner, false),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -284,8 +389,10 @@ mod tests {
             plan.is_honest(),
             "every residual-risk disclosure is non-empty"
         );
-        let legs: Vec<&str> = plan.disclosures.iter().map(|d| d.leg).collect();
-        assert!(legs.contains(&"cas-dedup"));
+        let legs: Vec<&str> = plan.disclosures.iter().map(|d| d.leg.as_str()).collect();
+        // The CAS leg here is the SHARED objects ONLY (the account-exclusive objects
+        // are a physical-GC obligation, not a disclosure).
+        assert!(legs.contains(&"cas-shared"));
         assert!(legs.contains(&"github-mirror"));
         assert!(legs.contains(&"context-store"));
     }
@@ -299,6 +406,57 @@ mod tests {
         assert!(
             plan.is_honest(),
             "the non-repo legs are still honestly disclosed"
+        );
+        // No content-addressed objects owned → no exclusive-GC obligation, not blocked.
+        assert!(!plan.cas_gc.required);
+        assert!(!plan.is_launch_blocked());
+    }
+
+    #[test]
+    fn plan_enumerates_a_durable_but_unloaded_repo_the_b1_completeness_fix() {
+        // AUDIT B1 (the worst class — under-erasure): a repo whose log is DURABLE in the
+        // store but whose git seam is GONE (provisioned then dropped from the boot env)
+        // MUST still be in the subject's plan — else the subject is told "erased" while
+        // it survives. The old in-memory-only enumeration missed it; the durable listing
+        // catches it.
+        let st = state_with(&[("loaded", "org-a", false)]);
+        seed_durable_only(&st, "stranded", "org-a"); // durable log, NO in-memory seam
+        let plan = plan_account_erasure(&st, "org-a").expect("plan");
+        let mut slugs: Vec<&str> = plan.repos.iter().map(|r| r.repo.as_str()).collect();
+        slugs.sort();
+        assert_eq!(
+            slugs,
+            vec!["loaded", "stranded"],
+            "the durable-but-unloaded repo is NOT missed (no silent under-erasure)"
+        );
+    }
+
+    #[test]
+    fn plan_splits_the_cas_leg_and_flags_the_exclusive_gc_go_live_blocker() {
+        // AUDIT #4: an account that owns repos owns content-addressed objects → the
+        // account-EXCLUSIVE physical-GC obligation is REQUIRED; with the CAS-GC seam not
+        // wired in v0 the plan LOUDLY flags a go-live blocker (never folded into the soft
+        // shared-object disclosure).
+        let st = state_with(&[("alpha", "org-a", false)]);
+        let plan = plan_account_erasure(&st, "org-a").expect("plan");
+        assert!(
+            plan.cas_gc.required,
+            "owning a repo requires the exclusive-GC partition"
+        );
+        assert!(
+            !plan.cas_gc.seam_wired,
+            "the CAS-GC seam is not wired in v0"
+        );
+        assert!(
+            plan.is_launch_blocked(),
+            "account-exclusive physical GC is an unmet obligation → a loud go-live blocker"
+        );
+        // The shared-object CAS leg is a distinct, defensible disclosure (not the blocker).
+        assert!(
+            plan.disclosures
+                .iter()
+                .any(|d| d.leg == DisclosureLeg::CasShared),
+            "the SHARED-object CAS leg stays a disclosure, split from the exclusive-GC obligation"
         );
     }
 }
