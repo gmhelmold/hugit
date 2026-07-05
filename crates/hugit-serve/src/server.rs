@@ -510,8 +510,19 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
                 other => vec![other],
             })
             .collect();
+        // Clone-pack build state (clone-pack legibility): `"idle"` or
+        // `"building:<slug>,…"` from the in-memory guard set — cheap, NO R2 read, so the
+        // liveness probe stays fast. Lets a consumer see WHY a full clone is 503ing
+        // during the ~minutes boot pack-assembly window (a retry signal, not a silent
+        // empty clone). Char-filtered defensively (engine-produced, slug-safe).
+        let clonepack: String = state
+            .clone_pack_building_snapshot()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | ':' | ','))
+            .take(256)
+            .collect();
         let body = format!(
-            r#"{{"ready":true,"git_serving":{git_serving},"git_repos":{git_repos},"version":"{version}","cas_batch_read":"{cas_batch_read}"}}"#
+            r#"{{"ready":true,"git_serving":{git_serving},"git_repos":{git_repos},"version":"{version}","cas_batch_read":"{cas_batch_read}","clonepack":"{clonepack}"}}"#
         );
         return (200, body);
     }
@@ -2012,7 +2023,11 @@ mod godpath_gate_tests {
         let body = serde_json::json!({"name":"t","scopes":scopes,"ttl_secs":0})
             .to_string()
             .into_bytes();
-        verbs::write_token::token_create(s, &body, &[user.to_string()], 10)
+        // Mint at the REAL current time: with the server max-TTL cap, `ttl_secs=0` →
+        // `expires_at = at + MAX_TTL_MS`, and `two_tier_auth` resolves against the real
+        // `now_ms()`. A fixture `at` (e.g. 10) would put `expires_at` ~1970 → the token
+        // reads as expired vs the real clock. `now_ms()` keeps it 90 days in the future.
+        verbs::write_token::token_create(s, &body, &[user.to_string()], now_ms())
             .expect("mint a PAT")
             .secret
     }

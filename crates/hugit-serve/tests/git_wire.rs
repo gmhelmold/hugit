@@ -1257,9 +1257,12 @@ fn full_clone_serves_cached_pack_bytes() {
 }
 
 #[test]
-fn full_clone_absent_cache_falls_open_to_walk() {
-    // No `current.json` in R2 → the cache lookup returns None → the serve FALLS OPEN
-    // to the slow walk, which still produces a correct full 7-object clone.
+fn full_clone_absent_cache_is_503_building_not_a_dos_walk() {
+    // No `current.json` in R2 → the cache is ABSENT (the pack is still building at boot).
+    // A full clone of a CACHE-BACKED repo gets a RETRYABLE 503 (clone-pack legibility) —
+    // NEVER the whole-closure slow walk, which on the single-threaded prod engine is a
+    // latency DoS (thousands of sync R2 fetches → the io-deadline abandon that surfaced
+    // as a silent empty/hung clone). This is the "not a silent empty/hung clone" fix.
     let (mut state, _d, seed) = state_with_git("acme", "public");
     let mock = spawn_mock_r2(std::collections::BTreeMap::new()); // empty: GET 404, PUT 403
     state.set_repo_clone_cache("acme", cache_seam(&mock, "acme"));
@@ -1272,12 +1275,15 @@ fn full_clone_absent_cache_falls_open_to_walk() {
         "application/x-git-upload-pack-request",
         &body,
     );
-    let (status, _h, out) = split_response(&resp);
-    assert!(status.starts_with("HTTP/1.1 200"), "status: {status}");
-    assert!(out.starts_with(b"0008NAK\n"), "NAK then a real walked pack");
-    assert_eq!(&out[8..12], b"PACK", "a real packfile from the walk");
-    let count = u32::from_be_bytes(out[16..20].try_into().unwrap());
-    assert_eq!(count, 7, "the full 7-object closure (walk, not the cache)");
+    let (status, head, _out) = split_response(&resp);
+    assert!(
+        status.starts_with("HTTP/1.1 503"),
+        "an absent cache → retryable 503, not a DoS walk: {status}"
+    );
+    assert!(
+        head.to_ascii_lowercase().contains("retry-after"),
+        "the 503 carries Retry-After so the client backs off + retries: {head}"
+    );
 }
 
 #[test]

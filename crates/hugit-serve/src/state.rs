@@ -1527,6 +1527,26 @@ impl AppState {
             .iter()
             .find_map(|cand| crate::writes::verbs::write_token::resolve_pat(&idx, cand, now_ms))
     }
+
+    /// A cheap, in-memory snapshot of which repos have a clone-pack build in progress —
+    /// surfaced on `/readyz` as `clonepack` (clone-pack legibility). NO R2 read (the
+    /// liveness probe must stay fast): reads only the in-process `clone_pack_building`
+    /// guard set. `"idle"` when none, else `"building:<slug>[,<slug>…]"` (sorted). The
+    /// slugs are `is_safe_repo_slug` by construction (only real repos are inserted), so
+    /// the string is JSON-safe; `/readyz` char-filters defensively regardless.
+    #[must_use]
+    pub fn clone_pack_building_snapshot(&self) -> String {
+        let set = self
+            .clone_pack_building
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if set.is_empty() {
+            return "idle".to_string();
+        }
+        let mut slugs: Vec<&str> = set.iter().map(String::as_str).collect();
+        slugs.sort_unstable();
+        format!("building:{}", slugs.join(","))
+    }
 }
 
 impl LogSource {
@@ -3266,6 +3286,20 @@ mod tests {
             2,
             "boot + runtime counted once each"
         );
+    }
+
+    #[test]
+    fn clone_pack_building_snapshot_reports_idle_and_sorted_building_set() {
+        let st = AppState::new(PathBuf::from("/tmp/logs"), "tok".to_string());
+        // Empty guard set → idle.
+        assert_eq!(st.clone_pack_building_snapshot(), "idle");
+        // Insert out of order → the snapshot is sorted + prefixed.
+        {
+            let mut set = st.clone_pack_building.lock().unwrap();
+            set.insert("githugr".to_string());
+            set.insert("hugit".to_string());
+        }
+        assert_eq!(st.clone_pack_building_snapshot(), "building:githugr,hugit");
     }
 
     #[test]

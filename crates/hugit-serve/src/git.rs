@@ -385,6 +385,16 @@ impl ClonePlan {
 /// predicate; combined with an empty `have` list it means an initial clone. Strict
 /// set-equality: a want for a non-tip (already rejected by [`wants_all_advertised`])
 /// or a missing tip → NOT a full clone → the slow walk (safe). Order-independent.
+/// Whether an upload-pack response takes the clone-pack CACHE path (vs the slow walk).
+/// True ONLY for a full clone of a repo that HAS a cache seam — for that repo the
+/// pre-assembled pack IS the serve path, so a cache MISS is a retryable 503 (the pack
+/// is building), never the single-thread-DoS slow walk. A seam-less repo (GIT_DIR /
+/// small) or any non-full-clone (a bounded fetch) → false → the slow walk. Pure +
+/// unit-tested (the DoS-avoidance routing is proven without a live worker/R2).
+fn takes_clone_cache_path(full_clone: bool, has_seam: bool) -> bool {
+    full_clone && has_seam
+}
+
 fn wants_equal_all_tips(refs: &BTreeMap<String, String>, wants: &[gix_hash::ObjectId]) -> bool {
     let tips: std::collections::BTreeSet<String> = refs.values().cloned().collect();
     let want_set: std::collections::BTreeSet<String> =
@@ -589,29 +599,54 @@ fn serve_upload_pack_response(
     // disagrees → a moved ref, an absent/garbage pointer, or a GET error all yield
     // `None` and FALL OPEN to the slow walk below. So the cache serves a byte-correct
     // pack for the advertised refs, or nothing — never a wrong/truncated pack.
-    if plan.full_clone
-        && let Some(seam) = &seam
-        && let Some(pack_bytes) = clone_pack::try_serve_cached_clone_pack(
+    // A FULL clone of a repo that HAS a clone-pack cache seam is served from the
+    // pre-assembled pack — that IS the intended serve path (one R2 GET vs walking the
+    // whole closure). So for such a repo the cache lookup is authoritative on WHY it
+    // missed (clone-pack legibility):
+    //   • HIT    → stream the cached pack.
+    //   • ABSENT → the pack is not built yet (building at boot — the ~minutes background
+    //              assembly — or a transient read). Answer a RETRYABLE 503, NEVER the
+    //              whole-closure slow walk, which on the single-threaded engine is a
+    //              latency DoS (a full clone = thousands of sync R2 fetches → the
+    //              io-deadline abandon that surfaced as a silent empty/hung clone). The
+    //              client sees a clear, retryable failure; `/readyz` shows `clonepack`.
+    //   • STALE  → a ref moved (pointer built for a different tip-set). FALL OPEN to the
+    //              slow walk: byte-correct for the advertised refs, and it avoids
+    //              wedging the repo unclonable until the next push rebuilds the pack.
+    // A repo with NO seam (GIT_DIR / small) and any non-full-clone (a fetch — bounded,
+    // incremental) take the slow walk below, unchanged.
+    if takes_clone_cache_path(plan.full_clone, seam.is_some()) {
+        let seam = seam.as_ref().expect("has_seam checked");
+        match clone_pack::try_serve_cached_clone_pack(
             &seam.r2,
             &seam.tenant,
             &seam.repo_slug,
             &plan.refs,
-        )
-    {
-        // Frame IDENTICALLY to `build_upload_pack_bytes`: the `NAK` pkt-line
-        // (`0008NAK\n`) then the RAW cached pack bytes, same media type. The cached
-        // bytes are the raw packfile the walk would have produced for this tip-set.
-        let mut out = Vec::with_capacity(8 + pack_bytes.len());
-        pkt_line(&mut out, b"NAK\n");
-        out.extend_from_slice(&pack_bytes);
-        let body_len = out.len();
-        let resp = Response::from_data(out)
-            .with_status_code(200)
-            .with_header(git_content_type("application/x-git-upload-pack-result"));
-        return send(request, resp, body_len, io_budget);
+        ) {
+            clone_pack::CloneCacheLookup::Hit(pack_bytes) => {
+                // Frame IDENTICALLY to `build_upload_pack_bytes`: the `NAK` pkt-line
+                // (`0008NAK\n`) then the RAW cached pack bytes, same media type. The
+                // cached bytes are the raw packfile the walk would produce for this
+                // tip-set.
+                let mut out = Vec::with_capacity(8 + pack_bytes.len());
+                pkt_line(&mut out, b"NAK\n");
+                out.extend_from_slice(&pack_bytes);
+                let body_len = out.len();
+                let resp = Response::from_data(out)
+                    .with_status_code(200)
+                    .with_header(git_content_type("application/x-git-upload-pack-result"));
+                return send(request, resp, body_len, io_budget);
+            }
+            clone_pack::CloneCacheLookup::Absent => {
+                return respond_clone_pack_building(request, io_budget);
+            }
+            // Fall open to the slow walk below (a moved-ref stale cache).
+            clone_pack::CloneCacheLookup::Stale => {}
+        }
     }
 
-    // Cache miss / stale / not-a-full-clone / no cache → the existing slow walk.
+    // No cache seam (GIT_DIR / small repo), a non-full-clone fetch (bounded), OR a stale
+    // (moved-ref) cache on a cache-backed repo → the slow walk.
     match build_upload_pack_bytes(source.as_ref(), &want) {
         Some(out) => {
             let body_len = out.len();
@@ -689,6 +724,29 @@ where
         // into the closure, so hand it back to the caller intact.
         Err(_) => Err(payload),
     }
+}
+
+/// A retryable `503` for a full clone whose pre-assembled clone-pack is not ready yet
+/// (building at boot — the ~minutes background assembly — or mid-rebuild after a push).
+/// Sent INSTEAD of the whole-closure slow walk, which on the single-threaded engine is a
+/// latency DoS. Carries `Retry-After` so `git` / the client backs off + retries, and a
+/// clear message so the user sees a real, actionable state instead of a silent
+/// empty/hung clone. Small body → the [`send`] write stays on the inline non-blocking
+/// path. Operators see which repos are building on `/readyz` (`clonepack`).
+fn respond_clone_pack_building(request: Request, io_budget: Duration) {
+    let body = b"clone pack is being prepared; retry shortly\n".to_vec();
+    let body_len = body.len();
+    let resp = Response::from_data(body)
+        .with_status_code(503)
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..])
+                .expect("static content-type"),
+        )
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Retry-After"[..], &b"10"[..])
+                .expect("static retry-after"),
+        );
+    send(request, resp, body_len, io_budget);
 }
 
 /// Shed a fast `503` for a git request the engine cannot service right now (a clone
@@ -2316,6 +2374,30 @@ mod want_validation_tests {
     fn oid(hex_char: char) -> gix_hash::ObjectId {
         gix_hash::ObjectId::from_hex(hex_char.to_string().repeat(40).as_bytes())
             .expect("valid 40-hex oid")
+    }
+
+    /// The clone-serve routing (WP clone-pack legibility): a full clone of a repo WITH a
+    /// cache seam takes the cache path (→ cached pack on hit, retryable 503 on miss,
+    /// NEVER the single-thread-DoS slow walk). A seam-less repo OR any non-full-clone
+    /// (a bounded fetch) takes the slow walk.
+    #[test]
+    fn full_clone_with_seam_takes_the_cache_path_else_slow_walk() {
+        assert!(
+            takes_clone_cache_path(true, true),
+            "full clone + cache seam → cache path (503 on a build-window miss, not a DoS walk)"
+        );
+        assert!(
+            !takes_clone_cache_path(true, false),
+            "full clone but NO seam (GIT_DIR/small) → slow walk"
+        );
+        assert!(
+            !takes_clone_cache_path(false, true),
+            "a fetch (not a full clone) → slow walk even with a seam (cache holds the full pack only)"
+        );
+        assert!(
+            !takes_clone_cache_path(false, false),
+            "fetch, no seam → slow walk"
+        );
     }
 
     /// Only an advertised ref tip may be `want`ed (allowReachableSHA1InWant-off):

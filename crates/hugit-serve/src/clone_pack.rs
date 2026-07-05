@@ -216,28 +216,57 @@ pub fn build_clone_pack(
     Ok((pack.bytes, object_count))
 }
 
-/// The serve-side lookup: return the cached pack bytes IFF the cache matches the
-/// live refs, else `None` (the caller falls back to the slow walk).
+/// The outcome of a serve-side clone-pack cache lookup. The caller (`git.rs`
+/// `serve_upload_pack_response`) routes each variant differently — critically,
+/// [`Absent`](CloneCacheLookup::Absent) and [`Stale`](CloneCacheLookup::Stale) are NOT
+/// the same: an absent pack is still building (retry), a stale pack means a ref moved
+/// (walk), and conflating them would either DoS or wedge a repo.
+pub enum CloneCacheLookup {
+    /// The cached pointer matches the live refs — serve these pack bytes verbatim.
+    Hit(Vec<u8>),
+    /// No usable pointer (no `current.json` yet — the pack is still building in the
+    /// boot window — or a transient read fault, or a pointer that matched but whose
+    /// pack read failed). The caller answers a RETRYABLE 503, NEVER the whole-closure
+    /// slow walk (a single-thread latency DoS on a large repo).
+    Absent,
+    /// A pointer EXISTS but for a DIFFERENT tip-set (a ref moved without a rebuild yet).
+    /// The caller FALLS OPEN to the slow walk — both correctness- AND availability-
+    /// preserving: a 503 here could leave a repo unclonable until the next push
+    /// rebuilds the pack (e.g. after a `push --delete`), whereas the walk always
+    /// produces a byte-correct pack for the advertised refs.
+    Stale,
+}
+
+/// The serve-side lookup: classify the cache against the live refs (see
+/// [`CloneCacheLookup`]).
 ///
 /// The gate: [`load_current`] → the pointer's `refset_sha` must equal the
-/// [`refset_sha`] of `live_refs` (the SAME map the advertisement is built from) →
-/// GET the pack at `current.pack_key`. Any mismatch (a moved ref), an absent
-/// pointer, or an absent/failed pack read yields `None`. This is the ONLY thing
-/// that keeps a streamed cached pack consistent with the advertised refs.
+/// [`refset_sha`] of `live_refs` (the SAME map the advertisement is built from) → GET
+/// the pack at `current.pack_key`. A `refset_sha` mismatch is `Stale`; an absent
+/// pointer or a matched-pointer-but-failed-pack-read is `Absent`; a clean read is
+/// `Hit`. This is the ONLY thing that keeps a streamed cached pack consistent with the
+/// advertised refs (a `Stale`/`Absent` never serves a wrong pack).
 pub fn try_serve_cached_clone_pack<R: R2Get>(
     r2: &R,
     tenant: &str,
     repo: &str,
     live_refs: &BTreeMap<String, String>,
-) -> Option<Vec<u8>> {
-    let pointer = load_current(r2, tenant, repo)?;
+) -> CloneCacheLookup {
+    let Some(pointer) = load_current(r2, tenant, repo) else {
+        // No pointer (building / transient / corrupt) → retryable.
+        return CloneCacheLookup::Absent;
+    };
     if pointer.refset_sha != refset_sha(live_refs) {
-        // The cache was built for a different ref tip-set (a ref moved) — refuse
-        // it; serving it would advertise tips whose closure the pack may not hold.
-        return None;
+        // The cache was built for a different ref tip-set (a ref moved) — a moved-ref
+        // stale, distinct from a not-yet-built absent → the caller walks, not 503s.
+        return CloneCacheLookup::Stale;
     }
-    // The pointer matches the live refs — serve the cached pack bytes.
-    r2.get_object(&pointer.pack_key).ok()?
+    match r2.get_object(&pointer.pack_key) {
+        Ok(Some(bytes)) => CloneCacheLookup::Hit(bytes),
+        // The pointer matched but the pack read failed/absent — a transient fault; the
+        // pack SHOULD be there, so treat as retryable (Absent), not a wrong-pack risk.
+        _ => CloneCacheLookup::Absent,
+    }
 }
 
 #[cfg(test)]
@@ -487,33 +516,43 @@ mod tests {
     }
 
     #[test]
-    fn try_serve_returns_pack_on_matching_refset() {
+    fn try_serve_hit_on_matching_refset() {
         let r2 = RecordingR2::default();
         let live = refs(&[("refs/heads/main", "a".repeat(40).as_str())]);
         let sha = refset_sha(&live);
         flip_via_double(&r2, "t", "hugit", &sha, b"PACKbytes", 2, 99).unwrap();
 
-        let served = try_serve_cached_clone_pack(&r2, "t", "hugit", &live);
-        assert_eq!(served.as_deref(), Some(&b"PACKbytes"[..]));
+        match try_serve_cached_clone_pack(&r2, "t", "hugit", &live) {
+            CloneCacheLookup::Hit(bytes) => assert_eq!(bytes, b"PACKbytes"),
+            other => panic!("expected Hit, got {:?}", std::mem::discriminant(&other)),
+        }
     }
 
     #[test]
-    fn try_serve_none_on_mismatched_refset() {
+    fn try_serve_stale_on_mismatched_refset() {
         let r2 = RecordingR2::default();
         let built_for = refs(&[("refs/heads/main", "a".repeat(40).as_str())]);
         let sha = refset_sha(&built_for);
         flip_via_double(&r2, "t", "hugit", &sha, b"PACKbytes", 2, 99).unwrap();
 
-        // A moved tip → the live refset sha no longer matches the pointer.
+        // A moved tip → the live refset sha no longer matches the pointer → STALE (the
+        // serve falls open to the walk, NOT a 503 — a moved-ref repo stays clonable).
         let live_now = refs(&[("refs/heads/main", "d".repeat(40).as_str())]);
-        assert!(try_serve_cached_clone_pack(&r2, "t", "hugit", &live_now).is_none());
+        assert!(matches!(
+            try_serve_cached_clone_pack(&r2, "t", "hugit", &live_now),
+            CloneCacheLookup::Stale
+        ));
     }
 
     #[test]
-    fn try_serve_none_on_absent_pointer() {
+    fn try_serve_absent_on_absent_pointer() {
         let r2 = RecordingR2::default();
         let live = refs(&[("refs/heads/main", "a".repeat(40).as_str())]);
-        assert!(try_serve_cached_clone_pack(&r2, "t", "hugit", &live).is_none());
+        // No pointer yet (building at boot) → ABSENT (the serve answers a retryable 503).
+        assert!(matches!(
+            try_serve_cached_clone_pack(&r2, "t", "hugit", &live),
+            CloneCacheLookup::Absent
+        ));
     }
 
     // ── build_clone_pack smoke against a tiny in-memory ObjectSource ───────────
