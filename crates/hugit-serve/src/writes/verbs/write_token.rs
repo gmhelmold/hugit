@@ -46,6 +46,15 @@ pub const VALID_SCOPES: &[&str] = &["repo:read", "repo:write"];
 /// Max PATs one account may hold (a DoS / log-bloat bound). Over-cap create → 429.
 pub const MAX_PATS_PER_ACCOUNT: usize = 50;
 
+/// The HARD server-side maximum token TTL, in ms — a ceiling so NO PAT is ever
+/// never-expiring (clw #261 must-fix). Every token self-heals: `expires_at` is ALWAYS
+/// non-zero, so the boot-warm-up / crash eviction-skip window (a revoked token the
+/// insert-only index scan could re-add) is ALWAYS time-bounded — closing the otherwise
+/// unbounded revocation-evasion. 90 days mirrors GitHub's fine-grained-PAT max posture
+/// (no infinite tokens). A `ttl_secs == 0` request ("never") is clamped to this; any
+/// larger request is capped here.
+pub const MAX_TTL_MS: u64 = 90 * 86_400 * 1000;
+
 /// Hex SHA-256 of the raw secret — the ONLY form stored.
 fn hash_secret(secret: &str) -> String {
     hex::encode(Sha256::digest(secret.as_bytes()))
@@ -401,11 +410,17 @@ pub fn token_create(
         ));
     }
     let scopes = resolve_scopes(&req)?;
-    let expires_at = if req.ttl_secs == 0 {
-        0
+    // Clamp the TTL to the server ceiling ([`MAX_TTL_MS`]): `ttl_secs == 0` ("never")
+    // becomes the ceiling, and any larger request is capped. So `expires_at` is ALWAYS
+    // non-zero → EVERY token expires → the boot-warm-up/crash eviction-skip window is
+    // time-bounded (no never-expiring PAT; closes the unbounded revocation-evasion —
+    // clw #261 must-fix).
+    let ttl_ms = if req.ttl_secs == 0 {
+        MAX_TTL_MS
     } else {
-        at.saturating_add(req.ttl_secs.saturating_mul(1000))
+        req.ttl_secs.saturating_mul(1000).min(MAX_TTL_MS)
     };
+    let expires_at = at.saturating_add(ttl_ms);
 
     let secret = mint_secret()?;
     let secret_hash = hash_secret(&secret);
@@ -620,6 +635,39 @@ mod tests {
         assert_eq!(mine.len(), 1);
         assert_eq!(mine[0].id, created.id);
         assert_eq!(mine[0].last_used_at, 0);
+    }
+
+    #[test]
+    fn ttl_is_capped_no_never_expiring_token() {
+        let st = state();
+        // ttl_secs = 0 ("never") → CLAMPED to the ceiling, NOT 0. Every token self-heals.
+        let never =
+            token_create(&st, &body("n", &["repo:read"]), &user("org-a", "u1"), 1000).unwrap();
+        assert_eq!(
+            never.expires_at,
+            1000 + MAX_TTL_MS,
+            "ttl=0 is clamped to the server ceiling, never a never-expiring token"
+        );
+        assert_ne!(
+            never.expires_at, 0,
+            "no PAT is ever never-expiring (revoke-evasion fix)"
+        );
+        // A ludicrous ttl_secs → capped to the ceiling (no overflow via saturating).
+        let huge = serde_json::json!({"name":"h","scopes":["repo:read"],"ttl_secs": u64::MAX})
+            .to_string()
+            .into_bytes();
+        let capped = token_create(&st, &huge, &user("org-a", "u2"), 2000).unwrap();
+        assert_eq!(
+            capped.expires_at,
+            2000 + MAX_TTL_MS,
+            "an over-cap ttl is clamped to the ceiling"
+        );
+        // A within-cap ttl is honored verbatim (5s = 5000ms).
+        let small = serde_json::json!({"name":"s","scopes":["repo:read"],"ttl_secs": 5})
+            .to_string()
+            .into_bytes();
+        let ok = token_create(&st, &small, &user("org-a", "u3"), 3000).unwrap();
+        assert_eq!(ok.expires_at, 3000 + 5000, "a within-cap ttl is honored");
     }
 
     #[test]
