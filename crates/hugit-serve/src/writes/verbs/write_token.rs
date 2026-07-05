@@ -140,6 +140,126 @@ fn live_pat_count(log: &EventLog, user: &str) -> usize {
     project_pats(log, user).len()
 }
 
+// ── the AUTH RESOLUTION foundation (slice 2b — pure; NOT yet wired to the live
+//    auth hot path) ─────────────────────────────────────────────────────────────
+//
+// A PAT authenticates git/API by resolving its SECRET to the owning principal +
+// scopes. The engine stores only `sha256(secret)`, so resolution is: hash the
+// presented secret → look it up among the live (non-revoked, non-expired) tokens →
+// the owning `clerk:{org}:{user}` + scopes. This module provides the PURE resolver +
+// an in-memory index builder; wiring it into `two_tier_auth`/`clone_principal` (the
+// hot path) + the Basic-auth (git-CLI) decode is the reviewed follow-on (see the
+// design `docs/design/2026-07-05-pat-git-auth-wire.md`).
+
+/// What a resolved PAT authorizes — the owning principal + its scopes. NEVER the
+/// operator: `principal` is the token owner's FULL `clerk:{org}:{user}` chain tail (as
+/// stored on `pat.created`), so a resolved PAT is structurally a clerk principal and
+/// can NEVER be the god-path (the resolver is inserted BEFORE the dev-token tier).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatAuth {
+    /// The owning principal — the full `clerk:{org}:{user}` string.
+    pub principal: String,
+    /// The granted scopes (`repo:read`/`repo:write`).
+    pub scopes: Vec<String>,
+    /// Unix ms expiry; `0` = never.
+    pub expires_at: u64,
+}
+
+impl PatAuth {
+    /// The full engine principal chain a resolved PAT authenticates as.
+    #[must_use]
+    pub fn principal_chain(&self) -> Vec<String> {
+        vec![self.principal.clone()]
+    }
+
+    /// Whether the PAT is expired at `now_ms` (never for `expires_at == 0`).
+    #[must_use]
+    pub fn is_expired(&self, now_ms: u64) -> bool {
+        self.expires_at != 0 && now_ms >= self.expires_at
+    }
+
+    /// Whether the PAT grants write access (`repo:write`). A read-only PAT
+    /// (`repo:read` only) MUST NOT authenticate a mutation — the write paths gate on
+    /// this once wired.
+    #[must_use]
+    pub fn can_write(&self) -> bool {
+        self.scopes.iter().any(|s| s == "repo:write")
+    }
+}
+
+/// Build the `secret_hash → PatAuth` index for ONE account log. Skips revoked tokens.
+/// This is composed across all `_accounts/*` logs at boot + refreshed on create/revoke
+/// to form the engine-wide index. The owning principal is taken verbatim from each
+/// record's `user` field (the full `clerk:{org}:{user}`).
+#[must_use]
+pub fn index_account_log(log: &EventLog) -> std::collections::HashMap<String, PatAuth> {
+    let mut revoked = std::collections::BTreeSet::new();
+    for r in log.records().iter().filter(|r| r.kind == PAT_REVOKED_KIND) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&r.payload)
+            && let Some(id) = v.get("id").and_then(|x| x.as_str())
+        {
+            revoked.insert(id.to_string());
+        }
+    }
+    let mut out = std::collections::HashMap::new();
+    for r in log.records().iter().filter(|r| r.kind == PAT_CREATED_KIND) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&r.payload) else {
+            continue;
+        };
+        let (Some(id), Some(hash), Some(user)) = (
+            v.get("id").and_then(|x| x.as_str()),
+            v.get("secret_hash").and_then(|x| x.as_str()),
+            v.get("user").and_then(|x| x.as_str()),
+        ) else {
+            continue;
+        };
+        if revoked.contains(id) {
+            continue;
+        }
+        let scopes = v
+            .get("scopes")
+            .and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.insert(
+            hash.to_string(),
+            PatAuth {
+                principal: user.to_string(),
+                scopes,
+                expires_at: v.get("expires_at").and_then(|x| x.as_u64()).unwrap_or(0),
+            },
+        );
+    }
+    out
+}
+
+/// Resolve a presented raw secret against a `secret_hash → PatAuth` index at `now_ms`.
+/// `None` for: not a hugit PAT (wrong prefix), unknown/revoked (absent from the
+/// index), or expired. `Some` ONLY for a live, valid PAT → its owning principal +
+/// scopes. The lookup keys on `sha256(secret)`, so knowing a hash is useless without
+/// the secret (a stored-hash leak cannot forge a token).
+#[must_use]
+pub fn resolve_pat(
+    index: &std::collections::HashMap<String, PatAuth>,
+    raw_secret: &str,
+    now_ms: u64,
+) -> Option<PatAuth> {
+    // Fast-reject anything that is not shaped like a hugit PAT (avoids hashing every
+    // random Bearer). A real session token / dev-token never has this prefix.
+    if !raw_secret.starts_with(PAT_SECRET_PREFIX) {
+        return None;
+    }
+    let auth = index.get(&hash_secret(raw_secret))?;
+    if auth.is_expired(now_ms) {
+        return None; // expired → treated as no credential (the caller 401s / degrades)
+    }
+    Some(auth.clone())
+}
+
 /// Append one record to the account log via a bounded compare-and-swap (mirrors the
 /// account-door CAS loop). Fail-closed on a durable fault.
 fn append_account(
@@ -472,6 +592,109 @@ mod tests {
                 .unwrap_err()
                 .status,
             400
+        );
+    }
+
+    // ── the AUTH RESOLUTION foundation (slice 2b) — adversarial ───────────────
+
+    /// Create a PAT and return (secret, the org's index).
+    fn make_pat(
+        st: &AppState,
+        org: &str,
+        u: &str,
+        scopes: &[&str],
+        ttl_secs: u64,
+        at: u64,
+    ) -> (String, std::collections::HashMap<String, PatAuth>) {
+        let b = serde_json::json!({"name":"t","scopes":scopes,"ttl_secs":ttl_secs})
+            .to_string()
+            .into_bytes();
+        let created = token_create(st, &b, &user(org, u), at).unwrap();
+        let (log, _) = st.load_account_log(org).unwrap();
+        (created.secret, index_account_log(&log))
+    }
+
+    #[test]
+    fn resolve_maps_a_live_pat_to_its_owning_principal_never_operator() {
+        let st = state();
+        let (secret, idx) = make_pat(&st, "org-a", "u1", &["repo:write"], 0, 10);
+        let auth = resolve_pat(&idx, &secret, 20).expect("a live PAT resolves");
+        assert_eq!(auth.principal_chain(), vec!["clerk:org-a:u1".to_string()]);
+        assert!(auth.can_write(), "repo:write PAT can write");
+        // A PAT is STRUCTURALLY a clerk principal — never the operator.
+        assert!(auth.principal_chain()[0].starts_with("clerk:"));
+        assert!(!auth.principal_chain()[0].starts_with("orchestrator:"));
+    }
+
+    #[test]
+    fn resolve_rejects_wrong_prefix_unknown_and_revoked() {
+        let st = state();
+        let (secret, idx) = make_pat(&st, "org-a", "u1", &[], 0, 10);
+        // A non-PAT bearer (session token / garbage) is fast-rejected (never hashed).
+        assert!(resolve_pat(&idx, "sess_whatever", 20).is_none());
+        // A well-formed-but-unknown PAT secret → None.
+        assert!(resolve_pat(&idx, &format!("{PAT_SECRET_PREFIX}deadbeef"), 20).is_none());
+        // After revoke, the token is ABSENT from a freshly-built index → None.
+        let id = format!("pat_{}", &hash_secret(&secret)[..16]);
+        token_revoke(&st, &id, &user("org-a", "u1"), 30).unwrap();
+        let (log2, _) = st.load_account_log("org-a").unwrap();
+        let idx2 = index_account_log(&log2);
+        assert!(
+            resolve_pat(&idx2, &secret, 40).is_none(),
+            "a revoked PAT no longer resolves"
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_an_expired_pat() {
+        let st = state();
+        // ttl 5s → expires_at = created_at(1000) + 5000 = 6000ms.
+        let (secret, idx) = make_pat(&st, "org-a", "u1", &[], 5, 1000);
+        assert!(
+            resolve_pat(&idx, &secret, 5999).is_some(),
+            "valid before expiry"
+        );
+        assert!(
+            resolve_pat(&idx, &secret, 6000).is_none(),
+            "expired exactly at expires_at → no credential"
+        );
+        assert!(
+            resolve_pat(&idx, &secret, 9999).is_none(),
+            "still expired later"
+        );
+    }
+
+    #[test]
+    fn a_read_only_pat_cannot_write() {
+        let st = state();
+        let (secret, idx) = make_pat(&st, "org-a", "u1", &["repo:read"], 0, 10);
+        let auth = resolve_pat(&idx, &secret, 20).unwrap();
+        assert!(
+            !auth.can_write(),
+            "a repo:read PAT must NOT authorize a write"
+        );
+        // The default scope (empty request) is repo:read → also read-only.
+        let (s2, i2) = make_pat(&st, "org-a", "u2", &[], 0, 11);
+        assert!(!resolve_pat(&i2, &s2, 20).unwrap().can_write());
+    }
+
+    #[test]
+    fn the_index_isolates_users_and_carries_no_secret() {
+        let st = state();
+        let (sa, _) = make_pat(&st, "org-a", "u1", &["repo:write"], 0, 10);
+        make_pat(&st, "org-a", "u2", &["repo:read"], 0, 11);
+        let (log, _) = st.load_account_log("org-a").unwrap();
+        let idx = index_account_log(&log);
+        // Two tokens indexed; each resolves to its OWN user.
+        assert_eq!(idx.len(), 2);
+        assert_eq!(
+            resolve_pat(&idx, &sa, 20).unwrap().principal,
+            "clerk:org-a:u1"
+        );
+        // The index keys on the HASH — the raw secret appears nowhere.
+        assert!(
+            !idx.keys().any(|k| k.contains(&sa)),
+            "the index stores hashes, not secrets"
         );
     }
 }
