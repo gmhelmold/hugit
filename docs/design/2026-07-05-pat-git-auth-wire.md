@@ -1,10 +1,16 @@
 # PAT git-auth wire — the decided design (slice 2b of WP-#90)
 
-> **Status:** DECIDED design. Slice 2a (store + create/revoke + `me/account.pats`) is live on `main`
-> (#259). Slice 2b's PURE FOUNDATION (the `PatAuth` resolver + `index_account_log` + `resolve_pat`,
-> adversarially unit-tested) is landed alongside this doc. This doc is the plan for the HOT-PATH
-> WIRING — the one remaining step, which changes the live auth surface and so ships behind an
-> adversarial review (treated like the GDPR execution cascade: build → review → enable).
+> **Status:** DECIDED design + WIRING BUILT (behind the `HUGIT_SERVE_PAT_AUTH` flag, default
+> OFF — awaiting the adversarial review before live enable). Slice 2a (store + create/revoke +
+> `me/account.pats`) is live on `main` (#259). Slice 2b's PURE FOUNDATION (the `PatAuth` resolver +
+> `index_account_log` + `resolve_pat`) landed in #260. **The HOT-PATH WIRING is now built** (this
+> branch): the `AppState` index field + boot-scan of `_accounts/*` + create/revoke refresh + the
+> Bearer AND HTTP-Basic credential extraction + Tier-1.5 in `two_tier_auth`/`clone_principal`/
+> receive-pack + the `can_write` scope gate (403 `SCOPE_INSUFFICIENT`) + the multi-instance
+> fail-closed boot guard. Gate-green (626 lib tests + the new wiring tests, clippy `-D warnings`,
+> fmt). It changes the live auth surface, so it stays behind `HUGIT_SERVE_PAT_AUTH=1` (OFF on prod)
+> until the adversarial review below signs off — the same discipline as the GDPR execution cascade:
+> build → review → enable.
 > **Why gated:** accepting a PAT as a git/API credential is a NEW AUTH SURFACE. A subtle bug (a
 > revoked/expired token accepted, a PAT conferring operator, cross-user leakage, a read-only PAT
 > writing) is a security incident. It gets the same discipline as any security-surface go-live.
@@ -70,6 +76,37 @@ engine. Options for later: update an in-memory `last_used` on the index entry + 
 next create/revoke, or a periodic flush). Until then `me/account.pats[].last_used_at` stays `0` (=
 never/unknown) — honest, flagged to githugr.
 
+## Self-run adversarial audit (2026-07-05, 3 parallel read-only auditors)
+
+Before handing to clw, a 3-dimension adversarial sweep of the built wiring — all **SOUND**:
+- **Auth-bypass / escalation:** NO holes. PAT never reaches operator (Tier-1.5 before the dev-token;
+  `principal_chain` is structurally `clerk:*`); a `repo:read` PAT is 403'd on every `/v1` write +
+  push + the mint route; no cross-user/org leak; Basic-decode username inert; disabled ⇒ inert.
+- **Index lifecycle / durability:** SOUND. Boot-scan key-contract matches `persist_account` exactly
+  (no missed accounts, no non-account keys); insert-after-append + remove-after-append never lead the
+  log toward more access; lock discipline poison-safe.
+- **Panic / DoS:** SOUND. `decode_base64_std`, `candidate_pat_secrets`, `resolve_pat`, `token_id` are
+  all total (never unwind on any adversarial `Authorization`); resolve is O(1) in-memory with a working
+  `ghgr_pat_` fast-reject (no per-request hash of a random Bearer, no R2 read).
+
+**Fixed from the audit:** the boot index build was synchronous on the boot path (one verified R2
+fetch per account → the chunk-256 startup-deadline class as accounts grow). Now DETACHED off-boot
+(mirrors the CAS self-probe): the engine starts with an empty index (PATs 401 until warm — fail-closed)
+and the thread MERGES the scan in (insert-only, so a create during warm-up survives).
+
+**Tracked low notes for the clw review:**
+- *Write-PAT self-proliferation — CLOSED (hardened).* A `repo:write` PAT used to pass the mint route,
+  so it could spawn sibling tokens surviving revocation of the original. Now `AuthCtx.is_pat` flags a
+  PAT credential and `POST /v1/me/tokens` refuses it with 403 `PAT_CANNOT_MINT` — token creation
+  requires a session (browser/Clerk) credential, GitHub-style. (Revoke stays open to a PAT — it only
+  reduces access.) Test: `a_pat_cannot_mint_another_token`.
+- *Revoke rests on in-memory eviction:* the hot path checks prefix + index-hit + expiry, not the durable
+  `pat.revoked` tombstone. Safe under the single-instance invariant + the create-always-writes-`secret_hash`
+  guarantee; a non-expiring token whose eviction is skipped (crash window, or the warm-up revoke race)
+  authenticates until reboot (self-healing). Backstop idea: default a non-zero max TTL.
+- *base64 non-canonical acceptance:* `len%4 ∈ {2,3}` doesn't validate trailing zero bits — benign (no
+  forgery; still needs the secret to sha256-match), noted for completeness.
+
 ## The adversarial checklist (clw / a fresh reviewer runs it before live enablement)
 
 1. A `ghgr_pat_` bearer NEVER yields the operator (Tier-1.5 is before the dev-token; assert a PAT
@@ -88,9 +125,15 @@ never/unknown) — honest, flagged to githugr.
 
 1. ✅ Store + create/revoke + `me/account.pats` (#259, slice 2a).
 2. ✅ The PURE resolver foundation (`PatAuth` + `index_account_log` + `resolve_pat`) + adversarial
-   unit tests (this PR).
-3. **[clw / adversarial review of THIS design + the wiring PR]** — the gate before live.
-4. The hot-path WIRING: the `AppState` index field + boot scan + create/revoke refresh + the
-   Bearer/Basic extraction + Tier-1.5 in `two_tier_auth`/`clone_principal`/receive-pack + the
-   `can_write` scope gate. Behind the review; NOT enabled on `max_instances>1`.
-5. Deploy (a redeploy) + live-verify: `git clone`/`git push` with a real PAT as-tenant; revoke → 401.
+   unit tests (#260).
+3. ✅ **The hot-path WIRING (built, behind the flag):** the `AppState` `pat_index` field + boot-scan
+   of `_accounts/*` (fail-closed-DENY on a fault) + create/revoke index refresh (immediate mint/
+   revoke, no reboot) + the Bearer AND HTTP-Basic credential extraction (`candidate_pat_secrets` +
+   the hand-rolled panic-safe base64 decoder) + Tier-1.5 in `two_tier_auth_ctx`/`clone_principal`/
+   receive-pack (before the dev-token → never operator) + the `can_write` scope gate (`write_auth`
+   → 403 `SCOPE_INSUFFICIENT` on `/v1` writes + receive-pack) + the multi-instance fail-closed boot
+   guard. Gated on `HUGIT_SERVE_PAT_AUTH` (default OFF). Tests cover every checklist item below.
+4. **[clw / adversarial review of THIS design + the wiring — the gate before live enable]** ← HERE.
+5. Enable (`HUGIT_SERVE_PAT_AUTH=1`) + redeploy + live-verify: `git clone`/`git push` with a real
+   PAT as-tenant; a read-only PAT is refused push (403); revoke → the token stops authenticating.
+   NOT enabled on `max_instances>1` until the B5 read-after-write seam.
