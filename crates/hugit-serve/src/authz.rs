@@ -53,25 +53,42 @@ pub struct RepoMeta {
     pub visibility: Visibility,
     /// The tenant that owns the repo's objects, or `None` when unassigned.
     pub owner_tenant: Option<String>,
+    /// TERMINAL: the repo was ERASED (GDPR1 — a `repo.erased` tombstone record on the
+    /// append-only log). Once set it is irreversible (append-only, terminal): the
+    /// content reads/clone serve 404 to EVERYONE (including the operator — the content
+    /// is gone), and writes are refused. The audit LOG still exists (append-only), but
+    /// the content projection is tombstoned.
+    pub erased: bool,
 }
 
 impl RepoMeta {
-    /// Fail-safe default: PRIVATE, unassigned. A repo with no `repo.meta` record
-    /// is therefore operator-only until its tenant is assigned — never open.
+    /// Fail-safe default: PRIVATE, unassigned, not erased. A repo with no `repo.meta`
+    /// record is therefore operator-only until its tenant is assigned — never open.
     fn private_default() -> Self {
         Self {
             visibility: Visibility::Private,
             owner_tenant: None,
+            erased: false,
         }
     }
 }
 
 /// Project the repo's authz metadata from the (already chain-verified) log:
-/// the LATEST `repo.meta` record wins; absent ⇒ the fail-safe private default.
+/// the LATEST `repo.meta` record wins; a `repo.erased` tombstone marks it ERASED
+/// (terminal); absent ⇒ the fail-safe private default.
 #[must_use]
 pub fn project_repo_meta(log: &EventLog) -> RepoMeta {
     let mut meta = RepoMeta::private_default();
-    for r in log.records().iter().filter(|r| r.kind == REPO_META_KIND) {
+    for r in log.records() {
+        // A GDPR1 erasure tombstone is TERMINAL — once seen, the repo is erased
+        // (append-only; it can never be un-set by a later record).
+        if r.kind == crate::writes::erasure::REPO_ERASED_KIND {
+            meta.erased = true;
+            continue;
+        }
+        if r.kind != REPO_META_KIND {
+            continue;
+        }
         let Ok(v) = serde_json::from_str::<Value>(&r.payload) else {
             continue;
         };
@@ -138,6 +155,11 @@ fn caller(principal: &[String]) -> Caller {
 ///   or an unknown caller, is denied.
 #[must_use]
 pub fn authorize_read(principal: &[String], meta: &RepoMeta) -> bool {
+    // An ERASED repo (GDPR1 tombstone) serves NO content to ANYONE — including the
+    // operator. The data is gone; the read/clone gate is a uniform 404 (no oracle).
+    if meta.erased {
+        return false;
+    }
     match caller(principal) {
         Caller::Operator => true,
         // An unrecognized principal (present-but-unclassifiable bearer) reads
@@ -166,6 +188,11 @@ pub fn authorize_read(principal: &[String], meta: &RepoMeta) -> bool {
 ///   no `owner_tenant` (writes stay operator-only until ownership is assigned).
 #[must_use]
 pub fn authorize_write(principal: &[String], meta: &RepoMeta) -> bool {
+    // An ERASED repo is TERMINAL — no further writes by anyone (land/verdict/policy/…),
+    // not even the operator. It cannot be resurrected.
+    if meta.erased {
+        return false;
+    }
     match caller(principal) {
         Caller::Operator => true,
         c => matches!(
@@ -202,12 +229,21 @@ mod tests {
         RepoMeta {
             visibility: Visibility::Public,
             owner_tenant: Some("org-a".into()),
+            erased: false,
         }
     }
     fn private(owner: Option<&str>) -> RepoMeta {
         RepoMeta {
             visibility: Visibility::Private,
             owner_tenant: owner.map(str::to_string),
+            erased: false,
+        }
+    }
+    fn erased(owner: &str) -> RepoMeta {
+        RepoMeta {
+            visibility: Visibility::Public,
+            owner_tenant: Some(owner.into()),
+            erased: true,
         }
     }
 
@@ -255,11 +291,69 @@ mod tests {
     }
 
     #[test]
+    fn erased_repo_serves_no_content_and_no_writes_to_anyone() {
+        // GDPR1 tombstone: an erased repo is 404 for EVERYONE (operator + owner + anon)
+        // on both the content read gate and the write gate — the data is gone, terminal.
+        let e = erased("org-a");
+        assert!(
+            !authorize_read(&op(), &e),
+            "operator reads no erased content"
+        );
+        assert!(
+            !authorize_read(&tenant("org-a"), &e),
+            "the owner reads no erased content"
+        );
+        assert!(!authorize_read(&[], &e), "anon reads no erased content");
+        assert!(
+            !authorize_write(&op(), &e),
+            "no writes to an erased repo, even operator"
+        );
+        assert!(
+            !authorize_write(&tenant("org-a"), &e),
+            "the owner cannot write an erased repo"
+        );
+    }
+
+    #[test]
+    fn project_repo_meta_marks_a_repo_erased_on_the_tombstone_record() {
+        let mut log = EventLog::new();
+        let meta = serde_json::json!({"visibility":"public","owner_tenant":"org-a"}).to_string();
+        log.append_authorized(
+            PrincipalClass::Orchestrator,
+            Endpoint::Land,
+            REPO_META_KIND,
+            vec!["o".into()],
+            hugit_refstore::canonical_json(&meta).unwrap_or(meta),
+            1,
+        )
+        .unwrap();
+        assert!(
+            !project_repo_meta(&log).erased,
+            "not erased before the tombstone"
+        );
+        let p = serde_json::json!({"account":"org-a","reason":"erasure"}).to_string();
+        log.append_authorized(
+            PrincipalClass::Orchestrator,
+            Endpoint::Land,
+            crate::writes::erasure::REPO_ERASED_KIND,
+            vec!["o".into()],
+            hugit_refstore::canonical_json(&p).unwrap_or(p),
+            2,
+        )
+        .unwrap();
+        assert!(
+            project_repo_meta(&log).erased,
+            "the tombstone marks it erased"
+        );
+    }
+
+    #[test]
     fn write_on_a_no_owner_repo_is_operator_only() {
         // Public OR private with no owner_tenant → writes stay operator-only.
         let public_no_owner = RepoMeta {
             visibility: Visibility::Public,
             owner_tenant: None,
+            erased: false,
         };
         assert!(!authorize_write(&tenant("org-a"), &public_no_owner));
         assert!(!authorize_write(&tenant("org-a"), &private(None)));

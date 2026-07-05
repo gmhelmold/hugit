@@ -5306,6 +5306,7 @@ mod tests {
         let meta = RepoMeta {
             visibility: Visibility::Public,
             owner_tenant: Some("org-a".to_string()),
+            erased: false,
         };
         let non_owner = vec!["clerk:org-b:user-9".to_string()];
         assert!(
