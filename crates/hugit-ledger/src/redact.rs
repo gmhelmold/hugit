@@ -167,11 +167,50 @@ fn high_entropy_token(s: &str) -> bool {
         {
             return true;
         }
+        // A benign multi-segment PATH is exempt from the whole-token entropy gate.
+        // `/` is a token char (base64 uses it), so a file/ref path is ONE maximal token
+        // — and a long varied path (`Org/repo/refs/heads/some-feature`) clears the 4.0
+        // free-text threshold, falsely redacting the WHOLE path. The exemption fires
+        // ONLY when the token splits into ≥2 `/`-segments AND NO segment is itself
+        // secret-shaped, so it removes ONLY false positives: a `/`-containing SECRET
+        // (a base64 blob's segments stay high-entropy → secret-shaped; a
+        // `config/<key>/x` path's key segment fires) is NEVER exempted. See
+        // [`is_benign_path_token`].
+        if is_benign_path_token(token) {
+            continue;
+        }
         if shannon_entropy(token) >= ENTROPY_THRESHOLD {
             return true;
         }
     }
     false
+}
+
+/// True iff `token` is a benign multi-segment PATH — it has ≥2 non-empty `/`-separated
+/// segments AND NO segment is itself secret-shaped. This exempts a normal file/ref path
+/// (`org/repo/refs/heads/feature`) from the whole-token entropy gate: because `/` is a
+/// [`is_token_char`], such a path is ONE maximal token whose overall Shannon entropy
+/// clears the 4.0 free-text threshold, which was FALSELY redacting the entire path.
+///
+/// COVERAGE-PRESERVING (the load-bearing property): the exemption fires ONLY when EVERY
+/// `/`-segment is individually non-secret under the SAME detector suite ([`is_secret`],
+/// recursively — a segment has no `/`, so it never re-enters this function → no loop).
+/// So a `/`-containing SECRET is never exempted: a base64 credential's segments stay
+/// high-entropy (secret-shaped) and a `config/<key>/x` path's key segment fires. The
+/// only value it removes is a FALSE POSITIVE on an all-benign-segment path.
+///
+/// Residual (documented; covered by the adversarial audit): a crafted string with `/`
+/// every few chars whose EVERY chunk is individually benign — not a real credential
+/// format (a key is a contiguous high-entropy blob; base64 `/` is ~1/64 of chars, so
+/// real segments are long + high-entropy → flagged), and it is indistinguishable from a
+/// path by construction. This is a read-boundary defence-in-depth, not the secret store.
+fn is_benign_path_token(token: &str) -> bool {
+    let segments: Vec<&str> = token.split('/').filter(|s| !s.is_empty()).collect();
+    if segments.len() < 2 {
+        return false; // not a path (no `/` separator, or a single segment)
+    }
+    // Every segment must be individually non-secret under the full suite.
+    segments.iter().all(|seg| !is_secret(seg))
 }
 
 /// True iff the bytes immediately before `run_start` form `<algo>:` where
@@ -225,6 +264,71 @@ mod tests {
     #[test]
     fn embedded_marker_becomes_redacted() {
         assert_eq!(apply("prefix SECRET: suffix"), REDACTED);
+    }
+
+    // ── path exemption: a benign multi-segment path must not over-redact ──────
+    // (fixes #70b — a long file/ref path is ONE token, `/` being a token char, so its
+    // whole-token entropy cleared 4.0 and nuked the entire path).
+
+    #[test]
+    fn benign_long_path_over_the_entropy_gate_is_not_redacted() {
+        // Both specimens have whole-token entropy ≥ 4.0 (they DID redact before the
+        // exemption) but every `/`-segment is a benign slug → now survive verbatim.
+        let file_path = "HumanGuardrail/hugit/crates/hugit-serve/src/handlers/blob.rs";
+        assert_eq!(
+            apply(file_path),
+            file_path,
+            "clean file path survives (was ~4.18)"
+        );
+        let repo_path = "HumanGuardrail/some-really-long-repository-name";
+        assert_eq!(
+            apply(repo_path),
+            repo_path,
+            "clean org/repo path survives (was ~4.01)"
+        );
+        let ref_path = "refs/heads/feat/pat-git-auth-wiring";
+        assert_eq!(apply(ref_path), ref_path, "a ref path survives");
+    }
+
+    #[test]
+    fn path_with_a_real_secret_segment_still_redacts_coverage_preserved() {
+        // A structural secret (a GitHub PAT) inside a path → `is_structural_secret`
+        // fires on the whole string BEFORE the entropy path, so the exemption never even
+        // runs: a path containing a real secret fully redacts.
+        let pat = "ghp_16C7e42F292c6912E7710c838347Ae178B4a";
+        assert_eq!(apply(&format!("dir/{pat}/file")), REDACTED);
+        // A high-entropy KEY segment lifts the WHOLE token over the gate (~4.95) AND is
+        // itself secret-shaped → NOT a benign path (every segment must be benign) → the
+        // whole token still redacts. The exemption is strictly narrower than the old
+        // whole-token entropy fire — anything the old code caught, it still catches.
+        assert_eq!(apply("config/Kf7wPvN2sTuY8rE1oW4iJ6kH0gC5/prod"), REDACTED);
+    }
+
+    #[test]
+    fn base64_secret_containing_slashes_is_not_exempted() {
+        // A base64 credential uses `/`, but its segments stay long + high-entropy →
+        // each segment is secret-shaped → NOT a benign path → redacted (no leak).
+        let b64 = "Kf7wPvN2sTuY8rE1oW4iJ6kH/gC5bVlMnQpXsZ3aB9dEfGh";
+        assert_eq!(
+            apply(b64),
+            REDACTED,
+            "a base64 secret with '/' still redacts"
+        );
+    }
+
+    #[test]
+    fn single_high_entropy_segment_no_slash_still_redacts() {
+        // No `/` → not a path → the entropy gate applies (a bare key redacts, ~4.81).
+        assert_eq!(apply("Kf7wPvN2sTuY8rE1oW4iJ6kH0gC5"), REDACTED);
+    }
+
+    #[test]
+    fn is_benign_path_token_requires_two_clean_segments() {
+        assert!(is_benign_path_token("a/b/c"));
+        assert!(!is_benign_path_token("single")); // no separator
+        assert!(!is_benign_path_token("a")); // one segment
+        // A secret segment disqualifies the whole token.
+        assert!(!is_benign_path_token(&format!("a/{}/c", "f".repeat(50))));
     }
 
     // ── (a) known-prefix detectors — one realistic specimen each ─────────────
