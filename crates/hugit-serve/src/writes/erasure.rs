@@ -563,6 +563,73 @@ pub fn execute_account_erasure_with_erase(
     )
 }
 
+/// The COMPOSITION (clw bar #3) — the single call the route drives: derive the durable
+/// subject/surviving repo partition (bar #1), read each repo's referenced digests
+/// (`digests`, bar #2 in production = [`R2OidIndexDigests`]), compute the subject-EXCLUSIVE
+/// set (`subject − surviving`), and drive the executor over EXACTLY that set.
+///
+/// **The exact-superset guarantee bar #3 requires:** the digests physically erased are
+/// PRECISELY `partition_exclusive_digests(subject, surviving)` — never a digest outside
+/// `subject − surviving`. Concretely, the `exclusive` this computes is the *same slice*
+/// handed to [`execute_account_erasure_with_erase`], which erases each and no other. So a
+/// surviving user's shared object is structurally impossible to erase (it is subtracted
+/// before the drive ever sees it), and an EMPTY exclusive set is a LEGITIMATE `executed`
+/// erasure (a subject whose every object is shared with a surviving user, or that
+/// references none: tombstone the repos, delete nothing physical, claim executed honestly).
+///
+/// **Fail-closed end to end:** the partition aborts on an indeterminate durable listing
+/// (bar #1, `503`) and the digest read aborts on any R2 fault or malformed index (bar #2,
+/// `503`) — nothing is erased under an incomplete surviving set. This is why `digests` is a
+/// `&dyn RepoDigestSource` (not constructed inline): the route wires the real
+/// `R2OidIndexDigests`, tests a hermetic double, and the exact-superset contract holds for
+/// either.
+///
+/// `cas_tenant` is the CoreLink CAS tenant hugit's git content lives under (the single
+/// shared `HUGIT_SERVE_CAS_TENANT_ID`); the partition is meaningful precisely because that
+/// tenant is shared across accounts (per-tenant CAS keying — verified), so a naïve
+/// whole-tenant wipe would delete surviving users' objects.
+///
+/// # Errors
+/// `503` — indeterminate durable enumeration (bar #1), any digest-read fault/malformed
+/// index (bar #2), or any tombstone/erase/claim durable fault (the drive). `401` —
+/// unclassifiable principal (the drive). Fail-closed throughout; nothing over-claimed and
+/// nothing outside the exclusive set is ever erased.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_account_erasure_composed(
+    state: &AppState,
+    digests: &dyn RepoDigestSource,
+    account: &str,
+    principal_chain: Vec<String>,
+    at: u64,
+    erase: &dyn CasEraseTransport,
+    cas_tenant: &str,
+    dsr_id: &str,
+) -> Result<ErasureOutcome, EngineErr> {
+    // Bar #1 — the durable subject-vs-surviving partition (fail-closed on an indeterminate
+    // listing → 503; a partial surviving set NEVER proceeds).
+    let (subject_repos, surviving_repos) = state.erasure_repo_partition(account)?;
+
+    // Partition (bars #2 → exclusive) — the subject-EXCLUSIVE digests, `subject − surviving`,
+    // fail-closed on any read fault (503). This slice is EXACTLY what the drive erases.
+    let exclusive: Vec<String> =
+        partition_exclusive_digests(digests, cas_tenant, &subject_repos, &surviving_repos)?
+            .into_iter()
+            .collect();
+
+    // Bar #3 — drive the executor over EXACTLY the exclusive set (exact-superset: what is
+    // erased == what was computed exclusive; empty → executed legitimately).
+    execute_account_erasure_with_erase(
+        state,
+        account,
+        principal_chain,
+        at,
+        erase,
+        cas_tenant,
+        &exclusive,
+        dsr_id,
+    )
+}
+
 /// The shared executor drive (fail-closed `executed ⇒ every leg durable + physically GC'd`,
 /// the receive-pack discipline):
 /// 1. Plan (fail-closed on an indeterminate durable enumeration — never under-erase).
@@ -1331,6 +1398,106 @@ mod tests {
                 .iter()
                 .any(|d| d.leg == DisclosureLeg::CasShared),
             "the SHARED-object CAS leg stays a disclosure, split from the exclusive-GC obligation"
+        );
+    }
+
+    // ── the COMPOSITION (clw bar #3): partition (bar #1) → digests (bar #2) → drive ──
+
+    #[test]
+    fn composed_erases_exactly_the_subject_exclusive_set_the_exact_superset_guarantee() {
+        // subject `alpha` (org-a) refs {d1,d2,shared}; surviving `beta` (org-b) refs
+        // {shared,dv}. The composition must erase EXACTLY {d1,d2} — never `shared` (a
+        // surviving user's retained object) and never `dv` (not the subject's at all).
+        let st = state_with(&[("alpha", "org-a", false), ("beta", "org-b", false)]);
+        let src = MockDigests::new(&[
+            ("alpha", &["d1", "d2", "shared"]),
+            ("beta", &["shared", "dv"]),
+        ]);
+        let mock = MockErase::new();
+        let outcome = execute_account_erasure_composed(
+            &st,
+            &src,
+            "org-a",
+            operator(),
+            10,
+            &mock,
+            "d863fafb",
+            "dsr-1",
+        )
+        .expect("composed execute");
+        assert_eq!(
+            outcome,
+            ErasureOutcome::Executed {
+                repos_tombstoned: 1
+            }
+        );
+        // EXACT-SUPERSET: what got physically erased == the computed exclusive set == {d1,d2}.
+        let erased: std::collections::BTreeSet<String> = mock.erased.borrow().clone();
+        assert_eq!(
+            erased,
+            ["d1", "d2"].iter().map(|s| s.to_string()).collect(),
+            "erased exactly subject − surviving; a shared/foreign digest is never touched"
+        );
+    }
+
+    #[test]
+    fn composed_empty_exclusive_is_executed_legitimate_retention() {
+        // The subject owns a repo but shares EVERY object with a surviving user → the
+        // exclusive set is empty → tombstone the repo, delete nothing physical, claim
+        // `executed` honestly (legitimate retention, not an over-claim).
+        let st = state_with(&[("alpha", "org-a", false), ("beta", "org-b", false)]);
+        let src = MockDigests::new(&[("alpha", &["shared"]), ("beta", &["shared"])]);
+        let mock = MockErase::new();
+        let outcome = execute_account_erasure_composed(
+            &st,
+            &src,
+            "org-a",
+            operator(),
+            10,
+            &mock,
+            "d863fafb",
+            "dsr-1",
+        )
+        .expect("composed execute");
+        assert_eq!(
+            outcome,
+            ErasureOutcome::Executed {
+                repos_tombstoned: 1
+            }
+        );
+        assert!(
+            mock.erased.borrow().is_empty(),
+            "every object is shared with a surviving user → nothing physical to delete"
+        );
+    }
+
+    #[test]
+    fn composed_fault_reading_a_surviving_repo_aborts_503_nothing_erased() {
+        // THE fail-closed contract at the composition boundary: a fault reading a SURVIVING
+        // repo's digests must abort (503) BEFORE the drive — else a shared digest could be
+        // mis-classified exclusive and a retained object deleted. Nothing is erased, no claim.
+        let st = state_with(&[("alpha", "org-a", false), ("beta", "org-b", false)]);
+        let mut src = MockDigests::new(&[("alpha", &["d1", "shared"]), ("beta", &["shared"])]);
+        src.fault_on = Some("beta".into()); // the surviving repo faults
+        let mock = MockErase::new();
+        let err = execute_account_erasure_composed(
+            &st,
+            &src,
+            "org-a",
+            operator(),
+            10,
+            &mock,
+            "d863fafb",
+            "dsr-1",
+        )
+        .expect_err("a surviving-repo read fault aborts the composition");
+        assert_eq!(
+            err.status, 503,
+            "fail-closed: nothing proceeds on a partial surviving set"
+        );
+        assert!(
+            mock.erased.borrow().is_empty(),
+            "NOT a single digest erased when the partition is indeterminate"
         );
     }
 }
