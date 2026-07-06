@@ -650,10 +650,11 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
                 &state.me_repo_logs(&principal),
             ))
         }
-        // The caller's OWN structured account data (usage + PAT metadata) — the
-        // per-principal read githugr's account page consumes (owner-decided PATs=yes).
-        // Same identity gate + isolation as `me/dashboard`; `pats` is empty until the
-        // engine PAT store lands (a fresh caller has none).
+        // The caller's OWN structured account data (usage + live PAT metadata) — the
+        // per-principal read githugr's account page consumes (owner-decided PATs=yes,
+        // user-managed: list here, mint via POST /v1/me/tokens, revoke via DELETE
+        // /v1/me/tokens/{id}). Same identity gate + isolation as `me/dashboard`; `pats`
+        // carries the caller's OWN live tokens + a best-effort in-memory `last_used_at`.
         ["v1", "me", "account"] => {
             let (principal, _) = match two_tier_auth(state, headers) {
                 Ok(p) => p,
@@ -671,6 +672,7 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
                 &state.me_repo_logs(&principal),
                 account_log.as_ref(),
                 &user,
+                &state.pat_last_used_snapshot(),
             ))
         }
         // `GET /v1/orgs/{name}` — thin real org view. `name` is the path param

@@ -78,6 +78,14 @@ fn token_id(secret_hash: &str) -> String {
     format!("pat_{}", &secret_hash[..16.min(secret_hash.len())])
 }
 
+/// The `pat_<…>` id a raw secret resolves to — the SAME id `pat.created` stores and
+/// [`project_pats`] surfaces. Used by the resolver to key the in-memory last-used tracker
+/// by id (never by the secret). `pub(crate)` so `AppState` can record a PAT's use on auth.
+#[must_use]
+pub(crate) fn pat_id_of_secret(secret: &str) -> String {
+    token_id(&hash_secret(secret))
+}
+
 /// Validate + normalize the requested scopes. Empty → the default `["repo:read"]`.
 /// An unknown scope → `400` (fail-closed).
 fn resolve_scopes(req: &CreateTokenReq) -> Result<Vec<String>, EngineErr> {
