@@ -1265,6 +1265,56 @@ impl AppState {
         Ok(out)
     }
 
+    /// GDPR1 slice-2 (clw's #1 blast-radius bar): partition EVERY repo in the tenant into
+    /// the SUBJECT's repos vs the SURVIVING repos, from the SAME durable authoritative
+    /// candidate set as [`authoritative_owned_repo_logs`] (`list_repo_slugs()` — the
+    /// durable R2 listing — ∪ the in-memory loaded overlay) with the SAME fail-closed
+    /// discipline. Returns `(subject_repos, surviving_repos)`.
+    ///
+    /// The exclusive-digest partition is only safe if the SURVIVING set is COMPLETE: an
+    /// omitted surviving repo → a shared digest mis-classified exclusive → a retained
+    /// user's data physically erased. So this NEVER returns a partial surviving set — an
+    /// unloadable candidate (5xx) propagates (`Err`), exactly like its sibling. Two
+    /// fail-safe choices: (a) an UNOWNED repo (no `owner_tenant`) is classified SURVIVING
+    /// (when ownership is absent, RETAIN its digests — never delete on ambiguity); (b) a
+    /// 404 (a listing/runtime race where the object vanished) is skipped from BOTH sides,
+    /// which is safe — a repo that no longer exists references nothing.
+    ///
+    /// # Errors
+    /// `503` — any listing/load fault (fail-closed; the caller MUST NOT then erase).
+    pub fn erasure_repo_partition(
+        &self,
+        subject: &str,
+    ) -> Result<(Vec<String>, Vec<String>), EngineErr> {
+        let mut names: Vec<String> = self.source.list_repo_slugs()?;
+        names.extend(self.repos.keys().cloned());
+        {
+            let runtime = self.repos_runtime.read().unwrap_or_else(|e| e.into_inner());
+            names.extend(runtime.keys().cloned());
+        }
+        names.sort();
+        names.dedup();
+
+        let mut subject_repos = Vec::new();
+        let mut surviving_repos = Vec::new();
+        for name in names {
+            match self.load_verified(&name) {
+                Ok(log) => {
+                    let meta = crate::authz::project_repo_meta(&log);
+                    if meta.owner_tenant.as_deref() == Some(subject) {
+                        subject_repos.push(name);
+                    } else {
+                        // Other-owned OR unowned → SURVIVING (retain — fail-safe).
+                        surviving_repos.push(name);
+                    }
+                }
+                Err(e) if e.status == 404 => continue, // vanished between list + load
+                Err(e) => return Err(e),               // 5xx → fail-closed, never partial
+            }
+        }
+        Ok((subject_repos, surviving_repos))
+    }
+
     /// The number of repos whose git content seam is loaded (the `/readyz`
     /// capability count). Zero = git serving not live for any repo. Counts the boot
     /// set PLUS the runtime overlay (the two are disjoint by construction — insert
@@ -3789,5 +3839,38 @@ mod me_repos_tests {
         let mut slugs = src.list_repo_slugs().expect("list");
         slugs.sort();
         assert_eq!(slugs, vec!["alpha", "beta"], "account logs are not repos");
+    }
+
+    #[test]
+    fn erasure_repo_partition_splits_subject_vs_surviving_from_the_durable_set() {
+        // clw's #1 bar: the surviving set = EVERY non-subject repo from the SAME durable
+        // authoritative listing the planner uses. org-b's repo is SURVIVING (retained).
+        let st = state_with(&[
+            ("alpha", &meta_log("private", "org-a")),
+            ("beta", &meta_log("public", "org-a")),
+            ("gamma", &meta_log("private", "org-b")),
+        ]);
+        let (mut subject, mut surviving) = st.erasure_repo_partition("org-a").expect("partition");
+        subject.sort();
+        surviving.sort();
+        assert_eq!(subject, vec!["alpha", "beta"], "the subject's own repos");
+        assert_eq!(
+            surviving,
+            vec!["gamma"],
+            "another account's repo is SURVIVING (its digests are retained, never erased)"
+        );
+        // The subject side MUST match the planner's authoritative owned set exactly (same
+        // durable + fail-closed discipline — no drift between the two derivations).
+        let mut auth: Vec<String> = st
+            .authoritative_owned_repo_logs("org-a")
+            .unwrap()
+            .into_iter()
+            .map(|(s, _)| s)
+            .collect();
+        auth.sort();
+        assert_eq!(
+            subject, auth,
+            "subject_repos == authoritative_owned_repo_logs slugs"
+        );
     }
 }

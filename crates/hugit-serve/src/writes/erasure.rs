@@ -325,6 +325,43 @@ pub fn partition_exclusive_digests(
     Ok(subject.difference(&surviving).cloned().collect())
 }
 
+/// The production [`RepoDigestSource`] (clw bar #2): reads a repo's `oid-index.json` from
+/// R2 (`<tenant>/<repo>/oid-index.json`, the git-oid→blake3 map) and collects its blake3
+/// VALUES = the CAS digests the repo references. Holds a `&dyn R2Get` so it is testable
+/// against a double.
+///
+/// FAIL-CLOSED, the partition's safety depends on it: an R2 read fault OR a malformed
+/// index → `Err` (503; NEVER a partial digest set — a shrunk set on a surviving repo
+/// would delete a retained object). An ABSENT index (`get_object` → `None`, i.e. a genuine
+/// 404 — a repo with no pushed objects) → the EMPTY set: it references nothing, which is
+/// correct + safe on both sides (a surviving repo with no objects retains nothing; a
+/// subject repo with no objects contributes no exclusive digests).
+pub struct R2OidIndexDigests<'a> {
+    /// The R2 store the tenant's oid-indexes live in.
+    pub r2: &'a dyn crate::cas::R2Get,
+}
+
+impl RepoDigestSource for R2OidIndexDigests<'_> {
+    fn repo_digests(
+        &self,
+        tenant: &str,
+        slug: &str,
+    ) -> Result<std::collections::BTreeSet<String>, EngineErr> {
+        let key = crate::cas::oid_index_key(tenant, slug);
+        let bytes = self
+            .r2
+            .get_object(&key)
+            .map_err(|e| EngineErr::unavailable(format!("oid-index read failed: {e}")))?;
+        let Some(bytes) = bytes else {
+            // Genuine absence (404) — the repo references no CAS objects. Fault → Err above.
+            return Ok(std::collections::BTreeSet::new());
+        };
+        let index = crate::cas::parse_oid_index(&bytes)
+            .map_err(|e| EngineErr::unavailable(format!("oid-index malformed: {e}")))?;
+        Ok(index.into_values().collect())
+    }
+}
+
 // ── the EXECUTOR (slice 2 — the irreversible legs; NOT route-wired) ───────────
 //
 // This drives the plan against the REAL stores. It is deliberately NOT reachable from
@@ -522,6 +559,73 @@ pub fn execute_account_erasure_with_erase(
         Some(erase),
         cas_tenant,
         exclusive_digests,
+        dsr_id,
+    )
+}
+
+/// The COMPOSITION (clw bar #3) — the single call the route drives: derive the durable
+/// subject/surviving repo partition (bar #1), read each repo's referenced digests
+/// (`digests`, bar #2 in production = [`R2OidIndexDigests`]), compute the subject-EXCLUSIVE
+/// set (`subject − surviving`), and drive the executor over EXACTLY that set.
+///
+/// **The exact-superset guarantee bar #3 requires:** the digests physically erased are
+/// PRECISELY `partition_exclusive_digests(subject, surviving)` — never a digest outside
+/// `subject − surviving`. Concretely, the `exclusive` this computes is the *same slice*
+/// handed to [`execute_account_erasure_with_erase`], which erases each and no other. So a
+/// surviving user's shared object is structurally impossible to erase (it is subtracted
+/// before the drive ever sees it), and an EMPTY exclusive set is a LEGITIMATE `executed`
+/// erasure (a subject whose every object is shared with a surviving user, or that
+/// references none: tombstone the repos, delete nothing physical, claim executed honestly).
+///
+/// **Fail-closed end to end:** the partition aborts on an indeterminate durable listing
+/// (bar #1, `503`) and the digest read aborts on any R2 fault or malformed index (bar #2,
+/// `503`) — nothing is erased under an incomplete surviving set. This is why `digests` is a
+/// `&dyn RepoDigestSource` (not constructed inline): the route wires the real
+/// `R2OidIndexDigests`, tests a hermetic double, and the exact-superset contract holds for
+/// either.
+///
+/// `cas_tenant` is the CoreLink CAS tenant hugit's git content lives under (the single
+/// shared `HUGIT_SERVE_CAS_TENANT_ID`); the partition is meaningful precisely because that
+/// tenant is shared across accounts (per-tenant CAS keying — verified), so a naïve
+/// whole-tenant wipe would delete surviving users' objects.
+///
+/// # Errors
+/// `503` — indeterminate durable enumeration (bar #1), any digest-read fault/malformed
+/// index (bar #2), or any tombstone/erase/claim durable fault (the drive). `401` —
+/// unclassifiable principal (the drive). Fail-closed throughout; nothing over-claimed and
+/// nothing outside the exclusive set is ever erased.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_account_erasure_composed(
+    state: &AppState,
+    digests: &dyn RepoDigestSource,
+    account: &str,
+    principal_chain: Vec<String>,
+    at: u64,
+    erase: &dyn CasEraseTransport,
+    cas_tenant: &str,
+    dsr_id: &str,
+) -> Result<ErasureOutcome, EngineErr> {
+    // Bar #1 — the durable subject-vs-surviving partition (fail-closed on an indeterminate
+    // listing → 503; a partial surviving set NEVER proceeds).
+    let (subject_repos, surviving_repos) = state.erasure_repo_partition(account)?;
+
+    // Partition (bars #2 → exclusive) — the subject-EXCLUSIVE digests, `subject − surviving`,
+    // fail-closed on any read fault (503). This slice is EXACTLY what the drive erases.
+    let exclusive: Vec<String> =
+        partition_exclusive_digests(digests, cas_tenant, &subject_repos, &surviving_repos)?
+            .into_iter()
+            .collect();
+
+    // Bar #3 — drive the executor over EXACTLY the exclusive set (exact-superset: what is
+    // erased == what was computed exclusive; empty → executed legitimately).
+    execute_account_erasure_with_erase(
+        state,
+        account,
+        principal_chain,
+        at,
+        erase,
+        cas_tenant,
+        &exclusive,
         dsr_id,
     )
 }
@@ -916,6 +1020,86 @@ mod tests {
         assert_eq!(err.status, 503);
     }
 
+    // ── the real R2 oid-index reader (clw bar #2) ─────────────────────────────────
+
+    /// A hermetic `R2Get`: key → bytes; `fault` forces the read-fault (fail-closed) branch.
+    struct MockR2 {
+        objects: std::collections::BTreeMap<String, Vec<u8>>,
+        fault: bool,
+    }
+    impl crate::cas::R2Get for MockR2 {
+        fn get_object(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
+            if self.fault {
+                return Err("mock R2 fault".to_string());
+            }
+            Ok(self.objects.get(key).cloned())
+        }
+    }
+    fn mock_r2(entries: &[(&str, &[u8])]) -> MockR2 {
+        MockR2 {
+            objects: entries
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), v.to_vec()))
+                .collect(),
+            fault: false,
+        }
+    }
+
+    #[test]
+    fn r2_oid_index_source_collects_the_blake3_values() {
+        // oid-index.json = {git_oid: blake3}; the digests the repo references are the VALUES.
+        let r2 = mock_r2(&[(
+            "d863fafb/alpha/oid-index.json",
+            br#"{"oid1":"blakeaaa","oid2":"blakebbb"}"#,
+        )]);
+        let src = R2OidIndexDigests { r2: &r2 };
+        let digs = src.repo_digests("d863fafb", "alpha").expect("read");
+        assert_eq!(
+            digs,
+            ["blakeaaa", "blakebbb"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        );
+    }
+
+    #[test]
+    fn r2_oid_index_absent_index_is_empty_not_a_fault() {
+        // A repo with no pushed objects → no oid-index.json → 404→None → empty set (it
+        // references nothing; safe on both sides).
+        let r2 = mock_r2(&[]);
+        let src = R2OidIndexDigests { r2: &r2 };
+        assert!(src.repo_digests("t", "none").expect("read").is_empty());
+    }
+
+    #[test]
+    fn r2_oid_index_malformed_is_fail_closed_503() {
+        let r2 = mock_r2(&[("t/bad/oid-index.json", b"not json at all")]);
+        let src = R2OidIndexDigests { r2: &r2 };
+        assert_eq!(
+            src.repo_digests("t", "bad")
+                .expect_err("malformed aborts")
+                .status,
+            503,
+            "a malformed index is never a partial set"
+        );
+    }
+
+    #[test]
+    fn r2_oid_index_read_fault_is_fail_closed_503() {
+        let r2 = MockR2 {
+            objects: std::collections::BTreeMap::new(),
+            fault: true,
+        };
+        let src = R2OidIndexDigests { r2: &r2 };
+        assert_eq!(
+            src.repo_digests("t", "x")
+                .expect_err("read fault aborts")
+                .status,
+            503
+        );
+    }
+
     #[test]
     fn execute_tombstones_repos_records_partial_and_repos_become_404() {
         // v0 is ALWAYS launch-blocked (the CAS-GC seam is not wired), so an account with
@@ -1214,6 +1398,106 @@ mod tests {
                 .iter()
                 .any(|d| d.leg == DisclosureLeg::CasShared),
             "the SHARED-object CAS leg stays a disclosure, split from the exclusive-GC obligation"
+        );
+    }
+
+    // ── the COMPOSITION (clw bar #3): partition (bar #1) → digests (bar #2) → drive ──
+
+    #[test]
+    fn composed_erases_exactly_the_subject_exclusive_set_the_exact_superset_guarantee() {
+        // subject `alpha` (org-a) refs {d1,d2,shared}; surviving `beta` (org-b) refs
+        // {shared,dv}. The composition must erase EXACTLY {d1,d2} — never `shared` (a
+        // surviving user's retained object) and never `dv` (not the subject's at all).
+        let st = state_with(&[("alpha", "org-a", false), ("beta", "org-b", false)]);
+        let src = MockDigests::new(&[
+            ("alpha", &["d1", "d2", "shared"]),
+            ("beta", &["shared", "dv"]),
+        ]);
+        let mock = MockErase::new();
+        let outcome = execute_account_erasure_composed(
+            &st,
+            &src,
+            "org-a",
+            operator(),
+            10,
+            &mock,
+            "d863fafb",
+            "dsr-1",
+        )
+        .expect("composed execute");
+        assert_eq!(
+            outcome,
+            ErasureOutcome::Executed {
+                repos_tombstoned: 1
+            }
+        );
+        // EXACT-SUPERSET: what got physically erased == the computed exclusive set == {d1,d2}.
+        let erased: std::collections::BTreeSet<String> = mock.erased.borrow().clone();
+        assert_eq!(
+            erased,
+            ["d1", "d2"].iter().map(|s| s.to_string()).collect(),
+            "erased exactly subject − surviving; a shared/foreign digest is never touched"
+        );
+    }
+
+    #[test]
+    fn composed_empty_exclusive_is_executed_legitimate_retention() {
+        // The subject owns a repo but shares EVERY object with a surviving user → the
+        // exclusive set is empty → tombstone the repo, delete nothing physical, claim
+        // `executed` honestly (legitimate retention, not an over-claim).
+        let st = state_with(&[("alpha", "org-a", false), ("beta", "org-b", false)]);
+        let src = MockDigests::new(&[("alpha", &["shared"]), ("beta", &["shared"])]);
+        let mock = MockErase::new();
+        let outcome = execute_account_erasure_composed(
+            &st,
+            &src,
+            "org-a",
+            operator(),
+            10,
+            &mock,
+            "d863fafb",
+            "dsr-1",
+        )
+        .expect("composed execute");
+        assert_eq!(
+            outcome,
+            ErasureOutcome::Executed {
+                repos_tombstoned: 1
+            }
+        );
+        assert!(
+            mock.erased.borrow().is_empty(),
+            "every object is shared with a surviving user → nothing physical to delete"
+        );
+    }
+
+    #[test]
+    fn composed_fault_reading_a_surviving_repo_aborts_503_nothing_erased() {
+        // THE fail-closed contract at the composition boundary: a fault reading a SURVIVING
+        // repo's digests must abort (503) BEFORE the drive — else a shared digest could be
+        // mis-classified exclusive and a retained object deleted. Nothing is erased, no claim.
+        let st = state_with(&[("alpha", "org-a", false), ("beta", "org-b", false)]);
+        let mut src = MockDigests::new(&[("alpha", &["d1", "shared"]), ("beta", &["shared"])]);
+        src.fault_on = Some("beta".into()); // the surviving repo faults
+        let mock = MockErase::new();
+        let err = execute_account_erasure_composed(
+            &st,
+            &src,
+            "org-a",
+            operator(),
+            10,
+            &mock,
+            "d863fafb",
+            "dsr-1",
+        )
+        .expect_err("a surviving-repo read fault aborts the composition");
+        assert_eq!(
+            err.status, 503,
+            "fail-closed: nothing proceeds on a partial surviving set"
+        );
+        assert!(
+            mock.erased.borrow().is_empty(),
+            "NOT a single digest erased when the partition is indeterminate"
         );
     }
 }
