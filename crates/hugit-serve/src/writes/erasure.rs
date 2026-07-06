@@ -623,17 +623,15 @@ impl EraseConfig {
 /// record the digest as CONFIRMED-gone. Any other outcome (401/403 auth, 404, 5xx,
 /// transport fault) is FAIL-CLOSED `Err` — never a silent success, never a recorded-gone.
 ///
-/// `is_gone` re-reads the seam per the trait's documented "fetch-by-digest returns 410"
-/// contract: `GET {base}/_internal/cas/<tenant>/<digest>` → 410 ⇒ gone, 200 ⇒ NOT gone,
-/// anything else ⇒ `Err`. As a fail-closed floor it also honours the gone-truth the erase
-/// response already proved (a digest this client just saw 410/200 for is gone even if the
-/// verify GET is unavailable), so a confirmed physical delete is never downgraded to a
-/// false `partial`.
-///
-/// ⚠️ LIVE-ENABLE GATE: the exact GET verb/path of the fetch-by-digest verify seam is
-/// pending explicit confirmation from the corelink-server TL (the erase POST is confirmed;
-/// the read-verify verb is built to the trait's documented behavior). Confirm it before
-/// live enablement — it rides the SAME clw re-audit + key window as the whole executor.
+/// `is_gone` reflects that recorded gone-truth directly — NO independent network read. The
+/// corelink-server TL confirmed (2026-07-05) that the erase's **410 is durably
+/// read-consistent** (the handler deletes the R2 bytes + upserts the `cas_tombstone` D1 row
+/// BEFORE returning, and the CAS read consults that same primary D1 — read-your-write), so
+/// the erase response IS the durable physical-GC proof; a separate fetch-by-digest verify
+/// would be redundant (and would need a `cas:r` PAT on a different data-plane route
+/// `GET /v1/cas/<tenant>/<hash>`, not the internal-auth key). We therefore do NOT open a
+/// second socket — `is_gone` is membership in `confirmed_gone`, so a proven physical delete
+/// is never downgraded to a false `partial`, and an un-erased digest is honestly not-gone.
 pub struct HttpCasErase {
     base_url: String,
     auth_key: String,
@@ -706,29 +704,12 @@ impl CasEraseTransport for HttpCasErase {
         }
     }
 
-    fn is_gone(&self, tenant: &str, digest: &str) -> Result<bool, EngineErr> {
-        // Fail-closed floor: a digest whose erase already returned 410/200 is durably gone
-        // per the confirmed contract — honour that even if the verify read is unavailable,
-        // so a proven physical delete is never downgraded to a false `partial`.
-        if self.confirmed_gone.borrow().contains(digest) {
-            return Ok(true);
-        }
-        // Independent verify per the trait contract: fetch-by-digest → 410 ⇒ gone.
-        let url = format!("{}/_internal/cas/{tenant}/{digest}", self.base_url);
-        let resp = Self::agent()
-            .get(&url)
-            .set("x-corelink-internal-auth", &self.auth_key)
-            .call();
-        match resp {
-            Ok(_r) => Ok(false), // 200 ⇒ the object is still readable ⇒ NOT gone
-            Err(ureq::Error::Status(410, _)) => Ok(true), // 410 Gone ⇒ physically erased
-            Err(ureq::Error::Status(code, _)) => Err(EngineErr::unavailable(format!(
-                "cas-erase verify returned {code} (not 200/410)"
-            ))),
-            Err(ureq::Error::Transport(_)) => {
-                Err(EngineErr::unavailable("cas-erase verify transport fault"))
-            }
-        }
+    fn is_gone(&self, _tenant: &str, digest: &str) -> Result<bool, EngineErr> {
+        // The erase's 410/200 is the DURABLE physical-GC proof (read-your-write, confirmed
+        // by the corelink-server TL 2026-07-05) — so a digest recorded gone by `erase` above
+        // IS gone, and one that was not is honestly not-gone. NO independent network read
+        // (a separate verify would be redundant + would need a different `cas:r`-PAT route).
+        Ok(self.confirmed_gone.borrow().contains(digest))
     }
 }
 
@@ -1033,11 +1014,11 @@ mod tests {
         assert_eq!(cfg.auth_key, "secret-key");
     }
 
-    /// A mock erase seam: POST `.../erase` → `post_status`, GET `.../<digest>` →
-    /// `get_status`. Serves `n` requests, reporting each `(method, path, auth_header)`.
+    /// A mock erase seam: the erase POST `.../erase` → `post_status`. Serves `n` requests,
+    /// reporting each `(method, path, auth_header)`. (`is_gone` opens no socket, so the
+    /// seam only ever sees the POST.)
     fn mock_erase_seam(
         post_status: u16,
-        get_status: u16,
         n: usize,
     ) -> (
         String,
@@ -1057,12 +1038,8 @@ mod tests {
                     .find(|h| h.field.equiv("x-corelink-internal-auth"))
                     .map(|h| h.value.as_str().to_string());
                 let _ = tx.send((method.clone(), path, auth));
-                let status = if method == "POST" {
-                    post_status
-                } else {
-                    get_status
-                };
-                let _ = req.respond(tiny_http::Response::from_string("").with_status_code(status));
+                let _ =
+                    req.respond(tiny_http::Response::from_string("").with_status_code(post_status));
             }
         });
         (base, rx)
@@ -1072,7 +1049,7 @@ mod tests {
     fn http_erase_410_records_gone_and_sends_raw_key() {
         // 410 Gone is the SUCCESS signal; the key rides RAW in x-corelink-internal-auth
         // (never a Bearer). is_gone is then satisfied by the recorded gone-truth (no GET).
-        let (base, rx) = mock_erase_seam(410, 200, 1);
+        let (base, rx) = mock_erase_seam(410, 1);
         let client = HttpCasErase::new(base, "the-erase-key".into());
         client
             .erase("d863fafb", "deadbeef", "dsr-1", "erasure")
@@ -1090,7 +1067,7 @@ mod tests {
 
     #[test]
     fn http_erase_200_already_erased_is_gone() {
-        let (base, _rx) = mock_erase_seam(200, 200, 1);
+        let (base, _rx) = mock_erase_seam(200, 1);
         let client = HttpCasErase::new(base, "k".into());
         client
             .erase("t", "d1", "dsr", "erasure")
@@ -1101,7 +1078,7 @@ mod tests {
     #[test]
     fn http_erase_401_fails_closed_not_recorded_gone() {
         // The RAW-vs-Bearer trap / wrong key → 401 → fail-closed Err, NEVER recorded gone.
-        let (base, _rx) = mock_erase_seam(401, 200, 1);
+        let (base, _rx) = mock_erase_seam(401, 1);
         let client = HttpCasErase::new(base, "wrong".into());
         assert_eq!(
             client
@@ -1114,7 +1091,7 @@ mod tests {
 
     #[test]
     fn http_erase_500_fails_closed() {
-        let (base, _rx) = mock_erase_seam(500, 200, 1);
+        let (base, _rx) = mock_erase_seam(500, 1);
         let client = HttpCasErase::new(base, "k".into());
         assert_eq!(
             client
@@ -1126,26 +1103,29 @@ mod tests {
     }
 
     #[test]
-    fn http_is_gone_independent_verify_410_is_gone() {
-        // A digest NOT previously erased by THIS client → the independent fetch-by-digest
-        // verify: GET → 410 ⇒ gone.
-        let (base, rx) = mock_erase_seam(200, 410, 1);
-        let client = HttpCasErase::new(base, "k".into());
-        assert!(client.is_gone("t", "unseen").expect("410 verify → gone"));
-        let (method, path, _auth) = rx.recv().expect("request");
-        assert_eq!(method, "GET");
-        assert_eq!(path, "/_internal/cas/t/unseen");
-    }
-
-    #[test]
-    fn http_is_gone_independent_verify_200_is_not_gone() {
-        // GET → 200 ⇒ the object is still readable ⇒ NOT gone (executor stays partial).
-        let (base, _rx) = mock_erase_seam(200, 200, 1);
+    fn http_is_gone_reflects_only_the_erase_no_network() {
+        // is_gone opens NO socket (the erase 410 is durably read-consistent — corelink-TL
+        // confirmed): a recorded-gone digest is gone; an un-erased one is honestly not-gone.
+        // The mock serves ONLY the single erase POST (n=1) — if is_gone tried a network
+        // read it would hang/observe a second request; it does neither.
+        let (base, _rx) = mock_erase_seam(410, 1);
         let client = HttpCasErase::new(base, "k".into());
         assert!(
             !client
-                .is_gone("t", "still-here")
-                .expect("200 verify → not gone")
+                .is_gone("t", "never-erased")
+                .expect("un-erased → not gone"),
+            "a digest this client never erased is honestly not-gone (no false positive)"
+        );
+        client.erase("t", "d1", "dsr", "erasure").expect("410 → Ok");
+        assert!(
+            client.is_gone("t", "d1").expect("erased → gone"),
+            "the recorded gone-truth suffices with no independent read"
+        );
+        assert!(
+            !client
+                .is_gone("t", "still-never")
+                .expect("other → not gone"),
+            "recording one digest gone does not mark others gone"
         );
     }
 
