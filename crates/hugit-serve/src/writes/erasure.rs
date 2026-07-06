@@ -325,6 +325,43 @@ pub fn partition_exclusive_digests(
     Ok(subject.difference(&surviving).cloned().collect())
 }
 
+/// The production [`RepoDigestSource`] (clw bar #2): reads a repo's `oid-index.json` from
+/// R2 (`<tenant>/<repo>/oid-index.json`, the git-oid→blake3 map) and collects its blake3
+/// VALUES = the CAS digests the repo references. Holds a `&dyn R2Get` so it is testable
+/// against a double.
+///
+/// FAIL-CLOSED, the partition's safety depends on it: an R2 read fault OR a malformed
+/// index → `Err` (503; NEVER a partial digest set — a shrunk set on a surviving repo
+/// would delete a retained object). An ABSENT index (`get_object` → `None`, i.e. a genuine
+/// 404 — a repo with no pushed objects) → the EMPTY set: it references nothing, which is
+/// correct + safe on both sides (a surviving repo with no objects retains nothing; a
+/// subject repo with no objects contributes no exclusive digests).
+pub struct R2OidIndexDigests<'a> {
+    /// The R2 store the tenant's oid-indexes live in.
+    pub r2: &'a dyn crate::cas::R2Get,
+}
+
+impl RepoDigestSource for R2OidIndexDigests<'_> {
+    fn repo_digests(
+        &self,
+        tenant: &str,
+        slug: &str,
+    ) -> Result<std::collections::BTreeSet<String>, EngineErr> {
+        let key = crate::cas::oid_index_key(tenant, slug);
+        let bytes = self
+            .r2
+            .get_object(&key)
+            .map_err(|e| EngineErr::unavailable(format!("oid-index read failed: {e}")))?;
+        let Some(bytes) = bytes else {
+            // Genuine absence (404) — the repo references no CAS objects. Fault → Err above.
+            return Ok(std::collections::BTreeSet::new());
+        };
+        let index = crate::cas::parse_oid_index(&bytes)
+            .map_err(|e| EngineErr::unavailable(format!("oid-index malformed: {e}")))?;
+        Ok(index.into_values().collect())
+    }
+}
+
 // ── the EXECUTOR (slice 2 — the irreversible legs; NOT route-wired) ───────────
 //
 // This drives the plan against the REAL stores. It is deliberately NOT reachable from
@@ -914,6 +951,86 @@ mod tests {
         let err =
             partition_exclusive_digests(&src, "t", &["subj".into()], &[]).expect_err("aborts");
         assert_eq!(err.status, 503);
+    }
+
+    // ── the real R2 oid-index reader (clw bar #2) ─────────────────────────────────
+
+    /// A hermetic `R2Get`: key → bytes; `fault` forces the read-fault (fail-closed) branch.
+    struct MockR2 {
+        objects: std::collections::BTreeMap<String, Vec<u8>>,
+        fault: bool,
+    }
+    impl crate::cas::R2Get for MockR2 {
+        fn get_object(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
+            if self.fault {
+                return Err("mock R2 fault".to_string());
+            }
+            Ok(self.objects.get(key).cloned())
+        }
+    }
+    fn mock_r2(entries: &[(&str, &[u8])]) -> MockR2 {
+        MockR2 {
+            objects: entries
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), v.to_vec()))
+                .collect(),
+            fault: false,
+        }
+    }
+
+    #[test]
+    fn r2_oid_index_source_collects_the_blake3_values() {
+        // oid-index.json = {git_oid: blake3}; the digests the repo references are the VALUES.
+        let r2 = mock_r2(&[(
+            "d863fafb/alpha/oid-index.json",
+            br#"{"oid1":"blakeaaa","oid2":"blakebbb"}"#,
+        )]);
+        let src = R2OidIndexDigests { r2: &r2 };
+        let digs = src.repo_digests("d863fafb", "alpha").expect("read");
+        assert_eq!(
+            digs,
+            ["blakeaaa", "blakebbb"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        );
+    }
+
+    #[test]
+    fn r2_oid_index_absent_index_is_empty_not_a_fault() {
+        // A repo with no pushed objects → no oid-index.json → 404→None → empty set (it
+        // references nothing; safe on both sides).
+        let r2 = mock_r2(&[]);
+        let src = R2OidIndexDigests { r2: &r2 };
+        assert!(src.repo_digests("t", "none").expect("read").is_empty());
+    }
+
+    #[test]
+    fn r2_oid_index_malformed_is_fail_closed_503() {
+        let r2 = mock_r2(&[("t/bad/oid-index.json", b"not json at all")]);
+        let src = R2OidIndexDigests { r2: &r2 };
+        assert_eq!(
+            src.repo_digests("t", "bad")
+                .expect_err("malformed aborts")
+                .status,
+            503,
+            "a malformed index is never a partial set"
+        );
+    }
+
+    #[test]
+    fn r2_oid_index_read_fault_is_fail_closed_503() {
+        let r2 = MockR2 {
+            objects: std::collections::BTreeMap::new(),
+            fault: true,
+        };
+        let src = R2OidIndexDigests { r2: &r2 };
+        assert_eq!(
+            src.repo_digests("t", "x")
+                .expect_err("read fault aborts")
+                .status,
+            503
+        );
     }
 
     #[test]
