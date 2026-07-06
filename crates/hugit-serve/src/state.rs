@@ -584,6 +584,16 @@ pub struct AppState {
     /// leaked index/hash cannot forge a token (resolution hashes the presented secret).
     pub pat_index:
         Arc<RwLock<std::collections::HashMap<String, crate::writes::verbs::write_token::PatAuth>>>,
+    /// Best-effort in-memory PAT last-used tracker: `pat_id → last-used Unix ms`, updated on
+    /// a successful PAT auth (`resolve_pat_from_auth`). Surfaced as `PatMetaVm.last_used_at`
+    /// on `GET /v1/me/account` so a user can spot idle/leaked tokens (the whole point of
+    /// user-managed PATs). **Cheap on the accept loop** — an in-memory map write, NO durable
+    /// I/O (a `pat.used` append per auth would be a log-bloat + accept-loop-latency DoS).
+    /// **Honest limitation:** in-memory only, so it **resets on engine restart** (0 = not
+    /// observed used since boot) and is per-instance under `max_instances>1` — a durable
+    /// off-loop flush (like the B5 ref refresher) is the tracked follow-up. Keyed by the
+    /// non-secret `pat_id` (never the secret / its hash).
+    pub pat_last_used: Arc<RwLock<std::collections::HashMap<String, u64>>>,
     /// The CoreLink physical CAS-erase seam config (GDPR1 slice-2), read fail-closed from
     /// `CORELINK_ERASE_URL` + `CORELINK_ERASE_AUTH_KEY` at boot. `None` → the erase seam is
     /// NOT configured, so the operator-execute route is DISABLED (404 — presence not
@@ -867,6 +877,7 @@ impl AppState {
             clone_pack_building: Arc::new(Mutex::new(HashSet::new())),
             pat_auth_enabled,
             pat_index: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            pat_last_used: Arc::new(RwLock::new(std::collections::HashMap::new())),
             erase_config,
         };
         // Populate the PAT index from the durable `_accounts/*` logs (only when
@@ -1166,6 +1177,7 @@ impl AppState {
             // exercises the PAT path flips `pat_auth_enabled` on the returned state.
             pat_auth_enabled: false,
             pat_index: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            pat_last_used: Arc::new(RwLock::new(std::collections::HashMap::new())),
             // No physical erase seam in the dev/test constructor (the operator-execute
             // route is disabled). A test wiring the executor sets it explicitly.
             erase_config: None,
@@ -1716,9 +1728,42 @@ impl AppState {
             return None;
         }
         let idx = self.pat_index.read().unwrap_or_else(|e| e.into_inner());
-        candidates
-            .iter()
-            .find_map(|cand| crate::writes::verbs::write_token::resolve_pat(&idx, cand, now_ms))
+        for cand in &candidates {
+            if let Some(pat) = crate::writes::verbs::write_token::resolve_pat(&idx, cand, now_ms) {
+                // Record best-effort last-used, keyed by the non-secret pat id (derived from
+                // the matched candidate). Drop the pat_index read lock first so the two
+                // locks never nest. Cheap (in-memory), no durable I/O on the accept loop.
+                let id = crate::writes::verbs::write_token::pat_id_of_secret(cand);
+                drop(idx);
+                self.record_pat_used(id, now_ms);
+                return Some(pat);
+            }
+        }
+        None
+    }
+
+    /// Record a PAT's last-used timestamp (best-effort, in-memory — see
+    /// [`pat_last_used`](Self::pat_last_used)). Keyed by the non-secret `pat_id`. Called on
+    /// a successful [`resolve_pat_from_auth`]; a monotonic `max` guard means an
+    /// out-of-order call never rewinds the stamp.
+    fn record_pat_used(&self, pat_id: String, now_ms: u64) {
+        let mut m = self
+            .pat_last_used
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let slot = m.entry(pat_id).or_insert(0);
+        *slot = (*slot).max(now_ms);
+    }
+
+    /// A snapshot of the `pat_id → last-used ms` map for the account projection
+    /// ([`build_me_account`](crate::handlers::build_me_account) merges it into
+    /// `PatMetaVm.last_used_at`). Cheap: a handful of PATs per account.
+    #[must_use]
+    pub fn pat_last_used_snapshot(&self) -> std::collections::HashMap<String, u64> {
+        self.pat_last_used
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// A cheap, in-memory snapshot of which repos have a clone-pack build in progress —
@@ -3420,6 +3465,18 @@ mod tests {
             Some("v1"),
             "a malformed manifest never installs a corrupt/empty map"
         );
+    }
+
+    #[test]
+    fn record_pat_used_is_monotonic_and_snapshotted() {
+        let st = AppState::new(PathBuf::from("/tmp/logs"), "tok".to_string());
+        st.record_pat_used("pat_x".to_string(), 100);
+        st.record_pat_used("pat_x".to_string(), 50); // out-of-order → never rewinds
+        st.record_pat_used("pat_y".to_string(), 200);
+        let snap = st.pat_last_used_snapshot();
+        assert_eq!(snap.get("pat_x"), Some(&100), "the monotonic max wins");
+        assert_eq!(snap.get("pat_y"), Some(&200));
+        assert_eq!(snap.get("pat_absent"), None, "an unseen pat has no stamp");
     }
 
     #[test]

@@ -131,7 +131,10 @@ pub struct PatMetaVm {
     /// `now_ms()`; matches [`CreatedTokenVm::expires_at`]). Render as ms (JS
     /// `new Date(ms)`), NOT seconds.
     pub created_at: u64,
-    /// Unix **milliseconds** of last use; `0` = never used.
+    /// Unix **milliseconds** of last observed use; `0` = not seen used since the engine
+    /// started. **Best-effort** — the engine tracks last-use in memory (no durable write per
+    /// auth), so it resets on restart and is per-instance; a `0` means "not used since boot",
+    /// NOT necessarily "never used". Render honestly (e.g. "not used recently" for `0`).
     pub last_used_at: u64,
     /// The granted scopes (machine values, e.g. `repo:read`).
     pub scopes: Vec<String>,
