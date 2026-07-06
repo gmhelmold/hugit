@@ -159,7 +159,8 @@ pub struct SessionExchangeConfig {
 const EXCHANGE_URL_TRUSTED_SUFFIXES: &[&str] = &[".humangr.com", "localhost", "127.0.0.1", "[::1]"];
 
 /// Extract the host (without port) from a URL string (`scheme://host[:port]/path`).
-fn extract_host(url: &str) -> Option<&str> {
+/// `pub(crate)` — reused by the erase-seam SSRF allowlist (`writes::erasure`).
+pub(crate) fn extract_host(url: &str) -> Option<&str> {
     // Strip scheme.
     let after_scheme = url.split_once("://")?.1;
     // Strip path (everything from first `/`).
