@@ -135,6 +135,15 @@ pub struct ErasureDecideReq {
 pub struct AccountEraseReq {
     /// The typed confirmation — must exactly match the caller's own account slug.
     pub confirm: String,
+    /// The DSR (data-subject-request) id from githugr's CoreLink `/_internal/dsr/anchor`
+    /// call — the legitimacy token the executor threads into the CAS physical-erase seam
+    /// (`{dsr_id, tenant}`) so a leaked erase key alone cannot delete. **Optional until
+    /// the executor is live:** today's honest "solicitado" staging does not require it
+    /// (githugr flag-gates the anchor call), so a request may omit it; the executor will
+    /// require a valid `dsr_id` before performing any physical deletion. Captured verbatim
+    /// on the `erasure.requested` record when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dsr_id: Option<String>,
 }
 
 /// `POST /v1/repos/{repo}/edit/{path}/propose` — a web edit → signed branch + PR.
@@ -186,9 +195,22 @@ mod tests {
     fn account_erase_req_round_trips() {
         let v = AccountEraseReq {
             confirm: "org-a".into(),
+            dsr_id: None,
         };
         let s = serde_json::to_string(&v).unwrap();
         assert_eq!(serde_json::from_str::<AccountEraseReq>(&s).unwrap(), v);
+        // Back-compat: a legacy body with ONLY `confirm` still deserializes (dsr_id → None).
+        assert_eq!(
+            serde_json::from_str::<AccountEraseReq>("{\"confirm\":\"org-a\"}").unwrap(),
+            v
+        );
+        // And a body WITH the anchor id round-trips.
+        let with = AccountEraseReq {
+            confirm: "org-a".into(),
+            dsr_id: Some("dsr_x".into()),
+        };
+        let s2 = serde_json::to_string(&with).unwrap();
+        assert_eq!(serde_json::from_str::<AccountEraseReq>(&s2).unwrap(), with);
     }
 
     #[test]
