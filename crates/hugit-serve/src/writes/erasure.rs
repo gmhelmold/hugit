@@ -515,6 +515,223 @@ pub trait CasEraseTransport {
     fn is_gone(&self, tenant: &str, digest: &str) -> Result<bool, EngineErr>;
 }
 
+// ── the REAL HTTP CasEraseTransport (slice-2 network seam; NOT route-wired) ─────
+//
+// The ONLY code here that opens a socket. Mirrors the ureq + SSRF-allowlist discipline
+// of the session-exchange client (`token.rs`). It is inert until the route wires it AND
+// `CORELINK_ERASE_URL`/`CORELINK_ERASE_AUTH_KEY` are set AND clw re-audits — it deletes
+// nothing on its own.
+
+/// SSRF allowlist for the CoreLink internal-erase base URL — same posture as the
+/// session-exchange client: only a `.humangr.com` host (or a loopback for tests) may
+/// ever receive the internal-auth key. Fail-closed at config parse time.
+const ERASE_URL_TRUSTED_SUFFIXES: &[&str] = &[".humangr.com", "localhost", "127.0.0.1", "[::1]"];
+
+/// Bounded per-call timeout (a single small POST/GET).
+const ERASE_TIMEOUT_SECS: u64 = 15;
+
+/// Config for the real erase transport, read FAIL-CLOSED from env.
+///
+/// - `CORELINK_ERASE_URL` — the CoreLink internal API base (e.g.
+///   `https://corelink-api.humangr.com`). ABSENT → `Ok(None)`: the erase seam is not
+///   configured, so the executor has no transport and stays `partial` (never live).
+/// - `CORELINK_ERASE_AUTH_KEY` — the internal-auth secret sent RAW in the
+///   `x-corelink-internal-auth` header (NEVER a Bearer — a Bearer is 401 on this seam).
+///
+/// `Err` (set-but-invalid) on: an empty/scheme-less URL, an untrusted host (SSRF), or a
+/// URL present WITHOUT a key (a half-configured erase seam must never boot).
+pub struct EraseConfig {
+    base_url: String,
+    auth_key: String,
+}
+
+/// REDACTING Debug — the `auth_key` is a secret and must never appear in a log/panic.
+impl std::fmt::Debug for EraseConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EraseConfig")
+            .field("base_url", &self.base_url)
+            .field("auth_key", &"<redacted>")
+            .finish()
+    }
+}
+
+impl EraseConfig {
+    /// Read the erase seam config from env (fail-closed; see the type doc).
+    pub fn from_env() -> Result<Option<Self>, String> {
+        Self::validate(
+            std::env::var("CORELINK_ERASE_URL").ok(),
+            std::env::var("CORELINK_ERASE_AUTH_KEY").ok(),
+        )
+    }
+
+    /// The PURE validation (testable without touching the process env): the SSRF allowlist
+    /// + the half-configured-seam fail-close. `base_url` ABSENT → `Ok(None)` (no transport).
+    fn validate(
+        base_url: Option<String>,
+        auth_key: Option<String>,
+    ) -> Result<Option<Self>, String> {
+        let base_url = match base_url {
+            Some(v) => v.trim().to_string(),
+            None => return Ok(None), // not configured → no transport → executor stays partial
+        };
+        if base_url.is_empty() {
+            return Err("CORELINK_ERASE_URL is empty (fail-closed)".to_string());
+        }
+        if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+            return Err(format!(
+                "CORELINK_ERASE_URL must start with http(s)://; got: {base_url}"
+            ));
+        }
+        let host = crate::token::extract_host(&base_url)
+            .ok_or_else(|| format!("CORELINK_ERASE_URL: cannot parse host from `{base_url}`"))?;
+        if !ERASE_URL_TRUSTED_SUFFIXES
+            .iter()
+            .any(|s| host == *s || host.ends_with(s))
+        {
+            return Err(format!(
+                "CORELINK_ERASE_URL host `{host}` is not on the trusted allowlist \
+                 (suffixes: {ERASE_URL_TRUSTED_SUFFIXES:?}); set a *.humangr.com endpoint"
+            ));
+        }
+        // A URL WITHOUT a key is a half-configured seam — fail-closed (never send an erase
+        // with a missing/empty internal-auth key: it would 401 silently, or worse).
+        let auth_key =
+            auth_key.ok_or("CORELINK_ERASE_URL set but CORELINK_ERASE_AUTH_KEY missing")?;
+        if auth_key.trim().is_empty() {
+            return Err("CORELINK_ERASE_AUTH_KEY is empty (fail-closed)".to_string());
+        }
+        Ok(Some(EraseConfig {
+            // Trim the trailing slash so `{base}/_internal/...` is well-formed; the key is
+            // used verbatim (already rejected all-whitespace above).
+            base_url: base_url.trim_end_matches('/').to_string(),
+            auth_key,
+        }))
+    }
+
+    /// Build the client.
+    pub fn into_client(self) -> HttpCasErase {
+        HttpCasErase::new(self.base_url, self.auth_key)
+    }
+}
+
+/// The REAL HTTP [`CasEraseTransport`] against CoreLink's internal erase seam.
+///
+/// `erase` POSTs `POST {base}/_internal/cas/<tenant>/<digest>/erase` with the RAW
+/// `x-corelink-internal-auth` key and body `{tenant, dsr_id, reason}`. The confirmed seam
+/// contract (corelink-server #634) answers **410 Gone** on a fresh physical delete and
+/// **200 AlreadyErased** on an idempotent replay — BOTH mean the bytes are gone, so both
+/// record the digest as CONFIRMED-gone. Any other outcome (401/403 auth, 404, 5xx,
+/// transport fault) is FAIL-CLOSED `Err` — never a silent success, never a recorded-gone.
+///
+/// `is_gone` re-reads the seam per the trait's documented "fetch-by-digest returns 410"
+/// contract: `GET {base}/_internal/cas/<tenant>/<digest>` → 410 ⇒ gone, 200 ⇒ NOT gone,
+/// anything else ⇒ `Err`. As a fail-closed floor it also honours the gone-truth the erase
+/// response already proved (a digest this client just saw 410/200 for is gone even if the
+/// verify GET is unavailable), so a confirmed physical delete is never downgraded to a
+/// false `partial`.
+///
+/// ⚠️ LIVE-ENABLE GATE: the exact GET verb/path of the fetch-by-digest verify seam is
+/// pending explicit confirmation from the corelink-server TL (the erase POST is confirmed;
+/// the read-verify verb is built to the trait's documented behavior). Confirm it before
+/// live enablement — it rides the SAME clw re-audit + key window as the whole executor.
+pub struct HttpCasErase {
+    base_url: String,
+    auth_key: String,
+    /// Digests this client has CONFIRMED gone from the erase seam's own 410/200 response —
+    /// the durable gone-truth the confirmed contract already carries. Per-erasure-run
+    /// local (a `HttpCasErase` is built per execute call), single-threaded accept loop.
+    confirmed_gone: std::cell::RefCell<std::collections::BTreeSet<String>>,
+}
+
+impl HttpCasErase {
+    /// Construct from an already-validated base URL + key (the config path is
+    /// [`EraseConfig::from_env`]).
+    pub fn new(base_url: String, auth_key: String) -> Self {
+        Self {
+            base_url,
+            auth_key,
+            confirmed_gone: std::cell::RefCell::new(std::collections::BTreeSet::new()),
+        }
+    }
+
+    fn agent() -> ureq::Agent {
+        ureq::AgentBuilder::new()
+            .timeout(std::time::Duration::from_secs(ERASE_TIMEOUT_SECS))
+            .build()
+    }
+}
+
+impl CasEraseTransport for HttpCasErase {
+    fn erase(
+        &self,
+        tenant: &str,
+        digest: &str,
+        dsr_id: &str,
+        reason: &str,
+    ) -> Result<(), EngineErr> {
+        let url = format!("{}/_internal/cas/{tenant}/{digest}/erase", self.base_url);
+        let body = serde_json::json!({
+            "tenant": tenant,
+            "dsr_id": dsr_id,
+            "reason": reason,
+        })
+        .to_string();
+        // The internal-auth key is sent RAW in `x-corelink-internal-auth` (NOT a Bearer —
+        // a Bearer is 401 on this seam) and NEVER logged/echoed.
+        let resp = Self::agent()
+            .post(&url)
+            .set("x-corelink-internal-auth", &self.auth_key)
+            .set("Content-Type", "application/json")
+            .send_string(&body);
+        match resp {
+            // ureq: <400 → Ok. 200 AlreadyErased ⇒ gone (idempotent).
+            Ok(_r) => {
+                self.confirmed_gone.borrow_mut().insert(digest.to_string());
+                Ok(())
+            }
+            // 410 Gone is the SUCCESS signal (ureq surfaces >=400 as Err(Status)).
+            Err(ureq::Error::Status(410, _)) => {
+                self.confirmed_gone.borrow_mut().insert(digest.to_string());
+                Ok(())
+            }
+            // Everything else FAILS CLOSED — never a recorded-gone, never an over-claim.
+            // 401/403 = the internal-auth key is wrong/missing (the RAW-vs-Bearer trap);
+            // 404 = the seam did not confirm a tombstone; 5xx = retryable.
+            Err(ureq::Error::Status(code, _)) => Err(EngineErr::unavailable(format!(
+                "cas-erase seam returned {code} (not 410/200)"
+            ))),
+            Err(ureq::Error::Transport(_)) => {
+                Err(EngineErr::unavailable("cas-erase seam transport fault"))
+            }
+        }
+    }
+
+    fn is_gone(&self, tenant: &str, digest: &str) -> Result<bool, EngineErr> {
+        // Fail-closed floor: a digest whose erase already returned 410/200 is durably gone
+        // per the confirmed contract — honour that even if the verify read is unavailable,
+        // so a proven physical delete is never downgraded to a false `partial`.
+        if self.confirmed_gone.borrow().contains(digest) {
+            return Ok(true);
+        }
+        // Independent verify per the trait contract: fetch-by-digest → 410 ⇒ gone.
+        let url = format!("{}/_internal/cas/{tenant}/{digest}", self.base_url);
+        let resp = Self::agent()
+            .get(&url)
+            .set("x-corelink-internal-auth", &self.auth_key)
+            .call();
+        match resp {
+            Ok(_r) => Ok(false), // 200 ⇒ the object is still readable ⇒ NOT gone
+            Err(ureq::Error::Status(410, _)) => Ok(true), // 410 Gone ⇒ physically erased
+            Err(ureq::Error::Status(code, _)) => Err(EngineErr::unavailable(format!(
+                "cas-erase verify returned {code} (not 200/410)"
+            ))),
+            Err(ureq::Error::Transport(_)) => {
+                Err(EngineErr::unavailable("cas-erase verify transport fault"))
+            }
+        }
+    }
+}
+
 /// EXECUTE an account erasure (GDPR1 Part 2 — the irreversible legs). NOT route-wired;
 /// gated behind clw's re-audit before any live enablement. NO CAS erase transport → the
 /// account-exclusive physical GC is unmet, so the claim is `partial` (never over-claims).
@@ -775,6 +992,161 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    // ── the real HTTP erase transport (config validation + mock-seam wire) ────────
+
+    #[test]
+    fn erase_config_absent_url_is_none_no_transport() {
+        assert!(
+            EraseConfig::validate(None, Some("k".into()))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn erase_config_url_without_key_fails_closed() {
+        // A half-configured seam (URL present, key absent) must NEVER boot — an erase
+        // with a missing internal-auth key would 401 silently.
+        let err = EraseConfig::validate(Some("https://corelink-api.humangr.com".into()), None)
+            .expect_err("url-without-key is fail-closed");
+        assert!(err.contains("AUTH_KEY missing"), "{err}");
+    }
+
+    #[test]
+    fn erase_config_untrusted_host_rejected_ssrf() {
+        let err = EraseConfig::validate(Some("https://evil.example.com".into()), Some("k".into()))
+            .expect_err("untrusted host is SSRF-rejected");
+        assert!(err.contains("not on the trusted allowlist"), "{err}");
+    }
+
+    #[test]
+    fn erase_config_trusted_host_ok() {
+        let cfg = EraseConfig::validate(
+            Some("https://corelink-api.humangr.com/".into()),
+            Some("secret-key".into()),
+        )
+        .expect("trusted")
+        .expect("some");
+        assert_eq!(cfg.base_url, "https://corelink-api.humangr.com"); // trailing slash trimmed
+        assert_eq!(cfg.auth_key, "secret-key");
+    }
+
+    /// A mock erase seam: POST `.../erase` → `post_status`, GET `.../<digest>` →
+    /// `get_status`. Serves `n` requests, reporting each `(method, path, auth_header)`.
+    fn mock_erase_seam(
+        post_status: u16,
+        get_status: u16,
+        n: usize,
+    ) -> (
+        String,
+        std::sync::mpsc::Receiver<(String, String, Option<String>)>,
+    ) {
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind mock");
+        let port = server.server_addr().to_ip().expect("ip").port();
+        let base = format!("http://127.0.0.1:{port}");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests().take(n) {
+                let method = req.method().as_str().to_string();
+                let path = req.url().to_string();
+                let auth = req
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.equiv("x-corelink-internal-auth"))
+                    .map(|h| h.value.as_str().to_string());
+                let _ = tx.send((method.clone(), path, auth));
+                let status = if method == "POST" {
+                    post_status
+                } else {
+                    get_status
+                };
+                let _ = req.respond(tiny_http::Response::from_string("").with_status_code(status));
+            }
+        });
+        (base, rx)
+    }
+
+    #[test]
+    fn http_erase_410_records_gone_and_sends_raw_key() {
+        // 410 Gone is the SUCCESS signal; the key rides RAW in x-corelink-internal-auth
+        // (never a Bearer). is_gone is then satisfied by the recorded gone-truth (no GET).
+        let (base, rx) = mock_erase_seam(410, 200, 1);
+        let client = HttpCasErase::new(base, "the-erase-key".into());
+        client
+            .erase("d863fafb", "deadbeef", "dsr-1", "erasure")
+            .expect("410 → Ok");
+        assert!(client.is_gone("d863fafb", "deadbeef").expect("gone"));
+        let (method, path, auth) = rx.recv().expect("server saw a request");
+        assert_eq!(method, "POST");
+        assert_eq!(path, "/_internal/cas/d863fafb/deadbeef/erase");
+        assert_eq!(
+            auth.as_deref(),
+            Some("the-erase-key"),
+            "RAW key, not a Bearer"
+        );
+    }
+
+    #[test]
+    fn http_erase_200_already_erased_is_gone() {
+        let (base, _rx) = mock_erase_seam(200, 200, 1);
+        let client = HttpCasErase::new(base, "k".into());
+        client
+            .erase("t", "d1", "dsr", "erasure")
+            .expect("200 AlreadyErased → Ok");
+        assert!(client.is_gone("t", "d1").expect("gone"));
+    }
+
+    #[test]
+    fn http_erase_401_fails_closed_not_recorded_gone() {
+        // The RAW-vs-Bearer trap / wrong key → 401 → fail-closed Err, NEVER recorded gone.
+        let (base, _rx) = mock_erase_seam(401, 200, 1);
+        let client = HttpCasErase::new(base, "wrong".into());
+        assert_eq!(
+            client
+                .erase("t", "d1", "dsr", "erasure")
+                .expect_err("401 aborts")
+                .status,
+            503
+        );
+    }
+
+    #[test]
+    fn http_erase_500_fails_closed() {
+        let (base, _rx) = mock_erase_seam(500, 200, 1);
+        let client = HttpCasErase::new(base, "k".into());
+        assert_eq!(
+            client
+                .erase("t", "d1", "dsr", "erasure")
+                .expect_err("5xx aborts")
+                .status,
+            503
+        );
+    }
+
+    #[test]
+    fn http_is_gone_independent_verify_410_is_gone() {
+        // A digest NOT previously erased by THIS client → the independent fetch-by-digest
+        // verify: GET → 410 ⇒ gone.
+        let (base, rx) = mock_erase_seam(200, 410, 1);
+        let client = HttpCasErase::new(base, "k".into());
+        assert!(client.is_gone("t", "unseen").expect("410 verify → gone"));
+        let (method, path, _auth) = rx.recv().expect("request");
+        assert_eq!(method, "GET");
+        assert_eq!(path, "/_internal/cas/t/unseen");
+    }
+
+    #[test]
+    fn http_is_gone_independent_verify_200_is_not_gone() {
+        // GET → 200 ⇒ the object is still readable ⇒ NOT gone (executor stays partial).
+        let (base, _rx) = mock_erase_seam(200, 200, 1);
+        let client = HttpCasErase::new(base, "k".into());
+        assert!(
+            !client
+                .is_gone("t", "still-here")
+                .expect("200 verify → not gone")
+        );
     }
 
     /// A serialized genesis `repo.meta{owner_tenant}` log, optionally with a terminal
