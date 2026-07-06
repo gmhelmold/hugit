@@ -51,11 +51,17 @@ pub fn write_account_erase(
             "confirm deve ser exatamente o slug da sua própria conta",
         ));
     }
-    let payload_value = json!({
+    let mut payload_value = json!({
         "account": account,
         "subject": account,
         "state": "requested",
     });
+    // Capture the DSR legitimacy id verbatim WHEN supplied (githugr's anchor call) — the
+    // executor reads it back off this record to authorize the physical CAS erase. Omitted
+    // when absent (today's flag-gated "solicitado" flow), so the payload stays back-compat.
+    if let Some(dsr_id) = req.dsr_id.as_deref().filter(|s| !s.is_empty()) {
+        payload_value["dsr_id"] = json!(dsr_id);
+    }
     let payload = hugit_refstore::canonical_json(&payload_value.to_string())
         .unwrap_or_else(|| payload_value.to_string());
     // As-the-user: the REAL caller's chain-derived class (a tenant → the Orchestrator
@@ -98,6 +104,7 @@ mod tests {
     fn req(confirm: &str) -> AccountEraseReq {
         AccountEraseReq {
             confirm: confirm.into(),
+            dsr_id: None,
         }
     }
 
@@ -113,6 +120,36 @@ mod tests {
             "the subject is the caller's own account: {}",
             rec.payload
         );
+        // No dsr_id supplied → the record omits it (back-compat, flag-gated anchor off).
+        assert!(
+            !rec.payload.contains("dsr_id"),
+            "absent dsr_id is omitted: {}",
+            rec.payload
+        );
+    }
+
+    #[test]
+    fn supplied_dsr_id_is_captured_on_the_requested_record() {
+        let mut log = EventLog::new();
+        let r = AccountEraseReq {
+            confirm: "org-a".into(),
+            dsr_id: Some("dsr_abc123".into()),
+        };
+        write_account_erase(&mut log, &r, tenant("org-a"), 1).unwrap();
+        let rec = log.records().last().expect("a record was appended");
+        assert!(
+            rec.payload.contains("\"dsr_id\":\"dsr_abc123\""),
+            "the DSR legitimacy id is captured verbatim for the executor: {}",
+            rec.payload
+        );
+        // An empty dsr_id is treated as absent (not a bogus empty legitimacy token).
+        let mut log2 = EventLog::new();
+        let empty = AccountEraseReq {
+            confirm: "org-a".into(),
+            dsr_id: Some(String::new()),
+        };
+        write_account_erase(&mut log2, &empty, tenant("org-a"), 1).unwrap();
+        assert!(!log2.records().last().unwrap().payload.contains("dsr_id"));
     }
 
     #[test]
