@@ -163,6 +163,19 @@ impl LiveRefs {
             .unwrap_or_else(|e| e.into_inner())
             .remove(ref_name);
     }
+
+    /// Atomically REPLACE the whole LIVE map with `refs` (WP-B5 read-after-write): the
+    /// background refresher loads the authoritative durable `refs.json` and installs it, so
+    /// a second engine instance picks up another instance's push/delete within the refresh
+    /// window (bounded staleness, ≤ the TTL). A full replace (not a merge) is correct
+    /// because the durable manifest is the COMPLETE authoritative ref set — an add
+    /// propagates, and a ref deleted on another instance (dropped from the manifest) drops
+    /// here too. Safe against this instance's own in-flight push: the push finalize writes
+    /// the durable manifest BEFORE its `set_ref` hot-swap, so a replace can never lose a
+    /// locally-pushed ref (it is already in the manifest it reads).
+    pub fn replace(&self, refs: BTreeMap<String, String>) {
+        *self.0.write().unwrap_or_else(|e| e.into_inner()) = refs;
+    }
 }
 
 impl From<BTreeMap<String, String>> for LiveRefs {
@@ -596,6 +609,14 @@ pub struct AppState {
 /// now MECHANICALLY enforced by this cap, not merely assumed.
 pub const MAX_REPOS_PER_TENANT: usize = 100;
 
+/// The WP-B5 read-after-write ref-cache refresh interval: the background refresher reloads
+/// every loaded repo's durable `refs.json` this often, so a second engine instance sees
+/// another instance's push/delete within this window. clw signed off **2s** for
+/// `max_instances=2` — the durable CAS + conditional If-Match `refs.json` PUT make the
+/// ≤2s staleness UX-only (a stale-base push is rejected non-fast-forward + retried), never a
+/// lost update. Upgrade to a zero-staleness conditional-GET (Option 1) before widening past 2.
+const REFS_REFRESH_INTERVAL_MS: u64 = 2_000;
+
 impl AppState {
     /// The receive-pack flag gate for `hugit_proto::receive_pack` — `self-hosted-alpha`
     /// ON iff [`write_path_enabled`](Self::write_path_enabled).
@@ -636,6 +657,81 @@ impl AppState {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
     }
+
+    /// Refresh ONE repo's in-memory ref cache from its durable `refs.json` (WP-B5
+    /// read-after-write). FAIL-SAFE: an ABSENT manifest or ANY read/parse fault leaves the
+    /// current live cache UNCHANGED (retry the next tick) — never clobbers a good advertise
+    /// with an empty/partial map. A full [`LiveRefs::replace`] installs the durable set
+    /// (the authoritative complete ref list — adds AND cross-instance deletes propagate).
+    /// Pure over an [`crate::cas::R2Get`] double (testable without a live R2).
+    pub(crate) fn refresh_repo_refs_once(
+        r2: &dyn crate::cas::R2Get,
+        tenant: &str,
+        slug: &str,
+        live: &LiveRefs,
+    ) {
+        // Install the durable manifest ONLY on a clean read+parse; an absent manifest
+        // (`Ok(None)`), a read fault (`Err`), or a parse fault all keep the current live
+        // cache (retry next tick) — never install a corrupt/empty map.
+        if let Ok(Some(bytes)) = r2.get_object(&crate::cas::refs_manifest_key(tenant, slug))
+            && let Ok(manifest) = crate::cas::parse_refs_manifest(&bytes)
+        {
+            live.replace(manifest.refs);
+        }
+    }
+
+    /// Spawn the background ref-cache refresher (WP-B5 read-after-write — the
+    /// `max_instances>1` fungibility fix, clw-designed 2026-07-06). NO-OP in Local/git-dir
+    /// mode (no durable `refs.json` store to reload). In CAS mode a dedicated DETACHED
+    /// thread reloads every loaded repo's `refs.json` every [`REFS_REFRESH_INTERVAL_MS`], so
+    /// a SECOND engine instance picks up another instance's push/delete within that window
+    /// (bounded staleness ≤ the interval; clw signed off 2s for `max_instances=2`).
+    ///
+    /// **Strictly OFF the single-threaded accept loop:** the thread only writes the
+    /// Arc-shared [`LiveRefs`] (exactly what the push hot-swap already does), and it clones
+    /// the per-repo `LiveRefs` handles BEFORE any R2 I/O so it never holds a lock across a
+    /// network read — the accept loop NEVER blocks on this. **Safe (not just fast):** a
+    /// stale advertise is UX-only, never a lost update — every durable ref mutation goes
+    /// through the receive-pack log compare-and-swap + the conditional If-Match `refs.json`
+    /// PUT, so a push on a stale base is rejected non-fast-forward and the client retries.
+    /// A spawn failure is non-fatal (the engine degrades to the pre-B5 reboot-refresh).
+    fn spawn_refs_refresh_loop(&self) {
+        if self.cas_r2_read().is_none() {
+            return; // Local/git-dir: no durable manifest store to refresh from
+        }
+        let Some(tenant) = Self::cas_tenant() else {
+            return;
+        };
+        let state = self.clone();
+        let _ = std::thread::Builder::new()
+            .name("hugit-refs-refresh".to_string())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(REFS_REFRESH_INTERVAL_MS));
+                    let Some(r2) = state.cas_r2_read() else {
+                        break; // mode changed (never, in practice) → stop cleanly
+                    };
+                    // Collect (slug, LiveRefs) WITHOUT holding a lock across the R2 reads
+                    // (LiveRefs is an Arc clone — cheap; the runtime lock is released first).
+                    let mut targets: Vec<(String, LiveRefs)> = state
+                        .repos
+                        .iter()
+                        .map(|(s, rs)| (s.clone(), rs.git_refs.clone()))
+                        .collect();
+                    {
+                        let rt = state
+                            .repos_runtime
+                            .read()
+                            .unwrap_or_else(|e| e.into_inner());
+                        targets.extend(rt.iter().map(|(s, rs)| (s.clone(), rs.git_refs.clone())));
+                    }
+                    for (slug, live) in targets {
+                        Self::refresh_repo_refs_once(r2, &tenant, &slug, &live);
+                    }
+                }
+            });
+    }
+
     /// Build from env. `HUGIT_ENGINE_DEV_TOKEN` is always required (fail-closed).
     /// If `HUGIT_SERVE_R2_ACCOUNT_ID` is set → the R2 source (all `R2_*` required);
     /// else the Local source (`HUGIT_SERVE_LOG_DIR` required).
@@ -780,6 +876,10 @@ impl AppState {
         if pat_auth_enabled {
             state.boot_build_pat_index();
         }
+        // WP-B5: start the background ref-cache refresher (read-after-write fungibility).
+        // NO-OP outside CAS mode; strictly off the accept loop. Spawn LAST (after the state
+        // is fully built) so the thread sees the loaded repos.
+        state.spawn_refs_refresh_loop();
         Ok(state)
     }
 
@@ -3229,6 +3329,96 @@ mod tests {
             err.reason.contains("no version token"),
             "the reason must name the refused non-CAS write, got: {}",
             err.reason
+        );
+    }
+
+    // ── WP-B5 read-after-write ref refresh ────────────────────────────────────────
+
+    /// A hermetic [`crate::cas::R2Get`]: key → bytes, or a forced read fault.
+    struct MockR2 {
+        objects: BTreeMap<String, Vec<u8>>,
+        fault: bool,
+    }
+    impl crate::cas::R2Get for MockR2 {
+        fn get_object(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
+            if self.fault {
+                return Err("mock R2 fault".to_string());
+            }
+            Ok(self.objects.get(key).cloned())
+        }
+    }
+    fn mock_r2(entries: &[(&str, &[u8])]) -> MockR2 {
+        MockR2 {
+            objects: entries
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), v.to_vec()))
+                .collect(),
+            fault: false,
+        }
+    }
+    fn seed_live(refs: &[(&str, &str)]) -> LiveRefs {
+        LiveRefs::new(
+            refs.iter()
+                .map(|(r, o)| ((*r).to_string(), (*o).to_string()))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn refresh_installs_the_durable_manifest_adds_updates_and_drops() {
+        // Another instance advanced main v1→v2, added `feat`, and deleted `old`. The refresh
+        // installs the durable manifest verbatim: update propagates, add propagates, and the
+        // cross-instance delete propagates (a full replace, not a merge).
+        let live = seed_live(&[("refs/heads/main", "v1"), ("refs/heads/old", "z")]);
+        let manifest =
+            br#"{"head":"refs/heads/main","refs":{"refs/heads/main":"v2","refs/heads/feat":"c"}}"#;
+        let r2 = mock_r2(&[("d863fafb/alpha/refs.json", manifest)]);
+        AppState::refresh_repo_refs_once(&r2, "d863fafb", "alpha", &live);
+        let s = live.snapshot();
+        assert_eq!(s.get("refs/heads/main").map(String::as_str), Some("v2"));
+        assert_eq!(s.get("refs/heads/feat").map(String::as_str), Some("c"));
+        assert!(
+            !s.contains_key("refs/heads/old"),
+            "a cross-instance delete propagates"
+        );
+    }
+
+    #[test]
+    fn refresh_absent_manifest_keeps_the_cache_fail_safe() {
+        let live = seed_live(&[("refs/heads/main", "v1")]);
+        let r2 = mock_r2(&[]); // no refs.json → get_object → None
+        AppState::refresh_repo_refs_once(&r2, "t", "alpha", &live);
+        assert_eq!(
+            live.snapshot().get("refs/heads/main").map(String::as_str),
+            Some("v1"),
+            "an absent manifest never clobbers a good live cache with empty"
+        );
+    }
+
+    #[test]
+    fn refresh_read_fault_keeps_the_cache() {
+        let live = seed_live(&[("refs/heads/main", "v1")]);
+        let r2 = MockR2 {
+            objects: BTreeMap::new(),
+            fault: true,
+        };
+        AppState::refresh_repo_refs_once(&r2, "t", "alpha", &live);
+        assert_eq!(
+            live.snapshot().get("refs/heads/main").map(String::as_str),
+            Some("v1"),
+            "a read fault keeps the cache (retry next tick)"
+        );
+    }
+
+    #[test]
+    fn refresh_malformed_manifest_keeps_the_cache() {
+        let live = seed_live(&[("refs/heads/main", "v1")]);
+        let r2 = mock_r2(&[("t/alpha/refs.json", b"not json at all")]);
+        AppState::refresh_repo_refs_once(&r2, "t", "alpha", &live);
+        assert_eq!(
+            live.snapshot().get("refs/heads/main").map(String::as_str),
+            Some("v1"),
+            "a malformed manifest never installs a corrupt/empty map"
         );
     }
 
