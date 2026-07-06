@@ -2340,6 +2340,38 @@ mod live_refs_tests {
         );
     }
 
+    /// WP-B5 INVARIANT LOCK (clw-requested): the read-after-write refresh keeps the
+    /// staleness UX-only, NEVER a lost update. After the background refresh installs another
+    /// instance's advance (`feat` v1→v2 — modeled by `LiveRefs::replace`, the refresh's core
+    /// action), the stale-check reads the LIVE `git_refs` the refresher just updated, so a
+    /// push still carrying the STALE base (`v1`) is rejected `non-fast-forward` (the client
+    /// re-fetches + retries). This is the whole reason a bounded-staleness advertise is safe:
+    /// every durable ref mutation rides the stale-check + the conditional If-Match PUT.
+    #[test]
+    fn b5_refresh_then_stale_base_push_is_rejected_non_fast_forward() {
+        let live = crate::state::LiveRefs::new(std::collections::BTreeMap::from([
+            ("refs/heads/main".to_string(), "m".repeat(40)),
+            ("refs/heads/feat".to_string(), "1".repeat(40)),
+        ]));
+        // The background refresh installs the durable manifest — another instance advanced
+        // `feat` to v2.
+        live.replace(std::collections::BTreeMap::from([
+            ("refs/heads/main".to_string(), "m".repeat(40)),
+            ("refs/heads/feat".to_string(), "2".repeat(40)),
+        ]));
+        // A push on the now-stale base `v1` is rejected against the refreshed live view.
+        assert_eq!(
+            delete_ref_decision(&live.snapshot(), "refs/heads/feat", &"1".repeat(40)),
+            Err("non-fast-forward"),
+            "a stale-base push is rejected post-refresh — staleness stays UX-only"
+        );
+        // The refreshed tip `v2` is accepted.
+        assert_eq!(
+            delete_ref_decision(&live.snapshot(), "refs/heads/feat", &"2".repeat(40)),
+            Ok(())
+        );
+    }
+
     /// §1.b — deleting a ref that does not exist is refused (no fabricated success).
     #[test]
     fn delete_absent_branch_rejected() {
