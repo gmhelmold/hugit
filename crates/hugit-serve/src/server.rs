@@ -466,6 +466,22 @@ fn hide_load_err(principal: &[String], e: EngineErr) -> EngineErr {
     }
 }
 
+/// Fail-CLOSED readiness predicate for `/readyz` (WP-B5). A CAS-backed engine boots a
+/// DETACHED `cas_batch_read` self-probe that writes [`AppState::cas_batch_read_health`]; the
+/// engine is READY only once that probe confirms the CAS batch plane is serviceable:
+/// - `ok …` / `empty-index` — the batch plane works (or the repo is empty but reachable) → READY.
+/// - `unprobed` — NO lazy-CAS dep (Local/git-dir mode) → READY immediately (nothing to warm).
+/// - `probing` — still booting (the detached probe has not landed) → NOT ready.
+/// - `err:…` — the CAS plane failed the self-probe → NOT ready.
+///
+/// So a booting or CAS-broken instance 503s `/readyz` and a health router routes around it,
+/// while a healthy or non-CAS instance is ready. Reading the string is O(len), no I/O.
+#[must_use]
+fn engine_ready(cas_batch_read_health: &str) -> bool {
+    let h = cas_batch_read_health;
+    h.starts_with("ok") || h == "empty-index" || h == "unprobed"
+}
+
 /// Route + dispatch one request to a `(status, body)` pair. Socket-free.
 #[must_use]
 pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -> (u16, String) {
@@ -521,10 +537,18 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
             .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | ':' | ','))
             .take(256)
             .collect();
+        // FAIL-CLOSED readiness (WP-B5 fungibility pre-condition): a cold/booting instance
+        // reports NOT-ready (503) until its boot deps are actually serviceable, so a health
+        // router routes AROUND it (the `max_instances>1` requirement) instead of sending
+        // traffic to an instance that would serve stale/empty. Fast + deterministic — reads
+        // the in-memory probe cell only (no I/O), so `/readyz` never hangs. The full field
+        // set is returned in BOTH states so a consumer sees WHY (e.g. `cas_batch_read`).
+        let ready = engine_ready(&cas_batch_read);
+        let status = if ready { 200 } else { 503 };
         let body = format!(
-            r#"{{"ready":true,"git_serving":{git_serving},"git_repos":{git_repos},"version":"{version}","cas_batch_read":"{cas_batch_read}","clonepack":"{clonepack}"}}"#
+            r#"{{"ready":{ready},"git_serving":{git_serving},"git_repos":{git_repos},"version":"{version}","cas_batch_read":"{cas_batch_read}","clonepack":"{clonepack}"}}"#
         );
-        return (200, body);
+        return (status, body);
     }
 
     // /v1/me/login — PUBLIC (no Bearer): the auth entry-point, served before any
@@ -2341,6 +2365,65 @@ mod godpath_gate_tests {
         assert_eq!(
             status, 503,
             "physical erase requires CAS mode (oid-index in R2)"
+        );
+    }
+
+    // ── /readyz fail-closed readiness (WP-B5) ─────────────────────────────────────
+
+    #[test]
+    fn engine_ready_predicate_is_fail_closed() {
+        // Serviceable → ready.
+        assert!(engine_ready("ok 3/3 12ms"));
+        assert!(engine_ready("empty-index"));
+        assert!(engine_ready("unprobed")); // no lazy-CAS dep (Local/git-dir)
+        // Booting or broken → NOT ready.
+        assert!(!engine_ready("probing"), "a booting instance is not ready");
+        assert!(
+            !engine_ready("err: cas batch read failed"),
+            "a broken CAS plane is not ready"
+        );
+    }
+
+    fn set_health(s: &AppState, h: &str) {
+        *s.cas_batch_read_health.write().unwrap() = h.to_string();
+    }
+
+    #[test]
+    fn readyz_503s_while_probing_then_200_when_serviceable() {
+        let s = unique_state();
+        // Booting: the detached CAS self-probe has not landed → 503, ready:false (a health
+        // router routes around this instance instead of sending it traffic).
+        set_health(&s, "probing");
+        let (status, body) = route(&s, &Method::Get, "/readyz", &[]);
+        assert_eq!(status, 503, "a booting instance fails /readyz closed");
+        assert!(body.contains("\"ready\":false"));
+        assert!(
+            body.contains("\"cas_batch_read\":\"probing\""),
+            "the WHY is surfaced"
+        );
+        // Probe landed OK → 200, ready:true.
+        set_health(&s, "ok 5/5 14ms");
+        let (status, body) = route(&s, &Method::Get, "/readyz", &[]);
+        assert_eq!(status, 200);
+        assert!(body.contains("\"ready\":true"));
+    }
+
+    #[test]
+    fn readyz_503s_on_a_broken_cas_plane() {
+        let s = unique_state();
+        set_health(&s, "err: cas_batch_read fault");
+        let (status, body) = route(&s, &Method::Get, "/readyz", &[]);
+        assert_eq!(status, 503, "an err: self-probe fails /readyz closed");
+        assert!(body.contains("\"ready\":false"));
+    }
+
+    #[test]
+    fn readyz_200_for_a_non_cas_engine_unprobed() {
+        let s = unique_state(); // Local mode → "unprobed" (no lazy-CAS dep) → ready
+        let (status, _) = route(&s, &Method::Get, "/readyz", &[]);
+        assert_eq!(
+            status, 200,
+            "a non-CAS engine has no boot dep to warm → ready"
         );
     }
 
