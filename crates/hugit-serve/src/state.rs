@@ -571,6 +571,16 @@ pub struct AppState {
     /// leaked index/hash cannot forge a token (resolution hashes the presented secret).
     pub pat_index:
         Arc<RwLock<std::collections::HashMap<String, crate::writes::verbs::write_token::PatAuth>>>,
+    /// The CoreLink physical CAS-erase seam config (GDPR1 slice-2), read fail-closed from
+    /// `CORELINK_ERASE_URL` + `CORELINK_ERASE_AUTH_KEY` at boot. `None` → the erase seam is
+    /// NOT configured, so the operator-execute route is DISABLED (404 — presence not
+    /// disclosed) and the executor could only ever claim `partial`. `Some` holds the
+    /// validated config (SSRF-allowlisted host + a non-empty key); a fresh per-call
+    /// [`HttpCasErase`](crate::writes::erasure::HttpCasErase) is built from it in the route
+    /// (the client is `!Sync` — a per-erasure-run local — so the SHARED `AppState` holds
+    /// only the `Send + Sync` config, never the client). The key never Debug-prints
+    /// (redacting `Debug` on `EraseConfig`).
+    pub erase_config: Option<crate::writes::erasure::EraseConfig>,
 }
 
 /// The hard cap on repos a single tenant may hold in ONE engine lifetime (the boot
@@ -601,6 +611,30 @@ impl AppState {
     /// Enable the receive-pack write path (test seed / explicit opt-in).
     pub fn enable_write_path(&mut self) {
         self.write_path_enabled = true;
+    }
+
+    /// The R2 read handle for the CAS content bucket (`<tenant>/<repo>/oid-index.json`, the
+    /// digests a repo references) — the SAME `R2Config` (one bucket, `from_env`) that serves
+    /// the event logs, so it reads any key in the bucket. `None` in Local/dev mode (no R2).
+    /// Used by the GDPR1 erase route to build the [`R2OidIndexDigests`](crate::writes::erasure::R2OidIndexDigests)
+    /// digest source. `R2Config` implements [`crate::cas::R2Get`].
+    #[must_use]
+    pub fn cas_r2_read(&self) -> Option<&R2Config> {
+        match &self.source {
+            LogSource::R2(r2) => Some(r2),
+            LogSource::Local { .. } => None,
+        }
+    }
+
+    /// The CAS tenant hugit's git content is keyed under (`HUGIT_SERVE_CAS_TENANT_ID`, the
+    /// single shared `d863fafb` — see the state doc). `None` when unset/empty. The prefix
+    /// for `oid-index.json` reads + the erase seam's tenant field.
+    #[must_use]
+    pub fn cas_tenant() -> Option<String> {
+        std::env::var("HUGIT_SERVE_CAS_TENANT_ID")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
     }
     /// Build from env. `HUGIT_ENGINE_DEV_TOKEN` is always required (fail-closed).
     /// If `HUGIT_SERVE_R2_ACCOUNT_ID` is set → the R2 source (all `R2_*` required);
@@ -715,6 +749,11 @@ impl AppState {
         let pat_auth_enabled = pat_auth_enabled_env();
         pat_auth_multi_instance_guard(pat_auth_enabled, allow_multi_instance())?;
 
+        // The physical CAS-erase seam config (GDPR1 slice-2). Fail-closed: a set-but-invalid
+        // URL/key aborts boot (never a half-configured erase seam). Absent → `None` (the
+        // operator-execute route is disabled). This is the ONE irreversible-delete seam.
+        let erase_config = crate::writes::erasure::EraseConfig::from_env()?;
+
         let state = Self {
             source,
             dev_token,
@@ -732,6 +771,7 @@ impl AppState {
             clone_pack_building: Arc::new(Mutex::new(HashSet::new())),
             pat_auth_enabled,
             pat_index: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            erase_config,
         };
         // Populate the PAT index from the durable `_accounts/*` logs (only when
         // enabled). Boot-scan faults are fail-closed-DENY (the affected PATs simply
@@ -1026,6 +1066,9 @@ impl AppState {
             // exercises the PAT path flips `pat_auth_enabled` on the returned state.
             pat_auth_enabled: false,
             pat_index: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            // No physical erase seam in the dev/test constructor (the operator-execute
+            // route is disabled). A test wiring the executor sets it explicitly.
+            erase_config: None,
         }
     }
 

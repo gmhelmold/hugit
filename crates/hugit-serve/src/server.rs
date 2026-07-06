@@ -994,6 +994,19 @@ fn route_write(state: &AppState, url: &str, headers: &[Header], body: &[u8]) -> 
             };
             dispatch_account_erase(state, headers, body, ctx.principal, ctx.fresh_auth)
         }
+        // POST /v1/account/erase/execute — GDPR1 Part 2: the OPERATOR drives the
+        // IRREVERSIBLE erasure cascade over a SUBJECT-STAGED standing request (design D1,
+        // clw-audited). Operator-only, step-up, post-grace; the subject + dsr_id come from
+        // the standing `erasure.requested` record, NEVER a caller arg (no god-erase). This
+        // is the ONLY irreversible-delete surface; gated OFF unless the erase seam is
+        // configured (`state.erase_config`).
+        ["v1", "account", "erase", "execute"] => {
+            let ctx = match write_auth(state, headers) {
+                Ok(c) => c,
+                Err(e) => return err(e),
+            };
+            dispatch_account_erase_execute(state, headers, body, ctx.principal, ctx.fresh_auth)
+        }
         // POST /v1/me/tokens — mint a PAT (secret returned ONCE, 201). Per-principal;
         // the subject is derived from the Bearer (operator/anon refused 401). The
         // git-auth WIRE that ACCEPTS a PAT as a credential is the next slice.
@@ -1105,6 +1118,160 @@ fn dispatch_account_erase(
             }
             Err(e) => err(EngineErr::unavailable(format!("serialize: {e}"))),
         },
+        Err(e) => err(e),
+    }
+}
+
+/// The erasure grace window in milliseconds — the two-authority cooling-off between a
+/// subject's `erasure.requested` (Part 1) and the operator's execute (Part 2). An OWNER
+/// KNOB, overridable by `HUGIT_ERASURE_GRACE_SECS` (a placeholder default; GDPR permits the
+/// controller up to 30 days). Set to `0` for a live-verify against a just-staged request.
+fn erasure_grace_ms() -> u64 {
+    const DEFAULT_ERASURE_GRACE_SECS: u64 = 7 * 86_400; // 7 days — owner-overridable
+    std::env::var("HUGIT_ERASURE_GRACE_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_ERASURE_GRACE_SECS)
+        .saturating_mul(1000)
+}
+
+/// Map an [`ErasureOutcome`] to the `/v1` response. `executed` → 200 (the irreversible
+/// cascade completed); `partial` → 202 (accepted, re-runnable — an outstanding leg);
+/// already-executed → 200 idempotent no-op.
+fn erase_execute_response(outcome: &crate::writes::erasure::ErasureOutcome) -> (u16, String) {
+    use crate::writes::erasure::ErasureOutcome::{AlreadyExecuted, Executed, Partial};
+    match outcome {
+        Executed { repos_tombstoned } => (
+            200,
+            serde_json::json!({
+                "state": "executed",
+                "repos_tombstoned": repos_tombstoned,
+                "accepted": true,
+            })
+            .to_string(),
+        ),
+        Partial {
+            repos_tombstoned,
+            blocked_reason,
+        } => (
+            202,
+            serde_json::json!({
+                "state": "partial",
+                "repos_tombstoned": repos_tombstoned,
+                "outstanding": blocked_reason,
+                "accepted": true,
+            })
+            .to_string(),
+        ),
+        AlreadyExecuted => (
+            200,
+            serde_json::json!({ "state": "already_executed", "accepted": true }).to_string(),
+        ),
+    }
+}
+
+/// Dispatch `POST /v1/account/erase/execute` (GDPR1 Part 2 — the IRREVERSIBLE cascade).
+///
+/// Design D1 operator-execute (clw-audited), fail-closed at every gate:
+/// - **Operator-only** ([`is_operator`](crate::authz::is_operator)): a tenant/anon can NEVER
+///   execute (they only STAGE via `/v1/account/erase`) → uniform `404` (no oracle, matching
+///   the audit/erasure control-plane gate). The operator NEVER originates — only executes.
+/// - **Erase seam configured**: `state.erase_config` absent → `404` (the route is DISABLED;
+///   its presence is not disclosed). The ONLY irreversible-delete surface.
+/// - **Step-up** required (a fresh session OR the operator's `X-Step-Up`) → else `403`.
+/// - **Subject from the STANDING record**: load the target account's log, read the latest
+///   GOVERNING `erasure.requested`; the SUBJECT + `dsr_id` come from THAT record (Part-1
+///   subject-authenticated), NEVER the caller. No standing request → `404` (no god-erase).
+/// - **Grace elapsed**: refuse before [`erasure_grace_ms`] since the request → `403`. (A
+///   superseding `erasure.cancelled`/`erasure.executed` already drops the standing request.)
+/// - **DSR legitimacy**: no `dsr_id` on the request → `403` (a physical delete needs the
+///   githugr-anchored legitimacy id; never erase without it).
+/// - **CAS reads available**: not CAS mode → `503` (physical erase reads oid-indexes from R2).
+///
+/// Then drives [`execute_account_erasure_composed`](crate::writes::erasure::execute_account_erasure_composed)
+/// over the SUBJECT — itself fail-closed (`executed` ⇒ every leg durable + physically GC'd;
+/// the enumerate-claim TOCTOU re-assert + the exact-superset exclusive-digest partition).
+fn dispatch_account_erase_execute(
+    state: &AppState,
+    headers: &[Header],
+    body: &[u8],
+    principal: Vec<String>,
+    fresh_auth: bool,
+) -> (u16, String) {
+    // OPERATOR-only: a tenant/anon can never execute an erasure. Uniform 404 (no oracle),
+    // matching the control-plane gate — the operator executes a standing lawful request,
+    // never mints one.
+    if !crate::authz::is_operator(&principal) {
+        return err(EngineErr::not_found());
+    }
+    // The erase seam must be configured (CORELINK_ERASE_URL/KEY) — else the route is
+    // DISABLED (404, presence not disclosed). No half-live delete surface.
+    let Some(erase_cfg) = &state.erase_config else {
+        return err(EngineErr::not_found());
+    };
+    // Step-up (irreversible): a fresh session OR the operator's dev `X-Step-Up`.
+    let step_up_header = header_val(headers, "X-Step-Up")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    if !(fresh_auth || step_up_header) {
+        return err(EngineErr::step_up_required());
+    }
+    // The operator supplies WHICH account's standing request to run; the SUBJECT is read
+    // from the record, never trusted from here.
+    let req: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return err(EngineErr::invalid_request(format!("corpo inválido: {e}"))),
+    };
+    let account = match req.get("account").and_then(|a| a.as_str()) {
+        Some(a) if !a.is_empty() => a.to_string(),
+        _ => return err(EngineErr::invalid_request("campo `account` obrigatório")),
+    };
+    // Load the standing request off the account log (fail-closed on a load/verify fault).
+    let account_log = match state.load_account_log(&account) {
+        Ok((log, _)) => log,
+        Err(e) => return err(e),
+    };
+    let Some(standing) = crate::writes::erasure::read_standing_erasure_request(&account_log) else {
+        // No lawful standing request (never staged, or already cancelled/executed) → 404,
+        // no god-erase, no existence oracle.
+        return err(EngineErr::not_found());
+    };
+    // Grace window: refuse before the cooling-off elapses since the request was staged.
+    let now = now_ms();
+    if now < standing.requested_at.saturating_add(erasure_grace_ms()) {
+        return err(EngineErr::policy_denied(
+            "a janela de carência do apagamento ainda não decorreu",
+        ));
+    }
+    // DSR legitimacy: NEVER physically erase without the githugr-anchored legitimacy id.
+    let Some(dsr_id) = standing.dsr_id.as_deref().filter(|s| !s.is_empty()) else {
+        return err(EngineErr::policy_denied(
+            "apagamento requer um id de legitimidade DSR (anchor) — ausente no pedido",
+        ));
+    };
+    // Physical erase reads each owned repo's oid-index from R2 (CAS mode only) + the shared
+    // CAS tenant. Absent → 503 (never a silent no-erase).
+    let (Some(r2), Some(cas_tenant)) = (state.cas_r2_read(), AppState::cas_tenant()) else {
+        return err(EngineErr::unavailable(
+            "apagamento físico requer o modo CAS (oid-index em R2)",
+        ));
+    };
+    let digests = crate::writes::erasure::R2OidIndexDigests { r2 };
+    // A FRESH per-run client (HttpCasErase is !Sync — a per-erasure-run local).
+    let erase = erase_cfg.clone().into_client();
+    // Drive the composed executor over the SUBJECT from the standing record. The OPERATOR
+    // principal is the acting chain (auditable); the SUBJECT is whose data is erased.
+    match crate::writes::erasure::execute_account_erasure_composed(
+        state,
+        &digests,
+        &standing.subject,
+        principal,
+        now,
+        &erase,
+        &cas_tenant,
+        dsr_id,
+    ) {
+        Ok(outcome) => erase_execute_response(&outcome),
         Err(e) => err(e),
     }
 }
@@ -2030,6 +2197,151 @@ mod godpath_gate_tests {
         verbs::write_token::token_create(s, &body, &[user.to_string()], now_ms())
             .expect("mint a PAT")
             .secret
+    }
+
+    // ── GDPR1 operator-execute route gates (POST /v1/account/erase/execute) ───────
+
+    /// A per-test AppState in a COLLISION-FREE dir (a static counter — `unique_state`'s
+    /// nanos+pid alone races under the parallel test runner) with the `_accounts/` store
+    /// dir pre-created so the account-log persist lands.
+    fn gdpr_state() -> AppState {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("hugit-gdpr-route-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(dir.join("_accounts")).unwrap();
+        AppState::new(dir, DEV.to_string())
+    }
+
+    fn operator_chain() -> Vec<String> {
+        vec!["orchestrator:hugit".to_string()]
+    }
+
+    /// A loopback erase-seam config (passes the SSRF allowlist; never dialed in the gate
+    /// tests, which all return before the compose).
+    fn seam_cfg() -> crate::writes::erasure::EraseConfig {
+        crate::writes::erasure::EraseConfig::validate(
+            Some("http://127.0.0.1:9/".to_string()),
+            Some("erase-key".to_string()),
+        )
+        .expect("valid")
+        .expect("some")
+    }
+
+    /// Seed a standing `erasure.requested` on `account`'s log, stamped `at_ms`, with an
+    /// optional `dsr_id`.
+    fn seed_requested(s: &AppState, account: &str, dsr_id: Option<&str>, at_ms: u64) {
+        let mut log = hugit_refstore::EventLog::new();
+        let mut payload = serde_json::json!({
+            "account": account, "subject": account, "state": "requested",
+        });
+        if let Some(d) = dsr_id {
+            payload["dsr_id"] = serde_json::json!(d);
+        }
+        let p = payload.to_string();
+        log.append_authorized(
+            hugit_refstore::PrincipalClass::Orchestrator,
+            hugit_refstore::Endpoint::Land,
+            verbs::write_account_erase::ERASURE_REQUESTED_KIND,
+            vec!["o".to_string()],
+            hugit_refstore::canonical_json(&p).unwrap_or(p),
+            at_ms,
+        )
+        .expect("append requested");
+        s.persist_account_log(account, &log, &crate::writes::CasToken::Absent)
+            .expect("persist");
+    }
+
+    fn exec_body(account: &str) -> Vec<u8> {
+        serde_json::json!({ "account": account })
+            .to_string()
+            .into_bytes()
+    }
+
+    #[test]
+    fn erase_execute_non_operator_is_404_no_oracle() {
+        let mut s = gdpr_state();
+        s.erase_config = Some(seam_cfg());
+        // A tenant principal (not the operator) can NEVER execute — uniform 404, no oracle.
+        let (status, _) = dispatch_account_erase_execute(
+            &s,
+            &[],
+            &exec_body("org-a"),
+            vec!["clerk:org-a:user".to_string()],
+            true,
+        );
+        assert_eq!(status, 404, "a non-operator gets the no-oracle 404");
+    }
+
+    #[test]
+    fn erase_execute_seam_not_configured_is_404() {
+        let s = gdpr_state(); // erase_config = None (route disabled, presence not disclosed)
+        let (status, _) =
+            dispatch_account_erase_execute(&s, &[], &exec_body("org-a"), operator_chain(), true);
+        assert_eq!(status, 404);
+    }
+
+    #[test]
+    fn erase_execute_step_up_required() {
+        let mut s = gdpr_state();
+        s.erase_config = Some(seam_cfg());
+        // Operator + seam configured, but NO fresh auth and NO X-Step-Up → 403.
+        let (status, _) =
+            dispatch_account_erase_execute(&s, &[], &exec_body("org-a"), operator_chain(), false);
+        assert_eq!(status, 403);
+    }
+
+    #[test]
+    fn erase_execute_no_standing_request_is_404() {
+        let mut s = gdpr_state();
+        s.erase_config = Some(seam_cfg());
+        // Operator, step-up OK, but the account never staged a request → 404 (no god-erase).
+        let (status, _) =
+            dispatch_account_erase_execute(&s, &[], &exec_body("org-a"), operator_chain(), true);
+        assert_eq!(status, 404);
+    }
+
+    #[test]
+    fn erase_execute_grace_not_elapsed_is_403() {
+        let mut s = gdpr_state();
+        s.erase_config = Some(seam_cfg());
+        // A request staged NOW (default grace = 7 days) → still within the cooling-off → 403.
+        seed_requested(&s, "org-a", Some("dsr-1"), now_ms());
+        let (status, _) =
+            dispatch_account_erase_execute(&s, &[], &exec_body("org-a"), operator_chain(), true);
+        assert_eq!(
+            status, 403,
+            "execution before the grace window elapses is refused"
+        );
+    }
+
+    #[test]
+    fn erase_execute_missing_dsr_is_403() {
+        let mut s = gdpr_state();
+        s.erase_config = Some(seam_cfg());
+        // Grace elapsed (staged at t=0) but NO dsr_id on the request → 403 (no legitimacy id).
+        seed_requested(&s, "org-a", None, 0);
+        let (status, _) =
+            dispatch_account_erase_execute(&s, &[], &exec_body("org-a"), operator_chain(), true);
+        assert_eq!(
+            status, 403,
+            "a physical erase without the DSR legitimacy id is refused"
+        );
+    }
+
+    #[test]
+    fn erase_execute_not_cas_mode_is_503() {
+        let mut s = gdpr_state(); // Local mode → cas_r2_read() is None
+        s.erase_config = Some(seam_cfg());
+        // All gates pass (operator, seam, step-up, standing request past grace WITH a dsr_id),
+        // but Local mode can't read oid-indexes from R2 → 503 (never a silent no-erase).
+        seed_requested(&s, "org-a", Some("dsr-1"), 0);
+        let (status, _) =
+            dispatch_account_erase_execute(&s, &[], &exec_body("org-a"), operator_chain(), true);
+        assert_eq!(
+            status, 503,
+            "physical erase requires CAS mode (oid-index in R2)"
+        );
     }
 
     /// A PAT Bearer resolves to its clerk OWNER — NEVER the operator — even with the

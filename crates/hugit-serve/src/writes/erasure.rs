@@ -380,6 +380,61 @@ pub const ERASURE_EXECUTED_KIND: &str = "erasure.executed";
 /// done + the outstanding obligation. NEVER an over-claim of full erasure.
 pub const ERASURE_PARTIAL_KIND: &str = "erasure.partial";
 
+/// A self-serve cancellation of a standing erasure request. **v0 ships NO producer** (the
+/// operator is the cancellation authority — they simply don't execute a disputed standing
+/// request after grace, per clw's #3(b) settle); this const exists so the standing-request
+/// scan is future-proof — wiring a `POST /v1/account/erase/cancel` verb is a one-line
+/// producer, no reader change. The scan is vacuously satisfied today.
+pub const ERASURE_CANCELLED_KIND: &str = "erasure.cancelled";
+
+/// A standing, still-governing erasure request read off an account log — the subject-staged
+/// legitimacy the operator-execute route validates BEFORE driving the irreversible cascade.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StandingErasureRequest {
+    /// The subject account — captured from the AUTHENTICATED requester at REQUEST time
+    /// (Part-1's `derive_owner_tenant`, subject == author), read back here at EXECUTE time.
+    /// The executor erases THIS subject; it is NEVER a caller-supplied arg (no god-erase).
+    pub subject: String,
+    /// The DSR legitimacy id (githugr's `/_internal/dsr/anchor` originates it; hugit
+    /// CONSUMES). `None` when the request predates the anchor wiring — physical erase is
+    /// refused without it (the route fails closed; a delete needs a legitimacy id).
+    pub dsr_id: Option<String>,
+    /// Unix-ms the request was staged — the grace window is measured from here.
+    pub requested_at: u64,
+}
+
+/// Read the LATEST standing `erasure.requested` off an account log, IF it is still the
+/// governing lifecycle state (NOT superseded by a later [`ERASURE_CANCELLED_KIND`] or
+/// [`ERASURE_EXECUTED_KIND`]). `None` when there is no lawful standing request → the route
+/// 404s (no god-erase: the operator can only execute a subject-staged request, never mint).
+///
+/// Fail-safe: a `requested` record with an unparseable/`subject`-less payload is SKIPPED
+/// (not trusted → never erased on a corrupt record); a later valid `requested` still governs.
+pub fn read_standing_erasure_request(log: &EventLog) -> Option<StandingErasureRequest> {
+    let mut standing: Option<StandingErasureRequest> = None;
+    for r in log.records() {
+        if r.kind == crate::writes::verbs::write_account_erase::ERASURE_REQUESTED_KIND {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&r.payload)
+                && let Some(subject) = v.get("subject").and_then(|s| s.as_str())
+            {
+                let dsr_id = v
+                    .get("dsr_id")
+                    .and_then(|s| s.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(String::from);
+                standing = Some(StandingErasureRequest {
+                    subject: subject.to_string(),
+                    dsr_id,
+                    requested_at: r.recorded_at,
+                });
+            }
+        } else if r.kind == ERASURE_CANCELLED_KIND || r.kind == ERASURE_EXECUTED_KIND {
+            standing = None; // superseded — no standing request to execute
+        }
+    }
+    standing
+}
+
 /// The outcome of driving an account erasure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ErasureOutcome {
@@ -540,6 +595,7 @@ const ERASE_TIMEOUT_SECS: u64 = 15;
 ///
 /// `Err` (set-but-invalid) on: an empty/scheme-less URL, an untrusted host (SSRF), or a
 /// URL present WITHOUT a key (a half-configured erase seam must never boot).
+#[derive(Clone)]
 pub struct EraseConfig {
     base_url: String,
     auth_key: String,
@@ -565,8 +621,9 @@ impl EraseConfig {
     }
 
     /// The PURE validation (testable without touching the process env): the SSRF allowlist
-    /// + the half-configured-seam fail-close. `base_url` ABSENT → `Ok(None)` (no transport).
-    fn validate(
+    /// plus the half-configured-seam fail-close. `base_url` ABSENT → `Ok(None)` (no
+    /// transport). `pub(crate)` so the route builds a config from a loopback mock in tests.
+    pub(crate) fn validate(
         base_url: Option<String>,
         auth_key: Option<String>,
     ) -> Result<Option<Self>, String> {
@@ -879,9 +936,19 @@ fn execute_account_erasure_inner(
     let (gc_complete, digests_erased) =
         drive_cas_gc(&plan, erase, cas_tenant, exclusive_digests, dsr_id)?;
 
-    // The terminal claim, LAST. Not complete → partial (never over-claim `executed`).
+    // ENUMERATE-CLAIM TOCTOU guard (clw must-fix #3c): a repo the subject provisioned
+    // AFTER the plan enumeration but BEFORE this claim would be missed by the tombstone
+    // loop — so `executed` could be claimed while a fresh repo survives. RE-ASSERT the
+    // durable owned set here, immediately before the claim: if ANY owned repo is still
+    // pending (a new one appeared mid-cascade), we do NOT claim `executed` — we downgrade
+    // to `partial` (re-runnable; the next run tombstones it). Fail-closed against a false
+    // `executed`; `partial`-and-reconverge is the correct fail-safe (never over-claim).
+    let toctou_clean = plan_account_erasure(state, account)?.pending_repo_count() == 0;
+
+    // The terminal claim, LAST. Not complete OR a new repo appeared → partial (never
+    // over-claim `executed`).
     let acct_sink: &dyn AccountLogSink = state;
-    if gc_complete {
+    if gc_complete && toctou_clean {
         let payload = serde_json::json!({
             "account": account,
             "state": "executed",
@@ -900,12 +967,19 @@ fn execute_account_erasure_inner(
             repos_tombstoned: tombstoned,
         })
     } else {
+        // Distinguish WHY it's partial: an unmet CAS-GC obligation vs a repo that
+        // appeared mid-cascade (the TOCTOU re-assert fired) — both are honestly re-runnable.
+        let outstanding = if !toctou_clean {
+            "owned-repo-appeared-mid-cascade"
+        } else {
+            "cas-exclusive-physical-gc"
+        };
         let payload = serde_json::json!({
             "account": account,
             "state": "partial",
             "repos_tombstoned": tombstoned,
             "digests_erased": digests_erased,
-            "outstanding": "cas-exclusive-physical-gc",
+            "outstanding": outstanding,
         });
         append_account_claim(
             acct_sink,
@@ -973,6 +1047,106 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    // ── the standing-request reader (operator-execute route) ─────────────────────
+
+    /// Build an account log by appending `(kind, payload)` records in order; the record's
+    /// `recorded_at` (the grace-window anchor) = its 1-based position, in ms.
+    fn account_log(records: &[(&str, serde_json::Value)]) -> EventLog {
+        let mut log = EventLog::new();
+        for (i, (kind, payload)) in records.iter().enumerate() {
+            let p = payload.to_string();
+            log.append_authorized(
+                PrincipalClass::Orchestrator,
+                Endpoint::Land,
+                *kind,
+                vec!["o".into()],
+                hugit_refstore::canonical_json(&p).unwrap_or(p),
+                (i as u64) + 1,
+            )
+            .expect("append");
+        }
+        log
+    }
+
+    const REQ: &str = crate::writes::verbs::write_account_erase::ERASURE_REQUESTED_KIND;
+
+    #[test]
+    fn standing_request_extracts_subject_dsr_and_time() {
+        let log = account_log(&[(
+            REQ,
+            serde_json::json!({"account":"org-a","subject":"org-a","state":"requested","dsr_id":"dsr-9"}),
+        )]);
+        let s = read_standing_erasure_request(&log).expect("a standing request");
+        assert_eq!(s.subject, "org-a");
+        assert_eq!(s.dsr_id.as_deref(), Some("dsr-9"));
+        assert_eq!(
+            s.requested_at, 1,
+            "the grace anchor is the request's recorded_at"
+        );
+    }
+
+    #[test]
+    fn standing_request_dsr_absent_is_none_dsr() {
+        // A request staged before the anchor wiring carries no dsr_id → None (the route
+        // then refuses the physical erase: no legitimacy id).
+        let log = account_log(&[(
+            REQ,
+            serde_json::json!({"account":"org-a","subject":"org-a","state":"requested"}),
+        )]);
+        let s = read_standing_erasure_request(&log).expect("standing");
+        assert_eq!(s.subject, "org-a");
+        assert!(s.dsr_id.is_none());
+    }
+
+    #[test]
+    fn standing_request_superseded_by_executed_is_none() {
+        let log = account_log(&[
+            (REQ, serde_json::json!({"subject":"org-a","dsr_id":"d"})),
+            (
+                ERASURE_EXECUTED_KIND,
+                serde_json::json!({"state":"executed"}),
+            ),
+        ]);
+        assert!(
+            read_standing_erasure_request(&log).is_none(),
+            "an executed account has no standing request to re-execute"
+        );
+    }
+
+    #[test]
+    fn standing_request_superseded_by_cancelled_is_none() {
+        let log = account_log(&[
+            (REQ, serde_json::json!({"subject":"org-a","dsr_id":"d"})),
+            (
+                ERASURE_CANCELLED_KIND,
+                serde_json::json!({"state":"cancelled"}),
+            ),
+        ]);
+        assert!(read_standing_erasure_request(&log).is_none());
+    }
+
+    #[test]
+    fn standing_request_none_when_never_requested() {
+        let log = account_log(&[("account.created", serde_json::json!({"x":1}))]);
+        assert!(read_standing_erasure_request(&log).is_none());
+    }
+
+    #[test]
+    fn standing_request_latest_governs_and_a_re_request_after_cancel_stands() {
+        // requested → cancelled → requested again: the LAST governing request stands.
+        let log = account_log(&[
+            (REQ, serde_json::json!({"subject":"org-a","dsr_id":"old"})),
+            (
+                ERASURE_CANCELLED_KIND,
+                serde_json::json!({"state":"cancelled"}),
+            ),
+            (REQ, serde_json::json!({"subject":"org-a","dsr_id":"new"})),
+        ]);
+        let s = read_standing_erasure_request(&log).expect("the re-request stands");
+        assert_eq!(s.dsr_id.as_deref(), Some("new"));
+        assert_eq!(s.requested_at, 3);
     }
 
     // ── the real HTTP erase transport (config validation + mock-seam wire) ────────
@@ -1287,6 +1461,31 @@ mod tests {
 
     fn operator() -> Vec<String> {
         vec!["orchestrator:hugit".to_string()]
+    }
+
+    #[test]
+    fn toctou_reassert_predicate_detects_a_new_pending_repo() {
+        // The enumerate-claim TOCTOU guard (clw #3c) is
+        // `plan_account_erasure(...).pending_repo_count() == 0`, re-asserted immediately
+        // before the `erasure.executed` claim. A NON-tombstoned owned repo (one that
+        // appeared mid-cascade) makes it > 0 → the executor downgrades to `partial` rather
+        // than over-claim `executed`. Once every owned repo is tombstoned it is 0 → clean.
+        let pending = state_with(&[("alpha", "org-a", false)]); // NOT erased → pending
+        assert!(
+            plan_account_erasure(&pending, "org-a")
+                .unwrap()
+                .pending_repo_count()
+                > 0,
+            "a non-tombstoned owned repo trips the re-assert → partial, never a false executed"
+        );
+        let clean = state_with(&[("alpha", "org-a", true)]); // already erased
+        assert_eq!(
+            plan_account_erasure(&clean, "org-a")
+                .unwrap()
+                .pending_repo_count(),
+            0,
+            "all owned repos tombstoned → the re-assert is clean → executed is allowed"
+        );
     }
 
     // ── the exclusive-digest partition ────────────────────────────────────────────
