@@ -604,6 +604,15 @@ pub struct AppState {
     /// only the `Send + Sync` config, never the client). The key never Debug-prints
     /// (redacting `Debug` on `EraseConfig`).
     pub erase_config: Option<crate::writes::erasure::EraseConfig>,
+    /// The engine-wide precomputed per-path blob-history index (#70(a)): `slug →
+    /// (head, path → touching revisions)`, built OFF the accept loop (at boot +
+    /// post-push) so a DEEP-history file's "Histórico" drawer serves from the index
+    /// instead of an exhausting live walk that trips the 2 s budget → empty. A lookup
+    /// MISS (no index yet, a stale HEAD, or an un-indexed path) falls back to the live
+    /// wall-clock-bounded [`hugit_proto::blob_history`] walk — a pure enhancement over
+    /// that safety bound, never a replacement. Interior-mutable behind the shared
+    /// `&AppState` (same pattern as [`LiveRefs`]/`repos_runtime`); cheap to clone.
+    pub blob_history_index: crate::blob_history_index::BlobHistoryStore,
     /// Cached, per-repo projected [`RepoMeta`](crate::authz::RepoMeta) — task #74
     /// (W-METENANT scaling follow-up). [`me_repo_logs`](Self::me_repo_logs) and
     /// [`count_owned_repos`](Self::count_owned_repos) used to call
@@ -905,6 +914,7 @@ impl AppState {
             pat_index: Arc::new(RwLock::new(std::collections::HashMap::new())),
             pat_last_used: Arc::new(RwLock::new(std::collections::HashMap::new())),
             erase_config,
+            blob_history_index: crate::blob_history_index::BlobHistoryStore::new(),
             repo_meta_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
         };
         // Populate the PAT index from the durable `_accounts/*` logs (only when
@@ -1214,6 +1224,7 @@ impl AppState {
             // No physical erase seam in the dev/test constructor (the operator-execute
             // route is disabled). A test wiring the executor sets it explicitly.
             erase_config: None,
+            blob_history_index: crate::blob_history_index::BlobHistoryStore::new(),
             // Empty: `new()`'s boot `repos` set is always empty too (tests wire repos
             // via `set_repo_git`/`insert_runtime_repo`, not a real boot load), so there
             // is nothing to pre-populate. A test exercising the cache calls

@@ -42,6 +42,108 @@ pub const BLOB_HISTORY_BUDGET: std::time::Duration = std::time::Duration::from_m
 /// drawer only shows a bounded recent timeline, so 50 most-recent revisions is ample.
 pub const MAX_HISTORY_REVS: usize = 50;
 
+/// Default wall-clock budget for building the WHOLE-history per-path index
+/// ([`build_blob_history_index`]). MUCH larger than the per-request
+/// [`BLOB_HISTORY_BUDGET`] because the build runs OFF the single-threaded accept loop
+/// on a detached thread (the same discipline as the cached clone-pack build), so it
+/// may reach deep into history without wedging the engine. STILL hard-bounded: a
+/// pathological deep history stops here with the PARTIAL (newest-first) index rather
+/// than hang the build thread forever.
+pub const INDEX_BUILD_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Max commits the index build walks (first-parent), paired with
+/// [`INDEX_BUILD_BUDGET`] — whichever trips first stops the walk with the partial
+/// index. A hard ceiling on the build's CAS-fetch count independent of wall-clock.
+pub const MAX_INDEX_COMMITS: usize = 20_000;
+
+/// Build the PRECOMPUTED per-path history index for a repo: a single first-parent walk
+/// from `head_commit` that records, for EVERY path any walked commit touched, the
+/// newest-first list of touching revisions. Returns `path → [BlobHistoryEntry]` (each
+/// list capped at [`MAX_HISTORY_REVS`], newest first).
+///
+/// # Why an index (vs the per-request [`blob_history`] walk)
+///
+/// [`blob_history`] walks from HEAD *per path* under a 2 s budget; for a file whose
+/// touches are DEEP in history, the many intervening non-touching commits exhaust the
+/// budget before a single touch is found → an empty "Histórico" drawer. This function
+/// walks the history ONCE and diffs each commit against its first parent
+/// ([`crate::tree_diff_until`]), so a deep-history file's touches are recorded during
+/// the same pass that records the shallow ones — the index then serves the deep file's
+/// list directly, no per-request walk.
+///
+/// # Bounded — MUST run off the accept loop
+///
+/// Each commit is several synchronous CAS fetches (commit + a recursive tree-diff), so
+/// this is the SAME single-thread latency-DoS class the per-request budget defends
+/// against — it must be called on a detached thread, never inline. The walk is bounded
+/// by BOTH `deadline` (wall-clock) and `max_commits`; on either bound — or a
+/// missing/garbled object mid-walk — it STOPS and returns the PARTIAL index built so
+/// far (the newest commits, which is exactly what a recency-ordered drawer wants). It
+/// NEVER errors and NEVER fabricates.
+#[must_use]
+pub fn build_blob_history_index(
+    src: &dyn ObjectSource,
+    head_commit: &ObjectId,
+    deadline: std::time::Instant,
+    max_commits: usize,
+) -> std::collections::HashMap<String, Vec<BlobHistoryEntry>> {
+    let mut by_path: std::collections::HashMap<String, Vec<BlobHistoryEntry>> =
+        std::collections::HashMap::new();
+    // A root commit (or a missing first parent) is diffed against the EMPTY tree so
+    // every file it contains is recorded as its introduction (an Added change).
+    let empty_tree = ObjectId::empty_tree(gix_hash::Kind::Sha1);
+    let mut current = Some(*head_commit);
+    let mut walked = 0usize;
+
+    while let Some(commit_oid) = current {
+        // Bounds checked BEFORE any fetch — stop with the partial index, never wedge
+        // the build thread past the budget/commit ceiling.
+        if walked >= max_commits || std::time::Instant::now() >= deadline {
+            break;
+        }
+        walked += 1;
+
+        // A missing/garbled commit → stop with the partial index (fail-closed-honest).
+        let Some(commit) = load_commit(src, &commit_oid) else {
+            break;
+        };
+        let first_parent = commit.parents.first().copied();
+        // The first parent's root tree (EMPTY for a root commit or a missing parent →
+        // the commit's whole tree diffs as Added = its files' introductions).
+        let parent_tree = match first_parent {
+            Some(parent_oid) => crate::commit_root_tree(src, &parent_oid)
+                .ok()
+                .flatten()
+                .unwrap_or(empty_tree),
+            None => empty_tree,
+        };
+        // The paths this commit touched vs its first parent. Shares the SAME `deadline`
+        // so a single huge-commit diff can never run past the whole-build budget; a
+        // diff error → an empty change set (that commit contributes nothing, honest).
+        let changed =
+            crate::tree_diff_until(src, &parent_tree, &commit.tree, deadline).unwrap_or_default();
+
+        let entry = BlobHistoryEntry {
+            commit_hex: commit_oid.to_hex().to_string(),
+            author_time_ms: commit.author_time_ms,
+            author: commit.author.clone(),
+            summary: commit.summary.clone(),
+        };
+        for file in changed {
+            let revs = by_path.entry(file.path).or_default();
+            // Newest-first walk → keep only the newest MAX_HISTORY_REVS per path (once
+            // full, skip — the deep tail is never shown in the bounded drawer).
+            if revs.len() < MAX_HISTORY_REVS {
+                revs.push(entry.clone());
+            }
+        }
+
+        current = first_parent;
+    }
+
+    by_path
+}
+
 /// One revision in which `path` was touched. Every field is REAL — read from the
 /// commit object — or the entry is not emitted; NOTHING is fabricated.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -624,6 +726,162 @@ mod tests {
         assert_eq!(hist[0].commit_hex, c3.to_hex().to_string());
         assert_eq!(hist[1].commit_hex, c1.to_hex().to_string());
         assert!(!hist.iter().any(|h| h.commit_hex == c2.to_hex().to_string()));
+    }
+
+    /// INDEX: a whole-history build records EVERY path's touching commits in ONE walk,
+    /// including a file whose ONLY touch is DEEP in history behind many non-touching
+    /// commits — the exact case the per-request 2 s walk exhausts to empty.
+    #[test]
+    fn index_build_records_deep_history_paths() {
+        let mut src = CasObjectSource::new();
+        // C0 (root): introduces deep.rs = "v1" (its ONLY touch — deep in history).
+        let deep_v1 = src.insert_raw(ObjectKind::Blob, b"v1".to_vec());
+        let t0 = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_BLOB,
+                name: "deep.rs",
+                oid: deep_v1,
+            }],
+        );
+        let mut parent = insert_commit(&mut src, t0, None, "Root <r@x>", 1000, "add deep");
+        let root_commit = parent;
+        // 100 commits that each touch a DIFFERENT churny file, never deep.rs.
+        for i in 0..100u32 {
+            let churn = src.insert_raw(ObjectKind::Blob, format!("c{i}").into_bytes());
+            let tree = insert_tree(
+                &mut src,
+                vec![
+                    TreeEntry {
+                        mode: MODE_BLOB,
+                        name: "deep.rs",
+                        oid: deep_v1, // UNCHANGED across the whole churn
+                    },
+                    TreeEntry {
+                        mode: MODE_BLOB,
+                        name: "churn.rs",
+                        oid: churn,
+                    },
+                ],
+            );
+            parent = insert_commit(
+                &mut src,
+                tree,
+                Some(parent),
+                "A <a@x>",
+                2000 + i as i64,
+                "churn",
+            );
+        }
+        let head = parent;
+
+        // Sanity: the per-request walk with a TINY budget can't reach deep.rs's touch
+        // (the churn exhausts it) → empty, the bug this index fixes.
+        let starved = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        assert!(
+            blob_history(&src, &head, "deep.rs", starved, MAX_HISTORY_REVS).is_empty(),
+            "a starved per-request walk returns empty for a deep-history file (the bug)"
+        );
+
+        // The index build (generous deadline) records deep.rs's introduction anyway.
+        let index = build_blob_history_index(&src, &head, far_deadline(), MAX_INDEX_COMMITS);
+        let deep = index.get("deep.rs").expect("deep.rs is indexed");
+        assert_eq!(deep.len(), 1, "deep.rs touched exactly once (its intro)");
+        assert_eq!(deep[0].commit_hex, root_commit.to_hex().to_string());
+        assert_eq!(deep[0].summary, "add deep");
+        // churn.rs is touched by all 100 churn commits but the per-path list is capped
+        // at MAX_HISTORY_REVS (newest-first) — the drawer only shows the recent tail.
+        let churn = index.get("churn.rs").expect("churn.rs is indexed");
+        assert_eq!(
+            churn.len(),
+            MAX_HISTORY_REVS,
+            "churn.rs is count-capped at MAX_HISTORY_REVS (newest-first)"
+        );
+        assert_eq!(
+            churn[0].commit_hex,
+            head.to_hex().to_string(),
+            "newest-first"
+        );
+    }
+
+    /// INDEX: per-path lists are count-capped at MAX_HISTORY_REVS (newest-first).
+    #[test]
+    fn index_build_caps_per_path_at_max_revs() {
+        let mut src = CasObjectSource::new();
+        let mut parent: Option<ObjectId> = None;
+        let mut head = ObjectId::null(gix_hash::Kind::Sha1);
+        for i in 0..(MAX_HISTORY_REVS as u32 + 25) {
+            let blob = src.insert_raw(ObjectKind::Blob, format!("v{i}").into_bytes());
+            let tree = insert_tree(
+                &mut src,
+                vec![TreeEntry {
+                    mode: MODE_BLOB,
+                    name: "foo.rs",
+                    oid: blob,
+                }],
+            );
+            head = insert_commit(&mut src, tree, parent, "A <a@x>", 1000 + i as i64, "edit");
+            parent = Some(head);
+        }
+        let index = build_blob_history_index(&src, &head, far_deadline(), MAX_INDEX_COMMITS);
+        let foo = index.get("foo.rs").expect("foo.rs indexed");
+        assert_eq!(foo.len(), MAX_HISTORY_REVS, "per-path list is count-capped");
+        assert_eq!(foo[0].commit_hex, head.to_hex().to_string(), "newest kept");
+    }
+
+    /// INDEX BOUND: a deadline already in the PAST stops the build immediately — it
+    /// does NOT walk the whole (deep) history (proves the build is bounded, no hang).
+    #[test]
+    fn index_build_is_bounded_by_deadline() {
+        let mut src = CasObjectSource::new();
+        let mut parent: Option<ObjectId> = None;
+        let mut head = ObjectId::null(gix_hash::Kind::Sha1);
+        for i in 0..200u32 {
+            let blob = src.insert_raw(ObjectKind::Blob, format!("v{i}").into_bytes());
+            let tree = insert_tree(
+                &mut src,
+                vec![TreeEntry {
+                    mode: MODE_BLOB,
+                    name: "foo.rs",
+                    oid: blob,
+                }],
+            );
+            head = insert_commit(&mut src, tree, parent, "A <a@x>", 1000 + i as i64, "edit");
+            parent = Some(head);
+        }
+        let past = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        let index = build_blob_history_index(&src, &head, past, MAX_INDEX_COMMITS);
+        // The very first bound check trips → nothing indexed (partial-empty), no hang.
+        assert!(
+            index.get("foo.rs").map_or(0, Vec::len) < 200,
+            "a past deadline must stop the build early"
+        );
+    }
+
+    /// INDEX BOUND: `max_commits` caps the walk independently of wall-clock.
+    #[test]
+    fn index_build_is_bounded_by_max_commits() {
+        let mut src = CasObjectSource::new();
+        let mut parent: Option<ObjectId> = None;
+        let mut head = ObjectId::null(gix_hash::Kind::Sha1);
+        for i in 0..50u32 {
+            let blob = src.insert_raw(ObjectKind::Blob, format!("v{i}").into_bytes());
+            let tree = insert_tree(
+                &mut src,
+                vec![TreeEntry {
+                    mode: MODE_BLOB,
+                    name: "foo.rs",
+                    oid: blob,
+                }],
+            );
+            head = insert_commit(&mut src, tree, parent, "A <a@x>", 1000 + i as i64, "edit");
+            parent = Some(head);
+        }
+        // Only walk the newest 5 commits → foo.rs has at most 5 recorded touches.
+        let index = build_blob_history_index(&src, &head, far_deadline(), 5);
+        let foo = index.get("foo.rs").expect("foo.rs indexed");
+        assert_eq!(foo.len(), 5, "max_commits bounds the walk");
+        assert_eq!(foo[0].commit_hex, head.to_hex().to_string(), "newest-first");
     }
 
     /// An `ObjectSource` decorator that counts `get` calls — so a test can ASSERT the

@@ -32,6 +32,7 @@ use gix_hash::ObjectId;
 use hugit_http_contracts::blob::{BlobHistoryVm, BlobTreeRowVm, BlobVm};
 use hugit_refstore::EventLog;
 
+use crate::blob_history_index::BlobHistoryStore;
 use crate::budgeted_source::{BudgetedSource, WALK_BUDGET};
 use crate::fmt::{humanize_age, scrub};
 
@@ -78,6 +79,36 @@ pub fn build_blob(
         src,
         root_tree,
         head_commit,
+        None,
+        Instant::now() + WALK_BUDGET,
+    )
+}
+
+/// [`build_blob`] plus the engine's precomputed per-path blob-history index
+/// ([`BlobHistoryStore`], #70(a)) — the LIVE serve entrypoint. The "Histórico" drawer
+/// consults the index FIRST (fast + complete for deep history) and falls back to the
+/// live wall-clock-bounded walk on any miss (no index yet / a stale HEAD / an
+/// un-indexed path). Every other field is identical to [`build_blob`]. Split from
+/// [`build_blob`] so the many hermetic `build_blob` tests keep exercising the pure
+/// live-walk path (index `None`) unchanged.
+#[must_use]
+pub fn build_blob_with_history(
+    _log: &EventLog,
+    repo: &str,
+    path: &str,
+    src: Option<&Arc<dyn hugit_proto::ObjectSource + Send + Sync>>,
+    root_tree: Option<&ObjectId>,
+    head_commit: Option<&ObjectId>,
+    history: Option<&BlobHistoryStore>,
+) -> Option<BlobVm> {
+    build_blob_until(
+        _log,
+        repo,
+        path,
+        src,
+        root_tree,
+        head_commit,
+        history,
         Instant::now() + WALK_BUDGET,
     )
 }
@@ -86,7 +117,12 @@ pub fn build_blob(
 /// resolve — deterministically testable (a deadline already in the past stops
 /// before the first fetch → honest `None`). See [`build_blob`] for the DoS
 /// rationale; mirrors `handlers::edit::build_edit_until`.
+///
+/// (The arg count is deliberately flat — each is an independent, orthogonal input to a
+/// single render; bundling them would only obscure the read path, so the lint is
+/// allowed here rather than papered over with a struct.)
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 fn build_blob_until(
     _log: &EventLog,
     repo: &str,
@@ -94,6 +130,7 @@ fn build_blob_until(
     src: Option<&Arc<dyn hugit_proto::ObjectSource + Send + Sync>>,
     root_tree: Option<&ObjectId>,
     head_commit: Option<&ObjectId>,
+    history: Option<&BlobHistoryStore>,
     deadline: Instant,
 ) -> Option<BlobVm> {
     // The content seam: both the source and the root tree must be present.
@@ -156,8 +193,10 @@ fn build_blob_until(
         // (wall-clock + count) so a deep history never wedges the single-threaded
         // engine; empty when no HEAD commit is threaded (honest "seam not live").
         // Also walked over `budgeted` — the render's shared deadline caps it on top
-        // of its own `BLOB_HISTORY_BUDGET` (whichever trips first).
-        history: build_history(&budgeted, head_commit, path),
+        // of its own `BLOB_HISTORY_BUDGET` (whichever trips first). Consults the
+        // precomputed per-path index FIRST (#70(a) — deep-history serves complete),
+        // falling back to that live walk on any miss.
+        history: build_history(&budgeted, repo, head_commit, path, history),
     })
 }
 
@@ -223,26 +262,47 @@ fn build_tree_sidebar(
 /// `head_commit` is the repo's default-branch tip (threaded from `AppState`); `None`
 /// → empty history (the honest "no HEAD / seam not live" — the drawer stays disabled).
 ///
-/// DoS: the walk is bounded by BOTH a WALL-CLOCK [`BLOB_HISTORY_BUDGET`] deadline AND
-/// the [`MAX_HISTORY_REVS`] count — each commit is a synchronous CAS fetch on the
-/// single-threaded engine, so an unbounded deep-history walk would wedge the accept
-/// loop (the code-search-wedge class). Fail-closed: a bound trip / garbled object
+/// ## Index-first, live-walk fallback (#70(a))
+///
+/// The precomputed per-path index ([`BlobHistoryStore`]) is consulted FIRST: for a
+/// DEEP-history file it serves the complete newest-first list instantly, where the live
+/// walk below would exhaust its 2 s budget on the intervening non-touching commits and
+/// return EMPTY. On ANY index miss — no index built yet, a stale HEAD (a push moved the
+/// tip), or a path absent from the index — this FALLS BACK to the live walk, so the
+/// behaviour is never worse than today's (the index is a pure enhancement over the
+/// existing safety bound, not a replacement).
+///
+/// DoS: the fallback walk is bounded by BOTH a WALL-CLOCK [`BLOB_HISTORY_BUDGET`]
+/// deadline AND the [`MAX_HISTORY_REVS`] count — each commit is a synchronous CAS fetch
+/// on the single-threaded engine, so an unbounded deep-history walk would wedge the
+/// accept loop (the code-search-wedge class). Fail-closed: a bound trip / garbled object
 /// returns the partial newest-first list, never an error.
 ///
 /// REDACTION: `author` and `summary` are FREE TEXT from the commit (a commit message
 /// or author identity could embed a secret) → both are [`scrub`]bed at the read
-/// boundary, exactly like every other free-text field this handler serves. `rev_ref`
-/// is a hex oid (no scrub needed); `when` is a humanized timestamp.
+/// boundary, exactly like every other free-text field this handler serves — whether the
+/// entries came from the index or the live walk (the index stores UNSCRUBBED proto
+/// entries; scrub is always applied HERE, so the index is never a redaction bypass).
+/// `rev_ref` is a hex oid (no scrub needed); `when` is a humanized timestamp.
 fn build_history(
     src: &dyn hugit_proto::ObjectSource,
+    repo: &str,
     head_commit: Option<&ObjectId>,
     path: &str,
+    history: Option<&BlobHistoryStore>,
 ) -> Vec<BlobHistoryVm> {
     let Some(head) = head_commit else {
         return vec![];
     };
-    let deadline = std::time::Instant::now() + BLOB_HISTORY_BUDGET;
-    hugit_proto::blob_history(src, head, path, deadline, MAX_HISTORY_REVS)
+    // Index-first (deep-history complete); fall back to the live wall-clock-bounded walk
+    // on any miss (no index / stale HEAD / un-indexed path) — never a regress.
+    let entries = history
+        .and_then(|store| store.lookup(repo, head, path))
+        .unwrap_or_else(|| {
+            let deadline = std::time::Instant::now() + BLOB_HISTORY_BUDGET;
+            hugit_proto::blob_history(src, head, path, deadline, MAX_HISTORY_REVS)
+        });
+    entries
         .into_iter()
         .map(|e| BlobHistoryVm {
             rev_ref: e.commit_hex,
@@ -1166,6 +1226,251 @@ mod tests {
         );
     }
 
+    // ── blob.history precomputed-index path (#70(a)) ─────────────────────────
+
+    use hugit_proto::BlobHistoryEntry;
+    use std::collections::HashMap;
+
+    /// #70(a) CORE: a DEEP-history file whose revisions the LIVE walk cannot produce
+    /// (here the HEAD commit object is unreachable from the source → the walk yields
+    /// EMPTY, the exact bug shape) is served COMPLETE from the precomputed index.
+    #[test]
+    fn deep_history_served_from_index_where_live_walk_is_empty() {
+        let mut src = CasObjectSource::new();
+        let foo = src.insert_raw(ObjectKind::Blob, b"v1".to_vec());
+        let t = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_BLOB,
+                name: "foo.rs",
+                oid: foo,
+            }],
+        );
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
+        // A HEAD commit oid whose object is NOT in the source → the live history walk
+        // finds NOTHING (load_commit fails) → empty, standing in for a deep-history file
+        // whose touch the 2 s per-request walk can't reach.
+        let head = ObjectId::from_hex(b"1234123412341234123412341234123412341234").unwrap();
+
+        // Baseline (no index): the live walk cannot produce the history → EMPTY (the bug).
+        let vm_live = build_blob_with_history(
+            &log(),
+            "r",
+            "foo.rs",
+            Some(&src),
+            Some(&t),
+            Some(&head),
+            None,
+        )
+        .expect("foo.rs resolves");
+        assert!(
+            vm_live.history.is_empty(),
+            "the live walk cannot produce the deep history → empty (the #70(a) bug)"
+        );
+
+        // The off-loop index build recorded foo.rs's revisions → served directly.
+        let store = BlobHistoryStore::new();
+        let mut by_path = HashMap::new();
+        by_path.insert(
+            "foo.rs".to_string(),
+            vec![BlobHistoryEntry {
+                commit_hex: "a".repeat(40),
+                author_time_ms: 3_000,
+                author: "Deep <d@x>".into(),
+                summary: "introduce foo".into(),
+            }],
+        );
+        store.install("r", head, by_path);
+
+        let vm_idx = build_blob_with_history(
+            &log(),
+            "r",
+            "foo.rs",
+            Some(&src),
+            Some(&t),
+            Some(&head),
+            Some(&store),
+        )
+        .expect("foo.rs resolves");
+        assert_eq!(
+            vm_idx.history.len(),
+            1,
+            "the index serves the deep-history revision the live walk missed"
+        );
+        assert_eq!(vm_idx.history[0].summary, "introduce foo");
+        assert_eq!(vm_idx.history[0].rev_ref, "a".repeat(40));
+        assert_eq!(vm_idx.history[0].author, "Deep <d@x>");
+    }
+
+    /// FALLBACK: a path ABSENT from the index (the index was built for other paths, or
+    /// this path was added after it) falls back to the live wall-clock-bounded walk —
+    /// never a regress. Here the live walk over a real 2-commit chain still serves.
+    #[test]
+    fn history_falls_back_to_live_walk_on_index_miss() {
+        let mut src = CasObjectSource::new();
+        // C1 (root) adds foo.rs; C2 (head) edits it → the live walk finds 2 touches.
+        let foo_v1 = src.insert_raw(ObjectKind::Blob, b"v1".to_vec());
+        let t1 = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_BLOB,
+                name: "foo.rs",
+                oid: foo_v1,
+            }],
+        );
+        let c1 = insert_commit(&mut src, t1, None, "Alice <a@x>", 1000, "add foo");
+        let foo_v2 = src.insert_raw(ObjectKind::Blob, b"v2".to_vec());
+        let t2 = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_BLOB,
+                name: "foo.rs",
+                oid: foo_v2,
+            }],
+        );
+        let c2 = insert_commit(&mut src, t2, Some(c1), "Bob <b@x>", 2000, "edit foo");
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
+
+        // An index built for the SAME head but a DIFFERENT path → foo.rs is a MISS.
+        let store = BlobHistoryStore::new();
+        let mut by_path = HashMap::new();
+        by_path.insert(
+            "other.rs".to_string(),
+            vec![BlobHistoryEntry {
+                commit_hex: "b".repeat(40),
+                author_time_ms: 9_000,
+                author: "X <x@x>".into(),
+                summary: "unrelated".into(),
+            }],
+        );
+        store.install("r", c2, by_path);
+
+        let vm = build_blob_with_history(
+            &log(),
+            "r",
+            "foo.rs",
+            Some(&src),
+            Some(&t2),
+            Some(&c2),
+            Some(&store),
+        )
+        .expect("foo.rs resolves");
+        // foo.rs absent from the index → fell back to the live walk → the real revisions.
+        assert_eq!(
+            vm.history.len(),
+            2,
+            "an un-indexed path falls back to the live walk: {:?}",
+            vm.history
+        );
+        assert_eq!(vm.history[0].rev_ref, c2.to_hex().to_string());
+        assert_eq!(vm.history[1].rev_ref, c1.to_hex().to_string());
+    }
+
+    /// FALLBACK: a STALE index (built for a different HEAD — a push moved the tip) is
+    /// refused; the read falls back to the live walk of the CURRENT tip.
+    #[test]
+    fn stale_head_index_falls_back_to_live_walk() {
+        let mut src = CasObjectSource::new();
+        let foo = src.insert_raw(ObjectKind::Blob, b"v1".to_vec());
+        let t1 = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_BLOB,
+                name: "foo.rs",
+                oid: foo,
+            }],
+        );
+        let c1 = insert_commit(&mut src, t1, None, "Alice <a@x>", 1000, "add foo");
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
+
+        // The index was built for an OLD head; the current HEAD is c1.
+        let old_head = ObjectId::from_hex(b"9999999999999999999999999999999999999999").unwrap();
+        let store = BlobHistoryStore::new();
+        let mut by_path = HashMap::new();
+        by_path.insert(
+            "foo.rs".to_string(),
+            vec![BlobHistoryEntry {
+                commit_hex: "c".repeat(40),
+                author_time_ms: 1,
+                author: "Stale <s@x>".into(),
+                summary: "stale".into(),
+            }],
+        );
+        store.install("r", old_head, by_path);
+
+        let vm = build_blob_with_history(
+            &log(),
+            "r",
+            "foo.rs",
+            Some(&src),
+            Some(&t1),
+            Some(&c1),
+            Some(&store),
+        )
+        .expect("foo.rs resolves");
+        // The stale index is refused (HEAD mismatch) → live walk of c1 → the real intro.
+        assert_eq!(vm.history.len(), 1, "stale index refused → live walk");
+        assert_eq!(vm.history[0].rev_ref, c1.to_hex().to_string());
+        assert_ne!(
+            vm.history[0].summary, "stale",
+            "the stale entry was NOT served"
+        );
+    }
+
+    /// REDACTION (no index bypass): an index entry whose author/summary carries a
+    /// secret-shaped token is [`scrub`]bed at the read boundary exactly like the live
+    /// walk — the index stores UNSCRUBBED proto entries; scrub is always applied HERE.
+    #[test]
+    fn index_served_history_is_scrubbed_at_the_read_boundary() {
+        let secret = "ghp_16C7e42F292c6912E7710c838347Ae178B4a";
+        let mut src = CasObjectSource::new();
+        let foo = src.insert_raw(ObjectKind::Blob, b"v1".to_vec());
+        let t = insert_tree(
+            &mut src,
+            vec![TreeEntry {
+                mode: MODE_BLOB,
+                name: "foo.rs",
+                oid: foo,
+            }],
+        );
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
+        let head = ObjectId::from_hex(b"2222222222222222222222222222222222222222").unwrap();
+
+        let store = BlobHistoryStore::new();
+        let mut by_path = HashMap::new();
+        by_path.insert(
+            "foo.rs".to_string(),
+            vec![BlobHistoryEntry {
+                commit_hex: "d".repeat(40),
+                author_time_ms: 1,
+                author: format!("leak {secret} <l@x>"),
+                summary: format!("token {secret} added"),
+            }],
+        );
+        store.install("r", head, by_path);
+
+        let vm = build_blob_with_history(
+            &log(),
+            "r",
+            "foo.rs",
+            Some(&src),
+            Some(&t),
+            Some(&head),
+            Some(&store),
+        )
+        .expect("foo.rs resolves");
+        let row = &vm.history[0];
+        assert!(
+            !row.author.contains(secret) && !row.summary.contains(secret),
+            "a secret in an INDEX entry must be scrubbed at the read boundary"
+        );
+        assert!(
+            row.author.contains(hugit_ledger::redact::REDACTED)
+                && row.summary.contains(hugit_ledger::redact::REDACTED),
+            "the REDACTED sentinel must be present in both index-served fields"
+        );
+    }
+
     // ── DoS bound: the path→blob CAS resolve is wall-clock bounded ────────────
     /// A deadline already in the PAST stops the CAS path→blob resolve before the
     /// first fetch → an honest `None` (404) EVEN THOUGH the file is present. Proves
@@ -1192,16 +1497,34 @@ mod tests {
         // Sanity: with a live budget the present file resolves.
         let live = Instant::now() + Duration::from_secs(60);
         assert!(
-            build_blob_until(&log(), "r", "here.txt", Some(&src), Some(&root), None, live)
-                .is_some(),
+            build_blob_until(
+                &log(),
+                "r",
+                "here.txt",
+                Some(&src),
+                Some(&root),
+                None,
+                None,
+                live
+            )
+            .is_some(),
             "a present file resolves under a live budget"
         );
 
         // Past deadline: the resolve is refused at the first `get` → honest 404.
         let past = Instant::now() - Duration::from_secs(1);
         assert!(
-            build_blob_until(&log(), "r", "here.txt", Some(&src), Some(&root), None, past)
-                .is_none(),
+            build_blob_until(
+                &log(),
+                "r",
+                "here.txt",
+                Some(&src),
+                Some(&root),
+                None,
+                None,
+                past
+            )
+            .is_none(),
             "a present file is honest-404'd once the walk budget is spent"
         );
     }

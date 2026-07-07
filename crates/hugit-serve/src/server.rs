@@ -61,6 +61,13 @@ pub fn serve_on(state: AppState, server: Server) -> std::io::Result<()> {
     // the first build lands. Never blocks the loop (one `load_current` GET per repo).
     crate::git::bootstrap_clone_packs(&state);
 
+    // #70(a): warm each repo's per-path blob-history index in the background so a
+    // DEEP-history file's "Histórico" drawer serves from the index instead of an
+    // exhausting live walk (which trips the 2 s budget → empty). Detached builds;
+    // blob reads fall back to the live wall-clock-bounded walk until a build lands.
+    // Never blocks the loop (this only SPAWNS the bounded builds).
+    crate::blob_history_index::bootstrap_blob_history_indexes(&state);
+
     let mut incoming = server.incoming_requests();
     loop {
         // Time the BLOCK waiting for the next request: a long wait means the queue
@@ -613,6 +620,7 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
                     root_tree,
                     head_commit: head,
                     refs: r.git_refs.snapshot(),
+                    history_index: state.blob_history_index.clone(),
                 }
             });
             dispatch_repo(
@@ -1833,6 +1841,10 @@ struct RepoGit<'a> {
     /// The LIVE ref snapshot (ref-name → oid hex) — the compare base/head resolver.
     /// Owned (a `snapshot()`), so a just-pushed tip is reflected without a reboot.
     refs: std::collections::BTreeMap<String, String>,
+    /// The engine-wide precomputed per-path blob-history index (#70(a)). A cheap `Arc`
+    /// clone; the blob read consults it index-first with a live-walk fallback so a
+    /// DEEP-history file's "Histórico" serves complete instead of empty.
+    history_index: crate::blob_history_index::BlobHistoryStore,
 }
 
 /// Dispatch an authenticated `/v1/repos/{repo}/<tail...>` read. `query` is the
@@ -1855,6 +1867,9 @@ fn dispatch_repo(
     // The live ref snapshot for the compare base/head resolver (empty for a repo
     // with no content seam → an honest-empty compare diff).
     let git_refs = git.map(|g| g.refs.clone()).unwrap_or_default();
+    // The precomputed per-path blob-history index (#70(a)) — consulted index-first by
+    // the blob read, with a live-walk fallback (`None` for a repo with no git seam).
+    let history_index = git.map(|g| &g.history_index);
     match tail {
         ["home"] => ok(&handlers::build_home(log, repo, git_source, root_tree)),
         ["new-pr"] => ok(&handlers::build_new_pr(log, repo)),
@@ -1978,13 +1993,14 @@ fn dispatch_repo(
         // `dispatch_repo_write` — this is the GET read of the file to edit.
         ["blob", rest @ ..] if !rest.is_empty() => {
             let path = rest.join("/");
-            match handlers::build_blob(
+            match handlers::build_blob_with_history(
                 log,
                 repo,
                 &path,
                 git_source,
                 root_tree,
                 head_commit.as_ref(),
+                history_index,
             ) {
                 Some(vm) => ok(&vm),
                 None => err(EngineErr::not_found()),
