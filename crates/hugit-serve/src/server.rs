@@ -1727,7 +1727,7 @@ fn dispatch_repo_write(
         }
         ["repo", "meta"] => {
             let req = parse!(wr::RepoMetaReq);
-            with_write(
+            let outcome = with_write(
                 sink,
                 repo,
                 "repo_meta",
@@ -1738,7 +1738,18 @@ fn dispatch_repo_write(
                 p,
                 at,
                 |log, p, at| verbs::write_repo_meta::write_repo_meta(log, repo, &req, p, at),
-            )
+            );
+            // Task #74 (W-METENANT scaling follow-up): a successful `repo.meta` write
+            // (visibility/owner-tenant) just changed what `me_repo_logs`/
+            // `count_owned_repos` project for this repo — refresh the cache
+            // immediately so the NEXT request never reads a stale cached meta (a
+            // stale "private" cached as "public", or vice versa, is an authz-relevant
+            // divergence, not just a performance one). Harmless on an idempotent
+            // replay (re-caches the same current value).
+            if outcome.is_ok() {
+                state.refresh_repo_meta_cache(repo);
+            }
+            outcome
         }
         _ => Err(EngineErr::not_found()),
     };
