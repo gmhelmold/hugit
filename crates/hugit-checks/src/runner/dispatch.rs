@@ -408,45 +408,40 @@ fn attest_and_collect<T: RunnerTransport>(
         .submit_envelope(&ingest.ingest_path, &ingest.credential, &events)
         .map_err(RunnerExecError::Lease)?;
 
-    // Read the fabric's signed envelope back (PAT-gated poll) for the CheckResult
-    // FIELDS (exit/artifacts/refs/duration/runner_ref/produced_at). The metrics
-    // parsed here are a fallback only: `dispatch_attest_offbox` SUPERSEDES them
-    // with the finalized §13.1 metrics from the CLOSE response (the signed source
-    // of truth) — see that function for why close wins over this poll readback.
-    let meta = client
-        .poll_meta(&acquired.lease.lease_id)
-        .map_err(RunnerExecError::Lease)?;
-    let envelope: RunnerResultEnvelope = serde_json::from_value(meta.0)
-        .map_err(|e| RunnerExecError::Run(format!("result-envelope meta decode failed: {e}")))?;
-
-    let RunnerResultEnvelope {
-        exit,
-        artifacts,
-        stdout_ref,
-        stderr_ref,
-        duration_ms,
-        runner_ref,
-        produced_at,
-        metrics,
-    } = envelope;
-
+    // OFF-BOX: there is NO box-exec result envelope to poll. The off-box agent
+    // loop ran hugit-side; the fabric hosts + signs the §13 attestation but never
+    // runs a box, so `GET .../envelope/meta` returns the §13.2 event echo
+    // (`{"meta":[]}`) — NOT a `RunnerResultEnvelope` — and the close response's
+    // `check_result` is `null`. (Verified LIVE 2026-07-07 against the CF fabricd:
+    // the prior code decoded meta as a box `RunnerResultEnvelope` and failed
+    // `missing field exit`; it only ever passed against the fake transport — the
+    // never-run-live blind spot that also hid #204/#205/#214.) So DON'T poll a box
+    // result: synthesize the off-box `CheckResult` from the stamped axes. The
+    // CALLER (`hugit pr land --dispatch`) uses ONLY `DispatchOutcome.metrics`,
+    // which `dispatch_attest_offbox` supersedes with the fabric's FINALIZED close
+    // metrics (the signed source of truth); the `result`/fallback `metrics` here
+    // are never surfaced, so they only need to be honest + valid.
+    //
+    // v0 attests a COMPLETED off-box run: `exit: 0` ⇒ the outer close claims
+    // `succeeded`. A failed off-box run needs an explicit success/exit input to
+    // this path — a tracked follow-up, out of scope for the happy A-path today.
     let result = CheckResult {
         memo_key: memo_key.to_string(),
         tree_hash: tree_root.to_string(),
         def_digest: def_digest.to_string(),
         toolchain_digest: toolchain_digest.to_string(),
-        exit,
-        artifacts,
-        stdout_ref,
-        stderr_ref,
-        duration_ms,
-        runner_ref,
-        produced_at,
+        exit: 0,
+        artifacts: Vec::new(),
+        stdout_ref: String::new(),
+        stderr_ref: String::new(),
+        duration_ms: measured.wall_ms,
+        runner_ref: format!("offbox:{}", acquired.lease.lease_id),
+        produced_at: 0,
     };
 
     Ok(DispatchOutcome {
         result,
-        metrics: metrics.into_intent_metrics(),
+        metrics: measured.clone(),
     })
 }
 
@@ -876,9 +871,10 @@ mod tests {
                     Some(("/v1/leases/lease-attest-1/envelope/ingest", SCOPED)),
                 ),
             ), // acquire
-            (200, Vec::new()),      // submit_envelope
-            (200, envelope_body()), // poll_meta (CheckResult fields)
+            (200, Vec::new()), // submit_envelope
             // close — carries the FINALIZED §13.1 metrics (the attested figure).
+            // The off-box A-path does NOT poll a box result envelope (no box ran;
+            // the live fabric returns `{"meta":[]}` + `check_result:null`).
             (200, close_body("lease-attest-1", 4281900, 50)),
         ]);
         let client = client(transport);
@@ -900,11 +896,16 @@ mod tests {
         // The returned metrics are the fabric's finalized CLOSE metrics.
         assert_eq!(out.metrics.cost_usd_micros, 4281900);
         assert_eq!(out.metrics.tokens.cache_read, 50);
+        // The synthesized off-box result carries the stamped axes + an off-box
+        // marker (the caller ignores `result`; it must still be honest + valid).
+        assert_eq!(out.result.exit, 0);
+        assert_eq!(out.result.runner_ref, "offbox:lease-attest-1");
+        assert!(out.result.artifacts.is_empty());
 
         let calls = client.transport().calls();
-        assert_eq!(calls.len(), 4, "acquire → submit → poll → close");
+        assert_eq!(calls.len(), 3, "acquire → submit → close (NO box poll)");
         // The close body carried the submitted provider-billed cost verbatim (#64).
-        let close_body: serde_json::Value = serde_json::from_slice(&calls[3].body).unwrap();
+        let close_body: serde_json::Value = serde_json::from_slice(&calls[2].body).unwrap();
         assert_eq!(close_body["status"], "succeeded");
         assert_eq!(close_body["cost_usd_micros"], 9_900_000);
         // acquire — PAT.
@@ -921,18 +922,17 @@ mod tests {
             !calls[1].bearer.contains(SENTINEL_PAT),
             "the tenant PAT must NEVER reach the ingest endpoint"
         );
-        // poll — PAT.
-        assert_eq!(
-            calls[2].url,
-            "https://runner.example/v1/leases/lease-attest-1/envelope/meta"
+        // No box-result poll on the off-box A-path — `envelope/meta` is never hit.
+        assert!(
+            !calls.iter().any(|c| c.url.ends_with("/envelope/meta")),
+            "off-box A-path must not poll a box result envelope"
         );
-        assert_eq!(calls[2].bearer, format!("Bearer {SENTINEL_PAT}"));
         // close — PAT.
         assert_eq!(
-            calls[3].url,
+            calls[2].url,
             "https://runner.example/v1/leases/lease-attest-1/close"
         );
-        assert_eq!(calls[3].bearer, format!("Bearer {SENTINEL_PAT}"));
+        assert_eq!(calls[2].bearer, format!("Bearer {SENTINEL_PAT}"));
     }
 
     /// (A-2) FAIL-CLOSED: a check lease whose acquire response carries NO
@@ -1018,10 +1018,10 @@ mod tests {
         assert!(model_turns[1].usage.is_none());
     }
 
-    /// (A-4) The A-mode ATTESTED figure comes from the CLOSE response, NOT the
-    /// modeled `poll_meta`: the poll envelope carries one cost (`4281900`) and the
-    /// close carries a DISTINCT finalized figure (`7000001`, cache_read `4242`) —
-    /// the returned metrics are the CLOSE figure, full cache-split preserved.
+    /// (A-4) The A-mode ATTESTED figure comes from the CLOSE response — the
+    /// fabric's finalized, signed §13.1 metrics (`7000001`, cache_read `4242`) —
+    /// with the FULL cache-split preserved (never flattened). The off-box path
+    /// polls no box result envelope; close is the sole source of truth.
     #[test]
     fn attest_offbox_attested_figure_comes_from_close_metrics() {
         const SCOPED: &str = "scoped-ingest-cred-A4";
@@ -1033,9 +1033,9 @@ mod tests {
                     Some(("/v1/leases/lease-attest-4/envelope/ingest", SCOPED)),
                 ),
             ),
-            (200, Vec::new()),      // submit_envelope
-            (200, envelope_body()), // poll_meta — cost 4281900 (the MODELED figure)
-            // close — the FINALIZED, signed figure, distinct from the poll.
+            (200, Vec::new()), // submit_envelope
+            // close — the FINALIZED, signed figure (the off-box path polls no box
+            // result; close is the sole source of truth).
             (200, close_body("lease-attest-4", 7_000_001, 4242)),
         ]);
         let client = client(transport);
@@ -1052,14 +1052,10 @@ mod tests {
         )
         .expect("A-path lifecycle succeeds");
 
-        // The attested figure is the CLOSE figure — NOT the modeled poll_meta one.
+        // The attested figure is the fabric's finalized CLOSE figure.
         assert_eq!(
             out.metrics.cost_usd_micros, 7_000_001,
             "the attested cost is the fabric's finalized close figure"
-        );
-        assert_ne!(
-            out.metrics.cost_usd_micros, 4_281_900,
-            "the modeled poll_meta figure must NOT be the attested one"
         );
         // The full cache-split is preserved from the close metrics (never flattened).
         assert_eq!(out.metrics.tokens.cache_read, 4242);
@@ -1068,8 +1064,9 @@ mod tests {
     }
 
     /// (A-5) HONEST ZERO: when the fabric's close reports zero metrics (nothing
-    /// observed), the attested figure is zero — even though the poll envelope
-    /// carries a nonzero cost. The figure is the fabric's, never a hugit stand-in.
+    /// observed), the attested figure is zero — never a hugit stand-in. Even
+    /// though the off-box run had `measured` non-zero inputs, the attested figure
+    /// is strictly the fabric's finalized close number.
     #[test]
     fn attest_offbox_honest_zero_when_fabric_reports_zero() {
         const SCOPED: &str = "scoped-ingest-cred-A5";
@@ -1081,9 +1078,8 @@ mod tests {
                     Some(("/v1/leases/lease-attest-5/envelope/ingest", SCOPED)),
                 ),
             ),
-            (200, Vec::new()),      // submit_envelope
-            (200, envelope_body()), // poll_meta — NONZERO cost 4281900
-            // close — the fabric honestly reports ZERO.
+            (200, Vec::new()), // submit_envelope
+            // close — the fabric honestly reports ZERO (no box result poll).
             (200, close_body_zero("lease-attest-5")),
         ]);
         let client = client(transport);
@@ -1101,7 +1097,7 @@ mod tests {
         .expect("A-path lifecycle succeeds");
 
         // Honest zero — the fabric reported zero, so the attested figure is zero
-        // (never the nonzero poll figure, never a fabricated number).
+        // (never the `measured` input, never a fabricated number).
         assert_eq!(out.metrics.cost_usd_micros, 0);
         assert_eq!(out.metrics.tokens.total, 0);
         assert_eq!(out.metrics.tokens.cache_read, 0);
