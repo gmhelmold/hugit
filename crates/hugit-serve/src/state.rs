@@ -810,7 +810,9 @@ impl AppState {
             }
         };
         let exchange = SessionExchangeConfig::from_env()?.map(|cfg| Arc::new(cfg.into_client()));
-        let token_store = Arc::new(TokenStore::new());
+        // WP-B5: keyed for cross-instance fungibility when HUGIT_ENGINE_TOKEN_KEY is
+        // shared across instances (else a per-boot random key = single-host, as before).
+        let token_store = Arc::new(TokenStore::from_env());
 
         // The per-repo git content seam (`blob`/`edit` reads + the clone/fetch
         // wire), one entry per loaded repo. MULTI-REPO: both source vars accept a
