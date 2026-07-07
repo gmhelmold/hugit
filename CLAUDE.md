@@ -161,6 +161,34 @@ was previously set via UNCOMMITTED deploy-time edits — now committed in `../gi
 + `engine-worker/index.js` so the live push config is reproducible and a redeploy never silently regresses
 push to 403.
 
+**Update 2026-07-07 (engine caught up to `main` + B5 token fungibility DEPLOYED — the HA `≥2`
+blocker's code+key are live; activation is githugr+clw):** the prod engine, which had drifted far
+behind (`2026-07-06-b5-recover-hdrm`), was **redeployed to current `main`** (`609b8b6` →
+`/readyz version 2026-07-07-b5-token-74e5c8f`, image `afa2a5ba`), carrying ~7 merged-but-unshipped PRs:
+**#278** the **stateless HMAC-signed engine token** (the REAL `#128` `≥2` blocker — the session token
+was an in-process `Mutex<HashMap>`, single-host → ~50% `401` at 2 instances; now `hg1_<payload>.<hmac>`,
+verified constant-time + STATELESSLY, so any instance with the shared `HUGIT_ENGINE_TOKEN_KEY` accepts
+any instance's token — **owner-adjudicated (b) stateless over clw's June `459e761` D1-store, because a
+D1 read per authed request DoSes the single-threaded accept loop**); **#91** (operator `/v1/me/*` no
+longer leaks a GDPR-erased repo's slug); **#70** blob-history index; **#74** repo.meta boot cache; **#90**
+PAT/`GET /v1/me/account`; the **GDPR1 erase route** + min-grace floor; **#265** cost-killer path-B
+(agent-exec seam DTOs, byte-identical). The `HUGIT_ENGINE_TOKEN_KEY` secret is SET (one wrangler secret =
+identical every instance); the deployed config is committed reproducible on githugr `main` (`e0d35d5` —
+drift closed, not recreated). **Cutover VERIFIED, not asserted:** polled `/readyz` — old served until the
+new container warmed (**zero downtime**), new booted `probing`→`ready:true` (no crash-loop), `www.githugr.com/`
+200 with real content (no wire-drift), the new-only routes (`/v1/me/account`, `/v1/me/tokens`, GDPR erase,
+`/v1/repos/{r}/prs`) answer `401` (present+gated), NOT `404` (absent). **Honest gaps (NOT mine):** the
+`≥2` **activation** is githugr's flip (`ENGINE_INSTANCE_COUNT=1`→`2`, `max_instances` already `2`) + the
+two-key authed smoke → clw witnesses → signs off (the D1 counterpart is DROPPED); an **authed render**
+verify (the killer-data / `/v1/me/*`) is the githugr TL's session-token smoke (from anon BOTH repos `404`
+— the correct private-visibility posture, `RepoMeta` default PRIVATE, NOT a regression; whether `githugr`
+should be anon-cloneable is an owner/forge `repo.meta{visibility}` decision). The `✓ cas:` attestation
+marker's **keyset selector** (`attest_keyset::{select_attestation_key,verify_with_keyset}`, #57) is BUILT +
+conformance-pinned (`attestation_keyset_selection.json`, 5 cases + anti-downgrade), but not yet WIRED into
+the live `CloseResponse` (the tracked additive change; owner holds the first `/insights` land until cost is
+non-zero). Deploy runbook is now proven end-to-end (CF `wrangler login` → isolated worktree staging →
+`npm install` + docker → secret-forward → poll `/readyz` cutover → commit-the-bump).
+
 **What IS genuinely live (don't under-claim it either):** the `/v1` read+write API
 against `hugit` (+ now `githugr`) — 11/20 reads serve real chain-verified R2 data;
 the 9 POST verbs are code-complete + R2-CAS-persisted (proven against prod R2),
