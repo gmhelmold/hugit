@@ -291,6 +291,12 @@ pub fn provision(
         Err(e) => return Err(e),
     }
 
+    // 5b. Cache the freshly durable genesis meta immediately (task #74, W-METENANT
+    //     scaling follow-up): project it from the in-memory genesis `log` we just
+    //     persisted (no redundant reload) so `count_owned_repos`/`me_repo_logs` see
+    //     this NEW repo's ownership at the very next request, no cold log-walk.
+    state.cache_repo_meta(&slug, crate::authz::project_repo_meta(&log));
+
     // 6. DURABLY created. Now make it push/clone-live with no reboot: insert the
     //    empty CAS-mode git seam into the runtime overlay. In Local/dev mode (no CAS
     //    template) there is no seam to build — the repo is created + readable, and

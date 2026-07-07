@@ -604,6 +604,41 @@ pub struct AppState {
     /// only the `Send + Sync` config, never the client). The key never Debug-prints
     /// (redacting `Debug` on `EraseConfig`).
     pub erase_config: Option<crate::writes::erasure::EraseConfig>,
+    /// The engine-wide precomputed per-path blob-history index (#70(a)): `slug →
+    /// (head, path → touching revisions)`, built OFF the accept loop (at boot +
+    /// post-push) so a DEEP-history file's "Histórico" drawer serves from the index
+    /// instead of an exhausting live walk that trips the 2 s budget → empty. A lookup
+    /// MISS (no index yet, a stale HEAD, or an un-indexed path) falls back to the live
+    /// wall-clock-bounded [`hugit_proto::blob_history`] walk — a pure enhancement over
+    /// that safety bound, never a replacement. Interior-mutable behind the shared
+    /// `&AppState` (same pattern as [`LiveRefs`]/`repos_runtime`); cheap to clone.
+    pub blob_history_index: crate::blob_history_index::BlobHistoryStore,
+    /// Cached, per-repo projected [`RepoMeta`](crate::authz::RepoMeta) — task #74
+    /// (W-METENANT scaling follow-up). [`me_repo_logs`](Self::me_repo_logs) and
+    /// [`count_owned_repos`](Self::count_owned_repos) used to call
+    /// [`project_repo_meta`](crate::authz::project_repo_meta) PER repo PER request,
+    /// re-walking each repo's ENTIRE event log just to derive 3 fields; on a
+    /// per-tenant listing this is O(repos × log-size) on the single-threaded engine.
+    /// This cache makes the common case O(1): populated ONCE at boot for every
+    /// loaded repo ([`boot_populate_repo_meta_cache`](Self::boot_populate_repo_meta_cache),
+    /// called from [`from_env`](Self::from_env)), and kept fresh by every write path
+    /// that can change a repo's projected meta — provisioning a NEW repo
+    /// ([`crate::writes::verbs::write_provision::provision`], via
+    /// [`cache_repo_meta`](Self::cache_repo_meta)), a `repo.meta`
+    /// visibility/owner-tenant update ([`crate::writes::verbs::write_repo_meta`],
+    /// invalidated in [`dispatch_repo_write`](crate::server::dispatch_repo_write) via
+    /// [`refresh_repo_meta_cache`](Self::refresh_repo_meta_cache)), and the GDPR1
+    /// `repo.erased` tombstone
+    /// ([`crate::writes::erasure::tombstone_repo`], same refresh hook).
+    ///
+    /// **Fail-safe by construction:** [`repo_meta_cached`](Self::repo_meta_cached) is
+    /// the ONLY reader, and a cache MISS falls back to a LIVE
+    /// [`project_repo_meta`] over the caller's already-loaded log — the exact
+    /// pre-cache computation. A gap in cache coverage can only ever cost time, never
+    /// correctness. Interior-mutable behind the shared `&AppState` (same pattern as
+    /// `repos_runtime`/`pat_index`); the single-threaded accept loop keeps the lock
+    /// uncontended.
+    pub repo_meta_cache: Arc<RwLock<std::collections::HashMap<String, crate::authz::RepoMeta>>>,
 }
 
 /// The hard cap on repos a single tenant may hold in ONE engine lifetime (the boot
@@ -879,6 +914,8 @@ impl AppState {
             pat_index: Arc::new(RwLock::new(std::collections::HashMap::new())),
             pat_last_used: Arc::new(RwLock::new(std::collections::HashMap::new())),
             erase_config,
+            blob_history_index: crate::blob_history_index::BlobHistoryStore::new(),
+            repo_meta_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
         };
         // Populate the PAT index from the durable `_accounts/*` logs (only when
         // enabled). Boot-scan faults are fail-closed-DENY (the affected PATs simply
@@ -887,6 +924,12 @@ impl AppState {
         if pat_auth_enabled {
             state.boot_build_pat_index();
         }
+        // Task #74 (W-METENANT scaling follow-up): populate the repo-meta cache once
+        // at boot for every loaded repo, so the very first `/v1/me/*` request already
+        // hits the cache instead of a cold per-repo log walk. Best-effort — an
+        // unloadable candidate is simply left uncached (the fail-safe
+        // `repo_meta_cached` fallback covers it, identical to pre-cache behavior).
+        state.boot_populate_repo_meta_cache();
         // WP-B5: start the background ref-cache refresher (read-after-write fungibility).
         // NO-OP outside CAS mode; strictly off the accept loop. Spawn LAST (after the state
         // is fully built) so the thread sees the loaded repos.
@@ -1181,6 +1224,12 @@ impl AppState {
             // No physical erase seam in the dev/test constructor (the operator-execute
             // route is disabled). A test wiring the executor sets it explicitly.
             erase_config: None,
+            blob_history_index: crate::blob_history_index::BlobHistoryStore::new(),
+            // Empty: `new()`'s boot `repos` set is always empty too (tests wire repos
+            // via `set_repo_git`/`insert_runtime_repo`, not a real boot load), so there
+            // is nothing to pre-populate. A test exercising the cache calls
+            // `cache_repo_meta`/`refresh_repo_meta_cache` explicitly.
+            repo_meta_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
     }
 
@@ -1205,6 +1254,96 @@ impl AppState {
             .unwrap_or_else(|e| e.into_inner())
             .get(repo)
             .copied()
+    }
+
+    /// Boot-time [`repo_meta_cache`](Self::repo_meta_cache) population (task #74):
+    /// project every LOADED boot repo's [`RepoMeta`](crate::authz::RepoMeta) ONCE, so
+    /// the very first `/v1/me/*` request after boot already hits the cache. Computes
+    /// every candidate BEFORE taking the write lock (never holds it across the
+    /// per-repo load/verify I/O — same discipline as
+    /// [`spawn_refs_refresh_loop`](Self::spawn_refs_refresh_loop)). Best-effort: an
+    /// unloadable/untrusted candidate log is simply SKIPPED (never cached) — the
+    /// fail-safe [`repo_meta_cached`](Self::repo_meta_cached) fallback covers it on
+    /// the next read, identical to the pre-cache behavior.
+    fn boot_populate_repo_meta_cache(&self) {
+        let names: Vec<String> = self.repos.keys().cloned().collect();
+        let computed: Vec<(String, crate::authz::RepoMeta)> = names
+            .into_iter()
+            .filter_map(|name| {
+                self.load_verified(&name)
+                    .ok()
+                    .map(|log| (name, crate::authz::project_repo_meta(&log)))
+            })
+            .collect();
+        let mut cache = self
+            .repo_meta_cache
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        for (name, meta) in computed {
+            cache.insert(name, meta);
+        }
+    }
+
+    /// Read `repo`'s projected [`RepoMeta`](crate::authz::RepoMeta) from the
+    /// [`repo_meta_cache`](Self::repo_meta_cache); on a cache MISS, project it LIVE
+    /// from the caller-supplied (already loaded/verified) `log` — the EXACT
+    /// computation every caller ran before this cache existed. A miss can only ever
+    /// cost the same as today, never a wrong answer: this is the fail-safe that makes
+    /// every write-path invalidation a performance concern only, never a correctness
+    /// one.
+    #[must_use]
+    pub fn repo_meta_cached(&self, repo: &str, log: &EventLog) -> crate::authz::RepoMeta {
+        if let Some(meta) = self
+            .repo_meta_cache
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(repo)
+        {
+            return meta.clone();
+        }
+        crate::authz::project_repo_meta(log)
+    }
+
+    /// Cache an ALREADY-COMPUTED [`RepoMeta`](crate::authz::RepoMeta) for `repo` —
+    /// the provisioning hook: `write_provision::provision` builds + durably persists
+    /// a repo's genesis log itself, so it can project the meta from that in-memory
+    /// log directly (no redundant reload) and hand it here immediately after the
+    /// durable commit succeeds.
+    pub fn cache_repo_meta(&self, repo: &str, meta: crate::authz::RepoMeta) {
+        self.repo_meta_cache
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(repo.to_string(), meta);
+    }
+
+    /// The write-path invalidation hook (task #74's hard constraint): recompute +
+    /// store `repo`'s [`RepoMeta`](crate::authz::RepoMeta) from its CURRENT durable
+    /// log. Call this immediately after ANY durable write that can change a repo's
+    /// projected meta — a `repo.meta` visibility/owner-tenant update, or a GDPR1
+    /// `repo.erased` tombstone — so the cache can never diverge from the log for
+    /// longer than one write.
+    ///
+    /// **Fail-safe on the reload itself:** if the post-write load/verify fails (never
+    /// expected right after a durable persist, but never assumed), the entry is
+    /// REMOVED rather than left holding a pre-write value — a subsequent read falls
+    /// back to a live projection ([`repo_meta_cached`](Self::repo_meta_cached))
+    /// instead of ever serving a stale cached answer.
+    pub fn refresh_repo_meta_cache(&self, repo: &str) {
+        match self.load_verified(repo) {
+            Ok(log) => {
+                let meta = crate::authz::project_repo_meta(&log);
+                self.repo_meta_cache
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(repo.to_string(), meta);
+            }
+            Err(_) => {
+                self.repo_meta_cache
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(repo);
+            }
+        }
     }
 
     /// The identity-scoped (`/v1/me/*`) repo set for `principal`, resolved to the
@@ -1268,7 +1407,8 @@ impl AppState {
             let Ok(log) = self.load_verified(&name) else {
                 continue;
             };
-            let meta = crate::authz::project_repo_meta(&log);
+            // Task #74: the cache, with a live fallback — never a different answer.
+            let meta = self.repo_meta_cached(&name, &log);
             // THE SAME predicate the per-repo read gate runs — no second gate.
             if crate::authz::authorize_read(principal, &meta) {
                 out.push((name, log));
@@ -1324,7 +1464,8 @@ impl AppState {
         for name in names {
             // Fail-closed: an unloadable/untrusted candidate ⇒ indeterminate count.
             let log = self.load_verified(&name).ok()?;
-            let meta = crate::authz::project_repo_meta(&log);
+            // Task #74: the cache, with a live fallback — never a different answer.
+            let meta = self.repo_meta_cached(&name, &log);
             if meta.owner_tenant.as_deref() == Some(owner_tenant) {
                 count += 1;
             }
@@ -1363,7 +1504,8 @@ impl AppState {
         for name in names {
             // Fail-closed: an unloadable/untrusted candidate ⇒ indeterminate set.
             let log = self.load_verified(&name).ok()?;
-            let meta = crate::authz::project_repo_meta(&log);
+            // Task #74: the cache, with a live fallback — never a different answer.
+            let meta = self.repo_meta_cached(&name, &log);
             if meta.owner_tenant.as_deref() == Some(owner_tenant) {
                 out.push((name, log));
             }
@@ -1387,6 +1529,13 @@ impl AppState {
     ///
     /// Cost: one bounded durable listing + one verified load per candidate — acceptable
     /// on the rare, authorized erasure path (NOT a hot read).
+    ///
+    /// **Deliberately NOT wired to [`repo_meta_cache`](Self::repo_meta_cache) (task
+    /// #74):** this runs on the irreversible GDPR1 erasure cascade, where a live
+    /// `project_repo_meta` per candidate is cheap relative to the physical-GC legs it
+    /// gates — reusing the cache here would buy no measurable perf and would add a
+    /// second place to reason about cache freshness on the codebase's most
+    /// security-sensitive path, for zero benefit.
     pub fn authoritative_owned_repo_logs(
         &self,
         owner_tenant: &str,
@@ -1437,6 +1586,12 @@ impl AppState {
     ///
     /// # Errors
     /// `503` — any listing/load fault (fail-closed; the caller MUST NOT then erase).
+    ///
+    /// **Deliberately NOT wired to [`repo_meta_cache`](Self::repo_meta_cache)** — same
+    /// reasoning as [`authoritative_owned_repo_logs`](Self::authoritative_owned_repo_logs):
+    /// not a hot read, and this partition runs inside the SAME cascade that tombstones
+    /// repos, so keeping it on a live projection sidesteps any question of whether an
+    /// in-cascade cache refresh landed before this call reads it.
     pub fn erasure_repo_partition(
         &self,
         subject: &str,
@@ -4080,6 +4235,251 @@ mod me_repos_tests {
                 "each returned log is the repo's real verified log"
             );
         }
+    }
+
+    // ── repo-meta cache (task #74, W-METENANT scaling follow-up) ────────────
+
+    /// (a) A cache HIT returns EXACTLY what a live `project_repo_meta` over the same
+    /// log would — caching must never change the answer, only the cost.
+    #[test]
+    fn cached_meta_matches_live_projection() {
+        let st = state_with(&[("alpha", &meta_log("private", "org-a"))]);
+        let log = st.load_verified("alpha").expect("load");
+        let live = crate::authz::project_repo_meta(&log);
+
+        // Populate the cache exactly like the write-path hooks do, then read it back.
+        st.cache_repo_meta("alpha", live.clone());
+        let cached = st.repo_meta_cached("alpha", &log);
+        assert_eq!(cached, live, "a cache HIT must equal the live projection");
+    }
+
+    /// (c) A cache MISS (nothing was ever cached for this slug) falls back to the
+    /// live projection — a gap in coverage never changes the answer.
+    #[test]
+    fn cache_miss_falls_back_to_live_projection() {
+        let st = state_with(&[("alpha", &meta_log("public", "org-a"))]);
+        let log = st.load_verified("alpha").expect("load");
+        // Nothing was ever written to `repo_meta_cache` for "alpha" — `state_with`
+        // (unlike `from_env`) never calls the boot populator.
+        assert!(
+            st.repo_meta_cache.read().unwrap().get("alpha").is_none(),
+            "precondition: nothing cached yet"
+        );
+        let via_cache = st.repo_meta_cached("alpha", &log);
+        let live = crate::authz::project_repo_meta(&log);
+        assert_eq!(
+            via_cache, live,
+            "a cache MISS must return the same answer as calling project_repo_meta directly"
+        );
+    }
+
+    /// (b) THE security-relevant case: a repo cached as visible/not-erased, then a
+    /// `repo.meta`/`repo.erased` mutation lands on the durable log — `refresh_repo_meta_cache`
+    /// (the invalidation hook every meta-mutating write path calls) MUST flip the
+    /// cached answer, and the hot `me_repo_logs` path MUST reflect it on the very
+    /// next call. Proves the invalidation, not just the happy path: a STALE cache
+    /// here would let `authorize_read` grant a private/erased repo — a real leak.
+    #[test]
+    fn refresh_after_erasure_flips_the_cache_and_me_repo_logs_stops_serving_it() {
+        let dir = scratch_dir();
+        let mut st = AppState::new(dir.clone(), "dev-token".to_string());
+        std::fs::write(dir.join("alpha.json"), meta_log("private", "org-a")).unwrap();
+        st.set_repo_git(
+            "alpha",
+            Arc::new(hugit_proto::CasObjectSource::new()),
+            gix_hash::ObjectId::empty_tree(gix_hash::Kind::Sha1),
+            BTreeMap::new(),
+        );
+
+        // Seed the cache with the PRE-erasure meta (as boot population would) —
+        // visible to its owner, not erased.
+        let log0 = st.load_verified("alpha").expect("load");
+        st.cache_repo_meta("alpha", crate::authz::project_repo_meta(&log0));
+        assert_eq!(
+            st.me_repo_logs(&tenant("org-a"))
+                .iter()
+                .map(|(s, _)| s.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha"],
+            "precondition: the owner sees the repo before erasure"
+        );
+
+        // Now durably append the terminal `repo.erased` tombstone directly to the log
+        // (mirrors what `tombstone_repo` does), WITHOUT yet invalidating the cache —
+        // proving the stale-cache risk this cache design must close.
+        let mut log1 = log0.clone();
+        log1.append_authorized(
+            PrincipalClass::Orchestrator,
+            Endpoint::Land,
+            crate::writes::erasure::REPO_ERASED_KIND,
+            vec!["orchestrator:hugit".into()],
+            serde_json::json!({"reason":"erasure","state":"erased"}).to_string(),
+            1,
+        )
+        .expect("append repo.erased");
+        std::fs::write(
+            dir.join("alpha.json"),
+            serde_json::to_string(log1.records()).unwrap(),
+        )
+        .unwrap();
+
+        // BEFORE the invalidation hook runs, the stale cache still hides the tombstone
+        // from `me_repo_logs` — this is exactly the hole the write-path hooks close.
+        assert_eq!(
+            st.me_repo_logs(&tenant("org-a"))
+                .iter()
+                .map(|(s, _)| s.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha"],
+            "a stale cache would still (wrongly) serve the now-erased repo"
+        );
+
+        // The invalidation hook every meta-mutating write path calls.
+        st.refresh_repo_meta_cache("alpha");
+
+        // The cache itself now reflects `erased: true`.
+        let cached = st
+            .repo_meta_cache
+            .read()
+            .unwrap()
+            .get("alpha")
+            .cloned()
+            .expect("refreshed entry present");
+        assert!(cached.erased, "the cache must reflect the tombstone");
+
+        // And the hot path — `me_repo_logs` — stops serving it to its own owner via
+        // the cached meta (erasure is terminal, no exception for a tenant read).
+        // NOTE: the operator branch of `me_repo_logs` is an unconditional bypass (it
+        // returns every loaded repo without consulting `project_repo_meta`/
+        // `authorize_read`/the cache at all) — that pre-existing behavior is
+        // unrelated to this cache and out of scope here; this test only proves the
+        // cache-consulting (tenant) branch.
+        assert!(
+            st.me_repo_logs(&tenant("org-a")).is_empty(),
+            "post-refresh, the owner must no longer see the erased repo"
+        );
+    }
+
+    /// A visibility flip (not just erasure) also invalidates correctly: a repo cached
+    /// as `private` becomes `public` after a `repo.meta` update + refresh, and a
+    /// FOREIGN tenant (previously denied) can now see it via `me_repo_logs`.
+    #[test]
+    fn refresh_after_visibility_change_flips_cross_tenant_read() {
+        let dir = scratch_dir();
+        let mut st = AppState::new(dir.clone(), "dev-token".to_string());
+        std::fs::write(dir.join("alpha.json"), meta_log("private", "org-a")).unwrap();
+        st.set_repo_git(
+            "alpha",
+            Arc::new(hugit_proto::CasObjectSource::new()),
+            gix_hash::ObjectId::empty_tree(gix_hash::Kind::Sha1),
+            BTreeMap::new(),
+        );
+        let log0 = st.load_verified("alpha").expect("load");
+        st.cache_repo_meta("alpha", crate::authz::project_repo_meta(&log0));
+
+        assert!(
+            st.me_repo_logs(&tenant("org-b")).is_empty(),
+            "precondition: a foreign tenant cannot see the private repo"
+        );
+
+        // Append a `repo.meta` record flipping visibility to public (mirrors
+        // `write_repo_meta`).
+        let mut log1 = log0.clone();
+        log1.append_authorized(
+            PrincipalClass::Orchestrator,
+            Endpoint::Land,
+            crate::authz::REPO_META_KIND,
+            vec!["orchestrator:hugit".into()],
+            serde_json::json!({"visibility":"public"}).to_string(),
+            1,
+        )
+        .expect("append repo.meta");
+        std::fs::write(
+            dir.join("alpha.json"),
+            serde_json::to_string(log1.records()).unwrap(),
+        )
+        .unwrap();
+
+        // Still stale before the refresh hook runs.
+        assert!(
+            st.me_repo_logs(&tenant("org-b")).is_empty(),
+            "stale cache still hides the now-public repo from a foreign tenant"
+        );
+
+        st.refresh_repo_meta_cache("alpha");
+
+        assert_eq!(
+            st.me_repo_logs(&tenant("org-b"))
+                .iter()
+                .map(|(s, _)| s.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha"],
+            "post-refresh, a foreign tenant sees the now-public repo"
+        );
+    }
+
+    /// `refresh_repo_meta_cache` is fail-safe on the reload itself: if the repo can no
+    /// longer be loaded (e.g. its log vanished), it REMOVES the stale entry rather
+    /// than leaving a pre-write value behind — a subsequent read falls back live.
+    #[test]
+    fn refresh_removes_stale_entry_when_reload_fails() {
+        let dir = scratch_dir();
+        let mut st = AppState::new(dir.clone(), "dev-token".to_string());
+        std::fs::write(dir.join("alpha.json"), meta_log("public", "org-a")).unwrap();
+        st.set_repo_git(
+            "alpha",
+            Arc::new(hugit_proto::CasObjectSource::new()),
+            gix_hash::ObjectId::empty_tree(gix_hash::Kind::Sha1),
+            BTreeMap::new(),
+        );
+        let log0 = st.load_verified("alpha").expect("load");
+        st.cache_repo_meta("alpha", crate::authz::project_repo_meta(&log0));
+        assert!(st.repo_meta_cache.read().unwrap().contains_key("alpha"));
+
+        // The log vanishes (simulates a transient/impossible-but-never-assumed fault).
+        std::fs::remove_file(dir.join("alpha.json")).unwrap();
+        st.refresh_repo_meta_cache("alpha");
+
+        assert!(
+            !st.repo_meta_cache.read().unwrap().contains_key("alpha"),
+            "a failed reload must REMOVE the entry, never leave a stale one"
+        );
+    }
+
+    /// Boot population (`from_env`'s path): a real `from_env`-style boot cannot run
+    /// hermetically (needs env vars + possibly R2), so this proves the populator
+    /// function directly against a `repos`-seeded state — the same shape `from_env`
+    /// builds before calling it.
+    #[test]
+    fn boot_populate_repo_meta_cache_covers_every_loaded_repo() {
+        let dir = scratch_dir();
+        let mut st = AppState::new(dir.clone(), "dev-token".to_string());
+        std::fs::write(dir.join("alpha.json"), meta_log("private", "org-a")).unwrap();
+        std::fs::write(dir.join("beta.json"), meta_log("public", "org-b")).unwrap();
+        for slug in ["alpha", "beta"] {
+            st.set_repo_git(
+                slug,
+                Arc::new(hugit_proto::CasObjectSource::new()),
+                gix_hash::ObjectId::empty_tree(gix_hash::Kind::Sha1),
+                BTreeMap::new(),
+            );
+        }
+        assert!(
+            st.repo_meta_cache.read().unwrap().is_empty(),
+            "precondition: nothing cached before boot population"
+        );
+        st.boot_populate_repo_meta_cache();
+
+        let cache = st.repo_meta_cache.read().unwrap();
+        assert_eq!(cache.len(), 2, "both loaded repos are cached");
+        assert_eq!(
+            cache.get("alpha").unwrap().owner_tenant.as_deref(),
+            Some("org-a")
+        );
+        assert_eq!(
+            cache.get("beta").unwrap().visibility,
+            crate::authz::Visibility::Public
+        );
     }
 
     // ── ListObjectsV2 XML parsing (the durable-enumeration B1 fix) ────────────
