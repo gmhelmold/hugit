@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "bash",
+    "-lc",
+    "cargo test --workspace"
+  ],
+  "env": {
+    "CI": "1",
+    "RUST_BACKTRACE": "1"
+  },
+  "workdir": "/run/corelink/abcd",
+  "timeout_ms": 600000
+}

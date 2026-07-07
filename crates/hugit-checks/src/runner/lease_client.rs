@@ -257,6 +257,76 @@ pub struct ExecAck {
     pub accepted: bool,
 }
 
+// ── The agent-exec seam (cost-killer path B — exec-server drive) ──────────────
+//
+// The FROZEN cross-repo DTOs for the `mode: agent` lease's exec-drive, byte-frozen
+// in `conformance/{AgentExecRequest,AgentExecAck,AgentExecResult}.json` (Runners TL
+// #290, sha256 in `conformance/manifest.sha256`, matched against their published
+// hashes). hugit's OFF-BOX §13 agent loop drives an egress-enabled, NON-memoized
+// agent box via these: `POST /v1/leases/{id}/agent-exec` (→ [`AgentExecAck`]) then
+// `GET /v1/leases/{id}/agent-exec/{step_id}` (→ [`AgentExecResult`]), possibly many
+// times, then `close` with the provider-`/usage` `cost_usd_micros` + the §13 envelope
+// (both UNCHANGED — already frozen + proven). The §13 agent LOOP itself is the P2
+// deferral; these DTOs freeze the seam it will drive.
+
+/// An agent-exec dispatch body: `POST /v1/leases/{lease_id}/agent-exec`. Runs an
+/// ARBITRARY command (NOT a [`CheckDef`] — no `toolchain_ref`, never memoized) in the
+/// egress-enabled agent box. `argv` avoids a shell-quoting seam; `env` is an ORDERED
+/// map (byte-stability) and MUST NEVER carry a tenant PAT (the §13.2 ingest credential
+/// is the separate, lease-scoped token). Empty `workdir` ⇒ the lease `tmp_root`
+/// server-side; a `timeout_ms` kill ⇒ conventional exit `124`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentExecRequest {
+    /// The command as an argv vector (no shell parsing on hugit's side).
+    pub argv: Vec<String>,
+    /// The scoped run env — ORDERED for byte-stable serialization; NEVER a tenant PAT.
+    pub env: std::collections::BTreeMap<String, String>,
+    /// Working directory; empty ⇒ the lease `tmp_root` (server-side default).
+    pub workdir: String,
+    /// Per-exec wall-clock bound in ms; a timeout kill surfaces as exit `124`.
+    pub timeout_ms: u64,
+}
+
+/// Acknowledgement of an [`AgentExecRequest`]: the box accepted the step (200 ran |
+/// 202 async). A REFUSAL is an HTTP error, NEVER `accepted: false`. Poll the result
+/// via `GET /v1/leases/{lease_id}/agent-exec/{step_id}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentExecAck {
+    /// The lease the step ran under.
+    pub lease_id: String,
+    /// The step handle to poll the [`AgentExecResult`] with.
+    pub step_id: String,
+    /// Whether the box accepted the step (always `true` on a 2xx; a refusal is an error).
+    pub accepted: bool,
+}
+
+/// The captured result of an agent-exec step: `GET /v1/leases/{lease_id}/agent-exec/{step_id}`.
+/// `exit_code` is verbatim (a `timeout_ms` kill ⇒ `124`; a signal ⇒ `128 + n`);
+/// `truncated` flags captured stdio that hit the fabric's capture cap.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentExecResult {
+    /// The step this result belongs to.
+    pub step_id: String,
+    /// The process exit code, verbatim (`124` = timeout kill, `128+n` = signal).
+    pub exit_code: i32,
+    /// Captured stdout (possibly `truncated`).
+    pub stdout: String,
+    /// Captured stderr (possibly `truncated`).
+    pub stderr: String,
+    /// Wall-clock duration of the step in ms.
+    pub duration_ms: u64,
+    /// True iff captured stdio hit the fabric's capture cap.
+    pub truncated: bool,
+}
+
+/// The `agent`-mode marker on an acquire request (peer to `runner`/check-host). An
+/// empty `{}` today — egress-enabled + memoization-OFF ARE the mode semantics
+/// (server-side), so the marker's mere PRESENCE selects agent mode; the struct is
+/// extensible without a wire break. An `agent` + `runner` both-present acquire is a
+/// fabric `400`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AgentSpec {}
+
 /// The raw, un-interpreted result-envelope META as returned by
 /// `GET /v1/leases/{lease_id}/envelope/meta`.
 ///

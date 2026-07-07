@@ -1,0 +1,8 @@
+{
+  "step_id": "step-0000000000000001",
+  "exit_code": 0,
+  "stdout": "test result: ok. 182 passed; 0 failed\n",
+  "stderr": "",
+  "duration_ms": 42000,
+  "truncated": false
+}

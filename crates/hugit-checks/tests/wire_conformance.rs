@@ -23,7 +23,10 @@
 
 use std::path::PathBuf;
 
-use hugit_checks::runner::{AcquireLeaseRequest, AcquireResponse, CloseRequest, CloseResponse};
+use hugit_checks::runner::{
+    AcquireLeaseRequest, AcquireResponse, AgentExecAck, AgentExecRequest, AgentExecResult,
+    CloseRequest, CloseResponse,
+};
 use hugit_contracts::{IntentMetrics, RunnerState};
 
 /// Read a wire fixture under `tests/fixtures/wire/`.
@@ -308,4 +311,48 @@ fn canonical_close_response_subset_round_trips() {
     // hugit consumes the finalized metrics (incl. the attested cost); the attestation
     // block is liberally ignored on this DTO (a separate verification path owns sigs).
     assert_eq!(dto.metrics.cost_usd_micros, 4_200_000);
+}
+
+// ── The FROZEN agent-exec seam vectors (cost-killer path B; lockstep with
+//    corelink-runners #290) ─────────────────────────────────────────────────────
+// `conformance/{AgentExecRequest,AgentExecAck,AgentExecResult}.json` are byte-identical
+// to the Runners TL's frozen vectors (sha256 in `conformance/manifest.sha256`, matched
+// against their published hashes). These pin the exec-drive wire so the drift class that
+// hit the 4 lease DTOs cannot recur on the agent seam. The REQUEST hugit SENDS is
+// asserted byte-exact (it drives the box); the ACK/RESULT hugit PARSES are subset
+// round-trips (liberal-in).
+
+#[test]
+fn canonical_agent_exec_request_round_trips_byte_exact() {
+    // hugit SENDS this — it must serialize to EXACTLY the frozen body (argv/env(ordered)/
+    // workdir/timeout_ms), so a drift 400s the `deny_unknown_fields` fabric here first.
+    let src = conformance("AgentExecRequest.json");
+    let dto: AgentExecRequest = serde_json::from_str(&src).expect("hugit parses canonical");
+    let produced = serde_json::to_value(&dto).unwrap();
+    let canonical: serde_json::Value = serde_json::from_str(&src).unwrap();
+    assert_eq!(
+        produced, canonical,
+        "hugit's AgentExecRequest must serialize byte-exact to the frozen fabric body"
+    );
+    assert_eq!(dto.argv, vec!["bash", "-lc", "cargo test --workspace"]);
+    assert_eq!(dto.env.get("CI").map(String::as_str), Some("1"));
+    assert_eq!(dto.timeout_ms, 600_000);
+}
+
+#[test]
+fn canonical_agent_exec_ack_subset_round_trips() {
+    let src = conformance("AgentExecAck.json");
+    let dto: AgentExecAck = serde_json::from_str(&src).expect("hugit parses canonical");
+    assert_subset_roundtrip(&serde_json::to_value(&dto).unwrap(), &src);
+    assert!(dto.accepted && !dto.step_id.is_empty());
+}
+
+#[test]
+fn canonical_agent_exec_result_subset_round_trips() {
+    let src = conformance("AgentExecResult.json");
+    let dto: AgentExecResult = serde_json::from_str(&src).expect("hugit parses canonical");
+    assert_subset_roundtrip(&serde_json::to_value(&dto).unwrap(), &src);
+    assert_eq!(dto.exit_code, 0);
+    assert!(!dto.truncated);
+    assert_eq!(dto.duration_ms, 42000);
 }
