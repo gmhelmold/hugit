@@ -14,12 +14,14 @@
 //!    TL's Option-B simplification; mooted the old local `ClerkValidator`).
 //! 3. hugit checks `audience == tenant` (cross-tenant mint blocked → `401`, NOT
 //!    `403`: NO tenant-existence oracle on the mint path — frozen client §Q2).
-//! 4. [`TokenStore::mint_with_ttl`] returns an OPAQUE 32-byte hex engine token, its
-//!    TTL bounded by `min(ENGINE_TOKEN_TTL_SECS, upstream remaining)` so the engine
-//!    token never outlives the upstream session. The store holds `SHA-256(token)`;
-//!    the raw token is NEVER logged.
-//! 5. Subsequent calls present `Bearer <engine_token>`; `token_store.lookup`
-//!    SHA-256s it and compares constant-time.
+//! 4. [`TokenStore::mint_with_ttl`] returns an OPAQUE **signed** engine token
+//!    (`hg1_<hex(payload)>.<hex(hmac)>`) carrying the verified identity + expiry,
+//!    HMAC-SHA256-signed with the engine's shared key; its TTL is bounded by
+//!    `min(ENGINE_TOKEN_TTL_SECS, upstream remaining)` so the engine token never
+//!    outlives the upstream session. The raw token is NEVER logged.
+//! 5. Subsequent calls present `Bearer <engine_token>`; [`TokenStore::lookup`]
+//!    verifies the HMAC (constant-time) + expiry **STATELESSLY** — no store read,
+//!    so ANY instance holding the shared key recognises ANY instance's token.
 //!
 //! ## Error mapping (CoreLink exchange status → client `/v1/token`)
 //!
@@ -48,25 +50,42 @@
 //! - The verified `tenant`/`principal` are colon-guarded before they become the
 //!   `clerk:{org}:{user}` authz principal (`:` is the authz delimiter — the
 //!   "exemption-is-a-hole" structural class). Real CoreLink UUIDs never contain `:`.
-//! - Engine-token lookup is SHA-256 + constant-time XOR.
+//! - Engine-token verification is a constant-time HMAC-SHA256 (`Mac::verify_slice`)
+//!   over the signed payload — no store lookup (stateless; see the P2-seams note).
 //!
 //! ## P2 seams (disclosed, not faked)
 //!
 //! - The exchange ENDPOINT host is owner/infra-gated (a deployed Worker pointed at
 //!   the dev Clerk instance). Absent `HUGIT_SESSION_EXCHANGE_URL` ⇒ `/v1/token`
 //!   404s (dev-token-only mode; the route's presence is not disclosed).
-//! - Multi-instance shared token store: the in-process `Mutex<HashMap>` is
-//!   single-host; the dedicated `hugit-prod-d1` swap is the P2 store seam, behind
-//!   the same [`TokenStore`] surface.
+//! - Multi-instance token fungibility: RESOLVED (WP-B5, #128). The engine token is
+//!   **stateless + HMAC-signed** — any instance holding the shared
+//!   `HUGIT_ENGINE_TOKEN_KEY` verifies any instance's token, so `≥2` instances are
+//!   fungible on the auth plane WITHOUT a shared store or a per-request network hop
+//!   (a D1 lookup per authed call would block the single-threaded accept loop — the
+//!   read-latency-DoS class). Absent the env key, a per-boot random key is used →
+//!   the pre-#128 single-host behaviour (a restart invalidates outstanding tokens,
+//!   exactly as the old in-memory store did), so this is additive + zero-config for
+//!   `max_instances=1`. The in-process store is retained ONLY for the admin session
+//!   list ([`TokenStore::list_for_org`]), still best-effort/single-host by design.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::EngineErr;
+
+/// HMAC-SHA256 over the engine-token payload (mirrors `sigv4.rs`/`merge_hook.rs`).
+type HmacSha256 = Hmac<Sha256>;
+
+/// Version tag prefixing every signed engine token. A presented credential that
+/// does not start with this is not a v1 engine token (a legacy 64-hex token from
+/// before this change, or garbage) → `Invalid`; the client re-mints via `/v1/token`.
+const ENGINE_TOKEN_V1_PREFIX: &str = "hg1_";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -93,7 +112,9 @@ pub struct TokenExchangeReq {
 /// The JSON body returned on success (hugit → the client/window).
 #[derive(Debug, Serialize)]
 pub struct TokenExchangeResp {
-    /// The opaque engine token. 32 random bytes, hex-encoded (64 chars).
+    /// The opaque engine token — a signed `hg1_<hex(payload)>.<hex(hmac)>` string.
+    /// Treat as OPAQUE: present it verbatim as `Authorization: Bearer <engine_token>`;
+    /// its length/format may evolve (it is not 64-char hex).
     pub engine_token: String,
     /// Seconds until the engine token expires (bounded by the upstream session).
     pub expires_in: u64,
@@ -304,13 +325,37 @@ fn map_exchange_status(code: u16) -> EngineErr {
 
 // ── TokenStore ────────────────────────────────────────────────────────────────
 
-/// An in-process store for minted engine tokens.
+/// The signed claims carried INSIDE an engine token (the payload the HMAC covers).
+/// Compact single-char keys keep the token short; every field is the verified
+/// identity/expiry that [`lookup`](TokenStore::lookup) reconstructs statelessly.
+#[derive(Debug, Serialize, Deserialize)]
+struct SignedClaims {
+    /// `TokenRecord::user` (the verified Clerk principal).
+    u: String,
+    /// `TokenRecord::org` (the verified tenant).
+    o: String,
+    /// `TokenRecord::fresh_auth`.
+    f: bool,
+    /// `TokenRecord::expires_at` (Unix seconds).
+    e: u64,
+}
+
+/// A store for minted engine tokens.
 ///
-/// Key: `SHA-256(raw_token)` — 32 bytes, stored as `[u8; 32]`.
-/// Lookup is constant-time (XOR fold, mirrors auth.rs:34-42).
-/// Raw tokens are NEVER stored, logged, or echoed (ADR-0002 §6.1).
+/// The token itself is **stateless + HMAC-signed** ([`signing_key`](Self::signing_key)):
+/// [`lookup`](Self::lookup) verifies it WITHOUT consulting `tokens`, so any instance
+/// with the same key recognises any instance's token (WP-B5 fungibility). The
+/// in-process `tokens` map is retained ONLY so the minting instance can enumerate
+/// its own active sessions for the admin list ([`list_for_org`](Self::list_for_org))
+/// — best-effort + single-host, as before.
+///
+/// Raw tokens are NEVER stored, logged, or echoed (ADR-0002 §6.1); the map is keyed
+/// by `SHA-256(raw_token)`.
 pub struct TokenStore {
     tokens: Mutex<HashMap<[u8; 32], TokenRecord>>,
+    /// The HMAC-SHA256 signing key. SHARED across instances (`HUGIT_ENGINE_TOKEN_KEY`)
+    /// ⇒ fungible; a per-boot random key ⇒ single-host (the pre-#128 behaviour).
+    signing_key: [u8; 32],
 }
 
 /// A minted engine-token record.
@@ -330,11 +375,51 @@ impl Default for TokenStore {
 }
 
 impl TokenStore {
-    /// Create a new, empty token store.
+    /// Create a new, empty token store with a **per-boot random** signing key.
+    ///
+    /// Tokens minted here are recognised only for this process's lifetime (a
+    /// restart or a *different* instance won't verify them) — the single-host
+    /// behaviour. Use [`from_env`](Self::from_env) for the multi-instance
+    /// (shared-key) engine; `new` is the test/dev default.
     pub fn new() -> Self {
         Self {
             tokens: Mutex::new(HashMap::new()),
+            // A CSPRNG key from /dev/urandom (essentially always available). If it is
+            // somehow unreadable we DERIVE a process-unique fallback (never a fixed
+            // public constant — a `[0u8;32]` would let a remote attacker forge tokens
+            // on an entropy-failed instance; silent degradation is a hole). Boot never
+            // panics; the shared-key production path (`from_env`) never reaches here.
+            signing_key: random_key().unwrap_or_else(fallback_key),
         }
+    }
+
+    /// Build the boot token store, keyed for cross-instance fungibility.
+    ///
+    /// `HUGIT_ENGINE_TOKEN_KEY` (any non-empty secret; derived to 32 bytes via
+    /// SHA-256) → tokens are verifiable by EVERY instance sharing that value
+    /// (WP-B5 `≥2`). Absent/empty → a per-boot random key ([`new`](Self::new)),
+    /// i.e. the single-host behaviour — so this is additive + safe on the current
+    /// `max_instances=1` engine with no config change. The key material is derived
+    /// (never stored verbatim) and never logged.
+    pub fn from_env() -> Self {
+        match std::env::var("HUGIT_ENGINE_TOKEN_KEY") {
+            Ok(secret) if !secret.trim().is_empty() => Self {
+                tokens: Mutex::new(HashMap::new()),
+                signing_key: sha256_bytes(secret.trim().as_bytes()),
+            },
+            _ => Self::new(),
+        }
+    }
+
+    /// HMAC-SHA256 the `payload` bytes with this store's signing key → 32 raw bytes.
+    fn sign(&self, payload: &[u8]) -> [u8; 32] {
+        let mut mac =
+            HmacSha256::new_from_slice(&self.signing_key).expect("HMAC accepts any key length");
+        mac.update(payload);
+        let out = mac.finalize().into_bytes();
+        let mut sig = [0u8; 32];
+        sig.copy_from_slice(&out);
+        sig
     }
 
     /// Mint a new engine token for `principal` at the default TTL ceiling
@@ -348,10 +433,13 @@ impl TokenStore {
     /// upstream session (`ttl_secs` < ceiling) and never lives longer than the
     /// ceiling (`ttl_secs` > ceiling), and is always positive.
     ///
-    /// - 32 random bytes read from `/dev/urandom` (OS CSPRNG; no `rand` dep).
-    /// - Hex-encoded → returned as the raw token string.
-    /// - Stored as `SHA-256(raw_token)`.
-    /// - Expired tokens are swept on every mint (bounded scan).
+    /// The token is **self-describing + HMAC-signed**: `hg1_<hex(payload)>.<hex(sig)>`,
+    /// where `payload` is the JSON-encoded [`SignedClaims`] and `sig` is
+    /// `HMAC-SHA256(signing_key, hex(payload))`. It carries the identity + expiry, so
+    /// [`lookup`](Self::lookup) verifies it with NO store read (cross-instance
+    /// fungible). The record is ALSO inserted into `tokens` (keyed by
+    /// `SHA-256(token)`) purely so the minting instance can list its own active
+    /// sessions ([`list_for_org`](Self::list_for_org)) — best-effort, single-host.
     ///
     /// The raw token is NEVER logged here; it is only returned to the caller.
     pub fn mint_with_ttl(
@@ -360,68 +448,84 @@ impl TokenStore {
         ttl_secs: u64,
     ) -> Result<String, EngineErr> {
         let ttl = ttl_secs.clamp(1, ENGINE_TOKEN_TTL_SECS);
-        let raw = random_hex_token()?;
-        let hash = sha256_bytes(raw.as_bytes());
         let expires_at = now_secs() + ttl;
+        let claims = SignedClaims {
+            u: principal.user.clone(),
+            o: principal.org.clone(),
+            f: principal.fresh_auth,
+            e: expires_at,
+        };
+        let payload_json = serde_json::to_vec(&claims)
+            .map_err(|e| EngineErr::unavailable(format!("token: claims serialize: {e}")))?;
+        let payload_hex = hex::encode(&payload_json);
+        let sig_hex = hex::encode(self.sign(payload_hex.as_bytes()));
+        let token = format!("{ENGINE_TOKEN_V1_PREFIX}{payload_hex}.{sig_hex}");
+
+        // Best-effort session-list bookkeeping. A poisoned lock (an "impossible"
+        // anomaly) must NOT fail the mint — the token is valid statelessly; only the
+        // admin session list is affected. Recover the guard and continue.
         let record = TokenRecord {
             user: principal.user.clone(),
             org: principal.org.clone(),
             fresh_auth: principal.fresh_auth,
             expires_at,
         };
-        let mut guard = self
-            .tokens
-            .lock()
-            .map_err(|_| EngineErr::unavailable("token store lock poisoned"))?;
+        let mut guard = self.tokens.lock().unwrap_or_else(|e| e.into_inner());
         // Sweep expired entries on mint (bounded by the number of active sessions).
         let now = now_secs();
         guard.retain(|_, v| v.expires_at > now);
-        guard.insert(hash, record);
-        Ok(raw)
+        guard.insert(sha256_bytes(token.as_bytes()), record);
+        Ok(token)
     }
 
-    /// Look up a raw engine token.
+    /// Verify a presented engine token — **STATELESS** (no store read).
     ///
-    /// - SHA-256s the presented token.
-    /// - Compares against stored keys using constant-time XOR (mirrors auth.rs:34-42).
-    /// - Returns the record if present AND unexpired.
-    /// - Expired-but-present → prune + return `Expired` (caller maps to TOKEN_EXPIRED).
-    /// - Not present → `Invalid` (caller maps to TOKEN_INVALID).
+    /// - Requires the `hg1_` v1 prefix; a legacy 64-hex token (pre-#128) or any
+    ///   non-v1 string → `Invalid` (the client re-mints via `/v1/token`).
+    /// - Recomputes `HMAC-SHA256(signing_key, hex(payload))` and compares to the
+    ///   presented signature via `Mac::verify_slice` (the `subtle` constant-time
+    ///   equality). A forged/tampered/wrong-key token → `Invalid`.
+    /// - Only AFTER the signature verifies is the authenticated payload decoded;
+    ///   an expired token → `Expired`, else `Ok(record)`.
+    ///
+    /// Any instance holding the same `signing_key` accepts any instance's token —
+    /// the WP-B5 fungibility guarantee. No lock, no network, no store dependency.
     pub fn lookup(&self, raw: &str) -> LookupResult {
-        let hash = sha256_bytes(raw.as_bytes());
-        let mut guard = match self.tokens.lock() {
-            Ok(g) => g,
-            Err(_) => return LookupResult::Invalid, // lock poisoned → fail-closed
+        let Some(rest) = raw.strip_prefix(ENGINE_TOKEN_V1_PREFIX) else {
+            return LookupResult::Invalid;
         };
-        // Linear scan with a constant-time XOR PER-KEY comparison (mirrors
-        // auth.rs): each candidate key is compared byte-for-byte without an
-        // early-exit on the bytes, so the per-key compare leaks no byte-position
-        // timing. The loop itself DOES `break` on the first match. The only timing
-        // signal is the match's POSITION in HashMap iteration order, which is
-        // randomized and not attacker-controllable — not an exploitable oracle.
-        // The store is bounded by active sessions (swept on mint + short TTL).
-        let mut found_key: Option<[u8; 32]> = None;
-        let mut found: Option<TokenRecord> = None;
-        for (stored_hash, record) in guard.iter() {
-            if hashes_match(&hash, stored_hash) {
-                found_key = Some(*stored_hash);
-                found = Some(record.clone());
-                break;
-            }
+        let Some((payload_hex, sig_hex)) = rest.split_once('.') else {
+            return LookupResult::Invalid;
+        };
+        let Ok(sig_bytes) = hex::decode(sig_hex) else {
+            return LookupResult::Invalid;
+        };
+        // Constant-time verify over the EXACT received payload segment (verify the
+        // bytes we'll decode — no canonicalization gap between sign and verify).
+        let mut mac = match HmacSha256::new_from_slice(&self.signing_key) {
+            Ok(m) => m,
+            Err(_) => return LookupResult::Invalid,
+        };
+        mac.update(payload_hex.as_bytes());
+        if mac.verify_slice(&sig_bytes).is_err() {
+            return LookupResult::Invalid;
         }
-        match found {
-            None => LookupResult::Invalid,
-            Some(rec) => {
-                if rec.expires_at <= now_secs() {
-                    if let Some(k) = found_key {
-                        guard.remove(&k);
-                    }
-                    LookupResult::Expired
-                } else {
-                    LookupResult::Ok(rec)
-                }
-            }
+        // Signature authenticated the payload → now it is safe to decode + trust it.
+        let Ok(payload_json) = hex::decode(payload_hex) else {
+            return LookupResult::Invalid;
+        };
+        let Ok(claims) = serde_json::from_slice::<SignedClaims>(&payload_json) else {
+            return LookupResult::Invalid;
+        };
+        if claims.e <= now_secs() {
+            return LookupResult::Expired;
         }
+        LookupResult::Ok(TokenRecord {
+            user: claims.u,
+            org: claims.o,
+            fresh_auth: claims.f,
+            expires_at: claims.e,
+        })
     }
 
     /// List the ACTIVE (unexpired) sessions for the admin area, SCOPED to a tenant.
@@ -466,15 +570,6 @@ pub enum LookupResult {
     Invalid,
 }
 
-/// Constant-time hash comparison (mirrors auth.rs:34-42).
-fn hashes_match(a: &[u8; 32], b: &[u8; 32]) -> bool {
-    let mut diff: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
-
 /// SHA-256 of `bytes` → `[u8; 32]`.
 fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
     let digest = Sha256::digest(bytes);
@@ -483,16 +578,46 @@ fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
     out
 }
 
-/// Read 32 bytes from `/dev/urandom` → hex string (64 chars).
-/// No `rand` dep; `/dev/urandom` is always available on Linux/macOS.
-fn random_hex_token() -> Result<String, EngineErr> {
+/// Read 32 raw bytes from `/dev/urandom` (OS CSPRNG; no `rand` dep). Used for the
+/// per-boot random signing key when no shared `HUGIT_ENGINE_TOKEN_KEY` is set.
+/// Returns `None` if the entropy source is unreadable (the caller falls back).
+fn random_key() -> Option<[u8; 32]> {
     use std::fs::File;
     use std::io::Read;
     let mut buf = [0u8; 32];
     File::open("/dev/urandom")
         .and_then(|mut f| f.read_exact(&mut buf))
-        .map_err(|e| EngineErr::unavailable(format!("entropy source unavailable: {e}")))?;
-    Ok(hex::encode(buf))
+        .ok()
+        .map(|()| buf)
+}
+
+/// A process-unique fallback signing key for the (essentially unreachable) case
+/// where `/dev/urandom` is unreadable. NOT a CSPRNG — but deliberately NEVER a
+/// fixed public constant (a `[0u8;32]` would let a remote attacker forge tokens on
+/// an entropy-failed instance). Mixes the boot nanosecond + a code address (ASLR),
+/// neither remotely observable, via SHA-256. A loud warning is emitted so the
+/// anomaly is visible. Single-host only — `from_env` with a shared secret never
+/// reaches this.
+fn fallback_key() -> [u8; 32] {
+    eprintln!(
+        "WARN: /dev/urandom unreadable at boot; engine-token key derived from a \
+         process-unique fallback (single-host only, tokens valid for this process)"
+    );
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    // A stack address (ASLR/stack-layout randomised, not remotely observable) as a
+    // second entropy source.
+    let stack_marker: u8 = 0;
+    let stack_addr = std::ptr::addr_of!(stack_marker) as usize;
+    let mut hasher = Sha256::new();
+    hasher.update(nanos.to_le_bytes());
+    hasher.update(stack_addr.to_le_bytes());
+    hasher.update(b"hugit-engine-token-fallback-v1");
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&hasher.finalize());
+    out
 }
 
 fn now_secs() -> u64 {
@@ -762,7 +887,10 @@ mod tests {
         let resp: serde_json::Value = serde_json::from_str(&resp_body).unwrap();
         assert_eq!(resp["accepted"], true);
         let et = resp["engine_token"].as_str().expect("engine_token present");
-        assert_eq!(et.len(), 64, "32 bytes → 64 hex chars");
+        assert!(
+            et.starts_with("hg1_") && et.contains('.'),
+            "a v1 signed engine token: hg1_<payload>.<sig>"
+        );
         let expires_in = resp["expires_in"].as_u64().unwrap();
         assert!(expires_in > 0 && expires_in <= 300, "TTL within ceiling");
         // The minted token resolves to the verified identity.
@@ -922,7 +1050,7 @@ mod tests {
         let store = TokenStore::new();
         let p = make_principal(true);
         let raw = store.mint(&p).expect("mint OK");
-        assert_eq!(raw.len(), 64, "32 bytes → 64 hex chars");
+        assert!(raw.starts_with("hg1_"), "a v1 signed token");
         match store.lookup(&raw) {
             LookupResult::Ok(rec) => {
                 assert_eq!(rec.user, TEST_PRINCIPAL);
@@ -978,55 +1106,199 @@ mod tests {
         assert!(matches!(store.lookup("not-a-token"), LookupResult::Invalid));
     }
 
-    #[test]
-    fn expired_engine_token_returns_expired() {
-        let store = TokenStore::new();
-        let p = make_principal(false);
-        let raw = store.mint(&p).expect("mint OK");
-        {
-            let hash = sha256_bytes(raw.as_bytes());
-            let mut guard = store.tokens.lock().unwrap();
-            if let Some(rec) = guard.get_mut(&hash) {
-                rec.expires_at = now_secs() - 1; // already expired
-            }
-        }
-        assert!(matches!(store.lookup(&raw), LookupResult::Expired));
+    /// Assemble a valid v1 signed token for arbitrary claims, using `store`'s key —
+    /// so a test can mint an ALREADY-EXPIRED (or otherwise crafted) token that the
+    /// public `mint` (ttl-clamped to the future) never produces.
+    fn signed_token_with(store: &TokenStore, claims: &SignedClaims) -> String {
+        let payload_hex = hex::encode(serde_json::to_vec(claims).unwrap());
+        let sig_hex = hex::encode(store.sign(payload_hex.as_bytes()));
+        format!("{ENGINE_TOKEN_V1_PREFIX}{payload_hex}.{sig_hex}")
     }
 
     #[test]
-    fn expired_engine_token_is_pruned_after_lookup() {
+    fn expired_engine_token_returns_expired() {
+        // Expiry is read from the SIGNED payload — statelessly, no store mutation.
         let store = TokenStore::new();
-        let p = make_principal(false);
-        let raw = store.mint(&p).expect("mint OK");
-        let hash = sha256_bytes(raw.as_bytes());
-        {
-            let mut guard = store.tokens.lock().unwrap();
-            if let Some(rec) = guard.get_mut(&hash) {
-                rec.expires_at = now_secs() - 1;
-            }
-        }
-        let _ = store.lookup(&raw);
-        let guard = store.tokens.lock().unwrap();
-        assert!(!guard.contains_key(&hash), "expired entry must be pruned");
+        let expired = signed_token_with(
+            &store,
+            &SignedClaims {
+                u: TEST_PRINCIPAL.into(),
+                o: TEST_TENANT.into(),
+                f: false,
+                e: now_secs().saturating_sub(1), // already in the past
+            },
+        );
+        assert!(matches!(store.lookup(&expired), LookupResult::Expired));
     }
 
     #[test]
     fn sweep_on_mint_removes_expired() {
+        // Two DISTINCT principals → two distinct signed tokens → two distinct store
+        // keys. (A signed token is deterministic in {user,org,fresh,expiry}, so the
+        // same principal minted twice in one second would collide — intentional +
+        // harmless, but not what this session-list-sweep test exercises.)
         let store = TokenStore::new();
-        let p = make_principal(false);
-        let first = store.mint(&p).expect("mint 1");
+        let pa = ClerkPrincipal {
+            user: "u-a".into(),
+            org: "org-a".into(),
+            fresh_auth: false,
+        };
+        let pb = ClerkPrincipal {
+            user: "u-b".into(),
+            org: "org-b".into(),
+            fresh_auth: false,
+        };
+        let first = store.mint(&pa).expect("mint 1");
         {
             let hash = sha256_bytes(first.as_bytes());
             let mut guard = store.tokens.lock().unwrap();
             guard.get_mut(&hash).unwrap().expires_at = now_secs() - 1;
         }
-        let _second = store.mint(&p).expect("mint 2 (triggers sweep)");
+        let _second = store.mint(&pb).expect("mint 2 (triggers sweep)");
         let guard = store.tokens.lock().unwrap();
         let first_hash = sha256_bytes(first.as_bytes());
         assert!(
             !guard.contains_key(&first_hash),
             "sweep must remove expired first token"
         );
+    }
+
+    // ── WP-B5 stateless fungibility + adversarial coverage ────────────────────
+
+    /// Build a store with an explicit signing key (two stores with the SAME key
+    /// model two engine instances sharing `HUGIT_ENGINE_TOKEN_KEY`).
+    fn store_with_key(key: [u8; 32]) -> TokenStore {
+        TokenStore {
+            tokens: Mutex::new(HashMap::new()),
+            signing_key: key,
+        }
+    }
+
+    /// THE #128 fix: instance A mints, instance B (SAME key, its OWN empty store)
+    /// verifies statelessly → `Ok` with the exact identity. This is what makes
+    /// `max_instances≥2` fungible: B never saw A's mint yet still accepts the token.
+    #[test]
+    fn tokens_are_fungible_across_instances_with_a_shared_key() {
+        let key = [7u8; 32];
+        let a = store_with_key(key);
+        let b = store_with_key(key); // a DIFFERENT instance, empty store, same key
+        let token = a.mint(&make_principal(true)).expect("A mints");
+        match b.lookup(&token) {
+            LookupResult::Ok(rec) => {
+                assert_eq!(rec.user, TEST_PRINCIPAL);
+                assert_eq!(rec.org, TEST_TENANT);
+                assert!(rec.fresh_auth);
+            }
+            _ => panic!("instance B (shared key) must accept A's token"),
+        }
+        // And B's store was never touched — verification is stateless.
+        assert!(
+            b.tokens.lock().unwrap().is_empty(),
+            "lookup must not read/populate the store"
+        );
+    }
+
+    /// A DIFFERENT key (an instance that does NOT share the secret) rejects the
+    /// token — no forgery across trust domains.
+    #[test]
+    fn a_different_key_rejects_another_instances_token() {
+        let token = store_with_key([1u8; 32])
+            .mint(&make_principal(false))
+            .unwrap();
+        assert!(matches!(
+            store_with_key([2u8; 32]).lookup(&token),
+            LookupResult::Invalid
+        ));
+    }
+
+    /// A tampered PAYLOAD (privilege escalation attempt — swap the org) fails the
+    /// HMAC and is rejected BEFORE the payload is ever decoded/trusted.
+    #[test]
+    fn tampered_payload_is_rejected() {
+        let store = store_with_key([9u8; 32]);
+        let token = store.mint(&make_principal(false)).unwrap();
+        let (payload_hex, sig_hex) = token.strip_prefix("hg1_").unwrap().split_once('.').unwrap();
+        // Flip one nibble of the payload → a different byte, invalid signature.
+        let mut bytes = payload_hex.as_bytes().to_vec();
+        bytes[10] = if bytes[10] == b'a' { b'b' } else { b'a' };
+        let forged = format!("hg1_{}.{}", String::from_utf8(bytes).unwrap(), sig_hex);
+        assert!(matches!(store.lookup(&forged), LookupResult::Invalid));
+    }
+
+    /// A tampered SIGNATURE is rejected (constant-time verify).
+    #[test]
+    fn tampered_signature_is_rejected() {
+        let store = store_with_key([9u8; 32]);
+        let token = store.mint(&make_principal(false)).unwrap();
+        let (payload_hex, sig_hex) = token.strip_prefix("hg1_").unwrap().split_once('.').unwrap();
+        let mut bytes = sig_hex.as_bytes().to_vec();
+        bytes[0] = if bytes[0] == b'0' { b'1' } else { b'0' };
+        let forged = format!("hg1_{}.{}", payload_hex, String::from_utf8(bytes).unwrap());
+        assert!(matches!(store.lookup(&forged), LookupResult::Invalid));
+    }
+
+    /// A legacy pre-#128 64-hex token (no `hg1_` prefix) is `Invalid` → the client
+    /// re-mints. Covers the rolling-deploy window (old token → new instance).
+    #[test]
+    fn legacy_hex_token_is_invalid() {
+        let store = TokenStore::new();
+        let legacy = "a".repeat(64); // 64 hex chars, the old opaque shape
+        assert!(matches!(store.lookup(&legacy), LookupResult::Invalid));
+    }
+
+    /// Malformed v1 shapes never panic and never verify.
+    #[test]
+    fn garbage_v1_shapes_are_invalid() {
+        let store = TokenStore::new();
+        for bad in [
+            "hg1_",          // empty rest
+            "hg1_nodot",     // no `.` separator
+            "hg1_zz.zz",     // non-hex payload/sig
+            "hg1_.deadbeef", // empty payload
+            "hg1_6162.",     // empty signature
+            "hg1_6162.gg",   // non-hex signature
+        ] {
+            assert!(
+                matches!(store.lookup(bad), LookupResult::Invalid),
+                "`{bad}` must be Invalid, never a panic or Ok"
+            );
+        }
+    }
+
+    /// `from_env`: two stores built under the SAME shared secret are fungible; a
+    /// store under a DIFFERENT secret rejects the token. Proves the env→key
+    /// derivation is deterministic + the wiring the deploy relies on.
+    #[test]
+    fn from_env_shared_secret_is_fungible_distinct_secret_is_not() {
+        let token = with_env("HUGIT_ENGINE_TOKEN_KEY", "shared-fleet-secret", || {
+            let a = TokenStore::from_env();
+            let b = TokenStore::from_env(); // a second instance, same env
+            let t = a.mint(&make_principal(false)).unwrap();
+            assert!(
+                matches!(b.lookup(&t), LookupResult::Ok(_)),
+                "same shared secret → fungible"
+            );
+            t
+        });
+        // A different secret must NOT accept the token minted under the first.
+        with_env("HUGIT_ENGINE_TOKEN_KEY", "a-different-secret", || {
+            assert!(
+                matches!(TokenStore::from_env().lookup(&token), LookupResult::Invalid),
+                "a different secret must reject the token"
+            );
+        });
+    }
+
+    /// Absent `HUGIT_ENGINE_TOKEN_KEY`, `from_env` still mints usable (single-host)
+    /// tokens — a random per-boot key, verifiable within the same store.
+    #[test]
+    fn from_env_absent_key_is_single_host_but_functional() {
+        // Ensure the var is unset for this assertion (serialized via ENV_LOCK).
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("HUGIT_ENGINE_TOKEN_KEY") };
+        let store = TokenStore::from_env();
+        let t = store.mint(&make_principal(false)).unwrap();
+        assert!(matches!(store.lookup(&t), LookupResult::Ok(_)));
     }
 
     // ── SSRF allowlist / SessionExchangeConfig ────────────────────────────────
@@ -1039,14 +1311,16 @@ mod tests {
 
     /// Helper: temporarily set an env var for the duration of the closure, under
     /// the process-wide [`ENV_LOCK`] so env-touching tests never run concurrently.
-    fn with_env<F: FnOnce()>(key: &str, val: &str, f: F) {
+    /// Returns the closure's value (so a test can capture something minted inside).
+    fn with_env<R, F: FnOnce() -> R>(key: &str, val: &str, f: F) -> R {
         // Recover from a poisoned lock (a prior test panicked mid-closure) — the
         // env is restored below regardless, so the guard's data is irrelevant.
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Safety: serialized by ENV_LOCK above; no other test mutates env concurrently.
         unsafe { std::env::set_var(key, val) };
-        f();
+        let r = f();
         unsafe { std::env::remove_var(key) };
+        r
     }
 
     #[test]
