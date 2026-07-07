@@ -141,6 +141,40 @@ fn safe_address() -> impl Strategy<Value = String> {
     ]
 }
 
+/// Legitimate long PATH / git-REF shapes that MUST survive unredacted (#70b):
+/// lowercase/mixed slug words joined by `/` and `-`, long enough to clear the
+/// free-text entropy floor (which over-redacted them before the fix). Charset is
+/// kept to the human path/slug set — never base64's `+`/`=`.
+fn path_or_ref_shape() -> impl Strategy<Value = String> {
+    // A single slug word: a lowercase run (`some`, `descriptive`, `oauth`) — a
+    // human path component, always low class-transition density and low entropy.
+    // (Numbered / camelCase / JIRA-tag variants are covered by the hand-written
+    // unit tests; the generator stays lowercase to keep the must-survive set
+    // unambiguously legitimate.)
+    let word = proptest::string::string_regex("[a-z]{2,12}").unwrap();
+    // 3..=8 words joined by a mix of `/` and `-` separators. With >=3 words of
+    // >=2 chars this always exceeds ENTROPY_MIN_LEN as a single token run.
+    proptest::collection::vec((word, prop::sample::select(vec!['/', '-'])), 3..=8)
+        .prop_map(|parts| {
+            let mut s = String::new();
+            for (i, (w, sep)) in parts.iter().enumerate() {
+                if i > 0 {
+                    s.push(*sep);
+                }
+                s.push_str(w);
+            }
+            format!("refs/heads/{s}")
+        })
+        // A random lowercase slug can, rarely, START with a credential-prefix
+        // token (`sk-<20+ run>`, `gho`, …) and be a genuine structural secret —
+        // correctly redacted, so it is NOT part of the must-survive set. Exclude
+        // those collisions here (NOT in the scrubber), mirroring `safe_address`.
+        .prop_filter(
+            "exclude credential-prefix collisions (correctly redacted)",
+            |s| !is_structural_secret(s),
+        )
+}
+
 // ── Properties ─────────────────────────────────────────────────────────────
 
 proptest! {
@@ -220,6 +254,38 @@ proptest! {
         prop_assert!(
             !is_structural_secret(&addr),
             "a legitimate address shape was classified a structural secret: {addr:?}"
+        );
+    }
+
+    /// #70b: a legitimate long PATH / git-REF shape MUST survive the free-text
+    /// scrub unchanged (no over-redaction) — and is never itself a structural
+    /// secret. This is the fix's must-survive set.
+    #[test]
+    fn path_and_ref_shapes_survive(p in path_or_ref_shape()) {
+        prop_assert_eq!(
+            apply(&p), p.clone(),
+            "a legitimate long path/ref was over-redacted: {:?}", p
+        );
+        prop_assert!(!is_structural_secret(&p));
+    }
+
+    /// #70b adversarial: a real credential planted INSIDE a path-shaped string
+    /// (`refs/heads/<credential>`, `keys/<credential>/rotate`) MUST still be
+    /// redacted — the path exemption never rescues a structural secret. Generated
+    /// over the full credential-shape set with path scaffolding around it.
+    #[test]
+    fn credential_in_path_context_still_redacts(
+        cred in credential_shape(),
+        lead in prop::sample::select(vec!["refs/heads/", "keys/", "src/vendor/", "objects/pack/"]),
+    ) {
+        let s = format!("{lead}{cred}");
+        prop_assert!(
+            is_structural_secret(&s),
+            "a credential in a path context was not detected structurally: {s:?}"
+        );
+        prop_assert_eq!(
+            apply(&s), REDACTED,
+            "a credential disguised inside a path SURVIVED the scrub: {:?}", s
         );
     }
 
