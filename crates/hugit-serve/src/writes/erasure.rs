@@ -929,6 +929,14 @@ fn execute_account_erasure_inner(
             continue; // idempotent — already terminal
         }
         tombstone_repo(sink, &leg.repo, &principal_chain, at)?;
+        // Task #74 (W-METENANT scaling follow-up): `repo.erased` is TERMINAL and
+        // authz-relevant (`authorize_read` denies an erased repo to EVERYONE,
+        // including the operator) — refresh the repo-meta cache immediately, before
+        // this loop's TOCTOU re-assert (`plan_account_erasure` below) or any
+        // concurrent `/v1/me/*` request can observe a stale "not erased" cached
+        // answer. A stale-cache leak here would be a private/erased-content
+        // exposure, not merely a perf regression.
+        state.refresh_repo_meta_cache(&leg.repo);
         tombstoned += 1;
     }
 
