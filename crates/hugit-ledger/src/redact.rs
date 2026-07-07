@@ -59,8 +59,9 @@
 // module keeps its OWN free-text POLICY (the 4.0 threshold + the bare-hex
 // exemption in `high_entropy_token`), built on those shared primitives.
 use crate::secret_shape::{
-    ENTROPY_MIN_LEN, SECRET_MARKER as SHARED_SECRET_MARKER, is_bare_hex_digest_shape,
-    is_content_address_ref, is_digest_algo, is_structural_secret, is_token_char, shannon_entropy,
+    ENTROPY_MIN_LEN, IDENT_ENTROPY_THRESHOLD, SECRET_MARKER as SHARED_SECRET_MARKER,
+    is_bare_hex_digest_shape, is_content_address_ref, is_digest_algo, is_structural_secret,
+    is_token_char, shannon_entropy,
 };
 
 /// The planted-secret prefix that triggers redaction (the marker path).
@@ -167,11 +168,156 @@ fn high_entropy_token(s: &str) -> bool {
         {
             return true;
         }
+        // Path/ref classification (#70b): a legitimate long org/branch path or
+        // deep repo path — the kind git itself emits (`refs/heads/<branch>`, a
+        // nested repo path) — is separator-structured, path-charset, and word-
+        // dense (NOT base64-dense). Such a token clears the 4.0 free-text entropy
+        // floor purely because it is long and varied, not because it is a
+        // credential, and over-redacts today. Classify it explicitly BEFORE the raw
+        // entropy gate. The classifier is fail-closed: a path token that hides a
+        // hex digest / long-hex / high-entropy SEGMENT, or is base64-dense overall,
+        // is REDACTED (not spared); only a genuinely word-shaped path survives.
+        match classify_path_token(token) {
+            Some(PathVerdict::Redact) => return true,
+            Some(PathVerdict::Survive) => continue,
+            None => {} // not path-shaped — fall through to the raw entropy scan
+        }
         if shannon_entropy(token) >= ENTROPY_THRESHOLD {
             return true;
         }
     }
     false
+}
+
+/// Maximum fraction of adjacent character-class (lower / upper / digit)
+/// TRANSITIONS a token may carry over its alphanumeric content and still count
+/// as human-authored path/ref text rather than a base64 credential blob.
+///
+/// Human paths run in long same-class stretches (`refs`, `heads`, `descriptive`,
+/// `1234`, `JIRA`, `oauth2`) → density well under this; a random base64 key flips
+/// class on ~65% of characters (each of {lower,upper,digit} is ~independent) →
+/// density ~0.6–1.0. 0.5 separates them with margin while admitting camelCase and
+/// numbered slugs. Deliberately conservative: a MIS-classified path merely redacts
+/// (safe) — the classifier never spares anything a segment check flags.
+const PATH_MAX_TRANSITION_DENSITY: f64 = 0.5;
+
+/// Shannon-entropy ceiling for a single path/ref SEGMENT that may still be spared
+/// as a human word rather than a credential run. Single-sourced from the
+/// identifier door's [`IDENT_ENTROPY_THRESHOLD`] (4.5) — DELIBERATELY the higher,
+/// identifier-layer threshold, NOT the engine's whole-token 4.0. Rationale: inside
+/// a proven path-shaped token a long camelCase/word segment (`addOAuthLoginFlow…`)
+/// sits at ~4.2–4.3 bits/char, while a real dense key (a 40-char AWS/base64 blob)
+/// clears 4.5 (or is already rejected by the density gate, which catches random
+/// keys regardless). Using the door's constant keeps the two redaction layers
+/// consistent on the path/ref case instead of drifting.
+const PATH_SEGMENT_ENTROPY_THRESHOLD: f64 = IDENT_ENTROPY_THRESHOLD;
+
+/// The verdict for a token that has the shape of a path/ref (`classify_path_token`).
+#[derive(PartialEq, Clone, Copy, Debug)]
+enum PathVerdict {
+    /// A genuine word-shaped path/ref — spare it from the raw entropy floor.
+    Survive,
+    /// Path-charset but hiding a credential (a hex digest / long-hex / high-entropy
+    /// segment, or base64-dense overall) — redact.
+    Redact,
+}
+
+/// Classify a maximal token run that MIGHT be a path/ref.
+///
+/// Returns:
+/// - `None` — the token is NOT path-shaped (it carries base64's `+`/`=`, or has no
+///   `/`/`-` separator); the caller runs its normal entropy scan on it.
+/// - `Some(Redact)` — the token is path-CHARSET but is not a legitimate path: it is
+///   base64-dense over its alphanumeric body, OR one of its separator-delimited
+///   segments is itself a credential — a structural secret, a bare {40,64}-hex
+///   digest, a long (≥ [`ENTROPY_MIN_LEN`]) all-hex run, or a high-entropy
+///   (≥ [`PATH_SEGMENT_ENTROPY_THRESHOLD`]) run. A secret wearing a fake path
+///   prefix (`objects/<64-hex>`, `x/<aws-key>`) is caught here.
+/// - `Some(Survive)` — a genuine slug/ref path (`refs/heads/<branch>`, a repo
+///   path): every segment is a low-entropy word, and the body is not base64-dense.
+///
+/// This is fail-closed: the exemption (survive) requires PROOF of innocence at
+/// BOTH the whole-token density level (catches a uniform base64 key sliced by `/`)
+/// AND the per-segment level (catches a key with long same-class runs, and any hex
+/// digest hiding as a path component). Anything else redacts.
+///
+/// The metric operates on separator-invariant views (concatenated alnum body for
+/// density; the split segments for the secret checks), so an attacker cannot dilute
+/// a dense credential by sprinkling `/` or `-`.
+fn classify_path_token(token: &str) -> Option<PathVerdict> {
+    // Path/slug charset only — exclude base64 `+` / `=` and everything else. A run
+    // bearing them is not a path candidate; let the caller's entropy scan judge it.
+    if !token
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'/' | b'-'))
+    {
+        return None;
+    }
+    // Must carry real path separator structure (`/` or `-`). A bare unseparated run
+    // is not a path — the caller's entropy scan handles it unchanged.
+    if !token.bytes().any(|b| matches!(b, b'/' | b'-')) {
+        return None;
+    }
+
+    // From here the token is path-CHARSET. It either proves it is a genuine path
+    // (Survive) or it is redacted (Redact) — it never falls back to the raw scan,
+    // so a hex/high-entropy SEGMENT (which the whole-token scan would miss because
+    // `/`/`-` glue it into one non-hex run) can never leak.
+
+    // (a) base64 density — measured over the ALPHANUMERIC body only, so separator
+    // placement cannot dilute a dense run. A base64 key (case/digit flips on most
+    // chars) exceeds the floor → redact.
+    if class_transition_density(token) > PATH_MAX_TRANSITION_DENSITY {
+        return Some(PathVerdict::Redact);
+    }
+
+    // (b) per-segment credential checks. A legitimate path segment is a short,
+    // low-entropy word; a credential smuggled as a segment (a bare hex digest, a
+    // long all-hex run, or any high-entropy run) is caught here even though the
+    // surrounding `/`/`-` hid it from the whole-token hex/entropy rules.
+    for seg in token.split(['.', '_', '/', '-']) {
+        if seg.is_empty() {
+            continue;
+        }
+        let all_hex = seg.bytes().all(|b| b.is_ascii_hexdigit());
+        if is_structural_secret(seg)
+            || is_bare_hex_digest_shape(seg)
+            || (seg.len() >= ENTROPY_MIN_LEN && all_hex)
+            || shannon_entropy(seg) >= PATH_SEGMENT_ENTROPY_THRESHOLD
+        {
+            return Some(PathVerdict::Redact);
+        }
+    }
+
+    // A genuine word-shaped path/ref — spare it.
+    Some(PathVerdict::Survive)
+}
+
+/// Fraction of adjacent character-class (lower / upper / digit) TRANSITIONS over a
+/// token's ALPHANUMERIC content (separators dropped). `0.0` for a single-class run
+/// (`refstheads`, `1234`), approaching `1.0` for a base64 key that flips class on
+/// nearly every character. Returns `0.0` for a body of fewer than two alnum chars.
+fn class_transition_density(token: &str) -> f64 {
+    #[derive(PartialEq, Clone, Copy)]
+    enum Class {
+        Lower,
+        Upper,
+        Digit,
+    }
+    let classes: Vec<Class> = token
+        .bytes()
+        .filter_map(|b| match b {
+            b'a'..=b'z' => Some(Class::Lower),
+            b'A'..=b'Z' => Some(Class::Upper),
+            b'0'..=b'9' => Some(Class::Digit),
+            _ => None, // separators dropped
+        })
+        .collect();
+    if classes.len() < 2 {
+        return 0.0;
+    }
+    let transitions = classes.windows(2).filter(|w| w[0] != w[1]).count();
+    transitions as f64 / (classes.len() - 1) as f64
 }
 
 /// True iff the bytes immediately before `run_start` form `<algo>:` where
@@ -824,5 +970,220 @@ mod tests {
             REDACTED,
             "Bearer followed by multiple spaces must redact"
         );
+    }
+
+    // ── #70b: path/ref exemption — legitimate long paths SURVIVE ──────────────
+
+    #[test]
+    fn long_branch_ref_survives() {
+        // The reported over-redaction: a long, legitimate git ref. `/` and `-`
+        // are token chars, so the WHOLE ref is one 48-char run whose entropy
+        // clears 4.0 — it redacted before this fix. It must now survive verbatim.
+        let s = "refs/heads/some-very-long-descriptive-branch-name";
+        assert_eq!(apply(s), s, "a legitimate long branch ref must not redact");
+    }
+
+    #[test]
+    fn deep_repo_path_survives() {
+        // A deep repo path (the blob "Histórico" surface renders these).
+        let s = "crates/hugit-ledger/src/secret_shape";
+        assert_eq!(apply(s), s);
+    }
+
+    #[test]
+    fn jira_style_branch_survives() {
+        // A common ticket-tagged branch: uppercase tag + digits + kebab words.
+        let s = "feature/JIRA-1234-add-new-oauth-login-flow";
+        assert_eq!(apply(s), s);
+    }
+
+    #[test]
+    fn camelcase_branch_survives() {
+        // camelCase segments have a few case transitions but stay well under the
+        // base64 density floor.
+        let s = "feature/addOAuthLoginFlowForTheNewDashboard";
+        assert_eq!(apply(s), s);
+    }
+
+    #[test]
+    fn numbered_kebab_path_survives() {
+        // Numbers embedded in slug words (`oauth2`, `sha256`, `v2`).
+        let s = "release/v2-oauth2-sha256-migration-plan";
+        assert_eq!(apply(s), s);
+    }
+
+    #[test]
+    fn full_ref_path_survives() {
+        let s = "refs/remotes/origin/feature/multi-tenant-identity-exchange";
+        assert_eq!(apply(s), s);
+    }
+
+    // ── #70b adversarial: a secret disguised as a path STILL redacts ──────────
+
+    #[test]
+    fn secret_with_slash_still_redacts() {
+        // A dense random base64 key with a `/` in the middle: the alphanumeric
+        // body flips character class on nearly every char → density > 0.5 → the
+        // classifier redacts it. (A real "high-entropy token with a slash".)
+        let s = "8Kp2mZ9qLx4/vTn7wRj3sYb6cFd1gHe0Xy";
+        assert_eq!(
+            apply(s),
+            REDACTED,
+            "a dense random base64 key split by `/` must still redact"
+        );
+    }
+
+    #[test]
+    fn aws_key_low_density_in_path_still_redacts() {
+        // The AWS docs example secret key has LONG same-class runs (`EXAMPLEKEY`),
+        // so its class-transition density is low (~0.35) — the density gate alone
+        // would MISS it. But its 40-char segment clears the 4.5 per-segment entropy
+        // ceiling (~4.8 bits/char), so a real dense key wearing a path prefix is
+        // still caught. (Guards the low-density-but-high-entropy smuggle.)
+        let s = "keys/aws/wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY123";
+        assert_eq!(apply(s), REDACTED);
+    }
+
+    #[test]
+    fn secret_hyphen_grouped_still_redacts() {
+        // A dense key sliced into hyphen groups to look path-like. Concatenating
+        // the alnum body (separator-invariant) keeps the density high → rejected
+        // by the shape gate → entropy scan redacts.
+        let s = "aB3xZ-9qLm2-mK7pR-4tY8w-N6vC1-dF5gH";
+        assert_eq!(
+            apply(s),
+            REDACTED,
+            "a hyphen-grouped dense key must still redact"
+        );
+    }
+
+    #[test]
+    fn secret_slash_grouped_five_char_still_redacts() {
+        // The constructed smuggle: a base64 blob broken into 5-char `/` groups so
+        // each SEGMENT looks short/innocent. Density is measured over the
+        // CONCATENATED alnum body, so the slicing does not lower it → rejected.
+        let s = "aB3xZ/Z9qLm/2mK7p/pR4tY/wN6vC";
+        assert_eq!(
+            apply(s),
+            REDACTED,
+            "a dense key sliced into small `/` groups must still redact"
+        );
+    }
+
+    #[test]
+    fn ghp_inside_path_shaped_string_still_redacts() {
+        // A `ghp_` PAT embedded in a path-shaped string: caught structurally
+        // (KNOWN_PREFIXES) before the entropy scan / path exemption even runs.
+        let s = "refs/heads/ghp_16C7e42F292c6912E7710c838347Ae178B4a";
+        assert_eq!(apply(s), REDACTED, "a ghp_ PAT in a path must still redact");
+    }
+
+    #[test]
+    fn aws_key_in_path_shaped_string_still_redacts() {
+        // AKIA-prefixed AWS key inside a path — structural, still redacts.
+        let s = "keys/AKIAIOSFODNN7EXAMPLE/rotate";
+        assert_eq!(apply(s), REDACTED);
+    }
+
+    #[test]
+    fn bare_hex_in_path_still_redacts() {
+        // A 40-hex digest wearing a path prefix: the bare-hex-digest rule runs
+        // ABOVE the path exemption, so the hex run redacts regardless.
+        let s = "objects/3f786850e387550fdab836ed7e6dc881de23001b";
+        assert_eq!(apply(s), REDACTED);
+    }
+
+    #[test]
+    fn plus_bearing_base64_never_a_path() {
+        // A base64 run containing `+`/`=` fails the path charset gate outright,
+        // so it can never be mistaken for a path and still redacts.
+        let s = "creds/8Kp2mZ9qLx4vTn7wRj3sYb6cFd1gHe0+abc=/x";
+        assert_eq!(apply(s), REDACTED);
+    }
+
+    #[test]
+    fn classify_path_token_verdicts() {
+        use PathVerdict::{Redact, Survive};
+        // Real paths → Survive.
+        assert_eq!(
+            classify_path_token("refs/heads/some-very-long-descriptive-branch-name"),
+            Some(Survive)
+        );
+        assert_eq!(
+            classify_path_token("crates/hugit-ledger/src/secret_shape"),
+            Some(Survive)
+        );
+        assert_eq!(
+            classify_path_token("feature/JIRA-1234-add-oauth"),
+            Some(Survive)
+        );
+        // No separator → not a path candidate (caller runs the entropy scan).
+        assert_eq!(
+            classify_path_token("wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLE"),
+            None
+        );
+        // `+`/`=` charset → not a path candidate.
+        assert_eq!(classify_path_token("abc/def+ghi=jkl"), None);
+        // Base64-dense body with a slash → Redact (base64 density).
+        assert_eq!(
+            classify_path_token("aB3xZ9qL2mK7/pR4tY8wN6vC1dF5gH0jS"),
+            Some(Redact)
+        );
+        // Path prefix hiding a 40-hex digest segment → Redact.
+        assert_eq!(
+            classify_path_token("objects/3f786850e387550fdab836ed7e6dc881de23001b"),
+            Some(Redact)
+        );
+        // The AWS example key keeps density low (long `EXAMPLEKEY` run), but its
+        // segment clears the 4.5 per-segment entropy ceiling → Redact.
+        assert_eq!(
+            classify_path_token("keys/aws/wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY123"),
+            Some(Redact)
+        );
+    }
+
+    #[test]
+    fn full_specimen_set_redacts_standalone_and_disguised_as_path() {
+        // #70b DoD: the entire secret-specimen set MUST redact — both standalone
+        // AND when an attacker wraps it in a path-shaped string (`refs/heads/…`,
+        // `keys/…`) to try to ride the new path/ref exemption. The path exemption
+        // is fail-closed and never rescues any of these.
+        let specimens = [
+            "ghp_16C7e42F292c6912E7710c838347Ae178B4a",
+            "gho_16C7e42F292c6912E7710c838347Ae178B4a",
+            "ghs_16C7e42F292c6912E7710c838347Ae178B4a",
+            "github_pat_11ABCDEFG0aBcDeFgHiJ_kLmNoPqRsTuVwXyZ012345",
+            "AKIAIOSFODNN7EXAMPLE",
+            "xo\x78b-2222222222-3333333333-abcdefghijklmnop",
+            "glpat-abcdefghijklmnopqrst",
+            "dop_v1_0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab",
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.abc123def",
+            "Bearer abc123def456ghi789jkl",
+            "sk-abcdefghijklmnopqrstuvwxyz0123456789ABCDEF",
+            "postgres://user:S3cr3tP4ssword@db.example.com/mydb",
+            // 40-char + 64-char dense random base64 (unprefixed high-entropy).
+            "8Kp2mZ9qLx4vTn7wRj3sYb6cFd1gHe0aB3xZ9qL",
+            "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY123",
+        ];
+        for spec in specimens {
+            assert_eq!(
+                apply(spec),
+                REDACTED,
+                "standalone specimen leaked: {spec:?}"
+            );
+            // Disguised inside a path-shaped wrapper — must STILL redact.
+            let disguised = format!("refs/heads/{spec}");
+            assert_eq!(
+                apply(&disguised),
+                REDACTED,
+                "specimen leaked when disguised as a path: {disguised:?}"
+            );
+            let disguised2 = format!("src/vendor/{spec}/mod");
+            assert_eq!(
+                apply(&disguised2),
+                REDACTED,
+                "specimen leaked when embedded mid-path: {disguised2:?}"
+            );
+        }
     }
 }
