@@ -33,7 +33,10 @@ pub mod read;
 pub mod write;
 
 pub use gix_hash::ObjectId;
-pub use read::history::{BLOB_HISTORY_BUDGET, BlobHistoryEntry, MAX_HISTORY_REVS, blob_history};
+pub use read::history::{
+    BLOB_HISTORY_BUDGET, BlobHistoryEntry, INDEX_BUILD_BUDGET, MAX_HISTORY_REVS, MAX_INDEX_COMMITS,
+    blob_history, build_blob_history_index,
+};
 pub use read::negotiate::{
     Capabilities, NegotiationError, RefAdvertisement, RefView, WantHave, parse_client_shallow,
     parse_deepen,

@@ -41,7 +41,7 @@ pub mod viewer_can;
 
 pub use admin::{build_admin_overview, build_admin_tokens, build_audit, build_erasure};
 pub use attention::{build_attention, build_me_attention};
-pub use blob::build_blob;
+pub use blob::{build_blob, build_blob_with_history};
 pub use branches::build_branches;
 pub use campaign::build_campaign;
 pub use checks::build_checks;

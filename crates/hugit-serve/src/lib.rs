@@ -20,6 +20,7 @@
 
 pub mod auth;
 pub mod authz;
+pub mod blob_history_index;
 pub mod budgeted_source;
 pub mod cas;
 pub mod clone_pack;

@@ -1431,6 +1431,11 @@ fn finish_receive_pack(
                         // slow walk (never a wrong pack: the serve side re-checks
                         // `refset_sha`). A no-op if this repo has no clone cache.
                         spawn_clone_pack_rebuild(state, repo);
+                        // #70(a): the push moved HEAD → the per-path history index is now
+                        // stale (a lookup HEAD-mismatch would just fall back to the live
+                        // walk). Rebuild it for the new tip in the background (off this
+                        // worker's response path — the client already has its `ok`).
+                        crate::blob_history_index::spawn_blob_history_index_build(state, repo);
                     }
                     Err(crate::cas::CasPushError::Persist(reason)) => {
                         let report = build_report_status(
@@ -1658,6 +1663,10 @@ fn handle_delete_ref(
                     // pack in the background (best-effort; a stale cache would just
                     // fail the `refset_sha` re-check and slow-walk). No-op without a cache.
                     spawn_clone_pack_rebuild(state, repo);
+                    // #70(a): the delete moved the ref set → rebuild the per-path history
+                    // index for the new HEAD in the background (stale-index lookups fall
+                    // back to the live walk until it lands). No-op for a refless repo.
+                    crate::blob_history_index::spawn_blob_history_index_build(state, repo);
                 }
                 Err(crate::cas::CasPushError::Persist(reason)) => {
                     let report = build_report_status(
