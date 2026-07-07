@@ -30,8 +30,11 @@
 //! Debug; only HTTP statuses and non-secret fields are surfaced).
 
 use hugit_checks::runner::{
-    AcquireLeaseRequest, CloseStatus, IngestEvent, IngestUsage, RunnerError, runner_from_env,
+    AcquireLeaseRequest, CloseStatus, IngestEvent, IngestUsage, RunnerError,
+    dispatch_attest_offbox, runner_from_env,
 };
+use hugit_contracts::IntentMetrics;
+use hugit_contracts::context_envelope::{TokenCounts, ToolCount};
 
 #[test]
 fn runner_apath_live_smoke() {
@@ -147,6 +150,107 @@ fn runner_apath_live_smoke() {
     println!(
         "LIVE A-path smoke PASSED end-to-end (acquire → §13 → close) against the fabric — \
          hugit's LeaseClient wire matches the live fabric DTOs."
+    );
+}
+
+/// LIVE smoke for the A-path ORCHESTRATION layer — `dispatch_attest_offbox`,
+/// the function `hugit pr land --dispatch` actually calls. Where the raw-client
+/// smoke above pokes the client methods directly, this drives the whole product
+/// path in ONE call: acquire → project the measured §13.1 metrics into the §13.2
+/// event batch → submit (scoped cred) → close (PAT) → return the FINALIZED
+/// metrics from the close response (the fabric's signed source of truth).
+///
+/// This is what caught the off-box A-path bug: `dispatch.rs` was, like the
+/// client, "proven against the fake transport (no socket is opened)" — and its
+/// off-box branch decoded `poll_meta` as a box `RunnerResultEnvelope{exit,…}`,
+/// which an off-box lease NEVER produces (live: `envelope/meta → {"meta":[]}`,
+/// `close.check_result → null`). Against the live fabric that failed
+/// `missing field exit`; the fix drops the box-result poll on the off-box path
+/// (the caller uses only `.metrics`, superseded by the close figure) and this
+/// test now passes end-to-end — the standing guard that keeps it fixed.
+///
+/// Same gate (skip when `HUGIT_RUNNER_HOST` unset) + same single-acquire, no-box
+/// discipline. `cost_usd_micros = None` (honest-zero; no real provider figure).
+#[test]
+fn dispatch_offbox_orchestration_live_smoke() {
+    let client = match runner_from_env() {
+        Ok(c) => c,
+        Err(RunnerError::NotConfigured(why)) => {
+            println!(
+                "SKIPPED dispatch_offbox_orchestration_live_smoke: runner config absent ({why}) — \
+                 orchestration A-path not exercised. Set HUGIT_RUNNER_HOST + the PAT to run it."
+            );
+            return;
+        }
+        Err(other) => panic!("loader returned an unexpected error: {other:?}"),
+    };
+
+    // The off-box agent loop's measured §13.1 aggregate (what `project_intent_metrics`
+    // turns into the submitted event batch: a tool_call per breakdown count + one
+    // model_turn per turn, usage on the first).
+    let measured = IntentMetrics {
+        tokens: TokenCounts {
+            input: 100,
+            output: 50,
+            cache_read: 10,
+            cache_write: 5,
+            total: 165,
+        },
+        wall_ms: 2_000,
+        active_ms: 1_500,
+        tool_calls: 2,
+        tool_breakdown: vec![ToolCount {
+            tool: "grep".to_string(),
+            count: 2,
+        }],
+        model_turns: 2,
+        cost_usd_micros: 0,
+    };
+
+    // Fabric-accepted off-box shape (see the note in the raw-client test).
+    let acquire = AcquireLeaseRequest {
+        image_digest: format!("alpine@sha256:{}", "e".repeat(64)),
+        net_policy: "none".to_string(),
+        tmp_root: "/tmp/hugit-apath-orch-smoke".to_string(),
+        expiry_ms: 300_000,
+    };
+
+    // Three memo axes + toolchain digest — stamped onto the returned CheckResult;
+    // opaque to the fabric on this off-box submit path.
+    let tree_root = "aa".repeat(32);
+    let def_digest = "bb".repeat(32);
+    let toolchain_digest = "cc".repeat(32);
+    let memo_key = hugit_refstore::compute_memo_key(&tree_root, &def_digest, &toolchain_digest);
+
+    let outcome = dispatch_attest_offbox(
+        &client,
+        &acquire,
+        &measured,
+        &memo_key,
+        &tree_root,
+        &def_digest,
+        &toolchain_digest,
+        None, // honest-zero: no real provider-/usage figure to submit
+    )
+    .expect("live dispatch_attest_offbox must drive acquire → §13 → close end-to-end");
+
+    // The result must echo the axes we stamped; the metrics come from the fabric's
+    // FINALIZED close response (the signed source of truth), never a hand figure.
+    assert_eq!(
+        outcome.result.memo_key, memo_key,
+        "memo_key must round-trip"
+    );
+    assert_eq!(
+        outcome.result.tree_hash, tree_root,
+        "tree axis must round-trip"
+    );
+    println!(
+        "orchestration A-path OK: exit={} runner_ref={} finalized_metrics={:?}",
+        outcome.result.exit, outcome.result.runner_ref, outcome.metrics,
+    );
+    println!(
+        "LIVE dispatch_attest_offbox smoke PASSED — the product-level A-path orchestration \
+         (acquire → §13 submit → close, finalized metrics from close) matches the live fabric."
     );
 }
 

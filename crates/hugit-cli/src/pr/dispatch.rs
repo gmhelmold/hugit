@@ -399,32 +399,6 @@ mod tests {
         }
     }
 
-    /// A result-envelope meta body for the poll step. The A-path reads the
-    /// CheckResult FIELDS from here (exit/refs/…), but the ATTESTED metrics come
-    /// from the CLOSE response — so these poll metrics are a deliberate PLACEHOLDER
-    /// (distinct from [`close_body`]'s distinctive figure) to prove close wins.
-    fn envelope_body() -> Vec<u8> {
-        br#"{
-            "exit": 0,
-            "artifacts": [],
-            "stdout_ref": "blob:o",
-            "stderr_ref": "blob:e",
-            "duration_ms": 4242,
-            "runner_ref": "runner:box-land",
-            "metrics": {
-                "tokens": {"input": 1, "output": 1, "cache_read": 1, "cache_write": 1, "total": 4},
-                "wall_ms": 1,
-                "active_ms": 1,
-                "tool_calls": 1,
-                "tool_breakdown": [{"tool": "Read", "count": 1}],
-                "model_turns": 1,
-                "cost_usd_micros": 1,
-                "cpu_ms": 4321
-            }
-        }"#
-        .to_vec()
-    }
-
     /// The fabric `CloseResponse` carrying the DISTINCTIVE finalized §13.1 metrics
     /// — the attested figure the land envelope must capture — plus the fabric
     /// extras (attestation/sigs/key_id/echoed result) hugit liberally ignores.
@@ -464,18 +438,18 @@ mod tests {
         }
     }
 
-    /// A full A-path acquire→submit→poll→close FIFO. The poll carries placeholder
-    /// metrics; the CLOSE carries the distinctive finalized figure — the attested
-    /// per-job cost the land envelope captures (close is the source of truth).
+    /// A full off-box A-path acquire→submit→close FIFO. The off-box path polls NO
+    /// box result envelope (an off-box lease runs no box; live: `envelope/meta →
+    /// {"meta":[]}`, `close.check_result:null`); the CLOSE carries the distinctive
+    /// finalized figure — the attested per-job cost the land envelope captures.
     fn happy_responses() -> Vec<(u16, Vec<u8>)> {
         vec![
             (
                 200,
                 serde_json::to_vec(&acquire_resp_with_ingest()).unwrap(),
             ), // acquire (wrapper)
-            (200, Vec::new()),      // submit_envelope (§13.2 ingest)
-            (200, envelope_body()), // poll_meta (CheckResult fields, placeholder metrics)
-            (200, close_body()),    // close — the finalized §13.1 attested metrics
+            (200, Vec::new()),   // submit_envelope (§13.2 ingest)
+            (200, close_body()), // close — the finalized §13.1 attested metrics
         ]
     }
 
