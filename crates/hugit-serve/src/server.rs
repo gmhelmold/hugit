@@ -1150,15 +1150,52 @@ fn dispatch_account_erase(
 
 /// The erasure grace window in milliseconds — the two-authority cooling-off between a
 /// subject's `erasure.requested` (Part 1) and the operator's execute (Part 2). An OWNER
-/// KNOB, overridable by `HUGIT_ERASURE_GRACE_SECS` (a placeholder default; GDPR permits the
-/// controller up to 30 days). Set to `0` for a live-verify against a just-staged request.
+/// KNOB via `HUGIT_ERASURE_GRACE_SECS` (default 7d; GDPR permits the controller up to 30d).
+///
+/// **Min-grace FLOOR (clw hardening):** a sub-floor grace — including `0` — is CLAMPED up to
+/// [`MIN_ERASURE_GRACE_SECS`], so a stray `grace=0` can NEVER ship to prod and let the
+/// operator execute an irreversible erasure the instant it is requested (which would collapse
+/// the whole two-authority cooling-off — a compromised session could stage AND have it
+/// executed with no dispute window). The live-verify legitimately needs `0`, so it is allowed
+/// ONLY behind the explicit escape hatch `HUGIT_ERASURE_ALLOW_BELOW_GRACE_FLOOR=1` — a
+/// deliberate, auditable, verify-only opt-out that a routine prod deploy never carries.
 fn erasure_grace_ms() -> u64 {
-    const DEFAULT_ERASURE_GRACE_SECS: u64 = 7 * 86_400; // 7 days — owner-overridable
-    std::env::var("HUGIT_ERASURE_GRACE_SECS")
+    let configured = std::env::var("HUGIT_ERASURE_GRACE_SECS")
         .ok()
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .unwrap_or(DEFAULT_ERASURE_GRACE_SECS)
-        .saturating_mul(1000)
+        .and_then(|s| s.trim().parse::<u64>().ok());
+    let allow_below_floor = std::env::var("HUGIT_ERASURE_ALLOW_BELOW_GRACE_FLOOR")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false);
+    grace_secs_with_floor(configured, allow_below_floor).saturating_mul(1000)
+}
+
+/// The default grace when unset — 7 days (owner-overridable).
+const DEFAULT_ERASURE_GRACE_SECS: u64 = 7 * 86_400;
+/// The MINIMUM grace a prod deploy may carry — the smallest meaningful two-authority
+/// cooling-off. A configured grace below this (incl. `0`) is clamped UP to it unless the
+/// explicit `HUGIT_ERASURE_ALLOW_BELOW_GRACE_FLOOR` escape hatch is set (verify-only).
+const MIN_ERASURE_GRACE_SECS: u64 = 3_600; // 1 hour
+
+/// Pure grace-floor policy (testable without the process env). `configured = None` → the
+/// default. A configured value `< MIN` is clamped to `MIN` UNLESS `allow_below_floor` — in
+/// which case the raw value (incl. `0`) is honoured (the audited verify opt-out). A value
+/// `>= MIN` is honoured as-is.
+#[must_use]
+fn grace_secs_with_floor(configured: Option<u64>, allow_below_floor: bool) -> u64 {
+    match configured {
+        None => DEFAULT_ERASURE_GRACE_SECS,
+        Some(secs) if secs < MIN_ERASURE_GRACE_SECS && !allow_below_floor => {
+            // A sub-floor grace without the explicit opt-out is a foot-gun (a prod deploy
+            // that forgot to restore the grace after a verify) — clamp UP, never ship it.
+            eprintln!(
+                "[hugit-serve] HUGIT_ERASURE_GRACE_SECS={secs} is below the \
+                 {MIN_ERASURE_GRACE_SECS}s min-grace floor — clamping up (set \
+                 HUGIT_ERASURE_ALLOW_BELOW_GRACE_FLOOR=1 for a verify-only sub-floor grace)."
+            );
+            MIN_ERASURE_GRACE_SECS
+        }
+        Some(secs) => secs,
+    }
 }
 
 /// Map an [`ErasureOutcome`] to the `/v1` response. `executed` → 200 (the irreversible
@@ -2293,6 +2330,34 @@ mod godpath_gate_tests {
         serde_json::json!({ "account": account })
             .to_string()
             .into_bytes()
+    }
+
+    #[test]
+    fn grace_floor_clamps_sub_floor_unless_the_opt_out_is_set() {
+        // Unset → the 7d default.
+        assert_eq!(
+            grace_secs_with_floor(None, false),
+            DEFAULT_ERASURE_GRACE_SECS
+        );
+        // A sub-floor grace (incl. 0) WITHOUT the opt-out → clamped UP to the floor. This is
+        // THE guard: a stray grace=0 can never ship to prod.
+        assert_eq!(
+            grace_secs_with_floor(Some(0), false),
+            MIN_ERASURE_GRACE_SECS
+        );
+        assert_eq!(
+            grace_secs_with_floor(Some(60), false),
+            MIN_ERASURE_GRACE_SECS
+        );
+        // A sub-floor grace WITH the explicit opt-out → honoured raw (the verify-only path).
+        assert_eq!(grace_secs_with_floor(Some(0), true), 0);
+        assert_eq!(grace_secs_with_floor(Some(60), true), 60);
+        // At/above the floor → honoured as-is (opt-out irrelevant).
+        assert_eq!(
+            grace_secs_with_floor(Some(MIN_ERASURE_GRACE_SECS), false),
+            MIN_ERASURE_GRACE_SECS
+        );
+        assert_eq!(grace_secs_with_floor(Some(30 * 86_400), false), 30 * 86_400);
     }
 
     #[test]
