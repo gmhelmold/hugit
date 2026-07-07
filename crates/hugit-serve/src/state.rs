@@ -1387,12 +1387,25 @@ impl AppState {
         names.sort();
         names.dedup();
 
-        // Operator: all loaded repos (bypass — no per-repo authz needed). An
-        // unloadable log is skipped fail-closed (it cannot be aggregated anyway).
+        // Operator: all loaded repos, bypassing the per-repo VISIBILITY gate (an
+        // operator legitimately sees PRIVATE repos — that is the ops role). But a
+        // GDPR1-erased repo is TERMINAL and must be gone from EVERY view, the
+        // operator's included (#91): `authorize_read`/`authorize_write` already deny
+        // an erased repo to everyone incl. the operator, so leaking its slug via
+        // `/v1/me/*` while every other path 404s it is a real projection hole. So
+        // the operator branch consults the SAME cached meta the tenant branch uses
+        // and excludes ONLY `erased` (never visibility). An unloadable log is
+        // skipped fail-closed (it cannot be aggregated anyway).
         if crate::authz::is_operator(principal) {
             return names
                 .into_iter()
-                .filter_map(|n| self.load_verified(&n).ok().map(|log| (n, log)))
+                .filter_map(|n| {
+                    let log = self.load_verified(&n).ok()?;
+                    if self.repo_meta_cached(&n, &log).erased {
+                        return None; // erasure is terminal — gone from the operator view too
+                    }
+                    Some((n, log))
+                })
                 .collect();
         }
 
@@ -4351,14 +4364,65 @@ mod me_repos_tests {
 
         // And the hot path — `me_repo_logs` — stops serving it to its own owner via
         // the cached meta (erasure is terminal, no exception for a tenant read).
-        // NOTE: the operator branch of `me_repo_logs` is an unconditional bypass (it
-        // returns every loaded repo without consulting `project_repo_meta`/
-        // `authorize_read`/the cache at all) — that pre-existing behavior is
-        // unrelated to this cache and out of scope here; this test only proves the
-        // cache-consulting (tenant) branch.
+        // (The operator branch ALSO excludes an erased repo — #91, covered by
+        // `operator_me_repo_logs_excludes_an_erased_repo_but_keeps_private`; this
+        // test proves the cache-consulting tenant branch.)
         assert!(
             st.me_repo_logs(&tenant("org-a")).is_empty(),
             "post-refresh, the owner must no longer see the erased repo"
+        );
+    }
+
+    /// #91: an operator legitimately sees a PRIVATE repo, but a GDPR1-erased repo
+    /// (terminal `repo.erased` tombstone) must be gone from the operator's `/v1/me/*`
+    /// view too — else its slug leaks there while every other path 404s it. Proves
+    /// the operator branch now excludes ONLY `erased` (still sees private).
+    #[test]
+    fn operator_me_repo_logs_excludes_an_erased_repo_but_keeps_private() {
+        let dir = scratch_dir();
+        let mut st = AppState::new(dir.clone(), "dev-token".to_string());
+
+        // A private, NOT-erased repo the operator SHOULD still see.
+        std::fs::write(dir.join("keep.json"), meta_log("private", "org-a")).unwrap();
+        // A repo that will be erased (private meta + a terminal tombstone below).
+        std::fs::write(dir.join("gone.json"), meta_log("private", "org-b")).unwrap();
+        for slug in ["keep", "gone"] {
+            st.set_repo_git(
+                slug,
+                Arc::new(hugit_proto::CasObjectSource::new()),
+                gix_hash::ObjectId::empty_tree(gix_hash::Kind::Sha1),
+                BTreeMap::new(),
+            );
+        }
+        // Append the terminal `repo.erased` tombstone to `gone` durably.
+        let gone0 = st.load_verified("gone").expect("load gone");
+        let mut gone1 = gone0.clone();
+        gone1
+            .append_authorized(
+                PrincipalClass::Orchestrator,
+                Endpoint::Land,
+                crate::writes::erasure::REPO_ERASED_KIND,
+                vec!["orchestrator:hugit".into()],
+                serde_json::json!({"reason":"erasure","state":"erased"}).to_string(),
+                1,
+            )
+            .expect("append repo.erased");
+        std::fs::write(
+            dir.join("gone.json"),
+            serde_json::to_string(gone1.records()).unwrap(),
+        )
+        .unwrap();
+        // Boot-populate the cache (as `from_env` would) so the operator branch reads
+        // the erased projection for `gone` and the private projection for `keep`.
+        for slug in ["keep", "gone"] {
+            let log = st.load_verified(slug).expect("load");
+            st.cache_repo_meta(slug, crate::authz::project_repo_meta(&log));
+        }
+
+        assert_eq!(
+            st.repos_for(&operator()),
+            vec!["keep".to_string()],
+            "operator sees the private repo but the erased repo is gone from /v1/me (#91)"
         );
     }
 
