@@ -233,6 +233,11 @@ fn dispatch_pr_metrics<T: RunnerTransport>(
         // exit_code 0: this path is only reached AFTER the PR resolved + the land
         // gate passed, so the attested run is a COMPLETED success. A live off-box
         // agent loop (the P2 seam) that could FAIL would thread its real exit here.
+        // FORWARD GAP (tracked, inert today): when that loop is wired, `land` must
+        // REFUSE to settle on a failed off-box verdict — `dispatch_attest_offbox`
+        // records `failed` on the close but still returns `Ok`, and this caller
+        // propagates only lease ERRORS, so a failed verdict would otherwise land the
+        // PR with a `failed`-attested cost. Gate the settle on the verdict then.
         0,
     )?;
     Ok(outcome.metrics)
