@@ -362,14 +362,17 @@ impl RepoDigestSource for R2OidIndexDigests<'_> {
     }
 }
 
-// ── the EXECUTOR (slice 2 — the irreversible legs; NOT route-wired) ───────────
+// ── the EXECUTOR (slice 2 — the irreversible legs) ────────────────────────────
 //
-// This drives the plan against the REAL stores. It is deliberately NOT reachable from
-// any route yet: the route + grace gate is a later slice, and the whole executor is
-// gated behind clw's RE-audit before any live enablement. It tombstones each owned repo
-// (append-only terminal `repo.erased` → the authz projection serves 404) idempotently,
-// then records the terminal claim on the account log — `erasure.executed` ONLY when the
-// cascade is COMPLETE, else `erasure.partial` (fail-closed against an over-claim).
+// This drives the plan against the REAL stores. `execute_account_erasure_composed` IS
+// route-wired via the operator execute route (server.rs `POST /v1/account/erase/execute`
+// → `dispatch_account_erase_execute`); that route stays 404-DISABLED unless the erase seam
+// is configured (`CORELINK_ERASE_URL`/`AUTH_KEY` → `state.erase_config`) and is gated
+// operator-only + step-up + post-grace + DSR-legitimacy, so the physical CAS transport
+// stays inert until that env is set (clw-audited before live enablement). It tombstones
+// each owned repo (append-only terminal `repo.erased` → the authz projection serves 404)
+// idempotently, then records the terminal claim on the account log — `erasure.executed`
+// ONLY when the cascade is COMPLETE, else `erasure.partial` (fail-closed against an over-claim).
 
 /// The terminal claim appended to the ACCOUNT log when the cascade COMPLETED — every
 /// leg durably tombstoned/purged/GC'd. Emitted ONLY when the plan is not launch-blocked.
