@@ -231,6 +231,7 @@ fn dispatch_offbox_orchestration_live_smoke() {
         &def_digest,
         &toolchain_digest,
         None, // honest-zero: no real provider-/usage figure to submit
+        0,    // exit_code 0: a completed smoke run
     )
     .expect("live dispatch_attest_offbox must drive acquire → §13 → close end-to-end");
 
