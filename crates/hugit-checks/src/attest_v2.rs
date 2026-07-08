@@ -469,4 +469,66 @@ mod tests {
         want.extend_from_slice(&4_200_000u64.to_be_bytes()); // cost_usd_micros
         assert_eq!(got, want, "intent_metrics pre-image framing drifted");
     }
+
+    /// THE fabric-match tripwire (mirrors `preimage_matches_conformance_vector_byte_exact`
+    /// for v2): against the SHARED `conformance/intent_metrics_sig.json` (byte-identical in
+    /// both repos, corelink-runners #320), hugit's `intent_metrics_preimage` reproduces the
+    /// fabric's `preimage_hex` byte-exact AND `verify_intent_metrics_sig` accepts the
+    /// fabric's real signature. If both are green on the same committed bytes, the off-box
+    /// cost binding is proven wire-equivalent — no 5th drift. (Dev key, same discipline as
+    /// `result_binding_v2.json`: the drift risk is the pre-image bytes, key-independent.)
+    #[test]
+    fn intent_metrics_sig_matches_conformance_vector_byte_exact() {
+        use crate::runner::metrics::RunnerJobMetrics;
+        let raw = std::fs::read_to_string(conformance_path("intent_metrics_sig.json"))
+            .expect("read intent_metrics_sig.json");
+        let v: serde_json::Value = serde_json::from_str(&raw).expect("parse vector");
+        let pubkey = v["fabric_pubkey_b64"].as_str().unwrap();
+        let sig = v["intent_metrics_sig"].as_str().unwrap();
+        let lease_id = v["input"]["lease_id"].as_str().unwrap();
+        let tenant = v["input"]["tenant"].as_str().unwrap();
+        let m: RunnerJobMetrics =
+            serde_json::from_value(v["input"]["metrics"].clone()).expect("metrics parse");
+
+        // ① the pre-image bytes reproduce the fabric's `preimage_hex` byte-exact.
+        let breakdown: Vec<(String, u64)> = m
+            .tool_breakdown
+            .iter()
+            .map(|t| (t.tool.clone(), t.count))
+            .collect();
+        let preimage = hugit_refstore::intent_metrics_preimage(
+            lease_id,
+            tenant,
+            m.tokens.input,
+            m.tokens.output,
+            m.tokens.cache_read,
+            m.tokens.cache_write,
+            m.tokens.total,
+            m.wall_ms,
+            m.active_ms,
+            m.tool_calls,
+            &breakdown,
+            m.model_turns,
+            m.cost_usd_micros,
+        );
+        assert_eq!(
+            hex::encode(&preimage),
+            v["preimage_hex"].as_str().unwrap(),
+            "intent_metrics pre-image bytes must match conformance/intent_metrics_sig.json exactly"
+        );
+
+        // ② the fabric's real signature verifies under the committed pubkey (hugit's path).
+        assert!(
+            verify_intent_metrics_sig(pubkey, lease_id, tenant, &m, sig),
+            "the genuine fabric intent_metrics_sig must verify"
+        );
+
+        // ③ a +1 µUSD cost tamper does NOT verify — the sig genuinely binds cost.
+        let mut tampered = m.clone();
+        tampered.cost_usd_micros += 1;
+        assert!(
+            !verify_intent_metrics_sig(pubkey, lease_id, tenant, &tampered, sig),
+            "a cost tamper must break the signature (cost integrity)"
+        );
+    }
 }
