@@ -299,6 +299,19 @@ pub trait CasTransport {
     /// `body` is meaningful only on 200.
     fn get(&self, url: &str, bearer: &str) -> Result<(u16, Vec<u8>), CasError>;
 
+    /// As [`get`](Self::get), but for the accept-loop LAZY-LOAD-ON-MISS path
+    /// ([`crate::state::AppState::repo_state_or_load`]): it MUST NOT do the
+    /// [`with_throttle_retry!`] sleep-backoff (which can block the single-threaded
+    /// accept loop for ~12s) and it uses a TIGHT timeout ([`LAZY_LOAD_FETCH_TIMEOUT`]).
+    /// A throttle/timeout therefore surfaces FAST as a non-200 status / transport
+    /// error the caller classifies as [`RepoLoadError::Transient`] (never a sleep).
+    /// The default delegates to [`get`](Self::get) — an in-memory mock transport is
+    /// already instantaneous and never sleeps, so only the real network transport
+    /// ([`UreqCasTransport`]) overrides this.
+    fn get_fast(&self, url: &str, bearer: &str) -> Result<(u16, Vec<u8>), CasError> {
+        self.get(url, bearer)
+    }
+
     /// `PUT {url}` with a Bearer PAT + `cas:rw` scope and a raw body. Returns the
     /// response status.
     fn put(&self, url: &str, bearer: &str, body: &[u8]) -> Result<u16, CasError>;
@@ -430,6 +443,13 @@ impl CasConfig {
 pub struct CasClient<T: CasTransport = UreqCasTransport> {
     config: CasConfig,
     transport: T,
+    /// When set, [`get`](Self::get) routes through the transport's fast-fail
+    /// [`get_fast`](CasTransport::get_fast) (no throttle-retry sleeps, tight
+    /// timeout) instead of the standard retrying [`get`](CasTransport::get). Set
+    /// ONLY by the accept-loop lazy-load path via [`set_fast_fail`](Self::set_fast_fail)
+    /// (see [`LazyCasObjectSource::set_cas_fast_fail`]); default **false**, so every
+    /// steady-state read (blob/clone) keeps the retrying behavior.
+    fast_fail: bool,
 }
 
 /// The result of a bulk read: each requested blake3 paired with its bytes
@@ -440,7 +460,18 @@ impl<T: CasTransport> CasClient<T> {
     /// Construct over an explicit transport + config. Used in tests to inject a
     /// mock transport; in production `T = UreqCasTransport`.
     pub fn with_transport(config: CasConfig, transport: T) -> Self {
-        Self { config, transport }
+        Self {
+            config,
+            transport,
+            fast_fail: false,
+        }
+    }
+
+    /// Toggle fast-fail mode (see the [`fast_fail`](Self::fast_fail) field). Used
+    /// ONLY by [`load_manifests_from_cas`]'s LazyLoad root-tree resolution so a
+    /// runtime lazy-load never sleep-retries on the accept loop.
+    pub fn set_fast_fail(&mut self, on: bool) {
+        self.fast_fail = on;
     }
 
     /// Fetch a CAS object by its blake3 key. Maps the confirmed contract:
@@ -449,7 +480,12 @@ impl<T: CasTransport> CasClient<T> {
     /// - anything else → `Err(CasError::Status)`.
     pub fn get(&self, blake3: &str) -> Result<Option<Vec<u8>>, CasError> {
         let url = self.config.endpoint(blake3)?;
-        let (status, body) = self.transport.get(&url, &self.config.bearer())?;
+        let bearer = self.config.bearer();
+        let (status, body) = if self.fast_fail {
+            self.transport.get_fast(&url, &bearer)?
+        } else {
+            self.transport.get(&url, &bearer)?
+        };
         match status {
             200 => Ok(Some(body)),
             404 | 410 => Ok(None),
@@ -955,6 +991,7 @@ impl CasClient<UreqCasTransport> {
         Ok(Self {
             config: CasConfig::new(base_url, tenant, pat)?,
             transport: UreqCasTransport::new(),
+            fast_fail: false,
         })
     }
 
@@ -1057,9 +1094,21 @@ fn resolve_cas_pat_file() -> Result<PathBuf, CasError> {
 
 /// The real `ureq`-backed CAS transport — the thin network seam, the ONLY code
 /// here that opens a socket. `ureq` is already in the workspace lock.
+/// The tight per-call timeout for the accept-loop LAZY-LOAD-ON-MISS path (distinct
+/// from the standard 90s CAS / 30s R2 timeouts). A single lazy-load runs INLINE on
+/// the single-threaded accept loop and is reachable PRE-AUTH (git `info/refs`), so it
+/// must be bounded to a few seconds — a slow/throttling CAS or R2 must NOT stall the
+/// loop. Both [`UreqCasTransport::get_fast`] and hugit's R2 fast agent
+/// ([`crate::state::R2Config`]) use this.
+pub const LAZY_LOAD_FETCH_TIMEOUT: Duration = Duration::from_secs(3);
+
 #[derive(Debug, Clone)]
 pub struct UreqCasTransport {
     agent: ureq::Agent,
+    /// A SECOND agent with a tight timeout ([`LAZY_LOAD_FETCH_TIMEOUT`]) used ONLY by
+    /// [`get_fast`](Self::get_fast) (the accept-loop lazy-load path) — so a lazy-load
+    /// CAS fetch cannot block the single-threaded loop for the standard 90s.
+    fast_agent: ureq::Agent,
 }
 
 impl Default for UreqCasTransport {
@@ -1075,6 +1124,9 @@ impl UreqCasTransport {
         Self {
             agent: ureq::AgentBuilder::new()
                 .timeout(Duration::from_secs(90))
+                .build(),
+            fast_agent: ureq::AgentBuilder::new()
+                .timeout(LAZY_LOAD_FETCH_TIMEOUT)
                 .build(),
         }
     }
@@ -1125,6 +1177,32 @@ impl CasTransport for UreqCasTransport {
             }
             // ureq surfaces non-2xx as `Error::Status(code, resp)`; map it so the
             // protocol logic can branch (esp. 404/410 → absent).
+            Err(ureq::Error::Status(code, _resp)) => Ok((code, Vec::new())),
+            Err(e) => Err(CasError::Transport(e.to_string())),
+        }
+    }
+
+    fn get_fast(&self, url: &str, bearer: &str) -> Result<(u16, Vec<u8>), CasError> {
+        // Accept-loop lazy-load path: the tight-timeout `fast_agent` and NO
+        // `with_throttle_retry!` sleep-backoff. A 429/503 comes back as a non-200
+        // status (mapped below), and a timeout as `CasError::Transport` — both FAST,
+        // so `load_manifests_from_cas` classifies them `RepoLoadError::Transient`
+        // without ever sleeping the single-threaded loop.
+        let resp = self
+            .fast_agent
+            .get(url)
+            .set("Authorization", bearer)
+            .set(SCOPE_HEADER, SCOPE_READ)
+            .call();
+        match resp {
+            Ok(r) => {
+                let status = r.status();
+                let mut buf = Vec::new();
+                r.into_reader()
+                    .read_to_end(&mut buf)
+                    .map_err(|e| CasError::Transport(e.to_string()))?;
+                Ok((status, buf))
+            }
             Err(ureq::Error::Status(code, _resp)) => Ok((code, Vec::new())),
             Err(e) => Err(CasError::Transport(e.to_string())),
         }
@@ -1238,7 +1316,58 @@ pub fn oid_index_key(tenant: &str, repo: &str) -> String {
 pub trait R2Get {
     /// Fetch an R2 object by its full key. `Ok(None)` = absent; `Err` = transport.
     fn get_object(&self, key: &str) -> Result<Option<Vec<u8>>, String>;
+
+    /// As [`get_object`](Self::get_object), but for the accept-loop LAZY-LOAD-ON-MISS
+    /// path: a TIGHT timeout ([`LAZY_LOAD_FETCH_TIMEOUT`]) so a slow/throttling R2
+    /// cannot stall the single-threaded accept loop. Default → [`get_object`](Self::get_object)
+    /// (an in-memory double is instantaneous); only the real R2 (`R2Config`) overrides
+    /// it to use its tight-timeout agent.
+    fn get_object_bounded(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
+        self.get_object(key)
+    }
 }
+
+/// Which path is loading a repo's manifests — the two differ ONLY in latency
+/// discipline (see [`load_manifests_from_cas`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadMode {
+    /// Boot-time load ([`crate::state::AppState::load_repos_from_env`]). Can afford the
+    /// standard timeouts + the throttle-retry backoff (boot is off the request path).
+    Boot,
+    /// Runtime lazy-load-on-miss ([`crate::state::AppState::repo_state_or_load`]) —
+    /// runs INLINE on the single-threaded accept loop and is reachable PRE-AUTH. MUST
+    /// be bounded: no throttle-retry sleeps + a tight fetch timeout, so a single
+    /// lazy-load stalls the loop for at most a few seconds, never ~12s+.
+    LazyLoad,
+}
+
+/// A typed manifest-load failure so the lazy-load caller can distinguish an
+/// AUTHORITATIVE non-existence (safe to negative-cache) from a TRANSIENT fault
+/// (must NOT be cached — a retry may succeed) — mirroring the transient-vs-authoritative
+/// discipline `count_owned_repos`/`owned_repo_logs` already apply.
+#[derive(Debug)]
+pub enum RepoLoadError {
+    /// `refs.json` GET returned `Ok(None)` — the manifest is authoritatively absent
+    /// (a never-provisioned/never-seeded repo). SAFE to negative-cache: a 404-probe
+    /// storm of the same slug must not re-hit R2 every request.
+    Absent,
+    /// Any transport/throttle/timeout/decode/inconsistency fault (5xx, a throttle on
+    /// the fast path, a partial seam, malformed JSON, an unresolvable HEAD closure).
+    /// A retry may succeed, so the caller MUST NOT negative-cache it (else a real repo
+    /// is false-404'd for the whole cooldown).
+    Transient(String),
+}
+
+impl std::fmt::Display for RepoLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RepoLoadError::Absent => write!(f, "repo manifests are absent (refs.json 404)"),
+            RepoLoadError::Transient(e) => write!(f, "repo manifest load transient fault: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for RepoLoadError {}
 
 /// The output of [`load_from_cas`] — IDENTICAL in shape to `state::load_git_dir`,
 /// so the blob/edit/clone call sites are untouched regardless of source.
@@ -1517,6 +1646,14 @@ impl<T: CasTransport> LazyCasObjectSource<T> {
     #[cfg(test)]
     fn cache_len(&self) -> usize {
         self.cache.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// Toggle the underlying CAS client's fast-fail mode. Used ONLY by
+    /// [`load_manifests_from_cas`] to fast-fail the LazyLoad root-tree resolution
+    /// (no throttle-retry, tight timeout) while the STORED source resumes normal
+    /// retrying reads for subsequent blob/clone traffic.
+    fn set_cas_fast_fail(&mut self, on: bool) {
+        self.cas.set_fast_fail(on);
     }
 
     /// A shared handle to this source's live oid→blake3 index, so the push-finalize
@@ -1850,41 +1987,79 @@ pub fn load_manifests_from_cas<T: CasTransport + Send + Sync, R: R2Get>(
     r2: &R,
     tenant: &str,
     repo: &str,
-) -> Result<LazyCasLoad<T>, String> {
-    // The mutable manifests from R2 (fail-closed on absence — same as the eager path).
-    let refs_bytes = r2
-        .get_object(&refs_manifest_key(tenant, repo))?
-        .ok_or_else(|| format!("refs.json absent for {tenant}/{repo} (content seam not seeded)"))?;
-    let manifest = parse_refs_manifest(&refs_bytes)?;
+    mode: LoadMode,
+) -> Result<LazyCasLoad<T>, RepoLoadError> {
+    // The R2 manifest read: on the LazyLoad path use the TIGHT-timeout `get_object_bounded`
+    // (bounds the accept-loop stall); at Boot use the standard `get_object`.
+    let r2_get = |key: &str| match mode {
+        LoadMode::LazyLoad => r2.get_object_bounded(key),
+        LoadMode::Boot => r2.get_object(key),
+    };
 
-    let index_bytes = r2
-        .get_object(&oid_index_key(tenant, repo))?
-        .ok_or_else(|| {
-            format!("oid-index.json absent for {tenant}/{repo} (content seam not seeded)")
-        })?;
-    let index_raw = parse_oid_index(&index_bytes)?;
+    // refs.json is the AUTHORITATIVE existence signal:
+    //   * `Ok(None)`  → the manifest is absent → RepoLoadError::Absent (negative-cacheable).
+    //   * `Err(_)`    → a transport/throttle/timeout fault → Transient (retry, NEVER cache).
+    let refs_bytes = match r2_get(&refs_manifest_key(tenant, repo)) {
+        Ok(Some(b)) => b,
+        Ok(None) => return Err(RepoLoadError::Absent),
+        Err(e) => return Err(RepoLoadError::Transient(format!("refs.json GET: {e}"))),
+    };
+    let manifest = parse_refs_manifest(&refs_bytes)
+        .map_err(|e| RepoLoadError::Transient(format!("refs.json parse: {e}")))?;
+
+    // oid-index.json ABSENCE while refs.json is PRESENT is NOT authoritative non-existence
+    // — it is an inconsistent / partial seam (e.g. a half-written provision). Classify it
+    // Transient so a subsequent request re-reads it, never a false 30s 404 of a real repo.
+    let index_bytes = match r2_get(&oid_index_key(tenant, repo)) {
+        Ok(Some(b)) => b,
+        Ok(None) => {
+            return Err(RepoLoadError::Transient(format!(
+                "oid-index.json absent for {tenant}/{repo} while refs.json present (partial seam)"
+            )));
+        }
+        Err(e) => return Err(RepoLoadError::Transient(format!("oid-index.json GET: {e}"))),
+    };
+    let index_raw = parse_oid_index(&index_bytes)
+        .map_err(|e| RepoLoadError::Transient(format!("oid-index.json parse: {e}")))?;
 
     // Re-key the oid→blake3 index by ObjectId (O(log n) get on the serve path).
     let mut index: BTreeMap<gix_hash::ObjectId, String> = BTreeMap::new();
     for (oid_hex, blake3) in &index_raw {
-        let oid = gix_hash::ObjectId::from_hex(oid_hex.as_bytes())
-            .map_err(|e| format!("oid-index: {oid_hex:?} is not a valid git oid: {e}"))?;
+        let oid = gix_hash::ObjectId::from_hex(oid_hex.as_bytes()).map_err(|e| {
+            RepoLoadError::Transient(format!(
+                "oid-index: {oid_hex:?} is not a valid git oid: {e}"
+            ))
+        })?;
         index.insert(oid, blake3.clone());
     }
 
-    let source = LazyCasObjectSource::new(index, cas);
+    let mut source = LazyCasObjectSource::new(index, cas);
+    // Fast-fail ONLY the root-tree resolution on the LazyLoad path (no throttle-retry
+    // sleeps, tight timeout). The STORED source is reset to normal below, so all
+    // subsequent blob/clone reads keep the retrying behavior.
+    if matches!(mode, LoadMode::LazyLoad) {
+        source.set_cas_fast_fail(true);
+    }
 
     // Resolve HEAD's root tree — two on-demand fetches (the HEAD commit + its
-    // tree id is read from the commit), NOT the full closure.
-    let head_oid_hex = manifest.refs.get(&manifest.head).ok_or_else(|| {
-        format!(
-            "refs.json head {:?} has no entry in refs (manifest is inconsistent)",
-            manifest.head
-        )
-    })?;
-    let head_oid = gix_hash::ObjectId::from_hex(head_oid_hex.as_bytes())
-        .map_err(|e| format!("head oid {head_oid_hex:?} is not a valid git oid: {e}"))?;
-    let root_tree = root_tree_of_commit(&source, &head_oid)?;
+    // tree id is read from the commit), NOT the full closure. refs.json was present
+    // (the repo EXISTS), so any failure here is a fault of an existing seam → Transient.
+    let root_tree = (|| {
+        let head_oid_hex = manifest.refs.get(&manifest.head).ok_or_else(|| {
+            format!(
+                "refs.json head {:?} has no entry in refs (manifest is inconsistent)",
+                manifest.head
+            )
+        })?;
+        let head_oid = gix_hash::ObjectId::from_hex(head_oid_hex.as_bytes())
+            .map_err(|e| format!("head oid {head_oid_hex:?} is not a valid git oid: {e}"))?;
+        root_tree_of_commit(&source, &head_oid)
+    })()
+    .map_err(RepoLoadError::Transient)?;
+
+    if matches!(mode, LoadMode::LazyLoad) {
+        source.set_cas_fast_fail(false);
+    }
 
     Ok((source, root_tree, manifest.refs))
 }
@@ -4073,7 +4248,8 @@ mod tests {
     fn lazy_source_resolves_blob_on_demand_and_caches() {
         let (cas, r2, commit_hex, blob_oid, blob_body) = seed_repo();
         let (lazy, root_tree, refs) =
-            load_manifests_from_cas(cas, &r2, "tenant-1", "hugit").expect("manifests load lazily");
+            load_manifests_from_cas(cas, &r2, "tenant-1", "hugit", LoadMode::Boot)
+                .expect("manifests load lazily");
         assert_eq!(refs.get("refs/heads/main").unwrap(), &commit_hex);
         // The blob is fetched on demand (it was never pre-loaded at boot).
         let (resolved_oid, bytes) =
@@ -4090,6 +4266,263 @@ mod tests {
         // contains() reflects the index without a fetch.
         use hugit_proto::ObjectSource as _;
         assert!(lazy.contains(&blob_oid));
+    }
+
+    // ── #96 lazy-load hardening: L1 (fast-fail) + L3 (typed Absent/Transient) ──────
+
+    /// A CAS transport that DISTINGUISHES the standard `get` from the fast-fail
+    /// `get_fast`, counting each, and can be told to answer every GET with a 429 —
+    /// so a test can prove the LazyLoad path routes through `get_fast` (no
+    /// throttle-retry) and Boot through `get`.
+    /// `Clone` shares the SAME objects + counters (via `Arc`), so a test can hand a
+    /// clone to `load_manifests_from_cas` (which takes the client by value) and still
+    /// read the counters back through the original.
+    #[derive(Clone, Default)]
+    struct ModeSenseTransport {
+        objects: std::sync::Arc<std::sync::Mutex<BTreeMap<String, Vec<u8>>>>,
+        get_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        get_fast_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        throttle: bool,
+    }
+    impl ModeSenseTransport {
+        fn serve(&self, url: &str) -> Result<(u16, Vec<u8>), CasError> {
+            if self.throttle {
+                return Ok((429, Vec::new())); // throttled — FAST, never a sleep here.
+            }
+            let key = url.rsplit('/').next().unwrap_or("").to_string();
+            match self.objects.lock().unwrap().get(&key) {
+                Some(b) => Ok((200, b.clone())),
+                None => Ok((404, Vec::new())),
+            }
+        }
+    }
+    impl CasTransport for ModeSenseTransport {
+        fn get(&self, url: &str, _bearer: &str) -> Result<(u16, Vec<u8>), CasError> {
+            self.get_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.serve(url)
+        }
+        fn get_fast(&self, url: &str, _bearer: &str) -> Result<(u16, Vec<u8>), CasError> {
+            self.get_fast_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.serve(url)
+        }
+        fn put(&self, _url: &str, _bearer: &str, _body: &[u8]) -> Result<u16, CasError> {
+            Ok(201)
+        }
+        fn post(
+            &self,
+            _url: &str,
+            _bearer: &str,
+            _scope: &str,
+            _content_type: &str,
+            _body: &[u8],
+        ) -> Result<(u16, Vec<u8>), CasError> {
+            Ok((404, Vec::new())) // no bulk plane; the lazy load uses single-object GET.
+        }
+    }
+
+    /// Seed a `blob→tree→commit` closure directly into an object map + the R2 manifest
+    /// doubles (refs.json + oid-index.json), for the mode-sensing lazy-load tests.
+    fn seed_lazy_fixture() -> (BTreeMap<String, Vec<u8>>, MapR2, String) {
+        let blob_body = b"lazy hi\n".to_vec();
+        let blob_oid = git_oid(ObjectKind::Blob, &blob_body);
+        let tree_body = build_tree("100644", "f", blob_oid);
+        let tree_oid = git_oid(ObjectKind::Tree, &tree_body);
+        let commit_body = build_commit(tree_oid);
+        let commit_oid = git_oid(ObjectKind::Commit, &commit_body);
+
+        let mut objects: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        let mut index: OidIndex = BTreeMap::new();
+        for (oid, kind, body) in [
+            (blob_oid, ObjectKind::Blob, &blob_body),
+            (tree_oid, ObjectKind::Tree, &tree_body),
+            (commit_oid, ObjectKind::Commit, &commit_body),
+        ] {
+            let framed = encode_loose(kind, body);
+            let key = cas_key(&framed);
+            index.insert(oid.to_string(), key.clone());
+            objects.insert(key, framed);
+        }
+
+        let r2 = MapR2::default();
+        r2.put_object(
+            &oid_index_key("t", "hugit"),
+            &serde_json::to_vec(&index).unwrap(),
+        )
+        .unwrap();
+        let mut refs = BTreeMap::new();
+        refs.insert("refs/heads/main".to_string(), commit_oid.to_string());
+        let manifest = RefsManifest {
+            head: "refs/heads/main".to_string(),
+            refs,
+        };
+        r2.put_object(
+            &refs_manifest_key("t", "hugit"),
+            &serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        (objects, r2, commit_oid.to_string())
+    }
+
+    fn client_with_objects(
+        objects: BTreeMap<String, Vec<u8>>,
+        throttle: bool,
+    ) -> CasClient<ModeSenseTransport> {
+        let cfg = CasConfig::new("https://cas.example", "t", "secret-pat").unwrap();
+        CasClient::with_transport(
+            cfg,
+            ModeSenseTransport {
+                objects: std::sync::Arc::new(std::sync::Mutex::new(objects)),
+                throttle,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// L1: the LazyLoad path resolves HEAD's root tree through `get_fast` (the
+    /// no-retry, tight-timeout method) and NEVER through the retrying `get`.
+    #[test]
+    fn lazy_load_uses_fast_fail_get_not_retrying_get() {
+        let (objects, r2, commit_hex) = seed_lazy_fixture();
+        let cas = client_with_objects(objects, false);
+        let (_src, _root, refs) =
+            load_manifests_from_cas(cas.clone(), &r2, "t", "hugit", LoadMode::LazyLoad)
+                .expect("lazy load succeeds");
+        assert_eq!(refs.get("refs/heads/main").unwrap(), &commit_hex);
+        assert_eq!(
+            cas.transport
+                .get_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "LazyLoad must NOT use the retrying get"
+        );
+        assert!(
+            cas.transport
+                .get_fast_calls
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 0,
+            "LazyLoad must route the root-tree fetches through get_fast"
+        );
+    }
+
+    /// L1: the Boot path uses the retrying `get`, NOT `get_fast` (boot can afford the
+    /// throttle-retry backoff off the request path).
+    #[test]
+    fn boot_load_uses_retrying_get_not_fast_fail() {
+        let (objects, r2, _commit_hex) = seed_lazy_fixture();
+        let cas = client_with_objects(objects, false);
+        let _ = load_manifests_from_cas(cas.clone(), &r2, "t", "hugit", LoadMode::Boot)
+            .expect("boot load succeeds");
+        assert_eq!(
+            cas.transport
+                .get_fast_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "Boot must NOT use get_fast"
+        );
+        assert!(
+            cas.transport
+                .get_calls
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 0,
+            "Boot must route the root-tree fetches through the retrying get"
+        );
+    }
+
+    /// L1 + L3: a CAS throttle (429) on the LazyLoad path returns Transient FAST via
+    /// `get_fast` — one call, no 6× retry amplification, never a sleep.
+    #[test]
+    fn lazy_load_cas_throttle_is_transient_and_fast() {
+        let (objects, r2, _commit_hex) = seed_lazy_fixture();
+        let cas = client_with_objects(objects, true); // every GET → 429.
+        let Err(err) = load_manifests_from_cas(cas.clone(), &r2, "t", "hugit", LoadMode::LazyLoad)
+        else {
+            panic!("throttled CAS must error");
+        };
+        assert!(
+            matches!(err, RepoLoadError::Transient(_)),
+            "a CAS throttle on an EXISTING repo is Transient, not Absent: {err:?}"
+        );
+        // Exactly the HEAD-commit fetch — no throttle-retry loop (which would be ~6).
+        assert_eq!(
+            cas.transport
+                .get_fast_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "fast-fail: one fetch attempt, no retry amplification"
+        );
+        assert_eq!(
+            cas.transport
+                .get_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    /// L3: refs.json authoritatively absent (empty R2) → `RepoLoadError::Absent`
+    /// (negative-cacheable) in BOTH modes.
+    #[test]
+    fn missing_refs_json_is_absent() {
+        let cas = client_with_objects(BTreeMap::new(), false);
+        let r2 = MapR2::default(); // empty → refs.json 404.
+        for mode in [LoadMode::LazyLoad, LoadMode::Boot] {
+            let Err(err) = load_manifests_from_cas(cas.clone(), &r2, "t", "ghost", mode) else {
+                panic!("absent manifests must error ({mode:?})");
+            };
+            assert!(
+                matches!(err, RepoLoadError::Absent),
+                "refs.json 404 → Absent ({mode:?}): {err:?}"
+            );
+        }
+    }
+
+    /// L3: an R2 GET FAULT (not a 404) is Transient, never Absent — a transient R2 5xx
+    /// on a real repo must not be mistaken for authoritative non-existence.
+    #[test]
+    fn r2_fault_is_transient_not_absent() {
+        struct ErrR2;
+        impl R2Get for ErrR2 {
+            fn get_object(&self, _key: &str) -> Result<Option<Vec<u8>>, String> {
+                Err("R2 5xx".to_string())
+            }
+        }
+        let cas = client_with_objects(BTreeMap::new(), false);
+        let Err(err) = load_manifests_from_cas(cas, &ErrR2, "t", "hugit", LoadMode::LazyLoad)
+        else {
+            panic!("R2 fault must error");
+        };
+        assert!(
+            matches!(err, RepoLoadError::Transient(_)),
+            "an R2 transport fault is Transient: {err:?}"
+        );
+    }
+
+    /// L3: oid-index.json ABSENT while refs.json PRESENT is a partial seam → Transient,
+    /// NOT Absent (a half-written provision must be retried, never negative-cached).
+    #[test]
+    fn oid_index_absent_with_refs_present_is_transient() {
+        let cas = client_with_objects(BTreeMap::new(), false);
+        let r2 = MapR2::default();
+        // Only refs.json seeded; oid-index.json is absent.
+        let mut refs = BTreeMap::new();
+        refs.insert("refs/heads/main".to_string(), "a".repeat(40));
+        let manifest = RefsManifest {
+            head: "refs/heads/main".to_string(),
+            refs,
+        };
+        r2.put_object(
+            &refs_manifest_key("t", "hugit"),
+            &serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let Err(err) = load_manifests_from_cas(cas, &r2, "t", "hugit", LoadMode::LazyLoad) else {
+            panic!("partial seam must error");
+        };
+        assert!(
+            matches!(err, RepoLoadError::Transient(_)),
+            "oid-index absent while refs present is a partial seam → Transient: {err:?}"
+        );
     }
 
     /// Fail-closed: an oid the index references but the CAS no longer holds fails as
