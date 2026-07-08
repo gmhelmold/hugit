@@ -1085,16 +1085,67 @@ fn route_write(state: &AppState, url: &str, headers: &[Header], body: &[u8]) -> 
     }
 }
 
+/// GDPR1 Track-A VERIFY-ONLY escape-hatch subject (clw-approved 2026-07-08, 5
+/// hard conditions). The PURE gate (env-free, so it is exhaustively testable): a
+/// designated dev/test principal may stage `erasure.requested` for EXACTLY the ONE
+/// named test subject, so the operator-execute cascade + the physical `410-Gone`
+/// leg can be proven LIVE without waiting on the real reauth step-up (Track B — the
+/// actual go-live gate). Returns the subject to act AS, or `None` (the production
+/// path with its real-user `403` step-up holds unchanged). FAIL-CLOSED at every arm:
+///
+/// - `env_subject` unset/empty → `None`.
+/// - `env_subject` not a store-safe account slug → `None` (never synthesize a weird
+///   principal from a malformed env).
+/// - the caller is not the dev/operator principal (`orchestrator:hugit`) → `None`
+///   (a real Clerk user can NEVER trigger it).
+/// - the `X-Verify-Stage-Subject` header is absent or does NOT equal `env_subject`
+///   EXACTLY → `None` (defense-in-depth: env AND an explicit per-request header must
+///   agree, so a stray request never accidentally stages).
+///
+/// Named-subject-scoped: the ONLY subject it can ever return is `env_subject`, so the
+/// blast radius is that one account even while the env is set. NOT a go-live signal.
+fn erasure_verify_stage_subject_pure(
+    env_subject: Option<&str>,
+    header_subject: Option<&str>,
+    principal: &[String],
+) -> Option<String> {
+    let subject = env_subject?.trim();
+    if subject.is_empty() || !crate::state::is_safe_account_slug(subject) {
+        return None;
+    }
+    // Dev/operator principal ONLY — a real Clerk user is never `orchestrator:hugit`.
+    if principal.first().map(String::as_str) != Some("orchestrator:hugit") {
+        return None;
+    }
+    // The explicit header must name EXACTLY the env subject (env ∧ header agreement).
+    if header_subject? != subject {
+        return None;
+    }
+    Some(subject.to_string())
+}
+
+/// The env-reading wrapper for [`erasure_verify_stage_subject_pure`] — reads
+/// `HUGIT_ERASURE_VERIFY_STAGE_SUBJECT` + the `X-Verify-Stage-Subject` header. Kept a
+/// thin shell over the pure gate (the security lives in the pure fn, mirroring
+/// [`grace_secs_with_floor`]/[`erasure_grace_ms`]).
+fn erasure_verify_stage_subject(headers: &[Header], principal: &[String]) -> Option<String> {
+    let env_subject = std::env::var("HUGIT_ERASURE_VERIFY_STAGE_SUBJECT").ok();
+    let header_subject = header_val(headers, "X-Verify-Stage-Subject");
+    erasure_verify_stage_subject_pure(env_subject.as_deref(), header_subject.as_deref(), principal)
+}
+
 /// Dispatch `POST /v1/account/erase` (GDPR1) through the ACCOUNT write-door
 /// ([`with_account_write`]): step-up + idempotency + a create-or-append persist to the
 /// reserved `_accounts/{slug}` store. The subject account is DERIVED from the caller
 /// (`derive_owner_tenant` refuses operator/anon → 401, no god-erase / anon-erase) — a
-/// caller can only ever erase itself; the store key is never a request field.
+/// caller can only ever erase itself; the store key is never a request field. The ONE
+/// exception is the fail-closed, env-gated, named-subject Track-A verify hatch
+/// ([`erasure_verify_stage_subject`]) — off in prod, one throwaway subject, PR-audited.
 fn dispatch_account_erase(
     state: &AppState,
     headers: &[Header],
     body: &[u8],
-    principal: Vec<String>,
+    mut principal: Vec<String>,
     fresh_auth: bool,
 ) -> (u16, String) {
     // Idempotency-Key cap (DoS / log-bloat guard) — identical to the repo door.
@@ -1105,21 +1156,38 @@ fn dispatch_account_erase(
             "Idempotency-Key excede o limite de 256 bytes",
         ));
     }
-    // The subject account = the caller's OWN account (never the body). Operator/anon
-    // are refused HERE (401) — before any store touch — mirroring the verb's own guard.
-    let account = match verbs::write_provision::derive_owner_tenant(&principal) {
-        Ok(a) => a,
-        Err(e) => return err(e),
+    // Resolve the subject + step-up. The Track-A verify hatch is checked FIRST and is
+    // fail-closed: `None` (the overwhelming default, and ALWAYS for a real user) falls
+    // straight through to the production path below, entirely unchanged.
+    let (account, step_up) = match erasure_verify_stage_subject(headers, &principal) {
+        Some(subject) => {
+            // Act AS the named test subject (synthesize its clerk principal) so the
+            // production write path derives + confirms that subject; step-up satisfied.
+            // Blast radius = this one env-named account (see the pure gate).
+            principal = vec![format!("clerk:{subject}:verify-stage")];
+            (subject, true)
+        }
+        None => {
+            // Production: the subject account = the caller's OWN account (never the
+            // body). Operator/anon are refused HERE (401) — before any store touch —
+            // mirroring the verb's own guard.
+            let account = match verbs::write_provision::derive_owner_tenant(&principal) {
+                Ok(a) => a,
+                Err(e) => return err(e),
+            };
+            // Step-up: a fresh Clerk session (Tier-1 `fresh_auth`) OR the dev-only
+            // `X-Step-Up` header — identical to `dispatch_repo_write`, so a Clerk
+            // principal can never self-assert step-up via a header (its step-up MUST
+            // be a re-authenticated session).
+            let is_dev_principal =
+                principal.first().map(String::as_str) == Some("orchestrator:hugit");
+            let step_up_header = is_dev_principal
+                && header_val(headers, "X-Step-Up")
+                    .map(|v| v == "true" || v == "1")
+                    .unwrap_or(false);
+            (account, fresh_auth || step_up_header)
+        }
     };
-    // Step-up: a fresh Clerk session (Tier-1 `fresh_auth`) OR the dev-only `X-Step-Up`
-    // header — identical to `dispatch_repo_write`, so a Clerk principal can never
-    // self-assert step-up via a header (its step-up MUST be a re-authenticated session).
-    let is_dev_principal = principal.first().map(String::as_str) == Some("orchestrator:hugit");
-    let step_up_header = is_dev_principal
-        && header_val(headers, "X-Step-Up")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
-    let step_up = fresh_auth || step_up_header;
 
     let req = match serde_json::from_slice::<wr::AccountEraseReq>(body) {
         Ok(v) => v,
@@ -2374,6 +2442,99 @@ mod godpath_gate_tests {
             MIN_ERASURE_GRACE_SECS
         );
         assert_eq!(grace_secs_with_floor(Some(30 * 86_400), false), 30 * 86_400);
+    }
+
+    // ── Track-A verify-stage hatch: the PURE gate (clw's 5 conditions) ────────────
+
+    const VS: &str = "bdbff37f-5dcd-5c51-b035-66a9eb05672b"; // a store-safe test subject
+    fn dev() -> Vec<String> {
+        vec!["orchestrator:hugit".to_string()]
+    }
+
+    #[test]
+    fn verify_stage_hatch_active_only_when_env_header_and_dev_principal_all_agree() {
+        // The ONLY accepting case: env set + safe slug, dev principal, header == env.
+        assert_eq!(
+            erasure_verify_stage_subject_pure(Some(VS), Some(VS), &dev()),
+            Some(VS.to_string()),
+            "all three agree → act AS exactly the named subject"
+        );
+    }
+
+    #[test]
+    fn verify_stage_hatch_fails_closed_on_every_missing_or_mismatched_arm() {
+        // env absent / empty / whitespace → None.
+        assert_eq!(
+            erasure_verify_stage_subject_pure(None, Some(VS), &dev()),
+            None
+        );
+        assert_eq!(
+            erasure_verify_stage_subject_pure(Some(""), Some(VS), &dev()),
+            None
+        );
+        assert_eq!(
+            erasure_verify_stage_subject_pure(Some("   "), Some(VS), &dev()),
+            None
+        );
+        // env not a store-safe account slug → None (never synthesize a weird principal).
+        assert_eq!(
+            erasure_verify_stage_subject_pure(Some("Not A Slug!"), Some("Not A Slug!"), &dev()),
+            None
+        );
+        // header absent, or does not equal the env subject EXACTLY → None.
+        assert_eq!(
+            erasure_verify_stage_subject_pure(Some(VS), None, &dev()),
+            None
+        );
+        assert_eq!(
+            erasure_verify_stage_subject_pure(Some(VS), Some("other-subject"), &dev()),
+            None
+        );
+    }
+
+    #[test]
+    fn verify_stage_hatch_never_fires_for_a_real_clerk_user_even_with_env_and_header() {
+        // A real Clerk user is never `orchestrator:hugit` → the hatch can NEVER open for
+        // them, even if they somehow set the env + a matching header. This is the
+        // load-bearing "no real/arbitrary subject" guarantee.
+        let user = vec![format!("clerk:{VS}:user-1")];
+        assert_eq!(
+            erasure_verify_stage_subject_pure(Some(VS), Some(VS), &user),
+            None
+        );
+        // Anonymous / empty chain → None.
+        assert_eq!(
+            erasure_verify_stage_subject_pure(Some(VS), Some(VS), &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn verify_stage_synthesized_principal_stages_for_the_named_subject_not_the_caller() {
+        // End-to-end on the WRITE side: acting AS `clerk:{VS}:verify-stage` (what the
+        // hatch synthesizes) + confirm==VS stages an `erasure.requested` whose subject
+        // is the NAMED subject — proving the act-as-subject write is correct + scoped.
+        use crate::writes::verbs::write_account_erase::write_account_erase;
+        let mut log = hugit_refstore::EventLog::new();
+        let principal = vec![format!("clerk:{VS}:verify-stage")];
+        let req = wr::AccountEraseReq {
+            confirm: VS.to_string(),
+            dsr_id: Some("43c1dfd4-f5fd-563e-bb2d-81b6457fb8bb".to_string()),
+        };
+        write_account_erase(&mut log, &req, principal, 1).expect("stage for the named subject");
+        let rec = log.records().last().expect("a record");
+        assert_eq!(rec.kind, "erasure.requested");
+        assert!(
+            rec.payload.contains(&format!("\"subject\":\"{VS}\"")),
+            "the staged subject is the NAMED test subject: {}",
+            rec.payload
+        );
+        assert!(
+            rec.payload
+                .contains("\"dsr_id\":\"43c1dfd4-f5fd-563e-bb2d-81b6457fb8bb\""),
+            "the DSR legitimacy id rides into the standing record: {}",
+            rec.payload
+        );
     }
 
     #[test]
