@@ -43,10 +43,13 @@
 //! - `token_plaintext` from the exchange (a real CoreLink `cas:rw` PAT) is IGNORED
 //!   and never stored/logged — hugit needs only the verified identity to mint its
 //!   own engine token (so it avoids holding a `cas:rw` secret on the token path).
-//! - `fresh_auth` is `false` for exchange-minted principals: the exchange contract
-//!   carries no `auth_time`, so step-up for a Clerk principal MUST come from a
-//!   freshly re-authenticated session, never from `/v1/token` alone (fail-closed;
-//!   matches the prior P2 seam note — `auth_time` is not a Clerk session claim today).
+//! - `fresh_auth` is derived from the Clerk **`fva[0]`** (factor-verification age)
+//!   the exchange passes through as `fva_minutes` (WP-Track-B, frozen 2026-07-08):
+//!   fresh IFF the subject reauthed within [`FRESH_AUTH_MAX_FVA_MINUTES`]. FAIL-CLOSED
+//!   — an absent `fva_minutes` (a non-reauthed session, or a pre-Track-B exchange)
+//!   ⇒ NOT fresh, so step-up for a Clerk principal is refused unless a genuine recent
+//!   reauth is proven. (Supersedes the prior "always false / no auth_time" note: Clerk
+//!   emits `fva` natively, so a browser reauth now clears the erasure/policy step-up.)
 //! - The verified `tenant`/`principal` are colon-guarded before they become the
 //!   `clerk:{org}:{user}` authz principal (`:` is the authz delimiter — the
 //!   "exemption-is-a-hole" structural class). Real CoreLink UUIDs never contain `:`.
@@ -97,6 +100,13 @@ const ENGINE_TOKEN_TTL_SECS: u64 = 300;
 /// hangs the (single-threaded) `/v1/token` request indefinitely.
 const EXCHANGE_TIMEOUT_SECS: u64 = 10;
 
+/// Step-up freshness window (WP-Track-B): an exchange-minted engine token is
+/// `fresh_auth` IFF the subject's Clerk `fva[0]` (minutes since the first factor was
+/// last verified) is `<=` this. `5` min matches the engine-token TTL (`≤300s`), so a
+/// stale/hijacked session cannot originate an irreversible erase without a recent
+/// reauth. Tight-but-usable for a step-up-gated action (`policy`/`erasure`); tunable.
+const FRESH_AUTH_MAX_FVA_MINUTES: u32 = 5;
+
 // ── Client-facing wire types (FROZEN — backend-API-v1 §Q2; do NOT change) ─────
 
 /// The JSON body for `POST /v1/token` (the client/window → hugit).
@@ -136,6 +146,14 @@ struct ExchangeOk {
     /// Absolute epoch-ms expiry of the upstream session/PAT.
     #[serde(default)]
     expires_ms: u64,
+    /// Clerk **factor-verification age** — minutes since the subject's first factor
+    /// was last verified (`fva[0]` from the verified session JWT, passed through by
+    /// CoreLink's exchange, frozen 2026-07-08). `0` right after a reauth; grows until
+    /// the next one. **ABSENT ⇒ NOT fresh** (the exchange OMITS the key when the JWT
+    /// carried no well-formed non-negative `fva` — fail-closed, never a fabricated 0),
+    /// so step-up stays refused for a non-reauthed session.
+    #[serde(default)]
+    fva_minutes: Option<u32>,
 }
 
 /// The verified identity returned by a successful [`SessionExchangeClient::exchange`].
@@ -144,6 +162,9 @@ pub struct ExchangeIdentity {
     pub principal: String,
     pub tenant: String,
     pub expires_ms: u64,
+    /// Clerk factor-verification age in minutes (`fva[0]`); `None` ⇒ not fresh. The
+    /// step-up window policy is applied at mint (see [`FRESH_AUTH_MAX_FVA_MINUTES`]).
+    pub fva_minutes: Option<u32>,
 }
 
 // ── ClerkPrincipal (the minted-identity carrier) ──────────────────────────────
@@ -297,6 +318,7 @@ impl SessionExchangeClient {
                     principal: ok.principal,
                     tenant: ok.tenant,
                     expires_ms: ok.expires_ms,
+                    fva_minutes: ok.fva_minutes,
                 })
             }
             // 4xx/5xx land here as Error::Status(code, _).
@@ -683,10 +705,20 @@ pub fn handle_token_exchange(
         return (401, EngineErr::token_invalid().to_body());
     }
 
+    // Step-up freshness (WP-Track-B): derive `fresh_auth` from the propagated Clerk
+    // `fva[0]` (factor-verification age). Fresh IFF the subject reauthed within
+    // `FRESH_AUTH_MAX_FVA_MINUTES`. FAIL-CLOSED: `None` (the exchange omits the key
+    // when the JWT had no well-formed `fva`) ⇒ NOT fresh ⇒ step-up stays refused —
+    // exactly the pre-Track-B behaviour, so this deploys safely before/independently
+    // of the exchange emitting the field. The bit is baked into the HMAC-signed
+    // engine token, so it cannot be tampered post-mint.
+    let fresh_auth = id
+        .fva_minutes
+        .is_some_and(|m| m <= FRESH_AUTH_MAX_FVA_MINUTES);
     let principal = ClerkPrincipal {
         user: id.principal,
         org: id.tenant,
-        fresh_auth: false, // exchange carries no auth_time → step-up fails closed
+        fresh_auth,
     };
     let engine_token = match store.mint_with_ttl(&principal, upstream_remaining) {
         Ok(t) => t,
@@ -900,10 +932,67 @@ mod tests {
                 assert_eq!(rec.org, TEST_TENANT);
                 assert!(
                     !rec.fresh_auth,
-                    "exchange mint is never fresh (no auth_time)"
+                    "a response with no fva_minutes ⇒ NOT fresh (fail-closed)"
                 );
             }
             _ => panic!("expected a valid lookup"),
+        }
+    }
+
+    /// A `200` body with a fresh `fva_minutes` (`<= FRESH_AUTH_MAX_FVA_MINUTES`)
+    /// mints a `fresh_auth` engine token → the step-up gate (erasure/policy) passes.
+    #[test]
+    fn handle_exchange_fva_fresh_mints_a_step_up_fresh_token() {
+        let body_json = json!({
+            "token_plaintext": "ignored", "pat_id": "p", "token_id": "t",
+            "principal": TEST_PRINCIPAL, "tenant": TEST_TENANT,
+            "expires_ms": far_future_ms(), "fva_minutes": 0,
+        })
+        .to_string();
+        let (url, _rx) = mock_exchange(200, body_json);
+        let store = TokenStore::new();
+        let body = exchange_req("clerk-jwt", TEST_TENANT);
+        let (status, resp_body) =
+            handle_token_exchange(&SessionExchangeClient::new(url), &store, &body);
+        assert_eq!(status, 200);
+        let et = serde_json::from_str::<serde_json::Value>(&resp_body).unwrap()["engine_token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        match store.lookup(&et) {
+            LookupResult::Ok(rec) => assert!(
+                rec.fresh_auth,
+                "fva_minutes=0 (<=5) ⇒ fresh_auth ⇒ step-up passes"
+            ),
+            _ => panic!("valid lookup"),
+        }
+    }
+
+    /// A `200` body whose `fva_minutes` EXCEEDS the window mints a NON-fresh token —
+    /// a stale session cannot clear step-up (the whole security point).
+    #[test]
+    fn handle_exchange_fva_stale_is_not_fresh() {
+        let body_json = json!({
+            "token_plaintext": "ignored", "pat_id": "p", "token_id": "t",
+            "principal": TEST_PRINCIPAL, "tenant": TEST_TENANT,
+            "expires_ms": far_future_ms(), "fva_minutes": FRESH_AUTH_MAX_FVA_MINUTES + 1,
+        })
+        .to_string();
+        let (url, _rx) = mock_exchange(200, body_json);
+        let store = TokenStore::new();
+        let body = exchange_req("clerk-jwt", TEST_TENANT);
+        let (_s, resp_body) =
+            handle_token_exchange(&SessionExchangeClient::new(url), &store, &body);
+        let et = serde_json::from_str::<serde_json::Value>(&resp_body).unwrap()["engine_token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        match store.lookup(&et) {
+            LookupResult::Ok(rec) => assert!(
+                !rec.fresh_auth,
+                "fva_minutes>5 ⇒ NOT fresh ⇒ step-up refused"
+            ),
+            _ => panic!("valid lookup"),
         }
     }
 
