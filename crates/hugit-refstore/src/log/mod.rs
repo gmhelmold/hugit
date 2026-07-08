@@ -237,6 +237,82 @@ pub fn result_binding_preimage_v2(
     buf
 }
 
+/// Build the ed25519 signing/verification pre-image for the off-box
+/// **`intent_metrics_sig`** — the fabric's attestation over the finalized §13.1
+/// `IntentMetrics`, bound to `lease_id` + `tenant`.
+///
+/// This closes the off-box (A-path) cost-integrity gap. An off-box close carries a
+/// `result_binding_sig_v2` over an EMPTY `CheckResult` (`check_result: null` ⇒ 20
+/// constant zero bytes), so it binds only the TENANT (via the attestation chain),
+/// NOT the cost — the `cost_usd_micros` rides back in `CloseResponse.metrics`
+/// unsigned. `intent_metrics_sig` signs the metrics THEMSELVES bound to
+/// `lease_id`+`tenant` (anti-replay: a signature can never be moved to another lease
+/// or tenant), so a third party can prove the cost (and every other metric) was not
+/// altered. It is the ONLY path by which an off-box `✓ cas:` may claim cost integrity.
+///
+/// Pre-image (BYTE-EXACT, the single canonical realisation — call it, never
+/// re-transcribe; frozen with the corelink-runners TL 2026-07-08,
+/// `attestation::intent_metrics_preimage`, byte-identical both repos, to be pinned
+/// against `conformance/intent_metrics_sig.json`):
+///
+/// ```text
+/// LP(lease_id) ‖ LP(tenant)
+///   ‖ u64_be(input) ‖ u64_be(output) ‖ u64_be(cache_read)
+///   ‖ u64_be(cache_write) ‖ u64_be(total)
+///   ‖ u64_be(wall_ms) ‖ u64_be(active_ms) ‖ u64_be(tool_calls)
+///   ‖ u32_be(tool_breakdown.len)
+///   ‖ for each (tool, count) in tool_breakdown order: LP(tool) ‖ u64_be(count)
+///   ‖ u64_be(model_turns) ‖ u64_be(cost_usd_micros)
+/// ```
+///
+/// where `LP(s)` = `u32_be(byte_len(s)) ‖ utf8_bytes(s)`; all integers big-endian.
+/// The `tool_breakdown` ORDER is part of the binding (reordering changes the
+/// pre-image). The returned bytes are the ed25519 message (no extra hashing layer).
+/// The token fields are in `TokenCounts` struct order, then the top-level
+/// `IntentMetrics` fields in struct order — matching the §13.1 vector.
+#[allow(clippy::too_many_arguments)]
+pub fn intent_metrics_preimage(
+    lease_id: &str,
+    tenant: &str,
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_write: u64,
+    total: u64,
+    wall_ms: u64,
+    active_ms: u64,
+    tool_calls: u64,
+    tool_breakdown: &[(String, u64)],
+    model_turns: u64,
+    cost_usd_micros: u64,
+) -> Vec<u8> {
+    let mut buf: Vec<u8> = Vec::new();
+    push_lp_field(&mut buf, lease_id);
+    push_lp_field(&mut buf, tenant);
+    // The five token classes, then wall/active/tool_calls — all u64 big-endian.
+    for n in [
+        input,
+        output,
+        cache_read,
+        cache_write,
+        total,
+        wall_ms,
+        active_ms,
+        tool_calls,
+    ] {
+        buf.extend_from_slice(&n.to_be_bytes());
+    }
+    // The per-tool breakdown: a u32 count, then each `LP(tool) ‖ u64_be(count)`.
+    buf.extend_from_slice(&(tool_breakdown.len() as u32).to_be_bytes());
+    for (tool, count) in tool_breakdown {
+        push_lp_field(&mut buf, tool);
+        buf.extend_from_slice(&count.to_be_bytes());
+    }
+    buf.extend_from_slice(&model_turns.to_be_bytes());
+    buf.extend_from_slice(&cost_usd_micros.to_be_bytes());
+    buf
+}
+
 /// Canonicalise a JSON string: parse then re-serialise with **sorted object
 /// keys** and **no insignificant whitespace**, so equal JSON values map to
 /// identical bytes regardless of authoring key-order/spacing.

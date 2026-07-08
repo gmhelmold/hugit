@@ -479,6 +479,17 @@ pub struct CloseResponse {
     /// the frozen `IntentMetrics` via [`RunnerJobMetrics::into_intent_metrics`],
     /// preserving the FULL token cache-split (never flattened to `total`).
     pub metrics: RunnerJobMetrics,
+    /// The off-box **attested-cost binding** — a fabric ed25519 signature over the
+    /// finalized [`RunnerJobMetrics`], bound to `lease_id` + tenant (verifier:
+    /// [`crate::attest_v2::verify_intent_metrics_sig`]). This is the ONLY thing that
+    /// attests an OFF-BOX cost: the off-box `result_binding_sig_v2` binds an empty
+    /// `CheckResult` (the tenant via the chain, never the cost). **ABSENT from the
+    /// wire** unless the fabric has `FABRIC_EMIT_INTENT_METRICS_SIG` set (default
+    /// OFF), so today's byte-identical close is unaffected (`skip_serializing_if`).
+    /// `None` ⇒ the cost is fabric-recorded but NOT attested → a `✓ cas:` marker
+    /// MUST NOT claim cost integrity. Frozen with the corelink-runners TL 2026-07-08.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent_metrics_sig: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1231,6 +1242,34 @@ mod tests {
             "fabric_key_id": "0011223344556677"
         }"#
         .to_vec()
+    }
+
+    #[test]
+    fn close_response_intent_metrics_sig_is_wire_invisible_when_absent_and_parsed_when_present() {
+        // ABSENT on the wire (today's default-off fabric) → None; the existing
+        // byte-identical close body is unaffected (the whole point of the additive field).
+        let without: CloseResponse =
+            serde_json::from_slice(&sample_close_response_body()).expect("parse close");
+        assert!(
+            without.intent_metrics_sig.is_none(),
+            "absent intent_metrics_sig ⇒ None (deny_unknown_fields is off; wire byte-identical)"
+        );
+        // PRESENT (fabric emits it with FABRIC_EMIT_INTENT_METRICS_SIG) → Some(...).
+        let with_body = br#"{
+            "lease_id": "l", "released": true, "capture_incomplete": false,
+            "metrics": {"tokens":{"input":1,"output":2,"cache_read":3,"cache_write":4,"total":10},
+                        "wall_ms":20,"active_ms":30,"tool_calls":1,
+                        "tool_breakdown":[{"tool":"Bash","count":1}],"model_turns":2,"cost_usd_micros":4200000},
+            "intent_metrics_sig": "c2ln"
+        }"#;
+        let with: CloseResponse = serde_json::from_slice(with_body).expect("parse close w/ sig");
+        assert_eq!(with.intent_metrics_sig.as_deref(), Some("c2ln"));
+        // A None never serializes the key (skip_serializing_if) — no accidental `null` on the wire.
+        let json = serde_json::to_string(&without).expect("serialize");
+        assert!(
+            !json.contains("intent_metrics_sig"),
+            "None must omit the key entirely: {json}"
+        );
     }
 
     #[test]
