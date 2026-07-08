@@ -22,4 +22,8 @@ pub mod shadow;
 
 pub mod attest_v2;
 
+/// The pinned canonical `CheckDef` for hugit's own CI gate on the moat
+/// check-host (#68 — the verified `toolchain_ref` digest + the gate command).
+pub mod gate;
+
 pub mod attest_keyset;
