@@ -165,7 +165,17 @@ pub fn serve_on_with(
         // never an indefinite wedge. GET/HEAD carry no body, so reads keep the
         // zero-overhead inline path.
         let (request, body) = if method == Method::Post {
-            match read_body_bounded(request, io_budget) {
+            // The git receive-pack (push) route carries a PACKFILE — give it the larger
+            // dedicated pack cap (default 64 MiB) so a real push is not truncated by the
+            // 8 MiB `/v1` JSON door; every other POST keeps `MAX_BODY_BYTES`. The
+            // over-cap push is rejected with a clean 413 inside `handle_receive_pack`
+            // (which re-reads the SAME `max_pack_bytes()`), not silently truncated here.
+            let body_cap = if crate::git::is_receive_pack_path(&url) {
+                crate::git::max_pack_bytes()
+            } else {
+                writes::MAX_BODY_BYTES
+            };
+            match read_body_bounded(request, io_budget, body_cap) {
                 Some(pair) => pair,
                 None => {
                     // Slow-loris body dribble (or thread exhaustion under a flood): the
@@ -886,13 +896,16 @@ fn route_delete(state: &AppState, url: &str, headers: &[Header]) -> (u16, String
     }
 }
 
-/// Read a request body, capped at the door's `MAX_BODY_BYTES` (+1 byte so the
-/// door detects + rejects an over-cap body without buffering the whole thing).
-fn read_body_capped(request: &mut Request) -> Vec<u8> {
+/// Read a request body, capped at `cap` (+1 byte so the door detects + rejects an
+/// over-cap body without buffering the whole thing). `cap` is the `/v1` JSON door's
+/// `MAX_BODY_BYTES` (8 MiB) for every POST EXCEPT the git receive-pack route, which
+/// gets the larger dedicated pack cap ([`crate::git::max_pack_bytes`]) so a real git
+/// push is no longer TRUNCATED by the JSON door before the pack-size 413 can fire.
+fn read_body_capped(request: &mut Request, cap: usize) -> Vec<u8> {
     let mut buf = Vec::new();
     let _ = request
         .as_reader()
-        .take(writes::MAX_BODY_BYTES as u64 + 1)
+        .take(cap as u64 + 1)
         .read_to_end(&mut buf);
     buf
 }
@@ -976,10 +989,10 @@ where
 /// [`run_bounded`]: `Some((request, body))` when it completes in time (the `Request`
 /// is moved back intact, ready to respond); `None` on timeout — the loop drops the
 /// connection and returns to accept.
-fn read_body_bounded(request: Request, budget: Duration) -> Option<(Request, Vec<u8>)> {
+fn read_body_bounded(request: Request, budget: Duration, cap: usize) -> Option<(Request, Vec<u8>)> {
     run_bounded(budget, move || {
         let mut request = request;
-        let body = read_body_capped(&mut request);
+        let body = read_body_capped(&mut request, cap);
         (request, body)
     })
 }

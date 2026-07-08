@@ -1306,6 +1306,36 @@ pub fn oid_index_key(tenant: &str, repo: &str) -> String {
     format!("{tenant}/{repo}/oid-index.json")
 }
 
+/// The R2 key for a repo's stored-byte accounting manifest:
+/// `<tenant>/<repo>/size.json` (a sibling of `oid-index.json`). Holds the cumulative
+/// blake3-stored-byte total the per-repo / per-owner_tenant storage cap (G10) reads
+/// and increments.
+#[must_use]
+pub fn size_manifest_key(tenant: &str, repo: &str) -> String {
+    format!("{tenant}/{repo}/size.json")
+}
+
+/// A repo's stored-byte accounting manifest at `<tenant>/<repo>/size.json`.
+///
+/// `bytes` is the cumulative CAS-framing (inflated loose) byte total of every
+/// DISTINCT object this repo's closure has stored, accumulated across pushes. It is
+/// **monotonic in v0**: a `git push --delete <ref>` (which drops a ref pointer but
+/// keeps the objects — hugit does no GC) and any future GC do NOT decrement it. So
+/// the counter is an UPPER BOUND on the repo's live stored bytes, never an
+/// under-count — the safe (fail-closed) direction for a quota. A repo that legitimately
+/// churns a large amount of history could therefore trip the cap earlier than its live
+/// footprint warrants; a decrementing v1 (GC-aware accounting) is the documented follow-up.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SizeManifest {
+    /// Cumulative stored blake3 bytes for this repo (monotonic v0).
+    pub bytes: u64,
+}
+
+/// Parse the stored-byte size manifest from raw JSON bytes.
+pub fn parse_size_manifest(bytes: &[u8]) -> Result<SizeManifest, String> {
+    serde_json::from_slice(bytes).map_err(|e| format!("size.json parse failed: {e}"))
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // E. The boot loader — `load_from_cas` (DOUBLE integrity).
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2508,6 +2538,16 @@ impl<T: CasTransport> CasRw<T> {
         self.pending.is_empty()
     }
 
+    /// The total CAS-framing byte size of the DISTINCT NEW objects this push buffered
+    /// (deduped by blake3 — the exact set [`flush`](CasRw::flush) uploads). This is the
+    /// storage-cap (G10) delta: the NEW stored bytes this push adds to the repo's
+    /// closure. Objects the push referenced but did NOT carry (thin-pack bases served
+    /// from the repo's prior closure) are NOT buffered, so they never double-count.
+    #[must_use]
+    pub fn pending_bytes(&self) -> u64 {
+        self.pending.values().map(|v| v.len() as u64).sum()
+    }
+
     /// The wrapped CAS client (read fall-through + flush sink).
     #[must_use]
     pub fn cas_client(&self) -> &CasClient<T> {
@@ -2635,6 +2675,188 @@ impl<T: CasTransport> Cas for CasRw<T> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// H2. Storage-byte caps (G10) — per-repo + per-owner_tenant, fail-closed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Default per-repo stored-byte cap: 2 GiB. Override with `HUGIT_SERVE_MAX_REPO_BYTES`.
+pub const DEFAULT_MAX_REPO_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// Default per-owner_tenant stored-byte cap: 10 GiB. Override with
+/// `HUGIT_SERVE_MAX_TENANT_BYTES`.
+pub const DEFAULT_MAX_TENANT_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+
+/// The resolved storage caps (per-repo + per-owner_tenant), in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StorageCaps {
+    /// Ceiling on a single repo's cumulative stored bytes.
+    pub per_repo: u64,
+    /// Ceiling on the sum of a single owner_tenant's repos' stored bytes.
+    pub per_tenant: u64,
+}
+
+impl Default for StorageCaps {
+    fn default() -> Self {
+        Self {
+            per_repo: DEFAULT_MAX_REPO_BYTES,
+            per_tenant: DEFAULT_MAX_TENANT_BYTES,
+        }
+    }
+}
+
+/// Read the storage caps from the environment, falling back to the defaults. A repo
+/// cap larger than the tenant cap is nonsensical, so the repo cap is clamped down to
+/// the tenant cap (the tenant cap always dominates).
+#[must_use]
+pub fn storage_caps_from_env() -> StorageCaps {
+    let per_tenant = std::env::var("HUGIT_SERVE_MAX_TENANT_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(DEFAULT_MAX_TENANT_BYTES);
+    let per_repo = std::env::var("HUGIT_SERVE_MAX_REPO_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(DEFAULT_MAX_REPO_BYTES)
+        .min(per_tenant);
+    StorageCaps {
+        per_repo,
+        per_tenant,
+    }
+}
+
+/// The verdict of the pure storage-quota decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuotaVerdict {
+    /// The push fits within BOTH the per-repo and per-owner_tenant caps.
+    Ok,
+    /// The push would push THIS repo over its per-repo cap.
+    RepoExceeded,
+    /// The push would push the owner_tenant's aggregate over the per-tenant cap.
+    TenantExceeded,
+}
+
+/// The PURE storage-quota decision (env-free, R2-free — hermetically testable). Uses
+/// saturating arithmetic so a (pathological) overflow can never wrap a cap open.
+///
+/// * `repo_current` — this repo's currently-accounted stored bytes.
+/// * `tenant_total` — the owner_tenant's aggregate stored bytes (INCLUDING `repo_current`).
+/// * `delta` — this push's NEW stored-byte delta.
+#[must_use]
+pub fn storage_quota_decision(
+    repo_current: u64,
+    tenant_total: u64,
+    delta: u64,
+    caps: &StorageCaps,
+) -> QuotaVerdict {
+    if repo_current.saturating_add(delta) > caps.per_repo {
+        return QuotaVerdict::RepoExceeded;
+    }
+    if tenant_total.saturating_add(delta) > caps.per_tenant {
+        return QuotaVerdict::TenantExceeded;
+    }
+    QuotaVerdict::Ok
+}
+
+/// Why a storage-quota check refused (or could not decide) a push.
+#[derive(Debug)]
+pub enum StorageQuotaError {
+    /// A cap would be exceeded — map to `413 STORAGE_QUOTA_EXCEEDED`. Carries the
+    /// pure verdict for the caller's message.
+    Exceeded(QuotaVerdict),
+    /// The current accounting could NOT be read (an R2 fault / malformed size.json).
+    /// FAIL-CLOSED: the push is refused with `503`, NEVER allowed on an indeterminate
+    /// read (a transient fault must not be leverageable to slip past the cap). Mirrors
+    /// the `count_owned_repos` fail-closed pattern on the provision path.
+    Unavailable(String),
+}
+
+/// Read one repo's accounted stored bytes from `<tenant>/<repo>/size.json`. An ABSENT
+/// manifest is 0 (a never-pushed / freshly-provisioned repo). Any R2 read fault or a
+/// malformed manifest is an `Err` (the caller fails closed → 503), NEVER silently 0.
+pub fn read_repo_stored_bytes<R: R2Get>(r2: &R, tenant: &str, repo: &str) -> Result<u64, String> {
+    match r2.get_object(&size_manifest_key(tenant, repo))? {
+        Some(bytes) => Ok(parse_size_manifest(&bytes)?.bytes),
+        None => Ok(0),
+    }
+}
+
+/// Enforce the per-repo + per-owner_tenant storage caps for a push of `delta` NEW
+/// stored bytes, FAIL-CLOSED. Reads THIS repo's `size.json` plus every owner_tenant
+/// sibling repo's `size.json` (all under the same CAS `tenant`), sums them, and runs
+/// the pure [`storage_quota_decision`]. `tenant_repo_slugs` MUST be the owner_tenant's
+/// full owned-repo slug set (from the fail-closed `owned_repo_logs` enumeration) and
+/// MUST include `this_repo`.
+///
+/// * `Ok(())` — within both caps; the caller may finalize the push.
+/// * `Err(Exceeded)` — a cap is breached → `413` (no objects committed).
+/// * `Err(Unavailable)` — an accounting read faulted → `503` (fail-closed, never allow).
+///
+/// A `delta` of 0 (a re-push that stored no new object) is always `Ok` without any
+/// read — it cannot advance either total.
+pub fn check_storage_quota<R: R2Get>(
+    r2: &R,
+    tenant: &str,
+    this_repo: &str,
+    tenant_repo_slugs: &[String],
+    delta: u64,
+    caps: &StorageCaps,
+) -> Result<(), StorageQuotaError> {
+    if delta == 0 {
+        return Ok(());
+    }
+    let repo_current =
+        read_repo_stored_bytes(r2, tenant, this_repo).map_err(StorageQuotaError::Unavailable)?;
+    // Sum the owner_tenant's aggregate. Read each sibling's size.json; a fault on ANY
+    // is indeterminate → fail closed. `this_repo`'s current value is reused (never
+    // re-read) so the aggregate is self-consistent with the per-repo check.
+    let mut tenant_total = 0u64;
+    for slug in tenant_repo_slugs {
+        let bytes = if slug == this_repo {
+            repo_current
+        } else {
+            read_repo_stored_bytes(r2, tenant, slug).map_err(StorageQuotaError::Unavailable)?
+        };
+        tenant_total = tenant_total.saturating_add(bytes);
+    }
+    // Defensive: if the enumeration somehow omitted this_repo, still count it.
+    if !tenant_repo_slugs.iter().any(|s| s == this_repo) {
+        tenant_total = tenant_total.saturating_add(repo_current);
+    }
+    match storage_quota_decision(repo_current, tenant_total, delta, caps) {
+        QuotaVerdict::Ok => Ok(()),
+        v => Err(StorageQuotaError::Exceeded(v)),
+    }
+}
+
+/// Increment this repo's `size.json` counter by `delta` NEW stored bytes, via the same
+/// conditional (If-Match) compare-and-swap discipline as the other manifests — a
+/// concurrent push's increment is MERGED (re-read the fresh base, re-add `delta`),
+/// never clobbered. Monotonic (see [`SizeManifest`]). A no-op for `delta == 0`.
+pub fn commit_repo_size<R: R2GetVersioned + R2PutConditional>(
+    r2: &R,
+    tenant: &str,
+    repo: &str,
+    delta: u64,
+) -> Result<(), String> {
+    if delta == 0 {
+        return Ok(());
+    }
+    let key = size_manifest_key(tenant, repo);
+    conditional_manifest_write(r2, &key, |current| {
+        let base = match current {
+            Some(bytes) => parse_size_manifest(bytes)?.bytes,
+            None => 0,
+        };
+        let manifest = SizeManifest {
+            bytes: base.saturating_add(delta),
+        };
+        serde_json::to_vec(&manifest)
+            .map(Some)
+            .map_err(|e| format!("push: size.json serialize: {e}"))
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // I. CAS-mode push finalize — objects → log → manifests (the fail-closed order).
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2707,6 +2929,7 @@ pub fn finalize_cas_push<T, R, P>(
     ref_name: &str,
     new_oid: &str,
     expected: Option<&str>,
+    storage_delta: u64,
     persist_log: P,
 ) -> Result<(), CasPushError>
 where
@@ -2728,7 +2951,13 @@ where
         expected,
         cas.index_additions(),
     )
-    .map_err(CasPushError::Manifest)
+    .map_err(CasPushError::Manifest)?;
+    // 4. size accounting — bump the repo's stored-byte counter by this push's NEW-object
+    //    delta (monotonic v0). Runs AFTER the tip is durably advertised so a fault here
+    //    leaves the push durable but the counter merely lagging by this push's delta (a
+    //    retry — idempotent — re-attempts it). The quota CHECK before the flush is the
+    //    fail-closed gate; this write is the bookkeeping that feeds the next check.
+    commit_repo_size(r2, tenant, repo, storage_delta).map_err(CasPushError::Manifest)
 }
 
 /// Read-merge-write the mutable manifests for a CAS-mode push: merge `index_add`
@@ -5560,6 +5789,7 @@ mod tests {
             "refs/heads/pushed",
             &new_tip,
             None, // create: expected = None (the ref is absent on the base)
+            123,  // storage_delta (arbitrary non-zero — asserted via size.json below)
             || {
                 persisted = true;
                 Ok(())
@@ -5601,6 +5831,155 @@ mod tests {
             Some(&old_tip),
             "an untouched ref is preserved by the read-merge-write"
         );
+        // 4. size.json: the repo's stored-byte counter advanced by this push's delta.
+        let size_bytes = r2
+            .get_object(&size_manifest_key(tenant, repo))
+            .unwrap()
+            .expect("size.json written by finalize");
+        assert_eq!(
+            parse_size_manifest(&size_bytes).unwrap().bytes,
+            123,
+            "size.json accumulated the push's storage_delta"
+        );
+    }
+
+    // ── Storage-byte caps (G10) ────────────────────────────────────────────────
+
+    #[test]
+    fn storage_quota_decision_is_pure_and_saturating() {
+        let caps = StorageCaps {
+            per_repo: 100,
+            per_tenant: 250,
+        };
+        // Within both caps.
+        assert_eq!(storage_quota_decision(50, 50, 40, &caps), QuotaVerdict::Ok);
+        // Exactly AT the per-repo cap is allowed (cap-1..=cap ok).
+        assert_eq!(
+            storage_quota_decision(60, 60, 40, &caps),
+            QuotaVerdict::Ok,
+            "landing exactly on the per-repo cap is allowed"
+        );
+        // One byte over the per-repo cap trips first.
+        assert_eq!(
+            storage_quota_decision(60, 60, 41, &caps),
+            QuotaVerdict::RepoExceeded
+        );
+        // Under the per-repo cap but the TENANT aggregate trips.
+        assert_eq!(
+            storage_quota_decision(10, 240, 20, &caps),
+            QuotaVerdict::TenantExceeded
+        );
+        // Saturating add cannot wrap a cap open.
+        assert_eq!(
+            storage_quota_decision(u64::MAX, u64::MAX, u64::MAX, &caps),
+            QuotaVerdict::RepoExceeded
+        );
+    }
+
+    #[test]
+    fn read_repo_stored_bytes_absent_is_zero_present_is_parsed() {
+        let (tenant, repo) = ("t", "hugit");
+        let r2 = MapR2::default();
+        assert_eq!(
+            read_repo_stored_bytes(&r2, tenant, repo).unwrap(),
+            0,
+            "an absent size.json is zero (never-pushed repo)"
+        );
+        r2.put_object(
+            &size_manifest_key(tenant, repo),
+            &serde_json::to_vec(&SizeManifest { bytes: 4096 }).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(read_repo_stored_bytes(&r2, tenant, repo).unwrap(), 4096);
+    }
+
+    #[test]
+    fn check_storage_quota_within_caps_ok_and_delta_zero_short_circuits() {
+        let (tenant, repo) = ("t", "hugit");
+        let r2 = MapR2::default();
+        let caps = StorageCaps {
+            per_repo: 1_000,
+            per_tenant: 5_000,
+        };
+        r2.put_object(
+            &size_manifest_key(tenant, repo),
+            &serde_json::to_vec(&SizeManifest { bytes: 500 }).unwrap(),
+        )
+        .unwrap();
+        // 500 + 400 = 900 ≤ 1000 → ok.
+        check_storage_quota(&r2, tenant, repo, &[repo.to_string()], 400, &caps)
+            .expect("within the per-repo cap");
+        // A zero-delta push is always ok — and must NOT even read (proven by passing an
+        // owned-set that would otherwise trip; delta 0 can never advance a total).
+        check_storage_quota(&r2, tenant, repo, &[repo.to_string()], 0, &caps)
+            .expect("a zero-delta push is unconditionally ok");
+    }
+
+    #[test]
+    fn check_storage_quota_trips_per_repo_and_per_tenant() {
+        let (tenant, a, b) = ("t", "repo-a", "repo-b");
+        let r2 = MapR2::default();
+        let caps = StorageCaps {
+            per_repo: 1_000,
+            per_tenant: 1_500,
+        };
+        r2.put_object(
+            &size_manifest_key(tenant, a),
+            &serde_json::to_vec(&SizeManifest { bytes: 900 }).unwrap(),
+        )
+        .unwrap();
+        r2.put_object(
+            &size_manifest_key(tenant, b),
+            &serde_json::to_vec(&SizeManifest { bytes: 500 }).unwrap(),
+        )
+        .unwrap();
+        let owned = vec![a.to_string(), b.to_string()];
+        // repo-a: 900 + 200 = 1100 > 1000 → per-repo trip.
+        let e = check_storage_quota(&r2, tenant, a, &owned, 200, &caps)
+            .expect_err("per-repo cap tripped");
+        assert!(matches!(
+            e,
+            StorageQuotaError::Exceeded(QuotaVerdict::RepoExceeded)
+        ));
+        // repo-b: 500 + 150 = 650 ≤ 1000 (per-repo ok) BUT tenant 1400 + 150 = 1550 >
+        // 1500 → the per-tenant rollup trips across the two repos.
+        let e = check_storage_quota(&r2, tenant, b, &owned, 150, &caps)
+            .expect_err("per-tenant rollup tripped");
+        assert!(matches!(
+            e,
+            StorageQuotaError::Exceeded(QuotaVerdict::TenantExceeded)
+        ));
+    }
+
+    #[test]
+    fn check_storage_quota_fails_closed_on_read_fault() {
+        // An R2 read fault on size.json must FAIL CLOSED (503-mapped Unavailable),
+        // NEVER be treated as zero (which would let a fault slip a push past the cap).
+        struct FaultR2;
+        impl R2Get for FaultR2 {
+            fn get_object(&self, _key: &str) -> Result<Option<Vec<u8>>, String> {
+                Err("R2 transport fault".into())
+            }
+        }
+        let caps = StorageCaps::default();
+        let e = check_storage_quota(&FaultR2, "t", "hugit", &["hugit".to_string()], 1, &caps)
+            .expect_err("a read fault must fail closed");
+        assert!(matches!(e, StorageQuotaError::Unavailable(_)), "{e:?}");
+    }
+
+    #[test]
+    fn commit_repo_size_increments_and_merges() {
+        let (tenant, repo) = ("t", "hugit");
+        let r2 = MapR2::default();
+        // First push: 1000 from absent → 1000.
+        commit_repo_size(&r2, tenant, repo, 1_000).unwrap();
+        assert_eq!(read_repo_stored_bytes(&r2, tenant, repo).unwrap(), 1_000);
+        // Second push: += 250 → 1250 (read-merge-write on the fresh base).
+        commit_repo_size(&r2, tenant, repo, 250).unwrap();
+        assert_eq!(read_repo_stored_bytes(&r2, tenant, repo).unwrap(), 1_250);
+        // A zero-delta commit is a no-op.
+        commit_repo_size(&r2, tenant, repo, 0).unwrap();
+        assert_eq!(read_repo_stored_bytes(&r2, tenant, repo).unwrap(), 1_250);
     }
 
     #[test]
@@ -5634,6 +6013,7 @@ mod tests {
             "refs/heads/pushed",
             &"bb".repeat(20),
             None, // create: expected = None
+            0,    // storage_delta (irrelevant — the flush aborts before the size step)
             || {
                 persisted = true;
                 Ok(())
@@ -5702,6 +6082,7 @@ mod tests {
             "refs/heads/pushed",
             &new_tip,
             None, // create: expected = None
+            0,    // storage_delta (irrelevant — the persist aborts before the size step)
             || Err("cas-conflict".to_string()),
         )
         .expect_err("a persist failure fails the finalize");
