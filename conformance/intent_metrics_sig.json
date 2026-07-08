@@ -1,0 +1,38 @@
+{
+  "fabric_pubkey_b64": "+X0vGNFOSY5t9jo7OTlJNZsoLZOxE172jw/QURNEYw4=",
+  "fabric_key_id": "2d16e9ef2102df2a",
+  "input": {
+    "lease_id": "lease:conformance-vector:intent-metrics:v1",
+    "tenant": "tenant-conformance",
+    "metrics": {
+      "tokens": {
+        "input": 48211,
+        "output": 9143,
+        "cache_read": 120557,
+        "cache_write": 3361,
+        "total": 181272
+      },
+      "wall_ms": 754000,
+      "active_ms": 612450,
+      "tool_calls": 41,
+      "tool_breakdown": [
+        {
+          "tool": "Bash",
+          "count": 17
+        },
+        {
+          "tool": "Edit",
+          "count": 13
+        },
+        {
+          "tool": "Read",
+          "count": 11
+        }
+      ],
+      "model_turns": 58,
+      "cost_usd_micros": 1834290
+    }
+  },
+  "preimage_hex": "0000002a6c656173653a636f6e666f726d616e63652d766563746f723a696e74656e742d6d6574726963733a76310000001274656e616e742d636f6e666f726d616e6365000000000000bc5300000000000023b7000000000001d6ed0000000000000d21000000000002c41800000000000b81500000000000095862000000000000002900000003000000044261736800000000000000110000000445646974000000000000000d0000000452656164000000000000000b000000000000003a00000000001bfd32",
+  "intent_metrics_sig": "J++G/LgZNUuAnQV/ADeiENoGm5uLLFruevxp93aDfUTGzgnn+GjWir0QnjiD3wVhYsgkrGlPKJv9/6UhdwiTBw=="
+}

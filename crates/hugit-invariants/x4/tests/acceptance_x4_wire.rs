@@ -58,7 +58,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// vector (contract v1.2.0), and the §7.1 `result_binding_v2` vector (contract
 /// v1.4.0 — the full-outcome attestation signature; fabric-generated, mirrored
 /// byte-identical here under the same drift tripwire).
-const VECTORS: [&str; 12] = [
+const VECTORS: [&str; 13] = [
     "RunnerLease.json",
     "FenceManifest.json",
     "IntentMetrics.json",
@@ -75,6 +75,11 @@ const VECTORS: [&str; 12] = [
     "AgentExecRequest.json",
     "AgentExecAck.json",
     "AgentExecResult.json",
+    // The off-box attested-cost binding vector (cost-killer path A), mirrored
+    // byte-identical from corelink-runners #320 — proves hugit's
+    // `intent_metrics_preimage` + `verify_intent_metrics_sig` match the fabric's
+    // signer byte-for-byte (the go-signal for lighting `✓ cas:` attested cost).
+    "intent_metrics_sig.json",
 ];
 
 // ── ① the manifest pins every vector byte-exactly ────────────────────────────
