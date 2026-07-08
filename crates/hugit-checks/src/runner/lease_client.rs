@@ -65,6 +65,13 @@ pub enum RunnerError {
     /// cross-tenant escape via the lease-id path segment), distinct from any
     /// response guard. Carries a short description of the violation; never a PAT.
     InvalidLeaseId(String),
+    /// The server-supplied §13.2 `ingest_path` is not a safe absolute path, so
+    /// concatenating it onto the base could redirect the request (and the SCOPED
+    /// ingest CREDENTIAL sent with it) to an attacker-chosen host. A
+    /// RESPONSE-trust-boundary guard: the acquire response comes from the fabric,
+    /// but a buggy/compromised producer must NOT be able to exfiltrate the scoped
+    /// credential. Carries a short description; never the credential.
+    InvalidIngestPath(String),
 }
 
 impl std::fmt::Display for RunnerError {
@@ -83,6 +90,12 @@ impl std::fmt::Display for RunnerError {
                 write!(
                     f,
                     "runner invalid lease id (refusing to build request): {what}"
+                )
+            }
+            RunnerError::InvalidIngestPath(what) => {
+                write!(
+                    f,
+                    "runner invalid ingest path (refusing to send the scoped credential): {what}"
                 )
             }
         }
@@ -107,6 +120,38 @@ fn validate_lease_id(lease_id: &str) -> Result<(), RunnerError> {
         Err(RunnerError::InvalidLeaseId(format!(
             "lease id must match ^[A-Za-z0-9_-]{{1,128}}$ (got {} chars)",
             lease_id.len()
+        )))
+    }
+}
+
+/// The §13.2 `ingest_path` comes from the fabric's acquire response and is
+/// concatenated onto the configured base to form the URL the SCOPED ingest
+/// credential is sent to. It MUST be a safe ABSOLUTE path so a buggy/compromised
+/// producer cannot redirect that credential to an attacker host.
+///
+/// The attack this closes: `base = "https://runner.example"`, a hostile
+/// `ingest_path = "@evil.com/x"` → `"https://runner.example@evil.com/x"`, whose
+/// AUTHORITY is `evil.com` (`runner.example` is parsed as userinfo) — the scoped
+/// bearer would be sent to `evil.com`. Likewise `".evil.com/x"` →
+/// `"https://runner.example.evil.com/x"`, or `":9/x"` → a port swap. Requiring a
+/// single leading `/` (and no `//`) TERMINATES the authority at the base's host,
+/// so everything after is an in-authority path. We additionally reject
+/// whitespace, control bytes, and backslash (never in the frozen
+/// `/v1/leases/{id}/envelope/ingest` shape) as defense in depth.
+fn validate_ingest_path(ingest_path: &str) -> Result<(), RunnerError> {
+    let ok = ingest_path.starts_with('/')
+        && !ingest_path.starts_with("//")
+        && ingest_path.len() <= 512
+        && !ingest_path
+            .bytes()
+            .any(|b| b == b'\\' || b.is_ascii_whitespace() || b.is_ascii_control());
+    if ok {
+        Ok(())
+    } else {
+        Err(RunnerError::InvalidIngestPath(format!(
+            "ingest_path must be a single-leading-slash absolute path with no \
+             `//`/whitespace/control/backslash (got {} chars)",
+            ingest_path.len()
         )))
     }
 }
@@ -656,15 +701,21 @@ impl<T: RunnerTransport> LeaseClient<T> {
     /// acquire/poll/close). It is taken as a per-call bearer and NEVER stored,
     /// logged, or rendered in any error (errors carry only the HTTP status).
     ///
-    /// `ingest_path` is the server-supplied path from the acquire response; it is
-    /// concatenated onto the configured base, so the credential can only ever be
-    /// sent to the configured host (a producer cannot redirect it elsewhere).
+    /// `ingest_path` is the server-supplied path from the acquire response. It is
+    /// concatenated onto the configured base, so it is VALIDATED first
+    /// ([`validate_ingest_path`]) — a safe single-leading-slash absolute path —
+    /// so the credential can only ever be sent to the configured host: a
+    /// buggy/compromised producer cannot redirect it elsewhere (e.g. an
+    /// `@evil.com`/`.evil.com` authority-injection is rejected before any send).
     pub fn submit_envelope(
         &self,
         ingest_path: &str,
         credential: &str,
         events: &[IngestEvent],
     ) -> Result<(), RunnerError> {
+        // Fail-closed BEFORE building the URL or attaching the credential: never
+        // send the scoped ingest bearer to a host a hostile ingest_path chose.
+        validate_ingest_path(ingest_path)?;
         let url = format!("{}{}", self.config.base(), ingest_path);
         let bearer = format!("Bearer {credential}");
         let body = serde_json::to_vec(events).map_err(|e| RunnerError::Decode(e.to_string()))?;
@@ -1530,5 +1581,58 @@ mod tests {
             .unwrap();
         let calls = client.transport.calls();
         assert_eq!(calls[0].bearer, format!("Bearer {SENTINEL_PAT}"));
+    }
+
+    #[test]
+    fn validate_ingest_path_accepts_the_frozen_shape_rejects_authority_injection() {
+        // The frozen fabric shape is accepted.
+        assert!(validate_ingest_path("/v1/leases/lease-abc123/envelope/ingest").is_ok());
+        assert!(validate_ingest_path("/x").is_ok());
+
+        // Authority-injection vectors — each would move the URL's host off the
+        // configured base if concatenated, exfiltrating the scoped credential.
+        for hostile in [
+            "@evil.com/x",  // userinfo trick: base becomes userinfo, evil.com the host
+            ".evil.com/x",  // suffix: base.evil.com becomes the host
+            ":9999/x",      // port swap on the base host
+            "//evil.com/x", // protocol-relative-style double slash
+            "evil.com/x",   // no leading slash → joins the authority
+            "",             // empty
+            "v1/ingest",    // relative
+            "/a\\b",        // backslash (some parsers treat as /)
+            "/a b",         // whitespace
+            "/a\nb",        // control char (header/URL smuggling)
+        ] {
+            assert!(
+                validate_ingest_path(hostile).is_err(),
+                "must reject hostile ingest_path {hostile:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn submit_envelope_rejects_hostile_ingest_path_before_sending_the_credential() {
+        const SCOPED: &str = "scoped-ingest-cred-XYZ";
+        // A response is queued; if the guard works, it is NEVER consumed because
+        // the transport is never called.
+        let transport = FakeTransport::with_responses(vec![(200, Vec::new())]);
+        let config = RunnerConfig::new("https://runner.example", SENTINEL_PAT).unwrap();
+        let client = LeaseClient::with_transport(config, transport);
+
+        let err = client
+            .submit_envelope("@evil.com/steal", SCOPED, &[])
+            .expect_err("a hostile ingest_path must be refused, never sent");
+        assert!(
+            matches!(err, RunnerError::InvalidIngestPath(_)),
+            "must be InvalidIngestPath, got {err:?}"
+        );
+        // The credential NEVER reached the wire — no transport call was made.
+        assert!(
+            client.transport.calls().is_empty(),
+            "no request may be sent for a hostile ingest_path"
+        );
+        // And the scoped credential never appears in the error rendering.
+        assert!(!format!("{err}").contains(SCOPED));
+        assert!(!format!("{err:?}").contains(SCOPED));
     }
 }

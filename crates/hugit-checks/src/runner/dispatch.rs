@@ -246,9 +246,16 @@ pub fn dispatch_check<T: RunnerTransport>(
 /// the fabric price card) and are NOT representable as a per-turn event — which
 /// is exactly why the attested figure is the fabric's to compute, not hugit's.
 pub fn project_intent_metrics(m: &IntentMetrics) -> Vec<IngestEvent> {
+    // Bound the per-count expansion: the counts come from `measured` (a hugit-side
+    // off-box measurement, NOT a fabric response), but a corrupt/hostile
+    // measurement with `count`/`model_turns` near `u64::MAX` would OOM here. The
+    // projection is only the SUBMITTED trajectory — the ATTESTED figure is the
+    // fabric's finalized CLOSE metrics — so clamping the discrete-event count
+    // never affects the source-of-truth cost; it just caps a self-DoS.
+    const MAX_PROJECTED_PER_KIND: u64 = 10_000;
     let mut events = Vec::new();
     for tc in &m.tool_breakdown {
-        for _ in 0..tc.count {
+        for _ in 0..tc.count.min(MAX_PROJECTED_PER_KIND) {
             events.push(IngestEvent {
                 kind: "tool_call".to_string(),
                 bytes_b64: String::new(),
@@ -258,7 +265,7 @@ pub fn project_intent_metrics(m: &IntentMetrics) -> Vec<IngestEvent> {
             });
         }
     }
-    let turns = m.model_turns.max(1);
+    let turns = m.model_turns.clamp(1, MAX_PROJECTED_PER_KIND);
     for i in 0..turns {
         let (usage, busy_ms) = if i == 0 {
             (
@@ -303,13 +310,22 @@ pub fn project_intent_metrics(m: &IntentMetrics) -> Vec<IngestEvent> {
 /// - the SCOPED credential is used ONLY for the ingest submit; acquire / poll /
 ///   close use the tenant PAT (held privately in the [`LeaseClient`]).
 ///
-/// `cost_usd_micros` is the PROVIDER-billed total cost of the off-box agent run
-/// (read from the provider's `/usage` by the off-box loop) — submitted VERBATIM on
+/// `cost_usd_micros` is the total cost of the off-box run, submitted VERBATIM on
 /// the close (#64), where the fabric (#226) records it into
-/// `CloseResponse.metrics.cost_usd_micros`. Pass `None` when no real
-/// provider-billed figure exists yet (honest-zero floor); NEVER pass a
-/// derived/misattributed number (the per-PR honesty law). The off-box agent-loop
-/// source that would furnish a real figure is not yet built (see the callers).
+/// `CloseResponse.metrics.cost_usd_micros`. It MUST be a figure that is TRUE for
+/// THIS intent — the per-PR honesty law forbids a FABRICATED, ESTIMATED, or
+/// MISATTRIBUTED (another intent's) number. Two truthful sources qualify:
+///   - the provider's billed `/usage` figure read by a live off-box agent loop
+///     (the most direct; that loop is the not-yet-built P2 seam), OR
+///   - the owner-ratified **WP-COST-3 Option A** figure the shipped land caller
+///     passes: `Σ(this PR's REAL `ctx.usage` token records × the stamped
+///     published price-card rate)` — priced from THIS intent's real measurements
+///     at a versioned rate, so it is real + attributable + reproducible, NOT a
+///     stand-in. (It is a price-CARD figure, not the invoice, which is why a
+///     provider `/usage` bill supersedes it when the loop lands.)
+///
+/// Pass `None` for the honest-zero floor when neither exists (no `ctx.usage`
+/// records / an unknown model / an overflow — the caller's complete-or-nothing).
 ///
 /// `exit_code` is the off-box run's own verdict (`0` = completed successfully):
 /// it is carried onto the synthesized off-box `CheckResult.exit` and DECIDES the
