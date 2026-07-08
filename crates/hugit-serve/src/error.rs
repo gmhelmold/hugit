@@ -197,6 +197,19 @@ impl EngineErr {
         }
     }
 
+    /// 429 — the per-principal ENGINE rate limit (G10) refused this request: the
+    /// caller (tenant/anonymous edge) exceeded its req/s budget. Rejected INLINE in
+    /// the accept-loop preamble BEFORE any body read or worker spawn. Distinct from
+    /// [`Self::rate_limited`] (the upstream token-mint throttle).
+    #[must_use]
+    pub fn too_many_requests() -> Self {
+        Self {
+            status: 429,
+            code: "RATE_LIMITED",
+            reason: "muitas solicitações — reduza o ritmo e tente de novo".to_string(),
+        }
+    }
+
     /// The `{code, reason}` JSON body (UTF-8). Exactly the two fields the frozen
     /// client deserializes; extra fields are never added.
     #[must_use]

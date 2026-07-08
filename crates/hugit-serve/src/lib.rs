@@ -30,6 +30,7 @@ pub mod git;
 pub mod handlers;
 pub mod merge_hook;
 pub mod metrics;
+pub mod ratelimit;
 pub mod receive_wire;
 pub mod server;
 pub mod sigv4;
