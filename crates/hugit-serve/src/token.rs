@@ -105,7 +105,7 @@ const EXCHANGE_TIMEOUT_SECS: u64 = 10;
 /// last verified) is `<=` this. `5` min matches the engine-token TTL (`≤300s`), so a
 /// stale/hijacked session cannot originate an irreversible erase without a recent
 /// reauth. Tight-but-usable for a step-up-gated action (`policy`/`erasure`); tunable.
-const FRESH_AUTH_MAX_FVA_MINUTES: u32 = 5;
+const FRESH_AUTH_MAX_FVA_MINUTES: i64 = 5;
 
 // ── Client-facing wire types (FROZEN — backend-API-v1 §Q2; do NOT change) ─────
 
@@ -152,8 +152,26 @@ struct ExchangeOk {
     /// the next one. **ABSENT ⇒ NOT fresh** (the exchange OMITS the key when the JWT
     /// carried no well-formed non-negative `fva` — fail-closed, never a fabricated 0),
     /// so step-up stays refused for a non-reauthed session.
+    ///
+    /// TOLERANT-parsed as a raw `Value` (never `Option<u32>`): a malformed emit — a
+    /// negative value (e.g. a producer that mishandled Clerk's `fva[1]=-1` no-2FA
+    /// sentinel), a float, a string — must NOT fail the whole `ExchangeOk` decode and
+    /// take the ENTIRE token mint down with it. It degrades to "not fresh"
+    /// ([`fva_minutes_i64`]) — a bad freshness signal can never break authentication.
     #[serde(default)]
-    fva_minutes: Option<u32>,
+    fva_minutes: Option<serde_json::Value>,
+}
+
+impl ExchangeOk {
+    /// The freshness age as a plain `i64`, or `None` if absent OR not a JSON integer
+    /// (fail-safe: any non-integer — float/string/object/negative-is-kept-as-i64 —
+    /// that is not a clean integer yields `None`; the step-up window then rejects it).
+    /// Keeps a malformed optional field from ever failing the whole exchange decode.
+    fn fva_minutes_i64(&self) -> Option<i64> {
+        self.fva_minutes
+            .as_ref()
+            .and_then(serde_json::Value::as_i64)
+    }
 }
 
 /// The verified identity returned by a successful [`SessionExchangeClient::exchange`].
@@ -162,9 +180,10 @@ pub struct ExchangeIdentity {
     pub principal: String,
     pub tenant: String,
     pub expires_ms: u64,
-    /// Clerk factor-verification age in minutes (`fva[0]`); `None` ⇒ not fresh. The
-    /// step-up window policy is applied at mint (see [`FRESH_AUTH_MAX_FVA_MINUTES`]).
-    pub fva_minutes: Option<u32>,
+    /// Clerk factor-verification age in minutes (`fva[0]`) as a plain `i64`; `None` ⇒
+    /// absent or non-integer ⇒ not fresh. The step-up window policy (incl. the
+    /// `>= 0` lower bound) is applied at mint (see [`FRESH_AUTH_MAX_FVA_MINUTES`]).
+    pub fva_minutes: Option<i64>,
 }
 
 // ── ClerkPrincipal (the minted-identity carrier) ──────────────────────────────
@@ -314,11 +333,12 @@ impl SessionExchangeClient {
                     // A 200 with empty identity is not trustworthy → fail-closed.
                     return Err(EngineErr::unavailable("exchange: empty principal/tenant"));
                 }
+                let fva_minutes = ok.fva_minutes_i64();
                 Ok(ExchangeIdentity {
                     principal: ok.principal,
                     tenant: ok.tenant,
                     expires_ms: ok.expires_ms,
-                    fva_minutes: ok.fva_minutes,
+                    fva_minutes,
                 })
             }
             // 4xx/5xx land here as Error::Status(code, _).
@@ -712,9 +732,13 @@ pub fn handle_token_exchange(
     // exactly the pre-Track-B behaviour, so this deploys safely before/independently
     // of the exchange emitting the field. The bit is baked into the HMAC-signed
     // engine token, so it cannot be tampered post-mint.
+    // Fresh IFF fva[0] ∈ [0, FRESH_AUTH_MAX_FVA_MINUTES]. The `>= 0` lower bound is
+    // load-bearing: a NEGATIVE value (a malformed/sentinel emit) is NOT fresh, never
+    // a wraparound — and it never reached serde as a `u32` (see `ExchangeOk`), so it
+    // can't have failed the decode either. Out-of-range ⇒ not fresh, fail-closed.
     let fresh_auth = id
         .fva_minutes
-        .is_some_and(|m| m <= FRESH_AUTH_MAX_FVA_MINUTES);
+        .is_some_and(|m| (0..=FRESH_AUTH_MAX_FVA_MINUTES).contains(&m));
     let principal = ClerkPrincipal {
         user: id.principal,
         org: id.tenant,
@@ -993,6 +1017,47 @@ mod tests {
                 "fva_minutes>5 ⇒ NOT fresh ⇒ step-up refused"
             ),
             _ => panic!("valid lookup"),
+        }
+    }
+
+    /// A MALFORMED `fva_minutes` (negative sentinel, or a wrong JSON type) must
+    /// degrade to NOT fresh WITHOUT failing the whole exchange decode — a bad
+    /// freshness signal can never break token minting itself (the hardening).
+    #[test]
+    fn handle_exchange_malformed_fva_degrades_to_not_fresh_never_breaks_mint() {
+        for bad in [
+            json!(-1),
+            json!(-9999),
+            json!("garbage"),
+            json!(1.5),
+            json!({}),
+        ] {
+            let body_json = json!({
+                "token_plaintext": "ignored", "pat_id": "p", "token_id": "t",
+                "principal": TEST_PRINCIPAL, "tenant": TEST_TENANT,
+                "expires_ms": far_future_ms(), "fva_minutes": bad,
+            })
+            .to_string();
+            let (url, _rx) = mock_exchange(200, body_json);
+            let store = TokenStore::new();
+            let body = exchange_req("clerk-jwt", TEST_TENANT);
+            let (status, resp_body) =
+                handle_token_exchange(&SessionExchangeClient::new(url), &store, &body);
+            // The mint STILL succeeds (the malformed optional field did not break decode).
+            assert_eq!(
+                status, 200,
+                "a bad fva_minutes must not fail the token mint"
+            );
+            let et = serde_json::from_str::<serde_json::Value>(&resp_body).unwrap()["engine_token"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            match store.lookup(&et) {
+                LookupResult::Ok(rec) => {
+                    assert!(!rec.fresh_auth, "a malformed fva_minutes ⇒ NOT fresh")
+                }
+                _ => panic!("valid lookup"),
+            }
         }
     }
 
