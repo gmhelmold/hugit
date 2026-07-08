@@ -102,9 +102,15 @@ const EXCHANGE_TIMEOUT_SECS: u64 = 10;
 
 /// Step-up freshness window (WP-Track-B): an exchange-minted engine token is
 /// `fresh_auth` IFF the subject's Clerk `fva[0]` (minutes since the first factor was
-/// last verified) is `<=` this. `5` min matches the engine-token TTL (`≤300s`), so a
-/// stale/hijacked session cannot originate an irreversible erase without a recent
-/// reauth. Tight-but-usable for a step-up-gated action (`policy`/`erasure`); tunable.
+/// last verified) is STRICTLY `<` this (`0 <= fva < 5`; a token minted AT the boundary
+/// has no usable fresh window, so it is not fresh). To keep total staleness-AT-USE below
+/// the window — not merely at mint — a fresh token's TTL is TRIMMED at mint to the
+/// freshness remainder `(FRESH_AUTH_MAX_FVA_MINUTES - fva) * 60` seconds (further bounded
+/// by the upstream remaining and the `≤300s` ceiling). So a token minted at `fva=4`
+/// expires in ~60s, never a further 5 min stacked on an already-4-min-old reauth; total
+/// elapsed-since-reauth therefore stays `< FRESH_AUTH_MAX_FVA_MINUTES` for the entire
+/// life of a fresh token — the invariant HOLDS at use time. A stale/hijacked session
+/// thus cannot originate an irreversible erase without a recent reauth. Tunable.
 const FRESH_AUTH_MAX_FVA_MINUTES: i64 = 5;
 
 // ── Client-facing wire types (FROZEN — backend-API-v1 §Q2; do NOT change) ─────
@@ -732,26 +738,42 @@ pub fn handle_token_exchange(
     // exactly the pre-Track-B behaviour, so this deploys safely before/independently
     // of the exchange emitting the field. The bit is baked into the HMAC-signed
     // engine token, so it cannot be tampered post-mint.
-    // Fresh IFF fva[0] ∈ [0, FRESH_AUTH_MAX_FVA_MINUTES]. The `>= 0` lower bound is
-    // load-bearing: a NEGATIVE value (a malformed/sentinel emit) is NOT fresh, never
-    // a wraparound — and it never reached serde as a `u32` (see `ExchangeOk`), so it
-    // can't have failed the decode either. Out-of-range ⇒ not fresh, fail-closed.
-    let fresh_auth = id
-        .fva_minutes
-        .is_some_and(|m| (0..=FRESH_AUTH_MAX_FVA_MINUTES).contains(&m));
+    // Fresh IFF fva[0] ∈ [0, FRESH_AUTH_MAX_FVA_MINUTES) — a STRICT upper bound (a token
+    // minted AT the 5-min boundary has no usable fresh window, so it is not fresh). The
+    // `>= 0` lower bound is load-bearing: a NEGATIVE value (a malformed/sentinel emit) is
+    // NOT fresh, never a wraparound — and it never reached serde as a `u32` (see
+    // `ExchangeOk`), so it can't have failed the decode either. Out-of-range ⇒ not fresh,
+    // fail-closed.
+    let fva_minutes = id.fva_minutes;
+    let fresh_auth = fva_minutes.is_some_and(|m| (0..FRESH_AUTH_MAX_FVA_MINUTES).contains(&m));
+    // F1: TRIM a fresh token's TTL to the freshness remainder so total staleness-at-use
+    // can never exceed the `< FRESH_AUTH_MAX_FVA_MINUTES` window. `m < 5` ⇒ the remainder
+    // `(5 - m) * 60` is a positive i64 (≥ 1 min). A non-fresh token keeps its full
+    // upstream-bounded TTL (unchanged). The final `mint_with_ttl` clamp still applies.
+    let mint_ttl = if fresh_auth {
+        // fresh_auth ⇒ Some(m) with 0 <= m < FRESH_AUTH_MAX_FVA_MINUTES.
+        let m = fva_minutes.unwrap_or(0);
+        let fresh_ttl_secs = ((FRESH_AUTH_MAX_FVA_MINUTES - m) * 60) as u64;
+        upstream_remaining.min(fresh_ttl_secs)
+    } else {
+        upstream_remaining
+    };
     let principal = ClerkPrincipal {
         user: id.principal,
         org: id.tenant,
         fresh_auth,
     };
-    let engine_token = match store.mint_with_ttl(&principal, upstream_remaining) {
+    let engine_token = match store.mint_with_ttl(&principal, mint_ttl) {
         Ok(t) => t,
         Err(e) => {
             return (e.status, e.to_body());
         }
     };
 
-    let expires_in = upstream_remaining.clamp(1, ENGINE_TOKEN_TTL_SECS);
+    // `expires_in` reflects the ACTUAL minted TTL (trimmed for a fresh token), never the
+    // untrimmed upstream remaining — the client must not believe a fresh token lives
+    // longer than it does.
+    let expires_in = mint_ttl.clamp(1, ENGINE_TOKEN_TTL_SECS);
     let resp = TokenExchangeResp {
         engine_token,
         expires_in,
@@ -1058,6 +1080,94 @@ mod tests {
                 }
                 _ => panic!("valid lookup"),
             }
+        }
+    }
+
+    /// Drive `handle_token_exchange` with an explicit `fva_minutes` and a far-future
+    /// upstream session; return `(expires_in, fresh_auth)` — the two F1 observables.
+    fn exchange_with_fva(fva: serde_json::Value) -> (u64, bool) {
+        let body_json = json!({
+            "token_plaintext": "ignored", "pat_id": "p", "token_id": "t",
+            "principal": TEST_PRINCIPAL, "tenant": TEST_TENANT,
+            "expires_ms": far_future_ms(), "fva_minutes": fva,
+        })
+        .to_string();
+        let (url, _rx) = mock_exchange(200, body_json);
+        let store = TokenStore::new();
+        let body = exchange_req("clerk-jwt", TEST_TENANT);
+        let (status, resp_body) =
+            handle_token_exchange(&SessionExchangeClient::new(url), &store, &body);
+        assert_eq!(status, 200);
+        let v: serde_json::Value = serde_json::from_str(&resp_body).unwrap();
+        let expires_in = v["expires_in"].as_u64().unwrap();
+        let et = v["engine_token"].as_str().unwrap();
+        let fresh = match store.lookup(et) {
+            LookupResult::Ok(rec) => rec.fresh_auth,
+            _ => panic!("valid lookup"),
+        };
+        (expires_in, fresh)
+    }
+
+    /// F1 (a): `fva=0` ⇒ fresh, TTL TRIMMED to the full 5-min remainder (~300s = the
+    /// ceiling), well under the untrimmed far-future upstream remaining.
+    #[test]
+    fn handle_exchange_fva_0_fresh_ttl_trimmed_to_full_window() {
+        let (expires_in, fresh) = exchange_with_fva(json!(0));
+        assert!(fresh, "fva=0 (< 5) ⇒ fresh");
+        // (5 - 0) * 60 = 300, clamped to the ENGINE_TOKEN_TTL_SECS ceiling.
+        assert_eq!(
+            expires_in, ENGINE_TOKEN_TTL_SECS,
+            "fva=0 ⇒ 5-min remainder ⇒ TTL = ceiling (300s), NOT the far-future upstream"
+        );
+    }
+
+    /// F1 (b): `fva=4` ⇒ fresh, TTL TRIMMED to the 1-min remainder (~60s) so total
+    /// staleness-at-use (4 min elapsed + ≤1 min token life) stays < 5 min.
+    #[test]
+    fn handle_exchange_fva_4_fresh_ttl_trimmed_to_one_minute() {
+        let (expires_in, fresh) = exchange_with_fva(json!(4));
+        assert!(fresh, "fva=4 (< 5) ⇒ fresh");
+        // (5 - 4) * 60 = 60.
+        assert_eq!(
+            expires_in, 60,
+            "fva=4 ⇒ 1-min remainder ⇒ TTL trimmed to 60s"
+        );
+    }
+
+    /// F1 (c): `fva=5` ⇒ NOT fresh (the upper bound is STRICT) — a token minted AT the
+    /// boundary has no usable fresh window, so step-up is refused and the TTL is full.
+    #[test]
+    fn handle_exchange_fva_5_is_not_fresh_strict_boundary() {
+        let (expires_in, fresh) = exchange_with_fva(json!(FRESH_AUTH_MAX_FVA_MINUTES));
+        assert!(!fresh, "fva=5 ⇒ NOT fresh (strict `< 5`)");
+        // Non-fresh ⇒ full upstream-bounded TTL, clamped to the ceiling (far-future upstream).
+        assert_eq!(
+            expires_in, ENGINE_TOKEN_TTL_SECS,
+            "a non-fresh token keeps its full (ceiling-clamped) TTL, no trim"
+        );
+    }
+
+    /// F1 (d): a NON-fresh token (no `fva_minutes`) keeps its full upstream-bounded TTL
+    /// (no freshness trim) — the trim applies ONLY to a fresh token.
+    #[test]
+    fn handle_exchange_non_fresh_keeps_full_upstream_ttl() {
+        // ~30s upstream remaining, no fva ⇒ not fresh ⇒ TTL == upstream remaining (~30s).
+        let expires = (now_secs() + 30) * 1000;
+        let (url, _rx) = mock_exchange(200, ok_body(TEST_PRINCIPAL, TEST_TENANT, expires));
+        let store = TokenStore::new();
+        let body = exchange_req("clerk-jwt", TEST_TENANT);
+        let (status, resp_body) =
+            handle_token_exchange(&SessionExchangeClient::new(url), &store, &body);
+        assert_eq!(status, 200);
+        let v: serde_json::Value = serde_json::from_str(&resp_body).unwrap();
+        let expires_in = v["expires_in"].as_u64().unwrap();
+        assert!(
+            (1..=31).contains(&expires_in),
+            "a non-fresh token keeps the full ~30s upstream TTL, got {expires_in}"
+        );
+        match store.lookup(v["engine_token"].as_str().unwrap()) {
+            LookupResult::Ok(rec) => assert!(!rec.fresh_auth, "no fva ⇒ not fresh"),
+            _ => panic!("valid lookup"),
         }
     }
 
