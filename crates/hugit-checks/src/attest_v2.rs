@@ -52,6 +52,58 @@ pub fn verify_result_binding_v2(
     verifying_key.verify_strict(&preimage, &signature).is_ok()
 }
 
+/// Verify an off-box `intent_metrics_sig` over the finalized §13.1 metrics.
+///
+/// Returns `true` IFF the detached ed25519 signature `sig_b64` is valid for
+/// `fabric_pubkey_b64` over [`intent_metrics_preimage`](hugit_refstore::intent_metrics_preimage)
+/// of `metrics`, bound to `lease_id` + `tenant`. Fail-closed on any malformed input
+/// (bad base64, wrong key/sig length, a non-verifying signature) → `false`, never a
+/// panic.
+///
+/// This is the ONLY path by which an off-box `✓ cas:` may claim COST integrity: the
+/// off-box `result_binding_sig_v2` binds an EMPTY `CheckResult` (20 constant zero
+/// bytes — it attests the TENANT via the chain, never the cost), so the cost is
+/// covered HERE or not at all. The fabric emits `intent_metrics_sig` only when
+/// `FABRIC_EMIT_INTENT_METRICS_SIG` is set (default OFF); when it is absent from the
+/// close (`CloseResponse.intent_metrics_sig == None`), the cost stays
+/// fabric-recorded-but-unattested and `✓ cas:` MUST NOT assert cost integrity.
+#[must_use]
+pub fn verify_intent_metrics_sig(
+    fabric_pubkey_b64: &str,
+    lease_id: &str,
+    tenant: &str,
+    metrics: &crate::runner::metrics::RunnerJobMetrics,
+    sig_b64: &str,
+) -> bool {
+    let Some(verifying_key) = decode_verifying_key(fabric_pubkey_b64) else {
+        return false;
+    };
+    let Some(signature) = decode_signature(sig_b64) else {
+        return false;
+    };
+    let tool_breakdown: Vec<(String, u64)> = metrics
+        .tool_breakdown
+        .iter()
+        .map(|t| (t.tool.clone(), t.count))
+        .collect();
+    let preimage = hugit_refstore::intent_metrics_preimage(
+        lease_id,
+        tenant,
+        metrics.tokens.input,
+        metrics.tokens.output,
+        metrics.tokens.cache_read,
+        metrics.tokens.cache_write,
+        metrics.tokens.total,
+        metrics.wall_ms,
+        metrics.active_ms,
+        metrics.tool_calls,
+        &tool_breakdown,
+        metrics.model_turns,
+        metrics.cost_usd_micros,
+    );
+    verifying_key.verify_strict(&preimage, &signature).is_ok()
+}
+
 /// Decode a base64 ed25519 public key into a [`VerifyingKey`] (32 bytes). `None` on
 /// any decode/length/point error.
 fn decode_verifying_key(b64: &str) -> Option<VerifyingKey> {
@@ -267,5 +319,154 @@ mod tests {
             &v.artifacts,
             "AAAA"
         ));
+    }
+
+    // ── intent_metrics_sig (off-box attested cost) ────────────────────────────────
+
+    use crate::runner::metrics::{RunnerJobMetrics, RunnerTokenCounts, RunnerToolCount};
+    use ed25519_dalek::{Signer, SigningKey};
+
+    fn sample_metrics() -> RunnerJobMetrics {
+        RunnerJobMetrics {
+            tokens: RunnerTokenCounts {
+                input: 100,
+                output: 50,
+                cache_read: 10,
+                cache_write: 5,
+                total: 165,
+            },
+            wall_ms: 4200,
+            active_ms: 3100,
+            tool_calls: 3,
+            tool_breakdown: vec![
+                RunnerToolCount {
+                    tool: "Bash".into(),
+                    count: 2,
+                },
+                RunnerToolCount {
+                    tool: "Edit".into(),
+                    count: 1,
+                },
+            ],
+            model_turns: 2,
+            cost_usd_micros: 20_340_000,
+        }
+    }
+
+    fn sign_metrics(
+        signing: &SigningKey,
+        lease_id: &str,
+        tenant: &str,
+        m: &RunnerJobMetrics,
+    ) -> String {
+        let breakdown: Vec<(String, u64)> = m
+            .tool_breakdown
+            .iter()
+            .map(|t| (t.tool.clone(), t.count))
+            .collect();
+        let preimage = hugit_refstore::intent_metrics_preimage(
+            lease_id,
+            tenant,
+            m.tokens.input,
+            m.tokens.output,
+            m.tokens.cache_read,
+            m.tokens.cache_write,
+            m.tokens.total,
+            m.wall_ms,
+            m.active_ms,
+            m.tool_calls,
+            &breakdown,
+            m.model_turns,
+            m.cost_usd_micros,
+        );
+        B64.encode(signing.sign(&preimage).to_bytes())
+    }
+
+    #[test]
+    fn intent_metrics_sig_verifies_and_rejects_every_tamper() {
+        let signing = SigningKey::from_bytes(&[7u8; 32]);
+        let pubkey = B64.encode(signing.verifying_key().to_bytes());
+        let (lease, tenant) = ("lease-abc", "d863fafb");
+        let m = sample_metrics();
+        let sig = sign_metrics(&signing, lease, tenant, &m);
+
+        // Genuine → verifies.
+        assert!(verify_intent_metrics_sig(&pubkey, lease, tenant, &m, &sig));
+
+        // Anti-replay: a different lease_id or tenant fails (the binding is the point).
+        assert!(!verify_intent_metrics_sig(
+            &pubkey,
+            "lease-XYZ",
+            tenant,
+            &m,
+            &sig
+        ));
+        assert!(!verify_intent_metrics_sig(
+            &pubkey,
+            lease,
+            "other-tenant",
+            &m,
+            &sig
+        ));
+
+        // A +1 micro-USD cost tamper fails — the whole reason this sig exists.
+        let mut tampered = m.clone();
+        tampered.cost_usd_micros += 1;
+        assert!(!verify_intent_metrics_sig(
+            &pubkey, lease, tenant, &tampered, &sig
+        ));
+
+        // The tool_breakdown ORDER is bound — reordering fails.
+        let mut reordered = m.clone();
+        reordered.tool_breakdown.reverse();
+        assert!(!verify_intent_metrics_sig(
+            &pubkey, lease, tenant, &reordered, &sig
+        ));
+
+        // A different fabric key fails; malformed key/sig fail CLOSED (never panic).
+        let other = B64.encode(
+            SigningKey::from_bytes(&[9u8; 32])
+                .verifying_key()
+                .to_bytes(),
+        );
+        assert!(!verify_intent_metrics_sig(&other, lease, tenant, &m, &sig));
+        assert!(!verify_intent_metrics_sig(
+            "not-base64-!!!",
+            lease,
+            tenant,
+            &m,
+            &sig
+        ));
+        assert!(!verify_intent_metrics_sig(
+            &pubkey, lease, tenant, &m, "AAAA"
+        ));
+    }
+
+    #[test]
+    fn intent_metrics_preimage_framing_is_locked() {
+        // Format-lock: an INDEPENDENT byte-by-byte re-derivation of the frozen framing
+        // (LP fields, u32 tool-count, u64-be everywhere, exact field order) — so an
+        // accidental change to `intent_metrics_preimage` breaks this. (Fabric-match is
+        // separately proven against conformance/intent_metrics_sig.json when the runners
+        // TL delivers the shared vector.)
+        let breakdown = vec![("Bash".to_string(), 2u64)];
+        let got = hugit_refstore::intent_metrics_preimage(
+            "L", "T", 1, 2, 3, 4, 10, 20, 30, 1, &breakdown, 2, 4_200_000,
+        );
+        let mut want: Vec<u8> = Vec::new();
+        want.extend_from_slice(&1u32.to_be_bytes());
+        want.extend_from_slice(b"L");
+        want.extend_from_slice(&1u32.to_be_bytes());
+        want.extend_from_slice(b"T");
+        for n in [1u64, 2, 3, 4, 10, 20, 30, 1] {
+            want.extend_from_slice(&n.to_be_bytes());
+        }
+        want.extend_from_slice(&1u32.to_be_bytes()); // tool_breakdown.len
+        want.extend_from_slice(&4u32.to_be_bytes()); // LP("Bash") len
+        want.extend_from_slice(b"Bash");
+        want.extend_from_slice(&2u64.to_be_bytes()); // count
+        want.extend_from_slice(&2u64.to_be_bytes()); // model_turns
+        want.extend_from_slice(&4_200_000u64.to_be_bytes()); // cost_usd_micros
+        assert_eq!(got, want, "intent_metrics pre-image framing drifted");
     }
 }
