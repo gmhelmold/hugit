@@ -504,11 +504,21 @@ pub struct AppState {
     /// so leaking is semantically exact — and it lets `repo_state` return a
     /// `&RepoState` (the leaked ref outlives every borrow) WITHOUT changing the
     /// signature the do-not-touch git wire path relies on. Bounded by the number of
-    /// provisions in one engine lifetime (rare, human-driven). On reboot a
-    /// provisioned repo's LOG re-loads from `source` (durable) but its git seam is
-    /// gone until the `HUGIT_SERVE_CAS_REPO` list is updated — the runtime-repo-set
-    /// PERSISTENCE is the owner/infra-gated follow-up named in the frozen contract.
+    /// provisions in one engine lifetime (rare, human-driven). A provisioned repo's
+    /// git seam is now RECOVERED on demand — [`repo_state_or_load`](Self::repo_state_or_load)
+    /// lazy-loads it from the durable R2 manifests on the first request, so it survives
+    /// a reboot AND is served by an instance that did not create it (closing the
+    /// count≥2 new-repo-404 + reboot-loss gap, #96) without needing the
+    /// `HUGIT_SERVE_CAS_REPO` list to be updated.
     pub repos_runtime: Arc<RwLock<std::collections::HashMap<String, &'static RepoState>>>,
+    /// Negative cache for [`repo_state_or_load`](Self::repo_state_or_load): slug → the
+    /// `now_ms()` of the last R2 lazy-load MISS. A repo not found in R2 is recorded so
+    /// a 404-probe storm cannot re-hit R2 (`load_manifests_from_cas`) on EVERY request
+    /// and stall the single-threaded accept loop (the read-latency-DoS class); a miss
+    /// is only re-probed after [`REPO_LOAD_MISS_COOLDOWN_MS`]. Interior-mutable behind
+    /// the shared `&AppState` (same pattern as [`repos_runtime`](Self::repos_runtime));
+    /// the single-threaded accept loop keeps it uncontended.
+    pub repo_load_misses: Arc<RwLock<std::collections::HashMap<String, u64>>>,
     /// The CAS-mode provisioning template (`Some` only when the engine booted in CAS
     /// mode — `HUGIT_SERVE_CAS_URL` set): the handles `POST /v1/repos` mints a new
     /// empty repo's git seam from (so it is push/clone-live in the same op). `None`
@@ -661,6 +671,20 @@ pub const MAX_REPOS_PER_TENANT: usize = 100;
 /// ≤2s staleness UX-only (a stale-base push is rejected non-fast-forward + retried), never a
 /// lost update. Upgrade to a zero-staleness conditional-GET (Option 1) before widening past 2.
 const REFS_REFRESH_INTERVAL_MS: u64 = 2_000;
+
+/// Cooldown before re-probing R2 for a repo a lazy-load found ABSENT — bounds the
+/// accept-loop R2 cost of a 404-probe storm (see [`AppState::repo_load_misses`] +
+/// [`AppState::repo_state_or_load`]).
+const REPO_LOAD_MISS_COOLDOWN_MS: u64 = 30_000;
+
+/// Wall-clock ms since the Unix epoch (the negative-cache timestamp source). A clock
+/// fault degrades to `0` → a stale-but-safe miss re-probe, never a panic.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 impl AppState {
     /// The receive-pack flag gate for `hugit_proto::receive_pack` — `self-hosted-alpha`
@@ -905,6 +929,7 @@ impl AppState {
             token_store,
             repos,
             repos_runtime: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            repo_load_misses: Arc::new(RwLock::new(std::collections::HashMap::new())),
             provision,
             write_path_enabled,
             // PROD default: OFF. Without `HUGIT_ALLOW_DEV_OPERATOR=1` the dev-token
@@ -1097,52 +1122,20 @@ impl AppState {
                     ));
                 }
                 // LAZY boot: read only the manifests + resolve HEAD's tree; objects
-                // are fetched from the CAS on demand at serve time.
-                let (cas_src, root, refs) =
-                    crate::cas::load_manifests_from_cas(cas.clone(), &r2, &tenant, repo)?;
+                // are fetched from the CAS on demand at serve time. The SAME builder
+                // the lazy-load-on-miss path uses ([`build_cas_repo_state`]), so a
+                // boot repo and a runtime-discovered repo are constructed identically.
+                let (repo_state, probe) =
+                    build_cas_repo_state(&cas, &r2, &tenant, repo, receive_pack_enabled())?;
                 // Capture the boot CAS connectivity self-probe for the FIRST CAS repo
                 // ONLY (additional repos share the same CAS client → a second probe is
                 // redundant). It is NOT run here — the caller spawns it on a detached
                 // thread OFF the boot path (FIX: the synchronous probe blew the
                 // container startup deadline). Never fails boot.
                 if selfcheck_probe.is_none() {
-                    selfcheck_probe = Some(cas_src.selfcheck_probe());
+                    selfcheck_probe = Some(probe);
                 }
-                // A shared handle to the lazy source's live oid→blake3 index, so a
-                // successful push can merge new entries into the SAME cell it reads.
-                let live_oid_index = cas_src.live_index_handle();
-                let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(cas_src);
-                // The CAS-mode push write seam — populated ONLY when the receive-pack
-                // deploy flag is on, so a stock deploy (flag unset/`0`) gets `None`:
-                // identical to the prior behavior (push gated off, no write seam). The
-                // flag (`write_path_enabled`) remains THE gate; this just gives an
-                // enabled deploy the objects sink + manifest store a CAS push needs.
-                let cas_write = if receive_pack_enabled() {
-                    Some(CasWriteSeam {
-                        cas_client: cas.clone(),
-                        tenant: tenant.clone(),
-                        repo_slug: repo.to_string(),
-                        r2: r2.clone(),
-                    })
-                } else {
-                    None
-                };
-                // The clone-pack cache (WP-BC) rides the SAME write-scoped seam a CAS
-                // push finalizes through — so it exists exactly when a build CAN PUT
-                // (receive-pack on). Receive-pack off → `None` → the clone slow-walks.
-                let clone_cache = cas_write.as_ref().map(CasWriteSeam::clone_cache_seam);
-                repos.insert(
-                    repo.to_string(),
-                    RepoState {
-                        git_source: src,
-                        git_root_tree: root,
-                        git_refs: LiveRefs::new(refs),
-                        git_dir: None, // CAS mode: no local dir; push sink is cas_write
-                        cas_write,
-                        live_oid_index: Some(live_oid_index),
-                        clone_cache,
-                    },
-                );
+                repos.insert(repo.to_string(), repo_state);
             }
             if repos.is_empty() {
                 return Err("HUGIT_SERVE_CAS_REPO is empty (CAS source selected)".to_string());
@@ -1209,6 +1202,7 @@ impl AppState {
             token_store: Arc::new(TokenStore::new()),
             repos: std::collections::HashMap::new(),
             repos_runtime: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            repo_load_misses: Arc::new(RwLock::new(std::collections::HashMap::new())),
             provision: None,
             write_path_enabled: false,
             // The explicit dev/test/seed constructor enables the break-glass by
@@ -1256,6 +1250,79 @@ impl AppState {
             .unwrap_or_else(|e| e.into_inner())
             .get(repo)
             .copied()
+    }
+
+    /// [`repo_state`](Self::repo_state), then a LAZY-LOAD-ON-MISS from the durable R2
+    /// manifests (#96). A repo provisioned via `POST /v1/repos` lands ONLY in the
+    /// creating instance's [`repos_runtime`](Self::repos_runtime) (leaked `&'static`)
+    /// and is NOT in any other instance's boot set — so at `max_instances ≥ 2` (or
+    /// after a reboot) another instance `repo_state`-misses it and 404s. This closes
+    /// that: on a miss, reconstruct the repo from R2 via the boot builder
+    /// ([`build_cas_repo_state`]) + register it, so ANY instance serves ANY durably
+    /// provisioned repo on first request — no reboot, no `HUGIT_SERVE_CAS_REPO` edit.
+    ///
+    /// FAIL-CLOSED + accept-loop-SAFE:
+    /// - Only in CAS mode ([`provision`](Self::provision) `Some`); Local/git-dir has a
+    ///   fixed on-disk set → straight `repo_state`.
+    /// - An unsafe slug → `None` (never an R2 probe for a traversal string).
+    /// - A NEGATIVE CACHE ([`repo_load_misses`](Self::repo_load_misses)) skips the R2
+    ///   probe for a slug found absent within [`REPO_LOAD_MISS_COOLDOWN_MS`] — so a
+    ///   404-probe storm cannot re-hit `load_manifests_from_cas` on every request and
+    ///   stall the single-threaded accept loop (the read-latency-DoS class).
+    /// - The single-threaded accept loop means no same-instance race on the load/insert.
+    #[must_use]
+    pub fn repo_state_or_load(&self, repo: &str) -> Option<&RepoState> {
+        if let Some(r) = self.repo_state(repo) {
+            return Some(r);
+        }
+        // CAS mode only + a store-safe slug (never probe R2 for a traversal string).
+        let tmpl = self.provision.as_ref()?;
+        if !is_safe_repo_slug(repo) {
+            return None;
+        }
+        // Negative cache: a recent miss short-circuits without touching R2.
+        if self.repo_load_miss_recent(repo) {
+            return None;
+        }
+        match build_cas_repo_state(
+            &tmpl.cas_client,
+            &tmpl.r2,
+            &tmpl.tenant,
+            repo,
+            tmpl.receive_pack_enabled,
+        ) {
+            Ok((repo_state, _probe)) => {
+                // Register the discovered repo. `insert_runtime_repo` is create-only;
+                // a `CAS_CONFLICT` just means it is already present (benign) — either
+                // way re-read through `repo_state` for the leaked `&'static` borrow.
+                let _ = self.insert_runtime_repo(repo, repo_state);
+                self.repo_state(repo)
+            }
+            Err(_) => {
+                // Absent/unreadable in R2 → negative-cache the miss + honest 404.
+                self.mark_repo_load_miss(repo);
+                None
+            }
+        }
+    }
+
+    /// Whether `repo` was lazy-load-missed within [`REPO_LOAD_MISS_COOLDOWN_MS`] (the
+    /// negative-cache short-circuit for [`repo_state_or_load`]).
+    fn repo_load_miss_recent(&self, repo: &str) -> bool {
+        let now = now_ms();
+        self.repo_load_misses
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(repo)
+            .is_some_and(|&at| now.saturating_sub(at) < REPO_LOAD_MISS_COOLDOWN_MS)
+    }
+
+    /// Record a lazy-load MISS for `repo` (negative cache; see [`repo_load_miss_recent`]).
+    fn mark_repo_load_miss(&self, repo: &str) {
+        self.repo_load_misses
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(repo.to_string(), now_ms());
     }
 
     /// Boot-time [`repo_meta_cache`](Self::repo_meta_cache) population (task #74):
@@ -3050,6 +3117,57 @@ impl crate::cas::R2PutConditional for R2Config {
     }
 }
 
+/// Build a CAS-backed [`RepoState`] by loading `repo`'s manifests from R2 + the CAS
+/// (LAZY: read the manifests + resolve HEAD's tree; objects are fetched on demand).
+///
+/// The single construction path shared by boot ([`AppState::load_repos_from_env`])
+/// AND the runtime lazy-load ([`AppState::repo_state_or_load`]) — so a repo listed in
+/// the boot `HUGIT_SERVE_CAS_REPO` comma-list and a repo provisioned on ANOTHER
+/// instance (discovered on first request) are built identically. Returns the state +
+/// the CAS connectivity self-probe (boot uses it for the first repo; the lazy path
+/// discards it).
+///
+/// # Errors
+/// The repo's manifests are absent/unreadable in R2 (a not-yet-provisioned or
+/// nonexistent repo) or a CAS/R2 fault — propagated as the boot-style error string.
+fn build_cas_repo_state(
+    cas: &crate::cas::CasClient,
+    r2: &R2Config,
+    tenant: &str,
+    repo: &str,
+    receive_pack: bool,
+) -> Result<(RepoState, crate::cas::CasSelfcheckProbe), String> {
+    let (cas_src, root, refs) = crate::cas::load_manifests_from_cas(cas.clone(), r2, tenant, repo)?;
+    let probe = cas_src.selfcheck_probe();
+    // A shared handle to the lazy source's live oid→blake3 index, so a successful
+    // push can merge new entries into the SAME cell it reads.
+    let live_oid_index = cas_src.live_index_handle();
+    let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(cas_src);
+    // The CAS-mode push write seam — populated ONLY when receive-pack is on (a stock
+    // deploy gets `None`: identical to the read-only behavior).
+    let cas_write = receive_pack.then(|| CasWriteSeam {
+        cas_client: cas.clone(),
+        tenant: tenant.to_string(),
+        repo_slug: repo.to_string(),
+        r2: r2.clone(),
+    });
+    // The clone-pack cache rides the SAME write-scoped seam a CAS push finalizes
+    // through — so it exists exactly when a build CAN PUT (receive-pack on).
+    let clone_cache = cas_write.as_ref().map(CasWriteSeam::clone_cache_seam);
+    Ok((
+        RepoState {
+            git_source: src,
+            git_root_tree: root,
+            git_refs: LiveRefs::new(refs),
+            git_dir: None, // CAS mode: no local dir; push sink is cas_write
+            cas_write,
+            live_oid_index: Some(live_oid_index),
+            clone_cache,
+        },
+        probe,
+    ))
+}
+
 /// Whether `HUGIT_SERVE_RECEIVE_PACK` enables the git-push write path. The single
 /// source of truth for BOTH the [`AppState::write_path_enabled`] flag and whether a
 /// CAS-mode repo is loaded with a [`CasWriteSeam`] — so a stock deploy (the var
@@ -3995,6 +4113,49 @@ mod me_repos_tests {
             );
         }
         st
+    }
+
+    #[test]
+    fn repo_state_or_load_local_mode_is_a_pure_passthrough() {
+        // Local/dev mode has `provision: None` → NO lazy-load (there is a fixed
+        // on-disk/in-memory set). So `repo_state_or_load` == `repo_state`: a known
+        // repo resolves, an unknown one is an honest `None` (never an R2 probe).
+        let st = state_with(&[("alpha", "{}")]);
+        assert!(
+            st.repo_state_or_load("alpha").is_some(),
+            "known repo resolves"
+        );
+        assert!(
+            st.repo_state_or_load("ghost").is_none(),
+            "unknown repo in Local mode → None, no lazy-load (provision is None)"
+        );
+        // And it did NOT negative-cache in Local mode (the CAS-gate returns before the
+        // cache is ever consulted) — a defensive check that the gate order is right.
+        assert!(
+            !st.repo_load_miss_recent("ghost"),
+            "Local mode must not touch the negative cache"
+        );
+    }
+
+    #[test]
+    fn repo_load_negative_cache_marks_and_reads_back() {
+        // The DoS guard: a slug found absent is marked, and a recent mark short-circuits
+        // the next probe. A never-marked slug is not recent. (Cooldown is wall-clock;
+        // a just-marked slug is unambiguously within the window.)
+        let st = state_with(&[]);
+        assert!(
+            !st.repo_load_miss_recent("nope"),
+            "unmarked slug is not recent"
+        );
+        st.mark_repo_load_miss("nope");
+        assert!(
+            st.repo_load_miss_recent("nope"),
+            "a just-marked miss is recent → the next probe is skipped"
+        );
+        assert!(
+            !st.repo_load_miss_recent("other"),
+            "the negative cache is per-slug"
+        );
     }
 
     fn operator() -> Vec<String> {

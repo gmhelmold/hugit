@@ -603,7 +603,7 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
             // The git content seam (`blob`/`edit`) is resolved PER-REPO from the
             // map; a repo with no git seam loaded → `None` → those reads 404
             // honestly (identical to a not-wired engine, no oracle).
-            let repo_git = state.repo_state(repo);
+            let repo_git = state.repo_state_or_load(repo);
             // The per-repo git content seam (object source + HEAD root-tree + HEAD
             // commit), bundled so the dispatcher takes one param not three. The HEAD
             // commit (default-branch tip) is the start of the blob "Histórico"
@@ -1734,7 +1734,7 @@ fn dispatch_repo_write(
         ["prs"] => {
             let req = parse!(wr::PrCreateReq);
             let refs = state
-                .repo_state(repo)
+                .repo_state_or_load(repo)
                 .map(|r| r.git_refs.snapshot())
                 .unwrap_or_default();
             with_write(
