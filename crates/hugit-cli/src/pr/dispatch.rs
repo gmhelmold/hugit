@@ -230,6 +230,10 @@ fn dispatch_pr_metrics<T: RunnerTransport>(
         "",
         // WP-COST-3: the REAL priced-from-usage cost (Some) or honest-zero (None).
         cost_usd_micros,
+        // exit_code 0: this path is only reached AFTER the PR resolved + the land
+        // gate passed, so the attested run is a COMPLETED success. A live off-box
+        // agent loop (the P2 seam) that could FAIL would thread its real exit here.
+        0,
     )?;
     Ok(outcome.metrics)
 }

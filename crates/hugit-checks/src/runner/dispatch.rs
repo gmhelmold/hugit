@@ -310,6 +310,12 @@ pub fn project_intent_metrics(m: &IntentMetrics) -> Vec<IngestEvent> {
 /// provider-billed figure exists yet (honest-zero floor); NEVER pass a
 /// derived/misattributed number (the per-PR honesty law). The off-box agent-loop
 /// source that would furnish a real figure is not yet built (see the callers).
+///
+/// `exit_code` is the off-box run's own verdict (`0` = completed successfully):
+/// it is carried onto the synthesized off-box `CheckResult.exit` and DECIDES the
+/// close status, so a FAILED off-box run (`exit_code != 0`) closes `failed` and is
+/// never mis-attested as a success. Callers with no live off-box loop yet (the P2
+/// seam) that only reach this path AFTER their own success gate pass `0`.
 // The lease-lifecycle inputs (acquire spec, measured metrics, the three memo axes,
 // the toolchain digest) plus the #64 provider cost are each load-bearing and
 // distinct; a params struct would only obscure the call sites — allow the count.
@@ -323,6 +329,7 @@ pub fn dispatch_attest_offbox<T: RunnerTransport>(
     def_digest: &str,
     toolchain_digest: &str,
     cost_usd_micros: Option<u64>,
+    exit_code: i32,
 ) -> Result<DispatchOutcome, RunnerExecError> {
     let acquired = client.acquire(acquire).map_err(RunnerExecError::Lease)?;
     let lease_id = acquired.lease.lease_id.clone();
@@ -335,10 +342,13 @@ pub fn dispatch_attest_offbox<T: RunnerTransport>(
         tree_root,
         def_digest,
         toolchain_digest,
+        exit_code,
     );
 
-    // The close status is the run's honest verdict; on a collect error we still
-    // close, claiming `failed`.
+    // The close status is the run's honest verdict: the off-box run's own
+    // `exit_code` (carried onto `result.exit`), or `failed` on a collect error.
+    // So a FAILED off-box run (`exit_code != 0`) closes `failed` — never
+    // mis-attested as a success.
     let status = match &collected {
         Ok(o) if o.result.exit == 0 => CloseStatus::Succeeded,
         _ => CloseStatus::Failed,
@@ -379,6 +389,10 @@ pub fn dispatch_attest_offbox<T: RunnerTransport>(
 /// fabric's signed envelope. Does NOT acquire or close — that lifecycle is
 /// [`dispatch_attest_offbox`]'s. Fail-closed: refuses a non-`Held` lease and a
 /// lease with no §13.2 ingest credential.
+// Mirrors `dispatch_attest_offbox`'s arg set (the memo axes + toolchain + the
+// off-box `exit_code` verdict are each load-bearing + distinct); a params struct
+// would only obscure the single call site — allow the count.
+#[allow(clippy::too_many_arguments)]
 fn attest_and_collect<T: RunnerTransport>(
     client: &LeaseClient<T>,
     acquired: &AcquireResponse,
@@ -387,6 +401,7 @@ fn attest_and_collect<T: RunnerTransport>(
     tree_root: &str,
     def_digest: &str,
     toolchain_digest: &str,
+    exit_code: i32,
 ) -> Result<DispatchOutcome, RunnerExecError> {
     if acquired.lease.state != RunnerState::Held {
         return Err(RunnerExecError::LeaseNotHeld(acquired.lease.state.clone()));
@@ -422,15 +437,16 @@ fn attest_and_collect<T: RunnerTransport>(
     // metrics (the signed source of truth); the `result`/fallback `metrics` here
     // are never surfaced, so they only need to be honest + valid.
     //
-    // v0 attests a COMPLETED off-box run: `exit: 0` ⇒ the outer close claims
-    // `succeeded`. A failed off-box run needs an explicit success/exit input to
-    // this path — a tracked follow-up, out of scope for the happy A-path today.
+    // The off-box run's honest verdict rides `exit_code` (0 = the run completed
+    // successfully): the outer `dispatch_attest_offbox` derives the close status
+    // from `result.exit`, so a FAILED off-box run (`exit_code != 0`) closes
+    // `failed` and never mis-attests a failure as a success (the honesty law).
     let result = CheckResult {
         memo_key: memo_key.to_string(),
         tree_hash: tree_root.to_string(),
         def_digest: def_digest.to_string(),
         toolchain_digest: toolchain_digest.to_string(),
-        exit: 0,
+        exit: exit_code,
         artifacts: Vec::new(),
         stdout_ref: String::new(),
         stderr_ref: String::new(),
@@ -890,6 +906,7 @@ mod tests {
             // A representative provider-billed cost (#64): it must ride the close
             // body with the exact `cost_usd_micros` key the frozen fabric expects.
             Some(9_900_000),
+            0, // exit_code 0 ⇒ close claims succeeded
         )
         .expect("A-path lifecycle succeeds");
 
@@ -935,6 +952,51 @@ mod tests {
         assert_eq!(calls[2].bearer, format!("Bearer {SENTINEL_PAT}"));
     }
 
+    /// (A-1b) HONESTY: a FAILED off-box run (`exit_code != 0`) closes the lease
+    /// `failed`, never mis-attested as a success. The synthesized off-box
+    /// `CheckResult.exit` carries the caller's verdict and the close status
+    /// derives from it — so a wired off-box loop that fails cannot silently claim
+    /// a green attestation.
+    #[test]
+    fn attest_offbox_failed_run_closes_failed() {
+        const SCOPED: &str = "scoped-ingest-cred-A1b";
+        let transport = FakeTransport::with_responses(vec![
+            (
+                201,
+                acquire_wrapper(
+                    "lease-attest-fail",
+                    Some(("/v1/leases/lease-attest-fail/envelope/ingest", SCOPED)),
+                ),
+            ), // acquire
+            (200, Vec::new()),                            // submit_envelope
+            (200, close_body("lease-attest-fail", 0, 0)), // close
+        ]);
+        let client = client(transport);
+
+        let out = dispatch_attest_offbox(
+            &client,
+            &acquire_req(),
+            &measured_metrics(),
+            "f".repeat(64).as_str(),
+            "1".repeat(64).as_str(),
+            "2".repeat(64).as_str(),
+            "3".repeat(64).as_str(),
+            None,
+            1, // exit_code 1 ⇒ the off-box run FAILED
+        )
+        .expect("A-path lifecycle still completes (a failed run is closed, not errored)");
+
+        // The synthesized off-box result carries the failed verdict.
+        assert_eq!(out.result.exit, 1, "the failed exit rides the CheckResult");
+        // And the CLOSE claimed `failed` — the honesty invariant.
+        let calls = client.transport().calls();
+        let close_body: serde_json::Value = serde_json::from_slice(&calls[2].body).unwrap();
+        assert_eq!(
+            close_body["status"], "failed",
+            "a failed off-box run must close `failed`, never `succeeded`"
+        );
+    }
+
     /// (A-2) FAIL-CLOSED: a check lease whose acquire response carries NO
     /// `envelope_ingest` (a runner lease, or §13 off) errors with
     /// `NoEnvelopeIngest` — never a silent B-path fall-back — and the lease is
@@ -956,6 +1018,7 @@ mod tests {
             "2".repeat(64).as_str(),
             "3".repeat(64).as_str(),
             None,
+            0,
         )
         .expect_err("absent envelope_ingest is a fail-closed error");
         assert!(
@@ -1049,6 +1112,7 @@ mod tests {
             "2".repeat(64).as_str(),
             "3".repeat(64).as_str(),
             None,
+            0,
         )
         .expect("A-path lifecycle succeeds");
 
@@ -1093,6 +1157,7 @@ mod tests {
             "2".repeat(64).as_str(),
             "3".repeat(64).as_str(),
             None,
+            0,
         )
         .expect("A-path lifecycle succeeds");
 
