@@ -916,6 +916,16 @@ impl AppState {
         let pat_auth_enabled = pat_auth_enabled_env();
         pat_auth_multi_instance_guard(pat_auth_enabled, allow_multi_instance())?;
 
+        // Fail-closed: on a multi-instance deploy the engine-token signing key MUST be the
+        // SHARED `HUGIT_ENGINE_TOKEN_KEY` (else `TokenStore::from_env` falls back to a
+        // per-boot random key per instance → cross-instance 401s, the pre-#128 failure the
+        // stateless HMAC token closed). Refuse to boot when >1 instances are permitted but
+        // the key is absent/blank.
+        let engine_token_key_present = std::env::var("HUGIT_ENGINE_TOKEN_KEY")
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false);
+        engine_token_key_multi_instance_guard(allow_multi_instance(), engine_token_key_present)?;
+
         // The physical CAS-erase seam config (GDPR1 slice-2). Fail-closed: a set-but-invalid
         // URL/key aborts boot (never a half-configured erase seam). Absent → `None` (the
         // operator-execute route is disabled). This is the ONE irreversible-delete seam.
@@ -3280,6 +3290,32 @@ fn pat_auth_multi_instance_guard(
     Ok(())
 }
 
+/// The fail-closed boot guard tying the shared engine-token signing key to a
+/// multi-instance deploy. `TokenStore::from_env` falls back to a per-boot RANDOM signing
+/// key when `HUGIT_ENGINE_TOKEN_KEY` is unset/blank — safe single-host, but on a
+/// `>1`-instance deploy each instance would then sign with its OWN random key, so a token
+/// minted on instance A is rejected by instance B: exactly the pre-#128 ~50% 401 failure
+/// the stateless HMAC-signed engine token (WP-B5) was built to close. A secret-provisioning
+/// slip on one instance would silently reproduce it. So refuse to boot when multi-instance
+/// is permitted AND the key is absent/blank (mirrors the sibling single-instance-authoritative
+/// guards). Pure (takes the two booleans) → unit-tested without env.
+fn engine_token_key_multi_instance_guard(
+    allow_multi_instance: bool,
+    key_present: bool,
+) -> Result<(), String> {
+    if allow_multi_instance && !key_present {
+        return Err(
+            "HUGIT_SERVE_ALLOW_MULTI_INSTANCE is set but HUGIT_ENGINE_TOKEN_KEY is \
+             absent/blank — refusing to boot: without a shared engine-token signing key \
+             each instance falls back to its own per-boot random key, so a token minted on \
+             one instance is rejected by another (the pre-#128 ~50% 401 failure). Set \
+             HUGIT_ENGINE_TOKEN_KEY to the same value on every instance."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Split a comma-separated repo/dir list into trimmed, non-empty members. One
 /// member = the unchanged single-repo config; many = the multi-repo forge set.
 fn split_repo_list(list: &str) -> Vec<&str> {
@@ -4017,6 +4053,19 @@ mod tests {
         // PAT auth OFF → fine regardless of instance count.
         assert!(pat_auth_multi_instance_guard(false, true).is_ok());
         assert!(pat_auth_multi_instance_guard(false, false).is_ok());
+    }
+
+    #[test]
+    fn engine_token_key_multi_instance_guard_fail_closed() {
+        // Multi-instance permitted + key absent → REFUSE boot (each instance would sign
+        // with its own per-boot random key → cross-instance 401s, the pre-#128 failure).
+        let err = engine_token_key_multi_instance_guard(true, false).unwrap_err();
+        assert!(err.contains("refusing to boot") && err.contains("HUGIT_ENGINE_TOKEN_KEY"));
+        // Multi-instance + shared key present → fine (fungible tokens).
+        assert!(engine_token_key_multi_instance_guard(true, true).is_ok());
+        // Single instance → fine regardless of the key (per-boot random key is single-host safe).
+        assert!(engine_token_key_multi_instance_guard(false, false).is_ok());
+        assert!(engine_token_key_multi_instance_guard(false, true).is_ok());
     }
 
     #[test]
