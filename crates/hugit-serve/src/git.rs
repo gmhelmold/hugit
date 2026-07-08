@@ -430,7 +430,7 @@ fn prepare_upload_pack(
     // can move into the detached worker without borrowing `state`. Also snapshot the
     // repo's clone-pack cache seam (WP-BC) — `None` for a repo with no cache (GIT_DIR /
     // receive-pack off), which just means the worker slow-walks.
-    let repo_state = state.repo_state(repo)?;
+    let repo_state = state.repo_state_or_load(repo)?;
     let source: SharedSource = Arc::clone(&repo_state.git_source);
     let clone_cache = repo_state.clone_cache.clone();
 
@@ -818,7 +818,7 @@ fn git_refs_for(
     // git serving is not live for this repo unless its git seam was loaded at boot.
     // A repo with no `RepoState` (un-loaded, or a different repo's content) → None
     // → a uniform 404 (no oracle for which repos are git-served).
-    let repo_state = state.repo_state(repo)?;
+    let repo_state = state.repo_state_or_load(repo)?;
     if repo_state.git_refs.is_empty() {
         return None;
     }
@@ -976,7 +976,7 @@ fn handle_receive_advertise(state: &AppState, repo: &str, request: Request, io_b
     if !crate::state::is_safe_repo_slug(repo) {
         return respond_not_found(request, io_budget);
     }
-    let Some(repo_state) = state.repo_state(repo) else {
+    let Some(repo_state) = state.repo_state_or_load(repo) else {
         return respond_not_found(request, io_budget);
     };
     if !repo_state.has_write_seam() {
@@ -1068,7 +1068,7 @@ fn handle_receive_pack(
     if !crate::state::is_safe_repo_slug(repo) {
         return respond_not_found(request, io_budget);
     }
-    let Some(repo_state) = state.repo_state(repo) else {
+    let Some(repo_state) = state.repo_state_or_load(repo) else {
         return respond_not_found(request, io_budget);
     };
     // A write seam is required (GIT_DIR or CAS mode). None → 404, no oracle. The
@@ -1217,7 +1217,7 @@ fn serve_receive_pack_response(plan: ReceivePlan, request: Request, io_budget: D
     // Re-resolve the repo's live seam from the CLONED (Arc-sharing) state. Existence +
     // the write seam were already validated inline; this is a defensive re-check
     // (never an oracle) — a `None` here can only mean a concurrent teardown, → 404.
-    let Some(repo_state) = state.repo_state(&repo) else {
+    let Some(repo_state) = state.repo_state_or_load(&repo) else {
         return respond_not_found(request, io_budget);
     };
 
