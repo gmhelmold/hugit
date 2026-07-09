@@ -91,6 +91,30 @@ pub fn build_blob(
 /// un-indexed path). Every other field is identical to [`build_blob`]. Split from
 /// [`build_blob`] so the many hermetic `build_blob` tests keep exercising the pure
 /// live-walk path (index `None`) unchanged.
+/// Resolve ONLY the blob oid at `path` under `root_tree` — the ETag content identity for the
+/// conditional-GET path (#ETAG). The git blob oid IS a content hash (a blob hashes its exact
+/// bytes), so it is a faithful strong ETag: it changes iff the file content changes. Returns
+/// `None` when the path does not resolve to a blob / there is no git seam / the budget trips
+/// (→ the caller serves the normal 404, never a 304 for an absent file).
+///
+/// DoS-safe exactly like [`build_blob_with_history`]: the path→blob walk is depth-bounded
+/// AND wall-clock-bounded by [`WALK_BUDGET`] over a [`BudgetedSource`]. It skips the
+/// EXPENSIVE parts of the full VM build (the per-path history walk + the tree-sitter symbol
+/// outline + decode), so a matching `If-None-Match` yields a 304 on the cheap path.
+#[must_use]
+pub fn blob_oid_at_path(
+    src: Option<&Arc<dyn hugit_proto::ObjectSource + Send + Sync>>,
+    root_tree: Option<&ObjectId>,
+    path: &str,
+) -> Option<ObjectId> {
+    let (src, root_tree) = (src?, root_tree?);
+    let budgeted = BudgetedSource::new(src.as_ref(), Instant::now() + WALK_BUDGET);
+    match hugit_proto::resolve_blob_at_path(&budgeted, root_tree, path) {
+        Ok(Some((oid, _bytes))) => Some(oid),
+        Ok(None) | Err(_) => None,
+    }
+}
+
 #[must_use]
 pub fn build_blob_with_history(
     _log: &EventLog,

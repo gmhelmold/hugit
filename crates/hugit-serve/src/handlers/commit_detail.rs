@@ -177,6 +177,46 @@ fn commit_detail_from_cas(
     })
 }
 
+/// Resolve the CANONICAL content identity of the commit a `GET /commit/{sha}` addresses —
+/// the ETag for the conditional-GET path (#ETAG). Returns the full canonical sha the detail
+/// view WOULD render for `sha` (a full oid, a 6-char prefix, or a CAS-resolved short prefix),
+/// or `None` when the commit does not resolve (→ the caller serves the normal 404, never a
+/// 304 for a non-existent commit).
+///
+/// The commit oid IS the content identity (a commit hashes its tree + parents + metadata), so
+/// the canonical sha is a faithful strong ETag: it changes iff the commit content changes. This
+/// is deliberately CHEAP — it mirrors [`build_commit_detail`]'s resolution (log-row match, else
+/// the bounded CAS history walk) but SKIPS the numstat diff + VM build, so a matching
+/// `If-None-Match` yields a 304 without the expensive render. Read-only.
+#[must_use]
+pub fn resolve_commit_etag(
+    log: &EventLog,
+    sha: &str,
+    git_source: Option<&Arc<dyn hugit_proto::ObjectSource + Send + Sync>>,
+    head_commit: Option<ObjectId>,
+) -> Option<String> {
+    let machine = project_machine(log).ok()?;
+    let sha_lower = sha.to_ascii_lowercase();
+    // A log row owns this sha → its target is the canonical identity (same match rule as
+    // `build_commit_detail`: exact or 6-char prefix).
+    if let Some(row) = machine.rows().iter().find(|row| {
+        let target_lower = row_target(row).to_ascii_lowercase();
+        target_lower == sha_lower || sha_prefix(&target_lower, 6) == sha_lower
+    }) {
+        let target = row_target(row);
+        // An external change may carry no target oid — no stable identity, no ETag.
+        return (!target.is_empty()).then_some(target);
+    }
+    // No log row → resolve directly from the CAS (a git-pushed-but-never-landed commit),
+    // returning the FULL canonical oid. Bounded + budgeted (same guard as the detail path).
+    let src = git_source?;
+    let head = head_commit?;
+    let deadline = Instant::now() + WALK_BUDGET;
+    let budgeted = BudgetedSource::new(src.as_ref(), deadline);
+    let oid = resolve_sha_in_history(&budgeted, head, &sha_lower, deadline)?;
+    Some(oid.to_hex().to_string())
+}
+
 /// Resolve a URL `sha_lower` (full 40-hex oid OR a short prefix) to a full commit
 /// oid present in history. A full oid resolves directly; a prefix is matched by a
 /// BOUNDED first-parent walk from `head` (count [`COMMITS_CAP`] + the shared

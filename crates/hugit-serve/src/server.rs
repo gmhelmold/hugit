@@ -270,16 +270,22 @@ pub fn serve_on_with(
         // PANIC ISOLATION: a panic inside a handler must degrade to a 503 for THAT
         // request, never take down the whole single-threaded server.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            route_with_body(&state, &method, &url, &headers, &body)
+            route_with_body_etag(&state, &method, &url, &headers, &body)
         }));
-        let (status, body) = outcome.unwrap_or_else(|_| {
+        let ReadHttp { status, body, etag } = outcome.unwrap_or_else(|_| {
             eprintln!("hugit-serve: handler panicked — degraded to 503");
-            (503, EngineErr::unavailable("internal error").to_body())
+            ReadHttp::plain((503, EngineErr::unavailable("internal error").to_body()))
         });
         let body_len = body.len();
         let response = Response::from_string(body)
             .with_status_code(status)
             .with_header(json_content_type());
+        // Conditional-GET validator (#ETAG): stamp the strong `ETag` on a content read's
+        // 200/304 so the www worker can revalidate cheaply. `None` for every other route.
+        let response = match &etag {
+            Some(tag) => response.with_header(etag_header(tag)),
+            None => response,
+        };
         // Mark authenticated / private responses uncacheable (a public route —
         // `/readyz`, `/v1/me/login` — stays cacheable). SSE is handled separately in
         // `respond_sse` (always private).
@@ -679,64 +685,19 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
     // (`route_post`) still calls `two_tier_auth` directly and 401s on a bad principal.
     match segs.as_slice() {
         ["v1", "repos", repo, tail @ ..] => {
-            let principal = read_principal(state, headers);
-            // G11: map the bare URL slug to the caller's user-scoped stored key (legacy
-            // fallback for pre-G11 flat repos), then key EVERY load below on it.
-            let repo_owned = state.resolve_repo_slug(repo, &principal);
-            let repo = repo_owned.as_str();
-            // Load + verify the repo log ONCE (404 absent/unsafe-slug, 503
-            // tampered) BEFORE gating — and reuse it for the handler (no
-            // double-verify).
-            let log = match state.load_verified(repo) {
-                Ok(l) => l,
-                // Non-operator → 404 (a load failure on a private repo a tenant does
-                // not own must not reveal it exists / is tampered — same no-leak law
-                // as the gate-deny path below, which is already 404).
-                Err(e) => return err(hide_load_err(&principal, e)),
-            };
-            // PER-TENANT READ GATE (fail-closed, re-decided server-side on every
-            // repo read): a denied
-            // PRIVATE repo is a 404, identical to a non-existent one (no existence
-            // oracle). Operator (dev/orchestrator) bypass keeps single-tenant dev +
-            // the launch repo working until owner_tenant is assigned.
-            let meta = crate::authz::project_repo_meta(&log);
-            if !crate::authz::authorize_read(&principal, &meta) {
-                return err(EngineErr::not_found());
-            }
-            // The query (stripped above) is re-passed for the param-driven reads.
-            // The git content seam (`blob`/`edit`) is resolved PER-REPO from the
-            // map; a repo with no git seam loaded → `None` → those reads 404
-            // honestly (identical to a not-wired engine, no oracle).
-            let repo_git = state.repo_state_or_load(repo);
-            // The per-repo git content seam (object source + HEAD root-tree + HEAD
-            // commit), bundled so the dispatcher takes one param not three. The HEAD
-            // commit (default-branch tip) is the start of the blob "Histórico"
-            // per-path history walk; `None` for a refless repo.
-            let git = repo_git.map(|r| {
-                // Resolve root_tree from the LIVE HEAD commit (a push hot-swaps the
-                // ref but NOT `git_root_tree`). Fall back to the boot snapshot only
-                // when there is no tip or the commit isn't resolvable (empty repo →
-                // EMPTY_TREE → honest `files:[]`). One (cached) commit read.
-                let head = r.head_commit();
-                let root_tree = live_root_tree(r.git_source.as_ref(), head, r.git_root_tree);
-                RepoGit {
-                    source: &r.git_source,
-                    root_tree,
-                    head_commit: head,
-                    refs: r.git_refs.snapshot(),
-                    history_index: state.blob_history_index.clone(),
-                    search_index: state.search_index.clone(),
-                    home_cache: state.home_cache.clone(),
-                }
-            });
-            dispatch_repo(
+            // Non-conditional entry (`route`): no `If-None-Match`, so it never 304s and
+            // the ETag is dropped — byte-identical to the pre-ETag behaviour. The
+            // conditional path is `route_with_body_etag` (the accept loop), which threads
+            // the header + honors the 304.
+            let r = route_repo_read(
+                state,
                 repo,
                 tail,
                 url.split('?').nth(1).unwrap_or(""),
-                &log,
-                &principal,
-                git.as_ref(),
-            )
+                headers,
+                None,
+            );
+            (r.status, r.body)
         }
         // Identity-scoped reads (/v1/me/*): no {repo} path param — they resolve to
         // the CALLER's OWN repos (W-METENANT). `AppState::me_repo_logs` returns the
@@ -876,6 +837,186 @@ fn query_param(query: &str, key: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// A read outcome that can carry a conditional-GET ETag (#ETAG). `etag` is the strong
+/// content identity of a content read (`home`/`blob`/`commit`), attached to the `200` so a
+/// caching client (the githugr www worker) can revalidate cheaply; `None` for every route
+/// with no stable content hash. A `304` sets `status = 304` + an EMPTY `body` (the VM build
+/// was skipped) + the same `etag`.
+pub struct ReadHttp {
+    pub status: u16,
+    pub body: String,
+    pub etag: Option<String>,
+}
+
+impl ReadHttp {
+    /// A plain read outcome with no ETag (the non-content routes + all error paths).
+    fn plain(pair: (u16, String)) -> Self {
+        ReadHttp {
+            status: pair.0,
+            body: pair.1,
+            etag: None,
+        }
+    }
+}
+
+/// The strong content identity (ETag value) for a content read, resolved CHEAPLY — WITHOUT
+/// building the view-model — so a matching `If-None-Match` can 304 on the cheap path.
+/// `None` for a route with no stable content hash (or an absent resource → the caller runs
+/// the normal dispatch, which 404s honestly). The value is the raw identity (unquoted); the
+/// wire quoting is applied by [`etag_header`].
+///
+/// - `home` — `<root_tree_oid>.<log_record_count>`. The home VM folds the CAS root-tree
+///   listing/README (content-addressed by the root tree oid) AND FAST log-derived fields
+///   (branch/commit_count/last_commit/contributors/updated_ago). The event log is
+///   APPEND-ONLY, so ANY change to a log-derived field strictly increments the record count;
+///   combining it with the root tree oid yields an identity that changes on either a tree
+///   change (a push) OR a log append — never stale (the hard requirement), at worst
+///   conservatively re-fetched on an unrelated append (the pre-ETag behaviour). The root
+///   tree oid ALONE is NOT faithful here (a `land`/`verdict` changes the home VM without
+///   changing the tree), so it is composed with the log identity.
+/// - `blob/{path}` — the git blob oid (a content hash of the exact file bytes).
+/// - `commit/{sha}` — the canonical commit sha (a commit hashes its tree + parents + meta).
+fn content_etag(
+    tail: &[&str],
+    log: &hugit_refstore::EventLog,
+    git: Option<&RepoGit<'_>>,
+) -> Option<String> {
+    match tail {
+        ["home"] => {
+            let g = git?;
+            Some(format!("{}.{}", g.root_tree, log.records().len()))
+        }
+        ["blob", rest @ ..] if !rest.is_empty() => {
+            let g = git?;
+            let path = rest.join("/");
+            handlers::blob::blob_oid_at_path(Some(g.source), Some(&g.root_tree), &path)
+                .map(|oid| oid.to_string())
+        }
+        ["commit", sha] => {
+            let g = git;
+            handlers::commit_detail::resolve_commit_etag(
+                log,
+                sha,
+                g.map(|g| g.source),
+                g.and_then(|g| g.head_commit),
+            )
+        }
+        _ => None,
+    }
+}
+
+/// Whether the request's `If-None-Match` header matches the current strong `etag`. Honors
+/// `*` (matches any current representation → 304 when the resource exists) and a
+/// comma-separated list; each entry is normalized (strip an optional `W/` weak marker + the
+/// surrounding quotes) before a byte compare against the raw `etag` value.
+fn if_none_match_matches(inm: Option<&str>, etag: &str) -> bool {
+    let Some(inm) = inm else { return false };
+    let inm = inm.trim();
+    if inm == "*" {
+        return true;
+    }
+    inm.split(',').any(|entry| {
+        let e = entry.trim();
+        let e = e.strip_prefix("W/").unwrap_or(e);
+        let e = e
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .unwrap_or(e);
+        e == etag
+    })
+}
+
+/// Read a request header value by (case-insensitive) name. `name` is `&'static` because
+/// `tiny_http::HeaderField::equiv` takes a static string (the header names we read are
+/// compile-time literals).
+fn header_value<'a>(headers: &'a [Header], name: &'static str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|h| h.field.equiv(name))
+        .map(|h| h.value.as_str())
+}
+
+/// The `ETag` response header (a STRONG validator — exact byte identity via the content
+/// oid). Double-quoted per RFC 9110; the value is a hex oid / count, never containing a
+/// quote, so no escaping is needed.
+fn etag_header(etag: &str) -> Header {
+    Header::from_bytes(&b"ETag"[..], format!("\"{etag}\"").as_bytes())
+        .unwrap_or_else(|_| json_content_type())
+}
+
+/// Dispatch an authenticated `/v1/repos/{repo}/<tail...>` read, honoring the conditional-GET
+/// ETag (#ETAG). The read-authz gate runs BEFORE any ETag work, so an unauthorized caller on
+/// a private/absent repo gets the uniform `404` (never a `304` that would leak existence).
+/// `if_none_match` is `None` on the non-conditional [`route`] entry (→ never 304s), `Some`
+/// on the accept-loop [`route_with_body_etag`] path.
+fn route_repo_read(
+    state: &AppState,
+    repo_seg: &str,
+    tail: &[&str],
+    query: &str,
+    headers: &[Header],
+    if_none_match: Option<&str>,
+) -> ReadHttp {
+    let principal = read_principal(state, headers);
+    // G11: map the bare URL slug to the caller's user-scoped stored key (legacy fallback for
+    // pre-G11 flat repos), then key EVERY load below on it.
+    let repo_owned = state.resolve_repo_slug(repo_seg, &principal);
+    let repo = repo_owned.as_str();
+    // Load + verify the repo log ONCE (404 absent/unsafe-slug, 503 tampered) BEFORE gating.
+    let log = match state.load_verified(repo) {
+        Ok(l) => l,
+        // Non-operator → 404 (a load failure on a private repo a tenant does not own must
+        // not reveal it exists / is tampered — the no-leak law).
+        Err(e) => return ReadHttp::plain(err(hide_load_err(&principal, e))),
+    };
+    // PER-TENANT READ GATE (fail-closed) — runs BEFORE any ETag/304: a denied PRIVATE repo
+    // is a uniform 404 (no existence oracle), NEVER a 304.
+    let meta = crate::authz::project_repo_meta(&log);
+    if !crate::authz::authorize_read(&principal, &meta) {
+        return ReadHttp::plain(err(EngineErr::not_found()));
+    }
+    // The per-repo git content seam (object source + HEAD root-tree + HEAD commit).
+    let repo_git = state.repo_state_or_load(repo);
+    let git = repo_git.map(|r| {
+        let head = r.head_commit();
+        let root_tree = live_root_tree(r.git_source.as_ref(), head, r.git_root_tree);
+        RepoGit {
+            source: &r.git_source,
+            root_tree,
+            head_commit: head,
+            refs: r.git_refs.snapshot(),
+            history_index: state.blob_history_index.clone(),
+            search_index: state.search_index.clone(),
+            home_cache: state.home_cache.clone(),
+        }
+    });
+    // Conditional GET: resolve the strong ETag CHEAPLY. If it matches `If-None-Match`, return
+    // 304 with NO body — the VM build is skipped entirely (the cheap revalidation path).
+    if let Some(tag) = content_etag(tail, &log, git.as_ref()) {
+        if if_none_match_matches(if_none_match, &tag) {
+            return ReadHttp {
+                status: 304,
+                body: String::new(),
+                etag: Some(tag),
+            };
+        }
+        // A cache MISS (or an unconditional GET): serve 200 + the ETag so the client can
+        // revalidate next time.
+        let (status, body) = dispatch_repo(repo, tail, query, &log, &principal, git.as_ref());
+        // Only stamp the ETag on a real 200 render (never on a 404/500 body).
+        let etag = (status == 200).then_some(tag);
+        return ReadHttp { status, body, etag };
+    }
+    ReadHttp::plain(dispatch_repo(
+        repo,
+        tail,
+        query,
+        &log,
+        &principal,
+        git.as_ref(),
+    ))
+}
+
 /// The full entry (reads + writes). GET delegates to [`route`]; POST is a mutating
 /// verb routed through the write-door. Socket-free (body passed in).
 #[must_use]
@@ -893,6 +1034,38 @@ pub fn route_with_body(
         return route_delete(state, url, headers);
     }
     route(state, method, url, headers)
+}
+
+/// The accept-loop entry that additionally honors the conditional-GET ETag (#ETAG). A GET of
+/// a content route (`/v1/repos/{repo}/{home|blob/*|commit/{sha}}`) threads the request's
+/// `If-None-Match` into [`route_repo_read`] so a matching validator yields a `304` (no body,
+/// no VM build) and a miss yields `200` + the `ETag` header. Every other route (writes,
+/// `/readyz`, `/v1/me/*`, …) has no stable content hash → `etag: None`, byte-identical to
+/// [`route_with_body`].
+#[must_use]
+pub fn route_with_body_etag(
+    state: &AppState,
+    method: &Method,
+    url: &str,
+    headers: &[Header],
+    body: &[u8],
+) -> ReadHttp {
+    if method == &Method::Get {
+        let path = url.split('?').next().unwrap_or("");
+        let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        if let ["v1", "repos", repo, tail @ ..] = segs.as_slice() {
+            let inm = header_value(headers, "If-None-Match");
+            return route_repo_read(
+                state,
+                repo,
+                tail,
+                url.split('?').nth(1).unwrap_or(""),
+                headers,
+                inm,
+            );
+        }
+    }
+    ReadHttp::plain(route_with_body(state, method, url, headers, body))
 }
 
 /// DELETE routing — the small set of resource-deletion verbs. Currently: revoke a PAT.
@@ -3504,5 +3677,201 @@ mod anon_v1_read_tests {
             vec!["clerk:org-a:u".to_string()],
             "a valid Clerk token derives its real tenant principal"
         );
+    }
+}
+
+/// Conditional-GET / ETag (#ETAG) — the content reads (`home`/`blob`/`commit`) emit a strong
+/// ETag and honor `If-None-Match` with a `304`, with the read-authz gate ALWAYS before the
+/// 304 (no existence oracle).
+#[cfg(test)]
+mod etag_conditional_get_tests {
+    use super::*;
+    use crate::state::AppState;
+    use gix_hash::ObjectId;
+    use hugit_proto::{CasObjectSource, ObjectKind};
+    use hugit_refstore::EventLog;
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    const DEV: &str = "dev-token-etag";
+    const MODE_BLOB: &str = "100644";
+
+    fn scratch_dir() -> PathBuf {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let p = std::env::temp_dir().join(format!(
+            "hugit-etag-{}-{}-{}",
+            std::process::id(),
+            nanos,
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&p).expect("scratch dir");
+        p
+    }
+
+    /// A one-entry root tree containing `README.md` → the blob oid, name-sorted like git.
+    fn root_tree_with_readme(src: &mut CasObjectSource, blob: ObjectId) -> ObjectId {
+        let mut out = Vec::new();
+        out.extend_from_slice(MODE_BLOB.as_bytes());
+        out.push(b' ');
+        out.extend_from_slice(b"README.md");
+        out.push(0);
+        out.extend_from_slice(blob.as_bytes());
+        src.insert_raw(ObjectKind::Tree, out)
+    }
+
+    /// An `AppState` with a repo whose LOG has `records` `repo.meta`-plus-filler records and
+    /// a git seam (root tree + a README blob). Returns `(state, root_tree, blob_oid)`. Break-
+    /// glass forced OFF (public prod posture).
+    fn state_with_git(
+        repo: &str,
+        visibility: &str,
+        extra_records: usize,
+    ) -> (AppState, ObjectId, ObjectId) {
+        let dir = scratch_dir();
+        let mut log = EventLog::new();
+        log.append_for_test(
+            "repo.meta",
+            vec![],
+            serde_json::json!({"visibility": visibility, "owner_tenant": "org-a"}).to_string(),
+            0,
+        );
+        for i in 0..extra_records {
+            log.append_for_test(
+                "journal.note",
+                vec![],
+                format!("{{\"n\":{i}}}"),
+                i as u64 + 1,
+            );
+        }
+        std::fs::write(
+            dir.join(format!("{repo}.json")),
+            serde_json::to_string_pretty(log.records()).unwrap(),
+        )
+        .unwrap();
+        let mut src = CasObjectSource::new();
+        let blob = src.insert_raw(ObjectKind::Blob, b"# hi\nbody".to_vec());
+        let root = root_tree_with_readme(&mut src, blob);
+        let mut state = AppState::new(dir, DEV.to_string());
+        state.allow_dev_operator = false;
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
+        state.set_repo_git(repo, src, root, BTreeMap::new());
+        (state, root, blob)
+    }
+
+    fn get(state: &AppState, url: &str, headers: &[Header]) -> ReadHttp {
+        route_with_body_etag(state, &Method::Get, url, headers, &[])
+    }
+
+    fn inm(etag: &str) -> Vec<Header> {
+        vec![Header::from_bytes(&b"If-None-Match"[..], format!("\"{etag}\"").as_bytes()).unwrap()]
+    }
+
+    #[test]
+    fn home_emits_etag_and_304s_on_match_with_no_body() {
+        let (st, root, _blob) = state_with_git("hugit", "public", 0);
+        // First read: 200 + a strong ETag = <root_tree>.<record_count>.
+        let first = get(&st, "/v1/repos/hugit/home", &[]);
+        assert_eq!(first.status, 200);
+        let tag = first.etag.clone().expect("home 200 carries an ETag");
+        assert_eq!(
+            tag,
+            format!("{root}.1"),
+            "home ETag = root_tree.record_count"
+        );
+        // Revalidate with the ETag → 304, EMPTY body, same ETag (the cheap path).
+        let second = get(&st, "/v1/repos/hugit/home", &inm(&tag));
+        assert_eq!(second.status, 304);
+        assert!(second.body.is_empty(), "a 304 carries no body");
+        assert_eq!(second.etag.as_deref(), Some(tag.as_str()));
+    }
+
+    #[test]
+    fn home_etag_changes_when_the_log_grows() {
+        // Same git tree, DIFFERENT log length → a different home ETag (the home VM folds
+        // log-derived fields, so the ETag is composed with the record count — never stale).
+        let (a, root, _) = state_with_git("hugit", "public", 0);
+        let (b, root_b, _) = state_with_git("hugit", "public", 3);
+        assert_eq!(root, root_b, "same tree content → same root oid");
+        let ta = get(&a, "/v1/repos/hugit/home", &[]).etag.unwrap();
+        let tb = get(&b, "/v1/repos/hugit/home", &[]).etag.unwrap();
+        assert_ne!(ta, tb, "a log append changes the home ETag");
+        // A stale validator (a's tag) against b → 200 (a fresh render), never a wrong 304.
+        let miss = get(&b, "/v1/repos/hugit/home", &inm(&ta));
+        assert_eq!(miss.status, 200);
+        assert_eq!(miss.etag.as_deref(), Some(tb.as_str()));
+    }
+
+    #[test]
+    fn blob_etag_equals_the_blob_oid_and_304s_on_match() {
+        let (st, _root, blob) = state_with_git("hugit", "public", 0);
+        let first = get(&st, "/v1/repos/hugit/blob/README.md", &[]);
+        assert_eq!(first.status, 200);
+        let tag = first.etag.clone().expect("blob 200 carries an ETag");
+        assert_eq!(tag, blob.to_string(), "the blob ETag IS the git blob oid");
+        // Matching If-None-Match → 304, no body.
+        let second = get(&st, "/v1/repos/hugit/blob/README.md", &inm(&tag));
+        assert_eq!(second.status, 304);
+        assert!(second.body.is_empty());
+    }
+
+    #[test]
+    fn absent_blob_path_has_no_etag_and_404s() {
+        // A path that resolves to nothing → no ETag, the normal 404 (never a spurious 304).
+        let (st, _root, _blob) = state_with_git("hugit", "public", 0);
+        let r = get(&st, "/v1/repos/hugit/blob/nope.txt", &inm("anything"));
+        assert_eq!(r.status, 404);
+        assert!(r.etag.is_none());
+    }
+
+    #[test]
+    fn private_repo_404s_before_any_304_no_existence_oracle() {
+        // A PRIVATE repo to an UNAUTHORIZED (anon) caller is a uniform 404 EVEN WITH an
+        // If-None-Match that would otherwise 304 — the read-authz gate runs first, so the
+        // conditional path never leaks existence via a 304.
+        let (st, root, blob) = state_with_git("hugit", "private", 0);
+        let home = get(&st, "/v1/repos/hugit/home", &inm(&format!("{root}.1")));
+        assert_eq!(home.status, 404, "private home → 404, never 304");
+        assert!(home.etag.is_none());
+        let blobr = get(
+            &st,
+            "/v1/repos/hugit/blob/README.md",
+            &inm(&blob.to_string()),
+        );
+        assert_eq!(blobr.status, 404, "private blob → 404, never 304");
+        assert!(blobr.etag.is_none());
+    }
+
+    #[test]
+    fn star_if_none_match_304s_an_existing_representation() {
+        // `If-None-Match: *` means "if any current representation exists" → 304 for a GET.
+        let (st, _root, _blob) = state_with_git("hugit", "public", 0);
+        let star = vec![Header::from_bytes(&b"If-None-Match"[..], &b"*"[..]).unwrap()];
+        let r = get(&st, "/v1/repos/hugit/home", &star);
+        assert_eq!(r.status, 304);
+    }
+
+    #[test]
+    fn non_content_route_carries_no_etag() {
+        // A route with no stable content hash (e.g. /branches) never emits an ETag.
+        let (st, _root, _blob) = state_with_git("hugit", "public", 0);
+        let r = get(&st, "/v1/repos/hugit/branches", &[]);
+        assert_eq!(r.status, 200);
+        assert!(r.etag.is_none());
+    }
+
+    #[test]
+    fn if_none_match_parsing_handles_weak_and_lists() {
+        // Weak marker + a comma list both normalize to the strong compare.
+        assert!(if_none_match_matches(Some("W/\"abc\""), "abc"));
+        assert!(if_none_match_matches(Some("\"x\", \"abc\" , \"y\""), "abc"));
+        assert!(if_none_match_matches(Some("*"), "abc"));
+        assert!(!if_none_match_matches(Some("\"other\""), "abc"));
+        assert!(!if_none_match_matches(None, "abc"));
     }
 }
