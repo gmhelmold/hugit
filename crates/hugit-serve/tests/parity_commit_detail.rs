@@ -47,7 +47,8 @@ fn found_by_6char_prefix() {
         "fix: token expiry",
         "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
     );
-    let vm = build_commit_detail(&log, "hugit", "a1b2c3", no_git(), None).expect("prefix matches → Some");
+    let vm = build_commit_detail(&log, "hugit", "a1b2c3", no_git(), None)
+        .expect("prefix matches → Some");
     assert_eq!(vm.sha, "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2");
     assert_eq!(vm.intent_id.as_deref(), Some("i-1"));
     assert!(!vm.external);
