@@ -440,6 +440,48 @@ pub fn read_standing_erasure_request(log: &EventLog) -> Option<StandingErasureRe
     standing
 }
 
+/// PURE maturity predicate for the GDPR1 auto-executor (no I/O). A governing
+/// `erasure.requested` is ripe for the irreversible cascade IFF it is NOT superseded (a
+/// later `executed`/`cancelled` in its lifecycle) AND the cooling-off grace has FULLY
+/// elapsed (`now >= requested_at + grace_ms`). `superseded` is what the standing-request
+/// reader already encodes ([`read_standing_erasure_request`] returns `None` on a superseded
+/// lifecycle), surfaced here as an explicit arg so the predicate is testable in isolation.
+/// Saturating add so a huge grace / clock skew can NEVER wrap the threshold DOWN into a
+/// false "matured".
+#[must_use]
+pub fn is_matured_governing_request(
+    requested_at: u64,
+    grace_ms: u64,
+    now: u64,
+    superseded: bool,
+) -> bool {
+    if superseded {
+        return false;
+    }
+    now >= requested_at.saturating_add(grace_ms)
+}
+
+/// PURE per-account auto-execute DECISION (the sweep's selection logic, no I/O): drive the
+/// cascade IFF there is a governing (non-superseded) standing request whose grace has matured
+/// AND it carries a non-empty DSR legitimacy id (a physical erase is fail-closed-REFUSED
+/// without one, mirroring the operator route's 403 — a delete needs an anchored legitimacy
+/// id). `standing == None` (never requested, OR superseded by `executed`/`cancelled`) → never
+/// (idempotent: an already-executed account is a no-op the sweep must skip).
+#[must_use]
+pub fn should_auto_execute(
+    standing: Option<&StandingErasureRequest>,
+    grace_ms: u64,
+    now: u64,
+) -> bool {
+    match standing {
+        Some(s) => {
+            is_matured_governing_request(s.requested_at, grace_ms, now, false)
+                && s.dsr_id.as_deref().is_some_and(|d| !d.is_empty())
+        }
+        None => false,
+    }
+}
+
 /// The cancelability verdict of an account's erasure lifecycle at a given instant — the
 /// projection the self-serve cancel route ([`cancel_account_erasure`]) switches on. Read
 /// off the append-only account log by scanning to the LAST governing erasure-lifecycle
@@ -2304,6 +2346,105 @@ mod tests {
         assert!(
             mock.erased.borrow().is_empty(),
             "NOT a single digest erased when the partition is indeterminate"
+        );
+    }
+    // ── the auto-executor pure predicates (maturity + selection, no I/O) ──────────
+
+    #[test]
+    fn matured_governing_request_is_ripe() {
+        // requested at 100, 50ms grace → matured at 150; superseded=false.
+        assert!(
+            is_matured_governing_request(100, 50, 150, false),
+            "now == requested_at + grace is matured"
+        );
+        assert!(
+            is_matured_governing_request(100, 50, 10_000, false),
+            "well past grace is matured"
+        );
+    }
+
+    #[test]
+    fn before_grace_is_not_matured() {
+        assert!(
+            !is_matured_governing_request(100, 50, 149, false),
+            "one ms before the grace threshold is NOT matured"
+        );
+    }
+
+    #[test]
+    fn superseded_request_is_never_matured() {
+        assert!(
+            !is_matured_governing_request(100, 50, 10_000, true),
+            "a superseded (executed/cancelled) request is never matured, however old"
+        );
+    }
+
+    #[test]
+    fn maturity_threshold_saturates_never_wraps_into_matured() {
+        // A pathological grace can NEVER wrap the threshold down into a false "matured".
+        assert!(
+            !is_matured_governing_request(u64::MAX, u64::MAX, 0, false),
+            "saturating add keeps an impossible threshold un-matured"
+        );
+    }
+
+    #[test]
+    fn should_auto_execute_drives_matured_with_dsr() {
+        let s = StandingErasureRequest {
+            subject: "org-a".into(),
+            dsr_id: Some("dsr-1".into()),
+            requested_at: 100,
+        };
+        assert!(
+            should_auto_execute(Some(&s), 50, 200),
+            "matured governing request WITH a DSR id → drive"
+        );
+    }
+
+    #[test]
+    fn should_auto_execute_skips_not_yet_matured() {
+        let s = StandingErasureRequest {
+            subject: "org-a".into(),
+            dsr_id: Some("dsr-1".into()),
+            requested_at: 100,
+        };
+        assert!(
+            !should_auto_execute(Some(&s), 50, 120),
+            "grace not elapsed → skip"
+        );
+    }
+
+    #[test]
+    fn should_auto_execute_skips_superseded_or_absent() {
+        // `read_standing_erasure_request` returns None for a superseded (executed/cancelled)
+        // OR never-requested account → the sweep must skip it (idempotent no-op).
+        assert!(
+            !should_auto_execute(None, 50, 10_000),
+            "no governing request (superseded/absent) → never drive"
+        );
+    }
+
+    #[test]
+    fn should_auto_execute_skips_matured_without_dsr_id() {
+        // Fail-closed: a physical erase is refused without an anchored DSR legitimacy id
+        // (mirrors the operator route's 403), even when the grace has fully matured.
+        let no_id = StandingErasureRequest {
+            subject: "org-a".into(),
+            dsr_id: None,
+            requested_at: 100,
+        };
+        assert!(
+            !should_auto_execute(Some(&no_id), 50, 10_000),
+            "matured but NO DSR id → skip (no legitimacy id, no physical erase)"
+        );
+        let empty_id = StandingErasureRequest {
+            subject: "org-a".into(),
+            dsr_id: Some(String::new()),
+            requested_at: 100,
+        };
+        assert!(
+            !should_auto_execute(Some(&empty_id), 50, 10_000),
+            "an empty DSR id is treated as absent → skip"
         );
     }
 }

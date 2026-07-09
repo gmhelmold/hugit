@@ -1064,7 +1064,7 @@ fn header_val(headers: &[Header], name: &str) -> Option<String> {
 
 /// The v1 acting principal. Real authenticated identity (Clerk/RFC-8693) is the
 /// disclosed P2 seam; the dev-token path acts as the configured orchestrator.
-fn dev_principal() -> Vec<String> {
+pub(crate) fn dev_principal() -> Vec<String> {
     vec!["orchestrator:hugit".to_string()]
 }
 
@@ -1342,7 +1342,7 @@ fn dispatch_account_erase(
 /// executed with no dispute window). The live-verify legitimately needs `0`, so it is allowed
 /// ONLY behind the explicit escape hatch `HUGIT_ERASURE_ALLOW_BELOW_GRACE_FLOOR=1` — a
 /// deliberate, auditable, verify-only opt-out that a routine prod deploy never carries.
-fn erasure_grace_ms() -> u64 {
+pub(crate) fn erasure_grace_ms() -> u64 {
     let configured = std::env::var("HUGIT_ERASURE_GRACE_SECS")
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok());
