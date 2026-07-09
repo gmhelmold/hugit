@@ -1409,6 +1409,52 @@ impl AppState {
         }
     }
 
+    /// G11 — resolve a request's repo id (a BARE name from the URL/wire, or an already
+    /// user-scoped/explicit stored slug) to the STORED slug all downstream loads key on,
+    /// honoring the user-scoped namespace WITH legacy back-compat:
+    ///
+    /// 1. an already-scoped/multi-segment slug (contains `/`) is used VERBATIM — the
+    ///    operator / an internal caller may address the full stored key directly;
+    /// 2. a TENANT caller PREFERS their user-scoped key `<tenant>/<name>` when it EXISTS
+    ///    (an in-memory seam or a durable verified log) — so the owner reaches their own
+    ///    repo by the bare name and two tenants' identically-named repos never collide;
+    /// 3. BACK-COMPAT FALLBACK: otherwise the legacy flat `<name>` key — so every repo
+    ///    provisioned under the pre-G11 flat scheme keeps resolving unchanged (no
+    ///    destructive migration), and a genuinely-absent name resolves here too → an
+    ///    honest 404 downstream.
+    ///
+    /// The security consequence (audit G11): a cross-tenant / anon caller composing a
+    /// bare name never resolves ANOTHER tenant's user-scoped repo — the scoped key is
+    /// keyed on the CALLER's tenant, and the legacy fallback only ever reaches a
+    /// pre-G11 flat repo (whose own `authorize_read`/`authorize_write` gate still
+    /// decides). New user-scoped repos are addressable by the bare name ONLY by their
+    /// owning tenant (a composite `<owner>/<name>` id is not routable over the
+    /// single-segment git wire — the documented v0 limitation).
+    #[must_use]
+    pub fn resolve_repo_slug(&self, name: &str, principal: &[String]) -> String {
+        if name.contains('/') {
+            return name.to_string();
+        }
+        if let Some(tenant) = tenant_org(principal) {
+            let scoped = format!("{tenant}/{name}");
+            if self.repo_slug_exists(&scoped) {
+                return scoped;
+            }
+        }
+        name.to_string()
+    }
+
+    /// Whether a STORED slug currently resolves to a real repo — a loaded in-memory seam
+    /// (cheap, no I/O) or a durable chain-verified log (one bounded probe). The existence
+    /// oracle [`resolve_repo_slug`](Self::resolve_repo_slug) consults to decide the
+    /// user-scoped-vs-legacy key. A tamper/transport fault (non-404) counts as "does not
+    /// resolve here" so resolution falls through to the legacy key (fail-safe: never
+    /// strand a legacy repo behind a transient scoped-key read fault).
+    #[must_use]
+    fn repo_slug_exists(&self, slug: &str) -> bool {
+        self.has_repo_seam(slug) || self.load_verified(slug).is_ok()
+    }
+
     /// Whether `repo` was lazy-load-missed within [`REPO_LOAD_MISS_COOLDOWN_MS`] (the
     /// negative-cache short-circuit for [`repo_state_or_load`]).
     fn repo_load_miss_recent(&self, repo: &str) -> bool {
@@ -1596,7 +1642,12 @@ impl AppState {
             let meta = self.repo_meta_cached(&name, &log);
             // THE SAME predicate the per-repo read gate runs — no second gate.
             if crate::authz::authorize_read(principal, &meta) {
-                out.push((name, log));
+                // G11: project the BARE display name (strip the caller's own
+                // `<tenant>/` scope prefix) so the identity-scoped index stays
+                // routable — the owner navigates/clones their repo by the bare name,
+                // which `resolve_repo_slug` maps back to the user-scoped stored key. A
+                // legacy flat slug has no prefix → returned unchanged.
+                out.push((display_slug(&name, principal), log));
             }
         }
         out
@@ -2166,6 +2217,14 @@ impl LogSource {
                     EngineErr::unavailable(format!("local log dir create failed: {e}"))
                 })?;
                 let path = dir.join(format!("{repo}.json"));
+                // G11: a user-scoped slug (`<owner>/<name>`) nests one level, so ensure
+                // the parent dir exists before the temp-write + rename (the flat case is
+                // a no-op — the parent IS `dir`, already created above).
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| {
+                        EngineErr::unavailable(format!("local log subdir create failed: {e}"))
+                    })?;
+                }
                 // CAS check: the on-disk head must still equal `expected` (a local
                 // analogue of R2 `If-Match`). A residual TOCTOU remains between this
                 // compare and the rename below — acceptable because Local is the
@@ -2306,12 +2365,20 @@ impl LogSource {
     /// Enumerate the DURABLE repo slugs in the store — the authoritative owned-set
     /// source the GDPR1 erasure planner needs (the B1 completeness fix; the in-memory
     /// loaded set can MISS a durable-but-unloaded repo — one provisioned then dropped
-    /// from the boot env, whose R2 log survives). A repo log is a SINGLE-segment
-    /// `<slug>.json` object; the reserved `_accounts/`/`_erasure/` sub-prefixes and the
-    /// per-repo `<slug>/refs.json`/`oid-index.json` manifests (extra `/`) are EXCLUDED —
-    /// only top-level repo logs count. FAIL-CLOSED (`Err` → 503) on any listing fault:
-    /// an indeterminate enumeration must never silently under-report the erasure set.
+    /// from the boot env, whose R2 log survives). A repo log is EITHER a top-level
+    /// `<slug>.json` (legacy flat key) OR — post-G11 — a user-scoped `<owner>/<name>.json`
+    /// (the owner side a safe account slug, so never the reserved `_accounts`; the leaf
+    /// never a `<slug>/refs.json`/`oid-index.json` manifest). The `_accounts/…` account
+    /// logs and the per-repo `<slug>/refs.json`/`oid-index.json` (and the scoped
+    /// `<owner>/<name>/refs.json`, extra `/`) manifests are EXCLUDED. FAIL-CLOSED (`Err`
+    /// → 503) on any listing fault: an indeterminate enumeration must never silently
+    /// under-report the erasure set (a scoped repo missed here would be un-erasable).
     fn list_repo_slugs(&self) -> Result<Vec<String>, EngineErr> {
+        // The two reserved manifest leaves that share the `<seg>/<leaf>.json` shape of a
+        // user-scoped log — excluded so a LEGACY flat repo's manifest is never mistaken
+        // for a scoped repo log (provision also RESERVES these names, so a real scoped
+        // repo can never BE `refs`/`oid-index`).
+        let is_manifest_leaf = |leaf: &str| leaf == "refs" || leaf == "oid-index";
         match self {
             LogSource::Local { dir } => {
                 let rd = match std::fs::read_dir(dir) {
@@ -2330,14 +2397,42 @@ impl LogSource {
                     let entry = entry.map_err(|e| {
                         EngineErr::unavailable(format!("local repo listing entry failed: {e}"))
                     })?;
-                    // Only top-level `<slug>.json` FILES (the `_accounts` account logs
-                    // live in a SUBDIR, so they are never top-level files here).
-                    if entry.file_type().map(|t| t.is_file()).unwrap_or(false)
-                        && let Some(name) = entry.file_name().to_str()
-                        && let Some(slug) = name.strip_suffix(".json")
-                        && is_safe_repo_slug(slug)
-                    {
-                        slugs.push(slug.to_string());
+                    let ft = entry.file_type().ok();
+                    let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                        continue;
+                    };
+                    // A top-level `<slug>.json` FILE = a legacy flat repo log.
+                    if ft.map(|t| t.is_file()).unwrap_or(false) {
+                        if let Some(slug) = name.strip_suffix(".json")
+                            && is_safe_repo_slug(slug)
+                        {
+                            slugs.push(slug.to_string());
+                        }
+                        continue;
+                    }
+                    // A `<owner>/` SUBDIR (owner = a safe account slug, never `_accounts`)
+                    // = the G11 user-scoped namespace: enumerate its `<name>.json` logs as
+                    // `<owner>/<name>` (the manifest leaves are excluded).
+                    if !is_safe_account_slug(&name) {
+                        continue; // `_accounts` (underscore) and any non-account dir
+                    }
+                    let sub = dir.join(&name);
+                    let srd = match std::fs::read_dir(&sub) {
+                        Ok(srd) => srd,
+                        Err(_) => continue, // vanished/unreadable subdir → skip (best-effort)
+                    };
+                    for sentry in srd {
+                        let sentry = sentry.map_err(|e| {
+                            EngineErr::unavailable(format!("local repo listing entry failed: {e}"))
+                        })?;
+                        if sentry.file_type().map(|t| t.is_file()).unwrap_or(false)
+                            && let Some(leaf) = sentry.file_name().to_str()
+                            && let Some(rest) = leaf.strip_suffix(".json")
+                            && !is_manifest_leaf(rest)
+                            && is_safe_repo_slug(rest)
+                        {
+                            slugs.push(format!("{name}/{rest}"));
+                        }
                     }
                 }
                 Ok(slugs)
@@ -2347,19 +2442,32 @@ impl LogSource {
                 let keys = c.list_keys(&prefix)?;
                 let mut slugs = Vec::new();
                 for key in keys {
-                    // Strip `<tenant>/`; keep only a single-segment `<slug>.json` (no
-                    // further `/`, not a reserved `_`-prefixed key). The manifests
-                    // (`<slug>/refs.json`) + account logs (`_accounts/…`) are excluded.
                     let Some(rest) = key.strip_prefix(&prefix) else {
                         continue;
                     };
-                    if rest.contains('/') || rest.starts_with('_') {
+                    let Some(stem) = rest.strip_suffix(".json") else {
                         continue;
-                    }
-                    if let Some(slug) = rest.strip_suffix(".json")
-                        && is_safe_repo_slug(slug)
-                    {
-                        slugs.push(slug.to_string());
+                    };
+                    match stem.split_once('/') {
+                        // `<slug>` — a legacy flat repo log (not a reserved `_`-prefixed key).
+                        None => {
+                            if !stem.starts_with('_') && is_safe_repo_slug(stem) {
+                                slugs.push(stem.to_string());
+                            }
+                        }
+                        // `<owner>/<name>` — a G11 user-scoped log. The owner must be a
+                        // safe account slug (excludes `_accounts`); the leaf must not be a
+                        // `refs`/`oid-index` MANIFEST (a legacy flat repo's manifest shares
+                        // this shape); a scoped manifest (`<owner>/<name>/refs.json`) has a
+                        // second `/` in `name` and is rejected by `is_safe_repo_slug`.
+                        Some((owner, name)) => {
+                            if is_safe_account_slug(owner)
+                                && !is_manifest_leaf(name)
+                                && is_safe_repo_slug(stem)
+                            {
+                                slugs.push(stem.to_string());
+                            }
+                        }
                     }
                 }
                 Ok(slugs)
@@ -3762,21 +3870,67 @@ fn principal_is_tenant(principal: &[String]) -> bool {
         .unwrap_or(false)
 }
 
-/// A repo slug is a single safe path segment: non-empty, ≤100 chars, ASCII
-/// alnum + `-_.`, never `.`/`..`/containing `..` or a path separator. Blocks URL
-/// path-traversal into arbitrary files / R2 keys.
+/// The caller's owning tenant org (`clerk:{org}:{user}` → `org`) when it is a
+/// store-safe account slug, else `None` (operator/anon/unknown/malformed, or an
+/// org that is not [`is_safe_account_slug`]). The SOFT counterpart of
+/// [`write_provision::derive_owner_tenant`](crate::writes::verbs::write_provision::derive_owner_tenant)
+/// (which errors instead of `None`) — used to key the G11 user-scoped slug for READS
+/// and to strip the display prefix in the identity-scoped views. A `None` caller has no
+/// user-scoped namespace, so it resolves ONLY the legacy flat key (back-compat).
 #[must_use]
-pub fn is_safe_repo_slug(repo: &str) -> bool {
-    !repo.is_empty()
-        && repo.len() <= 100
-        && repo != "."
-        && repo != ".."
-        && !repo.contains("..")
-        && !repo.contains('/')
-        && !repo.contains('\\')
-        && repo
+fn tenant_org(principal: &[String]) -> Option<String> {
+    let rest = principal.first()?.strip_prefix("clerk:")?;
+    let org = rest.split(':').next().unwrap_or("");
+    if org.is_empty() || !is_safe_account_slug(org) {
+        return None;
+    }
+    Some(org.to_string())
+}
+
+/// Strip the caller's `<tenant>/` prefix from a STORED slug to get the DISPLAY name
+/// (G11: the routable/display id stays the BARE name; the owner-tenant prefix is an
+/// internal storage detail). A legacy flat slug (no prefix) is returned unchanged.
+#[must_use]
+fn display_slug(stored: &str, principal: &[String]) -> String {
+    if let Some(tenant) = tenant_org(principal)
+        && let Some(bare) = stored.strip_prefix(&format!("{tenant}/"))
+    {
+        return bare.to_string();
+    }
+    stored.to_string()
+}
+
+/// A single safe path segment: non-empty, ≤100 chars, ASCII alnum + `-_.`, never
+/// `.`/`..`/containing `..` or a path separator. Blocks URL path-traversal into
+/// arbitrary files / R2 keys. The building block of [`is_safe_repo_slug`].
+#[must_use]
+fn is_safe_repo_segment(seg: &str) -> bool {
+    !seg.is_empty()
+        && seg.len() <= 100
+        && seg != "."
+        && seg != ".."
+        && !seg.contains("..")
+        && !seg.contains('/')
+        && !seg.contains('\\')
+        && seg
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+}
+
+/// A safe repo slug — EITHER a single safe segment (the legacy flat key) OR a G11
+/// user-scoped `<owner_tenant>/<name>` stored key (exactly ONE `/`). For the scoped
+/// shape the tenant side MUST be a safe ACCOUNT slug ([`is_safe_account_slug`]:
+/// `[a-z0-9-]`, ≤64) — which excludes the reserved `_accounts` prefix (underscore) so a
+/// scoped repo key can NEVER collide with the account store — and the name side a safe
+/// single segment. A second `/` is rejected (the name side would then contain `/`), so
+/// traversal (`../…`, `a/../b`) stays blocked per segment. Blocks URL path-traversal
+/// into arbitrary files / R2 keys.
+#[must_use]
+pub fn is_safe_repo_slug(repo: &str) -> bool {
+    match repo.split_once('/') {
+        Some((tenant, name)) => is_safe_account_slug(tenant) && is_safe_repo_segment(name),
+        None => is_safe_repo_segment(repo),
+    }
 }
 
 /// Whether `account` is a safe account slug for the reserved `_accounts/{slug}` store
@@ -4001,16 +4155,28 @@ mod tests {
     }
 
     #[test]
+    fn safe_slugs_accept_user_scoped_keys() {
+        // G11: a `<owner_tenant>/<name>` stored key is safe (owner = an account slug).
+        for ok in ["org-a/foo", "acme-labs/my-repo", "t1/repo_1", "org-a/a.b"] {
+            assert!(is_safe_repo_slug(ok), "{ok} should be safe (scoped)");
+        }
+    }
+
+    #[test]
     fn unsafe_slugs_block_traversal() {
         for bad in [
             "",
             ".",
             "..",
             "../etc",
-            "a/b",
             "a\\b",
             "a..b",
             "../../etc/passwd",
+            "a/b/c",            // two segments below the owner (not a valid scoped key)
+            "org-a/../etc",     // traversal in the name side
+            "_accounts/victim", // reserved account prefix is not an owner tenant
+            "Org_A/foo",        // owner side is not a safe account slug (uppercase/_)
+            "org.a/foo",        // owner side has a dot (not an account slug)
         ] {
             assert!(!is_safe_repo_slug(bad), "{bad} must be rejected");
         }
@@ -4503,6 +4669,47 @@ mod me_repos_tests {
     }
     fn tenant(org: &str) -> Vec<String> {
         vec![format!("clerk:{org}:user-1")]
+    }
+
+    // ── G11: user-scoped slug — durable enumeration, resolution, display ──────
+
+    #[test]
+    fn user_scoped_repo_enumerates_resolves_and_displays_bare() {
+        // Seed a G11 user-scoped repo the way `provision` stores it: the durable log at
+        // `<owner>/<name>.json` PLUS the in-memory seam under the scoped key.
+        let dir = scratch_dir();
+        let mut st = AppState::new(dir.clone(), "dev-token".to_string());
+        std::fs::create_dir_all(dir.join("org-a")).unwrap();
+        std::fs::write(
+            dir.join("org-a").join("foo.json"),
+            meta_log("private", "org-a"),
+        )
+        .unwrap();
+        st.set_repo_git(
+            "org-a/foo",
+            Arc::new(hugit_proto::CasObjectSource::new()),
+            gix_hash::ObjectId::empty_tree(gix_hash::Kind::Sha1),
+            BTreeMap::new(),
+        );
+
+        // Durable enumeration (the GDPR1 erasure planner's source) MUST see the scoped
+        // log — a scoped repo missed here would be un-erasable.
+        let owned = st
+            .authoritative_owned_repo_logs("org-a")
+            .expect("enumeration");
+        assert!(
+            owned.iter().any(|(slug, _)| slug == "org-a/foo"),
+            "durable listing enumerates the scoped log, got {:?}",
+            owned.iter().map(|(s, _)| s).collect::<Vec<_>>()
+        );
+
+        // The owner resolves the bare name to the scoped stored key…
+        assert_eq!(st.resolve_repo_slug("foo", &tenant("org-a")), "org-a/foo");
+        // …but the identity-scoped index DISPLAYS the bare name (routable by the owner).
+        assert_eq!(st.repos_for(&tenant("org-a")), vec!["foo".to_string()]);
+        // A foreign tenant sees nothing and resolves only the (absent) legacy flat key.
+        assert!(st.repos_for(&tenant("org-b")).is_empty());
+        assert_eq!(st.resolve_repo_slug("foo", &tenant("org-b")), "foo");
     }
 
     // ── GDPR1 account store seam (_accounts/{slug}) ──────────────────────────
