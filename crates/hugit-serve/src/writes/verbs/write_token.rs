@@ -346,6 +346,15 @@ pub fn candidate_pat_secrets(auth_value: &str) -> Vec<String> {
 
 /// Append one record to the account log via a bounded compare-and-swap (mirrors the
 /// account-door CAS loop). Fail-closed on a durable fault.
+///
+/// The record's `principal_chain` is FORWARD-pseudonymised (ADR-0004 leg 2) after the guarded
+/// append, exactly like the write doors: the D14 CLASS is derived from the LIVE cleartext
+/// `principal_chain`, then the just-appended record's stored chain is rewritten to `subj:<hmac>`
+/// and re-hashed. NOTE the load-bearing PAT owner (`clerk:{org}:{user}`) lives in the record
+/// PAYLOAD's `user` field — the auth resolver ([`index_account_log`]) keys on it — so it is
+/// deliberately LEFT cleartext here (rendered unrecoverable at erase by leg 4's redaction pass);
+/// only the `principal_chain` is pseudonymised.
+#[allow(clippy::too_many_arguments)]
 fn append_account(
     sink: &dyn AccountLogSink,
     account: &str,
@@ -353,6 +362,7 @@ fn append_account(
     principal_chain: &[String],
     payload: String,
     at: u64,
+    pseudonymize: crate::writes::ChainPseudonymizer<'_>,
     // A pre-persist guard evaluated against the freshly-loaded log (e.g. the per-account
     // cap, or the "token exists / not already revoked" check) — re-checked on each CAS
     // attempt so it stays correct under contention. `Ok(())` proceeds; `Err` aborts.
@@ -362,6 +372,7 @@ fn append_account(
     for _attempt in 0..MAX_CAS_ATTEMPTS {
         let (mut log, token) = sink.load_account(account)?;
         guard(&log)?;
+        let head_len = log.records().len();
         log.append_authorized(
             class,
             Endpoint::Land,
@@ -373,6 +384,7 @@ fn append_account(
         .map_err(|d| {
             EngineErr::unavailable(format!("{kind} append denied: {}", d.reason.code()))
         })?;
+        let log = crate::writes::repseudonymize_tail(&log, head_len, pseudonymize)?;
         match sink.persist_account(account, &log, &token) {
             Ok(()) => return Ok(()),
             Err(e) if e.is_cas_conflict() => continue,
@@ -447,6 +459,7 @@ pub fn token_create(
 
     let sink: &dyn AccountLogSink = state;
     let user_for_guard = user.clone();
+    let pseudonymize = |c: &[String]| state.pseudonymize_write_chain(c);
     append_account(
         sink,
         &account,
@@ -454,6 +467,7 @@ pub fn token_create(
         principal_chain,
         payload,
         at,
+        &pseudonymize,
         move |log| {
             if live_pat_count(log, &user_for_guard) >= MAX_PATS_PER_ACCOUNT {
                 return Err(EngineErr {
@@ -555,6 +569,7 @@ pub fn token_revoke(
     let payload_value = serde_json::json!({ "id": id, "user": user });
     let payload = hugit_refstore::canonical_json(&payload_value.to_string())
         .unwrap_or_else(|| payload_value.to_string());
+    let pseudonymize = |c: &[String]| state.pseudonymize_write_chain(c);
     append_account(
         sink,
         &account,
@@ -562,6 +577,7 @@ pub fn token_revoke(
         principal_chain,
         payload,
         at,
+        &pseudonymize,
         // Under contention a concurrent revoke may have landed first — treat a
         // now-absent live token as an idempotent no-op (re-check owns the race).
         move |log| {

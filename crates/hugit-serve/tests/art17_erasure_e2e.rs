@@ -446,3 +446,211 @@ fn a_partial_erase_does_not_shred_the_key() {
         "no accountability record on a partial erase"
     );
 }
+
+// ── ADR-0004 leg 2: FORWARD write-path pseudonymisation, driven END-TO-END through the
+//    real write-door with the real (durable-key-backed) pseudonymizer ──────────────────
+
+use hugit_http_contracts::write_requests::CommentReq;
+use hugit_serve::writes::{LogSink, verbs, with_write};
+
+/// Seed a repo owned by `owner` (cleartext `owner_tenant` — the authz key) with an OPEN PR #1,
+/// so a `comment` verb has a target. The subject-authored records here are still cleartext; the
+/// FORWARD write under test appends the pseudonymised one.
+fn seed_repo_with_pr(dir: &std::path::Path, slug: &str, owner: &str) {
+    let mut log = EventLog::new();
+    log.append_authorized(
+        PrincipalClass::Orchestrator,
+        Endpoint::Land,
+        "repo.meta",
+        vec!["orchestrator:hugit".into()],
+        canon(serde_json::json!({"visibility":"private","owner_tenant":owner})),
+        1,
+    )
+    .unwrap();
+    log.append_authorized(
+        PrincipalClass::Orchestrator,
+        Endpoint::Land,
+        "pr.opened",
+        vec!["orchestrator:hugit".into()],
+        canon(serde_json::json!({
+            "author_kind":"orchestrator","campaign":"c","intent_ids":["i"],
+            "pr_id":"1","principal":null,"run_id":"r"
+        })),
+        2,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join(format!("{slug}.json")),
+        serde_json::to_string(log.records()).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn forward_write_through_the_door_pseudonymises_dedups_and_owner_authz_survives() {
+    // DoD (1)+(2)+(3), end-to-end through `with_write` + the durable key store:
+    // (1) a re-submitted identical `comment` dedups to ONE effect under pseudonymised storage;
+    // (2) NO new record stores the cleartext account/clerk principal in its chain (the whole
+    //     comment record is clean — its payload carries no slug); (3) the owner's authz still
+    //     resolves on the reloaded repo (pseudonymising the stored chain is authz-neutral).
+    use hugit_serve::authz::{authorize_write, project_repo_meta};
+
+    let dir = scratch_dir();
+    seed_repo_with_pr(&dir, "alpha", ACCOUNT);
+    let st = AppState::new(dir.clone(), "dev-token".into());
+    let sink: &dyn LogSink = &st;
+    let pseudonymize = |c: &[String]| st.pseudonymize_write_chain(c);
+
+    let chain = vec![format!("clerk:{ACCOUNT}:user-1")];
+    let req = CommentReq {
+        body: "looks good".into(),
+        anchor: None,
+    };
+    let body = serde_json::to_vec(&req).unwrap();
+
+    let first = with_write(
+        sink,
+        "alpha",
+        "comment",
+        "prs/1/comments",
+        "IDEM-1",
+        &body,
+        true,
+        chain.clone(),
+        10,
+        &pseudonymize,
+        |log, p, at| verbs::write_comment::write_comment(log, "alpha", 1, &req, p, at),
+    )
+    .expect("first comment ok");
+    // A lost-response retry (same key + body) must REPLAY, not post a second comment.
+    let replay = with_write(
+        sink,
+        "alpha",
+        "comment",
+        "prs/1/comments",
+        "IDEM-1",
+        &body,
+        true,
+        chain.clone(),
+        11,
+        &pseudonymize,
+        |log, p, at| verbs::write_comment::write_comment(log, "alpha", 1, &req, p, at),
+    )
+    .expect("replay ok");
+    assert_eq!(
+        first.seq, replay.seq,
+        "the replay returns the original outcome"
+    );
+
+    // Reload the durably-persisted, chain-verified log.
+    let (log, _) = sink.load("alpha").expect("repo log loads + verifies");
+    verify_chain(log.records()).expect("the pseudonymised forward chain verifies");
+    // (1) Exactly ONE pr.comment despite the resubmission.
+    assert_eq!(
+        log.records()
+            .iter()
+            .filter(|r| r.kind == verbs::write_comment::PR_COMMENT_KIND)
+            .count(),
+        1,
+        "the resubmission dedups to ONE comment"
+    );
+    // (2) The forward comment record carries NO cleartext account/clerk principal anywhere.
+    let comment = log
+        .records()
+        .iter()
+        .find(|r| r.kind == verbs::write_comment::PR_COMMENT_KIND)
+        .unwrap();
+    assert!(
+        comment
+            .principal_chain
+            .iter()
+            .all(|p| p.starts_with("subj:")),
+        "the stored chain is pseudonymised: {:?}",
+        comment.principal_chain
+    );
+    assert!(
+        comment.principal_chain.iter().all(|p| !p.contains(ACCOUNT))
+            && !comment.payload.contains(ACCOUNT),
+        "no cleartext account survives in the forward record"
+    );
+    // (3) The owner's authz is UNAFFECTED — it still owns + can write the repo.
+    let meta = project_repo_meta(&log);
+    assert_eq!(meta.owner_tenant.as_deref(), Some(ACCOUNT));
+    assert!(
+        authorize_write(&chain, &meta),
+        "the non-erased owner still resolves write authz after pseudonymised writes"
+    );
+    assert!(
+        !authorize_write(&["clerk:other-org:u".to_string()], &meta),
+        "a different tenant is still denied"
+    );
+}
+
+#[test]
+fn erase_renders_forward_pseudonymised_records_unrecoverable_no_double_handling() {
+    // DoD (4): a forward-PSEUDONYMISED write composes cleanly with the leg-4/5 erase — after a
+    // completed erase the forward record's identity is UNRECOVERABLE (its `subj:*` pseudonym is
+    // one-way once the key is shredded), the chain STILL verifies, and there is no double-
+    // handling (a record already pseudonymous forward needs no redaction marker).
+    let dir = scratch_dir();
+    seed_repo_with_pr(&dir, "alpha", ACCOUNT);
+    seed_account(&dir);
+    let st = AppState::new(dir.clone(), "dev-token".into());
+    let sink: &dyn LogSink = &st;
+    let pseudonymize = |c: &[String]| st.pseudonymize_write_chain(c);
+
+    // A forward pseudonymised comment by the subject.
+    let req = CommentReq {
+        body: "mine".into(),
+        anchor: None,
+    };
+    let body = serde_json::to_vec(&req).unwrap();
+    with_write(
+        sink,
+        "alpha",
+        "comment",
+        "prs/1/comments",
+        "IDEM-9",
+        &body,
+        true,
+        vec![format!("clerk:{ACCOUNT}:user-1")],
+        10,
+        &pseudonymize,
+        |log, p, at| verbs::write_comment::write_comment(log, "alpha", 1, &req, p, at),
+    )
+    .expect("forward comment ok");
+
+    // Now run the completed erase cascade (empty exclusive set → Executed) over the repo.
+    let outcome = execute_account_erasure_with_erase(
+        &st,
+        ACCOUNT,
+        vec!["orchestrator:hugit".into()],
+        100,
+        &AllGone,
+        "d863fafb",
+        &["alpha".to_string()],
+        "dsr-7",
+    )
+    .expect("execute");
+    assert!(
+        matches!(outcome, ErasureOutcome::Executed { .. }),
+        "the cascade completes: {outcome:?}"
+    );
+
+    // The repo log: cleartext GONE (forward pseudonym is now one-way), chain STILL verifies.
+    let rlog = st.load_verified("alpha").expect("repo log loads");
+    verify_chain(rlog.records()).expect("post-erase repo chain verifies");
+    no_cleartext_survives(&rlog);
+    // The forward comment is still present, pseudonymous, and unrecoverable.
+    assert!(
+        rlog.records()
+            .iter()
+            .any(|r| r.kind == verbs::write_comment::PR_COMMENT_KIND),
+        "the forward comment record is retained (pseudonymously)"
+    );
+    // The subject key is shredded — the forward `subj:*` can no longer be linked to cleartext.
+    assert!(
+        st.subject_key_for(ACCOUNT).unwrap().is_none(),
+        "the key is shredded after a completed erase"
+    );
+}

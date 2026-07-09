@@ -2,7 +2,8 @@
 
 Status: Accepted-and-implemented (decision + full migration landed — durable CSPRNG key
 store, hash-preserving redaction + redaction-aware `verify_chain`, executor shred-on-complete,
-forward-pseudonymisation primitive; see "Migration plan" below for the per-leg status)
+AND forward write-path pseudonymisation wired into every live write verb; see "Migration plan"
+below for the per-leg status — ALL five legs now DONE)
 Date: 2026-07-09
 Context-of: GDPR1 erasure completeness audit (hugit-serve — `writes::erasure`, `provenance_pii`)
 Applies to: hugit · githugr (DSR anchor)
@@ -162,13 +163,23 @@ provenance-PII erasure`). Per-leg status:
    CSPRNG (`rand::rng()`, OS-seeded) mints 32-byte keys create-only (survives restart);
    `shred` deletes (Local) / tombstone-overwrites (R2) — durable + irreversible; `SubjectKey`
    is `zeroize`-on-drop. Exposed as `AppState::subject_key_{for,ensure,shred}`.
-2. **Pseudonymise the write path** — ◑ PRIMITIVE DONE, live-verb wiring SCOPED. The pure
-   forward transform `pseudonymize_write_principal_chain` (ensure-key → `subj:<hex>`,
-   idempotency-stable, fail-closed) is implemented + tested. Wiring it into all ~12 live
-   write verbs + the idempotency ledger match is deliberately kept as its own flagged PR
-   (hot-path blast radius + the principal-keyed idem-match hazard the ADR foresaw) — and is
-   NOT required for the end-state guarantee, because leg 4 renders ALL cleartext (forward
-   records included) unrecoverable at erase.
+2. **Pseudonymise the write path** — ✅ DONE (leg-2 PR). The forward transform
+   `pseudonymize_write_principal_chain` is now WIRED into every live write verb's record-append
+   path, so a NEW record stores `subj:<hmac>` in its `principal_chain` instead of the cleartext
+   `clerk:{org}:…`. The coordination is centralised in the two write doors (`with_write` /
+   `with_account_write`) + the provision-genesis and token append paths: the verb body runs on
+   the LIVE cleartext chain (its D14 class + owner derivation unchanged — leg 3), then the door
+   FORWARD-pseudonymises the freshly-appended tail and re-hashes it (sound because `this_hash`
+   excludes the class/endpoint — a fresh, natively-verifying chain, no redaction marker). The
+   **principal-keyed idem-match hazard the ADR foresaw is closed**: the idempotency ledger stores
+   the pseudonym AND `idem_lookup` DUAL-MATCHES cleartext-OR-pseudonym, so a re-submitted verb
+   dedups to exactly one execution — including across the deploy that flips pseudonymisation on
+   (a pre-migration cleartext ledger entry still dedups a pseudonymised resubmission → no double
+   execution on the live forge). Wired ON by default with an ops kill-switch
+   (`HUGIT_SERVE_PROV_PSEUDONYM=0|false|off`). The load-bearing PAYLOAD identity fields the live
+   readers key on — `repo.meta.owner_tenant` (authz) and `pat.created.user` (PAT auth) — are
+   deliberately RETAINED cleartext forward (pseudonymising them would need the identity-reader
+   refactor leg 3 scoped out); they are rendered unrecoverable at erase by leg 4's redaction.
 3. **Identity readers** — ✅ VERIFIED (no code change needed). Confirmed `authorize_read`/
    `authorize_write` key on the projected `owner_tenant` + the LIVE request principal, NEVER
    on the stored `principal_chain` (G11). Pseudonymising the stored chain is therefore authz-

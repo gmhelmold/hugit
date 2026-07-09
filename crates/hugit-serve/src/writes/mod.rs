@@ -35,6 +35,7 @@
 pub mod erasure;
 pub mod verbs;
 
+use hugit_contracts::event_record::EventRecord;
 use hugit_http_contracts::actions::Accepted;
 use hugit_refstore::{EventLog, PrincipalClass};
 use sha2::{Digest, Sha256};
@@ -172,6 +173,68 @@ pub trait AccountLogSink: Send + Sync {
     ) -> Result<(), EngineErr>;
 }
 
+/// The chain-mapper the write doors apply to STORED provenance (ADR-0004 leg 2): a live
+/// request's `principal_chain` → its pseudonymous stored form (`clerk:{org}:…` → `subj:<hmac>`;
+/// every non-`clerk:` principal passed through). Injected (not hard-wired to `AppState`) so the
+/// door stays a pure, unit-testable chokepoint; the server passes
+/// [`AppState::pseudonymize_write_chain`](crate::state::AppState::pseudonymize_write_chain)
+/// (kill-switch-gated), the door's own tests pass an identity mapper. Fail-closed (`Err` aborts
+/// the write rather than storing cleartext or a wrong pseudonym).
+pub(crate) type ChainPseudonymizer<'a> = &'a dyn Fn(&[String]) -> Result<Vec<String>, EngineErr>;
+
+/// Re-pseudonymise the `principal_chain` of every record from index `from` onward, rebuilding
+/// the log with FRESH hashes (ADR-0004 leg 2 — the FORWARD transform, distinct from the
+/// hash-PRESERVING redaction leg 4 uses on already-written records).
+///
+/// This is sound BY CONSTRUCTION of the chain: `this_hash` is a SHA-256 over `(prev_hash, kind,
+/// principal_chain, payload, seq)` — the D14 CLASS and ENDPOINT are NOT in the pre-image — so a
+/// verb can append on the LIVE cleartext chain (its class + owner derivation run on the real
+/// caller, unaffected), and the door THEN rewrites the just-appended tail's chain to the
+/// pseudonym and re-chains forward. `seq`/`kind`/`payload`/`recorded_at` are preserved; only the
+/// `principal_chain` bytes (and the dependent `prev_hash`/`this_hash`) change, so the rebuilt
+/// suffix `verify_chain`s NATIVELY (no redaction marker) and a verb's returned `Accepted.seq`
+/// still points at the same record. Idempotent w.r.t. an already-pseudonymous chain and a no-op
+/// under the kill-switch (identity mapper ⇒ a byte-identical rebuild).
+///
+/// Fail-closed: a mapper fault (durable key-store error) is an `Err` — the write aborts.
+pub(crate) fn repseudonymize_tail(
+    log: &EventLog,
+    from: usize,
+    pseudonymize: ChainPseudonymizer<'_>,
+) -> Result<EventLog, EngineErr> {
+    let mut rebuilt = EventLog::new();
+    for (i, r) in log.records().iter().enumerate() {
+        let new_chain = if i < from {
+            r.principal_chain.clone() // head records are already durable — never rewritten here
+        } else {
+            pseudonymize(&r.principal_chain)?
+        };
+        if new_chain == r.principal_chain {
+            // Head record, an orchestrator-authored tail record (no clerk identity), or the
+            // kill-switch OFF — keep it byte-identical (this_hash unchanged).
+            rebuilt
+                .push_record(r.clone())
+                .expect("re-pushing an existing record preserves seq order");
+            continue;
+        }
+        let prev_hash = rebuilt.head_hash();
+        let this_hash =
+            hugit_refstore::compute_this_hash(&prev_hash, &r.kind, &new_chain, &r.payload, r.seq);
+        rebuilt
+            .push_record(EventRecord {
+                seq: r.seq,
+                prev_hash,
+                this_hash,
+                kind: r.kind.clone(),
+                principal_chain: new_chain,
+                payload: r.payload.clone(),
+                recorded_at: r.recorded_at,
+            })
+            .expect("a re-pseudonymised record preserves seq order");
+    }
+    Ok(rebuilt)
+}
+
 /// Hex SHA-256 of the raw request body — the idempotency body fingerprint.
 fn body_sha256(body: &[u8]) -> String {
     let mut h = Sha256::new();
@@ -200,9 +263,24 @@ struct PriorOutcome {
 /// unparseable matched outcome into "no prior found", which would silently
 /// RE-EXECUTE the verb (a double effect) — fail-open on the idempotency guard. A
 /// missing match is still `Ok(None)` (run the verb for the first time).
+///
+/// ## Pseudonym-aware principal match (ADR-0004 leg 2 — the double-execute hazard closed)
+///
+/// The ledger keys on the acting `principal`. Once forward writes pseudonymise the stored
+/// principal (`clerk:{org}:…` → `subj:<hmac>`), a resubmission must STILL dedup to the one
+/// prior execution — even across the deploy that flips pseudonymisation on, where OLD ledger
+/// entries hold the CLEARTEXT principal and NEW ones hold the pseudonym. So the match accepts
+/// EITHER form: `principal_clear` (the live cleartext, matches pre-migration entries) OR
+/// `principal_stored` (its pseudonym, matches forward entries). The two forms are the SAME
+/// identity in disjoint namespaces (`clerk:`/`orchestrator:` vs `subj:`), so this never
+/// collapses two different callers, and it guarantees a re-submitted identical verb resolves to
+/// exactly ONE execution regardless of which side of the migration each entry was written on.
+/// When the kill-switch is OFF, `principal_stored == principal_clear` and the match degenerates
+/// to the original single-key behaviour.
 fn idem_lookup(
     log: &EventLog,
-    principal: &str,
+    principal_clear: &str,
+    principal_stored: &str,
     verb: &str,
     resource: &str,
     key: &str,
@@ -213,7 +291,8 @@ fn idem_lookup(
         .filter(|r| r.kind == IDEM_RECORDED_KIND)
         .filter_map(|r| serde_json::from_str::<serde_json::Value>(&r.payload).ok())
         .find(|v| {
-            v.get("principal").and_then(|x| x.as_str()) == Some(principal)
+            let stored = v.get("principal").and_then(|x| x.as_str());
+            (stored == Some(principal_clear) || stored == Some(principal_stored))
                 && v.get("verb").and_then(|x| x.as_str()) == Some(verb)
                 && v.get("resource").and_then(|x| x.as_str()) == Some(resource)
                 && v.get("key").and_then(|x| x.as_str()) == Some(key)
@@ -286,6 +365,11 @@ fn idem_record(
 /// - `body` — the raw request body bytes (the replay fingerprint; size-capped).
 /// - `step_up_presented` — did the route present fresh re-auth? Required for the
 ///   [`STEP_UP_VERBS`] (policy/erasure), else `403 STEP_UP_REQUIRED`.
+/// - `pseudonymize` — the STORED-chain mapper (ADR-0004 leg 2). Applied AFTER authz + the
+///   verb body run, to the verb's freshly-appended records AND the `idem.recorded` entry, so a
+///   NEW record carries `subj:<hmac>` in its `principal_chain` instead of the cleartext
+///   `clerk:{org}:…`. Authz + the verb's own D14 class/owner derivation run on the LIVE
+///   cleartext chain, untouched (leg 3).
 /// - `run` — the pure verb body; it mutates the loaded log and returns `Accepted`.
 ///
 /// On success the verb's record(s) + the `idem.recorded` entry persist atomically.
@@ -310,6 +394,7 @@ pub fn with_write<F>(
     step_up_presented: bool,
     principal_chain: Vec<String>,
     at: u64,
+    pseudonymize: ChainPseudonymizer<'_>,
     run: F,
 ) -> Result<Accepted, EngineErr>
 where
@@ -330,6 +415,12 @@ where
         return Err(EngineErr::idempotency_required());
     }
     let principal = principal_chain.last().cloned().unwrap_or_default();
+    // The STORED (pseudonymous) principal — derived ONCE (stable per org while the subject key
+    // lives), used for BOTH the ledger append AND the replay match so a resubmission dedups to
+    // one execution (leg 2). Fail-closed on a durable key-store fault (the write never proceeds
+    // to store cleartext). Mints the caller's OWN identity key — benign before the authz gate.
+    let stored_chain = pseudonymize(&principal_chain)?;
+    let principal_stored = stored_chain.last().cloned().unwrap_or_default();
     let body_hash = body_sha256(body);
 
     for _attempt in 0..MAX_CAS_ATTEMPTS {
@@ -345,6 +436,8 @@ where
         // but writable ONLY by its owner/operator (else any signed-up tenant could
         // land/verdict/policy/… into the public launch repo). A non-owner is denied
         // as 404 (no existence leak), BEFORE the idempotency lookup or any effect.
+        // Keys on the LIVE CLEARTEXT chain + the projected `owner_tenant` (never the
+        // stored, pseudonymised chain) — pseudonymisation is authz-neutral (leg 3).
         if !crate::authz::authorize_write(&principal_chain, &crate::authz::project_repo_meta(&log))
         {
             return Err(EngineErr::not_found());
@@ -352,20 +445,38 @@ where
 
         // Replay guard: a seen key returns the stored outcome (or 409 on a body
         // change) BEFORE the verb runs — so a lost-response retry (or a same-key
-        // race lost above) never re-executes the effect.
-        if let Some(prior) = idem_lookup(&log, &principal, verb, resource, idem_key)? {
+        // race lost above) never re-executes the effect. Dual-matches cleartext OR
+        // pseudonym so the dedup holds across the pseudonymisation migration boundary.
+        if let Some(prior) = idem_lookup(
+            &log,
+            &principal,
+            &principal_stored,
+            verb,
+            resource,
+            idem_key,
+        )? {
             if prior.body_sha256 != body_hash {
                 return Err(EngineErr::idem_mismatch());
             }
             return Ok(prior.accepted);
         }
 
-        // First time for this key on this head: run the verb (mutates the in-memory
-        // log), record the idempotent outcome, then compare-and-swap-persist ONCE
-        // (atomic: both records or neither).
+        // First time for this key on this head: run the verb on the LIVE cleartext chain
+        // (its D14 class + owner derivation must see the real caller), then FORWARD-
+        // pseudonymise the freshly-appended tail (fresh re-hash), record the idempotent
+        // outcome under the PSEUDONYM, then compare-and-swap-persist ONCE (atomic).
+        let head_len = log.records().len();
         let accepted = run(&mut log, principal_chain.clone(), at)?;
+        let mut log = repseudonymize_tail(&log, head_len, pseudonymize)?;
         idem_record(
-            &mut log, &principal, verb, resource, idem_key, &body_hash, &accepted, at,
+            &mut log,
+            &principal_stored,
+            verb,
+            resource,
+            idem_key,
+            &body_hash,
+            &accepted,
+            at,
         )?;
         match sink.persist(repo, &log, &token) {
             Ok(()) => return Ok(accepted),
@@ -413,6 +524,7 @@ pub fn with_account_write<F>(
     step_up_presented: bool,
     principal_chain: Vec<String>,
     at: u64,
+    pseudonymize: ChainPseudonymizer<'_>,
     run: F,
 ) -> Result<Accepted, EngineErr>
 where
@@ -432,6 +544,10 @@ where
         return Err(EngineErr::idempotency_required());
     }
     let principal = principal_chain.last().cloned().unwrap_or_default();
+    // The STORED (pseudonymous) principal (leg 2) — see [`with_write`] for the rationale; here
+    // the subject IS the caller's own account, so the pseudonym is its `subj:<hmac>`.
+    let stored_chain = pseudonymize(&principal_chain)?;
+    let principal_stored = stored_chain.last().cloned().unwrap_or_default();
     let body_hash = body_sha256(body);
 
     for _attempt in 0..MAX_CAS_ATTEMPTS {
@@ -439,19 +555,38 @@ where
         let (mut log, token) = sink.load_account(account)?;
 
         // Replay guard (identical to the repo door): a seen key returns the stored
-        // outcome (or 409 on a body change) BEFORE the verb runs.
-        if let Some(prior) = idem_lookup(&log, &principal, verb, resource, idem_key)? {
+        // outcome (or 409 on a body change) BEFORE the verb runs. Dual-matches cleartext
+        // OR pseudonym so dedup holds across the pseudonymisation migration boundary.
+        if let Some(prior) = idem_lookup(
+            &log,
+            &principal,
+            &principal_stored,
+            verb,
+            resource,
+            idem_key,
+        )? {
             if prior.body_sha256 != body_hash {
                 return Err(EngineErr::idem_mismatch());
             }
             return Ok(prior.accepted);
         }
 
-        // First time for this key on this head: run the verb (which itself derives +
-        // authorizes the subject), record the idempotent outcome, then CAS-persist ONCE.
+        // First time for this key on this head: run the verb on the LIVE cleartext chain
+        // (it derives + authorizes the subject from the real principal), FORWARD-pseudonymise
+        // the freshly-appended tail, record the idempotent outcome under the PSEUDONYM, then
+        // CAS-persist ONCE.
+        let head_len = log.records().len();
         let accepted = run(&mut log, principal_chain.clone(), at)?;
+        let mut log = repseudonymize_tail(&log, head_len, pseudonymize)?;
         idem_record(
-            &mut log, &principal, verb, resource, idem_key, &body_hash, &accepted, at,
+            &mut log,
+            &principal_stored,
+            verb,
+            resource,
+            idem_key,
+            &body_hash,
+            &accepted,
+            at,
         )?;
         match sink.persist_account(account, &log, &token) {
             Ok(()) => return Ok(accepted),
@@ -469,6 +604,27 @@ where
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    /// The IDENTITY chain-pseudonymizer — the door's behaviour with the leg-2 kill-switch OFF
+    /// (a byte-identical rebuild). The happy-path door tests pin that the pre-leg-2 semantics
+    /// (idempotency, CAS, replay) are UNCHANGED under it; the pseudonymising path is exercised
+    /// separately (`pseudonym_*` tests) with a mapper that rewrites `clerk:*` → `subj:*`.
+    fn ident(c: &[String]) -> Result<Vec<String>, EngineErr> {
+        Ok(c.to_vec())
+    }
+
+    /// A test chain-pseudonymizer that mimics the real one WITHOUT a key store: every
+    /// `clerk:{org}:{user}` → a stable `subj:<org>` pseudonym; everything else passes through.
+    /// Stable per org (like the real HMAC-under-a-durable-key), so a resubmission maps to the
+    /// same pseudonym — the property the idempotency dedup relies on.
+    fn subj_pseudonymize(c: &[String]) -> Result<Vec<String>, EngineErr> {
+        Ok(c.iter()
+            .map(|p| match p.strip_prefix("clerk:") {
+                Some(rest) => format!("subj:{}", rest.split(':').next().unwrap_or("")),
+                None => p.clone(),
+            })
+            .collect())
+    }
 
     #[test]
     fn asserted_class_is_chain_derived_fail_closed() {
@@ -618,6 +774,7 @@ mod tests {
             true,
             vec!["orchestrator:o".into()],
             2,
+            &ident,
             dummy_verb,
         )
         .expect("winner write ok");
@@ -642,6 +799,22 @@ mod tests {
         MemSink {
             log: RefCell::new(log),
         }
+    }
+
+    /// `sink_with_pr` plus a `repo.meta{owner_tenant}` seed so a CLERK tenant (not just the
+    /// operator) OWNS the repo and clears `authorize_write` — needed to exercise the leg-2
+    /// pseudonymisation of a `clerk:{org}:…` principal at the repo door.
+    fn sink_owned_by(org: &str, pr_id: &str) -> MemSink {
+        let sink = sink_with_pr(pr_id);
+        {
+            let mut log = sink.log.borrow_mut();
+            let meta = hugit_refstore::canonical_json(
+                &serde_json::json!({"visibility":"private","owner_tenant":org}).to_string(),
+            )
+            .unwrap();
+            log.append_for_test("repo.meta", vec!["orchestrator:t".into()], meta, 2);
+        }
+        sink
     }
 
     /// A trivial verb that appends one record and returns a fixed Accepted.
@@ -685,6 +858,7 @@ mod tests {
             true,
             vec!["orchestrator:o".into()],
             2,
+            &ident,
             dummy_verb,
         )
         .expect_err("empty key must 400");
@@ -706,6 +880,7 @@ mod tests {
             true,
             vec!["orchestrator:o".into()],
             2,
+            &ident,
             dummy_verb,
         )
         .expect("first ok");
@@ -721,6 +896,7 @@ mod tests {
             true,
             vec!["orchestrator:o".into()],
             3,
+            &ident,
             dummy_verb,
         )
         .expect("replay ok");
@@ -748,6 +924,7 @@ mod tests {
             true,
             vec!["orchestrator:o".into()],
             2,
+            &ident,
             dummy_verb,
         )
         .expect("first ok");
@@ -761,6 +938,7 @@ mod tests {
             true,
             vec!["orchestrator:o".into()],
             3,
+            &ident,
             dummy_verb,
         )
         .expect_err("different body must 409");
@@ -782,6 +960,7 @@ mod tests {
             false,
             vec!["orchestrator:o".into()],
             2,
+            &ident,
             dummy_verb,
         )
         .expect_err("step-up verb without fresh auth must 403");
@@ -799,6 +978,7 @@ mod tests {
                 false,
                 vec!["orchestrator:o".into()],
                 3,
+                &ident,
                 dummy_verb
             )
             .is_ok()
@@ -819,6 +999,7 @@ mod tests {
             true,
             vec!["orchestrator:o".into()],
             2,
+            &ident,
             dummy_verb,
         )
         .expect_err("oversize body must 400");
@@ -842,6 +1023,7 @@ mod tests {
             true,
             vec!["orchestrator:o".into()],
             2,
+            &ident,
             dummy_verb,
         )
         .expect("first resource ok");
@@ -856,6 +1038,7 @@ mod tests {
             true,
             vec!["orchestrator:o".into()],
             3,
+            &ident,
             dummy_verb,
         )
         .expect("second resource ok");
@@ -913,6 +1096,7 @@ mod tests {
             true,
             vec!["orchestrator:o".into()],
             3,
+            &ident,
             dummy_verb,
         )
         .expect_err("a corrupt matched ledger entry must fail closed, not re-execute");
@@ -948,6 +1132,7 @@ mod tests {
             true,
             vec!["orchestrator:o".into()],
             2,
+            &ident,
             dummy_verb,
         )
         .expect("must recover from the lost race, not fail");
@@ -989,6 +1174,7 @@ mod tests {
             true,
             vec!["orchestrator:o".into()],
             2,
+            &ident,
             dummy_verb,
         )
         .expect("same-key race must resolve to a replay, not an error");
@@ -1032,6 +1218,7 @@ mod tests {
             true,
             vec!["orchestrator:o".into()],
             2,
+            &ident,
             dummy_verb,
         )
         .expect_err("sustained contention must fail, not silently drop");
@@ -1153,6 +1340,7 @@ mod tests {
             step_up,
             principal,
             at,
+            &ident,
             |log, p, at| verbs::write_account_erase::write_account_erase(log, req, p, at),
         )
     }
@@ -1325,5 +1513,221 @@ mod tests {
                 .any(|r| r.seq == acc.seq),
             "we returned the winner's recorded outcome (replay)"
         );
+    }
+
+    // ── ADR-0004 leg 2: FORWARD write-path pseudonymisation at the doors ──────────
+
+    #[test]
+    fn pseudonym_repo_write_stores_subj_chain_replay_dedups_and_chain_verifies() {
+        // DoD (1)+(2): a pseudonymised write stores `subj:*` in the record's principal_chain
+        // AND the idem ledger (no cleartext principal/account enters the chain), a re-submitted
+        // identical verb dedups to exactly ONE effect, and the rebuilt chain STILL verifies.
+        let sink = sink_owned_by("acme", "1");
+        let body = b"{\"mode\":\"union\"}";
+        let chain = vec!["clerk:acme:user-1".to_string()];
+        let first = with_write(
+            &sink,
+            "r",
+            "land",
+            "res",
+            "K1",
+            body,
+            true,
+            chain.clone(),
+            2,
+            &subj_pseudonymize,
+            dummy_verb,
+        )
+        .expect("first pseudonymised write ok");
+        let replay = with_write(
+            &sink,
+            "r",
+            "land",
+            "res",
+            "K1",
+            body,
+            true,
+            chain.clone(),
+            3,
+            &subj_pseudonymize,
+            dummy_verb,
+        )
+        .expect("replay ok");
+        assert_eq!(first.seq, replay.seq, "replay returns the original outcome");
+
+        let log = sink.log.borrow();
+        // Exactly ONE effect despite the resubmission (idempotency intact under pseudonymisation).
+        assert_eq!(
+            log.records()
+                .iter()
+                .filter(|r| r.kind == "pr.queued")
+                .count(),
+            1,
+            "the resubmission dedups to ONE execution"
+        );
+        // The verb record's chain is pseudonymous — NO cleartext clerk principal / account slug.
+        let queued = log
+            .records()
+            .iter()
+            .find(|r| r.kind == "pr.queued")
+            .unwrap();
+        assert!(
+            queued
+                .principal_chain
+                .iter()
+                .all(|p| p.starts_with("subj:")),
+            "stored chain is pseudonymised: {:?}",
+            queued.principal_chain
+        );
+        // (The test mapper keeps the org visible as `subj:acme`; the REAL HMAC pseudonym's
+        // no-cleartext-substring property is proven end-to-end in `art17_erasure_e2e`. Here we
+        // assert the cleartext `clerk:` principal no longer survives in the stored chain.)
+        assert!(
+            queued
+                .principal_chain
+                .iter()
+                .all(|p| !p.starts_with("clerk:")),
+            "no cleartext clerk principal survives in the chain: {:?}",
+            queued.principal_chain
+        );
+        // The idem.recorded ledger entry ALSO carries the pseudonym (chain + `principal` field).
+        let idem = log
+            .records()
+            .iter()
+            .find(|r| r.kind == IDEM_RECORDED_KIND)
+            .unwrap();
+        assert!(
+            !idem.payload.contains("clerk:acme") && !idem.payload.contains("\"acme\""),
+            "the idem ledger principal is pseudonymised: {}",
+            idem.payload
+        );
+        assert!(idem.principal_chain.iter().all(|p| p.starts_with("subj:")));
+        // The forward-pseudonymised chain re-hashed by the door verifies natively (no marker).
+        hugit_refstore::verify_chain(log.records()).expect("pseudonymised chain verifies");
+    }
+
+    #[test]
+    fn pseudonym_migration_boundary_old_cleartext_ledger_still_dedups_no_double_execute() {
+        // THE hazard #317 flagged: across the deploy that flips pseudonymisation ON, a ledger
+        // entry written PRE-migration holds the CLEARTEXT principal. A resubmission of the same
+        // key POST-migration must still REPLAY (dual-match), never re-execute the effect.
+        let sink = sink_owned_by("acme", "1");
+        let body = b"{\"mode\":\"union\"}";
+        let chain = vec!["clerk:acme:user-1".to_string()];
+        // Pre-migration write (kill-switch OFF ⇒ identity mapper ⇒ cleartext ledger entry).
+        with_write(
+            &sink,
+            "r",
+            "land",
+            "res",
+            "K1",
+            body,
+            true,
+            chain.clone(),
+            2,
+            &ident,
+            dummy_verb,
+        )
+        .expect("pre-migration write ok");
+        let before = sink
+            .log
+            .borrow()
+            .records()
+            .iter()
+            .filter(|r| r.kind == "pr.queued")
+            .count();
+        // Post-migration resubmission (pseudonymisation ON) — MUST dedup against the cleartext
+        // entry, not double-execute.
+        with_write(
+            &sink,
+            "r",
+            "land",
+            "res",
+            "K1",
+            body,
+            true,
+            chain,
+            3,
+            &subj_pseudonymize,
+            dummy_verb,
+        )
+        .expect("post-migration resubmission replays");
+        let after = sink
+            .log
+            .borrow()
+            .records()
+            .iter()
+            .filter(|r| r.kind == "pr.queued")
+            .count();
+        assert_eq!(
+            before, after,
+            "a pre-migration cleartext ledger entry MUST dedup a pseudonymised resubmission"
+        );
+        assert_eq!(after, 1, "exactly ONE effect across the migration boundary");
+    }
+
+    #[test]
+    fn pseudonym_account_erase_dedups_and_stores_subj_chain() {
+        // The account door (GDPR1) under pseudonymisation: the erasure.requested record's CHAIN
+        // is `subj:*`, a resubmission dedups to ONE request, and the chain verifies. (The
+        // account slug in the erasure PAYLOAD is deliberately retained — leg-4 erase-time
+        // territory — so this asserts on the chain, the leg-2 forward surface.)
+        let sink = AcctSink::empty();
+        let req = erase("org-a");
+        let body = serde_json::to_vec(&req).unwrap();
+        let first = with_account_write(
+            &sink,
+            "org-a",
+            "erasure",
+            "account/erase",
+            "K1",
+            &body,
+            true,
+            tenant("org-a"),
+            1,
+            &subj_pseudonymize,
+            |log, p, at| verbs::write_account_erase::write_account_erase(log, &req, p, at),
+        )
+        .expect("first erase ok");
+        let replay = with_account_write(
+            &sink,
+            "org-a",
+            "erasure",
+            "account/erase",
+            "K1",
+            &body,
+            true,
+            tenant("org-a"),
+            2,
+            &subj_pseudonymize,
+            |log, p, at| verbs::write_account_erase::write_account_erase(log, &req, p, at),
+        )
+        .expect("replay ok");
+        assert_eq!(first.seq, replay.seq, "replay returns the original request");
+
+        let log = sink.log.borrow();
+        let recs = log.as_ref().unwrap();
+        assert_eq!(
+            recs.records()
+                .iter()
+                .filter(|r| r.kind == verbs::write_account_erase::ERASURE_REQUESTED_KIND)
+                .count(),
+            1,
+            "the resubmission dedups to ONE erasure.requested"
+        );
+        let req_rec = recs
+            .records()
+            .iter()
+            .find(|r| r.kind == verbs::write_account_erase::ERASURE_REQUESTED_KIND)
+            .unwrap();
+        assert!(
+            req_rec
+                .principal_chain
+                .iter()
+                .all(|p| p.starts_with("subj:")),
+            "the erasure record's chain is pseudonymised: {:?}",
+            req_rec.principal_chain
+        );
+        hugit_refstore::verify_chain(recs.records()).expect("pseudonymised account chain verifies");
     }
 }

@@ -335,8 +335,15 @@ pub fn provision(
         Err(e) => return Err(e),        // 503 (unreadable/tampered) → refuse
     }
 
-    // 4. Build the genesis event-log (one repo.meta record, seq 0).
+    // 4. Build the genesis event-log (one repo.meta record, seq 0), then FORWARD-pseudonymise
+    //    its `principal_chain` (ADR-0004 leg 2): the record is BUILT on the live cleartext
+    //    `principal` (so `asserted_class` sees the real caller in `build_genesis_log`), then its
+    //    stored chain is rewritten to `subj:<hmac>` and re-hashed. The `owner_tenant` PAYLOAD
+    //    field is deliberately LEFT cleartext — the read/write authz gates project it as the
+    //    ownership key (leg 3); it is rendered unrecoverable at erase by leg 4's redaction.
     let log = build_genesis_log(&owner_tenant, visibility, principal, at)?;
+    let pseudonymize = |c: &[String]| state.pseudonymize_write_chain(c);
+    let log = crate::writes::repseudonymize_tail(&log, 0, &pseudonymize)?;
 
     // 5. THE atomic commit: persist the genesis as a CREATE-ONLY compare-and-swap.
     //    `Absent` → Local content-compare / R2 `If-None-Match: *`. A precondition
