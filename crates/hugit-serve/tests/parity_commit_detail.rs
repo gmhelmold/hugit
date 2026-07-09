@@ -47,7 +47,8 @@ fn found_by_6char_prefix() {
         "fix: token expiry",
         "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
     );
-    let vm = build_commit_detail(&log, "hugit", "a1b2c3", no_git()).expect("prefix matches → Some");
+    let vm = build_commit_detail(&log, "hugit", "a1b2c3", no_git(), None)
+        .expect("prefix matches → Some");
     assert_eq!(vm.sha, "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2");
     assert_eq!(vm.intent_id.as_deref(), Some("i-1"));
     assert!(!vm.external);
@@ -59,7 +60,7 @@ fn found_by_6char_prefix() {
 fn unknown_sha_is_none_404() {
     let log = EventLog::new();
     assert!(
-        build_commit_detail(&log, "hugit", "deadbe", no_git()).is_none(),
+        build_commit_detail(&log, "hugit", "deadbe", no_git(), None).is_none(),
         "absent → None (404, no leak)"
     );
 }
@@ -73,7 +74,7 @@ fn secret_in_charter_redacts_in_title() {
         &format!("ship {PAT} now"),
         "cafe00cafe00cafe00cafe00cafe00cafe00cafe",
     );
-    let vm = build_commit_detail(&log, "hugit", "cafe00", no_git())
+    let vm = build_commit_detail(&log, "hugit", "cafe00", no_git(), None)
         .expect("Some — secret scrubbed, not dropped");
     let json = serde_json::to_string(&vm).unwrap();
     assert!(!json.contains(PAT), "raw PAT must NEVER reach the VM JSON");

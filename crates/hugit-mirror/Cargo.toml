@@ -19,6 +19,12 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 sha1 = "0.10"
 hex = { workspace = true }
+# WP-2 (GitHub App installation-token minting): sign the App JWT (RS256 from the
+# on-disk PEM) and exchange it for an installation token. `jsonwebtoken` is already
+# in the workspace lock (hugit-queue) at this exact version; `ureq` is the single
+# blocking transport (mirrors `lease_client.rs`) — both add no new lock line.
+jsonwebtoken = "9"
+ureq = { workspace = true }
 
 [features]
 # Test-only surface (e.g. `AuthorityModel::set_github_authoritative_for_main`)

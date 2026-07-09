@@ -1701,6 +1701,10 @@ fn finish_receive_pack(
                         // walk). Rebuild it for the new tip in the background (off this
                         // worker's response path — the client already has its `ok`).
                         crate::blob_history_index::spawn_blob_history_index_build(state, repo);
+                        // The push moved HEAD → rebuild the code-search index for the
+                        // new tip in the background (a stale index MISSES → honest-empty
+                        // until it lands). No-op for a non-public / refless repo.
+                        crate::search_index::spawn_search_index_build(state, repo);
                     }
                     Err(crate::cas::CasPushError::Persist(reason)) => {
                         let report = build_report_status(
@@ -1932,6 +1936,9 @@ fn handle_delete_ref(
                     // index for the new HEAD in the background (stale-index lookups fall
                     // back to the live walk until it lands). No-op for a refless repo.
                     crate::blob_history_index::spawn_blob_history_index_build(state, repo);
+                    // The delete moved the ref set → rebuild the code-search index
+                    // for the new HEAD in the background (honest-empty until it lands).
+                    crate::search_index::spawn_search_index_build(state, repo);
                 }
                 Err(crate::cas::CasPushError::Persist(reason)) => {
                     let report = build_report_status(

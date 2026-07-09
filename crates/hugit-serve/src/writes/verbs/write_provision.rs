@@ -88,6 +88,17 @@ pub fn validate_name(name: &str) -> Result<(), EngineErr> {
     if name.starts_with('.') {
         return bad("o nome do repositório não pode começar com ponto");
     }
+    if name.starts_with('_') {
+        // The `_` prefix is RESERVED for the platform keyspace (`_accounts/`,
+        // `_tenants/`). Admitting a `_`-named repo would persist a `<tenant>/_foo.json`
+        // key that `LogSource::list_repo_slugs`'s R2 arm deliberately skips as reserved
+        // — so the repo would be INVISIBLE to the GDPR erasure enumeration + the
+        // exclusive-digest partition after a reboot (the runtime overlay is lost),
+        // holing the "durable-but-unloaded repo can never be missed" guarantee on the
+        // IRREVERSIBLE erase path (a surviving user's `_`-repo could be dropped from the
+        // surviving set → its shared CAS object mis-classified exclusive → erased).
+        return bad("o nome do repositório não pode começar com sublinhado");
+    }
     if name == "." || name == ".." || name.contains("..") {
         return bad("o nome do repositório não pode conter \"..\"");
     }
@@ -211,6 +222,27 @@ fn build_genesis_log(
     Ok(log)
 }
 
+/// Best-effort SELF-HEALING reconcile on the no-clobber path: the slug already exists, so
+/// if its durable genesis is owned by THIS tenant, ensure it is registered in the tenant's
+/// durable set (heals a repo whose genesis landed but whose registry register crashed
+/// mid-provision). Idempotent. A reconcile fault is logged, NEVER surfaced — the caller
+/// still returns the authoritative 409; the registry heals on a later touch.
+fn reconcile_on_conflict(
+    state: &AppState,
+    owner_tenant: &str,
+    slug: &str,
+    principal: &[String],
+    at: u64,
+) {
+    if let Err(e) = state.reconcile_tenant_repo(owner_tenant, slug, principal, at) {
+        eprintln!(
+            "[hugit-serve] provision: tenant-registry reconcile for {slug:?} failed ({}); \
+             the count heals on a later touch",
+            e.code
+        );
+    }
+}
+
 /// A 409 "already exists for this owner" (no clobber). A distinct code from the
 /// generic `CAS_CONFLICT` so the client can present "repo já existe" precisely.
 fn repo_exists_err() -> EngineErr {
@@ -286,12 +318,21 @@ pub fn provision(
     //    exists for the slug. A tampered/unreadable existing log (non-404) is NOT a
     //    free slot — surface it, never create over it (fail-closed).
     if state.has_repo_seam(&slug) {
+        // SELF-HEALING reconcile (WP-1 atomicity): a repo whose genesis landed but whose
+        // registry register crashed mid-provision is un-countable. A retry of the same
+        // slug lands here — heal the registry toward the genesis source of truth before
+        // the 409, so the count converges (best-effort: a heal fault is logged, the repo
+        // is already readable). Idempotent for an already-registered repo.
+        reconcile_on_conflict(state, &owner_tenant, &slug, principal, at);
         return Err(repo_exists_err());
     }
     match state.load_verified(&slug) {
-        Ok(_) => return Err(repo_exists_err()), // a log already exists → no clobber
-        Err(e) if e.status == 404 => {}         // absent → free to create
-        Err(e) => return Err(e),                // 503 (unreadable/tampered) → refuse
+        Ok(_) => {
+            reconcile_on_conflict(state, &owner_tenant, &slug, principal, at);
+            return Err(repo_exists_err()); // a log already exists → no clobber
+        }
+        Err(e) if e.status == 404 => {} // absent → free to create
+        Err(e) => return Err(e),        // 503 (unreadable/tampered) → refuse
     }
 
     // 4. Build the genesis event-log (one repo.meta record, seq 0).
@@ -313,6 +354,26 @@ pub fn provision(
     //     persisted (no redundant reload) so `count_owned_repos`/`me_repo_logs` see
     //     this NEW repo's ownership at the very next request, no cold log-walk.
     state.cache_repo_meta(&slug, crate::authz::project_repo_meta(&log));
+
+    // 5c. THE SECOND durable write (WP-1): register the new repo into the tenant's durable
+    //     `_tenants/{org}.json` set, so the per-tenant cap ([`count_owned_repos`]) is
+    //     durable across reboots (defect A) and O(1) w.r.t. the platform (defect B).
+    //     Ordered AFTER the genesis create — the genesis is the SOURCE OF TRUTH, so a repo
+    //     is never counted before it durably exists. A crash between the two writes leaves
+    //     an un-countable repo that SELF-HEALS: a retry of this slug reconciles it (step 3
+    //     above), and the standalone [`reconcile_tenant_repo`] can back-fill any residual.
+    //     Best-effort here (mirrors the runtime-seam insert below): the repo is durably
+    //     created + readable; a register fault is logged, never a failure of the create
+    //     (the count heals on the next touch — the fail-safe direction is a transient
+    //     undercount, closed by reconcile, NOT a lost repo).
+    if let Err(e) = state.register_repo_in_tenant(&owner_tenant, &slug, principal, at) {
+        eprintln!(
+            "[hugit-serve] provision: genesis for {slug:?} is durable, but the tenant-registry \
+             register failed ({}); the repo is readable — the per-tenant count self-heals on \
+             the next provision/reconcile of this slug",
+            e.code
+        );
+    }
 
     // 6. DURABLY created. Now make it push/clone-live with no reboot: insert the
     //    empty CAS-mode git seam into the runtime overlay. In Local/dev mode (no CAS
@@ -423,11 +484,11 @@ mod tests {
         (AppState::new(dir.clone(), "dev-token".to_string()), dir)
     }
 
-    /// Seed one repo OWNED by `owner`, COUNTABLE by the per-tenant cap: write its
-    /// durable genesis log AND wire a (dummy) git seam into the boot `repos` set — so
-    /// `count_owned_repos` enumerates it (in Local mode a real `provision` writes the
-    /// durable log but registers no runtime seam, so this mirrors what a CAS-mode
-    /// deploy — where every provision DOES leak an overlay entry — would count).
+    /// Seed one repo OWNED by `owner`, COUNTABLE by the per-tenant cap (WP-1): write its
+    /// durable genesis log, wire a (dummy) git seam into the boot `repos` set, AND register
+    /// it into the tenant's durable `_tenants/{owner}.json` registry — the O(1) denominator
+    /// [`count_owned_repos`] now reads. (A real `provision` does the same two durable writes;
+    /// this mirrors the post-provision durable state.)
     fn seed_owned(st: &mut AppState, dir: &std::path::Path, name: &str, owner: &str) {
         let log = build_genesis_log(owner, "private", &tenant(owner), 1).expect("genesis");
         let json = serde_json::to_string(log.records()).expect("serialize genesis");
@@ -438,6 +499,8 @@ mod tests {
             gix_hash::ObjectId::empty_tree(gix_hash::Kind::Sha1),
             std::collections::BTreeMap::new(),
         );
+        st.register_repo_in_tenant(owner, name, &tenant(owner), 1)
+            .expect("register seeded repo into the tenant registry");
     }
 
     // ── name validation ──────────────────────────────────────────────────────
@@ -455,6 +518,8 @@ mod tests {
             "",                      // empty
             "x".repeat(65).as_str(), // too long
             ".hidden",               // leading dot
+            "_foo",                  // leading underscore (reserved keyspace prefix)
+            "_",                     // bare underscore
             "..",                    // dotdot
             "a..b",                  // contains ..
             "a/b",                   // path sep

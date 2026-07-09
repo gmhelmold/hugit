@@ -97,6 +97,14 @@ pub fn live_landing_attempt(auth: &AppAuth) -> LiveLandingOutcome {
         Err(AppAuthError::RepoNotCovered { repo: r }) => LiveLandingOutcome::Partial {
             reason: format!("App installation does not cover {r}; live landing PARTIAL, not faked"),
         },
+        // A JWT-signing or live-exchange failure (transport / non-2xx / decode) is
+        // the honest fail-closed PARTIAL — never a fabricated Verified. The error
+        // carries no secret (only a generic reason / HTTP status).
+        Err(e) => LiveLandingOutcome::Partial {
+            reason: format!(
+                "App installation-token mint failed for {repo}: {e} (PARTIAL, not faked)"
+            ),
+        },
         Ok(token) => {
             // Token material present. The live HTTPS installation-token exchange
             // + git push + post-push re-read is wired for the dogfood soak; it

@@ -83,6 +83,13 @@ pub fn serve_on_with(
     // Never blocks the loop (this only SPAWNS the bounded builds).
     crate::blob_history_index::bootstrap_blob_history_indexes(&state);
 
+    // Code-search index: warm each PUBLIC repo's in-memory `/search` index in the
+    // background so a query is a bounded in-memory scan instead of a per-request CAS
+    // grep that fans out a synchronous R2 fetch PER FILE (the latency DoS that wedged
+    // prod). Detached builds; until one lands `/search` code results are honest-empty
+    // (never a live fetch). Never blocks the loop (this only SPAWNS the bounded builds).
+    crate::search_index::bootstrap_search_indexes(&state);
+
     let mut incoming = server.incoming_requests();
     loop {
         // Time the BLOCK waiting for the next request: a long wait means the queue
@@ -711,6 +718,7 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
                     head_commit: head,
                     refs: r.git_refs.snapshot(),
                     history_index: state.blob_history_index.clone(),
+                    search_index: state.search_index.clone(),
                 }
             });
             dispatch_repo(
@@ -1063,7 +1071,7 @@ fn header_val(headers: &[Header], name: &str) -> Option<String> {
 
 /// The v1 acting principal. Real authenticated identity (Clerk/RFC-8693) is the
 /// disclosed P2 seam; the dev-token path acts as the configured orchestrator.
-fn dev_principal() -> Vec<String> {
+pub(crate) fn dev_principal() -> Vec<String> {
     vec!["orchestrator:hugit".to_string()]
 }
 
@@ -1096,6 +1104,14 @@ fn route_write(state: &AppState, url: &str, headers: &[Header], body: &[u8]) -> 
             Some(c) => crate::token::handle_token_exchange(c, &state.token_store, body),
             None => err(EngineErr::not_found()),
         },
+        // POST /v1/github/webhook — the GitHub App webhook ingress (WP-1). A
+        // PRE-AUTH route (like `/v1/token`): GitHub authenticates via the HMAC
+        // `X-Hub-Signature-256`, NOT a Bearer, so it deliberately does NOT call
+        // `write_auth`. The handler verifies the signature, DURABLY enqueues the
+        // envelope, and returns 202 — it NEVER runs ingest/mirror/git-push inline
+        // (that would starve this single-threaded loop). Absent webhook secret →
+        // the route is disabled (404). Rides the loop's bounded body-read + shed.
+        ["v1", "github", "webhook"] => handlers::github_webhook::handle(headers, body),
         // POST /v1/repos — self-service repo CREATE (W-PROVISION, v0 create-empty).
         // A NEW repo has no head to load/gate on, so it does NOT ride the
         // `dispatch_repo_write` → `with_write` door (which 404s an absent log +
@@ -1341,7 +1357,7 @@ fn dispatch_account_erase(
 /// executed with no dispute window). The live-verify legitimately needs `0`, so it is allowed
 /// ONLY behind the explicit escape hatch `HUGIT_ERASURE_ALLOW_BELOW_GRACE_FLOOR=1` — a
 /// deliberate, auditable, verify-only opt-out that a routine prod deploy never carries.
-fn erasure_grace_ms() -> u64 {
+pub(crate) fn erasure_grace_ms() -> u64 {
     let configured = std::env::var("HUGIT_ERASURE_GRACE_SECS")
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok());
@@ -2123,6 +2139,10 @@ struct RepoGit<'a> {
     /// clone; the blob read consults it index-first with a live-walk fallback so a
     /// DEEP-history file's "Histórico" serves complete instead of empty.
     history_index: crate::blob_history_index::BlobHistoryStore,
+    /// The engine-wide precomputed code-search index. A cheap `Arc` clone; the
+    /// `/search` read consults it index-ONLY (never a live CAS grep), returning
+    /// honest-empty on a MISS.
+    search_index: crate::search_index::SearchStore,
 }
 
 /// Dispatch an authenticated `/v1/repos/{repo}/<tail...>` read. `query` is the
@@ -2157,7 +2177,13 @@ fn dispatch_repo(
         )),
         ["landing"] => ok(&handlers::build_landing(log, repo)),
         ["checks"] => ok(&handlers::build_checks(log, repo)),
-        ["commits"] => ok(&handlers::build_commits(log, repo)),
+        ["commits"] => ok(&handlers::build_commits(
+            log,
+            repo,
+            git_source,
+            head_commit,
+            &git_refs,
+        )),
         // Phase-2 collection reads (real engine backbone).
         ["chrome"] => ok(&handlers::build_repo_chrome(log, repo)),
         ["branches"] => ok(&handlers::build_branches(log, repo)),
@@ -2176,9 +2202,16 @@ fn dispatch_repo(
             // An unbounded `q` that is lowercased per record is a CPU/memory DoS.
             // 1 024 bytes is ample for any real search term.
             q.truncate(1024);
-            ok(&handlers::build_search(
-                log, repo, &q, git_source, root_tree,
-            ))
+            // The CODE portion is served from the PRECOMPUTED in-memory index ONLY
+            // (never a live CAS grep — that per-file R2 fetch fan-out is the latency
+            // DoS this replaces). A repo with no git seam OR an unbuilt/stale/private
+            // index → the query is a MISS → honest-empty code results.
+            let code_index = git.map(|g| crate::search_index::CodeIndexQuery {
+                store: &g.search_index,
+                slug: repo,
+                head: g.head_commit,
+            });
+            ok(&handlers::build_search(log, repo, &q, code_index.as_ref()))
         }
         // viewer-can mirrors the REAL per-caller write gate (`authorize_write`,
         // ownership) for THIS repo (audit 2026-06-16) — using the real caller +
@@ -2222,10 +2255,12 @@ fn dispatch_repo(
             Some(vm) => ok(&vm),
             None => err(EngineErr::not_found()),
         },
-        ["commit", sha] => match handlers::build_commit_detail(log, repo, sha, git_source) {
-            Some(vm) => ok(&vm),
-            None => err(EngineErr::not_found()),
-        },
+        ["commit", sha] => {
+            match handlers::build_commit_detail(log, repo, sha, git_source, head_commit) {
+                Some(vm) => ok(&vm),
+                None => err(EngineErr::not_found()),
+            }
+        }
         ["campaigns", name] => match handlers::build_campaign(log, repo, name) {
             Some(vm) => ok(&vm),
             None => err(EngineErr::not_found()),

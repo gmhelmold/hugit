@@ -404,3 +404,32 @@ pub fn build_landing(log: &EventLog, repo: &str) -> LandingVm {
         ],
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// WP4 — /landing is the LANDING board, NOT the commit log: a git-pushed-but-
+    /// never-landed repo (EMPTY event log) renders an HONEST empty board — no PR
+    /// cards, zero open/merged counts — and CRUCIALLY shows NO git commits (a pushed
+    /// commit was not landed via hugit; the commit DAG belongs to /commits, never
+    /// here). The board is built purely from the log's PR projection, so a git-only
+    /// repo can never leak a commit into a landing column. Nothing is fabricated.
+    #[test]
+    fn empty_log_yields_honest_empty_board_never_git_commits() {
+        let vm = build_landing(&EventLog::new(), "githugr");
+        assert_eq!(vm.open_count, 0);
+        assert_eq!(vm.merged_count, 0);
+        assert!(vm.campaigns.is_empty());
+        // All four columns are present (the full board) but carry ZERO items — no
+        // git commit ever appears as a landing card.
+        assert_eq!(vm.columns.len(), COLUMN_TITLES.len());
+        for col in &vm.columns {
+            assert!(
+                col.items.is_empty(),
+                "column {:?} must be empty for a git-only repo (no landings)",
+                col.title
+            );
+        }
+    }
+}

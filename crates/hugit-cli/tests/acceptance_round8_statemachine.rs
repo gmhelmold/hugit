@@ -489,6 +489,11 @@ fn no_out_of_crate_raw_append_in_production_source() {
                 // Journal (session-resume) append is a different store, not D14.
                 && !line.contains("journal")
                 && !line.contains("Journal")
+                // `std::fs::OpenOptions::append(bool)` is the file-open mode, NOT the
+                // D14 `EventLog::append` (which never takes a bare bool). The webhook
+                // ingress journals NDJSON to disk via `OpenOptions::new().append(true)`.
+                && !line.contains(".append(true)")
+                && !line.contains(".append(false)")
             {
                 offenders.push(format!("{}:{}: {}", p, i + 1, line.trim()));
             }

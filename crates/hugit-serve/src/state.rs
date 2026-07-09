@@ -637,6 +637,17 @@ pub struct AppState {
     /// that safety bound, never a replacement. Interior-mutable behind the shared
     /// `&AppState` (same pattern as [`LiveRefs`]/`repos_runtime`); cheap to clone.
     pub blob_history_index: crate::blob_history_index::BlobHistoryStore,
+    /// The engine-wide precomputed per-repo CODE SEARCH index: `slug → (head, indexed
+    /// files)`, built OFF the accept loop (at boot + post-push) so `/search` serves
+    /// real code matches from an in-memory scan instead of a per-request CAS grep that
+    /// fans out a synchronous R2 fetch PER FILE — the latency DoS that wedged prod once
+    /// (`/search` bounded by result-count is still a per-object-fetch DoS on the
+    /// single-threaded engine). A query consults this map ONLY; a MISS (no index yet /
+    /// stale HEAD / a private repo, which is never indexed) is honest-empty, NEVER a
+    /// live fetch. Only PUBLIC (anonymous-readable) repos are indexed (visibility gate
+    /// at build time). Interior-mutable behind the shared `&AppState` (same pattern as
+    /// [`LiveRefs`]/`repos_runtime`); cheap to clone.
+    pub search_index: crate::search_index::SearchStore,
     /// Cached, per-repo projected [`RepoMeta`](crate::authz::RepoMeta) — task #74
     /// (W-METENANT scaling follow-up). [`me_repo_logs`](Self::me_repo_logs) and
     /// [`count_owned_repos`](Self::count_owned_repos) used to call
@@ -685,6 +696,19 @@ pub const MAX_REPOS_PER_TENANT: usize = 100;
 /// ≤2s staleness UX-only (a stale-base push is rejected non-fast-forward + retried), never a
 /// lost update. Upgrade to a zero-staleness conditional-GET (Option 1) before widening past 2.
 const REFS_REFRESH_INTERVAL_MS: u64 = 2_000;
+
+/// The GDPR1 erasure AUTO-EXECUTOR sweep cadence — a background reconciler, MINUTES not
+/// seconds (this is NOT latency-sensitive: the erasure grace window is hours/days, so a
+/// 5-minute sweep lands every matured request well inside any bound). The whole cascade runs
+/// on the sweep thread, OFF the accept loop, so this interval only paces the reconciler; it
+/// never affects request liveness.
+const ERASURE_AUTO_EXECUTE_INTERVAL_MS: u64 = 5 * 60 * 1_000;
+
+/// The maximum number of accounts the sweep DRIVES an irreversible erasure on per pass — a
+/// runaway guard. The sweep is off-loop so its duration is fine, but an unbounded drive over
+/// a huge matured backlog is capped; the remainder lands on the NEXT sweep, idempotently (a
+/// completed account is a no-op, a `partial` retries).
+const ERASURE_AUTO_EXECUTE_MAX_PER_SWEEP: usize = 32;
 
 /// Cooldown before re-probing R2 for a repo a lazy-load found ABSENT — bounds the
 /// accept-loop R2 cost of a 404-probe storm (see [`AppState::repo_load_misses`] +
@@ -823,6 +847,169 @@ impl AppState {
                     }
                 }
             });
+    }
+
+    /// Spawn the GDPR1 erasure AUTO-EXECUTOR — a DETACHED background sweep that drives every
+    /// MATURED governing `erasure.requested` to the SAME irreversible cascade the manual
+    /// operator route runs, so a real user's Art.17 request AUTO-COMPLETES within a bounded
+    /// window (no cron/scheduler otherwise exists — the go-live audit's gap). Structured
+    /// EXACTLY like [`spawn_refs_refresh_loop`]: it clones the handles, loops with
+    /// `thread::sleep`, and runs the WHOLE cascade ON THIS thread — so its duration NEVER
+    /// blocks the single-threaded accept loop. This is ALSO the fix for the manual-cascade
+    /// accept-loop DoS the audit found (the O(all-repos) partition scan + per-digest blocking
+    /// erase now runs off-loop, never inline on a request).
+    ///
+    /// FAIL-CLOSED + env-gated: spawns ONLY when [`erasure_auto_execute_enabled`] AND CAS
+    /// mode AND [`erase_config`](Self::from_env) is set ([`should_spawn_auto_executor`]).
+    /// DEFAULT OFF — a routine deploy never auto-fires an irreversible erasure until the owner
+    /// flips it on at go-live. It drives the STANDARD
+    /// [`execute_account_erasure_composed`](crate::writes::erasure::execute_account_erasure_composed)
+    /// (never a custom path), so every cascade gate — the DSR-id legitimacy, the exact-superset
+    /// partition, the durable terminal `executed`/`partial` claim — is enforced UNCHANGED; it
+    /// does NOT touch the manual operator route (an in-flight Track-A verify uses that).
+    fn spawn_erasure_auto_executor_loop(&self) {
+        if !should_spawn_auto_executor(
+            erasure_auto_execute_enabled(),
+            self.cas_r2_read().is_some(),
+            self.erase_config.is_some(),
+        ) {
+            return; // fail-closed default: OFF (not enabled, or no CAS/erase seam)
+        }
+        let Some(tenant) = Self::cas_tenant() else {
+            return; // CAS mode requires a tenant (belt-and-suspenders with cas_r2_read)
+        };
+        let state = self.clone();
+        let spawn = std::thread::Builder::new()
+            .name("hugit-erasure-auto".to_string())
+            .spawn(move || {
+                eprintln!(
+                    "[hugit-serve] GDPR1 erasure auto-executor ENABLED — sweeping every {}s \
+                     (off the accept loop)",
+                    ERASURE_AUTO_EXECUTE_INTERVAL_MS / 1_000
+                );
+                loop {
+                    std::thread::sleep(Duration::from_millis(ERASURE_AUTO_EXECUTE_INTERVAL_MS));
+                    state.run_erasure_auto_sweep(&tenant);
+                }
+            });
+        if spawn.is_err() {
+            eprintln!(
+                "[hugit-serve] erasure auto-executor thread spawn failed — matured requests \
+                 will NOT auto-complete until a reboot (the manual operator route is unaffected)"
+            );
+        }
+    }
+
+    /// ONE reconciliation pass: enumerate account slugs, and for each MATURED governing
+    /// request drive the standard cascade. Per-account ISOLATED + fail-closed — a
+    /// load/execute fault OR a panic on one account is logged (`eprintln!`) and SKIPPED; it
+    /// never halts the sweep or crashes the thread. Bounded per pass
+    /// ([`ERASURE_AUTO_EXECUTE_MAX_PER_SWEEP`]); the remainder lands next sweep (idempotent).
+    fn run_erasure_auto_sweep(&self, tenant: &str) {
+        let slugs = match self.source.list_account_slugs() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "[hugit-serve] erasure auto-exec: account listing failed ({}) — skipping \
+                     this sweep",
+                    e.reason
+                );
+                return;
+            }
+        };
+        let mut driven = 0usize;
+        for slug in slugs {
+            if driven >= ERASURE_AUTO_EXECUTE_MAX_PER_SWEEP {
+                eprintln!(
+                    "[hugit-serve] erasure auto-exec: per-sweep cap \
+                     ({ERASURE_AUTO_EXECUTE_MAX_PER_SWEEP}) reached — remaining matured requests \
+                     run next sweep"
+                );
+                break;
+            }
+            let now = now_unix_ms();
+            let grace_ms = crate::server::erasure_grace_ms();
+            // Belt-and-suspenders isolation: the cascade already fail-closes on every fault,
+            // but a per-account catch_unwind guarantees a single account's panic never takes
+            // down the sweep thread (matching the other detached loops).
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.auto_execute_one(tenant, &slug, grace_ms, now)
+            }));
+            match outcome {
+                Ok(Ok(Some(o))) => {
+                    driven += 1;
+                    eprintln!("[hugit-serve] erasure auto-exec: account `{slug}` executed → {o:?}");
+                }
+                Ok(Ok(None)) => {} // not matured / no governing request / no DSR id — skip
+                Ok(Err(e)) => {
+                    eprintln!(
+                        "[hugit-serve] erasure auto-exec: account `{slug}` faulted ({}) — skipped \
+                         (sweep continues)",
+                        e.reason
+                    );
+                }
+                Err(_) => {
+                    eprintln!(
+                        "[hugit-serve] erasure auto-exec: account `{slug}` drive PANICKED — \
+                         skipped (sweep continues)"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Drive the cascade for ONE account IFF its standing request is matured + governing +
+    /// DSR-legitimate ([`should_auto_execute`](crate::writes::erasure::should_auto_execute)).
+    /// `Ok(None)` = intentionally SKIPPED (no governing request, grace not elapsed, or no DSR
+    /// id — fail-closed, never a physical erase without an anchored legitimacy id). `Ok(Some)`
+    /// = the STANDARD cascade ran (executed/partial/already-executed). `Err` = a load/execute
+    /// fault (the caller logs + continues). Drives the EXACT same
+    /// [`execute_account_erasure_composed`](crate::writes::erasure::execute_account_erasure_composed)
+    /// the operator route uses, as the OPERATOR principal ([`crate::server::dev_principal`]) —
+    /// the SUBJECT (whose data is erased) is read from the standing record, never invented.
+    fn auto_execute_one(
+        &self,
+        tenant: &str,
+        slug: &str,
+        grace_ms: u64,
+        now: u64,
+    ) -> Result<Option<crate::writes::erasure::ErasureOutcome>, EngineErr> {
+        use crate::writes::erasure::{
+            R2OidIndexDigests, execute_account_erasure_composed, read_standing_erasure_request,
+            should_auto_execute,
+        };
+        let (log, _) = self.load_account_log(slug)?;
+        let standing = read_standing_erasure_request(&log);
+        if !should_auto_execute(standing.as_ref(), grace_ms, now) {
+            return Ok(None);
+        }
+        // `should_auto_execute` guarantees `Some` with a non-empty `dsr_id`.
+        let standing = standing.expect("should_auto_execute implies Some");
+        let dsr_id = standing
+            .dsr_id
+            .as_deref()
+            .expect("should_auto_execute implies a non-empty DSR id");
+        // Physical erase requires CAS mode + the configured seam. The spawn guard asserted
+        // both, but re-check per drive — fail-closed, never a silent no-erase.
+        let Some(r2) = self.cas_r2_read() else {
+            return Ok(None);
+        };
+        let Some(erase_cfg) = self.erase_config.as_ref() else {
+            return Ok(None);
+        };
+        let digests = R2OidIndexDigests { r2 };
+        let erase = erase_cfg.clone().into_client();
+        let outcome = execute_account_erasure_composed(
+            self,
+            &digests,
+            &standing.subject,
+            crate::server::dev_principal(),
+            now,
+            &erase,
+            tenant,
+            dsr_id,
+        )?;
+        Ok(Some(outcome))
     }
 
     /// Build from env. `HUGIT_ENGINE_DEV_TOKEN` is always required (fail-closed).
@@ -977,6 +1164,7 @@ impl AppState {
             pat_last_used: Arc::new(RwLock::new(std::collections::HashMap::new())),
             erase_config,
             blob_history_index: crate::blob_history_index::BlobHistoryStore::new(),
+            search_index: crate::search_index::SearchStore::new(),
             repo_meta_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
         };
         // Populate the PAT index from the durable `_accounts/*` logs (only when
@@ -996,6 +1184,12 @@ impl AppState {
         // NO-OP outside CAS mode; strictly off the accept loop. Spawn LAST (after the state
         // is fully built) so the thread sees the loaded repos.
         state.spawn_refs_refresh_loop();
+        // GDPR1 Art.17 auto-executor (env-gated, fail-closed DEFAULT OFF). A detached
+        // off-loop sweep that auto-completes matured erasure requests (no cron otherwise) AND
+        // moves the irreversible cascade off the single-threaded accept loop (the DoS fix).
+        // NO-OP unless HUGIT_ERASURE_AUTO_EXECUTE=1 AND CAS mode AND the erase seam is
+        // configured. Spawn LAST (after the state is fully built).
+        state.spawn_erasure_auto_executor_loop();
         Ok(state)
     }
 
@@ -1266,6 +1460,7 @@ impl AppState {
             // route is disabled). A test wiring the executor sets it explicitly.
             erase_config: None,
             blob_history_index: crate::blob_history_index::BlobHistoryStore::new(),
+            search_index: crate::search_index::SearchStore::new(),
             // Empty: `new()`'s boot `repos` set is always empty too (tests wire repos
             // via `set_repo_git`/`insert_runtime_repo`, not a real boot load), so there
             // is nothing to pre-populate. A test exercising the cache calls
@@ -1665,48 +1860,30 @@ impl AppState {
             .collect()
     }
 
-    /// Count the repos OWNED by `owner_tenant` across the authoritative in-memory
-    /// set — the boot [`repos`](Self::repos) set ∪ the runtime overlay
-    /// ([`repos_runtime`](Self::repos_runtime)). This is the EXACT set whose entries
-    /// leak (a `&'static RepoState`, never freed) and whose genesis objects are
-    /// durable, so it is the right denominator for the per-tenant DoS cap
-    /// ([`MAX_REPOS_PER_TENANT`]) the provision path enforces BEFORE it leaks / writes.
+    /// Count the repos OWNED by `owner_tenant` — the denominator of the per-tenant DoS cap
+    /// ([`MAX_REPOS_PER_TENANT`]) the provision path enforces BEFORE it leaks a
+    /// `&'static RepoState` / writes a durable genesis.
     ///
-    /// CHEAP: bounded by the loaded-repo count (each candidate log is loaded EXACTLY
-    /// once). It NEVER enumerates the durable/R2 store — a listing scan there would
-    /// itself be a DoS (the anti-pattern this cap exists to prevent).
+    /// **WP-1 repoint (defects A + B):** this reads the DURABLE, chain-verified per-tenant
+    /// registry (`_tenants/{owner_tenant}.json`, [`crate::tenant_registry`]) — ONE small
+    /// per-tenant log fetch, O(1) w.r.t. the platform. It replaces the prior implementation
+    /// that:
+    /// - walked the in-memory boot∪runtime union, calling `load_verified` (a chain-verified
+    ///   R2 fetch) per candidate ON THE ACCEPT LOOP — an O(all-platform-repos) scan (defect
+    ///   B); AND
+    /// - lost its count on a reboot (the runtime overlay is in-memory), so a tenant could
+    ///   re-provision past the cap after a restart (defect A). The registry is DURABLE, so
+    ///   the count is now stable across engine lifetimes.
     ///
-    /// FAIL-CLOSED: returns `None` if ANY candidate log cannot be loaded/verified. An
-    /// indeterminate count MUST refuse the create (never allow-by-default): an
-    /// unloadable candidate is genuinely ambiguous re: whether it belongs to this
-    /// tenant, so a transient read fault can never be leveraged to slip past the cap.
+    /// FAIL-CLOSED: returns `None` if the registry read/verify is indeterminate (a transport
+    /// fault or a tamper/parse failure). An indeterminate count MUST refuse the create
+    /// (never allow-by-default), so a read fault can never be leveraged to slip past the
+    /// cap. An ABSENT registry is NOT indeterminate — it is a genuine empty owned-set
+    /// (`Some(0)`) for a new tenant.
     #[must_use]
     pub fn count_owned_repos(&self, owner_tenant: &str) -> Option<usize> {
-        // Deterministic candidate set: boot repos ∪ runtime overlay (dedup). Same
-        // union `me_repo_logs` walks, but filtered by OWNERSHIP (not read-authz).
-        let mut names: Vec<String> = self.repos.keys().cloned().collect();
-        {
-            let runtime = self.repos_runtime.read().unwrap_or_else(|e| e.into_inner());
-            for k in runtime.keys() {
-                if !self.repos.contains_key(k) {
-                    names.push(k.clone());
-                }
-            }
-        }
-        names.sort();
-        names.dedup();
-
-        let mut count = 0usize;
-        for name in names {
-            // Fail-closed: an unloadable/untrusted candidate ⇒ indeterminate count.
-            let log = self.load_verified(&name).ok()?;
-            // Task #74: the cache, with a live fallback — never a different answer.
-            let meta = self.repo_meta_cached(&name, &log);
-            if meta.owner_tenant.as_deref() == Some(owner_tenant) {
-                count += 1;
-            }
-        }
-        Some(count)
+        let (log, _) = self.load_tenant_registry(owner_tenant).ok()?;
+        Some(crate::tenant_registry::count(&log))
     }
 
     /// Enumerate the `(slug, EventLog)` of every repo OWNED by `owner_tenant` — the
@@ -2017,6 +2194,152 @@ impl AppState {
         let bytes = serde_json::to_vec(log.records())
             .map_err(|e| EngineErr::unavailable(format!("account log serialize failed: {e}")))?;
         self.source.persist_account(account, &bytes, expected)
+    }
+
+    // ── per-tenant repo REGISTRY (WP-1: the durable cap denominator) ──────────
+    //
+    // The authoritative, chain-verified per-tenant owned-repo set/count under the reserved
+    // `_tenants/{org}.json` keyspace (see [`crate::tenant_registry`]). It is DURABLE, so
+    // the cap survives a reboot (defect A) and is read O(1) w.r.t. the platform (defect B).
+    // The `org` key MUST be a safe account slug (the SAME `[a-z0-9-]≤64` identity provision
+    // derives — ONE identity for ownership + erasability + the registry key), fail-closed
+    // to 404 so a malformed org can never build a `_tenants/../evil.json` traversal key.
+
+    /// Load-or-create a tenant's durable repo registry + its head [`CasToken`] from the
+    /// reserved `_tenants/{org}.json` store. Like [`load_account_log`], an ABSENT registry
+    /// is the EMPTY owned-set with a create-only [`CasToken::Absent`] token (a new tenant),
+    /// NOT a 404. A present registry is chain-verified by the SAME PS-13 chokepoint (a
+    /// tamper/parse fault → 503, never a fake-empty world that would undercount the cap).
+    ///
+    /// # Errors
+    /// - `404 NOT_FOUND` — an unsafe org slug (traversal-safe fail-closed).
+    /// - `503 ENGINE_UNAVAILABLE` — a store transport fault or a chain-verify failure.
+    pub fn load_tenant_registry(&self, org: &str) -> Result<(EventLog, CasToken), EngineErr> {
+        if !is_safe_account_slug(org) {
+            return Err(EngineErr::not_found());
+        }
+        match self.source.fetch_tenant(org)? {
+            Some((bytes, label, token)) => {
+                let log = hugit_cli::checks::load_event_log_from_bytes(&bytes, Path::new(&label))
+                    .map_err(|e| {
+                    EngineErr::unavailable(format!(
+                        "tenant registry read/verify failed ({})",
+                        e.kind()
+                    ))
+                })?;
+                Ok((log, token))
+            }
+            None => Ok((EventLog::new(), CasToken::Absent)),
+        }
+    }
+
+    /// Durably persist a tenant's repo registry back to `_tenants/{org}.json` as a
+    /// COMPARE-AND-SWAP against `expected`. Fail-closed on an unsafe org slug (404).
+    pub fn persist_tenant_registry(
+        &self,
+        org: &str,
+        log: &EventLog,
+        expected: &CasToken,
+    ) -> Result<(), EngineErr> {
+        if !is_safe_account_slug(org) {
+            return Err(EngineErr::not_found());
+        }
+        let bytes = serde_json::to_vec(log.records()).map_err(|e| {
+            EngineErr::unavailable(format!("tenant registry serialize failed: {e}"))
+        })?;
+        self.source.persist_tenant(org, &bytes, expected)
+    }
+
+    /// Register `repo` into `org`'s durable owned-set via a bounded compare-and-swap
+    /// (mirrors the write-door / tombstone CAS loop). IDEMPOTENT — a repo already in the
+    /// set is a no-op (no double-count, no redundant persist). FAIL-CLOSED — a durable
+    /// persist fault propagates (the caller decides whether to surface or best-effort it).
+    ///
+    /// This is the SECOND durable write of a provision (after the genesis create, the
+    /// source of truth). It is APPEND-ONLY on the registry chain (never a rewrite → the
+    /// chain still verifies), attributed to the creating principal (chain-derived class).
+    pub fn register_repo_in_tenant(
+        &self,
+        org: &str,
+        repo: &str,
+        principal_chain: &[String],
+        at: u64,
+    ) -> Result<(), EngineErr> {
+        for _attempt in 0..crate::writes::MAX_CAS_ATTEMPTS {
+            let (mut log, token) = self.load_tenant_registry(org)?;
+            if !crate::tenant_registry::append_register(&mut log, repo, principal_chain, at)? {
+                return Ok(()); // already registered — idempotent no-op
+            }
+            match self.persist_tenant_registry(org, &log, &token) {
+                Ok(()) => return Ok(()),
+                Err(e) if e.is_cas_conflict() => continue, // head moved — reload + retry
+                Err(e) => return Err(e),
+            }
+        }
+        Err(EngineErr::unavailable(
+            "registro de repositório do tenant sob contenção — tente novamente",
+        ))
+    }
+
+    /// Remove `repo` from `org`'s durable owned-set (the GDPR1 erase-tombstone decrement —
+    /// the cap is a HOLD-count, erasable-down). IDEMPOTENT — a repo already absent is a
+    /// no-op. Same bounded-CAS + fail-closed discipline as [`register_repo_in_tenant`].
+    pub fn unregister_repo_from_tenant(
+        &self,
+        org: &str,
+        repo: &str,
+        principal_chain: &[String],
+        at: u64,
+    ) -> Result<(), EngineErr> {
+        for _attempt in 0..crate::writes::MAX_CAS_ATTEMPTS {
+            let (mut log, token) = self.load_tenant_registry(org)?;
+            if !crate::tenant_registry::append_unregister(&mut log, repo, principal_chain, at)? {
+                return Ok(()); // already decremented — idempotent no-op
+            }
+            match self.persist_tenant_registry(org, &log, &token) {
+                Ok(()) => return Ok(()),
+                Err(e) if e.is_cas_conflict() => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(EngineErr::unavailable(
+            "baixa de repositório do tenant sob contenção — tente novamente",
+        ))
+    }
+
+    /// SELF-HEALING reconcile toward the genesis source of truth (WP-1 atomicity story):
+    /// the genesis create is the FIRST, authoritative durable write; the registry register
+    /// is the SECOND. If the engine crashes BETWEEN them, a repo exists durably but is not
+    /// yet countable — an undercount. This heals that drift: given a `repo` whose durable
+    /// genesis EXISTS and is OWNED by `org`, ensure it is registered (idempotent). Called
+    /// on the provision no-clobber path (a retry of the same slug re-registers the crashed
+    /// repo before the 409), so the count converges to genesis-truth. Never registers a
+    /// repo that is not durably owned by `org` (verified via `load_verified`), so it can
+    /// never inflate the count for a foreign / non-existent repo.
+    ///
+    /// Best-effort by contract: a reconcile fault is surfaced as `Err` for the caller to
+    /// log-and-continue (the repo is already readable; the registry heals on a later
+    /// touch), never a hard failure of the surrounding operation.
+    pub fn reconcile_tenant_repo(
+        &self,
+        org: &str,
+        repo: &str,
+        principal_chain: &[String],
+        at: u64,
+    ) -> Result<(), EngineErr> {
+        // Only reconcile a repo that DURABLY exists AND is owned by `org` (genesis is the
+        // source of truth). An ABSENT genesis (404) → nothing to reconcile (Ok, no phantom
+        // registration); a 5xx (indeterminate) propagates.
+        let log = match self.load_verified(repo) {
+            Ok(log) => log,
+            Err(e) if e.status == 404 => return Ok(()), // no genesis → nothing to heal
+            Err(e) => return Err(e),
+        };
+        let meta = crate::authz::project_repo_meta(&log);
+        if meta.owner_tenant.as_deref() != Some(org) {
+            return Ok(()); // not owned by org → not this registry's entry
+        }
+        self.register_repo_in_tenant(org, repo, principal_chain, at)
     }
 
     // ── PAT auth index (slice 2b) ────────────────────────────────────────────
@@ -2355,6 +2678,93 @@ impl LogSource {
                         crate::cas::ManifestPutError::Precondition => EngineErr::cas_conflict(),
                         crate::cas::ManifestPutError::Other(m) => {
                             eprintln!("[hugit-serve] account log PUT failed: {m}");
+                            EngineErr::unavailable("engine storage write unavailable")
+                        }
+                    })
+            }
+        }
+    }
+
+    /// Fetch a per-tenant repo REGISTRY's raw bytes + head [`CasToken`] under the reserved
+    /// `_tenants/{org}.json` sub-prefix (WP-1). `Ok(None)` = absent (a new tenant → the
+    /// empty owned-set, a create-genesis on the first register); `Ok(Some(..))` = present;
+    /// `Err` = a transport/IO fault (→ 503). Structurally OUTSIDE the repo namespace (the
+    /// `_tenants/` prefix is unreachable by [`is_safe_repo_slug`]), so the registry can
+    /// never be served/cloned as a repo. Mirrors [`fetch_account`].
+    fn fetch_tenant(&self, org: &str) -> Result<Option<(Vec<u8>, String, CasToken)>, EngineErr> {
+        match self {
+            LogSource::Local { dir } => {
+                let path = dir.join("_tenants").join(format!("{org}.json"));
+                match std::fs::read(&path) {
+                    Ok(b) => {
+                        let token = CasToken::Version(content_hash(&b));
+                        Ok(Some((b, path.display().to_string(), token)))
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(e) => Err(EngineErr::unavailable(format!(
+                        "local tenant registry read failed: {e}"
+                    ))),
+                }
+            }
+            LogSource::R2(c) => {
+                let key = format!("{}/_tenants/{org}.json", c.tenant_id);
+                let label = format!("r2://{}/{key}", c.bucket);
+                Ok(c.get_object_etag(&key)?
+                    .map(|(bytes, token)| (bytes, label, token)))
+            }
+        }
+    }
+
+    /// Durably persist a per-tenant repo REGISTRY back to the reserved `_tenants/{org}.json`,
+    /// as a COMPARE-AND-SWAP against `expected` (the token the matching [`fetch_tenant`]
+    /// returned). Mirrors [`persist_account`]'s discipline: Local = re-read content-hash
+    /// compare + atomic temp-write/rename; R2 = a conditional (`If-Match`/`If-None-Match`)
+    /// PUT via [`R2Config::conditional_object_put`]. A concurrent head move →
+    /// [`EngineErr::cas_conflict`] (the caller reloads + retries), NEVER last-writer-wins.
+    fn persist_tenant(
+        &self,
+        org: &str,
+        bytes: &[u8],
+        expected: &CasToken,
+    ) -> Result<(), EngineErr> {
+        match self {
+            LogSource::Local { dir } => {
+                let tdir = dir.join("_tenants");
+                std::fs::create_dir_all(&tdir).map_err(|e| {
+                    EngineErr::unavailable(format!("local tenant dir create failed: {e}"))
+                })?;
+                let path = tdir.join(format!("{org}.json"));
+                let current = match std::fs::read(&path) {
+                    Ok(b) => CasToken::Version(content_hash(&b)),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => CasToken::Absent,
+                    Err(e) => {
+                        return Err(EngineErr::unavailable(format!(
+                            "local tenant registry re-read failed: {e}"
+                        )));
+                    }
+                };
+                if !cas_matches(expected, &current) {
+                    return Err(EngineErr::cas_conflict());
+                }
+                let tmp = tdir.join(format!("{org}.json.tmp.{}", std::process::id()));
+                std::fs::write(&tmp, bytes).map_err(|e| {
+                    EngineErr::unavailable(format!("local tenant registry write failed: {e}"))
+                })?;
+                std::fs::rename(&tmp, &path).map_err(|e| {
+                    let _ = std::fs::remove_file(&tmp);
+                    EngineErr::unavailable(format!("local tenant registry rename failed: {e}"))
+                })
+            }
+            LogSource::R2(c) => {
+                // FAIL-CLOSED (same as the repo/account persist): an `Unsupported` token
+                // would downgrade to an unconditional PUT (last-writer-wins).
+                let key = format!("{}/_tenants/{org}.json", c.tenant_id);
+                c.conditional_object_put(&key, bytes, expected)
+                    .map(|_| ())
+                    .map_err(|e| match e {
+                        crate::cas::ManifestPutError::Precondition => EngineErr::cas_conflict(),
+                        crate::cas::ManifestPutError::Other(m) => {
+                            eprintln!("[hugit-serve] tenant registry PUT failed: {m}");
                             EngineErr::unavailable("engine storage write unavailable")
                         }
                     })
@@ -3469,6 +3879,35 @@ fn receive_pack_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// Whether the GDPR1 erasure AUTO-EXECUTOR background sweep is enabled
+/// (`HUGIT_ERASURE_AUTO_EXECUTE=1|true`). DEFAULT OFF — fail-closed: a routine deploy NEVER
+/// auto-fires an irreversible Art.17 erasure until the owner DELIBERATELY flips this on at
+/// go-live (after clw's re-audit). Mirrors [`receive_pack_enabled`].
+fn erasure_auto_execute_enabled() -> bool {
+    std::env::var("HUGIT_ERASURE_AUTO_EXECUTE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// PURE spawn guard (testable without env): the auto-executor loop spawns ONLY when it is
+/// `enabled` AND the engine is in CAS mode (`cas_mode` — physical erase reads oid-indexes
+/// from R2) AND the physical-erase seam is configured (`erase_configured` — `state.erase_config`).
+/// Any of the three false → NO thread (the fail-closed default: a routine deploy never
+/// auto-erases).
+#[must_use]
+fn should_spawn_auto_executor(enabled: bool, cas_mode: bool, erase_configured: bool) -> bool {
+    enabled && cas_mode && erase_configured
+}
+
+/// Unix-ms wall clock — the same unit the erasure grace anchor (`requested_at`) is measured
+/// in. A pre-epoch clock (impossible in practice) reads `0`.
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// The dev-token→operator break-glass gate ([`AppState::allow_dev_operator`]). The
 /// PUBLIC prod deploy OMITS `HUGIT_ALLOW_DEV_OPERATOR`, so this is **false** by
 /// default and the dev-token confers NO operator elevation. Set to `1` ONLY as a
@@ -3954,6 +4393,34 @@ pub fn is_safe_account_slug(account: &str) -> bool {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    // ── GDPR1 erasure auto-executor spawn guard (pure, env-free) ─────────────────
+
+    #[test]
+    fn auto_executor_spawns_only_when_enabled_cas_and_erase_seam() {
+        // The full truth table: the loop spawns ONLY on (enabled AND CAS AND erase-seam).
+        assert!(
+            should_spawn_auto_executor(true, true, true),
+            "enabled + CAS + erase seam → spawn"
+        );
+        // Any single gate off → fail-closed no-spawn.
+        assert!(
+            !should_spawn_auto_executor(false, true, true),
+            "not enabled (the DEFAULT, HUGIT_ERASURE_AUTO_EXECUTE unset) → NEVER spawn"
+        );
+        assert!(
+            !should_spawn_auto_executor(true, false, true),
+            "no CAS mode → no spawn (physical erase needs the R2 oid-index)"
+        );
+        assert!(
+            !should_spawn_auto_executor(true, true, false),
+            "no erase seam configured → no spawn (no half-live delete path)"
+        );
+        assert!(
+            !should_spawn_auto_executor(false, false, false),
+            "the routine-deploy default (all off) never auto-fires an irreversible erasure"
+        );
+    }
 
     /// Build a `get`-style lookup over a fixed map (no global env mutation).
     fn vars(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
@@ -4820,39 +5287,169 @@ mod me_repos_tests {
         );
     }
 
-    // ── count_owned_repos (the per-tenant DoS-cap denominator) ───────────────
+    // ── count_owned_repos (the per-tenant DoS-cap denominator, WP-1 registry) ─
 
     #[test]
-    fn count_owned_repos_filters_by_owner_tenant() {
-        // Ownership (not read-authz): a PUBLIC repo still counts toward its OWNER's
-        // cap, and never toward another tenant's.
-        let st = state_with(&[
-            ("alpha", &meta_log("private", "org-a")),
-            ("beta", &meta_log("public", "org-a")),
-            ("gamma", &meta_log("private", "org-b")),
-        ]);
+    fn count_owned_repos_reads_the_durable_per_tenant_registry() {
+        // WP-1 repoint: the count is the SIZE of the durable `_tenants/{org}.json` set —
+        // per-tenant by construction (a separate registry per org), so no ownership scan.
+        let st = AppState::new(scratch_dir(), "dev-token".to_string());
+        st.register_repo_in_tenant("org-a", "alpha", &tenant("org-a"), 1)
+            .unwrap();
+        st.register_repo_in_tenant("org-a", "beta", &tenant("org-a"), 2)
+            .unwrap();
+        st.register_repo_in_tenant("org-b", "gamma", &tenant("org-b"), 3)
+            .unwrap();
         assert_eq!(st.count_owned_repos("org-a"), Some(2));
         assert_eq!(st.count_owned_repos("org-b"), Some(1));
+        // A new tenant with NO registry is a genuine empty owned-set (Some(0)), NOT
+        // indeterminate — an absent registry never blocks a first create.
         assert_eq!(st.count_owned_repos("org-z"), Some(0));
     }
 
     #[test]
-    fn count_owned_repos_fails_closed_on_unloadable_candidate() {
-        // A slug wired into the seam set but whose log cannot load/verify makes the
-        // count indeterminate → None (the provision path maps None to a refusal, so a
-        // read fault can never be leveraged to slip past the cap).
-        let mut st = state_with(&[("alpha", &meta_log("private", "org-a"))]);
-        st.set_repo_git(
-            "ghost", // no backing `ghost.json` log → load_verified 404 → indeterminate
-            Arc::new(hugit_proto::CasObjectSource::new()),
-            gix_hash::ObjectId::empty_tree(gix_hash::Kind::Sha1),
-            BTreeMap::new(),
+    fn count_survives_a_reboot_and_holds_the_cap_defect_a() {
+        // DEFECT A: the cap must be durable across engine lifetimes. Register repos, then
+        // build a FRESH AppState over the SAME on-disk store with an EMPTY runtime overlay
+        // (a reboot) — the durable registry still counts them, so a tenant cannot
+        // re-provision past the cap after a restart.
+        let dir = scratch_dir();
+        {
+            let st = AppState::new(dir.clone(), "dev-token".to_string());
+            for i in 0..3 {
+                st.register_repo_in_tenant("org-a", &format!("r{i}"), &tenant("org-a"), i as u64)
+                    .unwrap();
+            }
+            assert_eq!(st.count_owned_repos("org-a"), Some(3));
+        }
+        // Reboot: a new AppState, no in-memory overlay, same durable `_tenants/` store.
+        let rebooted = AppState::new(dir, "dev-token".to_string());
+        assert_eq!(
+            rebooted.count_owned_repos("org-a"),
+            Some(3),
+            "the durable registry holds the count across a reboot (defect A closed)"
         );
+    }
+
+    #[test]
+    fn count_owned_repos_fails_closed_on_an_indeterminate_registry() {
+        // With the WP-1 repoint the count reads ONLY the durable registry — so the
+        // fail-closed axis is a CORRUPT/unverifiable registry (not a repo log). A tampered
+        // `_tenants/{org}.json` that will not chain-verify makes the count indeterminate →
+        // None (the provision path maps None to a refusal, so a read fault can never be
+        // leveraged to slip past the cap).
+        let dir = scratch_dir();
+        let st = AppState::new(dir.clone(), "dev-token".to_string());
+        st.register_repo_in_tenant("org-a", "alpha", &tenant("org-a"), 1)
+            .unwrap();
+        assert_eq!(st.count_owned_repos("org-a"), Some(1));
+        // Corrupt the durable registry object (invalid JSON → load/verify fails → 503).
+        std::fs::write(dir.join("_tenants").join("org-a.json"), b"not json").unwrap();
         assert_eq!(
             st.count_owned_repos("org-a"),
             None,
-            "fail-closed on ambiguity"
+            "fail-closed on an indeterminate registry read"
         );
+    }
+
+    #[test]
+    fn erase_decrement_is_a_hold_count_defect_c_substrate() {
+        // WP-1 substrate for the erase-execute decrement: unregister removes a repo from
+        // the durable set (the cap is erasable-DOWN), the twin of register.
+        let st = AppState::new(scratch_dir(), "dev-token".to_string());
+        st.register_repo_in_tenant("org-a", "alpha", &tenant("org-a"), 1)
+            .unwrap();
+        st.register_repo_in_tenant("org-a", "beta", &tenant("org-a"), 2)
+            .unwrap();
+        assert_eq!(st.count_owned_repos("org-a"), Some(2));
+        st.unregister_repo_from_tenant("org-a", "alpha", &tenant("org-a"), 3)
+            .unwrap();
+        assert_eq!(st.count_owned_repos("org-a"), Some(1));
+        // Idempotent: decrementing an already-absent repo is a no-op.
+        st.unregister_repo_from_tenant("org-a", "alpha", &tenant("org-a"), 4)
+            .unwrap();
+        assert_eq!(st.count_owned_repos("org-a"), Some(1));
+    }
+
+    #[test]
+    fn reconcile_re_registers_a_genesis_without_a_registry_entry() {
+        // WP-1 self-heal: simulate a crash BETWEEN the genesis create and the registry
+        // register — the genesis exists durably but the registry has NO entry (undercount).
+        // The reconcile heals toward the genesis source of truth (re-registers it), so the
+        // count converges. It NEVER registers a repo not durably owned by the tenant.
+        let dir = scratch_dir();
+        let st = AppState::new(dir.clone(), "dev-token".to_string());
+        // Genesis landed (owned by org-a), registry register "crashed" (never ran).
+        std::fs::write(dir.join("orphan.json"), meta_log("private", "org-a")).unwrap();
+        assert_eq!(
+            st.count_owned_repos("org-a"),
+            Some(0),
+            "the un-registered genesis is invisible to the count (the crash undercount)"
+        );
+        // Reconcile toward genesis-truth → the repo becomes countable.
+        st.reconcile_tenant_repo("org-a", "orphan", &tenant("org-a"), 1)
+            .expect("reconcile a durably-owned repo");
+        assert_eq!(
+            st.count_owned_repos("org-a"),
+            Some(1),
+            "the reconcile re-registered the genesis (self-healed)"
+        );
+        // Reconcile is idempotent (a second run does not double-count).
+        st.reconcile_tenant_repo("org-a", "orphan", &tenant("org-a"), 2)
+            .unwrap();
+        assert_eq!(st.count_owned_repos("org-a"), Some(1));
+        // Reconcile NEVER registers a repo not owned by the tenant: org-b's reconcile of
+        // org-a's repo is a no-op (the genesis owner_tenant is org-a).
+        st.reconcile_tenant_repo("org-b", "orphan", &tenant("org-b"), 3)
+            .unwrap();
+        assert_eq!(st.count_owned_repos("org-b"), Some(0));
+        // And an absent genesis → nothing to reconcile (no phantom registration).
+        st.reconcile_tenant_repo("org-a", "ghost", &tenant("org-a"), 4)
+            .unwrap();
+        assert_eq!(st.count_owned_repos("org-a"), Some(1));
+    }
+
+    #[test]
+    fn tenant_registry_is_scoped_and_not_a_repo() {
+        // The registry lives under `_tenants/` — it is NEVER reachable/servable as a repo,
+        // and an unsafe org slug never touches the store (404, no traversal key built).
+        let st = AppState::new(scratch_dir(), "dev-token".to_string());
+        st.register_repo_in_tenant("org-a", "alpha", &tenant("org-a"), 1)
+            .unwrap();
+        assert_eq!(
+            st.load_verified("org-a").unwrap_err().status,
+            404,
+            "the tenant registry is not addressable as a repo"
+        );
+        // A traversal org slug is refused before any store touch.
+        assert_eq!(st.load_tenant_registry("../evil").unwrap_err().status, 404,);
+        assert_eq!(
+            st.register_repo_in_tenant("../evil", "x", &tenant("x"), 1)
+                .unwrap_err()
+                .status,
+            404,
+        );
+    }
+
+    #[test]
+    fn tenant_registry_cas_roundtrip() {
+        let st = AppState::new(scratch_dir(), "dev-token".to_string());
+        // Absent → the empty owned-set with a create-only token.
+        let (log0, tok0) = st
+            .load_tenant_registry("org-a")
+            .expect("absent → empty set");
+        assert!(log0.records().is_empty());
+        assert_eq!(tok0, CasToken::Absent);
+        // Register, then a stale create-only persist must conflict.
+        st.register_repo_in_tenant("org-a", "alpha", &tenant("org-a"), 1)
+            .unwrap();
+        let (log1, tok1) = st.load_tenant_registry("org-a").expect("present");
+        assert_eq!(crate::tenant_registry::count(&log1), 1);
+        assert!(matches!(tok1, CasToken::Version(_)));
+        let e = st
+            .persist_tenant_registry("org-a", &log1, &CasToken::Absent)
+            .expect_err("create-only over an existing registry must conflict");
+        assert!(e.is_cas_conflict(), "stale Absent → cas_conflict");
     }
 
     #[test]

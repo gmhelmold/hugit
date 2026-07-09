@@ -34,6 +34,11 @@ hugit-symbols        = { path = "../hugit-symbols" }
 # `GET /v1/repos/{repo}/blob|edit/{*path}` content handlers (reverses the PS-18
 # deferral — actually serving file content from a git tree).
 hugit-proto          = { path = "../hugit-proto" }
+# WP-1 (GitHub App webhook ingress): the frozen `WebhookProcessor` (HMAC-256
+# verify + uninstall/revoke + audit records) + the `PersistenceAdapter` halt
+# gate. hugit-serve mounts this free-standing library on the accept loop; the
+# heavy ingest/mirror work is NEVER run inline (fast-ack, fail-closed).
+hugit-app            = { path = "../hugit-app" }
 # `ObjectId` is `gix_hash::ObjectId` (the canonical git oid type the proto read
 # path is keyed by). Named directly for the `AppState.git_root_tree` field; the
 # version is pinned to the same `0.22` hugit-proto already resolves, so the
