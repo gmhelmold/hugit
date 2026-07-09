@@ -18,6 +18,7 @@ use hugit_refstore::replay::replay;
 
 use crate::budgeted_source::{BudgetedSource, WALK_BUDGET};
 use crate::fmt::{CONTRIBUTORS_CAP, humanize_age, scrub};
+use crate::home_cache::{CachedHomeContent, HomeRenderCache, RawTreeEntry};
 
 /// Maximum README size (in bytes) that will be buffered + rendered. A README
 /// beyond this is skipped (empty `readme_html`) rather than buffering a huge blob
@@ -57,13 +58,30 @@ fn principal_display_name(entry: &str) -> &str {
 /// every `get` yields `Ok(None)`, so the listing / README degrade to honest-empty
 /// rather than wedging the accept loop. A home read touches only the ROOT tree +
 /// one README blob, so it is cheap; the deadline is the belt-and-braces guard.
+///
+/// PERF: the CAS-expensive part (the tree listing + README bytes) is served from the
+/// content-addressed [`HomeRenderCache`] keyed by the root tree oid when `cache` is
+/// wired — a HIT is a pure in-memory op (ZERO CAS tree-walk), a MISS runs the bounded
+/// walk once + populates. A push produces a new tree oid → a MISS → automatic
+/// invalidation (a changed tree can never be a stale HIT). The FAST log-derived parts
+/// (branch/counts/last-commit/contributors) are rebuilt FRESH per request below — they
+/// are NEVER cached. `cache: None` → the walk runs inline every time (the pre-cache
+/// behaviour), used by the honest-empty / no-seam paths + the deterministic tests.
 pub fn build_home(
     log: &EventLog,
     repo: &str,
     src: Option<&Arc<dyn hugit_proto::ObjectSource + Send + Sync>>,
     root_tree: Option<&ObjectId>,
+    cache: Option<&HomeRenderCache>,
 ) -> RepoHomeVm {
-    build_home_until(log, repo, src, root_tree, Instant::now() + WALK_BUDGET)
+    build_home_until(
+        log,
+        repo,
+        src,
+        root_tree,
+        cache,
+        Instant::now() + WALK_BUDGET,
+    )
 }
 
 /// [`build_home`] with an explicit wall-clock `deadline` on the CAS reads —
@@ -75,6 +93,7 @@ fn build_home_until(
     repo: &str,
     src: Option<&Arc<dyn hugit_proto::ObjectSource + Send + Sync>>,
     root_tree: Option<&ObjectId>,
+    cache: Option<&HomeRenderCache>,
     deadline: Instant,
 ) -> RepoHomeVm {
     // ── REAL: replay → branch / branch_count / tag_count / branches ────────
@@ -200,20 +219,40 @@ fn build_home_until(
         .map(|r| humanize_age(r.recorded_at))
         .unwrap_or_default();
 
-    // ── REAL: the root file tree + rendered README, read from the git tree at
-    //         HEAD over a WALL-CLOCK-bounded source (single-thread latency guard).
-    // When the git content seam is not wired (`src`/`root_tree` None) both degrade
-    // to the honest-empty default (files: [], readme_html: "") — never fabricated.
-    let (files, readme_html) = match (src, root_tree) {
+    // ── REAL: the root file tree + rendered README. The CAS-expensive walk output is
+    //         served from the content-addressed HOME-RENDER CACHE (keyed by the root
+    //         tree oid); a HIT is a pure in-memory op (ZERO CAS), a MISS runs the
+    //         WALL-CLOCK-bounded walk once + populates. Stored UNSCRUBBED (raw entry
+    //         names + raw README bytes); scrubbed at the READ boundary just below.
+    // When the git content seam is not wired (`src`/`root_tree` None) it degrades to
+    // the honest-empty default (files: [], readme_html: "") — never fabricated.
+    let content: CachedHomeContent = match (src, root_tree) {
         (Some(src), Some(root_tree)) => {
-            let budgeted = BudgetedSource::new(src.as_ref(), deadline);
-            (
-                list_root_files(&budgeted, root_tree),
-                render_root_readme(&budgeted, root_tree),
-            )
+            // Cache HIT → serve from memory, NO CAS tree-walk (no `BudgetedSource`, no
+            // `get`). A different tree oid (a push) is a MISS → automatic invalidation.
+            if let Some(hit) = cache.and_then(|c| c.get(root_tree)) {
+                hit
+            } else {
+                // MISS → the existing bounded CAS walk (raw). Cache the result keyed by
+                // the content-addressed tree oid ONLY when the walk was COMPLETE — a
+                // budget-truncated walk is served for THIS request (honest-partial, as
+                // before) but never cached (else a later live read would HIT the
+                // truncated content and serve honest-empty for a present tree).
+                let (built, complete) = walk_home_content(src.as_ref(), root_tree, deadline);
+                if complete && let Some(cache) = cache {
+                    cache.insert(*root_tree, built.clone());
+                }
+                built
+            }
         }
-        _ => (Vec::new(), String::new()),
+        _ => CachedHomeContent::empty(),
     };
+
+    // ── READ-BOUNDARY REDACTION: scrub the RAW cached content on the way out. A
+    //    secret-shaped filename / a secret in the README redacts HERE (never a
+    //    redaction bypass — the cache stores raw exactly like search_index).
+    let files = scrub_entries(&content.entries);
+    let readme_html = scrub_readme(content.readme.as_deref());
 
     // ── STUB: all remaining fields with no local engine source ────────────────
     // about.description/stars/forks/license: GitHub-mirror P2 → ""
@@ -251,29 +290,95 @@ fn build_home_until(
     }
 }
 
-/// List the DIRECT entries of the root tree at HEAD → the repo-home file table.
+/// Run the bounded CAS walk for the home content — the RAW (unscrubbed) root-tree
+/// listing + README bytes — over a [`BudgetedSource`], returning
+/// `(content, complete)`. `complete` is `false` when the walk was budget-TRUNCATED
+/// (at least one `get` refused past the deadline): the partial content is honest to
+/// SERVE for this request, but the caller must NOT cache it (a truncated result is
+/// not the tree's full content). Shared by the read-path MISS
+/// ([`build_home_until`]) and the boot pre-warm
+/// ([`crate::home_cache::spawn_home_cache_prewarm`]) — one walk, one source of truth.
+pub(crate) fn walk_home_content(
+    src: &dyn hugit_proto::ObjectSource,
+    root_tree: &ObjectId,
+    deadline: Instant,
+) -> (CachedHomeContent, bool) {
+    let budgeted = BudgetedSource::new(src, deadline);
+    let content = CachedHomeContent {
+        entries: list_root_files_raw(&budgeted, root_tree),
+        readme: render_root_readme_raw(&budgeted, root_tree),
+    };
+    // A within-budget walk (`!tripped`) is COMPLETE and safe to cache; a truncated
+    // one is served for this request but never cached.
+    (content, !budgeted.tripped())
+}
+
+/// List the DIRECT entries of the root tree at HEAD as RAW (unscrubbed)
+/// [`RawTreeEntry`]s — the display scrub + dirs-first sort are applied at the READ
+/// boundary ([`scrub_entries`]) so the cache stores raw content (mirrors
+/// `search_index`).
 ///
 /// Delegates to [`hugit_proto::list_tree_at_dir`] (the same primitive the blob
 /// sidebar uses). Passing `""` lists the ROOT tree — the parent-of-path for a
 /// root-level file IS the root — so this is a ONE-LEVEL listing, not recursive.
 /// Symlinks + gitlinks are excluded by the primitive.
 ///
-/// Each entry becomes a [`TreeRowVm`]: `name` (SCRUBBED at the read boundary — a
-/// git entry literally named `ghp_….key` must not echo verbatim), `is_dir` (from
-/// the git mode). `intent_id`/`message`/`age` are honest-empty: attributing a
-/// last-touch commit per entry needs a per-file history walk (one CAS walk EACH →
-/// a latency-DoS on the single-threaded engine), a separate seam — this wave
-/// serves the listing, not per-row attribution, and never fabricates it.
-///
-/// SORT: directories first, then files, each alphabetical by name — the
-/// GitHub/githugr file-table order (the git-canonical name order from the
-/// primitive is re-sorted here).
-///
 /// Fail-closed: a missing object / malformed tree / budget cutoff yields an empty
 /// `Vec` (the primitive is itself `unwrap_or_default`), never an error.
-fn list_root_files(src: &dyn hugit_proto::ObjectSource, root_tree: &ObjectId) -> Vec<TreeRowVm> {
-    let mut rows: Vec<TreeRowVm> = hugit_proto::list_tree_at_dir(src, root_tree, "")
+fn list_root_files_raw(
+    src: &dyn hugit_proto::ObjectSource,
+    root_tree: &ObjectId,
+) -> Vec<RawTreeEntry> {
+    hugit_proto::list_tree_at_dir(src, root_tree, "")
         .into_iter()
+        .map(|e| RawTreeEntry {
+            name: e.name,
+            is_dir: e.is_dir,
+        })
+        .collect()
+}
+
+/// Read the root README (trying [`README_CANDIDATES`] in order) as RAW (unscrubbed)
+/// markdown bytes → `Some(text)`; `None` when no README resolves or it is oversized.
+/// Scrubbing happens at the READ boundary ([`scrub_readme`]).
+///
+/// The README is resolved via [`hugit_proto::resolve_blob_at_path`] over the SAME
+/// budgeted source (path-traversal-guarded, wall-clock-bounded). An oversized README
+/// (> [`MAX_README_BYTES`]) is skipped (returns `None`) rather than buffered into RAM.
+fn render_root_readme_raw(
+    src: &dyn hugit_proto::ObjectSource,
+    root_tree: &ObjectId,
+) -> Option<String> {
+    for candidate in README_CANDIDATES {
+        let bytes = match hugit_proto::resolve_blob_at_path(src, root_tree, candidate) {
+            Ok(Some((_oid, bytes))) => bytes,
+            // A miss / decode error / budget cutoff on this candidate → try the next.
+            Ok(None) | Err(_) => continue,
+        };
+        // OOM guard: skip an oversized README rather than buffering it into RAM.
+        if bytes.len() > MAX_README_BYTES {
+            return None;
+        }
+        // RAW (unscrubbed) markdown — lossy UTF-8 (binary → harmless mojibake, never a
+        // panic). Scrubbed line-by-line at the read boundary in `scrub_readme`.
+        return Some(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    None
+}
+
+/// Compose the repo-home file table from the RAW cached tree entries — SCRUB each
+/// displayed name at the read boundary (a git entry literally named `ghp_….key` must
+/// not echo verbatim), then apply the GitHub/githugr sort: directories first, then
+/// files, each alphabetical by the displayed (already-scrubbed) name so the on-wire
+/// order matches what the browser shows.
+///
+/// `intent_id`/`message`/`age` are honest-empty: attributing a last-touch commit per
+/// entry needs a per-file history walk (one CAS walk EACH → a latency-DoS on the
+/// single-threaded engine), a separate seam — this wave serves the listing, not
+/// per-row attribution, and never fabricates it.
+fn scrub_entries(entries: &[RawTreeEntry]) -> Vec<TreeRowVm> {
+    let mut rows: Vec<TreeRowVm> = entries
+        .iter()
         .map(|e| TreeRowVm {
             // SCRUB the displayed name at the read boundary — a secret-shaped
             // filename must redact before it reaches the browser.
@@ -292,12 +397,8 @@ fn list_root_files(src: &dyn hugit_proto::ObjectSource, root_tree: &ObjectId) ->
     rows
 }
 
-/// Read + render the root README (trying [`README_CANDIDATES`] in order) → the
-/// `readme_html` field. `String::new()` when no README resolves.
-///
-/// The README is resolved via [`hugit_proto::resolve_blob_at_path`] over the SAME
-/// budgeted source (path-traversal-guarded, wall-clock-bounded). Its bytes are
-/// SCRUBBED at the read boundary (a README may embed a secret).
+/// Compose the `readme_html` field from the RAW cached README markdown, SCRUBBING at
+/// the read boundary. `String::new()` when no README resolved (`None`).
 ///
 /// RENDERING IS THE WINDOW'S JOB (headless-engine doctrine): the engine returns the
 /// RAW (scrubbed, size-bounded) markdown; githugr renders + SANITIZES it through its
@@ -315,26 +416,13 @@ fn list_root_files(src: &dyn hugit_proto::ObjectSource, root_tree: &ObjectId) ->
 /// file). We instead scrub LINE-BY-LINE: only the offending line(s) redact and every
 /// other line survives verbatim as prose/markdown. The read-boundary guarantee is
 /// preserved (a real secret in the README STILL redacts — just its line, not the file).
-fn render_root_readme(src: &dyn hugit_proto::ObjectSource, root_tree: &ObjectId) -> String {
-    for candidate in README_CANDIDATES {
-        let bytes = match hugit_proto::resolve_blob_at_path(src, root_tree, candidate) {
-            Ok(Some((_oid, bytes))) => bytes,
-            // A miss / decode error / budget cutoff on this candidate → try the next.
-            Ok(None) | Err(_) => continue,
-        };
-        // OOM guard: skip an oversized README rather than buffering it into RAM.
-        if bytes.len() > MAX_README_BYTES {
-            return String::new();
-        }
-        // Scrub at the read boundary, LINE-BY-LINE, so one secret-shaped span redacts
-        // only its own line (not the whole file — `scrub` is a whole-input redactor).
+fn scrub_readme(raw: Option<&str>) -> String {
+    match raw {
         // Split on '\n' + re-join with '\n' preserves the exact line structure incl. a
-        // trailing newline. Return the RAW scrubbed markdown — githugr sanitizes +
-        // renders it (never trusted HTML here); the engine does no escaping/rendering.
-        let text = String::from_utf8_lossy(&bytes);
-        return text.split('\n').map(scrub).collect::<Vec<_>>().join("\n");
+        // trailing newline; each line is scrubbed independently (line-scoped redaction).
+        Some(text) => text.split('\n').map(scrub).collect::<Vec<_>>().join("\n"),
+        None => String::new(),
     }
-    String::new()
 }
 
 #[cfg(test)]
@@ -383,7 +471,7 @@ mod tests {
             r#"{"ref":"refs/heads/main","target":"aabbcc112233"}"#.to_string(),
             0, // recorded_at = 0 → must NOT humanize to "há 56 anos"
         );
-        let vm = build_home(&log, "githugr", None, None);
+        let vm = build_home(&log, "githugr", None, None, None);
         assert!(
             vm.about.updated_ago.is_empty(),
             "a 0/absent timestamp must emit empty updated_ago, got: {:?}",
@@ -401,7 +489,7 @@ mod tests {
             r#"{"ref":"refs/heads/main","target":"aabbcc112233"}"#.to_string(),
             1_700_000_000, // a real epoch
         );
-        let vm = build_home(&log, "githugr", None, None);
+        let vm = build_home(&log, "githugr", None, None, None);
         assert!(
             !vm.about.updated_ago.is_empty(),
             "a real timestamp must humanize to a non-empty updated_ago"
@@ -413,7 +501,7 @@ mod tests {
     #[test]
     fn no_git_seam_yields_empty_files_and_readme() {
         let log = EventLog::new();
-        let vm = build_home(&log, "hugit", None, None);
+        let vm = build_home(&log, "hugit", None, None, None);
         assert!(vm.files.is_empty(), "no seam → empty file listing");
         assert!(vm.readme_html.is_empty(), "no seam → empty readme_html");
     }
@@ -458,7 +546,7 @@ mod tests {
         );
         let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
 
-        let vm = build_home(&EventLog::new(), "hugit", Some(&src), Some(&root));
+        let vm = build_home(&EventLog::new(), "hugit", Some(&src), Some(&root), None);
 
         // Dirs first (src), then files alphabetical (Cargo.toml, README.md).
         let names: Vec<&str> = vm.files.iter().map(|r| r.name.as_str()).collect();
@@ -509,7 +597,7 @@ mod tests {
         );
         let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
 
-        let vm = build_home(&EventLog::new(), "hugit", Some(&src), Some(&root));
+        let vm = build_home(&EventLog::new(), "hugit", Some(&src), Some(&root), None);
 
         let all_names: String = vm.files.iter().map(|r| r.name.clone()).collect();
         assert!(
@@ -550,7 +638,7 @@ mod tests {
 
         // Sanity: a live budget lists + renders.
         let live = Instant::now() + Duration::from_secs(60);
-        let vm_live = build_home_until(&EventLog::new(), "r", Some(&src), Some(&root), live);
+        let vm_live = build_home_until(&EventLog::new(), "r", Some(&src), Some(&root), None, live);
         assert!(!vm_live.files.is_empty(), "live budget lists the tree");
         assert!(
             !vm_live.readme_html.is_empty(),
@@ -559,7 +647,7 @@ mod tests {
 
         // Past deadline: every get is refused → honest-empty files + readme.
         let past = Instant::now() - Duration::from_secs(1);
-        let vm_past = build_home_until(&EventLog::new(), "r", Some(&src), Some(&root), past);
+        let vm_past = build_home_until(&EventLog::new(), "r", Some(&src), Some(&root), None, past);
         assert!(
             vm_past.files.is_empty(),
             "past-deadline home read is honest-empty (files)"
@@ -590,7 +678,7 @@ mod tests {
         );
         let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
 
-        let vm = build_home(&EventLog::new(), "hugit", Some(&src), Some(&root));
+        let vm = build_home(&EventLog::new(), "hugit", Some(&src), Some(&root), None);
         // Raw markdown verbatim — no &lt;/&amp; escaping, no <pre> wrap. githugr sanitizes.
         assert_eq!(vm.readme_html, "# Title\n<script>alert(1)</script>\n");
     }
@@ -622,7 +710,7 @@ mod tests {
         );
         let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(src);
 
-        let vm = build_home(&EventLog::new(), "hugit", Some(&src), Some(&root));
+        let vm = build_home(&EventLog::new(), "hugit", Some(&src), Some(&root), None);
 
         // The raw secret never survives.
         assert!(
@@ -653,6 +741,268 @@ mod tests {
         assert_ne!(
             vm.readme_html, REDACTED,
             "the WHOLE README must NOT collapse to a bare sentinel"
+        );
+    }
+
+    // ── Home-render cache (content-addressed) ─────────────────────────────────
+
+    /// A source whose `get` PANICS — proves a cache HIT serves the home content with
+    /// ZERO CAS access (the walk would touch the source; a HIT never does). Mirrors
+    /// `search_index`'s `PanicSource`.
+    struct PanicSource;
+    impl hugit_proto::ObjectSource for PanicSource {
+        fn get(
+            &self,
+            _oid: &ObjectId,
+        ) -> Result<Option<hugit_proto::GitObject>, hugit_proto::PackError> {
+            panic!("a home-cache HIT must NOT touch the source (in-memory only)");
+        }
+    }
+
+    /// A pre-populated cache serves the listing + README from memory with ZERO CAS —
+    /// the `src` is a `PanicSource` that would panic if the walk ran. Proves a HIT is a
+    /// pure in-memory op (the whole perf point).
+    #[test]
+    fn cache_hit_serves_home_without_any_cas() {
+        let cache = HomeRenderCache::new();
+        let root = ObjectId::from_hex(b"aa".repeat(20).as_slice()).unwrap();
+        // Seed the cache with RAW content (dirs-first sort + scrub happen on emit).
+        cache.insert(
+            root,
+            CachedHomeContent {
+                entries: vec![
+                    RawTreeEntry {
+                        name: "Cargo.toml".into(),
+                        is_dir: false,
+                    },
+                    RawTreeEntry {
+                        name: "src".into(),
+                        is_dir: true,
+                    },
+                ],
+                readme: Some("# hugit\nhello".into()),
+            },
+        );
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(PanicSource);
+
+        // If the HIT touched CAS, PanicSource::get would panic and fail the test.
+        let vm = build_home(
+            &EventLog::new(),
+            "hugit",
+            Some(&src),
+            Some(&root),
+            Some(&cache),
+        );
+
+        // Composed at the read boundary: dirs first, then files alphabetical.
+        let names: Vec<&str> = vm.files.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["src", "Cargo.toml"],
+            "served from the cache HIT"
+        );
+        assert!(vm.files[0].is_dir);
+        assert!(vm.readme_html.contains("# hugit"));
+    }
+
+    /// A MISS walks the CAS once + POPULATES the cache; the NEXT read of the SAME tree
+    /// oid is a HIT (proven by swapping to a `PanicSource` for the second read — it
+    /// must not touch CAS).
+    #[test]
+    fn miss_walks_then_populates_then_next_read_hits() {
+        let cache = HomeRenderCache::new();
+        let mut cas = CasObjectSource::new();
+        let readme = cas.insert_raw(ObjectKind::Blob, b"# r\nbody".to_vec());
+        let root = insert_tree(
+            &mut cas,
+            vec![TreeEntry {
+                mode: MODE_BLOB,
+                name: "README.md",
+                oid: readme,
+            }],
+        );
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(cas);
+
+        // MISS → walks + populates.
+        assert!(cache.get(&root).is_none(), "cold: no entry yet");
+        let vm1 = build_home(
+            &EventLog::new(),
+            "hugit",
+            Some(&src),
+            Some(&root),
+            Some(&cache),
+        );
+        assert_eq!(vm1.files.len(), 1, "the walk listed the tree");
+        assert!(cache.get(&root).is_some(), "the MISS populated the cache");
+
+        // HIT → the SAME tree oid served with ZERO CAS (PanicSource would panic).
+        let panic_src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(PanicSource);
+        let vm2 = build_home(
+            &EventLog::new(),
+            "hugit",
+            Some(&panic_src),
+            Some(&root),
+            Some(&cache),
+        );
+        assert_eq!(
+            vm2.files.len(),
+            vm1.files.len(),
+            "same content served from HIT"
+        );
+        assert_eq!(vm2.readme_html, vm1.readme_html);
+    }
+
+    /// The content-addressed key makes a stale serve IMPOSSIBLE: a DIFFERENT tree oid
+    /// (a push produced a new tree) is a MISS that walks the NEW tree — it never serves
+    /// the previously-cached tree's content. Proven by caching tree A's content, then
+    /// reading tree B (a real, different CAS tree) and asserting B's listing, not A's.
+    #[test]
+    fn different_tree_oid_is_a_miss_never_a_stale_serve() {
+        let cache = HomeRenderCache::new();
+        // Cache tree A's content under a fabricated oid the read will NOT ask for.
+        let tree_a = ObjectId::from_hex(b"aa".repeat(20).as_slice()).unwrap();
+        cache.insert(
+            tree_a,
+            CachedHomeContent {
+                entries: vec![RawTreeEntry {
+                    name: "OLD_A_ONLY.txt".into(),
+                    is_dir: false,
+                }],
+                readme: Some("stale A readme".into()),
+            },
+        );
+        // Build a REAL, different tree B in CAS (the "push" result).
+        let mut cas = CasObjectSource::new();
+        let b_blob = cas.insert_raw(ObjectKind::Blob, b"x".to_vec());
+        let tree_b = insert_tree(
+            &mut cas,
+            vec![TreeEntry {
+                mode: MODE_BLOB,
+                name: "NEW_B_ONLY.rs",
+                oid: b_blob,
+            }],
+        );
+        assert_ne!(tree_a, tree_b, "a changed tree has a different oid");
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(cas);
+
+        let vm = build_home(
+            &EventLog::new(),
+            "hugit",
+            Some(&src),
+            Some(&tree_b),
+            Some(&cache),
+        );
+        let names: Vec<&str> = vm.files.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["NEW_B_ONLY.rs"],
+            "served the NEW tree, not stale A"
+        );
+        assert!(
+            !vm.readme_html.contains("stale A"),
+            "the stale tree-A README must never be served for tree B"
+        );
+    }
+
+    /// REDACTION at the read boundary through the cache: content is stored UNSCRUBBED,
+    /// but a secret-shaped filename / a secret in the README redacts before it reaches
+    /// the VM (never a redaction bypass, mirroring `search_index`).
+    #[test]
+    fn cache_stores_raw_but_scrubs_at_read_boundary() {
+        use hugit_ledger::redact::REDACTED;
+        let secret = "ghp_16C7e42F292c6912E7710c838347Ae178B4a";
+        let cache = HomeRenderCache::new();
+        let root = ObjectId::from_hex(b"cc".repeat(20).as_slice()).unwrap();
+        cache.insert(
+            root,
+            CachedHomeContent {
+                entries: vec![RawTreeEntry {
+                    name: format!("{secret}.key"),
+                    is_dir: false,
+                }],
+                readme: Some(format!("intro\ntoken = {secret}\noutro")),
+            },
+        );
+        // The cache holds the RAW secret (stored unscrubbed, like search_index).
+        let raw = cache.get(&root).expect("hit");
+        assert!(
+            raw.entries[0].name.contains(secret) && raw.readme.as_deref().unwrap().contains(secret),
+            "content is stored UNSCRUBBED"
+        );
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(PanicSource);
+
+        let vm = build_home(
+            &EventLog::new(),
+            "hugit",
+            Some(&src),
+            Some(&root),
+            Some(&cache),
+        );
+        let names: String = vm.files.iter().map(|r| r.name.clone()).collect();
+        assert!(
+            !names.contains(secret),
+            "raw secret filename must not survive"
+        );
+        assert!(
+            !vm.readme_html.contains(secret),
+            "raw secret in README must not survive"
+        );
+        assert!(
+            names.contains(REDACTED) || vm.readme_html.contains(REDACTED),
+            "the REDACTED sentinel must be present after the read-boundary scrub"
+        );
+        // Line-scoped README redaction: normal lines survive, only the secret line redacts.
+        assert!(vm.readme_html.contains("intro") && vm.readme_html.contains("outro"));
+    }
+
+    /// The FAST log-derived parts stay FRESH (not cached): with the SAME tree oid (a
+    /// cache HIT for files/README) but DIFFERENT logs, the branch/commit_count reflect
+    /// the CURRENT log each time — only the CAS-expensive tree content rides the cache.
+    #[test]
+    fn log_derived_parts_stay_fresh_not_cached() {
+        let cache = HomeRenderCache::new();
+        let root = ObjectId::from_hex(b"dd".repeat(20).as_slice()).unwrap();
+        cache.insert(
+            root,
+            CachedHomeContent {
+                entries: vec![RawTreeEntry {
+                    name: "lib.rs".into(),
+                    is_dir: false,
+                }],
+                readme: None,
+            },
+        );
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(PanicSource);
+
+        // Log 1: branch `main`.
+        let mut log1 = EventLog::new();
+        log1.append_for_test(
+            "ref.update",
+            vec!["a:one".to_string()],
+            r#"{"ref":"refs/heads/main","target":"aabbcc112233"}"#.to_string(),
+            1_700_000_000,
+        );
+        let vm1 = build_home(&log1, "hugit", Some(&src), Some(&root), Some(&cache));
+
+        // Log 2: branch `dev` + a second ref → a DIFFERENT branch/count.
+        let mut log2 = EventLog::new();
+        log2.append_for_test(
+            "ref.update",
+            vec!["a:two".to_string()],
+            r#"{"ref":"refs/heads/dev","target":"ddeeff445566"}"#.to_string(),
+            1_700_000_100,
+        );
+        let vm2 = build_home(&log2, "hugit", Some(&src), Some(&root), Some(&cache));
+
+        // The CAS-expensive content is identical (both served from the same cached tree).
+        assert_eq!(vm1.files.len(), 1);
+        assert_eq!(vm2.files.len(), 1);
+        // …but the log-derived parts differ per log (fresh, never cached).
+        assert_eq!(vm1.branch, "main");
+        assert_eq!(vm2.branch, "dev");
+        assert_ne!(
+            vm1.branch, vm2.branch,
+            "log-derived branch is rebuilt fresh per request, not cached"
         );
     }
 }

@@ -28,6 +28,7 @@ pub mod error;
 pub mod fmt;
 pub mod git;
 pub mod handlers;
+pub mod home_cache;
 pub mod merge_hook;
 pub mod metrics;
 pub mod ratelimit;

@@ -648,6 +648,19 @@ pub struct AppState {
     /// at build time). Interior-mutable behind the shared `&AppState` (same pattern as
     /// [`LiveRefs`]/`repos_runtime`); cheap to clone.
     pub search_index: crate::search_index::SearchStore,
+    /// The engine-wide, content-addressed HOME-RENDER cache: `root_tree_oid → (tree
+    /// listing, README)`. The `/home` read lists the root tree + resolves the README on
+    /// EVERY request — ~0.5–1 s of CAS tree-walk on the single-threaded lazy-CAS engine,
+    /// re-run per request because the walk does not warm. This cache stores the two
+    /// CAS-expensive outputs keyed by the content-addressed root tree oid: a HIT is a
+    /// pure in-memory op (ZERO CAS walk), a push produces a new tree oid → a MISS →
+    /// automatic invalidation (a changed tree can never be a stale HIT, so no rebuild
+    /// hook is needed for correctness). The FAST log-derived parts of the home VM are
+    /// rebuilt FRESH per request (never cached). Stored UNSCRUBBED; scrubbed at the read
+    /// boundary in [`build_home`](crate::handlers::build_home). Byte-bounded with FIFO
+    /// eviction. Interior-mutable behind the shared `&AppState` (same pattern as
+    /// [`search_index`](Self::search_index)); cheap to clone.
+    pub home_cache: crate::home_cache::HomeRenderCache,
     /// Cached, per-repo projected [`RepoMeta`](crate::authz::RepoMeta) — task #74
     /// (W-METENANT scaling follow-up). [`me_repo_logs`](Self::me_repo_logs) and
     /// [`count_owned_repos`](Self::count_owned_repos) used to call
@@ -1165,6 +1178,7 @@ impl AppState {
             erase_config,
             blob_history_index: crate::blob_history_index::BlobHistoryStore::new(),
             search_index: crate::search_index::SearchStore::new(),
+            home_cache: crate::home_cache::HomeRenderCache::new(),
             repo_meta_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
         };
         // Populate the PAT index from the durable `_accounts/*` logs (only when
@@ -1461,6 +1475,7 @@ impl AppState {
             erase_config: None,
             blob_history_index: crate::blob_history_index::BlobHistoryStore::new(),
             search_index: crate::search_index::SearchStore::new(),
+            home_cache: crate::home_cache::HomeRenderCache::new(),
             // Empty: `new()`'s boot `repos` set is always empty too (tests wire repos
             // via `set_repo_git`/`insert_runtime_repo`, not a real boot load), so there
             // is nothing to pre-populate. A test exercising the cache calls
