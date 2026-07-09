@@ -383,11 +383,13 @@ pub const ERASURE_EXECUTED_KIND: &str = "erasure.executed";
 /// done + the outstanding obligation. NEVER an over-claim of full erasure.
 pub const ERASURE_PARTIAL_KIND: &str = "erasure.partial";
 
-/// A self-serve cancellation of a standing erasure request. **v0 ships NO producer** (the
-/// operator is the cancellation authority — they simply don't execute a disputed standing
-/// request after grace, per clw's #3(b) settle); this const exists so the standing-request
-/// scan is future-proof — wiring a `POST /v1/account/erase/cancel` verb is a one-line
-/// producer, no reader change. The scan is vacuously satisfied today.
+/// A self-serve cancellation of a standing erasure request (GDPR1 withdrawal, go-live gap
+/// G12a). The subject (or an operator on their behalf) WITHDRAWS a still-pending erasure
+/// during the cooling-off — an append-only terminal that supersedes the standing
+/// `erasure.requested` so the operator-execute cascade will NOT run. Produced by
+/// [`cancel_account_erasure`] (route `POST /v1/account/erase/cancel`); consumed by
+/// [`read_standing_erasure_request`] (which already drops the standing request on this kind)
+/// and by [`classify_erase_cancel`].
 pub const ERASURE_CANCELLED_KIND: &str = "erasure.cancelled";
 
 /// A standing, still-governing erasure request read off an account log — the subject-staged
@@ -436,6 +438,160 @@ pub fn read_standing_erasure_request(log: &EventLog) -> Option<StandingErasureRe
         }
     }
     standing
+}
+
+/// The cancelability verdict of an account's erasure lifecycle at a given instant — the
+/// projection the self-serve cancel route ([`cancel_account_erasure`]) switches on. Read
+/// off the append-only account log by scanning to the LAST governing erasure-lifecycle
+/// record (requested/cancelled/executed/partial). FAIL-CLOSED: only a still-standing
+/// request that is provably WITHIN grace is cancelable; every other state is terminal and
+/// never claims a cancel it did not perform.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EraseCancelState {
+    /// A standing `erasure.requested` still within the grace window — CANCELABLE.
+    InGrace {
+        /// Unix-ms the standing request was staged (grace is measured from here).
+        requested_at: u64,
+    },
+    /// A standing `erasure.requested` whose grace has ELAPSED — the operator-execute
+    /// cascade may already run; a withdrawal is too late (not cancelable).
+    PastGrace,
+    /// The cascade already ran (`erasure.executed`/`erasure.partial`) — irreversible.
+    AlreadyExecuted,
+    /// Already withdrawn (`erasure.cancelled` is the governing state) — a re-cancel is an
+    /// idempotent success (there is nothing left to run).
+    AlreadyCancelled,
+    /// No standing request was ever staged (or the last state is neither requested nor a
+    /// terminal) — nothing to cancel.
+    NonePending,
+}
+
+/// Classify an account log's erasure lifecycle for the cancel route — a PURE projection
+/// (env-free, exhaustively testable, mirroring [`read_standing_erasure_request`]). Scans to
+/// the LAST governing erasure record: a `requested` (with its `recorded_at`) unless a later
+/// `cancelled`/`executed`/`partial` supersedes it. A `requested` still governing is split
+/// on the grace boundary (`now < requested_at + grace_ms`). FAIL-CLOSED at every arm — an
+/// account with no erasure history is [`EraseCancelState::NonePending`], never a false
+/// "cancelable".
+#[must_use]
+pub fn classify_erase_cancel(log: &EventLog, now: u64, grace_ms: u64) -> EraseCancelState {
+    use crate::writes::verbs::write_account_erase::ERASURE_REQUESTED_KIND;
+    // The last governing erasure-lifecycle record wins (append-only ⇒ last supersedes).
+    let mut governing_requested_at: Option<u64> = None;
+    let mut last_terminal: Option<&str> = None;
+    for r in log.records() {
+        if r.kind == ERASURE_REQUESTED_KIND {
+            governing_requested_at = Some(r.recorded_at);
+            last_terminal = None; // a fresh request re-opens the lifecycle
+        } else if r.kind == ERASURE_CANCELLED_KIND
+            || r.kind == ERASURE_EXECUTED_KIND
+            || r.kind == ERASURE_PARTIAL_KIND
+        {
+            governing_requested_at = None; // superseded — no standing request
+            last_terminal = Some(r.kind.as_str());
+        }
+    }
+    if let Some(requested_at) = governing_requested_at {
+        return if now < requested_at.saturating_add(grace_ms) {
+            EraseCancelState::InGrace { requested_at }
+        } else {
+            EraseCancelState::PastGrace
+        };
+    }
+    match last_terminal {
+        Some(ERASURE_CANCELLED_KIND) => EraseCancelState::AlreadyCancelled,
+        // `executed` OR `partial` — the irreversible cascade already ran (partial still
+        // physically tombstoned repos), so a withdrawal is impossible.
+        Some(_) => EraseCancelState::AlreadyExecuted,
+        None => EraseCancelState::NonePending,
+    }
+}
+
+/// The outcome of the self-serve cancel route — a 1:1 map to the frozen HTTP contract
+/// (`200 {canceled:true}` vs `409 not_cancelable{reason}`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EraseCancelOutcome {
+    /// A standing in-grace request was cleared THIS call (`erasure.cancelled` appended).
+    Canceled,
+    /// The request was ALREADY withdrawn — idempotent success (no second record).
+    AlreadyCanceled,
+    /// Terminal: the grace elapsed (the executor may run) → `409 past_grace`.
+    PastGrace,
+    /// Terminal: the cascade already executed → `409 already_executed`.
+    AlreadyExecuted,
+    /// Terminal: nothing was ever staged → `409 none_pending`.
+    NonePending,
+}
+
+/// Self-serve WITHDRAW a standing erasure request (GDPR1 gap G12a) — the account-scoped
+/// analogue of the operator-execute drive, but SAFE (it only STOPS a deletion, never
+/// performs one). Over an [`AccountLogSink`], in a bounded CAS loop so classify + append are
+/// atomic against the loaded head:
+///
+/// - [`EraseCancelState::InGrace`] → append the terminal `erasure.cancelled` (as the acting
+///   principal, append-only ⇒ the provenance chain still verifies) and CAS-persist →
+///   [`EraseCancelOutcome::Canceled`]. A concurrent head move → reload + re-classify (never
+///   last-writer-wins).
+/// - [`EraseCancelState::AlreadyCancelled`] → [`EraseCancelOutcome::AlreadyCanceled`] (no
+///   second record; idempotent double-cancel).
+/// - `PastGrace`/`AlreadyExecuted`/`NonePending` → the matching terminal outcome, NO write.
+///
+/// The DSR anchor row is LEFT intact (audit trail): cancel voids the STAGED request via the
+/// superseding `erasure.cancelled`; it does not rewrite or drop the `erasure.requested`
+/// (the log is append-only). `dsr_id`, when supplied, is captured on the cancel record for
+/// provenance. FAIL-CLOSED: any load/verify/persist fault is an `Err`, never a false cancel.
+pub fn cancel_account_erasure(
+    sink: &dyn AccountLogSink,
+    subject: &str,
+    dsr_id: Option<&str>,
+    principal_chain: &[String],
+    now: u64,
+    grace_ms: u64,
+) -> Result<EraseCancelOutcome, EngineErr> {
+    let class = asserted_class(principal_chain)?;
+    for _attempt in 0..MAX_CAS_ATTEMPTS {
+        let (mut log, token) = sink.load_account(subject)?;
+        match classify_erase_cancel(&log, now, grace_ms) {
+            EraseCancelState::InGrace { .. } => {
+                let mut payload_value = serde_json::json!({
+                    "account": subject,
+                    "subject": subject,
+                    "state": "canceled",
+                });
+                if let Some(d) = dsr_id.filter(|s| !s.is_empty()) {
+                    payload_value["dsr_id"] = serde_json::json!(d);
+                }
+                let payload = hugit_refstore::canonical_json(&payload_value.to_string())
+                    .unwrap_or_else(|| payload_value.to_string());
+                log.append_authorized(
+                    class,
+                    Endpoint::Land,
+                    ERASURE_CANCELLED_KIND,
+                    principal_chain.to_vec(),
+                    payload,
+                    now,
+                )
+                .map_err(|d| {
+                    EngineErr::unavailable(format!(
+                        "erasure.cancelled append denied: {}",
+                        d.reason.code()
+                    ))
+                })?;
+                match sink.persist_account(subject, &log, &token) {
+                    Ok(()) => return Ok(EraseCancelOutcome::Canceled),
+                    Err(e) if e.is_cas_conflict() => continue, // head moved — reload + retry
+                    Err(e) => return Err(e),
+                }
+            }
+            EraseCancelState::AlreadyCancelled => return Ok(EraseCancelOutcome::AlreadyCanceled),
+            EraseCancelState::PastGrace => return Ok(EraseCancelOutcome::PastGrace),
+            EraseCancelState::AlreadyExecuted => return Ok(EraseCancelOutcome::AlreadyExecuted),
+            EraseCancelState::NonePending => return Ok(EraseCancelOutcome::NonePending),
+        }
+    }
+    Err(EngineErr::unavailable(
+        "cancelamento de apagamento sob contenção — tente novamente",
+    ))
 }
 
 /// The outcome of driving an account erasure.
@@ -1158,6 +1314,94 @@ mod tests {
         let s = read_standing_erasure_request(&log).expect("the re-request stands");
         assert_eq!(s.dsr_id.as_deref(), Some("new"));
         assert_eq!(s.requested_at, 3);
+    }
+
+    // ── the cancel-lifecycle classifier (self-serve withdrawal, G12a) ─────────────
+
+    const GRACE: u64 = 1_000; // 1s grace for the pure classifier tests
+
+    #[test]
+    fn classify_in_grace_when_a_fresh_request_stands() {
+        let log = account_log(&[(REQ, serde_json::json!({"subject":"org-a"}))]); // recorded_at = 1
+        // now = 1 (== requested_at) is strictly < 1 + GRACE → in grace.
+        assert_eq!(
+            classify_erase_cancel(&log, 1, GRACE),
+            EraseCancelState::InGrace { requested_at: 1 }
+        );
+    }
+
+    #[test]
+    fn classify_past_grace_at_the_boundary() {
+        let log = account_log(&[(REQ, serde_json::json!({"subject":"org-a"}))]); // recorded_at = 1
+        // now == requested_at + grace is NOT < the bound → past grace (boundary is exclusive).
+        assert_eq!(
+            classify_erase_cancel(&log, 1 + GRACE, GRACE),
+            EraseCancelState::PastGrace
+        );
+    }
+
+    #[test]
+    fn classify_already_executed_wins_over_a_prior_request() {
+        let log = account_log(&[
+            (REQ, serde_json::json!({"subject":"org-a"})),
+            (
+                ERASURE_EXECUTED_KIND,
+                serde_json::json!({"state":"executed"}),
+            ),
+        ]);
+        assert_eq!(
+            classify_erase_cancel(&log, 1, GRACE),
+            EraseCancelState::AlreadyExecuted
+        );
+        // A `partial` cascade is likewise terminal (repos were physically tombstoned).
+        let plog = account_log(&[
+            (REQ, serde_json::json!({"subject":"org-a"})),
+            (ERASURE_PARTIAL_KIND, serde_json::json!({"state":"partial"})),
+        ]);
+        assert_eq!(
+            classify_erase_cancel(&plog, 1, GRACE),
+            EraseCancelState::AlreadyExecuted
+        );
+    }
+
+    #[test]
+    fn classify_already_cancelled_is_idempotent_terminal() {
+        let log = account_log(&[
+            (REQ, serde_json::json!({"subject":"org-a"})),
+            (
+                ERASURE_CANCELLED_KIND,
+                serde_json::json!({"state":"canceled"}),
+            ),
+        ]);
+        assert_eq!(
+            classify_erase_cancel(&log, 1, GRACE),
+            EraseCancelState::AlreadyCancelled
+        );
+    }
+
+    #[test]
+    fn classify_none_pending_when_no_erasure_history() {
+        assert_eq!(
+            classify_erase_cancel(&EventLog::new(), 1, GRACE),
+            EraseCancelState::NonePending
+        );
+    }
+
+    #[test]
+    fn classify_a_re_request_after_cancel_is_cancelable_again() {
+        // requested → cancelled → requested again: the latest request re-opens the window.
+        let log = account_log(&[
+            (REQ, serde_json::json!({"subject":"org-a"})),
+            (
+                ERASURE_CANCELLED_KIND,
+                serde_json::json!({"state":"canceled"}),
+            ),
+            (REQ, serde_json::json!({"subject":"org-a"})), // recorded_at = 3
+        ]);
+        assert_eq!(
+            classify_erase_cancel(&log, 3, GRACE),
+            EraseCancelState::InGrace { requested_at: 3 }
+        );
     }
 
     // ── the real HTTP erase transport (config validation + mock-seam wire) ────────

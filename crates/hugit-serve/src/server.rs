@@ -1127,6 +1127,19 @@ fn route_write(state: &AppState, url: &str, headers: &[Header], body: &[u8]) -> 
             };
             dispatch_account_erase_execute(state, headers, body, ctx.principal, ctx.fresh_auth)
         }
+        // POST /v1/account/erase/cancel — GDPR1 WITHDRAWAL (go-live gap G12a): the subject
+        // (or an operator on their behalf) cancels their OWN still-pending erasure during
+        // the cooling-off. SAFER than erase — it only STOPS a deletion — so subject-auth for
+        // one's own account is sufficient (no step-up; a re-auth wall on withdrawal would be
+        // user-hostile and carries no data-loss risk). The subject is the caller's own
+        // account (a cross-account cancel → 403); an operator may name any `account`.
+        ["v1", "account", "erase", "cancel"] => {
+            let ctx = match write_auth(state, headers) {
+                Ok(c) => c,
+                Err(e) => return err(e),
+            };
+            dispatch_account_erase_cancel(state, body, ctx.principal)
+        }
         // POST /v1/me/tokens — mint a PAT (secret returned ONCE, 201). Per-principal;
         // the subject is derived from the Bearer (operator/anon refused 401). The
         // git-auth WIRE that ACCEPTS a PAT as a credential is the next slice.
@@ -1497,6 +1510,105 @@ fn dispatch_account_erase_execute(
         dsr_id,
     ) {
         Ok(outcome) => erase_execute_response(&outcome),
+        Err(e) => err(e),
+    }
+}
+
+/// Map a [`EraseCancelOutcome`](crate::writes::erasure::EraseCancelOutcome) to the frozen
+/// HTTP contract (G12a): a cleared/idempotent withdrawal → `200 {canceled:true,
+/// state:"canceled"}`; a terminal state → `409 {error:"not_cancelable", reason:…}`. The
+/// 409 body is a DELIBERATE off-envelope shape (`error`+`reason`, not the `{code,reason}`
+/// engine envelope) — it is the contract the caller switches on.
+fn erase_cancel_response(outcome: &crate::writes::erasure::EraseCancelOutcome) -> (u16, String) {
+    use crate::writes::erasure::EraseCancelOutcome::{
+        AlreadyCanceled, AlreadyExecuted, Canceled, NonePending, PastGrace,
+    };
+    let not_cancelable = |reason: &str| {
+        (
+            409,
+            serde_json::json!({ "error": "not_cancelable", "reason": reason }).to_string(),
+        )
+    };
+    match outcome {
+        Canceled | AlreadyCanceled => (
+            200,
+            serde_json::json!({ "canceled": true, "state": "canceled" }).to_string(),
+        ),
+        PastGrace => not_cancelable("past_grace"),
+        AlreadyExecuted => not_cancelable("already_executed"),
+        NonePending => not_cancelable("none_pending"),
+    }
+}
+
+/// Dispatch `POST /v1/account/erase/cancel` (GDPR1 withdrawal — go-live gap G12a).
+///
+/// The self-serve inverse of the operator-execute cascade: it WITHDRAWS a still-pending
+/// erasure during the cooling-off. SAFE by construction — it only appends a superseding
+/// `erasure.cancelled` (which [`read_standing_erasure_request`](crate::writes::erasure::read_standing_erasure_request)
+/// already reads as dropping the standing request, so the executor then 404s), never
+/// deleting anything.
+///
+/// Auth (fail-closed): the caller must be the SUBJECT (authenticated as their own account)
+/// OR an operator:
+/// - **Operator** ([`is_operator`](crate::authz::is_operator)) → may cancel any named
+///   `account` (they act on the subject's behalf; a cancel can never destroy data).
+/// - **Subject** → the account is DERIVED from the principal
+///   ([`derive_owner_tenant`](crate::writes::verbs::write_provision::derive_owner_tenant)
+///   refuses operator/anon → 401). A body `account` that is NOT the caller's own → `403`
+///   (you cannot withdraw someone else's erasure).
+///
+/// No step-up: unlike erase, a withdrawal only STOPS a deletion, so subject-auth suffices
+/// (a step-up wall on withdrawal is user-hostile with no data-loss upside).
+fn dispatch_account_erase_cancel(
+    state: &AppState,
+    body: &[u8],
+    principal: Vec<String>,
+) -> (u16, String) {
+    let req: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return err(EngineErr::invalid_request(format!("corpo inválido: {e}"))),
+    };
+    let body_account = req
+        .get("account")
+        .and_then(|a| a.as_str())
+        .filter(|s| !s.is_empty());
+    let dsr_id = req
+        .get("dsr_id")
+        .and_then(|a| a.as_str())
+        .filter(|s| !s.is_empty());
+
+    // Resolve the subject + authorize. Operator → the named account; subject → their OWN
+    // account, and a body `account` (if present) MUST match it (else 403 — no cross-erase).
+    let subject: String = if crate::authz::is_operator(&principal) {
+        match body_account {
+            Some(a) => a.to_string(),
+            None => return err(EngineErr::invalid_request("campo `account` obrigatório")),
+        }
+    } else {
+        let own = match verbs::write_provision::derive_owner_tenant(&principal) {
+            Ok(a) => a,
+            Err(e) => return err(e),
+        };
+        if let Some(a) = body_account
+            && a != own
+        {
+            return err(EngineErr::policy_denied(
+                "só é possível cancelar o apagamento da sua própria conta",
+            ));
+        }
+        own
+    };
+
+    let sink: &dyn AccountLogSink = state;
+    match crate::writes::erasure::cancel_account_erasure(
+        sink,
+        &subject,
+        dsr_id,
+        &principal,
+        now_ms(),
+        erasure_grace_ms(),
+    ) {
+        Ok(outcome) => erase_cancel_response(&outcome),
         Err(e) => err(e),
     }
 }
@@ -2706,6 +2818,163 @@ mod godpath_gate_tests {
         assert_eq!(
             status, 503,
             "physical erase requires CAS mode (oid-index in R2)"
+        );
+    }
+
+    // ── GDPR1 self-serve erase-CANCEL route gates (POST /v1/account/erase/cancel, G12a) ──
+
+    /// A tenant (subject) principal that `derive_owner_tenant` maps to account `org`.
+    fn subject_chain(org: &str) -> Vec<String> {
+        vec![format!("clerk:{org}:user-1")]
+    }
+
+    fn cancel_body(account: &str) -> Vec<u8> {
+        serde_json::json!({ "account": account })
+            .to_string()
+            .into_bytes()
+    }
+
+    /// Append an arbitrary erasure-lifecycle record to `account`'s log (load-or-create then
+    /// CAS-persist against the loaded head, so it chains onto any prior seeded record).
+    fn seed_erasure_kind(s: &AppState, account: &str, kind: &str, at_ms: u64) {
+        let (mut log, tok) = s.load_account_log(account).expect("load-or-create");
+        let payload = serde_json::json!({ "account": account, "subject": account }).to_string();
+        log.append_authorized(
+            hugit_refstore::PrincipalClass::Orchestrator,
+            hugit_refstore::Endpoint::Land,
+            kind,
+            vec!["o".to_string()],
+            hugit_refstore::canonical_json(&payload).unwrap_or(payload),
+            at_ms,
+        )
+        .expect("append seeded record");
+        s.persist_account_log(account, &log, &tok).expect("persist");
+    }
+
+    fn last_kind(s: &AppState, account: &str) -> Option<String> {
+        let (log, _) = s.load_account_log(account).expect("load");
+        log.records().last().map(|r| r.kind.clone())
+    }
+
+    #[test]
+    fn cancel_in_grace_clears_the_request_and_the_executor_then_refuses() {
+        let mut s = gdpr_state();
+        s.erase_config = Some(seam_cfg());
+        // Stage a request NOW (default 7d grace ⇒ well within the cooling-off).
+        seed_requested(&s, "org-a", Some("dsr-1"), now_ms());
+        // The subject cancels their OWN account → 200 canceled.
+        let (status, body) =
+            dispatch_account_erase_cancel(&s, &cancel_body("org-a"), subject_chain("org-a"));
+        assert_eq!(status, 200, "an in-grace request is cancelable: {body}");
+        assert!(body.contains("\"canceled\":true") && body.contains("\"state\":\"canceled\""));
+        assert_eq!(
+            last_kind(&s, "org-a").as_deref(),
+            Some(crate::writes::erasure::ERASURE_CANCELLED_KIND),
+            "a superseding erasure.cancelled is appended"
+        );
+        // The executor now finds NO standing request → 404 (no cascade runs).
+        let (exec_status, _) =
+            dispatch_account_erase_execute(&s, &[], &exec_body("org-a"), operator_chain(), true);
+        assert_eq!(exec_status, 404, "a canceled request is not executable");
+    }
+
+    #[test]
+    fn cancel_with_nothing_pending_is_409_none_pending() {
+        let s = gdpr_state();
+        let (status, body) =
+            dispatch_account_erase_cancel(&s, &cancel_body("org-a"), subject_chain("org-a"));
+        assert_eq!(status, 409, "nothing staged → not cancelable");
+        assert!(
+            body.contains("\"error\":\"not_cancelable\"")
+                && body.contains("\"reason\":\"none_pending\"")
+        );
+    }
+
+    #[test]
+    fn cancel_after_execute_is_409_already_executed() {
+        let s = gdpr_state();
+        seed_erasure_kind(
+            &s,
+            "org-a",
+            verbs::write_account_erase::ERASURE_REQUESTED_KIND,
+            0,
+        );
+        seed_erasure_kind(
+            &s,
+            "org-a",
+            crate::writes::erasure::ERASURE_EXECUTED_KIND,
+            1,
+        );
+        let (status, body) =
+            dispatch_account_erase_cancel(&s, &cancel_body("org-a"), subject_chain("org-a"));
+        assert_eq!(status, 409, "an executed erasure is irreversible");
+        assert!(body.contains("\"reason\":\"already_executed\""));
+    }
+
+    #[test]
+    fn cancel_past_grace_is_409_past_grace() {
+        let s = gdpr_state();
+        // Staged at t=0 → the default 7d grace has long elapsed vs the real clock.
+        seed_requested(&s, "org-a", Some("dsr-1"), 0);
+        let (status, body) =
+            dispatch_account_erase_cancel(&s, &cancel_body("org-a"), subject_chain("org-a"));
+        assert_eq!(
+            status, 409,
+            "past the grace window → the executor may run; too late"
+        );
+        assert!(body.contains("\"reason\":\"past_grace\""));
+    }
+
+    #[test]
+    fn cancel_of_another_subjects_erasure_is_403() {
+        let s = gdpr_state();
+        seed_requested(&s, "org-a", Some("dsr-1"), now_ms());
+        // org-b tries to cancel org-a's erasure → 403 (you cannot withdraw someone else's).
+        let (status, _) =
+            dispatch_account_erase_cancel(&s, &cancel_body("org-a"), subject_chain("org-b"));
+        assert_eq!(status, 403, "a cross-account cancel is refused");
+        // And org-a's standing request is UNTOUCHED (still executable).
+        assert_eq!(
+            last_kind(&s, "org-a").as_deref(),
+            Some(verbs::write_account_erase::ERASURE_REQUESTED_KIND),
+            "the victim's request is not disturbed"
+        );
+    }
+
+    #[test]
+    fn double_cancel_is_idempotent_200() {
+        let s = gdpr_state();
+        seed_requested(&s, "org-a", Some("dsr-1"), now_ms());
+        let (s1, _) =
+            dispatch_account_erase_cancel(&s, &cancel_body("org-a"), subject_chain("org-a"));
+        assert_eq!(s1, 200);
+        // The second cancel finds the request ALREADY withdrawn → idempotent 200, no 2nd record.
+        let before = s.load_account_log("org-a").unwrap().0.records().len();
+        let (s2, body) =
+            dispatch_account_erase_cancel(&s, &cancel_body("org-a"), subject_chain("org-a"));
+        assert_eq!(s2, 200, "a re-cancel is an idempotent success");
+        assert!(body.contains("\"canceled\":true"));
+        let after = s.load_account_log("org-a").unwrap().0.records().len();
+        assert_eq!(
+            before, after,
+            "an idempotent re-cancel appends no second record"
+        );
+    }
+
+    #[test]
+    fn operator_may_cancel_a_named_account() {
+        let s = gdpr_state();
+        seed_requested(&s, "org-a", Some("dsr-1"), now_ms());
+        // The operator names the account explicitly (acts on the subject's behalf).
+        let (status, _) =
+            dispatch_account_erase_cancel(&s, &cancel_body("org-a"), operator_chain());
+        assert_eq!(
+            status, 200,
+            "an operator may withdraw a named account's pending erasure"
+        );
+        assert_eq!(
+            last_kind(&s, "org-a").as_deref(),
+            Some(crate::writes::erasure::ERASURE_CANCELLED_KIND)
         );
     }
 
