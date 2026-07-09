@@ -637,6 +637,17 @@ pub struct AppState {
     /// that safety bound, never a replacement. Interior-mutable behind the shared
     /// `&AppState` (same pattern as [`LiveRefs`]/`repos_runtime`); cheap to clone.
     pub blob_history_index: crate::blob_history_index::BlobHistoryStore,
+    /// The engine-wide precomputed per-repo CODE SEARCH index: `slug → (head, indexed
+    /// files)`, built OFF the accept loop (at boot + post-push) so `/search` serves
+    /// real code matches from an in-memory scan instead of a per-request CAS grep that
+    /// fans out a synchronous R2 fetch PER FILE — the latency DoS that wedged prod once
+    /// (`/search` bounded by result-count is still a per-object-fetch DoS on the
+    /// single-threaded engine). A query consults this map ONLY; a MISS (no index yet /
+    /// stale HEAD / a private repo, which is never indexed) is honest-empty, NEVER a
+    /// live fetch. Only PUBLIC (anonymous-readable) repos are indexed (visibility gate
+    /// at build time). Interior-mutable behind the shared `&AppState` (same pattern as
+    /// [`LiveRefs`]/`repos_runtime`); cheap to clone.
+    pub search_index: crate::search_index::SearchStore,
     /// Cached, per-repo projected [`RepoMeta`](crate::authz::RepoMeta) — task #74
     /// (W-METENANT scaling follow-up). [`me_repo_logs`](Self::me_repo_logs) and
     /// [`count_owned_repos`](Self::count_owned_repos) used to call
@@ -977,6 +988,7 @@ impl AppState {
             pat_last_used: Arc::new(RwLock::new(std::collections::HashMap::new())),
             erase_config,
             blob_history_index: crate::blob_history_index::BlobHistoryStore::new(),
+            search_index: crate::search_index::SearchStore::new(),
             repo_meta_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
         };
         // Populate the PAT index from the durable `_accounts/*` logs (only when
@@ -1266,6 +1278,7 @@ impl AppState {
             // route is disabled). A test wiring the executor sets it explicitly.
             erase_config: None,
             blob_history_index: crate::blob_history_index::BlobHistoryStore::new(),
+            search_index: crate::search_index::SearchStore::new(),
             // Empty: `new()`'s boot `repos` set is always empty too (tests wire repos
             // via `set_repo_git`/`insert_runtime_repo`, not a real boot load), so there
             // is nothing to pre-populate. A test exercising the cache calls
