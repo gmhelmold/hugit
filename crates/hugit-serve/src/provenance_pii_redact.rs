@@ -324,6 +324,44 @@ fn redact_repo_log(
     ))
 }
 
+/// Load → redact → CAS-persist the per-tenant REPO REGISTRY (`_tenants/{account}.json`) — the
+/// durable cap denominator ([`crate::tenant_registry`]). A no-op when it carries no subject
+/// cleartext (the forward-write door already pseudonymised the principal, or the tenant has no
+/// registry). Fail-closed on a durable fault.
+///
+/// This closes the second half of the registry hole: the forward-write door
+/// ([`AppState::register_repo_in_tenant`]) now stores the pseudonym, but a record written while
+/// the `HUGIT_SERVE_PROV_PSEUDONYM` kill-switch was OFF — or any legacy record predating that
+/// wiring — still holds a cleartext `clerk:{account}:{user}` principal, which the erase pass must
+/// render unrecoverable BEFORE the key shred (after the shred the pseudonym is no longer
+/// derivable, so a surviving cleartext principal could NEVER be redacted). Hash-preserving
+/// (append-only `provenance.redaction` markers), so `verify_chain` still passes and the fold —
+/// which keys on the `repo` PAYLOAD field, never the principal — is untouched (the count/cap does
+/// not regress).
+fn redact_tenant_registry(
+    state: &AppState,
+    account: &str,
+    key: &SubjectKey,
+    pseudonym: &SubjectPseudonym,
+    at: u64,
+) -> Result<(), EngineErr> {
+    for _ in 0..MAX_CAS_ATTEMPTS {
+        let (log, token) = state.load_tenant_registry(account)?;
+        let Some((mut rebuilt, markers)) = redact_log_for_subject(&log, account, key) else {
+            return Ok(()); // nothing to redact — already pseudonymous / no registry
+        };
+        append_markers(&mut rebuilt, &markers, pseudonym, at)?;
+        match state.persist_tenant_registry(account, &rebuilt, &token) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.is_cas_conflict() => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(EngineErr::unavailable(
+        "redação do registro de tenant sob contenção — tente novamente",
+    ))
+}
+
 /// The COMPLETED-erase provenance-PII step (ADR-0004 legs 4/5), driven ONCE from the
 /// executor's `Executed` branch — NEVER on `partial`/`cancelled` (those must leave the key
 /// intact so the subject's non-erased data stays resolvable):
@@ -332,8 +370,9 @@ fn redact_repo_log(
 /// 2. Append the retained pseudonymous accountability record (`erasure.pii_shredded`,
 ///    Art.5(2)) to the account log — it carries the pseudonym + dsr id + timestamps, NO
 ///    cleartext.
-/// 3. Redact (hash-preserving) the account log AND every tombstoned repo log, so no
-///    cleartext account slug / `clerk:` principal survives while `verify_chain` still passes.
+/// 3. Redact (hash-preserving) the account log, the per-tenant repo registry
+///    (`_tenants/{account}.json`), AND every tombstoned repo log, so no cleartext account
+///    slug / `clerk:` principal survives ANYWHERE while `verify_chain` still passes.
 /// 4. SHRED the subject key LAST — after which the pseudonyms are one-way and the cleartext
 ///    is unrecoverable. This is the point the executor may truthfully claim the provenance
 ///    cleartext is erased.
@@ -405,8 +444,12 @@ pub fn shred_and_redact_on_execute(
         }
     }
 
-    // 3. Redact the account log + every tombstoned repo log (hash-preserving).
+    // 3. Redact the account log + the per-tenant repo registry + every tombstoned repo log
+    //    (hash-preserving). The registry (`_tenants/{account}.json`) is enumerated HERE — it is
+    //    a durable, cleartext-bearing artifact the account/repo logs do not cover — so no
+    //    cleartext `clerk:` principal survives ANYWHERE for the account after the shred below.
     redact_account_log(state, account, &key, &pseudonym, at)?;
+    redact_tenant_registry(state, account, &key, &pseudonym, at)?;
     for repo in repo_slugs {
         redact_repo_log(state, repo, account, &key, &pseudonym, at)?;
     }

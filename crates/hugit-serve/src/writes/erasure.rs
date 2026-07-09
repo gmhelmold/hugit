@@ -671,6 +671,67 @@ fn account_already_executed(log: &EventLog) -> bool {
         .any(|r| r.kind == ERASURE_EXECUTED_KIND)
 }
 
+/// PURE predicate — whether an account is STRANDED with an incomplete provenance-PII step: it
+/// carries a terminal [`ERASURE_EXECUTED_KIND`] but LACKS the
+/// [`crate::provenance_pii::ERASURE_PII_SHREDDED_KIND`] accountability record.
+///
+/// This is the durable footprint of the HOLE-2 fault: `shred_and_redact_on_execute` runs AFTER
+/// the `erasure.executed` claim persists, so a transient durable fault there (R2 5xx / the
+/// documented runner `ENOTFOUND`) leaves the account reading `executed` while the cleartext is
+/// un-redacted AND the subject key un-shredded (pseudonyms still reversible). The
+/// accountability record is written FIRST inside that step and the key shredded LAST, so its
+/// ABSENCE is the reliable "the PII step did not converge" signal (a re-drive is idempotent —
+/// once it lands, this predicate is false forever).
+///
+/// Env-free + exhaustively testable. Says NOTHING about maturity/grace (executed is terminal);
+/// the sweep pairs it with [`should_reconcile_pii`] so it NEVER competes with a live execute.
+#[must_use]
+pub fn pii_shred_incomplete(log: &EventLog) -> bool {
+    let mut executed = false;
+    let mut pii_shredded = false;
+    for r in log.records() {
+        if r.kind == ERASURE_EXECUTED_KIND {
+            executed = true;
+        } else if r.kind == crate::provenance_pii::ERASURE_PII_SHREDDED_KIND {
+            pii_shredded = true;
+        }
+    }
+    executed && !pii_shredded
+}
+
+/// PURE sweep DECISION for the background PII-completion reconciler (no I/O): re-drive the
+/// idempotent shred+redact IFF the account is NOT already about to run the full cascade
+/// (`will_auto_execute` — which itself completes the PII step on its `Executed` branch) AND it is
+/// [`pii_shred_incomplete`]. Mutually exclusive with the auto-execute path by construction, so a
+/// stranded-executed account is healed by EXACTLY one leg per sweep, never both. Env-free +
+/// testable in isolation.
+#[must_use]
+pub fn should_reconcile_pii(log: &EventLog, will_auto_execute: bool) -> bool {
+    !will_auto_execute && pii_shred_incomplete(log)
+}
+
+/// The DSR legitimacy id of the account's erasure lifecycle, read from the (possibly superseded)
+/// `erasure.requested` record — the reconciler carries it into the retained accountability
+/// record so a self-healed erase keeps the SAME regulator-facing handle as a first-pass one.
+/// `None` when there is no requested record / it carries no `dsr_id` (the record then simply
+/// omits the optional field). Read regardless of supersession — an executed account's requested
+/// record still holds the original id.
+#[must_use]
+pub fn erasure_request_dsr_id(log: &EventLog) -> Option<String> {
+    use crate::writes::verbs::write_account_erase::ERASURE_REQUESTED_KIND;
+    log.records()
+        .iter()
+        .filter(|r| r.kind == ERASURE_REQUESTED_KIND)
+        .filter_map(|r| serde_json::from_str::<serde_json::Value>(&r.payload).ok())
+        .filter_map(|v| {
+            v.get("dsr_id")
+                .and_then(|s| s.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        })
+        .next_back()
+}
+
 /// Whether the account's erasure lifecycle is CURRENTLY superseded by a cancellation — a
 /// governing [`ERASURE_CANCELLED_KIND`] stands that is NOT re-opened by a later
 /// [`ERASURE_REQUESTED_KIND`] and NOT completed by a later [`ERASURE_EXECUTED_KIND`].
@@ -1545,6 +1606,88 @@ mod tests {
         let s = read_standing_erasure_request(&log).expect("standing");
         assert_eq!(s.subject, "org-a");
         assert!(s.dsr_id.is_none());
+    }
+
+    // ── HOLE-2 PII-completion reconciler: the pure predicate truth tables ─────────
+    const PII: &str = crate::provenance_pii::ERASURE_PII_SHREDDED_KIND;
+
+    #[test]
+    fn pii_shred_incomplete_truth_table() {
+        // executed ∧ ¬pii_shredded ⇒ stranded (the fault footprint).
+        let stranded = account_log(&[
+            (REQ, serde_json::json!({"subject":"org-a","dsr_id":"d"})),
+            (
+                ERASURE_EXECUTED_KIND,
+                serde_json::json!({"state":"executed"}),
+            ),
+        ]);
+        assert!(pii_shred_incomplete(&stranded), "executed, no pii_shredded");
+
+        // executed ∧ pii_shredded ⇒ complete (converged).
+        let converged = account_log(&[
+            (REQ, serde_json::json!({"subject":"org-a","dsr_id":"d"})),
+            (
+                ERASURE_EXECUTED_KIND,
+                serde_json::json!({"state":"executed"}),
+            ),
+            (
+                PII,
+                serde_json::json!({"subject_pseudonym":"subj:ab","cleartext_shredded":true}),
+            ),
+        ]);
+        assert!(
+            !pii_shred_incomplete(&converged),
+            "pii_shredded present ⇒ done"
+        );
+
+        // requested-only (never executed) ⇒ NOT this reconciler's job (the cascade owns it).
+        let requested_only =
+            account_log(&[(REQ, serde_json::json!({"subject":"org-a","dsr_id":"d"}))]);
+        assert!(
+            !pii_shred_incomplete(&requested_only),
+            "no executed ⇒ not stranded"
+        );
+
+        // empty lifecycle ⇒ nothing.
+        assert!(!pii_shred_incomplete(&EventLog::new()));
+    }
+
+    #[test]
+    fn should_reconcile_pii_is_mutually_exclusive_with_auto_execute() {
+        let stranded = account_log(&[
+            (REQ, serde_json::json!({"subject":"org-a","dsr_id":"d"})),
+            (
+                ERASURE_EXECUTED_KIND,
+                serde_json::json!({"state":"executed"}),
+            ),
+        ]);
+        // Stranded + NOT auto-executing ⇒ reconcile.
+        assert!(should_reconcile_pii(&stranded, false));
+        // The full cascade is about to run (it completes the PII step itself) ⇒ never both.
+        assert!(!should_reconcile_pii(&stranded, true));
+        // Not stranded ⇒ never reconcile regardless of the execute flag.
+        let requested_only =
+            account_log(&[(REQ, serde_json::json!({"subject":"org-a","dsr_id":"d"}))]);
+        assert!(!should_reconcile_pii(&requested_only, false));
+    }
+
+    #[test]
+    fn erasure_request_dsr_id_reads_through_supersession() {
+        // The requested record still carries the DSR id even after `executed` supersedes it.
+        let log = account_log(&[
+            (
+                REQ,
+                serde_json::json!({"subject":"org-a","dsr_id":"dsr-42"}),
+            ),
+            (
+                ERASURE_EXECUTED_KIND,
+                serde_json::json!({"state":"executed"}),
+            ),
+        ]);
+        assert_eq!(erasure_request_dsr_id(&log).as_deref(), Some("dsr-42"));
+        // No dsr_id on the request ⇒ None (the healed accountability record omits it).
+        let no_dsr = account_log(&[(REQ, serde_json::json!({"subject":"org-a"}))]);
+        assert!(erasure_request_dsr_id(&no_dsr).is_none());
     }
 
     #[test]

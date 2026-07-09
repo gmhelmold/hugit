@@ -36,13 +36,17 @@
 //! PSEUDONYMOUS accountability record is RETAINED (lawful + required under Art.5(2) —
 //! you must be able to demonstrate you honoured the erasure).
 //!
-//! ## Scope of THIS slice (additive; see ADR-0004 for the rest)
+//! ## Scope of THIS module (see ADR-0004 for the full erasure story)
 //!
-//! This module ships the shreddable primitive + the retained-accountability record
-//! builder, fully unit-tested, WITHOUT touching the hot write path, the identity
-//! readers (authz/ownership/projection), or the tamper core. Wiring new writes to
-//! emit pseudonyms, the backfill of existing cleartext records, and the
-//! redaction-aware verifier are the follow-up legs the ADR specifies.
+//! This module owns the shreddable primitive + the retained-accountability record
+//! builder, fully unit-tested, WITHOUT itself touching the identity readers
+//! (authz/ownership/projection) or the tamper core. The follow-up legs the ADR foresaw
+//! have SHIPPED (as of the #317/#319 wave): forward writes emit pseudonyms at the write
+//! doors ([`crate::provenance_pii_redact::pseudonymize_write_principal_chain`], wired
+//! through [`crate::writes::with_write`]/`with_account_write` + genesis + token + the
+//! per-tenant registry door), and the erase executor redacts already-written cleartext
+//! hash-preservingly ([`crate::provenance_pii_redact::shred_and_redact_on_execute`],
+//! redaction-aware [`hugit_refstore::verify_chain`]) before shredding the key.
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -166,9 +170,12 @@ pub trait SubjectKeyStore {
 }
 
 /// An in-memory [`SubjectKeyStore`] — the hermetic test double + the reference semantics
-/// the durable store must match. Interior-mutable so it is a shared `&dyn` like the other
-/// engine stores. NOT for production (keys evaporate on restart); the durable backend is
-/// ADR-0004 follow-up.
+/// the durable store matches. Interior-mutable so it is a shared `&dyn` like the other
+/// engine stores. NOT for production (keys evaporate on restart) — the production path is
+/// the durable, source-backed key store on [`crate::state::AppState`]
+/// (`subject_key_ensure`/`subject_key_for`/`subject_key_shred`, persisted via the
+/// `LogSource`), which SHIPPED with the #317/#319 wave; this double stays the test
+/// reference.
 #[derive(Default)]
 pub struct InMemorySubjectKeyStore {
     keys: std::sync::Mutex<std::collections::HashMap<String, SubjectKey>>,
