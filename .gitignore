@@ -21,3 +21,6 @@ ingest.env
 .DS_Store
 .idea/
 .vscode/
+
+# Ephemeral cross-TL courier correspondence (kept on disk, not tracked)
+docs/handoff/
