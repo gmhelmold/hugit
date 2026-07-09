@@ -1408,8 +1408,21 @@ fn grace_secs_with_floor(configured: Option<u64>, allow_below_floor: bool) -> u6
 /// cascade completed); `partial` → 202 (accepted, re-runnable — an outstanding leg);
 /// already-executed → 200 idempotent no-op.
 fn erase_execute_response(outcome: &crate::writes::erasure::ErasureOutcome) -> (u16, String) {
-    use crate::writes::erasure::ErasureOutcome::{AlreadyExecuted, Executed, Partial};
+    use crate::writes::erasure::ErasureOutcome::{
+        AbortedSuperseded, AlreadyExecuted, Executed, Partial,
+    };
     match outcome {
+        // #102 cancel-race: a cancel superseded the request mid-drive → nothing claimed. 409
+        // (the execute conflicts with a landed cancel; the operator re-reads the lifecycle).
+        AbortedSuperseded { repos_tombstoned } => (
+            409,
+            serde_json::json!({
+                "state": "aborted_superseded",
+                "repos_tombstoned": repos_tombstoned,
+                "accepted": false,
+            })
+            .to_string(),
+        ),
         Executed { repos_tombstoned } => (
             200,
             serde_json::json!({

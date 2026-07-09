@@ -122,19 +122,36 @@ pub struct RepoState {
     pub clone_cache: Option<crate::clone_pack::CloneCacheSeam>,
 }
 
+/// The interior of a [`LiveRefs`]: the `ref → oid` map plus a monotonic LOCAL
+/// generation counter. Every local mutation ([`LiveRefs::set_ref`] /
+/// [`LiveRefs::remove_ref`] — the push hot-swaps) bumps `generation` UNDER the same
+/// write lock as the map edit, so the background refresher can detect a hot-swap that
+/// landed AFTER it snapshotted the generation but BEFORE it installs a (now-stale) R2
+/// read — and skip the clobbering install ([`LiveRefs::replace_if_unchanged`]).
+struct LiveRefsInner {
+    refs: BTreeMap<String, String>,
+    /// Bumped on every local `set_ref`/`remove_ref` hot-swap. NOT a durable/R2 value
+    /// (R2 ETags are opaque + unordered and `RefsManifest` carries no generation), so
+    /// it is a purely in-process ordering token between the push path and the refresher.
+    generation: u64,
+}
+
 /// An interior-mutable, shared `ref name → tip oid hex` map — the live counterpart
 /// of the boot-loaded refs. Shared (via one `Arc`) between the git-wire read path
 /// (the advertise / clone) and the CAS-mode push finalize, so a pushed tip is
 /// advertised immediately, no reboot. The accept loop (`server::serve_on`) is
 /// single-threaded, so the `RwLock` is uncontended.
 #[derive(Clone)]
-pub struct LiveRefs(Arc<RwLock<BTreeMap<String, String>>>);
+pub struct LiveRefs(Arc<RwLock<LiveRefsInner>>);
 
 impl LiveRefs {
-    /// Wrap a boot-loaded `ref → oid` map.
+    /// Wrap a boot-loaded `ref → oid` map (generation starts at 0).
     #[must_use]
     pub fn new(refs: BTreeMap<String, String>) -> Self {
-        Self(Arc::new(RwLock::new(refs)))
+        Self(Arc::new(RwLock::new(LiveRefsInner {
+            refs,
+            generation: 0,
+        })))
     }
 
     /// An owned snapshot of the LIVE refs (the advertisement's `RefView` source).
@@ -142,31 +159,48 @@ impl LiveRefs {
     /// is negligible and keeps the read sites working with an owned `BTreeMap`.
     #[must_use]
     pub fn snapshot(&self) -> BTreeMap<String, String> {
-        self.0.read().unwrap_or_else(|e| e.into_inner()).clone()
+        self.0
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .refs
+            .clone()
     }
 
     /// Whether the LIVE ref set is empty (a not-loaded / refless repo).
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.0.read().unwrap_or_else(|e| e.into_inner()).is_empty()
+        self.0
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .refs
+            .is_empty()
+    }
+
+    /// The current LOCAL generation. The refresher captures this at read-START (before
+    /// the R2 GET) and passes it to [`replace_if_unchanged`](Self::replace_if_unchanged)
+    /// so a hot-swap that lands during the read is not overwritten by the stale snapshot.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.0.read().unwrap_or_else(|e| e.into_inner()).generation
     }
 
     /// Atomically set `ref_name`'s tip to `oid` in the LIVE map (a push hot-swap).
+    /// Bumps the generation under the same write lock so a concurrent stale refresh
+    /// cannot silently revert this hot-swap.
     pub fn set_ref(&self, ref_name: &str, oid: &str) {
-        self.0
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(ref_name.to_string(), oid.to_string());
+        let mut g = self.0.write().unwrap_or_else(|e| e.into_inner());
+        g.refs.insert(ref_name.to_string(), oid.to_string());
+        g.generation = g.generation.wrapping_add(1);
     }
 
     /// Atomically remove `ref_name` from the LIVE map (a delete-ref hot-swap). A
-    /// no-op if the ref is absent (the durable finalize already validated presence;
-    /// this only mirrors the committed removal into the in-memory advertise).
+    /// no-op on the map if the ref is absent (the durable finalize already validated
+    /// presence; this only mirrors the committed removal into the in-memory advertise),
+    /// but the generation still bumps so the ordering token advances on every hot-swap.
     pub fn remove_ref(&self, ref_name: &str) {
-        self.0
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(ref_name);
+        let mut g = self.0.write().unwrap_or_else(|e| e.into_inner());
+        g.refs.remove(ref_name);
+        g.generation = g.generation.wrapping_add(1);
     }
 
     /// Atomically REPLACE the whole LIVE map with `refs` (WP-B5 read-after-write): the
@@ -175,11 +209,34 @@ impl LiveRefs {
     /// window (bounded staleness, ≤ the TTL). A full replace (not a merge) is correct
     /// because the durable manifest is the COMPLETE authoritative ref set — an add
     /// propagates, and a ref deleted on another instance (dropped from the manifest) drops
-    /// here too. Safe against this instance's own in-flight push: the push finalize writes
-    /// the durable manifest BEFORE its `set_ref` hot-swap, so a replace can never lose a
-    /// locally-pushed ref (it is already in the manifest it reads).
+    /// here too. Does NOT consult the generation — the caller has decided this install
+    /// wins; the generation guard lives in [`replace_if_unchanged`](Self::replace_if_unchanged).
     pub fn replace(&self, refs: BTreeMap<String, String>) {
-        *self.0.write().unwrap_or_else(|e| e.into_inner()) = refs;
+        self.0.write().unwrap_or_else(|e| e.into_inner()).refs = refs;
+    }
+
+    /// Install `refs` ONLY if the LOCAL generation still equals `expected_generation`
+    /// (check + replace atomic under one write lock). Returns `true` on install, `false`
+    /// if a local hot-swap ([`set_ref`](Self::set_ref)/[`remove_ref`](Self::remove_ref))
+    /// bumped the generation since the caller snapshotted it — in which case this install
+    /// is SKIPPED so the fresher local tip survives.
+    ///
+    /// This closes the WP-B5 monotonic-guard defect: the refresher issues an unversioned
+    /// R2 GET, and a concurrent push's conditional PUT + `set_ref` hot-swap can land
+    /// AFTER that GET starts. Without the guard the refresher's `replace` would clobber
+    /// the just-applied new tip with the stale pre-push snapshot for up to one interval,
+    /// re-advertising the OLD tip after the client already got `ok`.
+    pub fn replace_if_unchanged(
+        &self,
+        refs: BTreeMap<String, String>,
+        expected_generation: u64,
+    ) -> bool {
+        let mut g = self.0.write().unwrap_or_else(|e| e.into_inner());
+        if g.generation != expected_generation {
+            return false; // a local hot-swap landed during the read — keep the fresher tip
+        }
+        g.refs = refs;
+        true
     }
 }
 
@@ -702,6 +759,12 @@ pub struct AppState {
 /// now MECHANICALLY enforced by this cap, not merely assumed.
 pub const MAX_REPOS_PER_TENANT: usize = 100;
 
+/// The #76 BOOT tenant-registry reconcile BOUND — how many durable repos a single off-loop
+/// boot pass heals into their owner tenant's `_tenants/{org}.json` registry. Bounded so the
+/// pass is finite even as the platform grows; the remainder heals on the next boot or the
+/// provision no-clobber path (idempotent, genesis-authoritative).
+const BOOT_RECONCILE_MAX_REPOS: usize = 512;
+
 /// The WP-B5 read-after-write ref-cache refresh interval: the background refresher reloads
 /// every loaded repo's durable `refs.json` this often, so a second engine instance sees
 /// another instance's push/delete within this window. clw signed off **2s** for
@@ -791,8 +854,10 @@ impl AppState {
     /// Refresh ONE repo's in-memory ref cache from its durable `refs.json` (WP-B5
     /// read-after-write). FAIL-SAFE: an ABSENT manifest or ANY read/parse fault leaves the
     /// current live cache UNCHANGED (retry the next tick) — never clobbers a good advertise
-    /// with an empty/partial map. A full [`LiveRefs::replace`] installs the durable set
-    /// (the authoritative complete ref list — adds AND cross-instance deletes propagate).
+    /// with an empty/partial map. MONOTONIC-SAFE: the local generation is captured BEFORE
+    /// the R2 GET and the install goes through [`LiveRefs::replace_if_unchanged`], so a
+    /// push hot-swap that lands DURING this (unversioned) read is never reverted by the
+    /// stale pre-push snapshot — the fresher local tip wins and this install is skipped.
     /// Pure over an [`crate::cas::R2Get`] double (testable without a live R2).
     pub(crate) fn refresh_repo_refs_once(
         r2: &dyn crate::cas::R2Get,
@@ -800,13 +865,17 @@ impl AppState {
         slug: &str,
         live: &LiveRefs,
     ) {
+        // Snapshot the local generation BEFORE any R2 I/O: a push's `set_ref`/`remove_ref`
+        // that bumps it after this point makes the install below a no-op (fresher tip wins).
+        let gen_at_start = live.generation();
         // Install the durable manifest ONLY on a clean read+parse; an absent manifest
         // (`Ok(None)`), a read fault (`Err`), or a parse fault all keep the current live
         // cache (retry next tick) — never install a corrupt/empty map.
         if let Ok(Some(bytes)) = r2.get_object(&crate::cas::refs_manifest_key(tenant, slug))
             && let Ok(manifest) = crate::cas::parse_refs_manifest(&bytes)
         {
-            live.replace(manifest.refs);
+            // Skip the install if a local hot-swap advanced the generation during the read.
+            live.replace_if_unchanged(manifest.refs, gen_at_start);
         }
     }
 
@@ -1198,6 +1267,10 @@ impl AppState {
         // NO-OP outside CAS mode; strictly off the accept loop. Spawn LAST (after the state
         // is fully built) so the thread sees the loaded repos.
         state.spawn_refs_refresh_loop();
+        // #76: heal the per-tenant repo registry toward genesis truth (register-side undercount
+        // + legacy git-ingest back-fill). Detached, catch_unwind-isolated, bounded, CAS-mode
+        // only; NEVER blocks boot. Spawn LAST (after the state is fully built).
+        state.spawn_boot_reconcile_tenant_registry();
         // GDPR1 Art.17 auto-executor (env-gated, fail-closed DEFAULT OFF). A detached
         // off-loop sweep that auto-completes matured erasure requests (no cron otherwise) AND
         // moves the irreversible cascade off the single-threaded accept loop (the DoS fix).
@@ -2355,6 +2428,97 @@ impl AppState {
             return Ok(()); // not owned by org → not this registry's entry
         }
         self.register_repo_in_tenant(org, repo, principal_chain, at)
+    }
+
+    /// Kick off the #76 BOOT-RECONCILE on a DETACHED thread — boot NEVER blocks on it
+    /// (mirrors [`boot_build_pat_index`](Self::boot_build_pat_index) / the refs-refresh loop:
+    /// detached, `catch_unwind`, bounded, gated to CAS mode). It heals the per-tenant repo
+    /// registry toward genesis truth on two axes:
+    ///
+    /// - the **registry write-side MED** — the `_tenants/{org}.json` register is a best-effort
+    ///   SECOND durable write after the genesis create, so a transient R2 fault on that PUT
+    ///   leaves a durable repo UNREGISTERED (a persistent undercount that would let
+    ///   different-slug creates accumulate past [`MAX_REPOS_PER_TENANT`]); and
+    /// - the **legacy back-fill** — git-ingested repos (hugit/githugr) that predate the
+    ///   registry and were never registered at all.
+    ///
+    /// For each durable repo whose genesis verifies it calls the idempotent +
+    /// genesis-authoritative [`reconcile_tenant_repo`](Self::reconcile_tenant_repo), which
+    /// registers it under its genesis-declared owner ONLY — never double-counts, never
+    /// registers a foreign-owned repo. NO-OP outside CAS mode. A spawn failure degrades to the
+    /// pre-#76 heal-on-touch (the provision no-clobber path still reconciles).
+    fn spawn_boot_reconcile_tenant_registry(&self) {
+        if self.cas_r2_read().is_none() {
+            return; // Local/git-dir: the durable-registry heal is a CAS-mode concern
+        }
+        let state = self.clone();
+        let spawn = std::thread::Builder::new()
+            .name("hugit-tenant-reconcile".to_string())
+            .spawn(move || {
+                // A panic on the reconcile pass is isolated (never crashes a detached thread /
+                // the engine), exactly like the other off-loop boot tasks.
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    state.run_boot_reconcile_tenant_registry();
+                }));
+            });
+        if spawn.is_err() {
+            eprintln!(
+                "[hugit-serve] tenant-registry boot reconcile thread spawn failed — the durable \
+                 repo registry heals on the next provision touch / reboot instead"
+            );
+        }
+    }
+
+    /// ONE reconcile pass (see [`spawn_boot_reconcile_tenant_registry`]). Enumerate the durable
+    /// repo slugs and reconcile each VERIFIED genesis into its owner tenant's registry. Per-repo
+    /// ISOLATED + fail-closed: a listing/load/reconcile fault on one repo is logged + skipped,
+    /// never halting the pass. Bounded by [`BOOT_RECONCILE_MAX_REPOS`]. Logs a one-line summary.
+    fn run_boot_reconcile_tenant_registry(&self) {
+        let slugs = match self.source.list_repo_slugs() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "[hugit-serve] tenant-registry reconcile: repo listing failed ({}) — skipping",
+                    e.reason
+                );
+                return;
+            }
+        };
+        let operator: Vec<String> = vec!["orchestrator:hugit".to_string()];
+        let at = now_unix_ms();
+        let (mut ensured, mut skipped) = (0usize, 0usize);
+        for slug in slugs.into_iter().take(BOOT_RECONCILE_MAX_REPOS) {
+            // The genesis-declared owner is the ONLY tenant this repo may register under.
+            let log = match self.load_verified(&slug) {
+                Ok(log) => log,
+                Err(e) if e.status == 404 => continue, // no genesis → nothing durable to heal
+                Err(_) => {
+                    skipped += 1;
+                    continue; // indeterminate read → skip (heals next boot)
+                }
+            };
+            let Some(owner) = crate::authz::project_repo_meta(&log).owner_tenant else {
+                continue; // no declared owner → not a registrable genesis
+            };
+            // `reconcile_tenant_repo` re-verifies ownership + is idempotent (an already-registered
+            // repo is a no-op; a foreign-owned repo is refused), so this can never double-count
+            // nor register a repo under the wrong tenant.
+            match self.reconcile_tenant_repo(&owner, &slug, &operator, at) {
+                Ok(()) => ensured += 1,
+                Err(e) => {
+                    skipped += 1;
+                    eprintln!(
+                        "[hugit-serve] tenant-registry reconcile: repo {slug:?} skipped ({}) — \
+                         heals on a later touch",
+                        e.reason
+                    );
+                }
+            }
+        }
+        eprintln!(
+            "[hugit-serve] tenant-registry boot reconcile: {ensured} repo(s) ensured-registered, \
+             {skipped} skipped"
+        );
     }
 
     // ── PAT auth index (slice 2b) ────────────────────────────────────────────
@@ -4601,6 +4765,51 @@ mod tests {
     }
 
     #[test]
+    fn refresh_does_not_revert_a_concurrent_push_hot_swap() {
+        // F1/WP-B5 monotonic guard: a push's hot-swap that lands AFTER the refresher
+        // snapshots the generation but BEFORE it installs must NOT be reverted by the
+        // stale pre-push snapshot the (unversioned) R2 GET carried. We simulate the race
+        // by (1) letting the refresher read the OLD manifest into a fresh LiveRefs whose
+        // generation we advance mid-read via a manual hot-swap, using the split primitives.
+        let live = seed_live(&[("refs/heads/main", "v1")]);
+        // Refresher captures the generation at read-START.
+        let gen_at_start = live.generation();
+        // A concurrent push hot-swaps `main` v1→v2 (bumps the generation) — this is the
+        // just-`ok`'d tip that must survive.
+        live.set_ref("refs/heads/main", "v2");
+        // The refresher now tries to install the STALE pre-push snapshot (still v1). With
+        // the monotonic guard it is a no-op because the generation advanced during the read.
+        let installed = live.replace_if_unchanged(
+            BTreeMap::from([("refs/heads/main".to_string(), "v1".to_string())]),
+            gen_at_start,
+        );
+        assert!(
+            !installed,
+            "the stale install is skipped once a hot-swap landed"
+        );
+        assert_eq!(
+            live.snapshot().get("refs/heads/main").map(String::as_str),
+            Some("v2"),
+            "the locally-newer hot-swap tip survives the stale refresh"
+        );
+    }
+
+    #[test]
+    fn refresh_installs_when_no_concurrent_hot_swap() {
+        // The guard only skips on a RACE: with no intervening hot-swap the refresh installs
+        // the durable manifest exactly as before (adds/updates/cross-instance deletes).
+        let live = seed_live(&[("refs/heads/main", "v1")]);
+        let manifest = br#"{"head":"refs/heads/main","refs":{"refs/heads/main":"v2"}}"#;
+        let r2 = mock_r2(&[("t/alpha/refs.json", manifest)]);
+        AppState::refresh_repo_refs_once(&r2, "t", "alpha", &live);
+        assert_eq!(
+            live.snapshot().get("refs/heads/main").map(String::as_str),
+            Some("v2"),
+            "absent a concurrent hot-swap the durable manifest installs verbatim"
+        );
+    }
+
+    #[test]
     fn record_pat_used_is_monotonic_and_snapshotted() {
         let st = AppState::new(PathBuf::from("/tmp/logs"), "tok".to_string());
         st.record_pat_used("pat_x".to_string(), 100);
@@ -5422,6 +5631,47 @@ mod me_repos_tests {
         st.reconcile_tenant_repo("org-a", "ghost", &tenant("org-a"), 4)
             .unwrap();
         assert_eq!(st.count_owned_repos("org-a"), Some(1));
+    }
+
+    #[test]
+    fn boot_reconcile_heals_undercount_and_is_idempotent_no_double_count() {
+        // #76 boot reconcile: durable genesis repos that are NOT in their tenant registry (the
+        // best-effort register-PUT undercount + the legacy git-ingest back-fill) are
+        // reconciled-in on boot; an already-registered repo is a no-op (never double-counted);
+        // and a foreign-owned repo is never registered under the wrong tenant.
+        let dir = scratch_dir();
+        let st = AppState::new(dir.clone(), "dev-token".to_string());
+        // org-a owns alpha+beta, NEITHER registered (undercount / legacy back-fill).
+        std::fs::write(dir.join("alpha.json"), meta_log("private", "org-a")).unwrap();
+        std::fs::write(dir.join("beta.json"), meta_log("private", "org-a")).unwrap();
+        // org-b owns gamma, ALREADY registered.
+        std::fs::write(dir.join("gamma.json"), meta_log("private", "org-b")).unwrap();
+        st.register_repo_in_tenant("org-b", "gamma", &tenant("org-b"), 1)
+            .unwrap();
+        assert_eq!(
+            st.count_owned_repos("org-a"),
+            Some(0),
+            "the un-registered genesis is invisible before the reconcile (the undercount)"
+        );
+        assert_eq!(st.count_owned_repos("org-b"), Some(1));
+
+        // The boot pass heals org-a's undercount + back-fill, no-ops gamma.
+        st.run_boot_reconcile_tenant_registry();
+        assert_eq!(
+            st.count_owned_repos("org-a"),
+            Some(2),
+            "both un-registered genesis repos are reconciled-in"
+        );
+        assert_eq!(
+            st.count_owned_repos("org-b"),
+            Some(1),
+            "an already-registered repo stays a single count (no double-count, no wrong-tenant)"
+        );
+
+        // Idempotent: a second pass changes nothing.
+        st.run_boot_reconcile_tenant_registry();
+        assert_eq!(st.count_owned_repos("org-a"), Some(2));
+        assert_eq!(st.count_owned_repos("org-b"), Some(1));
     }
 
     #[test]
