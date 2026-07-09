@@ -31,6 +31,7 @@ pub mod handlers;
 pub mod home_cache;
 pub mod merge_hook;
 pub mod metrics;
+pub mod provenance_pii;
 pub mod ratelimit;
 pub mod receive_wire;
 pub mod search_index;
