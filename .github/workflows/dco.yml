@@ -16,11 +16,12 @@ concurrency:
 
 jobs:
   dco:
-    # Self-hosted macOS builder (hugit-builder-01) — switched back from GitHub-hosted
-    # ubuntu 2026-06-29 during a hosted-runner outage (see ci.yml). Pure git/shell job,
-    # fully portable across OS. Fork-guard: skip PRs from forks (keeps them off the box).
+    # GitHub-hosted ubuntu (re-migrated 2026-07-09 with ci.yml — off the shared dev
+    # box so CI stops contending with local dev/agent builds; the 2026-06-29 self-hosted
+    # revert was a transient hosted-pool outage, now past). Pure git/shell job, portable.
+    # Fork-guard: skip PRs from forks. Revert to `[self-hosted, macOS]` on a pool outage.
     if: github.event.pull_request.head.repo.fork == false
-    runs-on: [self-hosted, macOS]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
