@@ -17,3 +17,4 @@ to reverse** and **cross-cutting** (affect contracts, the forge UI, or both).
 |------|-----------------------------------------|----------|----------------|
 | 0001 | Intent context envelope (`context.json`)| Accepted | hugit · githugr |
 | 0002 | HuGR identity: one account, CoreLink machinery | Accepted | family-wide |
+| 0003 | Owner-scoped repo routing deferred (G11)| Accepted (deferral) | hugit · githugr |
