@@ -57,6 +57,11 @@ pub struct R2Config {
     pub tenant_id: String,
     /// Sync HTTP client with a bounded timeout (no hanging reads).
     pub agent: ureq::Agent,
+    /// A SECOND agent with a TIGHT timeout ([`crate::cas::LAZY_LOAD_FETCH_TIMEOUT`]),
+    /// used ONLY by [`get_object_bounded`](Self::get_object_bounded) on the accept-loop
+    /// lazy-load-on-miss path — so a slow/throttling R2 manifest read cannot stall the
+    /// single-threaded accept loop for the standard 30s.
+    pub fast_agent: ureq::Agent,
 }
 
 /// The per-repo git content seam — one entry per repo whose git dir / CAS
@@ -519,6 +524,15 @@ pub struct AppState {
     /// the shared `&AppState` (same pattern as [`repos_runtime`](Self::repos_runtime));
     /// the single-threaded accept loop keeps it uncontended.
     pub repo_load_misses: Arc<RwLock<std::collections::HashMap<String, u64>>>,
+    /// GLOBAL rate-limiter on lazy-load ATTEMPTS that actually touch R2 (L2): a single
+    /// bounded fixed-window counter `(window_start_ms, count)` — NOT a per-slug map, so
+    /// it cannot itself leak (the per-slug [`repo_load_misses`](Self::repo_load_misses)
+    /// negative cache does not stop a VARIED-slug 404 storm; each distinct nonexistent
+    /// slug would otherwise force a fresh R2 round-trip). At most
+    /// [`MAX_LAZY_LOADS_PER_WINDOW`] attempts per [`LAZY_LOAD_WINDOW_MS`] reach R2; over
+    /// budget, [`repo_state_or_load`](Self::repo_state_or_load) returns `None` FAST
+    /// without touching R2. The single-threaded accept loop keeps the counter race-free.
+    pub repo_lazy_load_budget: Arc<RwLock<(u64, u32)>>,
     /// The CAS-mode provisioning template (`Some` only when the engine booted in CAS
     /// mode — `HUGIT_SERVE_CAS_URL` set): the handles `POST /v1/repos` mints a new
     /// empty repo's git seam from (so it is push/clone-live in the same op). `None`
@@ -676,6 +690,16 @@ const REFS_REFRESH_INTERVAL_MS: u64 = 2_000;
 /// accept-loop R2 cost of a 404-probe storm (see [`AppState::repo_load_misses`] +
 /// [`AppState::repo_state_or_load`]).
 const REPO_LOAD_MISS_COOLDOWN_MS: u64 = 30_000;
+
+/// L2 global lazy-load rate limit: at most this many lazy-load attempts that touch R2
+/// per [`LAZY_LOAD_WINDOW_MS`] window. Bounds a VARIED-slug 404 storm on the unauth git
+/// wire (which the per-slug negative cache cannot stop) so it cannot flood the
+/// single-threaded accept loop with R2 round-trips. Generous for real first-request
+/// traffic, a hard ceiling on abuse.
+const MAX_LAZY_LOADS_PER_WINDOW: u32 = 20;
+
+/// The fixed window for [`MAX_LAZY_LOADS_PER_WINDOW`].
+const LAZY_LOAD_WINDOW_MS: u64 = 1_000;
 
 /// Wall-clock ms since the Unix epoch (the negative-cache timestamp source). A clock
 /// fault degrades to `0` → a stale-but-safe miss re-probe, never a panic.
@@ -940,6 +964,7 @@ impl AppState {
             repos,
             repos_runtime: Arc::new(RwLock::new(std::collections::HashMap::new())),
             repo_load_misses: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            repo_lazy_load_budget: Arc::new(RwLock::new((0, 0))),
             provision,
             write_path_enabled,
             // PROD default: OFF. Without `HUGIT_ALLOW_DEV_OPERATOR=1` the dev-token
@@ -1135,8 +1160,17 @@ impl AppState {
                 // are fetched from the CAS on demand at serve time. The SAME builder
                 // the lazy-load-on-miss path uses ([`build_cas_repo_state`]), so a
                 // boot repo and a runtime-discovered repo are constructed identically.
-                let (repo_state, probe) =
-                    build_cas_repo_state(&cas, &r2, &tenant, repo, receive_pack_enabled())?;
+                // Boot can afford the standard timeouts + throttle-retry (it is off the
+                // request path); the typed load error maps to the fatal boot string.
+                let (repo_state, probe) = build_cas_repo_state(
+                    &cas,
+                    &r2,
+                    &tenant,
+                    repo,
+                    receive_pack_enabled(),
+                    crate::cas::LoadMode::Boot,
+                )
+                .map_err(|e| format!("boot-load of CAS repo {repo:?}: {e}"))?;
                 // Capture the boot CAS connectivity self-probe for the FIRST CAS repo
                 // ONLY (additional repos share the same CAS client → a second probe is
                 // redundant). It is NOT run here — the caller spawns it on a detached
@@ -1213,6 +1247,7 @@ impl AppState {
             repos: std::collections::HashMap::new(),
             repos_runtime: Arc::new(RwLock::new(std::collections::HashMap::new())),
             repo_load_misses: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            repo_lazy_load_budget: Arc::new(RwLock::new((0, 0))),
             provision: None,
             write_path_enabled: false,
             // The explicit dev/test/seed constructor enables the break-glass by
@@ -1276,9 +1311,18 @@ impl AppState {
     ///   fixed on-disk set → straight `repo_state`.
     /// - An unsafe slug → `None` (never an R2 probe for a traversal string).
     /// - A NEGATIVE CACHE ([`repo_load_misses`](Self::repo_load_misses)) skips the R2
-    ///   probe for a slug found absent within [`REPO_LOAD_MISS_COOLDOWN_MS`] — so a
-    ///   404-probe storm cannot re-hit `load_manifests_from_cas` on every request and
-    ///   stall the single-threaded accept loop (the read-latency-DoS class).
+    ///   probe for a slug found AUTHORITATIVELY absent within [`REPO_LOAD_MISS_COOLDOWN_MS`].
+    /// - A GLOBAL budget ([`repo_lazy_load_budget`](Self::repo_lazy_load_budget), L2)
+    ///   bounds how many attempts per [`LAZY_LOAD_WINDOW_MS`] touch R2 — so a VARIED-slug
+    ///   404 storm (which the per-slug cache cannot stop) cannot flood the accept loop.
+    /// - The load is BOUNDED ([`LoadMode::LazyLoad`](crate::cas::LoadMode::LazyLoad), L1):
+    ///   no throttle-retry sleeps + a tight timeout, so it never stalls the loop ~12s+.
+    /// - Only an AUTHORITATIVELY-ABSENT ([`RepoLoadError::Absent`](crate::cas::RepoLoadError::Absent))
+    ///   result is negative-cached (L3); a TRANSIENT fault returns `None` WITHOUT caching
+    ///   (the next request retries — a real repo is never false-404'd for the cooldown).
+    /// - W1: an ABSENT `refs.json` whose durable GENESIS LOG exists (provisioned but never
+    ///   pushed) is served as an EMPTY CAS seam (so first push/clone work on ANY instance),
+    ///   not 404'd.
     /// - The single-threaded accept loop means no same-instance race on the load/insert.
     #[must_use]
     pub fn repo_state_or_load(&self, repo: &str) -> Option<&RepoState> {
@@ -1290,29 +1334,78 @@ impl AppState {
         if !is_safe_repo_slug(repo) {
             return None;
         }
-        // Negative cache: a recent miss short-circuits without touching R2.
+        // Negative cache: a recent AUTHORITATIVE miss short-circuits without touching R2.
         if self.repo_load_miss_recent(repo) {
             return None;
         }
-        match build_cas_repo_state(
-            &tmpl.cas_client,
-            &tmpl.r2,
-            &tmpl.tenant,
-            repo,
-            tmpl.receive_pack_enabled,
-        ) {
-            Ok((repo_state, _probe)) => {
+        // L2: consume a global budget token. Over budget → None FAST, no R2 round-trip
+        // (checked BEFORE `build_cas_repo_state`, so an over-budget attempt never touches
+        // R2). `decide_lazy_load` re-checks this and refuses to invoke the loader.
+        let budget_ok = self.lazy_load_budget_take();
+        let act = decide_lazy_load(
+            budget_ok,
+            // The bounded (no-retry, tight-timeout) lazy-load — invoked ONLY when in
+            // budget (the closure is not called otherwise).
+            || {
+                build_cas_repo_state(
+                    &tmpl.cas_client,
+                    &tmpl.r2,
+                    &tmpl.tenant,
+                    repo,
+                    tmpl.receive_pack_enabled,
+                    crate::cas::LoadMode::LazyLoad,
+                )
+                .map(|(state, _probe)| state)
+            },
+            // W1 genesis-existence: the authoritative durable log predicate the rest of
+            // the engine uses (`load_verified` → `source.fetch` → `Ok(Some)` iff seeded).
+            || self.load_verified(repo).is_ok(),
+        );
+        match act {
+            LazyLoadAct::Insert(repo_state) => {
                 // Register the discovered repo. `insert_runtime_repo` is create-only;
                 // a `CAS_CONFLICT` just means it is already present (benign) — either
                 // way re-read through `repo_state` for the leaked `&'static` borrow.
+                let _ = self.insert_runtime_repo(repo, *repo_state);
+                self.repo_state(repo)
+            }
+            LazyLoadAct::InsertEmpty => {
+                // W1: provisioned-but-never-pushed on another instance — mint the SAME
+                // empty CAS seam `provision()` would, so the first push/clone works here.
+                let repo_state = self.build_empty_cas_repo_state(repo)?;
                 let _ = self.insert_runtime_repo(repo, repo_state);
                 self.repo_state(repo)
             }
-            Err(_) => {
-                // Absent/unreadable in R2 → negative-cache the miss + honest 404.
+            LazyLoadAct::NegativeCache => {
+                // Authoritatively absent (refs.json 404, no genesis log) → cache + 404.
                 self.mark_repo_load_miss(repo);
                 None
             }
+            // Transient fault or over budget → honest miss, NO negative cache (retry next).
+            LazyLoadAct::NoCacheRetry => None,
+        }
+    }
+
+    /// Consume one token from the global lazy-load budget (L2). Returns `true` iff an
+    /// attempt is allowed to touch R2 this window; `false` once
+    /// [`MAX_LAZY_LOADS_PER_WINDOW`] have been spent in the current [`LAZY_LOAD_WINDOW_MS`].
+    /// A fixed-window counter — a new window resets it. Single-threaded loop → race-free.
+    fn lazy_load_budget_take(&self) -> bool {
+        let now = now_ms();
+        let mut g = self
+            .repo_lazy_load_budget
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let (window_start, count) = *g;
+        if now.saturating_sub(window_start) >= LAZY_LOAD_WINDOW_MS {
+            // A fresh window — reset and spend this token.
+            *g = (now, 1);
+            true
+        } else if count < MAX_LAZY_LOADS_PER_WINDOW {
+            *g = (window_start, count + 1);
+            true
+        } else {
+            false
         }
     }
 
@@ -2553,6 +2646,9 @@ impl R2Config {
         let agent = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(30))
             .build();
+        let fast_agent = ureq::AgentBuilder::new()
+            .timeout(crate::cas::LAZY_LOAD_FETCH_TIMEOUT)
+            .build();
         Ok(R2Config {
             endpoint,
             host,
@@ -2562,6 +2658,7 @@ impl R2Config {
             secret,
             tenant_id: req("HUGIT_SERVE_R2_TENANT_ID")?,
             agent,
+            fast_agent,
         })
     }
 
@@ -2583,6 +2680,9 @@ impl R2Config {
             tenant_id: "test-tenant".to_string(),
             agent: ureq::AgentBuilder::new()
                 .timeout(Duration::from_secs(5))
+                .build(),
+            fast_agent: ureq::AgentBuilder::new()
+                .timeout(crate::cas::LAZY_LOAD_FETCH_TIMEOUT)
                 .build(),
         }
     }
@@ -2658,6 +2758,21 @@ impl R2Config {
     /// transport/non-404 fault. Mirrors [`fetch`]'s SigV4 + generic-503 discipline
     /// (no storage-topology leak to the client; specifics to the server log).
     pub fn get_object(&self, key: &str) -> Result<Option<Vec<u8>>, EngineErr> {
+        self.get_object_on(&self.agent, key)
+    }
+
+    /// As [`get_object`](Self::get_object), but through the TIGHT-timeout
+    /// [`fast_agent`](Self::fast_agent) — the accept-loop lazy-load-on-miss variant,
+    /// so a slow/throttling R2 manifest read fails fast instead of stalling the
+    /// single-threaded accept loop for the standard 30s.
+    pub fn get_object_bounded(&self, key: &str) -> Result<Option<Vec<u8>>, EngineErr> {
+        self.get_object_on(&self.fast_agent, key)
+    }
+
+    /// The shared body of [`get_object`](Self::get_object) /
+    /// [`get_object_bounded`](Self::get_object_bounded), parameterized by the HTTP
+    /// agent (so the two differ ONLY in the timeout budget).
+    fn get_object_on(&self, agent: &ureq::Agent, key: &str) -> Result<Option<Vec<u8>>, EngineErr> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -2673,8 +2788,7 @@ impl R2Config {
         );
         let url = format!("{}/{}/{key}", self.endpoint, self.bucket);
         let label = format!("r2://{}/{key}", self.bucket);
-        let resp = self
-            .agent
+        let resp = agent
             .get(&url)
             .set("Authorization", &signed.authorization)
             .set("x-amz-date", &signed.amz_date)
@@ -3092,6 +3206,10 @@ impl crate::cas::R2Get for R2Config {
     fn get_object(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
         R2Config::get_object(self, key).map_err(|e| format!("R2 get {key}: {}", e.reason))
     }
+
+    fn get_object_bounded(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
+        R2Config::get_object_bounded(self, key).map_err(|e| format!("R2 get {key}: {}", e.reason))
+    }
 }
 
 /// hugit's R2 as the mutable-manifest write target for the git-ingest bin: maps
@@ -3137,17 +3255,72 @@ impl crate::cas::R2PutConditional for R2Config {
 /// the CAS connectivity self-probe (boot uses it for the first repo; the lazy path
 /// discards it).
 ///
+/// `mode` picks the latency discipline: [`LoadMode::Boot`](crate::cas::LoadMode::Boot)
+/// keeps the standard timeouts + throttle-retry; [`LoadMode::LazyLoad`](crate::cas::LoadMode::LazyLoad)
+/// is bounded (no retry sleeps, tight timeout) for the single-threaded accept loop.
+///
 /// # Errors
-/// The repo's manifests are absent/unreadable in R2 (a not-yet-provisioned or
-/// nonexistent repo) or a CAS/R2 fault — propagated as the boot-style error string.
+/// [`RepoLoadError::Absent`](crate::cas::RepoLoadError::Absent) — `refs.json` is
+/// authoritatively absent (a not-yet-provisioned/nonexistent repo).
+/// [`RepoLoadError::Transient`](crate::cas::RepoLoadError::Transient) — a CAS/R2
+/// transport/throttle/timeout/decode fault (retry may succeed; never negative-cache).
+/// What [`AppState::repo_state_or_load`] should do with a lazy-load attempt — the pure
+/// decision, factored out so the L1/L2/L3/W1 policy is unit-tested without a live CAS/R2
+/// or the concrete `&'static` insert.
+enum LazyLoadAct {
+    /// The manifests loaded → insert this state + serve it. Boxed: `RepoState` is large
+    /// and the other variants are unit (clippy::large_enum_variant).
+    Insert(Box<RepoState>),
+    /// W1: `refs.json` absent but the durable genesis log EXISTS (provisioned, never
+    /// pushed) → mint + insert an EMPTY CAS seam (the caller builds it).
+    InsertEmpty,
+    /// Authoritatively absent (refs.json 404 AND no genesis log) → negative-cache + 404.
+    NegativeCache,
+    /// A TRANSIENT fault OR over budget → honest miss, do NOT negative-cache (retry next).
+    NoCacheRetry,
+}
+
+/// The pure L1/L2/L3/W1 decision core of [`AppState::repo_state_or_load`].
+///
+/// * `budget_ok` — the L2 global-budget verdict. When `false`, `load` is NEVER invoked
+///   (so an over-budget attempt does no R2 round-trip) → [`LazyLoadAct::NoCacheRetry`].
+/// * `load` — the bounded lazy-load (invoked at most once, only when in budget).
+/// * `genesis_exists` — the W1 durable-genesis-log predicate (invoked only on an
+///   [`RepoLoadError::Absent`](crate::cas::RepoLoadError::Absent) result).
+fn decide_lazy_load(
+    budget_ok: bool,
+    load: impl FnOnce() -> Result<RepoState, crate::cas::RepoLoadError>,
+    genesis_exists: impl FnOnce() -> bool,
+) -> LazyLoadAct {
+    if !budget_ok {
+        return LazyLoadAct::NoCacheRetry;
+    }
+    match load() {
+        Ok(state) => LazyLoadAct::Insert(Box::new(state)),
+        // L3 + W1: refs.json authoritatively absent. Only NOW consult the genesis log.
+        Err(crate::cas::RepoLoadError::Absent) => {
+            if genesis_exists() {
+                LazyLoadAct::InsertEmpty
+            } else {
+                LazyLoadAct::NegativeCache
+            }
+        }
+        // L3: a transient fault (5xx/timeout/throttle/decode/partial seam) is NEVER
+        // negative-cached — a real repo must recover on the next request.
+        Err(crate::cas::RepoLoadError::Transient(_)) => LazyLoadAct::NoCacheRetry,
+    }
+}
+
 fn build_cas_repo_state(
     cas: &crate::cas::CasClient,
     r2: &R2Config,
     tenant: &str,
     repo: &str,
     receive_pack: bool,
-) -> Result<(RepoState, crate::cas::CasSelfcheckProbe), String> {
-    let (cas_src, root, refs) = crate::cas::load_manifests_from_cas(cas.clone(), r2, tenant, repo)?;
+    mode: crate::cas::LoadMode,
+) -> Result<(RepoState, crate::cas::CasSelfcheckProbe), crate::cas::RepoLoadError> {
+    let (cas_src, root, refs) =
+        crate::cas::load_manifests_from_cas(cas.clone(), r2, tenant, repo, mode)?;
     let probe = cas_src.selfcheck_probe();
     // A shared handle to the lazy source's live oid→blake3 index, so a successful
     // push can merge new entries into the SAME cell it reads.
@@ -4204,6 +4377,124 @@ mod me_repos_tests {
         assert!(
             !st.repo_load_miss_recent("other"),
             "the negative cache is per-slug"
+        );
+    }
+
+    // ── #96 lazy-load hardening: L2 (global budget) + L3/W1 (decision policy) ──────
+
+    /// L2: the global lazy-load budget allows EXACTLY `MAX_LAZY_LOADS_PER_WINDOW`
+    /// attempts per window, then denies — so a varied-slug 404 storm (which the
+    /// per-slug negative cache cannot stop) cannot flood the accept loop with R2 hits.
+    #[test]
+    fn lazy_load_budget_caps_attempts_per_window() {
+        let st = state_with(&[]);
+        let mut allowed = 0u32;
+        for _ in 0..(MAX_LAZY_LOADS_PER_WINDOW + 5) {
+            if st.lazy_load_budget_take() {
+                allowed += 1;
+            }
+        }
+        assert_eq!(
+            allowed, MAX_LAZY_LOADS_PER_WINDOW,
+            "exactly the budget is spent within one window"
+        );
+    }
+
+    /// L2: a fresh window resets the budget.
+    #[test]
+    fn lazy_load_budget_resets_next_window() {
+        let st = state_with(&[]);
+        for _ in 0..MAX_LAZY_LOADS_PER_WINDOW {
+            assert!(st.lazy_load_budget_take());
+        }
+        assert!(
+            !st.lazy_load_budget_take(),
+            "over budget within the same window"
+        );
+        // Backdate the window start → the next take opens a fresh window.
+        {
+            let mut g = st.repo_lazy_load_budget.write().unwrap();
+            let backdated = now_ms().saturating_sub(LAZY_LOAD_WINDOW_MS + 1);
+            *g = (backdated, MAX_LAZY_LOADS_PER_WINDOW);
+        }
+        assert!(
+            st.lazy_load_budget_take(),
+            "a new window resets the budget to full"
+        );
+    }
+
+    /// L2: over budget, the loader closure (which would do the R2 round-trip) is NEVER
+    /// invoked, and the result is a no-cache retry.
+    #[test]
+    fn decide_over_budget_does_no_r2_call() {
+        let loaded = std::cell::Cell::new(false);
+        let act = decide_lazy_load(
+            false, // over budget
+            || {
+                loaded.set(true);
+                Err(crate::cas::RepoLoadError::Transient("unreachable".into()))
+            },
+            || panic!("genesis check must not run when over budget"),
+        );
+        assert!(matches!(act, LazyLoadAct::NoCacheRetry));
+        assert!(
+            !loaded.get(),
+            "over budget → the R2-touching loader is never invoked"
+        );
+    }
+
+    /// L3: an authoritatively-absent repo with NO genesis log → negative-cache + 404.
+    #[test]
+    fn decide_absent_without_genesis_negative_caches() {
+        let act = decide_lazy_load(
+            true,
+            || Err(crate::cas::RepoLoadError::Absent),
+            || false, // no durable genesis log.
+        );
+        assert!(matches!(act, LazyLoadAct::NegativeCache));
+    }
+
+    /// W1: an absent refs.json whose durable GENESIS LOG exists (provisioned but never
+    /// pushed) → build an EMPTY CAS seam, NOT a 404 — so first push/clone work on any
+    /// instance that did not create it.
+    #[test]
+    fn decide_absent_with_genesis_builds_empty_seam() {
+        let genesis_checked = std::cell::Cell::new(false);
+        let act = decide_lazy_load(
+            true,
+            || Err(crate::cas::RepoLoadError::Absent),
+            || {
+                genesis_checked.set(true);
+                true // the durable genesis log exists.
+            },
+        );
+        assert!(matches!(act, LazyLoadAct::InsertEmpty));
+        assert!(
+            genesis_checked.get(),
+            "genesis existence is consulted on Absent"
+        );
+    }
+
+    /// L3: a TRANSIENT fault is NEVER negative-cached (a real repo recovers next call),
+    /// and the genesis check is not even consulted (it applies only to Absent).
+    #[test]
+    fn decide_transient_does_not_negative_cache() {
+        let genesis_checked = std::cell::Cell::new(false);
+        let act = decide_lazy_load(
+            true,
+            || Err(crate::cas::RepoLoadError::Transient("R2 5xx".into())),
+            || {
+                genesis_checked.set(true);
+                true
+            },
+        );
+        assert!(
+            matches!(act, LazyLoadAct::NoCacheRetry),
+            "transient → retry, never cache"
+        );
+        assert!(
+            !genesis_checked.get(),
+            "the genesis check runs only for Absent, never for Transient"
         );
     }
 
