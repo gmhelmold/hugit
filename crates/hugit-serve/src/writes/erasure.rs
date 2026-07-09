@@ -1136,6 +1136,34 @@ fn execute_account_erasure_inner(
     // ever ABORTS on a CHANGE, never newly gates a drive that never had a standing request.
     let governing_at_start = read_standing_erasure_request(&account_log);
 
+    // #102 cancel-race guard — PRIMARY, at the POINT OF NO RETURN (before ANY physical
+    // erase). The post-loop guard below only blocks a false `executed` claim AFTER the
+    // repos are already tombstoned — which does NOT honor a cancel (the data is already
+    // gone). To actually PREVENT the erase, re-load + check for a governing
+    // `erasure.cancelled` HERE, immediately before the first tombstone: a cancel that
+    // landed up to this commit point aborts the drive with ZERO physical erase. We use
+    // `classify_erase_cancel` (not a bare `None` read) so a legitimate no-staged-request
+    // direct/operator drive (`NonePending`) and a matured standing request
+    // (`InGrace`/`PastGrace`) both PROCEED — only an `AlreadyCancelled` governing state
+    // aborts. Grace is irrelevant to the cancelled arm, so `0` is safe. After this point
+    // the erase is committed; a cancel landing DURING the loop is too late (the secondary
+    // post-loop guard then still blocks the false `executed` claim).
+    {
+        let (precheck_log, _) = state.load_account(account)?;
+        if matches!(
+            classify_erase_cancel(&precheck_log, at, 0),
+            EraseCancelState::AlreadyCancelled
+        ) {
+            eprintln!(
+                "[hugit-serve] erase: account {account:?} was CANCELLED at the commit point \
+                 — aborting before any physical erase (cancel honored, zero repos tombstoned)"
+            );
+            return Ok(ErasureOutcome::AbortedSuperseded {
+                repos_tombstoned: 0,
+            });
+        }
+    }
+
     // Tombstone every PENDING repo durably FIRST — the claim is gated on all of these.
     let sink: &dyn LogSink = state;
     let mut tombstoned = 0usize;
@@ -2291,6 +2319,27 @@ mod tests {
             .expect("persist requested");
     }
 
+    /// Append a governing `erasure.cancelled` (the user self-serve withdrawal, G12a #296)
+    /// so the account's erasure lifecycle is CANCELLED as of `at`.
+    fn seed_account_cancel(st: &AppState, account: &str, dsr: &str, at: u64) {
+        let (mut log, tok) = st.load_account_log(account).expect("load acct");
+        let payload = serde_json::json!({
+            "account": account, "subject": account, "state": "cancelled", "dsr_id": dsr,
+        })
+        .to_string();
+        log.append_authorized(
+            PrincipalClass::Orchestrator,
+            Endpoint::Land,
+            ERASURE_CANCELLED_KIND,
+            vec!["o".into()],
+            hugit_refstore::canonical_json(&payload).unwrap_or(payload),
+            at,
+        )
+        .expect("append cancelled");
+        st.persist_account_log(account, &log, &tok)
+            .expect("persist cancelled");
+    }
+
     /// A [`CasEraseTransport`] that INJECTS a superseding `erasure.cancelled` on its first
     /// `erase()`. `drive_cas_gc` runs AFTER the drive captures the governing request but
     /// BEFORE the terminal claim, so erasing a digest here deterministically simulates a
@@ -2406,6 +2455,53 @@ mod tests {
                 repos_tombstoned: 1
             },
             "a stable standing request drives to executed (guard is inert)"
+        );
+    }
+
+    #[test]
+    fn execute_aborts_before_any_physical_erase_when_already_cancelled() {
+        // #102 PRIMARY guard (point of no return): if the account's erasure is ALREADY
+        // CANCELLED at the commit point — BEFORE the drive reaches the tombstone loop — the
+        // drive aborts with ZERO physical erase. The cancel is genuinely HONORED (the repo
+        // is NOT tombstoned), not merely un-claimed after the fact. (Contrast
+        // `execute_aborts_when_a_cancel_lands_mid_drive`, where the cancel lands DURING the
+        // loop and the SECONDARY post-loop guard blocks only the false `executed` claim —
+        // the data there is already gone; here it is preserved.)
+        let st = state_with(&[("alpha", "org-a", false)]);
+        seed_account_request(&st, "org-a", "dsr-1", 1);
+        seed_account_cancel(&st, "org-a", "dsr-1", 2); // user withdraws within grace
+        let mock = MockErase::new();
+        let digests = vec!["deadbeef01".to_string()];
+        let outcome = execute_account_erasure_with_erase(
+            &st,
+            "org-a",
+            operator(),
+            10,
+            &mock,
+            "d863fafb",
+            &digests,
+            "dsr-1",
+        )
+        .expect("drive");
+        assert_eq!(
+            outcome,
+            ErasureOutcome::AbortedSuperseded {
+                repos_tombstoned: 0
+            },
+            "an already-cancelled account aborts BEFORE any tombstone — zero physical erase",
+        );
+        // The physical erase was PREVENTED: no repo.erased, no CAS erase call, no claim.
+        assert!(
+            mock.erased.borrow().is_empty(),
+            "the CAS erase transport was never invoked — no digest erased",
+        );
+        let (alog, _) = st.load_account_log("org-a").unwrap();
+        assert!(
+            !alog
+                .records()
+                .iter()
+                .any(|r| r.kind == ERASURE_EXECUTED_KIND || r.kind == ERASURE_PARTIAL_KIND),
+            "no executed/partial claim — the cancel was honored before any erase",
         );
     }
 
