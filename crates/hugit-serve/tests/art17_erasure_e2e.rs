@@ -266,6 +266,151 @@ fn forward_pseudonymization_replaces_clerk_principals_and_authz_is_unaffected() 
     );
 }
 
+/// A repo log that is already TOMBSTONED (repo.erased) but whose cleartext PII survives —
+/// the exact state after a first run persisted `erasure.executed` then faulted inside the
+/// PII step (repos tombstoned, not yet redacted).
+fn seed_tombstoned_repo_with_cleartext(dir: &std::path::Path, slug: &str) {
+    let mut log = EventLog::new();
+    log.append_authorized(
+        PrincipalClass::Orchestrator,
+        Endpoint::Land,
+        "repo.meta",
+        vec!["orchestrator:hugit".into()],
+        canon(serde_json::json!({"visibility":"private","owner_tenant":ACCOUNT})),
+        1,
+    )
+    .unwrap();
+    log.append_authorized(
+        PrincipalClass::Orchestrator,
+        Endpoint::Land,
+        "pr.opened",
+        vec![format!("clerk:{ACCOUNT}:user-1")],
+        canon(serde_json::json!({"author":format!("clerk:{ACCOUNT}:user-1")})),
+        2,
+    )
+    .unwrap();
+    log.append_authorized(
+        PrincipalClass::Orchestrator,
+        Endpoint::Land,
+        "repo.erased",
+        vec!["orchestrator:hugit".into()],
+        canon(serde_json::json!({"reason":"erasure","state":"erased"})),
+        3,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join(format!("{slug}.json")),
+        serde_json::to_string(log.records()).unwrap(),
+    )
+    .unwrap();
+}
+
+/// MF1 + MF2 self-heal: a first run that persisted `erasure.executed` (a record that ITSELF
+/// carries the cleartext account slug + `clerk:` principal) then FAULTED inside the PII step
+/// leaves the account reading "executed" with cleartext intact + the key un-shredded. The
+/// operator's retry hits the AlreadyExecuted short-circuit, which MUST re-drive the PII step
+/// to convergence (redact — incl. the executed record — + shred) rather than skip it; and a
+/// further post-shred re-execute must succeed idempotently (never 503 on the shred tombstone).
+#[test]
+fn already_executed_retry_self_heals_the_pii_step_and_is_not_fail_open() {
+    let dir = scratch_dir();
+    seed_tombstoned_repo_with_cleartext(&dir, "alpha");
+
+    // Seed the fail-open STATE: requested + executed persisted (both cleartext), but NO
+    // accountability record + NO redaction markers (the PII step never completed).
+    let adir = dir.join("_accounts");
+    std::fs::create_dir_all(&adir).unwrap();
+    let mut alog = EventLog::new();
+    alog.append_authorized(
+        PrincipalClass::Orchestrator,
+        Endpoint::Land,
+        "erasure.requested",
+        vec![format!("clerk:{ACCOUNT}:user-1")],
+        canon(serde_json::json!({"account":ACCOUNT,"subject":ACCOUNT,"state":"requested"})),
+        1,
+    )
+    .unwrap();
+    alog.append_authorized(
+        PrincipalClass::Orchestrator,
+        Endpoint::Land,
+        "erasure.executed",
+        vec![format!("clerk:{ACCOUNT}:user-1")], // the executed record's OWN cleartext principal
+        canon(serde_json::json!({"account":ACCOUNT,"state":"executed","repos_tombstoned":1})),
+        2,
+    )
+    .unwrap();
+    std::fs::write(
+        adir.join(format!("{ACCOUNT}.json")),
+        serde_json::to_string(alog.records()).unwrap(),
+    )
+    .unwrap();
+
+    let st = AppState::new(dir.clone(), "dev-token".into());
+    // Simulate the first run having MINTED the key before it faulted (key present, unshred).
+    let _ = st.subject_key_ensure(ACCOUNT).expect("mint");
+
+    // Pre-condition: the account reads executed AND cleartext (incl. the executed record) is present.
+    let (before, _) = st.load_account_log(ACCOUNT).unwrap();
+    assert!(
+        before
+            .records()
+            .iter()
+            .any(|r| r.kind == "erasure.executed")
+    );
+    assert!(
+        before.records().iter().any(|r| r.payload.contains(ACCOUNT)),
+        "cleartext survives before the self-heal"
+    );
+
+    // The operator's RETRY: AlreadyExecuted — but it must self-heal the PII step.
+    let outcome = execute_account_erasure(&st, ACCOUNT, vec!["orchestrator:hugit".into()], 500)
+        .expect("retry");
+    assert_eq!(outcome, ErasureOutcome::AlreadyExecuted);
+
+    // 1. The cleartext is now GONE from the account log — INCLUDING the executed record — and
+    //    the chain still verifies; the accountability record was retained.
+    let (alog2, _) = st.load_account_log(ACCOUNT).unwrap();
+    verify_chain(alog2.records()).expect("healed account chain verifies");
+    no_cleartext_survives(&alog2);
+    let executed = alog2
+        .records()
+        .iter()
+        .find(|r| r.kind == "erasure.executed")
+        .expect("executed record still present");
+    assert!(
+        !executed.payload.contains(ACCOUNT)
+            && executed
+                .principal_chain
+                .iter()
+                .all(|p| !p.contains(ACCOUNT)),
+        "the executed claim record itself is now redacted"
+    );
+    assert!(
+        alog2
+            .records()
+            .iter()
+            .any(|r| r.kind == "erasure.pii_shredded"),
+        "the accountability record was retained on the self-heal"
+    );
+
+    // 2. The tombstoned repo log was redacted too, and still verifies.
+    let rlog = st.load_verified("alpha").expect("repo log loads");
+    verify_chain(rlog.records()).expect("healed repo chain verifies");
+    no_cleartext_survives(&rlog);
+
+    // 3. The key is SHREDDED.
+    assert!(
+        st.subject_key_for(ACCOUNT).unwrap().is_none(),
+        "key shredded on heal"
+    );
+
+    // 4. A FURTHER post-shred re-execute is idempotent SUCCESS (MF2: no 503 on the tombstone).
+    let again = execute_account_erasure(&st, ACCOUNT, vec!["orchestrator:hugit".into()], 501)
+        .expect("post-shred re-execute must succeed, not 503");
+    assert_eq!(again, ErasureOutcome::AlreadyExecuted);
+    assert!(st.subject_key_for(ACCOUNT).unwrap().is_none());
+}
+
 #[test]
 fn a_partial_erase_does_not_shred_the_key() {
     let dir = scratch_dir();

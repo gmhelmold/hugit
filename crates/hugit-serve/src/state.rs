@@ -3064,14 +3064,24 @@ impl LogSource {
     fn shred_subject_key(&self, subject: &str) -> Result<(), EngineErr> {
         match self {
             LogSource::Local { dir } => {
-                let path = dir.join("_subject_keys").join(format!("{subject}.key"));
-                match std::fs::remove_file(&path) {
-                    Ok(()) => Ok(()),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()), // idempotent
-                    Err(e) => Err(EngineErr::unavailable(format!(
-                        "local subject-key shred failed: {e}"
-                    ))),
-                }
+                // OVERWRITE with a tombstone (NOT `remove_file`): a removed file could be
+                // re-created by a later `create_subject_key`, re-minting a fresh key and
+                // resurrecting a subject that was crypto-shredded. A tombstone decodes to
+                // `None` (undecodable body) AND blocks the create-only mint (O_EXCL sees the
+                // file), so a shredded subject is NON-re-mintable — matching the R2 backend.
+                let kdir = dir.join("_subject_keys");
+                std::fs::create_dir_all(&kdir).map_err(|e| {
+                    EngineErr::unavailable(format!("local subject-key dir create failed: {e}"))
+                })?;
+                let path = kdir.join(format!("{subject}.key"));
+                let tmp = kdir.join(format!("{subject}.key.tmp.{}", std::process::id()));
+                std::fs::write(&tmp, b"SHREDDED").map_err(|e| {
+                    EngineErr::unavailable(format!("local subject-key tombstone write failed: {e}"))
+                })?;
+                std::fs::rename(&tmp, &path).map_err(|e| {
+                    let _ = std::fs::remove_file(&tmp);
+                    EngineErr::unavailable(format!("local subject-key shred rename failed: {e}"))
+                })
             }
             LogSource::R2(c) => {
                 let key = format!("{}/_subject_keys/{subject}.key", c.tenant_id);

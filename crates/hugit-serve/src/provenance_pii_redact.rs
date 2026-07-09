@@ -184,6 +184,14 @@ use crate::state::AppState;
 use crate::writes::{AccountLogSink, LogSink, MAX_CAS_ATTEMPTS};
 use hugit_refstore::{Endpoint, PrincipalClass};
 
+/// Whether the account log durably carries a record of `kind` (fail-closed on a load fault
+/// so an indeterminate read never masquerades as "absent" and skips the PII step).
+fn account_has_kind(state: &AppState, account: &str, kind: &str) -> Result<bool, EngineErr> {
+    let sink: &dyn AccountLogSink = state;
+    let (log, _) = sink.load_account(account)?;
+    Ok(log.records().iter().any(|r| r.kind == kind))
+}
+
 /// The `requested_at` of the standing erasure request (for the retained accountability
 /// record), read best-effort from the account log; falls back to `default_at`.
 fn requested_at_of(log: &EventLog, default_at: u64) -> u64 {
@@ -302,8 +310,22 @@ pub fn shred_and_redact_on_execute(
     dsr_id: &str,
     at: u64,
 ) -> Result<(), EngineErr> {
-    // 1. Ensure the durable key (needed to derive the pseudonym for redaction) + derive it.
-    let key = state.subject_key_ensure(account)?;
+    // 1. Resolve the durable key. `None` is AMBIGUOUS — either "already shredded"
+    //    (a completed prior run: shred is the LAST step, so `None` ⇒ the accountability
+    //    record + redaction already landed) OR "never minted" (a subject that never wrote a
+    //    pseudonym). Disambiguate on the accountability record:
+    //    - `None` + accountability PRESENT ⇒ this erase already completed → idempotent no-op
+    //      (this is the MF2 fix: we do NOT call `ensure_key`, which would create-conflict on
+    //      the shred tombstone and 503 forever — a re-drive after a completed shred converges);
+    //    - `None` + accountability ABSENT ⇒ never minted → mint now so we can derive the
+    //      pseudonym and redact;
+    //    - `Some(key)` ⇒ mid-flight (shred not yet reached) → drive to completion.
+    let accountability_done = account_has_kind(state, account, ERASURE_PII_SHREDDED_KIND)?;
+    let key = match state.subject_key_for(account)? {
+        Some(k) => k,
+        None if accountability_done => return Ok(()), // shredded + complete → no-op self-heal
+        None => state.subject_key_ensure(account)?,   // never minted → mint to redact
+    };
     let pseudonym = SubjectPseudonym::derive(&key, account);
 
     // 2. Retain the pseudonymous accountability record on the account log (de-dupes on kind).
