@@ -18,4 +18,4 @@ pub mod emitter;
 
 pub use backoff::{BackoffConfig, BackoffError, MockHttpResponse, RetryOutcome, StatusBackoff};
 pub use badge::{BadgeState, BadgeStatus, STALENESS_BOUND_MS};
-pub use emitter::{EmitError, StatusEmitter, StatusPayload};
+pub use emitter::{EmitError, LiveStatusOutcome, StatusEmitter, StatusPayload};

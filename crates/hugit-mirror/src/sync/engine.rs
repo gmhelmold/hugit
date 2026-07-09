@@ -28,6 +28,7 @@ use hugit_refstore::{EventLog, RefState, TamperError, replay, verify_chain};
 use crate::divergence::{
     DivergenceResolution, MutationOrigin, RefState as DivRefState, resolve as resolve_divergence,
 };
+use crate::sync::reflect::{RefReflect, ReflectHalt, ReflectRef, ReflectReport};
 
 /// The reserved ref namespace under which a divergent GitHub-side tip is
 /// preserved as a recoverable incident (rule 4). It is a forge ref like any
@@ -631,6 +632,87 @@ impl BidirSync {
         Ok((resolution, incident))
     }
 
+    // ── the bounded one-way mirror (forge → GitHub), the safe rung ──────────
+
+    /// The tip the forge last emitted outbound for `ref_name` (rule-3 idempotency
+    /// bookkeeping) — `None` if never reflected.
+    pub fn last_emitted(&self, ref_name: &str) -> Option<&str> {
+        self.emitted_outbound.get(ref_name).map(String::as_str)
+    }
+
+    /// Run one **bounded, one-way** reflect pass (forge → GitHub).
+    ///
+    /// See [`crate::sync::reflect`] for the contract. In order, for each desired
+    /// reflection up to `bound` emissions:
+    ///
+    /// 1. **Divergence guard (never clobber).** If the observed GitHub tip is
+    ///    neither our last-emitted tip nor the target forge tip, the GitHub side
+    ///    moved under us → the pass **HALTS**: this ref and every subsequent one
+    ///    is `Deferred`, a [`ReflectHalt`] is returned, and NOTHING is emitted
+    ///    past the divergence. The divergent tip is left intact for
+    ///    [`Self::arbitrate_branch_divergence`] to preserve.
+    /// 2. **Idempotency.** If the forge tip equals what we last emitted, it is a
+    ///    no-op ([`RefReflect::Skipped`]) — a re-run reflects nothing.
+    /// 3. **Emit.** Otherwise record the emission (bounded by `bound`).
+    ///
+    /// This drives only the *bookkeeping* + decision; the actual bytes go out via
+    /// the E1 [`crate::outbound::OutboundWriter`] (its `MirrorPushTarget`). Fail-
+    /// closed: a divergence never advances the mirror.
+    pub fn reflect_bounded(&mut self, desired: &[ReflectRef], bound: usize) -> ReflectReport {
+        let mut results = Vec::with_capacity(desired.len());
+        let mut halted: Option<ReflectHalt> = None;
+        let mut emitted = 0usize;
+
+        for want in desired {
+            // Once halted, or once the pass budget is spent, defer the rest.
+            if halted.is_some() || emitted >= bound {
+                results.push(RefReflect::Deferred {
+                    ref_name: want.ref_name.clone(),
+                });
+                continue;
+            }
+
+            // (1) Divergence guard — never clobber a GitHub-side write.
+            if let Some(gh) = &want.observed_github_tip {
+                let last = self.last_emitted(&want.ref_name);
+                let is_our_echo = last == Some(gh.as_str());
+                let is_target = gh == &want.forge_tip;
+                if !is_our_echo && !is_target {
+                    // Someone moved this ref on GitHub to a tip we did not emit and
+                    // that is not where we're headed → divergence. HALT.
+                    halted = Some(ReflectHalt {
+                        ref_name: want.ref_name.clone(),
+                        forge_tip: want.forge_tip.clone(),
+                        github_tip: gh.clone(),
+                    });
+                    results.push(RefReflect::Deferred {
+                        ref_name: want.ref_name.clone(),
+                    });
+                    continue;
+                }
+            }
+
+            // (2) Idempotency — already reflected at this exact tip.
+            if self.last_emitted(&want.ref_name) == Some(want.forge_tip.as_str()) {
+                results.push(RefReflect::Skipped {
+                    ref_name: want.ref_name.clone(),
+                });
+                continue;
+            }
+
+            // (3) Emit (bounded): record the outbound emission.
+            self.emitted_outbound
+                .insert(want.ref_name.clone(), want.forge_tip.clone());
+            emitted += 1;
+            results.push(RefReflect::Emitted {
+                ref_name: want.ref_name.clone(),
+                tip: want.forge_tip.clone(),
+            });
+        }
+
+        ReflectReport { results, halted }
+    }
+
     // ── shared: the single external-change append (D3⑤) ─────────────────────
 
     /// Append a `ref.update` external-change event via the canonical
@@ -847,6 +929,90 @@ mod tests {
             s.authority().authority_for("refs/heads/main"),
             AuthoritySide::Forge
         );
+    }
+
+    #[test]
+    fn reflect_bounded_is_idempotent_and_bounded() {
+        let mut s = BidirSync::new();
+        let want = vec![
+            ReflectRef::new("refs/heads/a", oid('a'), None),
+            ReflectRef::new("refs/heads/b", oid('b'), None),
+            ReflectRef::new("refs/heads/c", oid('c'), None),
+        ];
+        // Bound = 2 ⇒ two emitted, the third deferred.
+        let report = s.reflect_bounded(&want, 2);
+        assert_eq!(report.emitted_count(), 2);
+        assert!(!report.is_halted());
+        assert!(matches!(report.results[2], RefReflect::Deferred { .. }));
+        // Re-running the SAME desired set (now with generous bound) reflects
+        // nothing new for the already-emitted refs (idempotent) and finishes c.
+        let report2 = s.reflect_bounded(&want, 10);
+        assert_eq!(report2.emitted_count(), 1, "only c is new");
+        assert!(matches!(report2.results[0], RefReflect::Skipped { .. }));
+        assert!(matches!(report2.results[1], RefReflect::Skipped { .. }));
+        assert!(matches!(report2.results[2], RefReflect::Emitted { .. }));
+        // A third run is a total no-op.
+        let report3 = s.reflect_bounded(&want, 10);
+        assert_eq!(report3.emitted_count(), 0);
+    }
+
+    #[test]
+    fn reflect_bounded_halts_on_divergence_never_clobbers() {
+        let mut s = BidirSync::new();
+        // First reflect a -> tip1 so we have a last-emitted baseline.
+        s.reflect_bounded(&[ReflectRef::new("refs/heads/a", oid('1'), None)], 10);
+        assert_eq!(s.last_emitted("refs/heads/a"), Some(oid('1').as_str()));
+
+        // Now the GitHub side has been moved to an UNRELATED tip (oid 9) — not our
+        // last-emitted (oid 1), not our new target (oid 2). We try to advance the
+        // forge to oid 2, plus a later ref b. The pass MUST halt and NOT clobber.
+        let want = vec![
+            ReflectRef::new("refs/heads/a", oid('2'), Some(oid('9'))),
+            ReflectRef::new("refs/heads/b", oid('b'), None),
+        ];
+        let report = s.reflect_bounded(&want, 10);
+        assert!(report.is_halted());
+        let halt = report.halted.as_ref().unwrap();
+        assert_eq!(halt.ref_name, "refs/heads/a");
+        assert_eq!(halt.github_tip, oid('9'));
+        // NOTHING was emitted — a was not advanced to oid 2 (no clobber), and b
+        // after the halt is deferred.
+        assert_eq!(report.emitted_count(), 0);
+        assert_eq!(
+            s.last_emitted("refs/heads/a"),
+            Some(oid('1').as_str()),
+            "the diverged ref must NOT be clobbered to the new tip"
+        );
+        assert!(matches!(report.results[1], RefReflect::Deferred { .. }));
+
+        // The divergence is recoverable via the engine's forge-authoritative
+        // arbitration — the GitHub tip is preserved as an incident, never dropped.
+        let (_res, incident) = s
+            .arbitrate_branch_divergence(
+                "refs/heads/a",
+                &oid('2'),
+                &oid('9'),
+                vec!["dev".into()],
+                5,
+            )
+            .unwrap();
+        assert_eq!(incident.preserved_tip, oid('9'));
+        s.verify_forge_chain().unwrap();
+    }
+
+    #[test]
+    fn reflect_bounded_treats_an_echo_as_safe() {
+        // If the observed GitHub tip equals what WE last emitted, that is our own
+        // write reflected back — safe to advance, not a divergence.
+        let mut s = BidirSync::new();
+        s.reflect_bounded(&[ReflectRef::new("refs/heads/a", oid('1'), None)], 10);
+        let report = s.reflect_bounded(
+            &[ReflectRef::new("refs/heads/a", oid('2'), Some(oid('1')))],
+            10,
+        );
+        assert!(!report.is_halted());
+        assert_eq!(report.emitted_count(), 1);
+        assert_eq!(s.last_emitted("refs/heads/a"), Some(oid('2').as_str()));
     }
 
     #[test]
