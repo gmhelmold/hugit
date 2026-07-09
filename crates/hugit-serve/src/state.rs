@@ -686,6 +686,19 @@ pub const MAX_REPOS_PER_TENANT: usize = 100;
 /// lost update. Upgrade to a zero-staleness conditional-GET (Option 1) before widening past 2.
 const REFS_REFRESH_INTERVAL_MS: u64 = 2_000;
 
+/// The GDPR1 erasure AUTO-EXECUTOR sweep cadence — a background reconciler, MINUTES not
+/// seconds (this is NOT latency-sensitive: the erasure grace window is hours/days, so a
+/// 5-minute sweep lands every matured request well inside any bound). The whole cascade runs
+/// on the sweep thread, OFF the accept loop, so this interval only paces the reconciler; it
+/// never affects request liveness.
+const ERASURE_AUTO_EXECUTE_INTERVAL_MS: u64 = 5 * 60 * 1_000;
+
+/// The maximum number of accounts the sweep DRIVES an irreversible erasure on per pass — a
+/// runaway guard. The sweep is off-loop so its duration is fine, but an unbounded drive over
+/// a huge matured backlog is capped; the remainder lands on the NEXT sweep, idempotently (a
+/// completed account is a no-op, a `partial` retries).
+const ERASURE_AUTO_EXECUTE_MAX_PER_SWEEP: usize = 32;
+
 /// Cooldown before re-probing R2 for a repo a lazy-load found ABSENT — bounds the
 /// accept-loop R2 cost of a 404-probe storm (see [`AppState::repo_load_misses`] +
 /// [`AppState::repo_state_or_load`]).
@@ -823,6 +836,169 @@ impl AppState {
                     }
                 }
             });
+    }
+
+    /// Spawn the GDPR1 erasure AUTO-EXECUTOR — a DETACHED background sweep that drives every
+    /// MATURED governing `erasure.requested` to the SAME irreversible cascade the manual
+    /// operator route runs, so a real user's Art.17 request AUTO-COMPLETES within a bounded
+    /// window (no cron/scheduler otherwise exists — the go-live audit's gap). Structured
+    /// EXACTLY like [`spawn_refs_refresh_loop`]: it clones the handles, loops with
+    /// `thread::sleep`, and runs the WHOLE cascade ON THIS thread — so its duration NEVER
+    /// blocks the single-threaded accept loop. This is ALSO the fix for the manual-cascade
+    /// accept-loop DoS the audit found (the O(all-repos) partition scan + per-digest blocking
+    /// erase now runs off-loop, never inline on a request).
+    ///
+    /// FAIL-CLOSED + env-gated: spawns ONLY when [`erasure_auto_execute_enabled`] AND CAS
+    /// mode AND [`erase_config`](Self::from_env) is set ([`should_spawn_auto_executor`]).
+    /// DEFAULT OFF — a routine deploy never auto-fires an irreversible erasure until the owner
+    /// flips it on at go-live. It drives the STANDARD
+    /// [`execute_account_erasure_composed`](crate::writes::erasure::execute_account_erasure_composed)
+    /// (never a custom path), so every cascade gate — the DSR-id legitimacy, the exact-superset
+    /// partition, the durable terminal `executed`/`partial` claim — is enforced UNCHANGED; it
+    /// does NOT touch the manual operator route (an in-flight Track-A verify uses that).
+    fn spawn_erasure_auto_executor_loop(&self) {
+        if !should_spawn_auto_executor(
+            erasure_auto_execute_enabled(),
+            self.cas_r2_read().is_some(),
+            self.erase_config.is_some(),
+        ) {
+            return; // fail-closed default: OFF (not enabled, or no CAS/erase seam)
+        }
+        let Some(tenant) = Self::cas_tenant() else {
+            return; // CAS mode requires a tenant (belt-and-suspenders with cas_r2_read)
+        };
+        let state = self.clone();
+        let spawn = std::thread::Builder::new()
+            .name("hugit-erasure-auto".to_string())
+            .spawn(move || {
+                eprintln!(
+                    "[hugit-serve] GDPR1 erasure auto-executor ENABLED — sweeping every {}s \
+                     (off the accept loop)",
+                    ERASURE_AUTO_EXECUTE_INTERVAL_MS / 1_000
+                );
+                loop {
+                    std::thread::sleep(Duration::from_millis(ERASURE_AUTO_EXECUTE_INTERVAL_MS));
+                    state.run_erasure_auto_sweep(&tenant);
+                }
+            });
+        if spawn.is_err() {
+            eprintln!(
+                "[hugit-serve] erasure auto-executor thread spawn failed — matured requests \
+                 will NOT auto-complete until a reboot (the manual operator route is unaffected)"
+            );
+        }
+    }
+
+    /// ONE reconciliation pass: enumerate account slugs, and for each MATURED governing
+    /// request drive the standard cascade. Per-account ISOLATED + fail-closed — a
+    /// load/execute fault OR a panic on one account is logged (`eprintln!`) and SKIPPED; it
+    /// never halts the sweep or crashes the thread. Bounded per pass
+    /// ([`ERASURE_AUTO_EXECUTE_MAX_PER_SWEEP`]); the remainder lands next sweep (idempotent).
+    fn run_erasure_auto_sweep(&self, tenant: &str) {
+        let slugs = match self.source.list_account_slugs() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "[hugit-serve] erasure auto-exec: account listing failed ({}) — skipping \
+                     this sweep",
+                    e.reason
+                );
+                return;
+            }
+        };
+        let mut driven = 0usize;
+        for slug in slugs {
+            if driven >= ERASURE_AUTO_EXECUTE_MAX_PER_SWEEP {
+                eprintln!(
+                    "[hugit-serve] erasure auto-exec: per-sweep cap \
+                     ({ERASURE_AUTO_EXECUTE_MAX_PER_SWEEP}) reached — remaining matured requests \
+                     run next sweep"
+                );
+                break;
+            }
+            let now = now_unix_ms();
+            let grace_ms = crate::server::erasure_grace_ms();
+            // Belt-and-suspenders isolation: the cascade already fail-closes on every fault,
+            // but a per-account catch_unwind guarantees a single account's panic never takes
+            // down the sweep thread (matching the other detached loops).
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.auto_execute_one(tenant, &slug, grace_ms, now)
+            }));
+            match outcome {
+                Ok(Ok(Some(o))) => {
+                    driven += 1;
+                    eprintln!("[hugit-serve] erasure auto-exec: account `{slug}` executed → {o:?}");
+                }
+                Ok(Ok(None)) => {} // not matured / no governing request / no DSR id — skip
+                Ok(Err(e)) => {
+                    eprintln!(
+                        "[hugit-serve] erasure auto-exec: account `{slug}` faulted ({}) — skipped \
+                         (sweep continues)",
+                        e.reason
+                    );
+                }
+                Err(_) => {
+                    eprintln!(
+                        "[hugit-serve] erasure auto-exec: account `{slug}` drive PANICKED — \
+                         skipped (sweep continues)"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Drive the cascade for ONE account IFF its standing request is matured + governing +
+    /// DSR-legitimate ([`should_auto_execute`](crate::writes::erasure::should_auto_execute)).
+    /// `Ok(None)` = intentionally SKIPPED (no governing request, grace not elapsed, or no DSR
+    /// id — fail-closed, never a physical erase without an anchored legitimacy id). `Ok(Some)`
+    /// = the STANDARD cascade ran (executed/partial/already-executed). `Err` = a load/execute
+    /// fault (the caller logs + continues). Drives the EXACT same
+    /// [`execute_account_erasure_composed`](crate::writes::erasure::execute_account_erasure_composed)
+    /// the operator route uses, as the OPERATOR principal ([`crate::server::dev_principal`]) —
+    /// the SUBJECT (whose data is erased) is read from the standing record, never invented.
+    fn auto_execute_one(
+        &self,
+        tenant: &str,
+        slug: &str,
+        grace_ms: u64,
+        now: u64,
+    ) -> Result<Option<crate::writes::erasure::ErasureOutcome>, EngineErr> {
+        use crate::writes::erasure::{
+            R2OidIndexDigests, execute_account_erasure_composed, read_standing_erasure_request,
+            should_auto_execute,
+        };
+        let (log, _) = self.load_account_log(slug)?;
+        let standing = read_standing_erasure_request(&log);
+        if !should_auto_execute(standing.as_ref(), grace_ms, now) {
+            return Ok(None);
+        }
+        // `should_auto_execute` guarantees `Some` with a non-empty `dsr_id`.
+        let standing = standing.expect("should_auto_execute implies Some");
+        let dsr_id = standing
+            .dsr_id
+            .as_deref()
+            .expect("should_auto_execute implies a non-empty DSR id");
+        // Physical erase requires CAS mode + the configured seam. The spawn guard asserted
+        // both, but re-check per drive — fail-closed, never a silent no-erase.
+        let Some(r2) = self.cas_r2_read() else {
+            return Ok(None);
+        };
+        let Some(erase_cfg) = self.erase_config.as_ref() else {
+            return Ok(None);
+        };
+        let digests = R2OidIndexDigests { r2 };
+        let erase = erase_cfg.clone().into_client();
+        let outcome = execute_account_erasure_composed(
+            self,
+            &digests,
+            &standing.subject,
+            crate::server::dev_principal(),
+            now,
+            &erase,
+            tenant,
+            dsr_id,
+        )?;
+        Ok(Some(outcome))
     }
 
     /// Build from env. `HUGIT_ENGINE_DEV_TOKEN` is always required (fail-closed).
@@ -996,6 +1172,12 @@ impl AppState {
         // NO-OP outside CAS mode; strictly off the accept loop. Spawn LAST (after the state
         // is fully built) so the thread sees the loaded repos.
         state.spawn_refs_refresh_loop();
+        // GDPR1 Art.17 auto-executor (env-gated, fail-closed DEFAULT OFF). A detached
+        // off-loop sweep that auto-completes matured erasure requests (no cron otherwise) AND
+        // moves the irreversible cascade off the single-threaded accept loop (the DoS fix).
+        // NO-OP unless HUGIT_ERASURE_AUTO_EXECUTE=1 AND CAS mode AND the erase seam is
+        // configured. Spawn LAST (after the state is fully built).
+        state.spawn_erasure_auto_executor_loop();
         Ok(state)
     }
 
@@ -3361,6 +3543,35 @@ fn receive_pack_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// Whether the GDPR1 erasure AUTO-EXECUTOR background sweep is enabled
+/// (`HUGIT_ERASURE_AUTO_EXECUTE=1|true`). DEFAULT OFF — fail-closed: a routine deploy NEVER
+/// auto-fires an irreversible Art.17 erasure until the owner DELIBERATELY flips this on at
+/// go-live (after clw's re-audit). Mirrors [`receive_pack_enabled`].
+fn erasure_auto_execute_enabled() -> bool {
+    std::env::var("HUGIT_ERASURE_AUTO_EXECUTE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// PURE spawn guard (testable without env): the auto-executor loop spawns ONLY when it is
+/// `enabled` AND the engine is in CAS mode (`cas_mode` — physical erase reads oid-indexes
+/// from R2) AND the physical-erase seam is configured (`erase_configured` — `state.erase_config`).
+/// Any of the three false → NO thread (the fail-closed default: a routine deploy never
+/// auto-erases).
+#[must_use]
+fn should_spawn_auto_executor(enabled: bool, cas_mode: bool, erase_configured: bool) -> bool {
+    enabled && cas_mode && erase_configured
+}
+
+/// Unix-ms wall clock — the same unit the erasure grace anchor (`requested_at`) is measured
+/// in. A pre-epoch clock (impossible in practice) reads `0`.
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// The dev-token→operator break-glass gate ([`AppState::allow_dev_operator`]). The
 /// PUBLIC prod deploy OMITS `HUGIT_ALLOW_DEV_OPERATOR`, so this is **false** by
 /// default and the dev-token confers NO operator elevation. Set to `1` ONLY as a
@@ -3800,6 +4011,34 @@ pub fn is_safe_account_slug(account: &str) -> bool {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    // ── GDPR1 erasure auto-executor spawn guard (pure, env-free) ─────────────────
+
+    #[test]
+    fn auto_executor_spawns_only_when_enabled_cas_and_erase_seam() {
+        // The full truth table: the loop spawns ONLY on (enabled AND CAS AND erase-seam).
+        assert!(
+            should_spawn_auto_executor(true, true, true),
+            "enabled + CAS + erase seam → spawn"
+        );
+        // Any single gate off → fail-closed no-spawn.
+        assert!(
+            !should_spawn_auto_executor(false, true, true),
+            "not enabled (the DEFAULT, HUGIT_ERASURE_AUTO_EXECUTE unset) → NEVER spawn"
+        );
+        assert!(
+            !should_spawn_auto_executor(true, false, true),
+            "no CAS mode → no spawn (physical erase needs the R2 oid-index)"
+        );
+        assert!(
+            !should_spawn_auto_executor(true, true, false),
+            "no erase seam configured → no spawn (no half-live delete path)"
+        );
+        assert!(
+            !should_spawn_auto_executor(false, false, false),
+            "the routine-deploy default (all off) never auto-fires an irreversible erasure"
+        );
+    }
 
     /// Build a `get`-style lookup over a fixed map (no global env mutation).
     fn vars(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
