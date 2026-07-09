@@ -39,6 +39,7 @@ pub mod lease_client;
 pub mod lease_exec;
 pub mod metrics;
 pub mod nondeterminism;
+pub mod reexec;
 
 pub use byte_identity::{ArtifactDiff, ByteIdentityReport, compare_byte_identity};
 pub use dispatch::{
@@ -58,3 +59,4 @@ pub use lease_exec::{
 };
 pub use metrics::{RunnerJobMetrics, RunnerTokenCounts, RunnerToolCount};
 pub use nondeterminism::{DeterminismState, NonDeterminismTracker, RunObservation};
+pub use reexec::{ReExecDemand, ReExecOutcome, UnavailableReason, dispatch_reexec};
