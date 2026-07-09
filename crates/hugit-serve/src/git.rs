@@ -199,6 +199,9 @@ pub fn respond_git(
             // absent/invalid/expired — fail-closed), then gate on authorize_read.
             // SAME derivation the upload-pack POST runs (no split-route bypass).
             let principal = clone_principal(state, request.headers());
+            // G11: map the bare URL slug to the caller's user-scoped stored key (legacy
+            // fallback for pre-G11 flat repos). Same derivation the POST below runs.
+            let repo = &state.resolve_repo_slug(repo, &principal);
             match advertise_refs(state, repo, &principal) {
                 Some(body) => {
                     let body_len = body.len();
@@ -215,6 +218,9 @@ pub fn respond_git(
             // POST must 404 for every case the advertise hides (no split-route
             // bypass where a pack is served for a repo the advertise concealed).
             let principal = clone_principal(state, request.headers());
+            // G11: resolve the bare URL slug to the caller's user-scoped stored key
+            // (legacy fallback) — IDENTICAL to the advertise, so no split-route bypass.
+            let repo = &state.resolve_repo_slug(repo, &principal);
             // Do the CHEAP work INLINE on the accept loop — principal, read-authz +
             // ref snapshot, want parse + want-validation (which caps the walk ROOT
             // before any worker exists). On any failure → 404 inline, no worker.
@@ -1051,6 +1057,10 @@ fn handle_receive_advertise(state: &AppState, repo: &str, request: Request, io_b
         return respond_push_scope_forbidden(request, io_budget);
     }
     let principal = ctx.principal;
+    // G11: resolve the bare URL slug to the pusher's user-scoped stored key (legacy
+    // fallback) — gated identically to the push, so no oracle before authz.
+    let repo_owned = state.resolve_repo_slug(repo, &principal);
+    let repo = repo_owned.as_str();
     if !crate::state::is_safe_repo_slug(repo) {
         return respond_not_found(request, io_budget);
     }
@@ -1140,6 +1150,12 @@ fn handle_receive_pack(
         return respond_push_scope_forbidden(request, io_budget);
     }
     let principal = ctx.principal;
+    // G11: resolve the bare URL slug to the pusher's user-scoped stored key (legacy
+    // fallback). The resolved slug flows through the seam load, the write-authz, AND the
+    // `ReceivePlan` handed to the worker, so the durable finalize keys the SAME stored
+    // slug's manifests.
+    let repo_owned = state.resolve_repo_slug(repo, &principal);
+    let repo = repo_owned.as_str();
 
     // A write seam is required (GIT_DIR mode). No seam (CAS mode / unknown repo) →
     // 404, no oracle. Everything past here is gated behind a successful authz.

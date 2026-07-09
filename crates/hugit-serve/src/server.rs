@@ -510,6 +510,9 @@ fn respond_sse(
             return send_json(request, status, body);
         }
     };
+    // G11: map the bare URL slug to the caller's user-scoped stored key (legacy
+    // fallback) before any load — same resolution as the /v1 read + git wire.
+    let repo = &state.resolve_repo_slug(repo, &principal);
     if !crate::state::is_safe_repo_slug(repo) {
         let (status, body) = err(EngineErr::not_found());
         return send_json(request, status, body);
@@ -663,6 +666,10 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
     match segs.as_slice() {
         ["v1", "repos", repo, tail @ ..] => {
             let principal = read_principal(state, headers);
+            // G11: map the bare URL slug to the caller's user-scoped stored key (legacy
+            // fallback for pre-G11 flat repos), then key EVERY load below on it.
+            let repo_owned = state.resolve_repo_slug(repo, &principal);
+            let repo = repo_owned.as_str();
             // Load + verify the repo log ONCE (404 absent/unsafe-slug, 503
             // tampered) BEFORE gating — and reuse it for the handler (no
             // double-verify).
@@ -1807,6 +1814,11 @@ fn dispatch_repo_write(
         ));
     }
     let idem = idem_raw;
+    // G11: map the bare URL slug to the caller's user-scoped stored key (legacy
+    // fallback) — every write verb below loads/persists + gates on the SAME stored
+    // slug, so a tenant mutates ONLY their own scoped repo.
+    let repo_owned = state.resolve_repo_slug(repo, &principal);
+    let repo = repo_owned.as_str();
     // Step-up is satisfied by a fresh Clerk session (Tier-1 `fresh_auth`, derived
     // from the signed `auth_time`) OR — for the DEV path ONLY — the explicit
     // `X-Step-Up` header. The header is honored solely for the single trusted dev

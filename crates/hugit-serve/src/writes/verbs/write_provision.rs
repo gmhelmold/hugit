@@ -100,6 +100,14 @@ pub fn validate_name(name: &str) -> Result<(), EngineErr> {
     {
         return bad("o nome do repositório só aceita [a-z0-9._-]");
     }
+    // G11: RESERVE the two manifest leaf names. A user-scoped log is stored at
+    // `<owner>/<name>.json`, which shares its shape with a legacy flat repo's manifest
+    // (`<slug>/refs.json` / `<slug>/oid-index.json`). Reserving `refs`/`oid-index`
+    // keeps the durable enumeration (`list_repo_slugs`) unambiguous — a scoped repo can
+    // never collide with a manifest key.
+    if name == "refs" || name == "oid-index" {
+        return bad("\"refs\" e \"oid-index\" são nomes reservados");
+    }
     Ok(())
 }
 
@@ -247,7 +255,16 @@ pub fn provision(
     // 2. Derive the owner tenant from the CALLER (never the body) — 401 for
     //    operator/anon/unknown (no god-create / anon-create).
     let owner_tenant = derive_owner_tenant(principal)?;
-    let slug = req.name.clone();
+    // G11 — the STORED key is USER-SCOPED: `<owner_tenant>/<name>`. This is what closes
+    // squatting AND the create oracle: the no-clobber pre-check + create-only persist
+    // below key on the scoped slug, so two DIFFERENT tenants can each create "foo"
+    // (disjoint keys, both 201) and a cross-tenant caller can never 409-probe another
+    // tenant's name. The DISPLAY name returned to the client stays the BARE `req.name`
+    // (a composite id is not routable over the single-segment git wire). `owner_tenant`
+    // is a safe account slug (`derive_owner_tenant` enforces it) and `name` a safe
+    // segment (`validate_name`), so `slug` is always an `is_safe_repo_slug` scoped key.
+    let name = req.name.clone();
+    let slug = format!("{owner_tenant}/{name}");
 
     // 2b. Per-tenant repo cap (DoS guard) — refuse BEFORE any durable write or the
     //     &'static RepoState leak. Every provision permanently leaks a RepoState
@@ -315,7 +332,9 @@ pub fn provision(
     }
 
     Ok(ProvisionOk {
-        repo: slug,
+        // DISPLAY: the BARE name (routable by the owner; `resolve_repo_slug` maps it
+        // back to the `<owner_tenant>/<name>` stored key on every subsequent request).
+        repo: name,
         owner_tenant,
         visibility: visibility.to_string(),
     })
@@ -327,11 +346,13 @@ pub fn provision(
 /// On success: `201 { "repo": "<slug>", "owner_tenant": "<org>", "visibility":
 /// "<...>", "ready": true }`.
 ///
-/// NOTE (deviation, flagged): the frozen contract's response `repo` is
-/// `"<owner_tenant>/<name>"`, but the engine routes/stores repos under a SINGLE URL
-/// segment ([`is_safe_repo_slug`](crate::state::is_safe_repo_slug) rejects `/`), so a
-/// composite `<owner_tenant>/<name>` id is NOT addressable. v0 returns the routable
-/// single-segment slug as `repo` and surfaces `owner_tenant` as a sibling field.
+/// NOTE (G11): the repo is STORED under the user-scoped key `<owner_tenant>/<name>`
+/// (closing name-squatting + the create oracle — see [`provision`]), but the response
+/// `repo` is the BARE `name`: the owner routes/clones by the bare name and
+/// [`resolve_repo_slug`](crate::state::AppState::resolve_repo_slug) maps it back to the
+/// stored key. A composite `<owner_tenant>/<name>` id is NOT routable over the
+/// single-segment git wire, so the bare name is the addressable id; `owner_tenant` is
+/// surfaced as a sibling field.
 #[must_use]
 pub fn handle_provision(
     state: &AppState,
@@ -501,9 +522,12 @@ mod tests {
         assert_eq!(ok.owner_tenant, "org-a");
         assert_eq!(ok.visibility, "private"); // default
 
-        // The genesis log is durable + readable: the owner passes the read gate, a
-        // foreign tenant + anon are denied (→ 404 no-oracle at the route).
-        let log = st.load_verified("proj").expect("genesis log is readable");
+        // The genesis log is durable + readable under the USER-SCOPED stored key: the
+        // owner passes the read gate, a foreign tenant + anon are denied (→ 404
+        // no-oracle at the route).
+        let log = st
+            .load_verified("org-a/proj")
+            .expect("genesis log is readable");
         let meta = project_repo_meta(&log);
         assert_eq!(meta.visibility, Visibility::Private);
         assert_eq!(meta.owner_tenant.as_deref(), Some("org-a"));
@@ -521,7 +545,7 @@ mod tests {
         let ok =
             provision(&st, &body("openrepo", Some("public")), &tenant("org-a"), 1).expect("201");
         assert_eq!(ok.visibility, "public");
-        let meta = project_repo_meta(&st.load_verified("openrepo").unwrap());
+        let meta = project_repo_meta(&st.load_verified("org-a/openrepo").unwrap());
         assert_eq!(meta.visibility, Visibility::Public);
         // A public repo opens anon reads (the clone gate).
         assert!(authorize_read(&[], &meta), "anon reads public");
@@ -542,7 +566,7 @@ mod tests {
     fn duplicate_is_409_and_does_not_clobber() {
         let st = state_local();
         provision(&st, &body("dup", Some("public")), &tenant("org-a"), 1).expect("first 201");
-        let before = st.load_verified("dup").unwrap();
+        let before = st.load_verified("org-a/dup").unwrap();
         let before_vis = project_repo_meta(&before).visibility;
 
         // A second create for the SAME slug — even by the SAME tenant with a
@@ -550,7 +574,7 @@ mod tests {
         let e = provision(&st, &body("dup", Some("private")), &tenant("org-a"), 2)
             .expect_err("duplicate must 409");
         assert_eq!(e.status, 409);
-        let after = project_repo_meta(&st.load_verified("dup").unwrap());
+        let after = project_repo_meta(&st.load_verified("org-a/dup").unwrap());
         assert_eq!(
             after.visibility, before_vis,
             "the original meta is untouched"
@@ -595,10 +619,87 @@ mod tests {
             ok.owner_tenant, "org-attacker",
             "owner is the caller, not the body"
         );
-        let meta = project_repo_meta(&st.load_verified("sec").unwrap());
+        let meta = project_repo_meta(&st.load_verified("org-attacker/sec").unwrap());
         assert_eq!(meta.owner_tenant.as_deref(), Some("org-attacker"));
         // The victim tenant cannot read it (it is NOT theirs).
         assert!(!authorize_read(&tenant("org-victim"), &meta));
+    }
+
+    // ── G11: user-scoped slug namespace ──────────────────────────────────────
+
+    #[test]
+    fn two_tenants_both_create_foo_isolated_no_squat_no_oracle() {
+        // THE gap G11 closes: the slug namespace is user-scoped, so two DIFFERENT
+        // owner_tenants can EACH create "foo" — both 201, disjoint stored keys — and
+        // neither 409-squats the other (no create oracle across tenants).
+        let (st, dir) = state_local_with_dir();
+        let a = provision(&st, &body("foo", Some("private")), &tenant("org-a"), 1)
+            .expect("org-a creates foo → 201");
+        let b = provision(&st, &body("foo", Some("public")), &tenant("org-b"), 2)
+            .expect("org-b ALSO creates foo → 201 (no squat, no 409 oracle)");
+        // Both DISPLAY the bare name.
+        assert_eq!(a.repo, "foo");
+        assert_eq!(b.repo, "foo");
+        // Stored under DISJOINT user-scoped keys, each owned by its creator.
+        let ma = project_repo_meta(&st.load_verified("org-a/foo").unwrap());
+        let mb = project_repo_meta(&st.load_verified("org-b/foo").unwrap());
+        assert_eq!(ma.owner_tenant.as_deref(), Some("org-a"));
+        assert_eq!(ma.visibility, Visibility::Private);
+        assert_eq!(mb.owner_tenant.as_deref(), Some("org-b"));
+        assert_eq!(mb.visibility, Visibility::Public);
+        // The two live side-by-side in the durable store (no clobber).
+        assert!(dir.join("org-a").join("foo.json").exists());
+        assert!(dir.join("org-b").join("foo.json").exists());
+    }
+
+    #[test]
+    fn legacy_flat_slug_repo_still_resolves_backcompat() {
+        // A pre-G11 repo stored under the FLAT key `legacy` (seeded directly, as an old
+        // provision would have) must keep resolving via the back-compat fallback — the
+        // migration story is non-destructive: legacy repos are served as-is.
+        let (mut st, dir) = state_local_with_dir();
+        seed_owned(&mut st, &dir, "legacy", "org-a"); // writes flat `legacy.json`
+        // The owner resolves the BARE name to the LEGACY flat key (no scoped key exists).
+        assert_eq!(st.resolve_repo_slug("legacy", &tenant("org-a")), "legacy");
+        // And the flat log still loads + projects its owner.
+        let meta = project_repo_meta(&st.load_verified("legacy").unwrap());
+        assert_eq!(meta.owner_tenant.as_deref(), Some("org-a"));
+    }
+
+    #[test]
+    fn display_name_is_the_bare_name_never_the_scoped_key() {
+        let st = state_local();
+        let ok = provision(&st, &body("proj", None), &tenant("org-a"), 1).expect("201");
+        assert_eq!(ok.repo, "proj", "the DISPLAY id is the bare name");
+        assert!(!ok.repo.contains('/'), "never the composite <owner>/<name>");
+        // The HTTP shape agrees.
+        let (status, jb) = handle_provision(&st, &body("proj2", None), &tenant("org-a"), 2);
+        assert_eq!(status, 201);
+        let v: serde_json::Value = serde_json::from_str(&jb).unwrap();
+        assert_eq!(v["repo"], "proj2");
+        assert_eq!(v["owner_tenant"], "org-a");
+    }
+
+    #[test]
+    fn cross_tenant_caller_cannot_resolve_or_observe_by_bare_name() {
+        // org-a owns a private "foo" (stored `org-a/foo`). A DIFFERENT tenant asking for
+        // the bare name "foo" must NOT resolve org-a's repo: its scoped key is `org-b/foo`
+        // (absent), and the legacy fallback `foo` is also absent → an honest 404, no
+        // existence oracle.
+        let st = state_local();
+        provision(&st, &body("foo", Some("private")), &tenant("org-a"), 1).expect("201");
+        // The owner resolves + reads their own.
+        assert_eq!(st.resolve_repo_slug("foo", &tenant("org-a")), "org-a/foo");
+        assert!(st.load_verified("org-a/foo").is_ok());
+        // A cross-tenant caller resolves to the (absent) legacy flat key, NEVER org-a's.
+        assert_eq!(st.resolve_repo_slug("foo", &tenant("org-b")), "foo");
+        assert_eq!(
+            st.load_verified("foo").unwrap_err().status,
+            404,
+            "the bare name reveals nothing about org-a's repo"
+        );
+        // Even the flat fallback key is absent (nothing to observe).
+        assert!(st.load_verified("org-b/foo").is_err());
     }
 
     // ── per-tenant repo cap (DoS guard) ──────────────────────────────────────
