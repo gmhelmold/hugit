@@ -1063,7 +1063,11 @@ impl AppState {
     /// [`execute_account_erasure_composed`](crate::writes::erasure::execute_account_erasure_composed)
     /// the operator route uses, as the OPERATOR principal ([`crate::server::dev_principal`]) —
     /// the SUBJECT (whose data is erased) is read from the standing record, never invented.
-    fn auto_execute_one(
+    /// `pub` so the HOLE-2 background reconciler leg can be driven END-TO-END from an
+    /// integration test through the SAME per-account sweep entry the loop calls (never a
+    /// direct `execute_account_erasure` primitive call — the audit flagged direct-primitive
+    /// false-greens). Prod callers remain the in-crate sweep.
+    pub fn auto_execute_one(
         &self,
         tenant: &str,
         slug: &str,
@@ -1072,11 +1076,27 @@ impl AppState {
     ) -> Result<Option<crate::writes::erasure::ErasureOutcome>, EngineErr> {
         use crate::writes::erasure::{
             R2OidIndexDigests, execute_account_erasure_composed, read_standing_erasure_request,
-            should_auto_execute,
+            should_auto_execute, should_reconcile_pii,
         };
         let (log, _) = self.load_account_log(slug)?;
         let standing = read_standing_erasure_request(&log);
-        if !should_auto_execute(standing.as_ref(), grace_ms, now) {
+        let will_auto_execute = should_auto_execute(standing.as_ref(), grace_ms, now);
+        if !will_auto_execute {
+            // HOLE-2 BACKGROUND PII-COMPLETION RECONCILER. `read_standing_erasure_request`
+            // treats `executed` as superseding (returns `None`), so an account whose post-claim
+            // `shred_and_redact_on_execute` faulted mid-flight (executed persisted, but cleartext
+            // un-redacted + key un-shredded) is INVISIBLE to `should_auto_execute` — the #317
+            // self-heal was unreachable in production. Detect that stranded state on the SAME
+            // sweep (a SEPARATE path that does NOT touch the standing-request supersession
+            // semantics) and idempotently re-drive the PII step to convergence. Fail-closed (a
+            // fault just retries next sweep) + idempotent (a converged account no longer matches
+            // the predicate, and a still-live re-drive no-ops once the key is shredded).
+            if should_reconcile_pii(&log, will_auto_execute) {
+                self.reconcile_pii_completion(slug, &log, now)?;
+                return Ok(Some(
+                    crate::writes::erasure::ErasureOutcome::AlreadyExecuted,
+                ));
+            }
             return Ok(None);
         }
         // `should_auto_execute` guarantees `Some` with a non-empty `dsr_id`.
@@ -1106,6 +1126,42 @@ impl AppState {
             dsr_id,
         )?;
         Ok(Some(outcome))
+    }
+
+    /// Idempotently re-drive the provenance-PII completion for an account STRANDED with
+    /// `erasure.executed` but no `erasure.pii_shredded` (HOLE-2). Called ONLY by
+    /// [`auto_execute_one`](Self::auto_execute_one) after
+    /// [`should_reconcile_pii`](crate::writes::erasure::should_reconcile_pii) confirmed the
+    /// stranded state — a SEPARATE path from the cascade that never touches the
+    /// standing-request supersession semantics.
+    ///
+    /// Drives the EXISTING idempotent primitive
+    /// [`shred_and_redact_on_execute`](crate::provenance_pii_redact::shred_and_redact_on_execute):
+    /// it redacts the account log + tenant registry + every tombstoned repo log and shreds the
+    /// key LAST, using the None-tolerant read-only key path (already-shredded + accountability
+    /// present ⇒ a clean no-op, never a key re-mint). The tombstoned repo slugs are the durable
+    /// owned set from [`plan_account_erasure`]; the DSR id is recovered from the (superseded)
+    /// `erasure.requested` record so the healed accountability record keeps the original handle.
+    ///
+    /// Fail-closed: any durable fault returns `Err` (the sweep logs + retries next pass — never
+    /// a false "healed"). Needs no CAS-erase transport (the byte-GC already ran before the
+    /// `executed` claim); it is a pure durable-log convergence step, valid in any source mode.
+    fn reconcile_pii_completion(
+        &self,
+        account: &str,
+        log: &EventLog,
+        now: u64,
+    ) -> Result<(), EngineErr> {
+        let plan = crate::writes::erasure::plan_account_erasure(self, account)?;
+        let repo_slugs: Vec<String> = plan.repos.iter().map(|l| l.repo.clone()).collect();
+        let dsr_id = crate::writes::erasure::erasure_request_dsr_id(log).unwrap_or_default();
+        crate::provenance_pii_redact::shred_and_redact_on_execute(
+            self,
+            account,
+            &repo_slugs,
+            &dsr_id,
+            now,
+        )
     }
 
     /// Build from env. `HUGIT_ENGINE_DEV_TOKEN` is always required (fail-closed).
@@ -2482,9 +2538,20 @@ impl AppState {
     ) -> Result<(), EngineErr> {
         for _attempt in 0..crate::writes::MAX_CAS_ATTEMPTS {
             let (mut log, token) = self.load_tenant_registry(org)?;
+            let head_len = log.records().len();
             if !crate::tenant_registry::append_register(&mut log, repo, principal_chain, at)? {
                 return Ok(()); // already registered — idempotent no-op
             }
+            // ART.17 leg 2 (registry door): the record was BUILT on the CLEARTEXT principal so
+            // its D14 class derivation (`asserted_class`) saw the real caller — now rewrite JUST
+            // the appended tail's stored `principal_chain` to `subj:<hmac>` and re-hash it
+            // NATIVELY (the exact `repseudonymize_tail` mechanism #319 uses at the write doors),
+            // so `_tenants/{org}.json` never durably stores the cleartext `clerk:{org}:{user}`.
+            // The fold keys on the `repo` PAYLOAD field, never the principal, so the count /
+            // ownership (the cap denominator) is unaffected. Fail-closed on a key-store fault
+            // (the register aborts rather than storing cleartext — the caller best-efforts it and
+            // the count self-heals on a later touch).
+            let log = crate::writes::repseudonymize_tail(&log, head_len, self)?;
             match self.persist_tenant_registry(org, &log, &token) {
                 Ok(()) => return Ok(()),
                 Err(e) if e.is_cas_conflict() => continue, // head moved — reload + retry
@@ -2508,9 +2575,17 @@ impl AppState {
     ) -> Result<(), EngineErr> {
         for _attempt in 0..crate::writes::MAX_CAS_ATTEMPTS {
             let (mut log, token) = self.load_tenant_registry(org)?;
+            let head_len = log.records().len();
             if !crate::tenant_registry::append_unregister(&mut log, repo, principal_chain, at)? {
                 return Ok(()); // already decremented — idempotent no-op
             }
+            // ART.17 leg 2 (registry door): rewrite the appended tail's stored chain to the
+            // pseudonym + re-hash natively — same mechanism as [`register_repo_in_tenant`]. The
+            // erase-tombstone decrement is authored by the OPERATOR (`orchestrator:`, a
+            // passthrough for the mapper), so this is a no-op there, but it keeps BOTH registry
+            // doors consistent so no cleartext `clerk:` principal can enter `_tenants/{org}.json`
+            // from either side.
+            let log = crate::writes::repseudonymize_tail(&log, head_len, self)?;
             match self.persist_tenant_registry(org, &log, &token) {
                 Ok(()) => return Ok(()),
                 Err(e) if e.is_cas_conflict() => continue,

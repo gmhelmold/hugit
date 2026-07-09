@@ -711,3 +711,264 @@ fn two_users_in_one_org_do_not_collide_in_the_idempotency_ledger() {
         "both stored pseudonyms are opaque (no cleartext account/user): {comment_chains:?}"
     );
 }
+
+// ── HOLE 1: the per-tenant repo REGISTRY (`_tenants/{account}.json`) must carry no cleartext
+//    clerk principal — closed at BOTH the write door (1a) and the erase redaction pass (1b) ──
+
+/// Assert `_tenants/{ACCOUNT}.json` carries NO cleartext `clerk:` principal / `acme:user-1` user
+/// id in ANY record's `principal_chain` (the `repo` payload legitimately contains the org slug,
+/// so we do NOT use the bare-slug `no_cleartext_survives` here).
+fn registry_has_no_cleartext_principal(reg: &EventLog) {
+    for r in reg.records() {
+        assert!(
+            r.principal_chain.iter().all(|p| !p.contains("clerk:")),
+            "a cleartext clerk principal survives in the tenant registry: {:?}",
+            r.principal_chain
+        );
+        assert!(
+            r.principal_chain
+                .iter()
+                .all(|p| !p.contains(&format!("{ACCOUNT}:user-1"))),
+            "a cleartext user id survives in the tenant registry: {:?}",
+            r.principal_chain
+        );
+    }
+}
+
+#[test]
+fn provision_pseudonymises_the_registry_and_erase_leaves_no_cleartext_there() {
+    // HOLE 1 end-to-end THROUGH THE REAL DOORS: provision a repo as `clerk:acme:user-1` (a real
+    // cleartext-candidate registry write via the door #319 bypassed), then erase the account.
+    // Asserts: (1a) the FRESH registry record stores `subj:`, not cleartext; and after erase the
+    // registry has NO cleartext clerk principal AND `verify_chain` still passes. RED on the
+    // un-fixed code (the door stored `clerk:acme:user-1` and the erase never touched `_tenants/`).
+    let dir = scratch_dir();
+    let st = AppState::new(dir.clone(), "dev-token".into());
+
+    let principal = vec![format!("clerk:{ACCOUNT}:user-1")];
+    let body =
+        serde_json::to_vec(&serde_json::json!({"name":"alpha","visibility":"private"})).unwrap();
+    hugit_serve::writes::verbs::write_provision::provision(&st, &body, &principal, 1)
+        .expect("provision through the real door");
+
+    // (1a) The fresh registry write stores the PSEUDONYM, never the cleartext clerk principal.
+    let (reg0, _) = st.load_tenant_registry(ACCOUNT).expect("registry loads");
+    verify_chain(reg0.records()).expect("registry chain verifies");
+    let registered: Vec<_> = reg0
+        .records()
+        .iter()
+        .filter(|r| r.kind == hugit_serve::tenant_registry::TENANT_REPO_REGISTERED_KIND)
+        .collect();
+    assert_eq!(registered.len(), 1, "exactly one repo registered");
+    assert!(
+        registered[0]
+            .principal_chain
+            .iter()
+            .all(|p| p.starts_with("subj:")),
+        "the fresh registry write stores subj:, not cleartext: {:?}",
+        registered[0].principal_chain
+    );
+    registry_has_no_cleartext_principal(&reg0);
+
+    // Request + EXECUTE the account erasure (empty exclusive set → Executed → shred+redact).
+    seed_account(&dir);
+    let outcome = execute_account_erasure_with_erase(
+        &st,
+        ACCOUNT,
+        vec!["orchestrator:hugit".into()],
+        100,
+        &AllGone,
+        "d863fafb",
+        &[],
+        "dsr-7",
+    )
+    .expect("execute");
+    assert!(
+        matches!(outcome, ErasureOutcome::Executed { .. }),
+        "the cascade completes: {outcome:?}"
+    );
+
+    // (1b) + INVARIANT: after a COMPLETED erase the registry carries NO cleartext clerk principal
+    // anywhere and its tamper-evident chain STILL verifies. The key is shredded LAST, so any
+    // surviving cleartext could NEVER be redacted afterward — it must already be gone.
+    let (reg1, _) = st
+        .load_tenant_registry(ACCOUNT)
+        .expect("registry loads post-erase");
+    verify_chain(reg1.records()).expect("post-erase registry chain still verifies");
+    registry_has_no_cleartext_principal(&reg1);
+    assert!(
+        st.subject_key_for(ACCOUNT).unwrap().is_none(),
+        "the subject key is shredded after the completed erase"
+    );
+}
+
+#[test]
+fn erase_redacts_a_legacy_cleartext_registry_record() {
+    // HOLE 1b in ISOLATION: a registry record written with a CLEARTEXT clerk principal (the
+    // kill-switch-OFF / legacy path the door pseudonymisation does not retroactively cover) must
+    // be rendered unrecoverable by the erase redaction pass. RED if `redact_tenant_registry` is
+    // not wired into `shred_and_redact_on_execute`.
+    let dir = scratch_dir();
+    // Seed `_tenants/acme.json` with a CLEARTEXT registered record via the raw registry primitive
+    // (bypassing the now-pseudonymising door — exactly what a legacy/kill-switch-OFF write left).
+    let tdir = dir.join("_tenants");
+    std::fs::create_dir_all(&tdir).unwrap();
+    let mut reg = EventLog::new();
+    hugit_serve::tenant_registry::append_register(
+        &mut reg,
+        &format!("{ACCOUNT}/alpha"),
+        &[format!("clerk:{ACCOUNT}:user-1")],
+        1,
+    )
+    .unwrap();
+    std::fs::write(
+        tdir.join(format!("{ACCOUNT}.json")),
+        serde_json::to_string(reg.records()).unwrap(),
+    )
+    .unwrap();
+    seed_account(&dir);
+
+    let st = AppState::new(dir.clone(), "dev-token".into());
+    // Pre-condition: the cleartext clerk principal IS present in the registry.
+    let (before, _) = st.load_tenant_registry(ACCOUNT).unwrap();
+    assert!(
+        before
+            .records()
+            .iter()
+            .any(|r| r.principal_chain.iter().any(|p| p.contains("clerk:"))),
+        "cleartext clerk principal is present before the erase"
+    );
+
+    let outcome = execute_account_erasure_with_erase(
+        &st,
+        ACCOUNT,
+        vec!["orchestrator:hugit".into()],
+        100,
+        &AllGone,
+        "d863fafb",
+        &[],
+        "dsr-7",
+    )
+    .expect("execute");
+    assert!(
+        matches!(outcome, ErasureOutcome::Executed { .. }),
+        "{outcome:?}"
+    );
+
+    // The registry cleartext is now redacted (hash-preservingly) and the chain still verifies.
+    let (after, _) = st.load_tenant_registry(ACCOUNT).unwrap();
+    verify_chain(after.records()).expect("redacted registry chain verifies");
+    registry_has_no_cleartext_principal(&after);
+    assert!(
+        after
+            .records()
+            .iter()
+            .any(|r| r.kind == "provenance.redaction"),
+        "a redaction marker was appended to the registry"
+    );
+}
+
+// ── HOLE 2: the post-claim shred+redact self-heal must be REACHABLE via the background sweep ──
+
+#[test]
+fn background_sweep_reconciles_a_stranded_executed_account() {
+    // HOLE 2 end-to-end THROUGH THE SWEEP'S per-account entry (`auto_execute_one` → the predicate
+    // + `reconcile_pii_completion`), NOT a direct `execute_account_erasure` call: an account left
+    // reading `executed` with cleartext un-redacted + key un-shredded (a transient durable fault
+    // hit the post-claim PII step) is converged. RED on the un-fixed code (the sweep skipped it
+    // because `executed` supersedes the standing request → the self-heal was dead code in prod).
+    let dir = scratch_dir();
+    seed_tombstoned_repo_with_cleartext(&dir, "alpha");
+
+    // The STRANDED account log: requested + executed persisted (both cleartext), NO pii_shredded.
+    let adir = dir.join("_accounts");
+    std::fs::create_dir_all(&adir).unwrap();
+    let mut alog = EventLog::new();
+    alog.append_authorized(
+        PrincipalClass::Orchestrator,
+        Endpoint::Land,
+        "erasure.requested",
+        vec![format!("clerk:{ACCOUNT}:user-1")],
+        canon(
+            serde_json::json!({"account":ACCOUNT,"subject":ACCOUNT,"state":"requested","dsr_id":"dsr-7"}),
+        ),
+        1,
+    )
+    .unwrap();
+    alog.append_authorized(
+        PrincipalClass::Orchestrator,
+        Endpoint::Land,
+        "erasure.executed",
+        vec![format!("clerk:{ACCOUNT}:user-1")],
+        canon(serde_json::json!({"account":ACCOUNT,"state":"executed","repos_tombstoned":1})),
+        2,
+    )
+    .unwrap();
+    std::fs::write(
+        adir.join(format!("{ACCOUNT}.json")),
+        serde_json::to_string(alog.records()).unwrap(),
+    )
+    .unwrap();
+
+    let st = AppState::new(dir.clone(), "dev-token".into());
+    // The first run MINTED the key before it faulted (key live, un-shredded).
+    let _ = st.subject_key_ensure(ACCOUNT).expect("mint");
+
+    // Pre-condition: the predicate detects the stranded state + cleartext is present.
+    let (before, _) = st.load_account_log(ACCOUNT).unwrap();
+    assert!(
+        hugit_serve::writes::erasure::pii_shred_incomplete(&before),
+        "the pure predicate flags the stranded (executed, no pii_shredded) state"
+    );
+    assert!(
+        before.records().iter().any(|r| r.payload.contains(ACCOUNT)),
+        "cleartext survives before the reconcile"
+    );
+    assert!(st.subject_key_for(ACCOUNT).unwrap().is_some(), "key live");
+
+    // Drive the RECONCILER via the sweep's per-account entry. grace/now are irrelevant to the
+    // reconcile arm (executed supersedes the standing request, so the auto-EXECUTE arm is inert).
+    let out = st
+        .auto_execute_one("d863fafb", ACCOUNT, 0, 1_000_000)
+        .expect("reconcile drive");
+    assert_eq!(
+        out,
+        Some(ErasureOutcome::AlreadyExecuted),
+        "the reconciler converged the stranded PII step"
+    );
+
+    // Converged: cleartext GONE from account + repo, key SHREDDED, accountability RECORDED, chains
+    // still verify.
+    let (alog2, _) = st.load_account_log(ACCOUNT).unwrap();
+    verify_chain(alog2.records()).expect("healed account chain verifies");
+    no_cleartext_survives(&alog2);
+    assert!(
+        alog2
+            .records()
+            .iter()
+            .any(|r| r.kind == "erasure.pii_shredded"),
+        "the accountability record is now recorded"
+    );
+    let rlog = st.load_verified("alpha").expect("repo log loads");
+    verify_chain(rlog.records()).expect("healed repo chain verifies");
+    no_cleartext_survives(&rlog);
+    assert!(
+        st.subject_key_for(ACCOUNT).unwrap().is_none(),
+        "the subject key is shredded on the reconcile"
+    );
+
+    // Idempotent: a SECOND sweep pass is a clean NO-OP (predicate now false; no re-mint/re-shred).
+    let (alog3, _) = st.load_account_log(ACCOUNT).unwrap();
+    assert!(
+        !hugit_serve::writes::erasure::pii_shred_incomplete(&alog3),
+        "the converged account no longer matches the reconcile predicate"
+    );
+    let again = st
+        .auto_execute_one("d863fafb", ACCOUNT, 0, 1_000_001)
+        .expect("second pass");
+    assert_eq!(
+        again, None,
+        "a converged account is skipped on the next sweep"
+    );
+    assert!(st.subject_key_for(ACCOUNT).unwrap().is_none());
+}
