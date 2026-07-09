@@ -8,6 +8,7 @@
 //! error body is the `{code, reason}` envelope.
 
 use std::io::Read;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -153,7 +154,15 @@ pub fn serve_on_with(
                 Ok((p, _fresh)) => p,
                 Err(_) => Vec::new(), // no/invalid Bearer → the strict anonymous bucket
             };
-            let peer_ip = request.remote_addr().map(std::net::SocketAddr::ip);
+            // Anonymous buckets key on the REAL client IP, not the raw TCP peer:
+            // hugit-serve sits behind githugr's Cloudflare front (a cloudflared
+            // tunnel → loopback origin), so every anon request arrives from the
+            // SAME tunnel egress — keying on `remote_addr()` collapses ALL anon
+            // traffic into ONE global bucket (a trivial global DoS). [`client_ip`]
+            // recovers the real client IP from the front-set proxy header (only
+            // when the TCP peer is a TRUSTED front — never spoofable by a direct
+            // caller). Tenant/operator buckets ignore this (they key on identity).
+            let peer_ip = client_ip(&headers, request.remote_addr().copied());
             let is_push = is_receive_pack(&method, &url);
             if rate_limiter.check(&principal, peer_ip, is_push, now_ms) == RlDecision::TooMany {
                 respond_rate_limited_429(request);
@@ -1075,6 +1084,67 @@ fn header_val(headers: &[Header], name: &str) -> Option<String> {
         .iter()
         .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name))
         .map(|h| h.value.as_str().to_string())
+}
+
+/// Whether a front-set proxy header (`CF-Connecting-IP` / `X-Forwarded-For`) may be
+/// TRUSTED from this TCP peer. hugit-serve runs behind githugr's Cloudflare front (a
+/// `cloudflared` tunnel whose origin is loopback), so such a header is authentic
+/// ONLY when the raw TCP peer is that front — a directly-reachable client must never
+/// be able to spoof it. `HUGIT_TRUSTED_PROXY` selects the policy:
+///   - unset / `loopback` (the default) → trust the header only from a LOOPBACK peer
+///     (the cloudflared-sidecar deployment: the tunnel forwards to `127.0.0.1`).
+///   - `any` → trust it from ANY peer (a non-loopback front — e.g. an in-cluster
+///     ingress on a private network the operator vouches for; the operator asserts
+///     the port is not directly reachable).
+///   - `off` / `none` → never trust it; always key on the raw TCP peer IP.
+fn trust_proxy_header(remote_addr: Option<SocketAddr>) -> bool {
+    match std::env::var("HUGIT_TRUSTED_PROXY")
+        .ok()
+        .map(|v| v.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("off") | Some("none") => false,
+        Some("any") => true,
+        // Default + explicit "loopback": only a loopback peer is the trusted front.
+        _ => remote_addr.map(|a| a.ip().is_loopback()).unwrap_or(false),
+    }
+}
+
+/// The REAL client IP for anonymous rate-limit keying (G10). Behind the trusted
+/// Cloudflare front the raw TCP peer is the SAME tunnel egress for EVERY request, so
+/// keying anon buckets on it collapses all anonymous traffic into one global bucket
+/// (a trivial global DoS). This recovers the true client from the front-set
+/// `CF-Connecting-IP` (preferred) or the LAST hop of `X-Forwarded-For` — Cloudflare
+/// APPENDS the connecting IP, so the rightmost entry is the one the front itself
+/// observed and a client cannot forge it by pre-seeding the header.
+///
+/// SPOOF-SAFETY: the header is honoured ONLY when [`trust_proxy_header`] vouches for
+/// the peer (a loopback front by default). From an untrusted / direct peer the
+/// header is IGNORED and we fall back to the raw TCP peer IP — so a directly
+/// reachable attacker can neither forge a victim's bucket nor scatter its flood
+/// across fabricated IPs. A missing / unparseable header likewise falls back to the
+/// peer IP, so the gate is never a free pass.
+fn client_ip(headers: &[Header], remote_addr: Option<SocketAddr>) -> Option<IpAddr> {
+    let peer_ip = remote_addr.map(|a| a.ip());
+    if !trust_proxy_header(remote_addr) {
+        return peer_ip;
+    }
+    if let Some(cf) = header_val(headers, "CF-Connecting-IP")
+        && let Ok(ip) = cf.trim().parse::<IpAddr>()
+    {
+        return Some(ip);
+    }
+    // Cloudflare APPENDS the connecting IP, so the LAST (rightmost) X-Forwarded-For
+    // entry is the real client as the trusted front observed it (spoof-resistant vs.
+    // a client that pre-seeds fake left-hand hops).
+    if let Some(xff) = header_val(headers, "X-Forwarded-For")
+        && let Some(last) = xff.rsplit(',').map(str::trim).find(|s| !s.is_empty())
+        && let Ok(ip) = last.parse::<IpAddr>()
+    {
+        return Some(ip);
+    }
+    // Trusted front but no / unparseable proxy header → fall back to the peer IP.
+    peer_ip
 }
 
 /// The v1 acting principal. Real authenticated identity (Clerk/RFC-8693) is the
@@ -3504,5 +3574,109 @@ mod anon_v1_read_tests {
             vec!["clerk:org-a:u".to_string()],
             "a valid Clerk token derives its real tenant principal"
         );
+    }
+}
+
+#[cfg(test)]
+mod anon_ratelimit_ip_tests {
+    //! FIX (G10): the anonymous rate-limit bucket must key on the REAL client IP,
+    //! not the shared CF-tunnel egress. All assertions live in ONE test so the
+    //! process-global `HUGIT_TRUSTED_PROXY` env is written by exactly one thread
+    //! (no cross-test env race); the default-policy checks run BEFORE it is set.
+    use super::*;
+    use crate::ratelimit::{RateLimiter, RlDecision};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    fn hdr(name: &str, value: &str) -> Header {
+        Header::from_bytes(name.as_bytes(), value.as_bytes()).unwrap()
+    }
+    fn peer(s: &str) -> Option<SocketAddr> {
+        Some(s.parse().unwrap())
+    }
+    // A loopback peer IS the trusted cloudflared front under the DEFAULT policy.
+    const LOOPBACK: &str = "127.0.0.1:52000";
+    // A public peer is NOT the trusted front (a directly-reachable client).
+    const DIRECT: &str = "203.0.113.9:41000";
+
+    #[test]
+    fn anon_key_is_real_client_ip_behind_cf_and_spoof_safe() {
+        // ── (1) trusted (loopback) front: CF-Connecting-IP is the real client ──
+        let a = client_ip(&[hdr("CF-Connecting-IP", "198.51.100.7")], peer(LOOPBACK));
+        let b = client_ip(&[hdr("CF-Connecting-IP", "198.51.100.8")], peer(LOOPBACK));
+        assert_eq!(a, Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7))));
+        assert_eq!(b, Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 8))));
+        assert_ne!(
+            a, b,
+            "two different CF client IPs must resolve to different keys"
+        );
+
+        // Two different CF client IPs get INDEPENDENT anon buckets (the whole point:
+        // one flooding client cannot exhaust another's budget by sharing the egress).
+        let rl = RateLimiter::for_test(60, 120, 1, 1, 5, 10, 1024); // anon burst 1
+        assert_eq!(rl.check(&[], a, false, 0), RlDecision::Allow);
+        assert_eq!(rl.check(&[], a, false, 0), RlDecision::TooMany); // a drained
+        assert_eq!(
+            rl.check(&[], b, false, 0),
+            RlDecision::Allow,
+            "a second CF client IP must have its OWN bucket, not share the first's"
+        );
+
+        // ── (2) X-Forwarded-For: the LAST hop (CF-appended) is the real client ──
+        let xff = client_ip(
+            &[hdr("X-Forwarded-For", "10.0.0.1, 192.0.2.55")],
+            peer(LOOPBACK),
+        );
+        assert_eq!(
+            xff,
+            Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 55))),
+            "the rightmost (front-appended) XFF hop is the real client"
+        );
+
+        // CF-Connecting-IP wins over X-Forwarded-For when both are present.
+        let both = client_ip(
+            &[
+                hdr("CF-Connecting-IP", "198.51.100.7"),
+                hdr("X-Forwarded-For", "192.0.2.55"),
+            ],
+            peer(LOOPBACK),
+        );
+        assert_eq!(both, Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7))));
+
+        // ── (3) missing header from the trusted front → safe fallback to peer ──
+        let none = client_ip(&[], peer(LOOPBACK));
+        assert_eq!(
+            none,
+            Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))),
+            "no proxy header → fall back to the raw peer IP (never a free pass)"
+        );
+        // Unparseable header likewise falls back rather than panicking.
+        let garbage = client_ip(&[hdr("CF-Connecting-IP", "not-an-ip")], peer(LOOPBACK));
+        assert_eq!(garbage, Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))));
+
+        // ── (4) SPOOF-SAFETY: a DIRECT (untrusted) peer's header is IGNORED ──
+        // A directly-reachable attacker sets CF-Connecting-IP to forge a victim's
+        // bucket (or to scatter a flood across fake IPs) — under the default policy
+        // the header from a non-loopback peer is dropped and we key on its real TCP
+        // IP, so the forge fails.
+        let spoof = client_ip(&[hdr("CF-Connecting-IP", "198.51.100.7")], peer(DIRECT));
+        assert_eq!(
+            spoof,
+            Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9))),
+            "an untrusted peer cannot spoof its client IP via the proxy header"
+        );
+
+        // ── (5) env policy knob (written last; single-threaded within this test) ──
+        // `any` → trust the header from ANY peer (a non-loopback front deployment).
+        unsafe { std::env::set_var("HUGIT_TRUSTED_PROXY", "any") };
+        let trusted_any = client_ip(&[hdr("CF-Connecting-IP", "198.51.100.7")], peer(DIRECT));
+        assert_eq!(
+            trusted_any,
+            Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)))
+        );
+        // `off` → never trust the header, even from a loopback peer.
+        unsafe { std::env::set_var("HUGIT_TRUSTED_PROXY", "off") };
+        let never = client_ip(&[hdr("CF-Connecting-IP", "198.51.100.7")], peer(LOOPBACK));
+        assert_eq!(never, Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))));
+        unsafe { std::env::remove_var("HUGIT_TRUSTED_PROXY") };
     }
 }

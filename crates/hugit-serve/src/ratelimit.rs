@@ -26,9 +26,15 @@
 //!     (`git-receive-pack`) uses a STRICTER sub-bucket than ordinary requests.
 //!   - anything else — a genuinely anonymous request (git clone over the wire, no
 //!     Bearer), a malformed/unknown principal → the strict ANONYMOUS bucket, keyed
-//!     by the peer edge IP (falling back to a single GLOBAL bucket when the socket
-//!     exposes no address). An anonymous flood therefore cannot borrow a tenant's
-//!     budget, and each edge IP is throttled independently.
+//!     by the REAL CLIENT IP the caller supplies as `peer_ip` (falling back to a
+//!     single GLOBAL bucket when it is `None`). hugit-serve runs behind githugr's
+//!     Cloudflare front, so the caller ([`crate::server::client_ip`]) derives that
+//!     IP from the front-set `CF-Connecting-IP` / `X-Forwarded-For` header when the
+//!     TCP peer is the TRUSTED front, and from the raw TCP peer otherwise — so the
+//!     gate sees the true per-client IP rather than the single shared tunnel egress
+//!     (keying on the egress would collapse ALL anon traffic into one bucket). An
+//!     anonymous flood therefore cannot borrow a tenant's budget, and each real
+//!     client IP is throttled independently.
 //!
 //! Interior mutability (a small `Mutex` per shard) lets the loop share
 //! `&RateLimiter`; on the single-threaded loop every lock is uncontended.
@@ -213,8 +219,10 @@ impl RateLimiter {
     }
 
     /// THE gate. Given the engine-resolved `principal` chain (as
-    /// [`crate::server::two_tier_auth`] yields it), the request's peer edge IP
-    /// (`None` when the socket exposes none), whether this is a push
+    /// [`crate::server::two_tier_auth`] yields it), the request's REAL client IP
+    /// (`peer_ip` — [`crate::server::client_ip`] resolves it from the trusted CF
+    /// proxy header or the raw TCP peer; `None` when neither is available), whether
+    /// this is a push
     /// (`git-receive-pack`), and the monotonic loop clock `now_ms`, decide ALLOW /
     /// TOO-MANY.
     ///
@@ -259,8 +267,11 @@ impl RateLimiter {
                 decision(allowed)
             }
             RlClass::Anon => {
-                // Key by the peer IP so each edge is throttled independently; `None`
-                // (no socket address) collapses to a single shared global bucket.
+                // Key by the REAL client IP (supplied as `peer_ip`) so each client is
+                // throttled independently; `None` collapses to a single shared global
+                // bucket. Behind the CF front the caller resolves this from the
+                // trusted proxy header (see [`crate::server::client_ip`]) — keying on
+                // the raw tunnel egress would collapse all anon traffic into one.
                 let seed = match peer_ip {
                     Some(ip) => ip_seed(ip),
                     None => 0,
