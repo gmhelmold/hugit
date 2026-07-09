@@ -55,6 +55,26 @@ impl PersistenceAdapter {
         }
     }
 
+    /// Create an adapter whose halted set is **seeded from the durable
+    /// revocation ledger** (WP-B1 item ⑤).
+    ///
+    /// This is what makes an uninstall's halt survive a restart: every
+    /// installation the ledger records as revoked is re-loaded into the halted
+    /// set at boot, so `persist_event` fail-closed-rejects its events even in a
+    /// fresh process that never saw the original `installation.deleted` webhook.
+    pub fn new_local_with_revocations(ledger: &crate::RevocationLedger) -> Self {
+        let halted = ledger.revoked_ids().into_iter().collect();
+        Self {
+            store: std::collections::HashMap::new(),
+            halted,
+        }
+    }
+
+    /// Whether events for `installation_id` are currently halted (revoked).
+    pub fn is_halted(&self, installation_id: &str) -> bool {
+        self.halted.contains(installation_id)
+    }
+
     /// Persist a `SignedEventEnvelope` and enqueue heavy work.
     ///
     /// If `installation_id` is `Some` and that installation has been halted,

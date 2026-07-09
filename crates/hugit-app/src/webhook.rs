@@ -174,15 +174,44 @@ pub struct WebhookProcessor {
     /// Key: installation_id string.
     /// Value: `Some(token)` while active, `None` after revocation.
     token_store: Arc<Mutex<HashMap<String, Option<String>>>>,
+    /// Durable revocation ledger (WP-B1 item ⑤). When present,
+    /// [`Self::handle_uninstall`] records the revocation on disk so it survives
+    /// a restart and is enforced by the token-mint + persistence gates. When
+    /// absent (the bare in-memory test constructor), the tombstone is
+    /// in-memory-only.
+    revocations: Option<crate::RevocationLedger>,
 }
 
 impl WebhookProcessor {
-    /// Create a new processor with the given webhook secret.
+    /// Create a new processor with the given webhook secret (in-memory revoke
+    /// only — no durable ledger).
     pub fn new(secret: impl Into<Vec<u8>>) -> Self {
         Self {
             secret: secret.into(),
             token_store: Arc::new(Mutex::new(HashMap::new())),
+            revocations: None,
         }
+    }
+
+    /// Create a processor backed by a **durable revocation ledger** so an
+    /// uninstall's revoke survives a restart and is enforced fail-closed by the
+    /// token-mint gate (WP-B1 item ⑤).
+    pub fn with_revocation_ledger(
+        secret: impl Into<Vec<u8>>,
+        ledger: crate::RevocationLedger,
+    ) -> Self {
+        Self {
+            secret: secret.into(),
+            token_store: Arc::new(Mutex::new(HashMap::new())),
+            revocations: Some(ledger),
+        }
+    }
+
+    /// Whether an installation is durably revoked (per the ledger, if present).
+    pub fn is_revoked(&self, installation_id: &str) -> bool {
+        self.revocations
+            .as_ref()
+            .is_some_and(|l| l.is_revoked(installation_id))
     }
 
     /// Register (or update) the installation token for an installation.
@@ -257,6 +286,9 @@ impl WebhookProcessor {
     ///   revocation; `false` if the slot was already absent or already `None`.
     /// - Sets `processing_halted = true` unconditionally (the caller is
     ///   responsible for calling `PersistenceAdapter::halt_installation`).
+    /// - **Durably records the revocation** in the ledger when one is present
+    ///   (`durably_revoked` reflects whether the on-disk tombstone was written),
+    ///   so the revoke survives a restart and refuses a subsequent token mint.
     /// - Builds and returns an `installation.revoked` EventRecord.
     pub fn handle_uninstall(
         &self,
@@ -287,10 +319,22 @@ impl WebhookProcessor {
             }
         };
 
+        // Durably persist the revocation so it survives a restart and gates the
+        // token-mint path. `durably_revoked` is `true` iff a ledger is present
+        // AND the on-disk tombstone was written (fail-closed: a write failure is
+        // NOT reported as durably revoked). When no ledger is wired the revoke is
+        // in-memory-only and `durably_revoked` is `false`.
+        let durably_revoked = self
+            .revocations
+            .as_ref()
+            .and_then(|l| l.revoke(installation_id).ok())
+            .is_some();
+
         let outcome = RevokeOutcome {
             installation_id: installation_id.to_string(),
             token_revoked,
             processing_halted: true,
+            durably_revoked,
         };
         (outcome, record)
     }
@@ -305,6 +349,10 @@ pub struct RevokeOutcome {
     pub token_revoked: bool,
     /// Whether queued processing was halted.
     pub processing_halted: bool,
+    /// Whether the revocation was **durably** recorded in the on-disk ledger
+    /// (survives a restart + refuses a subsequent token mint). `false` when no
+    /// ledger is wired (in-memory-only revoke) or the durable write failed.
+    pub durably_revoked: bool,
 }
 
 /// Build an `AckReceipt` for a successfully ingested webhook.
@@ -314,5 +362,88 @@ pub fn build_ack_receipt(delivery_id: &str, acked_at: u64) -> AckReceipt {
         delivery_id: delivery_id.to_string(),
         processing_id,
         acked_at,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::RevocationLedger;
+
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "hugit-webhook-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        p
+    }
+
+    #[test]
+    fn uninstall_persists_a_durable_revocation() {
+        let dir = tmp_dir("durable-uninstall");
+        let ledger = RevocationLedger::open(&dir).unwrap();
+        let proc = WebhookProcessor::with_revocation_ledger(b"s".to_vec(), ledger.clone());
+        proc.store_token("42", "ghs_live_token");
+
+        assert!(!proc.is_revoked("42"));
+        let (outcome, record) = proc.handle_uninstall("42", "genesis", 1, 1000);
+        assert!(outcome.token_revoked);
+        assert!(outcome.processing_halted);
+        assert!(
+            outcome.durably_revoked,
+            "the on-disk tombstone must be written"
+        );
+        assert_eq!(record.kind, "installation.revoked");
+
+        // The processor now reports revoked, AND a FRESH ledger over the same dir
+        // (a restart) still sees it — the enforcement survives a reboot.
+        assert!(proc.is_revoked("42"));
+        let reopened = RevocationLedger::open(&dir).unwrap();
+        assert!(reopened.is_revoked("42"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn uninstall_without_ledger_is_in_memory_only() {
+        // The bare constructor has no durable ledger: the token revoke still
+        // happens in memory, but `durably_revoked` is honestly false.
+        let proc = WebhookProcessor::new(b"s".to_vec());
+        proc.store_token("42", "tok");
+        let (outcome, _r) = proc.handle_uninstall("42", "genesis", 1, 1000);
+        assert!(outcome.token_revoked);
+        assert!(!outcome.durably_revoked);
+        assert!(!proc.is_revoked("42"), "no ledger ⇒ not durably revoked");
+    }
+
+    #[test]
+    fn a_restarted_persistence_adapter_re_halts_a_revoked_installation() {
+        // A revocation recorded in a prior process must fail-close the event
+        // persistence path even in a FRESH adapter that never saw the uninstall.
+        let dir = tmp_dir("restart-halt");
+        let ledger = RevocationLedger::open(&dir).unwrap();
+        ledger.revoke("99").unwrap();
+
+        // A brand-new adapter seeded from the ledger (models a restart).
+        let mut adapter = crate::PersistenceAdapter::new_local_with_revocations(&ledger);
+        assert!(adapter.is_halted("99"));
+
+        let envelope = SignedEventEnvelope {
+            delivery_id: "d1".into(),
+            event_type: "pull_request".into(),
+            signature: "sha256=deadbeef".into(),
+            payload: "{}".into(),
+            received_at: 1,
+        };
+        let err = adapter.persist_event(&envelope, Some("99")).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::PersistenceError::InstallationHalted { .. }
+        ));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

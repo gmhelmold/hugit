@@ -11,9 +11,14 @@
 pub mod checks;
 pub mod manifest;
 pub mod persistence;
+pub mod revocation;
 pub mod webhook;
 
-pub use checks::{ChecksClient, ChecksClientError};
+pub use checks::{
+    ChecksClient, ChecksClientError, ChecksTransport, UreqChecksTransport,
+    conclusion_to_status_state,
+};
 pub use manifest::APP_MANIFEST;
 pub use persistence::{PersistenceAdapter, PersistenceError};
-pub use webhook::{WebhookError, WebhookProcessor};
+pub use revocation::{RevocationError, RevocationLedger};
+pub use webhook::{RevokeOutcome, WebhookError, WebhookProcessor};

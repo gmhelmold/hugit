@@ -63,9 +63,11 @@
 
 pub mod detect;
 pub mod engine;
+pub mod reflect;
 
 pub use detect::{GitHubDetectOutcome, detect_github_change};
 pub use engine::{
     AuthorityModel, AuthoritySide, BidirSync, BranchSync, ConvergeOutcome, IncidentRef,
     IngestOutcome, ProtectedReroute, SyncError, incident_ref_name,
 };
+pub use reflect::{RefReflect, ReflectHalt, ReflectRef, ReflectReport};

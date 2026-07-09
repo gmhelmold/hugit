@@ -17,6 +17,10 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
 thiserror = { workspace = true }
+# The single blocking HTTP seam for the Checks-API write-back (mirrors the
+# `ureq` transport split in hugit-mirror's `auth`/`lease_client`). Already in the
+# workspace lock — adds no new lock line.
+ureq = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

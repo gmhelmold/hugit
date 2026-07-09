@@ -93,6 +93,17 @@ pub enum AppAuthError {
         /// transport-level fault (no response).
         status: Option<u16>,
     },
+
+    /// The installation has been **durably revoked** (an `installation.deleted`
+    /// webhook was processed; the on-disk revocation ledger records it). Minting
+    /// a token for a revoked installation is refused fail-closed — the mint is
+    /// NEVER attempted, so a revoked App can never surface a check-run/push again
+    /// even across a restart. Carries the (non-secret) installation id.
+    #[error("installation {installation_id} is revoked; token mint refused")]
+    InstallationRevoked {
+        /// The revoked installation id.
+        installation_id: String,
+    },
 }
 
 /// GitHub App auth client — mints per-push installation tokens.
@@ -107,6 +118,11 @@ pub struct AppAuth {
     /// `AppAuth` reuses the same live token). Interior-mutable so `mint` can be
     /// called through a shared `&self`.
     cache: Arc<Mutex<Option<CachedToken>>>,
+    /// Durable revocation ledger (WP-B1 item ⑤). When present, a mint for a
+    /// revoked installation is refused fail-closed BEFORE any disk/sign/network
+    /// work. Shared with the webhook processor so an `installation.deleted`
+    /// immediately (and durably) disarms future mints.
+    revocations: Option<hugit_app::RevocationLedger>,
 }
 
 /// A cached installation token + the epoch-ms at which it should be considered
@@ -146,7 +162,17 @@ impl AppAuth {
         Self {
             secret_dir: secret_dir.into(),
             cache: Arc::new(Mutex::new(None)),
+            revocations: None,
         }
+    }
+
+    /// Attach a durable revocation ledger so a mint for a revoked installation is
+    /// refused fail-closed (WP-B1 item ⑤). Share the SAME ledger the webhook
+    /// processor uses so an `installation.deleted` disarms mints immediately and
+    /// durably (survives a restart).
+    pub fn with_revocation_ledger(mut self, ledger: hugit_app::RevocationLedger) -> Self {
+        self.revocations = Some(ledger);
+        self
     }
 
     /// Resolve the App credential directory.
@@ -243,6 +269,18 @@ impl AppAuth {
         transport: &T,
         now_ms: u64,
     ) -> Result<InstallationToken, AppAuthError> {
+        // ── Revocation gate (WP-B1 ⑤): a revoked installation NEVER mints. ──
+        // Checked FIRST — before the cache, disk, signing, or any network — so a
+        // revoked App cannot even serve a still-cached token. Durable: the ledger
+        // reads its on-disk tombstones, so this holds across a restart.
+        if let Some(ledger) = &self.revocations
+            && ledger.is_revoked(installation_id)
+        {
+            return Err(AppAuthError::InstallationRevoked {
+                installation_id: installation_id.to_string(),
+            });
+        }
+
         // ── Cache fast-path: reuse a still-fresh token (no disk / sign / net). ──
         if let Some(hit) = self.cached_if_fresh(installation_id, now_ms) {
             return Ok(hit);
@@ -266,6 +304,23 @@ impl AppAuth {
         let jwt = sign_app_jwt(&key, app_id, now_secs)?;
 
         self.exchange_and_cache(installation_id, &jwt, transport, now_ms)
+    }
+
+    /// **Test-only** cache primer: seed a never-stale installation token so the
+    /// mint fast-path returns WITHOUT reading the on-disk key or signing a JWT.
+    ///
+    /// This lets the `mint`/`emit_live` happy-path be proven hermetically without
+    /// a real RSA private key (RS256 signing itself is covered by
+    /// `sign_app_jwt_rejects_a_bad_key`). The revocation gate runs *before* the
+    /// cache fast-path, so a primed token is still refused for a revoked
+    /// installation — that ordering is exactly what the gate test asserts.
+    #[cfg(test)]
+    pub(crate) fn prime_installation_token(&self, installation_id: &str, token: &str) {
+        *self.cache.lock().unwrap_or_else(|e| e.into_inner()) = Some(CachedToken {
+            installation_id: installation_id.to_string(),
+            token: InstallationToken::new(token),
+            refresh_after_ms: u64::MAX,
+        });
     }
 
     /// Return a still-fresh cached token for `installation_id` (or `None`). Split
@@ -704,6 +759,58 @@ mod tests {
             None
         );
         assert_eq!(parse_rfc3339_to_epoch_secs("not-a-date"), None);
+    }
+
+    #[test]
+    fn a_revoked_installation_refuses_the_mint_fail_closed() {
+        // WP-B1 ⑤: once an installation is durably revoked, even a still-valid
+        // cached-or-mintable token is refused — the mint is never attempted.
+        let led_dir = tmp_dir("revoke-gate");
+        let ledger = hugit_app::RevocationLedger::open(&led_dir).unwrap();
+        let auth = AppAuth::new(tmp_dir("revoke-auth")).with_revocation_ledger(ledger.clone());
+
+        // Before revocation: prime a cached token so the mint fast-path returns it
+        // (no on-disk key / signing needed) — the un-revoked installation mints.
+        auth.prime_installation_token("55", "tok-live");
+        let ok_transport =
+            FakeTransport::with(vec![(201, access_body("tok", "2999-01-01T00:00:00Z"))]);
+        assert_eq!(
+            auth.mint_with_transport("55", &ok_transport, 1_000)
+                .unwrap()
+                .expose(),
+            "tok-live",
+            "an un-revoked installation mints normally"
+        );
+        assert_eq!(ok_transport.call_count(), 0, "cache fast-path, no network");
+
+        // Revoke. The gate runs BEFORE the cache fast-path, so even the SAME
+        // AppAuth (with a still-primed cache) now refuses fail-closed.
+        ledger.revoke("55").unwrap();
+        let refused_transport =
+            FakeTransport::with(vec![(201, access_body("tok2", "2999-01-01T00:00:00Z"))]);
+        let err = auth
+            .mint_with_transport("55", &refused_transport, 2_000)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            AppAuthError::InstallationRevoked {
+                installation_id: "55".to_string()
+            }
+        );
+        // The transport was NEVER consulted (mint not attempted).
+        assert_eq!(refused_transport.call_count(), 0);
+
+        // Durable across a "restart": a fresh ledger over the same dir + a fresh
+        // AppAuth still refuses (no cache, no network).
+        let reopened = hugit_app::RevocationLedger::open(&led_dir).unwrap();
+        let auth3 = AppAuth::new(tmp_dir("revoke-auth3")).with_revocation_ledger(reopened);
+        let t3 = FakeTransport::with(vec![(201, access_body("tok3", "2999-01-01T00:00:00Z"))]);
+        assert!(matches!(
+            auth3.mint_with_transport("55", &t3, 3_000).unwrap_err(),
+            AppAuthError::InstallationRevoked { .. }
+        ));
+        assert_eq!(t3.call_count(), 0);
+        std::fs::remove_dir_all(&led_dir).ok();
     }
 
     #[test]
