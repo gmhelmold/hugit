@@ -2538,14 +2538,37 @@ impl<T: CasTransport> CasRw<T> {
         self.pending.is_empty()
     }
 
-    /// The total CAS-framing byte size of the DISTINCT NEW objects this push buffered
-    /// (deduped by blake3 — the exact set [`flush`](CasRw::flush) uploads). This is the
-    /// storage-cap (G10) delta: the NEW stored bytes this push adds to the repo's
-    /// closure. Objects the push referenced but did NOT carry (thin-pack bases served
-    /// from the repo's prior closure) are NOT buffered, so they never double-count.
+    /// The total CAS-framing byte size of the DISTINCT objects this push buffered
+    /// (deduped by blake3 — the exact set [`flush`](CasRw::flush) uploads). Objects the
+    /// push referenced but did NOT carry (thin-pack bases served from the repo's prior
+    /// closure) are NOT buffered, so they never appear here.
     #[must_use]
     pub fn pending_bytes(&self) -> u64 {
         self.pending.values().map(|v| v.len() as u64).sum()
+    }
+
+    /// The storage-cap (G10) delta: the GENUINELY-NEW stored bytes this push adds to the
+    /// repo's closure — [`pending_bytes`](CasRw::pending_bytes) MINUS every buffered
+    /// object whose content (blake3 CAS key) is ALREADY in the repo's prior closure
+    /// (`existing`). A pack can re-carry objects the repo already stores (a force-push,
+    /// an overlapping/duplicate push, a re-push of a shared base): [`put`](CasRw::put)
+    /// buffers them (it dedups only WITHIN this push), so counting `pending_bytes`
+    /// verbatim would DOUBLE-count bytes already on disk — a spurious `413` at the quota
+    /// gate AND permanent monotonic `size.json` inflation via the `commit_repo_size`
+    /// bump. Deduping the pending set against `existing` here makes the delta count only
+    /// objects the repo did not already have, so a re-carry contributes ~0. The flush
+    /// still uploads the full pending set (content-addressed ⇒ idempotent: a re-carried
+    /// object is a no-write `200-exists`), only the ACCOUNTING excludes it.
+    #[must_use]
+    pub fn storage_delta_bytes(&self) -> u64 {
+        // The blake3 CAS keys the repo already stores (its pre-push closure). `existing`
+        // maps git_oid → blake3; its VALUES are the content keys `pending` is keyed by.
+        let already: std::collections::HashSet<&String> = self.existing.values().collect();
+        self.pending
+            .iter()
+            .filter(|(key, _)| !already.contains(key))
+            .map(|(_, v)| v.len() as u64)
+            .sum()
     }
 
     /// The wrapped CAS client (read fall-through + flush sink).
@@ -5673,6 +5696,79 @@ mod tests {
     }
 
     #[test]
+    fn storage_delta_excludes_objects_already_in_the_repo_closure() {
+        // G10 double-count fix: a pack can RE-CARRY objects the repo already stores (a
+        // force-push / overlapping push). `put` buffers them (it dedups only WITHIN this
+        // push), so `pending_bytes` counts them — but the STORAGE delta must not, or the
+        // quota gate over-counts (spurious 413) and size.json inflates monotonically.
+        let carried_body = b"an object the repo already stores";
+        let carried_framing = encode_loose(ObjectKind::Blob, carried_body);
+        let carried_blake3 = cas_key(&carried_framing);
+        let carried_oid = "ab".repeat(20);
+
+        let new_body = b"a brand-new object this push adds";
+        let new_framing = encode_loose(ObjectKind::Blob, new_body);
+        let new_oid = "cd".repeat(20);
+
+        // The repo's pre-push closure ALREADY contains `carried` (oid → blake3).
+        let mut existing = OidIndex::new();
+        existing.insert(carried_oid.clone(), carried_blake3);
+
+        let mut casrw = CasRw::new(client_with(MapCasTransport::default()), existing);
+        // The pushed pack re-carries the already-stored object AND one genuinely new one.
+        casrw.put(&CasObject {
+            oid: carried_oid,
+            bytes: verbatim_zlib_loose(ObjectKind::Blob, carried_body),
+        });
+        casrw.put(&CasObject {
+            oid: new_oid,
+            bytes: verbatim_zlib_loose(ObjectKind::Blob, new_body),
+        });
+
+        // pending_bytes still counts BOTH buffered objects (the full idempotent flush set)…
+        assert_eq!(
+            casrw.pending_bytes(),
+            (carried_framing.len() + new_framing.len()) as u64,
+            "pending_bytes is the full buffered/flush set"
+        );
+        // …but the STORAGE delta excludes the re-carried already-stored object — only the
+        // genuinely-new object's bytes count toward the quota + the size.json bump.
+        assert_eq!(
+            casrw.storage_delta_bytes(),
+            new_framing.len() as u64,
+            "the delta counts ONLY objects not already in the repo's closure"
+        );
+    }
+
+    #[test]
+    fn storage_delta_is_zero_when_the_push_re_carries_only_existing_objects() {
+        // The pure re-carry (an overlapping/duplicate push of a shared base): every
+        // buffered object is already in the closure → delta is ZERO (no spurious 413, no
+        // size.json inflation), even though the object IS buffered for the idempotent flush.
+        let body = b"a shared base re-carried by an overlapping push";
+        let framing = encode_loose(ObjectKind::Blob, body);
+        let blake3 = cas_key(&framing);
+        let oid = "ef".repeat(20);
+
+        let mut existing = OidIndex::new();
+        existing.insert(oid.clone(), blake3);
+        let mut casrw = CasRw::new(client_with(MapCasTransport::default()), existing);
+        casrw.put(&CasObject {
+            oid,
+            bytes: verbatim_zlib_loose(ObjectKind::Blob, body),
+        });
+        assert!(
+            casrw.pending_bytes() > 0,
+            "the object IS buffered (the flush is idempotent — content-addressed 200-exists)"
+        );
+        assert_eq!(
+            casrw.storage_delta_bytes(),
+            0,
+            "a pure re-carry adds ZERO new stored bytes"
+        );
+    }
+
+    #[test]
     fn casrw_flush_fails_closed_on_a_non_inflatable_object() {
         let mut casrw = CasRw::new(client_with(MapCasTransport::default()), OidIndex::new());
         // A garbage (non-zlib) object: put() cannot inflate it. put() is infallible,
@@ -5980,6 +6076,81 @@ mod tests {
         // A zero-delta commit is a no-op.
         commit_repo_size(&r2, tenant, repo, 0).unwrap();
         assert_eq!(read_repo_stored_bytes(&r2, tenant, repo).unwrap(), 1_250);
+    }
+
+    #[test]
+    fn concurrent_same_tenant_pushes_cannot_both_pass_then_overshoot_the_cap() {
+        // G10 check→commit TOCTOU fix. Two concurrent detached receive-pack workers each
+        // run the quota CHECK then the size.json COMMIT. With per_tenant = 100 and repo
+        // empty, each push's delta = 60 is INDIVIDUALLY under the cap (0 + 60 ≤ 100), but
+        // TOGETHER 120 > 100. Without the per-owner_tenant advisory lock both read the
+        // pre-push total (0), both pass, both commit → 120 (overshoot). WITH the lock
+        // spanning check→commit the second push's check sees the first's committed 60, so
+        // 60 + 60 > 100 → rejected. This asserts the deterministic post-fix invariant:
+        // exactly ONE push commits and size.json never exceeds the cap.
+        use std::sync::{Arc, Barrier, Mutex};
+
+        let caps = StorageCaps {
+            per_repo: 100,
+            per_tenant: 100,
+        };
+        let (tenant, repo) = ("t", "hugit");
+        let slugs = vec![repo.to_string()];
+
+        // A shared R2 double — both workers see the SAME size.json.
+        let shared: Arc<Mutex<BTreeMap<String, Vec<u8>>>> = Arc::new(Mutex::new(BTreeMap::new()));
+
+        // The REAL per-owner_tenant lock, from a shared (cloned) AppState — the clone
+        // shares the `storage_quota_locks` Arc, so both workers contend on ONE mutex.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("hugit-g10-cap-{}-{}", std::process::id(), nanos));
+        std::fs::create_dir_all(&dir).unwrap();
+        let st = crate::state::AppState::new(dir, "dev-token".to_string());
+
+        let barrier = Arc::new(Barrier::new(2));
+        let committed = Arc::new(Mutex::new(0usize));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let st = st.clone();
+            let objects = Arc::clone(&shared);
+            let barrier = Arc::clone(&barrier);
+            let committed = Arc::clone(&committed);
+            let slugs = slugs.clone();
+            handles.push(std::thread::spawn(move || {
+                let r2 = MapR2 { objects };
+                barrier.wait(); // release both workers together — maximize the race
+                let lock = st.storage_quota_lock("org-a");
+                let _guard = lock.lock().unwrap();
+                // The atomic check→commit critical section (the production ordering).
+                if check_storage_quota(&r2, tenant, repo, &slugs, 60, &caps).is_ok() {
+                    commit_repo_size(&r2, tenant, repo, 60).unwrap();
+                    *committed.lock().unwrap() += 1;
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let r2 = MapR2 { objects: shared };
+        let final_bytes = read_repo_stored_bytes(&r2, tenant, repo).unwrap();
+        assert_eq!(
+            *committed.lock().unwrap(),
+            1,
+            "exactly ONE concurrent push may pass the cap (the other is rejected)"
+        );
+        assert_eq!(
+            final_bytes, 60,
+            "size.json holds only the one committed push — no overshoot beyond the cap"
+        );
+        assert!(
+            final_bytes <= caps.per_tenant,
+            "the aggregate never exceeds the cap"
+        );
     }
 
     #[test]

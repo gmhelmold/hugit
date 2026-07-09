@@ -1377,10 +1377,18 @@ enum StorageEnforcement {
 
 /// Enforce the per-repo + per-owner_tenant storage-byte caps (G10) for a CAS-mode push
 /// of `delta` NEW stored bytes, BEFORE any object is flushed. Enumerates the
-/// owner_tenant's owned-repo slug set via the FAIL-CLOSED `owned_repo_logs` (an
-/// indeterminate enumeration → 503), then runs the R2-backed [`crate::cas::check_storage_quota`]
-/// (each `size.json` read fail-closed). A `delta` of 0 is always allowed. A repo with no
-/// `owner_tenant` (legacy/unowned) falls back to a per-repo-only check (no rollup).
+/// owner_tenant's owned-repo slug set via the FAIL-CLOSED
+/// [`AppState::authoritative_owned_repo_logs`](crate::state::AppState::authoritative_owned_repo_logs)
+/// — the DURABLE authoritative set (`list_repo_slugs()` ∪ the in-memory loaded overlay),
+/// the SAME enumeration the GDPR1 erasure cascade uses. Rolling the per-owner_tenant cap
+/// over only the in-memory loaded set (the old `owned_repo_logs`) FAIL-OPENED: a
+/// durable-but-unloaded repo (provisioned, then dropped from the boot env — its R2
+/// `size.json` survives, its seam is gone) was silently omitted, so the aggregate
+/// under-counted and a push could slip past the 10 GiB owner_tenant ceiling. An
+/// indeterminate enumeration (any listing/load fault) → 503, then runs the R2-backed
+/// [`crate::cas::check_storage_quota`] (each `size.json` read fail-closed). A `delta` of 0
+/// is always allowed. A repo with no `owner_tenant` (legacy/unowned) falls back to a
+/// per-repo-only check (no rollup).
 fn enforce_cas_storage_quota(
     state: &AppState,
     seam: &crate::state::CasWriteSeam,
@@ -1392,10 +1400,12 @@ fn enforce_cas_storage_quota(
     }
     let caps = crate::cas::storage_caps_from_env();
     let owned_slugs: Vec<String> = match owner_tenant {
-        Some(ot) => match state.owned_repo_logs(ot) {
-            Some(logs) => logs.into_iter().map(|(slug, _)| slug).collect(),
+        // Roll up over the DURABLE authoritative set (never the in-memory loaded set) so a
+        // durable-but-unloaded owned repo still counts toward the owner_tenant ceiling.
+        Some(ot) => match state.authoritative_owned_repo_logs(ot) {
+            Ok(logs) => logs.into_iter().map(|(slug, _)| slug).collect(),
             // Indeterminate ownership enumeration → fail closed (503), never allow.
-            None => return Err(StorageEnforcement::Unavailable),
+            Err(_) => return Err(StorageEnforcement::Unavailable),
         },
         None => vec![seam.repo_slug.clone()],
     };
@@ -1616,39 +1626,63 @@ fn finish_receive_pack(
                 // Storage-byte cap (G10): enforce BEFORE the flush/manifest commit. The
                 // pack is unpacked in memory (bounded by the bomb caps) but NOT yet
                 // stored to CAS, so a refusal here commits NO object and leaves every
-                // manifest unchanged. `delta` is the NEW distinct-object stored bytes.
-                let storage_delta = cas.pending_bytes();
-                match enforce_cas_storage_quota(state, seam, &owner_tenant, storage_delta) {
-                    Ok(()) => {}
-                    Err(StorageEnforcement::Exceeded(msg)) => {
-                        return respond_push_payload_too_large(request, &msg, io_budget);
+                // manifest unchanged. `delta` is the GENUINELY-NEW distinct-object stored
+                // bytes: `storage_delta_bytes` excludes objects the pack re-carries that
+                // are ALREADY in the repo's closure, so a force-push / overlapping push
+                // neither trips a spurious 413 nor inflates size.json (double-count fix).
+                let storage_delta = cas.storage_delta_bytes();
+                // G10 check→commit atomicity: hold a per-owner_tenant advisory lock across
+                // the quota CHECK *and* the durable size.json COMMIT (finalize's step 4).
+                // Without it the check-then-commit is a TOCTOU — two concurrent same-tenant
+                // detached workers each read the pre-push aggregate, both pass the cap, then
+                // both monotonic-bump size.json and overshoot the ceiling by up to N×pack.
+                // Serializing on the owner_tenant (or a repo-scoped key for a legacy/unowned
+                // repo) means a second same-tenant push cannot pass the cap until the prior
+                // push's size.json is committed and visible to its check. A `delta == 0`
+                // push commits no bytes → no lock needed. The guard drops with this block,
+                // so the client-facing report + best-effort tail run UNLOCKED.
+                let res = {
+                    let quota_lock = (storage_delta > 0).then(|| {
+                        let key = owner_tenant
+                            .clone()
+                            .unwrap_or_else(|| format!("__unowned_repo__:{}", seam.repo_slug));
+                        state.storage_quota_lock(&key)
+                    });
+                    let _quota_guard = quota_lock
+                        .as_ref()
+                        .map(|l| l.lock().unwrap_or_else(|e| e.into_inner()));
+                    match enforce_cas_storage_quota(state, seam, &owner_tenant, storage_delta) {
+                        Ok(()) => {}
+                        Err(StorageEnforcement::Exceeded(msg)) => {
+                            return respond_push_payload_too_large(request, &msg, io_budget);
+                        }
+                        Err(StorageEnforcement::Unavailable) => {
+                            return respond_push_storage_unavailable(request, io_budget);
+                        }
                     }
-                    Err(StorageEnforcement::Unavailable) => {
-                        return respond_push_storage_unavailable(request, io_budget);
-                    }
-                }
-                let res = crate::cas::finalize_cas_push(
-                    cas.as_mut(),
-                    &seam.r2,
-                    &seam.tenant,
-                    &seam.repo_slug,
-                    &cmd.ref_name,
-                    &cmd.new_oid,
-                    // The pusher's `expected` tip (`None` for a create) — the SAME value
-                    // the stale-check validated (`req.update.expected`). Threaded so the
-                    // conditional refs.json write RE-VALIDATES it against the fresh base,
-                    // closing the cross-instance same-ref lost-update (FIX-IFMATCH-REMERGE).
-                    req.update.expected.as_deref(),
-                    // The push's NEW stored-byte delta — finalize bumps size.json by this
-                    // AFTER the tip is durably advertised (the quota CHECK already passed
-                    // above, before the flush).
-                    storage_delta,
-                    || {
-                        state
-                            .persist(repo, &log, &token)
-                            .map_err(|e| format!("persist:{}", e.status))
-                    },
-                );
+                    crate::cas::finalize_cas_push(
+                        cas.as_mut(),
+                        &seam.r2,
+                        &seam.tenant,
+                        &seam.repo_slug,
+                        &cmd.ref_name,
+                        &cmd.new_oid,
+                        // The pusher's `expected` tip (`None` for a create) — the SAME value
+                        // the stale-check validated (`req.update.expected`). Threaded so the
+                        // conditional refs.json write RE-VALIDATES it against the fresh base,
+                        // closing the cross-instance same-ref lost-update (FIX-IFMATCH-REMERGE).
+                        req.update.expected.as_deref(),
+                        // The push's NEW stored-byte delta — finalize bumps size.json by this
+                        // AFTER the tip is durably advertised (the quota CHECK already passed
+                        // above, before the flush, under the per-owner_tenant lock).
+                        storage_delta,
+                        || {
+                            state
+                                .persist(repo, &log, &token)
+                                .map_err(|e| format!("persist:{}", e.status))
+                        },
+                    )
+                };
                 match res {
                     Ok(()) => {
                         // The push is DURABLE (objects → log → manifests committed).

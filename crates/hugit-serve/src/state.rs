@@ -687,6 +687,20 @@ pub struct AppState {
     /// `repos_runtime`/`pat_index`); the single-threaded accept loop keeps the lock
     /// uncontended.
     pub repo_meta_cache: Arc<RwLock<std::collections::HashMap<String, crate::authz::RepoMeta>>>,
+    /// Per-owner_tenant advisory locks that serialize the G10 storage-cap
+    /// CHECK→size.json-COMMIT critical section across the DETACHED receive-pack workers
+    /// (each holds a CLONE of this `AppState`, so this registry MUST live behind an
+    /// `Arc` to be shared). Without it the check-then-commit is a TOCTOU: two concurrent
+    /// pushes for the same owner_tenant each read the pre-push aggregate, both pass the
+    /// cap, then both bump `size.json` (a monotonic CAS-merge that never rejects) — the
+    /// aggregate overshoots the per-owner_tenant (and, for same-repo pushes, per-repo)
+    /// ceiling by up to N×pack-cap. [`storage_quota_lock`](Self::storage_quota_lock)
+    /// hands out one lock per key; the receive-pack finalize holds its guard across the
+    /// quota check AND the durable commit, so a same-tenant push cannot pass the cap
+    /// until the prior push's `size.json` is committed and visible to its check.
+    /// Bounded by the tenant/repo count (each entry is a zero-byte `Mutex<()>`); the
+    /// outer `Mutex` is held only for the O(1) lookup, never across a push.
+    pub storage_quota_locks: Arc<Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 /// The hard cap on repos a single tenant may hold in ONE engine lifetime (the boot
@@ -1180,6 +1194,7 @@ impl AppState {
             search_index: crate::search_index::SearchStore::new(),
             home_cache: crate::home_cache::HomeRenderCache::new(),
             repo_meta_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            storage_quota_locks: Arc::new(Mutex::new(std::collections::HashMap::new())),
         };
         // Populate the PAT index from the durable `_accounts/*` logs (only when
         // enabled). Boot-scan faults are fail-closed-DENY (the affected PATs simply
@@ -1481,6 +1496,7 @@ impl AppState {
             // is nothing to pre-populate. A test exercising the cache calls
             // `cache_repo_meta`/`refresh_repo_meta_cache` explicitly.
             repo_meta_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            storage_quota_locks: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -1899,6 +1915,28 @@ impl AppState {
     pub fn count_owned_repos(&self, owner_tenant: &str) -> Option<usize> {
         let (log, _) = self.load_tenant_registry(owner_tenant).ok()?;
         Some(crate::tenant_registry::count(&log))
+    }
+
+    /// The per-`key` advisory lock that serializes the G10 storage-cap
+    /// CHECK→`size.json`-COMMIT critical section (see
+    /// [`storage_quota_locks`](Self::storage_quota_locks)). `key` is the owner_tenant
+    /// (so ALL of an owner's pushes — even to different repos — serialize against the
+    /// SAME per-owner_tenant aggregate) or, for a legacy/unowned repo, a repo-scoped
+    /// fallback key. Returns the shared `Arc<Mutex<()>>`; the caller `.lock()`s it and
+    /// holds the guard across BOTH the quota check and the durable `size.json` commit so
+    /// two concurrent same-key pushes cannot both pass the cap and then overshoot. The
+    /// outer registry `Mutex` is held only for this O(1) get-or-insert, NEVER across the
+    /// push itself.
+    #[must_use]
+    pub fn storage_quota_lock(&self, key: &str) -> Arc<Mutex<()>> {
+        let mut map = self
+            .storage_quota_locks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        Arc::clone(
+            map.entry(key.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
     }
 
     /// Enumerate the `(slug, EventLog)` of every repo OWNED by `owner_tenant` — the
@@ -5915,6 +5953,57 @@ mod me_repos_tests {
         let mut slugs = src.list_repo_slugs().expect("list");
         slugs.sort();
         assert_eq!(slugs, vec!["alpha", "beta"], "account logs are not repos");
+    }
+
+    #[test]
+    fn storage_cap_rollup_counts_durable_but_unloaded_owned_repos() {
+        // G10 rollup fail-open fix: `enforce_cas_storage_quota` used to roll the
+        // per-owner_tenant cap over the IN-MEMORY loaded set only (`owned_repo_logs`), so
+        // a DURABLE-but-UNLOADED owned repo (provisioned, then dropped from the boot env —
+        // its `<slug>.json` log + R2 size.json survive, its git seam is gone) was silently
+        // omitted → the aggregate under-counted → a push could slip past the 10 GiB
+        // owner_tenant ceiling. The check now rolls up over `authoritative_owned_repo_logs`
+        // (the DURABLE set: list_repo_slugs() ∪ the in-memory overlay), so the unloaded
+        // repo still counts.
+        let dir = scratch_dir();
+        let mut st = AppState::new(dir.clone(), "dev-token".to_string());
+        // `loaded` is durable AND in the in-memory seam; `dropped` is durable-only.
+        std::fs::write(dir.join("loaded.json"), meta_log("private", "org-a")).unwrap();
+        std::fs::write(dir.join("dropped.json"), meta_log("private", "org-a")).unwrap();
+        st.set_repo_git(
+            "loaded",
+            Arc::new(hugit_proto::CasObjectSource::new()),
+            gix_hash::ObjectId::empty_tree(gix_hash::Kind::Sha1),
+            BTreeMap::new(),
+        );
+
+        // The OLD in-memory-only enumeration MISSES the unloaded repo (the fail-open).
+        let inmem: Vec<String> = st
+            .owned_repo_logs("org-a")
+            .expect("in-memory enumeration")
+            .into_iter()
+            .map(|(s, _)| s)
+            .collect();
+        assert_eq!(
+            inmem,
+            vec!["loaded"],
+            "owned_repo_logs sees only the loaded seam (the fail-open source)"
+        );
+
+        // The DURABLE authoritative enumeration — the set the storage-cap rollup now uses —
+        // includes BOTH, so the unloaded repo can no longer slip the per-owner_tenant cap.
+        let mut auth: Vec<String> = st
+            .authoritative_owned_repo_logs("org-a")
+            .expect("durable enumeration")
+            .into_iter()
+            .map(|(s, _)| s)
+            .collect();
+        auth.sort();
+        assert_eq!(
+            auth,
+            vec!["dropped", "loaded"],
+            "the durable rollup set includes the durable-but-unloaded owned repo"
+        );
     }
 
     #[test]
