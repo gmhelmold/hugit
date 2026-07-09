@@ -132,6 +132,54 @@ impl From<RunnerJobMetrics> for IntentMetrics {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// The REVERSE mapping (`IntentMetrics` → `RunnerJobMetrics`). Field-identical +
+// lossless (same names/types/order), so the round-trip preserves EVERY byte the
+// fabric's `intent_metrics_sig` pre-image covers. Needed so the off-box
+// cost-attestation verdict can reconstruct the exact `RunnerJobMetrics` the
+// fabric signed from a [`crate::runner::dispatch::DispatchOutcome`] that carries
+// the mapped [`IntentMetrics`]. Never lossy: no field is dropped or defaulted.
+// ─────────────────────────────────────────────────────────────────────────────
+
+impl From<TokenCounts> for RunnerTokenCounts {
+    fn from(t: TokenCounts) -> Self {
+        RunnerTokenCounts {
+            input: t.input,
+            output: t.output,
+            cache_read: t.cache_read,
+            cache_write: t.cache_write,
+            total: t.total,
+        }
+    }
+}
+
+impl From<ToolCount> for RunnerToolCount {
+    fn from(t: ToolCount) -> Self {
+        RunnerToolCount {
+            tool: t.tool,
+            count: t.count,
+        }
+    }
+}
+
+impl From<IntentMetrics> for RunnerJobMetrics {
+    fn from(m: IntentMetrics) -> Self {
+        RunnerJobMetrics {
+            tokens: m.tokens.into(),
+            wall_ms: m.wall_ms,
+            active_ms: m.active_ms,
+            tool_calls: m.tool_calls,
+            tool_breakdown: m
+                .tool_breakdown
+                .into_iter()
+                .map(RunnerToolCount::from)
+                .collect(),
+            model_turns: m.model_turns,
+            cost_usd_micros: m.cost_usd_micros,
+        }
+    }
+}
+
 impl RunnerJobMetrics {
     /// Parse a raw result-envelope META (as returned by
     /// [`LeaseClient::poll_meta`]) into the typed §13.1 DTO. Unknown
