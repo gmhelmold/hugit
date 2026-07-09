@@ -650,13 +650,17 @@ pub enum ErasureOutcome {
     /// A no-op replay — the account was already `erasure.executed`. Irreversible +
     /// idempotent: never re-tombstones, never resurrects.
     AlreadyExecuted,
-    /// The drive was ABORTED because the governing `erasure.requested` was SUPERSEDED
-    /// (a later `erasure.cancelled`/`erasure.executed`, or replaced by a fresh request)
-    /// AFTER the caller's grace/standing check but BEFORE the terminal claim — the #102
-    /// TOCTOU cancel-race. NO terminal `executed`/`partial` claim is recorded, honoring the
-    /// user's cancel. (Repos tombstoned earlier in the pass stay tombstoned — terminal +
-    /// idempotent — but the erasure is NOT finalized/claimed executed.)
-    AbortedSuperseded { repos_tombstoned: usize },
+    /// A grace-boundary cancellation SUPERSEDED the request BEFORE any irreversible action —
+    /// the executor re-read the FRESH account log before a destructive leg (or the
+    /// terminal-claim CAS append) and found a governing [`ERASURE_CANCELLED_KIND`] with
+    /// NOTHING yet destroyed. STRICTLY NON-DESTRUCTIVE: zero repos tombstoned, zero CAS bytes
+    /// GC'd, NO terminal claim recorded — the callers map this to a no-op. This variant is
+    /// returned ONLY when `tombstoned==0 && digests_erased==0`; once ANY destruction has
+    /// occurred the executor reports the TRUTHFUL `Executed`/`Partial` instead (MF1 — it never
+    /// asserts `erased:false` over real, irreversible destruction). The data-loss race fix: an
+    /// in-grace cancel can never be silently overrun, and a false "executed" is never recorded
+    /// over a standing withdrawal that touched no data.
+    Cancelled,
 }
 
 /// Whether the account log already carries a terminal [`ERASURE_EXECUTED_KIND`] — the
@@ -665,6 +669,44 @@ fn account_already_executed(log: &EventLog) -> bool {
     log.records()
         .iter()
         .any(|r| r.kind == ERASURE_EXECUTED_KIND)
+}
+
+/// Whether the account's erasure lifecycle is CURRENTLY superseded by a cancellation — a
+/// governing [`ERASURE_CANCELLED_KIND`] stands that is NOT re-opened by a later
+/// [`ERASURE_REQUESTED_KIND`] and NOT completed by a later [`ERASURE_EXECUTED_KIND`].
+///
+/// This is the executor's fail-closed re-check at the POINT OF NO RETURN. The cancel guard
+/// otherwise lives ONLY in the callers (the auto-executor selection + the operator route),
+/// strictly BEFORE dispatch — a TOCTOU: the ~5-min auto-sweep can read the account log
+/// BEFORE an in-grace `erasure.cancelled` persists, then physically tombstone every repo +
+/// GC the CAS bytes while the cancel returns `200 {canceled:true}`. Re-reading the FRESH
+/// account log with this predicate before EACH destructive leg (each tombstone + before the
+/// byte-level GC) and in the terminal-claim CAS append closes that race per-leg. Mirrors the
+/// last-governing scan of [`classify_erase_cancel`], but answers ONLY the one question the
+/// executor needs: "is a cancellation the standing terminal right now?"
+///
+/// MF3 (crucial): [`ERASURE_PARTIAL_KIND`] DELIBERATELY does not clear a standing cancel. A
+/// partial is progress, not completion — a cancel that halted the cascade mid-flight leaves
+/// `[requested, cancelled, partial]`, and the withdrawal MUST keep governing the REMAINING
+/// (un-destroyed) legs so a later auto-sweep can never silently finish the erasure the
+/// subject withdrew. Only a full `executed` (the cascade truly completed) or a fresh
+/// `requested` (a NEW erasure lifecycle) clears it.
+fn account_erasure_superseded_by_cancel(log: &EventLog) -> bool {
+    use crate::writes::verbs::write_account_erase::ERASURE_REQUESTED_KIND;
+    let mut superseded_by_cancel = false;
+    for r in log.records() {
+        if r.kind == ERASURE_REQUESTED_KIND {
+            superseded_by_cancel = false; // a fresh request re-opens the lifecycle
+        } else if r.kind == ERASURE_CANCELLED_KIND {
+            superseded_by_cancel = true; // a cancellation supersedes the standing request
+        } else if r.kind == ERASURE_EXECUTED_KIND {
+            superseded_by_cancel = false; // a COMPLETED erasure is the governing terminal
+            // NOTE: ERASURE_PARTIAL_KIND is intentionally NOT handled here — a partial must
+            // NEVER clear a standing cancellation (MF3); the withdrawal still governs the
+            // remaining legs.
+        }
+    }
+    superseded_by_cancel
 }
 
 /// Tombstone ONE repo: append the terminal [`REPO_ERASED_KIND`] to its append-only log
@@ -713,6 +755,21 @@ fn tombstone_repo(
 /// Append the terminal erasure claim (`executed`|`partial`) to the ACCOUNT log via a
 /// bounded CAS. Idempotent on the SAME kind (a matching terminal record already present
 /// → no-op). Fail-closed on a durable fault.
+///
+/// Returns `Ok(true)` when the claim is recorded (or was already present — idempotent), and
+/// `Ok(false)` ONLY for a REFUSED `executed`: the CAS hardening for the data-loss race — when
+/// `allow_over_cancel` is FALSE (the completion was CLEAN, i.e. NOTHING was physically
+/// destroyed) this append re-reads the FRESH account log inside the CAS loop and REFUSES to
+/// stamp `erasure.executed` OVER a superseding `erasure.cancelled` (mirrors the If-Match
+/// discipline so the log can never record a false executed while a withdrawal stands and no
+/// data was touched).
+///
+/// `allow_over_cancel` is TRUE only when irreversible destruction ALREADY occurred
+/// (`tombstoned>0 || digests_erased>0`): recording `executed` is then the TRUTHFUL,
+/// coherent-with-the-repo-logs outcome (the data really is gone — asserting `cancelled`/
+/// `erased:false` over it would be the dishonest response MF1 forbids), so the refusal is
+/// bypassed. Only `executed` is ever guarded — a `partial` is not a completion over-claim
+/// and, per MF3, can never clear a standing cancel via the predicate.
 fn append_account_claim(
     sink: &dyn AccountLogSink,
     account: &str,
@@ -720,12 +777,22 @@ fn append_account_claim(
     principal_chain: &[String],
     at: u64,
     payload_value: &serde_json::Value,
-) -> Result<(), EngineErr> {
+    allow_over_cancel: bool,
+) -> Result<bool, EngineErr> {
     let class = asserted_class(principal_chain)?;
     for _attempt in 0..MAX_CAS_ATTEMPTS {
         let (mut log, token) = sink.load_account(account)?;
+        // CAS HARDENING (data-loss race, defense-in-depth): refuse to record `executed` over a
+        // superseding cancellation on the FRESH head — UNLESS destruction already occurred
+        // (`allow_over_cancel`), in which case `executed` is the truthful record (MF1).
+        if kind == ERASURE_EXECUTED_KIND
+            && !allow_over_cancel
+            && account_erasure_superseded_by_cancel(&log)
+        {
+            return Ok(false);
+        }
         if log.records().iter().any(|r| r.kind == kind) {
-            return Ok(()); // this terminal claim already recorded — idempotent
+            return Ok(true); // this terminal claim already recorded — idempotent
         }
         let payload = hugit_refstore::canonical_json(&payload_value.to_string())
             .unwrap_or_else(|| payload_value.to_string());
@@ -741,7 +808,7 @@ fn append_account_claim(
             EngineErr::unavailable(format!("{kind} append denied: {}", d.reason.code()))
         })?;
         match sink.persist_account(account, &log, &token) {
-            Ok(()) => return Ok(()),
+            Ok(()) => return Ok(true),
             Err(e) if e.is_cas_conflict() => continue,
             Err(e) => return Err(e),
         }
@@ -1128,48 +1195,40 @@ fn execute_account_erasure_inner(
     if account_already_executed(&account_log) {
         return Ok(ErasureOutcome::AlreadyExecuted);
     }
-    // #102 cancel-race guard — capture the GOVERNING standing request as of the drive's
-    // start. It is re-read immediately before the terminal claim; if a cancel (or any
-    // superseding record / fresh request) lands in that window, the governing request
-    // changes and the drive ABORTS without claiming executed (see below). `None` here (the
-    // direct-invocation/test path with no staged request) means the guard is inert — it only
-    // ever ABORTS on a CHANGE, never newly gates a drive that never had a standing request.
-    let governing_at_start = read_standing_erasure_request(&account_log);
 
-    // #102 cancel-race guard — PRIMARY, at the POINT OF NO RETURN (before ANY physical
-    // erase). The post-loop guard below only blocks a false `executed` claim AFTER the
-    // repos are already tombstoned — which does NOT honor a cancel (the data is already
-    // gone). To actually PREVENT the erase, re-load + check for a governing
-    // `erasure.cancelled` HERE, immediately before the first tombstone: a cancel that
-    // landed up to this commit point aborts the drive with ZERO physical erase. We use
-    // `classify_erase_cancel` (not a bare `None` read) so a legitimate no-staged-request
-    // direct/operator drive (`NonePending`) and a matured standing request
-    // (`InGrace`/`PastGrace`) both PROCEED — only an `AlreadyCancelled` governing state
-    // aborts. Grace is irrelevant to the cancelled arm, so `0` is safe. After this point
-    // the erase is committed; a cancel landing DURING the loop is too late (the secondary
-    // post-loop guard then still blocks the false `executed` claim).
-    {
-        let (precheck_log, _) = state.load_account(account)?;
-        if matches!(
-            classify_erase_cancel(&precheck_log, at, 0),
-            EraseCancelState::AlreadyCancelled
-        ) {
-            eprintln!(
-                "[hugit-serve] erase: account {account:?} was CANCELLED at the commit point \
-                 — aborting before any physical erase (cancel honored, zero repos tombstoned)"
-            );
-            return Ok(ErasureOutcome::AbortedSuperseded {
-                repos_tombstoned: 0,
-            });
-        }
+    // DATA-LOSS RACE FIX — the FIRST fail-closed re-check (the cheap early-out). The callers
+    // gate on cancellation strictly BEFORE dispatch, but a grace-boundary `erasure.cancelled`
+    // can persist in the TOCTOU window between that gate and here (the auto-sweep read the log
+    // ~5 min ago). If a cancellation already supersedes the request, ABORT before touching
+    // anything → non-destructive `Cancelled`. This is only the first of the per-leg re-checks:
+    // each `tombstone_repo` and the byte-level GC below re-read the FRESH log again, so every
+    // irreversible leg is guarded as a single-op TOCTOU rather than a whole-cascade window.
+    if account_erasure_superseded_by_cancel(&account_log) {
+        return Ok(ErasureOutcome::Cancelled);
     }
 
     // Tombstone every PENDING repo durably FIRST — the claim is gated on all of these.
+    // MF2: each `tombstone_repo` is an IRREVERSIBLE leg, so re-check the FRESH standing state
+    // immediately before EACH one — this makes every destructive leg a single-op TOCTOU, not a
+    // whole-cascade window. `halted_by_cancel` records that a withdrawal landed mid-cascade so
+    // we STOP the remaining destruction (never undo what is already gone) and take the truthful
+    // outcome for what WAS destroyed (MF1).
     let sink: &dyn LogSink = state;
     let mut tombstoned = 0usize;
+    let mut halted_by_cancel = false;
     for leg in &plan.repos {
         if leg.already_erased {
             continue; // idempotent — already terminal
+        }
+        // MF2: fresh per-leg re-check on a NEW account-log read, immediately before this
+        // irreversible tombstone. A cancel seen with NOTHING yet destroyed → clean abort; a
+        // cancel seen after destruction began → halt the REMAINING legs (the truthful path).
+        if account_erasure_superseded_by_cancel(&state.load_account(account)?.0) {
+            if tombstoned == 0 {
+                return Ok(ErasureOutcome::Cancelled); // nothing destroyed → clean no-op
+            }
+            halted_by_cancel = true;
+            break;
         }
         tombstone_repo(sink, &leg.repo, &principal_chain, at)?;
         // Task #74 (W-METENANT scaling follow-up): `repo.erased` is TERMINAL and
@@ -1196,9 +1255,36 @@ fn execute_account_erasure_inner(
         tombstoned += 1;
     }
 
-    // The account-exclusive CAS physical GC. `gc_complete` gates `executed`.
-    let (gc_complete, digests_erased) =
-        drive_cas_gc(&plan, erase, cas_tenant, exclusive_digests, dsr_id)?;
+    // The account-exclusive CAS physical GC — the BYTE-LEVEL, most irreversible leg. `gc_complete`
+    // gates `executed`. MF2: `drive_cas_gc` re-checks the FRESH standing state before EACH
+    // physical `erase.erase` (a single-op TOCTOU) and HALTS the remaining byte-deletes on a
+    // withdrawal. Skip the GC entirely if we already halted mid-tombstone.
+    let (gc_complete, digests_erased, gc_halted) = if halted_by_cancel {
+        (false, 0, false)
+    } else {
+        let mut cancel_supersedes = || -> Result<bool, EngineErr> {
+            Ok(account_erasure_superseded_by_cancel(
+                &state.load_account(account)?.0,
+            ))
+        };
+        drive_cas_gc(
+            &plan,
+            erase,
+            cas_tenant,
+            exclusive_digests,
+            dsr_id,
+            &mut cancel_supersedes,
+        )?
+    };
+    if gc_halted {
+        // The byte-level GC halted on a withdrawal. If NOTHING was destroyed anywhere (no
+        // tombstone, no byte erased), it is a clean no-op → `Cancelled`. Otherwise irreversible
+        // destruction already occurred → the truthful `partial` path (MF1) below.
+        if tombstoned == 0 && digests_erased == 0 {
+            return Ok(ErasureOutcome::Cancelled);
+        }
+        halted_by_cancel = true;
+    }
 
     // ENUMERATE-CLAIM TOCTOU guard (clw must-fix #3c): a repo the subject provisioned
     // AFTER the plan enumeration but BEFORE this claim would be missed by the tombstone
@@ -1209,50 +1295,77 @@ fn execute_account_erasure_inner(
     // `executed`; `partial`-and-reconverge is the correct fail-safe (never over-claim).
     let toctou_clean = plan_account_erasure(state, account)?.pending_repo_count() == 0;
 
-    // #102 CANCEL-RACE guard (fail-closed): G12a (#296) shipped a LIVE `erasure.cancelled`
-    // producer, so a cancel can land AFTER the caller's grace/standing check but BEFORE this
-    // terminal claim. RE-READ the governing standing request; if it no longer matches the one
-    // this drive started on (superseded by `erasure.cancelled`/`erasure.executed`, or replaced
-    // by a fresh request), ABORT WITHOUT the terminal claim — honoring the cancel. This ONLY
-    // ever ADDS an abort on a genuine mid-drive change (a stable/absent standing request is a
-    // no-op), never weakening any existing gate above.
-    {
-        let (recheck_log, _) = state.load_account(account)?;
-        let governing_now = read_standing_erasure_request(&recheck_log);
-        if governing_now != governing_at_start {
-            eprintln!(
-                "[hugit-serve] erase: account {account:?} governing request changed mid-drive \
-                 (cancel/supersede landed) — aborting without a terminal claim (cancel honored)"
-            );
-            return Ok(ErasureOutcome::AbortedSuperseded {
-                repos_tombstoned: tombstoned,
-            });
-        }
-    }
+    // Whether ANY irreversible destruction actually happened — the pivot of the honesty
+    // contract (MF1): the executor may NEVER report `Cancelled`/`erased:false` once a repo is
+    // tombstoned or a CAS byte is gone; it must surface the TRUTHFUL outcome instead.
+    let destroyed = tombstoned > 0 || digests_erased > 0;
 
-    // The terminal claim, LAST. Not complete OR a new repo appeared → partial (never
-    // over-claim `executed`).
+    // The terminal claim, LAST.
     let acct_sink: &dyn AccountLogSink = state;
-    if gc_complete && toctou_clean {
+    if gc_complete && toctou_clean && !halted_by_cancel {
+        // The cascade COMPLETED. If destruction occurred, `executed` is the truthful record
+        // and MUST be written even over a late cancel (coherent with the repo logs, MF1); a
+        // late-arriving withdrawal that lost the race is noted for the audit trail. If NOTHING
+        // was destroyed (empty plan / all-shared digests) and a cancel now stands, the CAS
+        // append refuses (`allow_over_cancel=false`) → honest `Cancelled` (nothing erased).
+        let late_cancel_overrun =
+            destroyed && account_erasure_superseded_by_cancel(&state.load_account(account)?.0);
         let payload = serde_json::json!({
             "account": account,
             "state": "executed",
             "repos_tombstoned": tombstoned,
             "digests_erased": digests_erased,
+            "late_cancel_overrun": late_cancel_overrun,
         });
-        append_account_claim(
+        let recorded = append_account_claim(
             acct_sink,
             account,
             ERASURE_EXECUTED_KIND,
             &principal_chain,
             at,
             &payload,
+            destroyed, // allow_over_cancel: only when the erasure truly happened
         )?;
+        if !recorded {
+            // Refused: the completion was CLEAN (nothing destroyed) and a cancel superseded at
+            // the append → honest non-destructive `Cancelled` (never a false "executed").
+            return Ok(ErasureOutcome::Cancelled);
+        }
         Ok(ErasureOutcome::Executed {
             repos_tombstoned: tombstoned,
         })
+    } else if halted_by_cancel {
+        // A withdrawal HALTED the cascade after irreversible destruction began. We can never
+        // resurrect what is already gone, so record the TRUTHFUL `partial` (MF1) — the
+        // already-destroyed legs are stated (`repos_tombstoned`/`digests_erased`) and the
+        // standing cancel keeps governing the REMAINING legs (MF3: partial never clears it), so
+        // no later sweep finishes the erasure the subject withdrew.
+        let outstanding = "halted-by-cancel-mid-cascade (already-destroyed legs are irreversible; \
+                           remaining destruction withdrawn per the standing cancellation)";
+        let payload = serde_json::json!({
+            "account": account,
+            "state": "partial",
+            "repos_tombstoned": tombstoned,
+            "digests_erased": digests_erased,
+            "outstanding": outstanding,
+        });
+        // Not cancel-guarded — a partial over a standing cancel is the honest record here, and
+        // it provably cannot clear the cancel (MF3 predicate).
+        append_account_claim(
+            acct_sink,
+            account,
+            ERASURE_PARTIAL_KIND,
+            &principal_chain,
+            at,
+            &payload,
+            true, // allow_over_cancel is irrelevant for a partial (only executed is guarded)
+        )?;
+        Ok(ErasureOutcome::Partial {
+            repos_tombstoned: tombstoned,
+            blocked_reason: outstanding.to_string(),
+        })
     } else {
-        // Distinguish WHY it's partial: an unmet CAS-GC obligation vs a repo that
+        // Incomplete for a NON-cancel reason: an unmet CAS-GC obligation vs a repo that
         // appeared mid-cascade (the TOCTOU re-assert fired) — both are honestly re-runnable.
         let outstanding = if !toctou_clean {
             "owned-repo-appeared-mid-cascade"
@@ -1273,6 +1386,7 @@ fn execute_account_erasure_inner(
             &principal_chain,
             at,
             &payload,
+            true, // allow_over_cancel is irrelevant for a partial (only executed is guarded)
         )?;
         Ok(ErasureOutcome::Partial {
             repos_tombstoned: tombstoned,
@@ -1281,27 +1395,41 @@ fn execute_account_erasure_inner(
     }
 }
 
-/// Drive the account-exclusive CAS physical GC. Returns `(gc_complete, digests_erased)`.
+/// Drive the account-exclusive CAS physical GC. Returns `(gc_complete, digests_erased,
+/// halted_by_cancel)`.
+///
 /// FAIL-CLOSED: `gc_complete` is true ONLY when the obligation is not required, or every
 /// exclusive digest is erased AND 410-verified. An erase fault propagates (`Err` → 503,
 /// idempotent retry converges); a post-erase not-gone yields `gc_complete=false` (→
 /// `partial`, never a silent over-claim).
+///
+/// MF2 — the byte-level phase is the MOST irreversible leg, so `cancel_supersedes` is re-run
+/// on the FRESH account log IMMEDIATELY before EACH physical `erase.erase` (a single-op
+/// TOCTOU, not a whole-phase window). A cancellation seen before a given digest HALTS the
+/// remaining byte-deletes: it returns `halted_by_cancel=true` with the count already erased,
+/// and the caller takes the TRUTHFUL outcome for what was destroyed (never `erased:false`).
 fn drive_cas_gc(
     plan: &ErasurePlan,
     erase: Option<&dyn CasEraseTransport>,
     cas_tenant: &str,
     exclusive_digests: &[String],
     dsr_id: &str,
-) -> Result<(bool, usize), EngineErr> {
+    cancel_supersedes: &mut dyn FnMut() -> Result<bool, EngineErr>,
+) -> Result<(bool, usize, bool), EngineErr> {
     if !plan.cas_gc.required {
-        return Ok((true, 0)); // no owned objects → nothing to physically GC
+        return Ok((true, 0, false)); // no owned objects → nothing to physically GC
     }
     let Some(erase) = erase else {
-        return Ok((false, 0)); // obligation required but no transport → unmet → partial
+        return Ok((false, 0, false)); // obligation required but no transport → unmet → partial
     };
     let mut erased = 0usize;
     let mut all_gone = true;
     for digest in exclusive_digests {
+        // MF2: fresh re-check immediately before this irreversible byte-delete. A withdrawal
+        // now standing → HALT the remaining deletes (never undo what is already gone).
+        if cancel_supersedes()? {
+            return Ok((false, erased, true));
+        }
         erase.erase(cas_tenant, digest, dsr_id, "erasure")?; // hard fault → 503, retry
         if erase.is_gone(cas_tenant, digest)? {
             erased += 1;
@@ -1309,7 +1437,7 @@ fn drive_cas_gc(
             all_gone = false; // erased but not 410-verified → do NOT over-claim
         }
     }
-    Ok((all_gone, erased))
+    Ok((all_gone, erased, false))
 }
 
 #[cfg(test)]
@@ -2296,10 +2424,566 @@ mod tests {
         );
     }
 
-    // ── #102 cancel-race guard (the terminal-claim TOCTOU) ────────────────────────
+    // ── the DATA-LOSS RACE FIX: the executor re-checks cancellation at the point of no
+    //    return (an in-grace cancel can never be silently overrun) ────────────────────
 
-    /// Persist a governing standing `erasure.requested` onto the account log (the state the
-    /// operator route would validate BEFORE driving the irreversible cascade).
+    /// Seed a chain-valid account log at `_accounts/{account}.json` (Local mode) from an
+    /// ordered `(kind, payload)` erasure-lifecycle history — the standing state the executor
+    /// re-reads immediately before the first irreversible action.
+    fn seed_account_log(st: &AppState, account: &str, records: &[(&str, serde_json::Value)]) {
+        let dir = match &st.source {
+            crate::state::LogSource::Local { dir } => dir.clone(),
+            crate::state::LogSource::R2(_) => unreachable!("test is Local-mode"),
+        };
+        let adir = dir.join("_accounts");
+        std::fs::create_dir_all(&adir).unwrap();
+        let log = account_log(records);
+        std::fs::write(
+            adir.join(format!("{account}.json")),
+            serde_json::to_string(log.records()).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn superseded_by_cancel_predicate_is_last_governing_and_reopenable() {
+        // The pure predicate: only a cancellation that is the STANDING terminal (not
+        // re-opened by a later request, not overtaken by executed/partial) supersedes.
+        let cases: &[(&[(&str, serde_json::Value)], bool)] = &[
+            (
+                &[(REQ, serde_json::json!({"subject":"a","dsr_id":"d"}))],
+                false,
+            ),
+            (
+                &[
+                    (REQ, serde_json::json!({"subject":"a","dsr_id":"d"})),
+                    (
+                        ERASURE_CANCELLED_KIND,
+                        serde_json::json!({"state":"cancelled"}),
+                    ),
+                ],
+                true,
+            ),
+            // a fresh request AFTER the cancel re-opens the lifecycle → NOT superseded.
+            (
+                &[
+                    (REQ, serde_json::json!({"subject":"a"})),
+                    (
+                        ERASURE_CANCELLED_KIND,
+                        serde_json::json!({"state":"cancelled"}),
+                    ),
+                    (REQ, serde_json::json!({"subject":"a","dsr_id":"d2"})),
+                ],
+                false,
+            ),
+            // executed is a terminal, not a cancel.
+            (
+                &[
+                    (REQ, serde_json::json!({"subject":"a"})),
+                    (
+                        ERASURE_EXECUTED_KIND,
+                        serde_json::json!({"state":"executed"}),
+                    ),
+                ],
+                false,
+            ),
+            // cancel is the LAST governing terminal after a re-request → superseded again.
+            (
+                &[
+                    (REQ, serde_json::json!({"subject":"a"})),
+                    (
+                        ERASURE_CANCELLED_KIND,
+                        serde_json::json!({"state":"cancelled"}),
+                    ),
+                    (REQ, serde_json::json!({"subject":"a","dsr_id":"d2"})),
+                    (
+                        ERASURE_CANCELLED_KIND,
+                        serde_json::json!({"state":"cancelled"}),
+                    ),
+                ],
+                true,
+            ),
+            // MF3: a `partial` after a cancel does NOT clear the cancellation — the withdrawal
+            // still governs the remaining legs (so no later sweep finishes the erasure).
+            (
+                &[
+                    (REQ, serde_json::json!({"subject":"a","dsr_id":"d"})),
+                    (
+                        ERASURE_CANCELLED_KIND,
+                        serde_json::json!({"state":"cancelled"}),
+                    ),
+                    (ERASURE_PARTIAL_KIND, serde_json::json!({"state":"partial"})),
+                ],
+                true,
+            ),
+            // a LEGIT partial with no cancel is not superseded (a re-run may still complete).
+            (
+                &[
+                    (REQ, serde_json::json!({"subject":"a","dsr_id":"d"})),
+                    (ERASURE_PARTIAL_KIND, serde_json::json!({"state":"partial"})),
+                ],
+                false,
+            ),
+        ];
+        for (records, expected) in cases {
+            let log = account_log(records);
+            assert_eq!(
+                account_erasure_superseded_by_cancel(&log),
+                *expected,
+                "records {records:?}"
+            );
+        }
+        assert!(
+            !account_erasure_superseded_by_cancel(&EventLog::new()),
+            "an empty lifecycle is never a false cancel"
+        );
+    }
+
+    #[test]
+    fn executor_aborts_when_a_cancel_superseded_before_the_irreversible_erase() {
+        // THE RACE (test 1): a governing request, then an `erasure.cancelled` persists
+        // BEFORE the executor's first physical action. The point-of-no-return re-read finds
+        // the cancel → the executor ABORTS: NO tombstone, NO CAS GC, NO `erasure.executed`,
+        // the account (repo) intact. Uses the FULL transport path to prove drive_cas_gc is
+        // never reached (no digest erased).
+        let st = state_with(&[("alpha", "org-a", false)]);
+        seed_account_log(
+            &st,
+            "org-a",
+            &[
+                (REQ, serde_json::json!({"subject":"org-a","dsr_id":"dsr-1"})),
+                (
+                    ERASURE_CANCELLED_KIND,
+                    serde_json::json!({"state":"cancelled"}),
+                ),
+            ],
+        );
+        let mock = MockErase::new();
+        let digests = vec!["deadbeef01".to_string()];
+        let outcome = execute_account_erasure_with_erase(
+            &st,
+            "org-a",
+            operator(),
+            50,
+            &mock,
+            "d863fafb",
+            &digests,
+            "dsr-1",
+        )
+        .expect("a superseding cancel is a non-destructive no-op, not an error");
+        assert_eq!(
+            outcome,
+            ErasureOutcome::Cancelled,
+            "the executor abandons the cascade on a superseding cancel"
+        );
+        assert!(
+            mock.erased.borrow().is_empty(),
+            "drive_cas_gc is NEVER reached — no CAS byte physically erased"
+        );
+        // The repo is NOT tombstoned — it is fully intact.
+        assert!(
+            !repo_is_erased(&st.load_verified("alpha").unwrap()),
+            "the repo is intact — no terminal repo.erased was appended"
+        );
+        // The account log is UNCHANGED: no executed, no partial — the cancel still governs.
+        let (alog, _) = st.load_account_log("org-a").unwrap();
+        assert!(
+            !alog
+                .records()
+                .iter()
+                .any(|r| r.kind == ERASURE_EXECUTED_KIND || r.kind == ERASURE_PARTIAL_KIND),
+            "no terminal erasure claim is ever stamped over a standing cancellation"
+        );
+    }
+
+    #[test]
+    fn append_claim_cas_refuses_executed_over_a_superseding_cancel() {
+        // THE CAS HARDENING (test 2): even if two racers slipped the pre-destruct re-read,
+        // the terminal-claim CAS append REFUSES to record `executed` while a superseding
+        // `erasure.cancelled` stands on the fresh head → Ok(false), nothing written.
+        let st = state_with(&[("alpha", "org-a", false)]);
+        seed_account_log(
+            &st,
+            "org-a",
+            &[
+                (REQ, serde_json::json!({"subject":"org-a","dsr_id":"dsr-1"})),
+                (
+                    ERASURE_CANCELLED_KIND,
+                    serde_json::json!({"state":"cancelled"}),
+                ),
+            ],
+        );
+        let acct_sink: &dyn AccountLogSink = &st;
+        let payload = serde_json::json!({"account":"org-a","state":"executed"});
+        // allow_over_cancel=false → the CLEAN-completion case (nothing destroyed) refuses.
+        let recorded = append_account_claim(
+            acct_sink,
+            "org-a",
+            ERASURE_EXECUTED_KIND,
+            &operator(),
+            60,
+            &payload,
+            false,
+        )
+        .expect("refusal is not a fault");
+        assert!(
+            !recorded,
+            "the CAS append REFUSES executed-over-cancelled on a clean completion (Ok(false))"
+        );
+        let (alog, _) = st.load_account_log("org-a").unwrap();
+        assert!(
+            !alog
+                .records()
+                .iter()
+                .any(|r| r.kind == ERASURE_EXECUTED_KIND),
+            "no erasure.executed is ever recorded over a superseding cancellation"
+        );
+
+        // MF1 mirror: with allow_over_cancel=TRUE (destruction already occurred) the SAME
+        // append RECORDS `executed` truthfully over the cancel — the honest, coherent record.
+        let recorded_truthful = append_account_claim(
+            acct_sink,
+            "org-a",
+            ERASURE_EXECUTED_KIND,
+            &operator(),
+            61,
+            &payload,
+            true,
+        )
+        .expect("truthful executed is not a fault");
+        assert!(
+            recorded_truthful,
+            "when destruction already happened, executed is the truthful record (not refused)"
+        );
+        let (alog2, _) = st.load_account_log("org-a").unwrap();
+        assert!(
+            alog2
+                .records()
+                .iter()
+                .any(|r| r.kind == ERASURE_EXECUTED_KIND),
+            "the truthful executed IS recorded, coherent with the (already-erased) repo logs"
+        );
+    }
+
+    #[test]
+    fn happy_path_matured_uncancelled_request_still_fully_executes() {
+        // TEST 3: the fix does NOT touch the happy path — a standing, un-cancelled request
+        // with every exclusive digest erased + 410-verified still completes to
+        // `erasure.executed` (the repo tombstoned, the digests erased).
+        let st = state_with(&[("alpha", "org-a", false)]);
+        seed_account_log(
+            &st,
+            "org-a",
+            &[(REQ, serde_json::json!({"subject":"org-a","dsr_id":"dsr-1"}))],
+        );
+        let mock = MockErase::new();
+        let digests = vec!["deadbeef01".to_string(), "deadbeef02".to_string()];
+        let outcome = execute_account_erasure_with_erase(
+            &st,
+            "org-a",
+            operator(),
+            50,
+            &mock,
+            "d863fafb",
+            &digests,
+            "dsr-1",
+        )
+        .expect("execute");
+        assert_eq!(
+            outcome,
+            ErasureOutcome::Executed {
+                repos_tombstoned: 1
+            },
+            "an un-cancelled matured request still fully executes"
+        );
+        assert_eq!(
+            mock.erased.borrow().len(),
+            2,
+            "both exclusive digests erased"
+        );
+        assert!(repo_is_erased(&st.load_verified("alpha").unwrap()));
+        let (alog, _) = st.load_account_log("org-a").unwrap();
+        assert!(
+            alog.records()
+                .iter()
+                .any(|r| r.kind == ERASURE_EXECUTED_KIND)
+        );
+    }
+
+    #[test]
+    fn idempotency_preserved_already_executed_is_still_a_noop_replay() {
+        // TEST 4: the cancel re-check did not disturb the existing already-executed
+        // idempotency — an account carrying a terminal `erasure.executed` is a no-op replay
+        // (never re-tombstones, never resurrects), and it is NEVER mistaken for cancelled.
+        let st = state_with(&[("alpha", "org-a", true)]); // repo already tombstoned
+        seed_account_log(
+            &st,
+            "org-a",
+            &[
+                (REQ, serde_json::json!({"subject":"org-a","dsr_id":"dsr-1"})),
+                (
+                    ERASURE_EXECUTED_KIND,
+                    serde_json::json!({"state":"executed"}),
+                ),
+            ],
+        );
+        let mock = MockErase::new();
+        let outcome = execute_account_erasure_with_erase(
+            &st,
+            "org-a",
+            operator(),
+            70,
+            &mock,
+            "d863fafb",
+            &["deadbeef01".to_string()],
+            "dsr-1",
+        )
+        .expect("replay");
+        assert_eq!(
+            outcome,
+            ErasureOutcome::AlreadyExecuted,
+            "a completed account replays as a no-op, never re-runs, never Cancelled"
+        );
+        assert!(
+            mock.erased.borrow().is_empty(),
+            "an already-executed replay erases nothing new"
+        );
+    }
+
+    // ── MF1/MF2: a cancel landing MID-cascade (after destruction began) is HONEST, not
+    //    silently overrun with a dishonest erased:false ────────────────────────────────
+
+    /// Append a chain-valid `erasure.cancelled` to an account log (Local mode) — the
+    /// grace-boundary withdrawal, injected at a controlled instant during a cascade.
+    fn append_cancel(st: &AppState, account: &str, at: u64) {
+        let (mut log, token) = st.load_account_log(account).unwrap();
+        let payload = serde_json::json!({"state":"cancelled","subject":account}).to_string();
+        log.append_authorized(
+            PrincipalClass::Orchestrator,
+            Endpoint::Land,
+            ERASURE_CANCELLED_KIND,
+            vec!["o".into()],
+            hugit_refstore::canonical_json(&payload).unwrap_or(payload),
+            at,
+        )
+        .expect("append erasure.cancelled");
+        st.persist_account_log(account, &log, &token).unwrap();
+    }
+
+    /// A [`CasEraseTransport`] that INJECTS an `erasure.cancelled` into the account log on its
+    /// Nth `erase` call (0-based) — reproduces a grace-boundary withdrawal that lands DURING
+    /// the irreversible byte-level GC, deterministically. Delegates the actual erase to an
+    /// inner [`MockErase`] so `is_gone` still reflects reality.
+    struct CancelInjectingErase<'a> {
+        st: &'a AppState,
+        account: &'a str,
+        inject_on_call: usize,
+        calls: std::cell::Cell<usize>,
+        inner: MockErase,
+    }
+    impl CasEraseTransport for CancelInjectingErase<'_> {
+        fn erase(&self, t: &str, digest: &str, d: &str, r: &str) -> Result<(), EngineErr> {
+            let n = self.calls.get();
+            if n == self.inject_on_call {
+                // Inject the withdrawal at the START of this erase call — so the per-digest
+                // re-check BEFORE the NEXT digest observes the standing cancel and halts.
+                append_cancel(self.st, self.account, 1_000 + n as u64);
+            }
+            self.calls.set(n + 1);
+            self.inner.erase(t, digest, d, r)
+        }
+        fn is_gone(&self, t: &str, digest: &str) -> Result<bool, EngineErr> {
+            self.inner.is_gone(t, digest)
+        }
+    }
+
+    #[test]
+    fn mf1_full_completion_with_a_late_cancel_records_the_truthful_executed_not_erased_false() {
+        // MF1: the cancel lands DURING the byte-level GC (on the only erase), AFTER the repo
+        // was tombstoned and the digest physically deleted — irreversible destruction is
+        // COMPLETE. The executor must surface the TRUTHFUL `Executed` (coherent with the erased
+        // repo log), NEVER `Cancelled`/erased:false. The overrun is flagged for the audit trail.
+        let st = state_with(&[("alpha", "org-a", false)]);
+        seed_account_log(
+            &st,
+            "org-a",
+            &[(REQ, serde_json::json!({"subject":"org-a","dsr_id":"dsr-1"}))],
+        );
+        let erase = CancelInjectingErase {
+            st: &st,
+            account: "org-a",
+            inject_on_call: 0, // inject on the first (only) erase → cancel present at the claim
+            calls: std::cell::Cell::new(0),
+            inner: MockErase::new(),
+        };
+        let outcome = execute_account_erasure_with_erase(
+            &st,
+            "org-a",
+            operator(),
+            50,
+            &erase,
+            "d863fafb",
+            &["deadbeef01".to_string()],
+            "dsr-1",
+        )
+        .expect("execute");
+        assert_eq!(
+            outcome,
+            ErasureOutcome::Executed {
+                repos_tombstoned: 1
+            },
+            "destruction COMPLETED — the truthful outcome is Executed, never Cancelled/erased:false"
+        );
+        // Coherence: repo tombstoned, digest gone, account log records executed OVER the cancel.
+        assert!(repo_is_erased(&st.load_verified("alpha").unwrap()));
+        assert_eq!(
+            erase.inner.erased.borrow().len(),
+            1,
+            "the digest was physically erased"
+        );
+        let (alog, _) = st.load_account_log("org-a").unwrap();
+        let executed = alog
+            .records()
+            .iter()
+            .find(|r| r.kind == ERASURE_EXECUTED_KIND)
+            .expect("erasure.executed is recorded (coherent with the erased repo)");
+        let v: serde_json::Value = serde_json::from_str(&executed.payload).unwrap();
+        assert_eq!(
+            v.get("late_cancel_overrun").and_then(|b| b.as_bool()),
+            Some(true),
+            "the late cancel that lost the race is flagged for the audit trail"
+        );
+        assert!(
+            alog.records()
+                .iter()
+                .any(|r| r.kind == ERASURE_CANCELLED_KIND),
+            "the cancel record is preserved (append-only) — the log states the full race"
+        );
+    }
+
+    #[test]
+    fn mf2_pre_erase_recheck_aborts_the_remaining_gc_and_reports_the_truthful_partial() {
+        // MF2: two exclusive digests; the cancel lands during the GC, AFTER the first byte is
+        // deleted but BEFORE the second. The per-digest re-check must ABORT the remaining
+        // erase (the second digest is SPARED), and since irreversible destruction already began
+        // the outcome is the TRUTHFUL `Partial` (repos_tombstoned>0), never Cancelled/erased:false.
+        let st = state_with(&[("alpha", "org-a", false)]);
+        seed_account_log(
+            &st,
+            "org-a",
+            &[(REQ, serde_json::json!({"subject":"org-a","dsr_id":"dsr-1"}))],
+        );
+        let erase = CancelInjectingErase {
+            st: &st,
+            account: "org-a",
+            inject_on_call: 0, // cancel injected during erase(d1); the check before d2 then halts
+            calls: std::cell::Cell::new(0),
+            inner: MockErase::new(),
+        };
+        let digests = vec!["d1aaaaaaaa".to_string(), "d2bbbbbbbb".to_string()];
+        let outcome = execute_account_erasure_with_erase(
+            &st,
+            "org-a",
+            operator(),
+            50,
+            &erase,
+            "d863fafb",
+            &digests,
+            "dsr-1",
+        )
+        .expect("execute");
+        assert!(
+            matches!(
+                outcome,
+                ErasureOutcome::Partial {
+                    repos_tombstoned: 1,
+                    ..
+                }
+            ),
+            "destruction began then a cancel halted the rest → truthful Partial, got {outcome:?}"
+        );
+        // The SECOND digest was spared (the pre-erase re-check aborted the remaining GC).
+        let erased = erase.inner.erased.borrow();
+        assert!(
+            erased.contains("d1aaaaaaaa"),
+            "the first digest was already deleted (irreversible)"
+        );
+        assert!(
+            !erased.contains("d2bbbbbbbb"),
+            "the pre-erase re-check ABORTED the remaining physical erase — the second byte is spared"
+        );
+        // Coherence + honesty: repo tombstoned, account log records `partial` (not executed,
+        // not a false erased:false), and the standing cancel still governs (MF3).
+        assert!(repo_is_erased(&st.load_verified("alpha").unwrap()));
+        let (alog, _) = st.load_account_log("org-a").unwrap();
+        assert!(
+            alog.records()
+                .iter()
+                .any(|r| r.kind == ERASURE_PARTIAL_KIND)
+        );
+        assert!(
+            !alog
+                .records()
+                .iter()
+                .any(|r| r.kind == ERASURE_EXECUTED_KIND)
+        );
+        assert!(
+            account_erasure_superseded_by_cancel(&alog),
+            "MF3: the partial did NOT clear the standing cancel — the withdrawal still governs"
+        );
+    }
+
+    #[test]
+    fn mf3_partial_cannot_clear_a_standing_cancel_remaining_repos_are_spared() {
+        // MF3 end-to-end: a prior halted cascade left `[requested, cancelled, partial]` and a
+        // still-pending repo `beta`. A later auto-sweep run MUST honor the standing cancel
+        // (the partial did not clear it) → `Cancelled`, and `beta` is NEVER tombstoned.
+        let st = state_with(&[("beta", "org-a", false)]);
+        seed_account_log(
+            &st,
+            "org-a",
+            &[
+                (REQ, serde_json::json!({"subject":"org-a","dsr_id":"dsr-1"})),
+                (
+                    ERASURE_CANCELLED_KIND,
+                    serde_json::json!({"state":"cancelled"}),
+                ),
+                (ERASURE_PARTIAL_KIND, serde_json::json!({"state":"partial"})),
+            ],
+        );
+        let mock = MockErase::new();
+        let outcome = execute_account_erasure_with_erase(
+            &st,
+            "org-a",
+            operator(),
+            90,
+            &mock,
+            "d863fafb",
+            &["deadbeef01".to_string()],
+            "dsr-1",
+        )
+        .expect("execute");
+        assert_eq!(
+            outcome,
+            ErasureOutcome::Cancelled,
+            "a partial can NEVER clear a standing cancel — the withdrawal governs the remaining legs"
+        );
+        assert!(
+            !repo_is_erased(&st.load_verified("beta").unwrap()),
+            "the still-pending repo is SPARED — no later sweep finishes the withdrawn erasure"
+        );
+        assert!(
+            mock.erased.borrow().is_empty(),
+            "no CAS byte is erased on the withdrawn re-run"
+        );
+    }
+
+    // ── RECONCILIATION: the OLD #102 `AbortedSuperseded → 409` call sites, re-proved under
+    //    the unified honest model that supersedes them (Cancelled/200 when nothing was
+    //    destroyed; truthful Executed/Partial once destruction began) ─────────────────────
+
+    /// Append a governing standing `erasure.requested` onto the account log (the #102 test
+    /// fixture — the state the operator route validates BEFORE driving the cascade).
     fn seed_account_request(st: &AppState, account: &str, dsr: &str, at: u64) {
         let (mut log, tok) = st.load_account_log(account).expect("load acct");
         let payload = serde_json::json!({
@@ -2319,77 +3003,16 @@ mod tests {
             .expect("persist requested");
     }
 
-    /// Append a governing `erasure.cancelled` (the user self-serve withdrawal, G12a #296)
-    /// so the account's erasure lifecycle is CANCELLED as of `at`.
-    fn seed_account_cancel(st: &AppState, account: &str, dsr: &str, at: u64) {
-        let (mut log, tok) = st.load_account_log(account).expect("load acct");
-        let payload = serde_json::json!({
-            "account": account, "subject": account, "state": "cancelled", "dsr_id": dsr,
-        })
-        .to_string();
-        log.append_authorized(
-            PrincipalClass::Orchestrator,
-            Endpoint::Land,
-            ERASURE_CANCELLED_KIND,
-            vec!["o".into()],
-            hugit_refstore::canonical_json(&payload).unwrap_or(payload),
-            at,
-        )
-        .expect("append cancelled");
-        st.persist_account_log(account, &log, &tok)
-            .expect("persist cancelled");
-    }
-
-    /// A [`CasEraseTransport`] that INJECTS a superseding `erasure.cancelled` on its first
-    /// `erase()`. `drive_cas_gc` runs AFTER the drive captures the governing request but
-    /// BEFORE the terminal claim, so erasing a digest here deterministically simulates a
-    /// cancel landing MID-DRIVE (the #102 window). `is_gone` returns true so that, absent the
-    /// guard, the drive WOULD claim `executed` — proving the guard is what prevents it.
-    struct CancelInjectingErase<'a> {
-        st: &'a AppState,
-        account: &'a str,
-        injected: std::cell::Cell<bool>,
-    }
-    impl CasEraseTransport for CancelInjectingErase<'_> {
-        fn erase(&self, _t: &str, _digest: &str, _d: &str, _r: &str) -> Result<(), EngineErr> {
-            if !self.injected.replace(true) {
-                let (mut log, tok) = self.st.load_account_log(self.account).expect("load acct");
-                let payload =
-                    serde_json::json!({ "account": self.account, "state": "canceled" }).to_string();
-                log.append_authorized(
-                    PrincipalClass::Orchestrator,
-                    Endpoint::Land,
-                    ERASURE_CANCELLED_KIND,
-                    vec!["o".into()],
-                    hugit_refstore::canonical_json(&payload).unwrap_or(payload),
-                    5,
-                )
-                .expect("append cancel");
-                self.st
-                    .persist_account_log(self.account, &log, &tok)
-                    .expect("persist cancel");
-            }
-            Ok(())
-        }
-        fn is_gone(&self, _t: &str, _digest: &str) -> Result<bool, EngineErr> {
-            Ok(true) // erase "succeeded" — the drive would claim executed but for the guard
-        }
-    }
-
     #[test]
-    fn execute_aborts_when_a_cancel_lands_mid_drive() {
-        // #102 TOCTOU: a standing request is validated, the drive starts, then a cancel lands
-        // DURING the drive (injected at the CAS-GC step — after the start-capture, before the
-        // terminal claim). The cascade MUST abort: no `erasure.executed`/`erasure.partial`
-        // claim, honoring the cancel the user just landed.
+    fn reconcile_old102_already_cancelled_now_returns_clean_cancelled_zero_erase() {
+        // OLD #102: this returned `AbortedSuperseded { repos_tombstoned: 0 } → 409`. Under the
+        // superseding model it returns the honest `Cancelled` (nothing destroyed): the repo is
+        // intact, the CAS transport is never invoked, and no claim is recorded. Same physical
+        // guarantee (zero erase), a cleaner/coherent contract (200 clean vs a bare 409).
         let st = state_with(&[("alpha", "org-a", false)]);
         seed_account_request(&st, "org-a", "dsr-1", 1);
-        let mock = CancelInjectingErase {
-            st: &st,
-            account: "org-a",
-            injected: std::cell::Cell::new(false),
-        };
-        let digests = vec!["deadbeef01".to_string()];
+        append_cancel(&st, "org-a", 2); // user withdraws within grace
+        let mock = MockErase::new();
         let outcome = execute_account_erasure_with_erase(
             &st,
             "org-a",
@@ -2397,55 +3020,58 @@ mod tests {
             10,
             &mock,
             "d863fafb",
-            &digests,
+            &["deadbeef01".to_string()],
             "dsr-1",
         )
         .expect("drive");
         assert_eq!(
             outcome,
-            ErasureOutcome::AbortedSuperseded {
-                repos_tombstoned: 1
-            },
-            "the mid-drive cancel aborts the drive without a terminal claim"
+            ErasureOutcome::Cancelled,
+            "an already-cancelled account aborts BEFORE any tombstone → clean Cancelled"
+        );
+        assert!(
+            mock.erased.borrow().is_empty(),
+            "the CAS erase transport was NEVER invoked — no digest erased (zero physical erase)"
+        );
+        assert!(
+            !repo_is_erased(&st.load_verified("alpha").unwrap()),
+            "the repo is intact — the cancel was honored before any erase"
         );
         let (alog, _) = st.load_account_log("org-a").unwrap();
         assert!(
             !alog
                 .records()
                 .iter()
-                .any(|r| r.kind == ERASURE_EXECUTED_KIND),
-            "no executed claim after a mid-drive cancel"
-        );
-        assert!(
-            !alog
-                .records()
-                .iter()
-                .any(|r| r.kind == ERASURE_PARTIAL_KIND),
-            "no partial claim either — the drive aborted cleanly, honoring the cancel"
-        );
-        assert!(
-            read_standing_erasure_request(&alog).is_none(),
-            "the landed cancel is the governing terminal state"
+                .any(|r| r.kind == ERASURE_EXECUTED_KIND || r.kind == ERASURE_PARTIAL_KIND),
+            "no executed/partial claim — coherent with the intact repo"
         );
     }
 
     #[test]
-    fn execute_still_claims_executed_when_the_request_is_stable() {
-        // The guard ONLY aborts on a genuine mid-drive change: a stable governing request
-        // (no cancel lands) drives to `executed` exactly as before — the guard never gates a
-        // legitimate drive.
+    fn reconcile_old102_cancel_mid_drive_now_reports_truthful_not_a_bare_abort() {
+        // OLD #102: a cancel landing DURING the drive (injected at the CAS-GC step, after the
+        // repo was tombstoned + the digest deleted) returned `AbortedSuperseded { repos_tombstoned:
+        // 1 } → 409` while LEAVING the repo tombstoned and the byte gone — a dishonest
+        // `erased:false`/incoherent account-vs-repo state. Under the superseding model the
+        // destruction is COMPLETE, so the TRUTHFUL outcome is `Executed` (coherent with the
+        // erased repo log), with `late_cancel_overrun` flagged for the audit trail.
         let st = state_with(&[("alpha", "org-a", false)]);
         seed_account_request(&st, "org-a", "dsr-1", 1);
-        let mock = MockErase::new();
-        let digests = vec!["deadbeef01".to_string()];
+        let erase = CancelInjectingErase {
+            st: &st,
+            account: "org-a",
+            inject_on_call: 0, // cancel lands during the (only) physical erase
+            calls: std::cell::Cell::new(0),
+            inner: MockErase::new(),
+        };
         let outcome = execute_account_erasure_with_erase(
             &st,
             "org-a",
             operator(),
             10,
-            &mock,
+            &erase,
             "d863fafb",
-            &digests,
+            &["deadbeef01".to_string()],
             "dsr-1",
         )
         .expect("drive");
@@ -2454,24 +3080,30 @@ mod tests {
             ErasureOutcome::Executed {
                 repos_tombstoned: 1
             },
-            "a stable standing request drives to executed (guard is inert)"
+            "destruction completed → truthful Executed (NOT a bare abort over gone data)"
+        );
+        assert!(repo_is_erased(&st.load_verified("alpha").unwrap()));
+        let (alog, _) = st.load_account_log("org-a").unwrap();
+        let executed = alog
+            .records()
+            .iter()
+            .find(|r| r.kind == ERASURE_EXECUTED_KIND)
+            .expect("erasure.executed recorded, coherent with the erased repo");
+        let v: serde_json::Value = serde_json::from_str(&executed.payload).unwrap();
+        assert_eq!(
+            v.get("late_cancel_overrun").and_then(|b| b.as_bool()),
+            Some(true),
+            "the late cancel that lost the race is flagged for audit"
         );
     }
 
     #[test]
-    fn execute_aborts_before_any_physical_erase_when_already_cancelled() {
-        // #102 PRIMARY guard (point of no return): if the account's erasure is ALREADY
-        // CANCELLED at the commit point — BEFORE the drive reaches the tombstone loop — the
-        // drive aborts with ZERO physical erase. The cancel is genuinely HONORED (the repo
-        // is NOT tombstoned), not merely un-claimed after the fact. (Contrast
-        // `execute_aborts_when_a_cancel_lands_mid_drive`, where the cancel lands DURING the
-        // loop and the SECONDARY post-loop guard blocks only the false `executed` claim —
-        // the data there is already gone; here it is preserved.)
+    fn reconcile_old102_stable_request_still_drives_to_executed() {
+        // OLD #102 kept this invariant and so does the unified model: a stable governing
+        // request (no cancel) drives to `executed` — the guard never gates a legitimate drive.
         let st = state_with(&[("alpha", "org-a", false)]);
         seed_account_request(&st, "org-a", "dsr-1", 1);
-        seed_account_cancel(&st, "org-a", "dsr-1", 2); // user withdraws within grace
         let mock = MockErase::new();
-        let digests = vec!["deadbeef01".to_string()];
         let outcome = execute_account_erasure_with_erase(
             &st,
             "org-a",
@@ -2479,29 +3111,16 @@ mod tests {
             10,
             &mock,
             "d863fafb",
-            &digests,
+            &["deadbeef01".to_string()],
             "dsr-1",
         )
         .expect("drive");
         assert_eq!(
             outcome,
-            ErasureOutcome::AbortedSuperseded {
-                repos_tombstoned: 0
+            ErasureOutcome::Executed {
+                repos_tombstoned: 1
             },
-            "an already-cancelled account aborts BEFORE any tombstone — zero physical erase",
-        );
-        // The physical erase was PREVENTED: no repo.erased, no CAS erase call, no claim.
-        assert!(
-            mock.erased.borrow().is_empty(),
-            "the CAS erase transport was never invoked — no digest erased",
-        );
-        let (alog, _) = st.load_account_log("org-a").unwrap();
-        assert!(
-            !alog
-                .records()
-                .iter()
-                .any(|r| r.kind == ERASURE_EXECUTED_KIND || r.kind == ERASURE_PARTIAL_KIND),
-            "no executed/partial claim — the cancel was honored before any erase",
+            "a stable standing request drives to executed (guard inert on the happy path)"
         );
     }
 

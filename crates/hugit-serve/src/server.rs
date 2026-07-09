@@ -1475,24 +1475,22 @@ fn grace_secs_with_floor(configured: Option<u64>, allow_below_floor: bool) -> u6
 }
 
 /// Map an [`ErasureOutcome`] to the `/v1` response. `executed` → 200 (the irreversible
-/// cascade completed); `partial` → 202 (accepted, re-runnable — an outstanding leg);
-/// already-executed → 200 idempotent no-op.
+/// cascade completed; may carry a `late_cancel_overrun` in the account log if a withdrawal
+/// lost the race after the physical delete); `partial` → 202 (accepted, re-runnable — an
+/// outstanding leg, incl. a cancel that HALTED the cascade after destruction began);
+/// already-executed → 200 idempotent no-op; `cancelled` → 200 non-destructive no-op (a
+/// grace-boundary withdrawal caught BEFORE any destruction — nothing erased).
+///
+/// This SUPERSEDES the earlier #102 `AbortedSuperseded → 409` model: that arm reported a bare
+/// 409 while leaving repos tombstoned-but-unclaimed (an incoherent account-vs-repo state and a
+/// dishonest `erased:false` over real destruction). The unified model reports the TRUTHFUL
+/// terminal outcome instead — `Cancelled`/200 only when nothing was destroyed, else the honest
+/// `Executed`/`Partial`. No consumer receives a 409 from this route anymore; a caller that
+/// distinguished "superseded" keys off `state:"cancelled"` (clean) vs `state:"partial"`
+/// (`outstanding:"halted-by-cancel-…"`).
 fn erase_execute_response(outcome: &crate::writes::erasure::ErasureOutcome) -> (u16, String) {
-    use crate::writes::erasure::ErasureOutcome::{
-        AbortedSuperseded, AlreadyExecuted, Executed, Partial,
-    };
+    use crate::writes::erasure::ErasureOutcome::{AlreadyExecuted, Cancelled, Executed, Partial};
     match outcome {
-        // #102 cancel-race: a cancel superseded the request mid-drive → nothing claimed. 409
-        // (the execute conflicts with a landed cancel; the operator re-reads the lifecycle).
-        AbortedSuperseded { repos_tombstoned } => (
-            409,
-            serde_json::json!({
-                "state": "aborted_superseded",
-                "repos_tombstoned": repos_tombstoned,
-                "accepted": false,
-            })
-            .to_string(),
-        ),
         Executed { repos_tombstoned } => (
             200,
             serde_json::json!({
@@ -1518,6 +1516,14 @@ fn erase_execute_response(outcome: &crate::writes::erasure::ErasureOutcome) -> (
         AlreadyExecuted => (
             200,
             serde_json::json!({ "state": "already_executed", "accepted": true }).to_string(),
+        ),
+        // DATA-LOSS RACE FIX: a grace-boundary `erasure.cancelled` superseded the request at
+        // the point of no return — the executor aborted NON-DESTRUCTIVELY (nothing erased).
+        // Report honestly (never a false "executed"); the standing withdrawal governs.
+        Cancelled => (
+            200,
+            serde_json::json!({ "state": "cancelled", "accepted": false, "erased": false })
+                .to_string(),
         ),
     }
 }
