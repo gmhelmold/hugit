@@ -10,6 +10,8 @@
 //! [`crate::log::compute_this_hash`] the append path uses, so producer and
 //! verifier can never drift.
 
+pub mod redaction;
+
 use crate::log::{GENESIS_PREV_HASH, compute_this_hash};
 use hugit_contracts::event_record::EventRecord;
 
@@ -96,12 +98,17 @@ impl std::error::Error for TamperError {}
 /// This function's role is local partial-tamper detection — it remains correct
 /// and necessary for that purpose. Logic is UNCHANGED.
 pub fn verify_chain(records: &[EventRecord]) -> Result<(), TamperError> {
+    // First pass: collect any in-band redaction markers (ADR-0004 leg 4). For a log with
+    // NO `provenance.redaction` records — the common case, and every historical log — this
+    // map is EMPTY, the redacted branch below is never entered, and verify_chain behaves
+    // byte-for-byte as it always has (zero regression).
+    let redactions = redaction::collect_redactions(records);
     let mut prev_this = GENESIS_PREV_HASH.to_string();
 
     for (i, record) in records.iter().enumerate() {
         let position = i as u64;
 
-        // 1. monotonic, gap-free seq.
+        // 1. monotonic, gap-free seq. (ALWAYS enforced — redaction never touches this.)
         if record.seq != position {
             return Err(TamperError::SeqOutOfOrder {
                 position,
@@ -110,7 +117,8 @@ pub fn verify_chain(records: &[EventRecord]) -> Result<(), TamperError> {
             });
         }
 
-        // 2. linkage to the predecessor.
+        // 2. linkage to the predecessor. (ALWAYS enforced — a redacted record PRESERVES its
+        //    original `this_hash`, so this splice/append-immutability check is intact.)
         if record.prev_hash != prev_this {
             return Err(TamperError::PrevHashMismatch {
                 seq: record.seq,
@@ -119,20 +127,51 @@ pub fn verify_chain(records: &[EventRecord]) -> Result<(), TamperError> {
             });
         }
 
-        // 3. content integrity: recompute this_hash via the frozen formula.
-        let recomputed = compute_this_hash(
-            &record.prev_hash,
-            &record.kind,
-            &record.principal_chain,
-            &record.payload,
-            record.seq,
-        );
-        if recomputed != record.this_hash {
-            return Err(TamperError::ThisHashMismatch {
-                seq: record.seq,
-                expected: recomputed,
-                got: record.this_hash.clone(),
-            });
+        // 3. content integrity.
+        if let Some(commitment) = redactions.get(&position) {
+            // REDACTED record (ADR-0004): its cleartext is gone, so the original this_hash
+            // is no longer re-derivable from the (now pseudonymised) fields. Instead:
+            //  (a) the stored this_hash MUST still equal the preserved original hash — this
+            //      binds the frozen hash the chain links through to the redaction claim; and
+            //  (b) recompute over the CURRENT (redacted) fields MUST equal the committed
+            //      redacted hash — so the redacted content is itself tamper-evident.
+            if record.this_hash != commitment.original_this_hash {
+                return Err(TamperError::ThisHashMismatch {
+                    seq: record.seq,
+                    expected: commitment.original_this_hash.clone(),
+                    got: record.this_hash.clone(),
+                });
+            }
+            let recomputed_redacted = compute_this_hash(
+                &record.prev_hash,
+                &record.kind,
+                &record.principal_chain,
+                &record.payload,
+                record.seq,
+            );
+            if recomputed_redacted != commitment.redacted_this_hash {
+                return Err(TamperError::ThisHashMismatch {
+                    seq: record.seq,
+                    expected: commitment.redacted_this_hash.clone(),
+                    got: recomputed_redacted,
+                });
+            }
+        } else {
+            // Normal record: recompute this_hash via the frozen formula (unchanged).
+            let recomputed = compute_this_hash(
+                &record.prev_hash,
+                &record.kind,
+                &record.principal_chain,
+                &record.payload,
+                record.seq,
+            );
+            if recomputed != record.this_hash {
+                return Err(TamperError::ThisHashMismatch {
+                    seq: record.seq,
+                    expected: recomputed,
+                    got: record.this_hash.clone(),
+                });
+            }
         }
 
         prev_this = record.this_hash.clone();

@@ -64,11 +64,18 @@ pub const ERASURE_PII_SHREDDED_KIND: &str = "erasure.pii_shredded";
 /// its cleartext account. 32 bytes from a CSPRNG. Erasure SHREDS it; once gone, the
 /// pseudonym is unrecoverable (one-way HMAC + no key to re-derive under).
 ///
-/// `zeroize`-on-drop is intentionally NOT taken as a new dependency in this slice — the
-/// in-memory store below drops the boxed bytes on `shred`; a hardened store (the durable
-/// follow-up, ADR-0004) owns key-material hygiene. The type is opaque (`Debug` redacts).
+/// `zeroize`-on-drop wipes the key bytes when a handle drops (the durable-store
+/// follow-up, ADR-0004 leg 1, takes `zeroize` as the ADR foresaw). The type is opaque
+/// (`Debug` redacts) and every dropped clone scrubs its own copy of the material.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SubjectKey([u8; 32]);
+
+impl Drop for SubjectKey {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.0.zeroize();
+    }
+}
 
 impl SubjectKey {
     /// Wrap raw key bytes (the durable store's job to source from a CSPRNG / KMS).

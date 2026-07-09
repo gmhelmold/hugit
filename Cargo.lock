@@ -1082,6 +1082,7 @@ dependencies = [
 name = "hugit-serve"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "blake3",
  "flate2",
  "gix-hash",
@@ -1096,11 +1097,13 @@ dependencies = [
  "hugit-proto",
  "hugit-refstore",
  "hugit-symbols",
+ "rand",
  "serde",
  "serde_json",
  "sha2",
  "tiny_http",
  "ureq",
+ "zeroize",
 ]
 
 [[package]]
