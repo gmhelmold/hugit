@@ -2322,6 +2322,72 @@ impl AppState {
         self.source.persist_account(account, &bytes, expected)
     }
 
+    // ── ADR-0004 leg 1: the durable per-subject KEY store (CSPRNG + shred) ─────
+    //
+    // The erasable secret behind the Art.17 crypto-shred: a CSPRNG 32-byte key per subject,
+    // persisted under the reserved `_subject_keys/` keyspace (survives restart), fetched to
+    // derive `subj:<hmac>` pseudonyms, and SHREDDED (durable + irreversible) on a completed
+    // erase — after which the subject's pseudonyms can no longer be linked to cleartext.
+
+    /// Fetch a subject's durable key, or `None` if never minted OR already shredded. `Err`
+    /// on a durable fault (never read as "no key" — that would mint a duplicate/under-shred).
+    pub fn subject_key_for(
+        &self,
+        subject: &str,
+    ) -> Result<Option<crate::provenance_pii::SubjectKey>, EngineErr> {
+        if !is_safe_account_slug(subject) {
+            return Err(EngineErr::not_found());
+        }
+        Ok(self
+            .source
+            .fetch_subject_key(subject)?
+            .map(crate::provenance_pii::SubjectKey::from_bytes))
+    }
+
+    /// Fetch-or-mint a subject's durable key (idempotent; a repeat returns the SAME key so a
+    /// subject's pseudonym is stable across its records). Mints 32 CSPRNG bytes on first use
+    /// and persists them create-only; a concurrent mint race adopts the winner's key. `Err`
+    /// on a durable fault.
+    pub fn subject_key_ensure(
+        &self,
+        subject: &str,
+    ) -> Result<crate::provenance_pii::SubjectKey, EngineErr> {
+        use rand::RngCore as _;
+        if !is_safe_account_slug(subject) {
+            return Err(EngineErr::not_found());
+        }
+        if let Some(b) = self.source.fetch_subject_key(subject)? {
+            return Ok(crate::provenance_pii::SubjectKey::from_bytes(b));
+        }
+        let mut bytes = [0u8; 32];
+        // ThreadRng is a cryptographically-secure PRNG (OS-seeded, ChaCha-based) — the
+        // CSPRNG the ADR requires for real key material.
+        rand::rng().fill_bytes(&mut bytes);
+        match self.source.create_subject_key(subject, &bytes) {
+            Ok(()) => Ok(crate::provenance_pii::SubjectKey::from_bytes(bytes)),
+            // A concurrent mint won the create-only race — adopt ITS durable key so the
+            // pseudonym stays stable (never last-writer-wins on key material).
+            Err(e) if e.is_cas_conflict() => {
+                let b = self.source.fetch_subject_key(subject)?.ok_or_else(|| {
+                    EngineErr::unavailable("subject key vanished after a create conflict")
+                })?;
+                Ok(crate::provenance_pii::SubjectKey::from_bytes(b))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// SHRED a subject's durable key — the irreversible Art.17 action. Idempotent (an absent
+    /// key → `Ok`). After this, [`subject_key_for`](Self::subject_key_for) returns `None` and
+    /// every one of the subject's pseudonyms is permanently unrecoverable. `Err` on a durable
+    /// fault (the caller must NOT then claim the cleartext erased).
+    pub fn subject_key_shred(&self, subject: &str) -> Result<(), EngineErr> {
+        if !is_safe_account_slug(subject) {
+            return Err(EngineErr::not_found());
+        }
+        self.source.shred_subject_key(subject)
+    }
+
     // ── per-tenant repo REGISTRY (WP-1: the durable cap denominator) ──────────
     //
     // The authoritative, chain-verified per-tenant owned-repo set/count under the reserved
@@ -2898,6 +2964,120 @@ impl LogSource {
                             EngineErr::unavailable("engine storage write unavailable")
                         }
                     })
+            }
+        }
+    }
+
+    // ── ADR-0004: the durable per-subject KEY store (`_subject_keys/{subject}.key`) ──
+    //
+    // The erasable secret the Art.17 crypto-shred deletes. Structurally OUTSIDE the repo
+    // namespace (the `_subject_keys/` prefix is unreachable by `is_safe_repo_slug`), so a
+    // key object can never be served/cloned as a repo. The BODY is base64 of the 32 raw
+    // key bytes; absence OR an undecodable body = "no live key" (never minted, or shredded).
+
+    /// Fetch a subject's raw 32-byte key, or `None` if never minted OR shredded. `Err` on a
+    /// transport/IO fault (→ the caller aborts; a durable fault must never be read as "no
+    /// key", which would mint a duplicate or under-shred).
+    fn fetch_subject_key(&self, subject: &str) -> Result<Option<[u8; 32]>, EngineErr> {
+        use base64::Engine as _;
+        let decode = |bytes: Vec<u8>| -> Option<[u8; 32]> {
+            let raw = base64::engine::general_purpose::STANDARD
+                .decode(bytes.trim_ascii())
+                .ok()?;
+            <[u8; 32]>::try_from(raw.as_slice()).ok()
+        };
+        match self {
+            LogSource::Local { dir } => {
+                let path = dir.join("_subject_keys").join(format!("{subject}.key"));
+                match std::fs::read(&path) {
+                    Ok(b) => Ok(decode(b)),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(e) => Err(EngineErr::unavailable(format!(
+                        "local subject-key read failed: {e}"
+                    ))),
+                }
+            }
+            LogSource::R2(c) => {
+                let key = format!("{}/_subject_keys/{subject}.key", c.tenant_id);
+                Ok(c.get_object(&key)?.and_then(decode))
+            }
+        }
+    }
+
+    /// Durably CREATE a subject's key (idempotent-safe: a create-only put that fails the CAS
+    /// if another writer minted first, so a concurrent mint never overwrites the winner's
+    /// key — the caller re-fetches on conflict). `bytes` is the 32-byte CSPRNG key.
+    fn create_subject_key(&self, subject: &str, bytes: &[u8; 32]) -> Result<(), EngineErr> {
+        use base64::Engine as _;
+        let body = base64::engine::general_purpose::STANDARD
+            .encode(bytes)
+            .into_bytes();
+        match self {
+            LogSource::Local { dir } => {
+                let kdir = dir.join("_subject_keys");
+                std::fs::create_dir_all(&kdir).map_err(|e| {
+                    EngineErr::unavailable(format!("local subject-key dir create failed: {e}"))
+                })?;
+                let path = kdir.join(format!("{subject}.key"));
+                // Create-only: `O_EXCL` fails if a concurrent mint already wrote → cas_conflict
+                // so the caller re-fetches the winner's key (never last-writer-wins).
+                match std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                {
+                    Ok(mut f) => {
+                        use std::io::Write as _;
+                        f.write_all(&body).map_err(|e| {
+                            EngineErr::unavailable(format!("local subject-key write failed: {e}"))
+                        })
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        Err(EngineErr::cas_conflict())
+                    }
+                    Err(e) => Err(EngineErr::unavailable(format!(
+                        "local subject-key create failed: {e}"
+                    ))),
+                }
+            }
+            LogSource::R2(c) => {
+                let key = format!("{}/_subject_keys/{subject}.key", c.tenant_id);
+                // Create-only (`If-None-Match: *`) via the CAS-token `Absent`.
+                c.conditional_object_put(&key, &body, &CasToken::Absent)
+                    .map(|_| ())
+                    .map_err(|e| match e {
+                        crate::cas::ManifestPutError::Precondition => EngineErr::cas_conflict(),
+                        crate::cas::ManifestPutError::Other(m) => {
+                            eprintln!("[hugit-serve] subject-key PUT failed: {m}");
+                            EngineErr::unavailable("engine storage write unavailable")
+                        }
+                    })
+            }
+        }
+    }
+
+    /// Durably + irreversibly SHRED a subject's key — the Art.17 crypto-shred. Local removes
+    /// the object; R2 OVERWRITES it with a non-decodable tombstone (no delete verb needed; an
+    /// undecodable body reads as `None` — the key material is gone either way). Idempotent (an
+    /// already-absent key → `Ok`). `Err` on a durable fault (the caller must NOT then claim
+    /// the cleartext erased).
+    fn shred_subject_key(&self, subject: &str) -> Result<(), EngineErr> {
+        match self {
+            LogSource::Local { dir } => {
+                let path = dir.join("_subject_keys").join(format!("{subject}.key"));
+                match std::fs::remove_file(&path) {
+                    Ok(()) => Ok(()),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()), // idempotent
+                    Err(e) => Err(EngineErr::unavailable(format!(
+                        "local subject-key shred failed: {e}"
+                    ))),
+                }
+            }
+            LogSource::R2(c) => {
+                let key = format!("{}/_subject_keys/{subject}.key", c.tenant_id);
+                // Overwrite with a tombstone: the key bytes are gone (irreversible); a later
+                // fetch decodes nothing → `None`. Unconditional put (shred is terminal).
+                c.put_object(&key, b"SHREDDED").map(|_| ())
             }
         }
     }

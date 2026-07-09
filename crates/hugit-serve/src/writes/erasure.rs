@@ -1328,9 +1328,26 @@ fn execute_account_erasure_inner(
         )?;
         if !recorded {
             // Refused: the completion was CLEAN (nothing destroyed) and a cancel superseded at
-            // the append → honest non-destructive `Cancelled` (never a false "executed").
+            // the append → honest non-destructive `Cancelled` (never a false "executed"). Nothing
+            // was erased, so we must NOT reach the shred+redact below — the subject key stays
+            // intact and the subject's data remains resolvable.
             return Ok(ErasureOutcome::Cancelled);
         }
+        // ADR-0004 legs 4/5 — ONLY on a COMPLETED erase: retain the pseudonymous
+        // accountability record, render the already-written cleartext PII unrecoverable
+        // (hash-preserving redaction of the account log + every tombstoned repo log, so
+        // `verify_chain` still passes), THEN shred the subject key. A `partial`/`cancelled`
+        // path NEVER reaches here, so the key stays intact and the subject's non-erased
+        // data remains resolvable. Fail-closed: a durable fault aborts BEFORE the executor
+        // may claim the provenance cleartext erased.
+        let repo_slugs: Vec<String> = plan.repos.iter().map(|l| l.repo.clone()).collect();
+        crate::provenance_pii_redact::shred_and_redact_on_execute(
+            state,
+            account,
+            &repo_slugs,
+            dsr_id,
+            at,
+        )?;
         Ok(ErasureOutcome::Executed {
             repos_tombstoned: tombstoned,
         })

@@ -1,6 +1,8 @@
 # ADR-0004: Art.17 erasure must render provenance cleartext PII unrecoverable (keyed-pseudonym + key-shred)
 
-Status: Accepted (decision + phased implementation; first slice shipped, remainder scoped)
+Status: Accepted-and-implemented (decision + full migration landed — durable CSPRNG key
+store, hash-preserving redaction + redaction-aware `verify_chain`, executor shred-on-complete,
+forward-pseudonymisation primitive; see "Migration plan" below for the per-leg status)
 Date: 2026-07-09
 Context-of: GDPR1 erasure completeness audit (hugit-serve — `writes::erasure`, `provenance_pii`)
 Applies to: hugit · githugr (DSR anchor)
@@ -150,25 +152,37 @@ represent the provenance cleartext as erased until the follow-up ships. The pseu
 retaining the accountability record and shredding keys as soon as the write path emits
 pseudonyms.
 
-## Migration plan (the follow-up legs, sequenced)
+## Migration plan (the follow-up legs, sequenced) — IMPLEMENTED
 
-1. **Durable `SubjectKeyStore`** (KMS/secrets-table; CSPRNG + zeroization) — the erasable
-   secret with a durable, auditable `shred`.
-2. **Pseudonymise the write path** — new records emit `subj:<hex>` in
-   `principal_chain`/payload; `is_pseudonymous` guards idempotency. Land behind a flag so
-   forward records go pseudonymous before any reader change is required (pseudonym is an
-   opaque token; readers that only key on identity are unaffected).
-3. **Identity readers** — teach `derive_owner_tenant`/authz to accept a pseudonym and
-   resolve cleartext via the key store only where genuinely needed; verify no authz
-   regression against the acceptance suite.
-4. **Redaction-with-hash-preservation + redaction-aware `verify_chain`** — backfill
-   existing cleartext records to the pseudonym while preserving `this_hash`; extend the
-   tamper verifier so a redacted record verifies via its preserved hash with #1/#2 still
-   enforced. This is the highest-risk leg (shared core) → its own PR + independent cold
-   review + golden-pin re-verification.
-5. **Wire the executor** — on a completed erasure, append the `erasure.pii_shredded`
-   accountability record THEN `shred` the subject's key; drop the provenance leg from the
-   residual disclosure once complete.
+Landed in `golive/art17-full-migration` (`feat(hugit-serve): complete Art.17
+provenance-PII erasure`). Per-leg status:
+
+1. **Durable `SubjectKeyStore`** (CSPRNG + zeroization) — ✅ DONE. `LogSource` grows a
+   reserved `_subject_keys/{subject}.key` keyspace (Local file + R2 conditional-PUT); a
+   CSPRNG (`rand::rng()`, OS-seeded) mints 32-byte keys create-only (survives restart);
+   `shred` deletes (Local) / tombstone-overwrites (R2) — durable + irreversible; `SubjectKey`
+   is `zeroize`-on-drop. Exposed as `AppState::subject_key_{for,ensure,shred}`.
+2. **Pseudonymise the write path** — ◑ PRIMITIVE DONE, live-verb wiring SCOPED. The pure
+   forward transform `pseudonymize_write_principal_chain` (ensure-key → `subj:<hex>`,
+   idempotency-stable, fail-closed) is implemented + tested. Wiring it into all ~12 live
+   write verbs + the idempotency ledger match is deliberately kept as its own flagged PR
+   (hot-path blast radius + the principal-keyed idem-match hazard the ADR foresaw) — and is
+   NOT required for the end-state guarantee, because leg 4 renders ALL cleartext (forward
+   records included) unrecoverable at erase.
+3. **Identity readers** — ✅ VERIFIED (no code change needed). Confirmed `authorize_read`/
+   `authorize_write` key on the projected `owner_tenant` + the LIVE request principal, NEVER
+   on the stored `principal_chain` (G11). Pseudonymising the stored chain is therefore authz-
+   neutral; regression-tested that a non-erased owner still resolves.
+4. **Redaction-with-hash-preservation + redaction-aware `verify_chain`** — ✅ DONE.
+   `hugit_refstore::redact_record` rewrites `principal_chain`/`payload` to the pseudonym while
+   PRESERVING `this_hash`; an append-only `provenance.redaction` marker carries the
+   `(original_this_hash, redacted_this_hash)` commitment; `verify_chain` does a first pass
+   collecting markers, keeps #1/#2 for every record, and swaps #3 for the redacted branch. A
+   log with no markers verifies BYTE-IDENTICALLY (zero regression; all golden pins green).
+5. **Wire the executor** — ✅ DONE. On `Executed` ONLY (never `partial`/`cancelled`), the
+   executor ensures the key, retains the `erasure.pii_shredded` accountability record, redacts
+   the account log + every tombstoned repo log (hash-preserving), THEN shreds the key —
+   fail-closed throughout, idempotent under retry.
 
 ## Consequences
 

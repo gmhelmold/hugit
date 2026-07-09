@@ -39,6 +39,9 @@ pub use log::{
     result_binding_preimage_v2,
 };
 pub use replay::{RefState, replay};
+pub use tamper::redaction::{
+    PROVENANCE_REDACTION_KIND, RedactionCommitment, collect_redactions, redact_record,
+};
 pub use tamper::{TamperError, verify_chain};
 
 pub use coldtier::{ColdRange, ColdStore, InMemoryColdStore};

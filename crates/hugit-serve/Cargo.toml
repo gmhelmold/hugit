@@ -65,6 +65,13 @@ serde_json = { workspace = true }
 # tiny_http server, which stays TLS-free (edge terminates inbound).
 hmac       = { workspace = true }
 hex        = { workspace = true }
+# ADR-0004 durable subject-key store: CSPRNG key material (`rand`, already resolved
+# in the lock) + `zeroize` for in-memory key-handle hygiene. Both pinned to the
+# already-locked versions so no new package enters the graph (`--locked` clean).
+rand       = "=0.9.4"
+zeroize    = "=1.9.0"
+# base64 for the durable subject-key object body (32 raw bytes ↔ text-safe object).
+base64     = { workspace = true }
 # `ureq` serves BOTH the R2 S3 GET (read source) AND the outbound
 # `POST /v1/session/exchange` call for `/v1/token` (Option B — hugit forwards the
 # Clerk JWT to CoreLink rather than validating it locally). TLS is required
