@@ -88,6 +88,17 @@ pub fn validate_name(name: &str) -> Result<(), EngineErr> {
     if name.starts_with('.') {
         return bad("o nome do repositório não pode começar com ponto");
     }
+    if name.starts_with('_') {
+        // The `_` prefix is RESERVED for the platform keyspace (`_accounts/`,
+        // `_tenants/`). Admitting a `_`-named repo would persist a `<tenant>/_foo.json`
+        // key that `LogSource::list_repo_slugs`'s R2 arm deliberately skips as reserved
+        // — so the repo would be INVISIBLE to the GDPR erasure enumeration + the
+        // exclusive-digest partition after a reboot (the runtime overlay is lost),
+        // holing the "durable-but-unloaded repo can never be missed" guarantee on the
+        // IRREVERSIBLE erase path (a surviving user's `_`-repo could be dropped from the
+        // surviving set → its shared CAS object mis-classified exclusive → erased).
+        return bad("o nome do repositório não pode começar com sublinhado");
+    }
     if name == "." || name == ".." || name.contains("..") {
         return bad("o nome do repositório não pode conter \"..\"");
     }
@@ -486,6 +497,8 @@ mod tests {
             "",                      // empty
             "x".repeat(65).as_str(), // too long
             ".hidden",               // leading dot
+            "_foo",                  // leading underscore (reserved keyspace prefix)
+            "_",                     // bare underscore
             "..",                    // dotdot
             "a..b",                  // contains ..
             "a/b",                   // path sep

@@ -74,9 +74,14 @@ impl WebhookQueue {
     }
 
     /// Append one NDJSON line (`value` + `\n`) to `<dir>/<file>`, creating the
-    /// directory if needed and fsync-flushing. Fail-closed: any I/O error is
-    /// returned so the caller does not ack a non-durable event.
-    fn append_line(&self, file: &str, value: &serde_json::Value) -> std::io::Result<()> {
+    /// directory if needed. `sync` controls the durability barrier: `true` fsyncs
+    /// (`sync_all`) so the caller may safely ack; `false` skips the fsync (an
+    /// OS-buffered append) — used for BEST-EFFORT audit records so an
+    /// unauthenticated flood on the PRE-AUTH reject path can never force a blocking
+    /// per-request fsync on the single-threaded accept loop (the audit DoS the
+    /// convergence re-audit flagged). Fail-closed either way: any I/O error is
+    /// returned so a durability-required caller does not ack a non-durable event.
+    fn append_line(&self, file: &str, value: &serde_json::Value, sync: bool) -> std::io::Result<()> {
         use std::io::Write;
         std::fs::create_dir_all(&self.dir)?;
         let mut line = serde_json::to_string(value).map_err(std::io::Error::other)?;
@@ -87,23 +92,31 @@ impl WebhookQueue {
             .open(self.dir.join(file))?;
         f.write_all(line.as_bytes())?;
         f.flush()?;
-        f.sync_all()?;
+        if sync {
+            f.sync_all()?;
+        }
         Ok(())
     }
 
-    /// Durably enqueue an accepted envelope. Returns `Err` (→ the caller 503s,
-    /// GitHub retries) if the durable write fails.
+    /// Durably enqueue an accepted envelope (fsync'd — the caller acks 202 only
+    /// after this returns `Ok`). Returns `Err` (→ the caller 503s, GitHub retries)
+    /// if the durable write fails. This is the ONLY webhook path that fsyncs; it is
+    /// reached only AFTER a valid HMAC + the per-principal rate limit.
     pub fn enqueue_envelope(&self, env: &SignedEventEnvelope) -> std::io::Result<()> {
         let value = serde_json::to_value(env).map_err(std::io::Error::other)?;
-        self.append_line("pending.ndjson", &value)
+        self.append_line("pending.ndjson", &value, true)
     }
 
-    /// Durably append an audit record (`webhook.rejected` / `installation.revoked`).
-    /// Best-effort at the call site (a 401/202 is still returned), but the write
-    /// itself is fail-honest: it returns `Err` rather than pretend it persisted.
+    /// Append an audit record (`webhook.rejected` / `installation.revoked`) WITHOUT
+    /// an fsync barrier — best-effort at the call site (a 401/202 is returned
+    /// regardless), so a rejected request never blocks the accept loop on disk. A
+    /// crash may lose the last few OS-buffered audit lines; that is acceptable for a
+    /// monitoring record of (often unauthenticated) rejected attempts, and it
+    /// removes the pre-auth per-request fsync DoS. Still fail-honest: returns `Err`
+    /// rather than pretend it persisted.
     pub fn append_audit(&self, rec: &EventRecord) -> std::io::Result<()> {
         let value = serde_json::to_value(rec).map_err(std::io::Error::other)?;
-        self.append_line("audit.ndjson", &value)
+        self.append_line("audit.ndjson", &value, false)
     }
 }
 
