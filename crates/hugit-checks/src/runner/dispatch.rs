@@ -83,6 +83,26 @@ pub struct DispatchOutcome {
     pub result: CheckResult,
     /// The per-job metrics (ADR-0001 §2.3 inputs).
     pub metrics: IntentMetrics,
+    /// The lease this outcome was produced under — the VERIFY BINDING for the
+    /// off-box cost attestation ([`intent_metrics_sig`](Self::intent_metrics_sig)
+    /// is bound to `lease_id` + tenant). Previously this only survived as
+    /// `result.runner_ref = "offbox:{id}"`; carried explicitly so the
+    /// cost-attestation verdict can re-derive the fabric's signed pre-image. Both
+    /// paths set it to the lease id (the B-path box lease, the A-path off-box lease).
+    pub lease_id: String,
+    /// The fabric's off-box **attested-cost signature** over the finalized §13.1
+    /// metrics (`CloseResponse.intent_metrics_sig`), bound to `lease_id` + tenant.
+    /// `Some` ONLY on the A-path when the fabric emits it (`FABRIC_EMIT_INTENT_
+    /// METRICS_SIG`); `None` on the B-path and whenever emission is off. This is
+    /// the ONLY thing that can attest an OFF-BOX cost — the verdict fails closed
+    /// to `Unattested` when it is `None`.
+    pub intent_metrics_sig: Option<String>,
+    /// The fabric key id the close named (`CloseResponse.fabric_key_id`), carried
+    /// for keyset selection ([`crate::attest_keyset`]). Not consumed by the v1
+    /// verdict (the pubkey is supplied by config), but propagated so a later
+    /// keyset-select wiring has it without a second fabric round-trip. `None` on
+    /// the B-path / when the fabric omits it.
+    pub fabric_key_id: Option<String>,
 }
 
 /// Execute a check on an ALREADY-HELD lease and collect its outcome.
@@ -149,6 +169,12 @@ pub fn exec_and_collect<T: RunnerTransport>(
     Ok(DispatchOutcome {
         result,
         metrics: metrics.into_intent_metrics(),
+        // B-path: a box-exec lease carries NO off-box §13.2 attested-cost binding,
+        // so the sig/key are absent by construction — the verdict is honestly
+        // `Unattested` for a B-path outcome. The lease id is still carried.
+        lease_id: lease.lease_id.clone(),
+        intent_metrics_sig: None,
+        fabric_key_id: None,
     })
 }
 
@@ -394,7 +420,17 @@ pub fn dispatch_attest_offbox<T: RunnerTransport>(
             let close_resp = close?;
             Ok(DispatchOutcome {
                 result: o.result,
+                // The attested figure is the fabric's finalized CLOSE metrics.
                 metrics: close_resp.metrics.into_intent_metrics(),
+                // Carry the verify binding + the fabric's OFF-BOX attested-cost
+                // signature (+ key id) OFF the close so the cost-attestation verdict
+                // can fail-closed-verify it. `intent_metrics_sig`/`fabric_key_id` are
+                // whatever the fabric emitted (both `None` when emission is off — the
+                // honest-unattested default). Nothing here CLAIMS attested cost; the
+                // verdict does, only after a present sig verifies.
+                lease_id,
+                intent_metrics_sig: close_resp.intent_metrics_sig,
+                fabric_key_id: close_resp.fabric_key_id,
             })
         }
         Err(e) => Err(e),
@@ -474,6 +510,13 @@ fn attest_and_collect<T: RunnerTransport>(
     Ok(DispatchOutcome {
         result,
         metrics: measured.clone(),
+        // INTERMEDIATE outcome: `dispatch_attest_offbox` supersedes `metrics` with
+        // the fabric's finalized close metrics AND attaches the close's
+        // `intent_metrics_sig`/`fabric_key_id`. The signed figure rides the CLOSE,
+        // not this poll-less collect step, so the sig/key are honestly `None` here.
+        lease_id: acquired.lease.lease_id.clone(),
+        intent_metrics_sig: None,
+        fabric_key_id: None,
     })
 }
 
@@ -671,6 +714,34 @@ mod tests {
                     "model_turns": 0,
                     "cost_usd_micros": 0
                 }}
+            }}"#
+        )
+        .into_bytes()
+    }
+
+    /// A fabric `CloseResponse` carrying the off-box attested-cost binding: the
+    /// finalized metrics PLUS an `intent_metrics_sig` + `fabric_key_id` (the fields
+    /// the fabric emits when `FABRIC_EMIT_INTENT_METRICS_SIG` is on). Used to prove
+    /// `dispatch_attest_offbox` PROPAGATES them off the close onto the outcome. The
+    /// `sig`/`key` are opaque strings here — propagation carries them verbatim; the
+    /// cryptographic verify is exercised in `cost_attest`'s verdict tests.
+    fn close_body_with_sig(lease_id: &str, cost_usd_micros: u64, sig: &str, key: &str) -> Vec<u8> {
+        format!(
+            r#"{{
+                "lease_id": "{lease_id}",
+                "released": true,
+                "capture_incomplete": false,
+                "metrics": {{
+                    "tokens": {{"input": 1000, "output": 200, "cache_read": 50, "cache_write": 25, "total": 1275}},
+                    "wall_ms": 9000,
+                    "active_ms": 7500,
+                    "tool_calls": 3,
+                    "tool_breakdown": [{{"tool": "Bash", "count": 3}}],
+                    "model_turns": 2,
+                    "cost_usd_micros": {cost_usd_micros}
+                }},
+                "intent_metrics_sig": "{sig}",
+                "fabric_key_id": "{key}"
             }}"#
         )
         .into_bytes()
@@ -1185,5 +1256,101 @@ mod tests {
         assert_eq!(out.metrics.tool_calls, 0);
         assert_eq!(out.metrics.model_turns, 0);
         assert!(out.metrics.tool_breakdown.is_empty());
+    }
+
+    /// (A-6) PROPAGATION: `dispatch_attest_offbox` carries the close's
+    /// `intent_metrics_sig` + `fabric_key_id` (+ the `lease_id` verify binding) OUT
+    /// on the `DispatchOutcome` — the plumbing the cost-attestation verdict needs.
+    #[test]
+    fn attest_offbox_propagates_intent_metrics_sig_and_key() {
+        const SCOPED: &str = "scoped-ingest-cred-A6";
+        let transport = FakeTransport::with_responses(vec![
+            (
+                201,
+                acquire_wrapper(
+                    "lease-attest-6",
+                    Some(("/v1/leases/lease-attest-6/envelope/ingest", SCOPED)),
+                ),
+            ),
+            (200, Vec::new()), // submit_envelope
+            (
+                200,
+                close_body_with_sig("lease-attest-6", 7_000_001, "c2lnLXY2", "0011223344556677"),
+            ),
+        ]);
+        let client = client(transport);
+
+        let out = dispatch_attest_offbox(
+            &client,
+            &acquire_req(),
+            &measured_metrics(),
+            "f".repeat(64).as_str(),
+            "1".repeat(64).as_str(),
+            "2".repeat(64).as_str(),
+            "3".repeat(64).as_str(),
+            None,
+            0,
+        )
+        .expect("A-path lifecycle succeeds");
+
+        assert_eq!(
+            out.lease_id, "lease-attest-6",
+            "the verify binding is carried"
+        );
+        assert_eq!(
+            out.intent_metrics_sig.as_deref(),
+            Some("c2lnLXY2"),
+            "the close's intent_metrics_sig is propagated onto the outcome"
+        );
+        assert_eq!(
+            out.fabric_key_id.as_deref(),
+            Some("0011223344556677"),
+            "the close's fabric_key_id is propagated onto the outcome"
+        );
+        // The attested figure is still the fabric's finalized close cost.
+        assert_eq!(out.metrics.cost_usd_micros, 7_000_001);
+    }
+
+    /// (A-7) A close WITHOUT the sig (emission off) leaves the outcome's
+    /// `intent_metrics_sig` `None` — the honest-unattested default. The B-path is
+    /// likewise always `None` (no off-box binding on a box-exec lease).
+    #[test]
+    fn attest_offbox_sig_absent_when_fabric_does_not_emit() {
+        const SCOPED: &str = "scoped-ingest-cred-A7";
+        let transport = FakeTransport::with_responses(vec![
+            (
+                201,
+                acquire_wrapper(
+                    "lease-attest-7",
+                    Some(("/v1/leases/lease-attest-7/envelope/ingest", SCOPED)),
+                ),
+            ),
+            (200, Vec::new()),
+            // A close body with NO intent_metrics_sig (emission off) — it does carry
+            // a `fabric_key_id` (the two are independent: a key id may ride the close
+            // even when the metrics sig is not emitted).
+            (200, close_body("lease-attest-7", 4281900, 50)),
+        ]);
+        let client = client(transport);
+
+        let out = dispatch_attest_offbox(
+            &client,
+            &acquire_req(),
+            &measured_metrics(),
+            "f".repeat(64).as_str(),
+            "1".repeat(64).as_str(),
+            "2".repeat(64).as_str(),
+            "3".repeat(64).as_str(),
+            None,
+            0,
+        )
+        .expect("A-path lifecycle succeeds");
+
+        // The load-bearing invariant: NO sig ⇒ the cost stays honestly unattested.
+        assert!(
+            out.intent_metrics_sig.is_none(),
+            "emission off ⇒ no sig carried (the cost is unattested)"
+        );
+        assert_eq!(out.lease_id, "lease-attest-7");
     }
 }

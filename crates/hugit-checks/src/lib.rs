@@ -22,6 +22,11 @@ pub mod shadow;
 
 pub mod attest_v2;
 
+/// The off-box cost-attestation verdict (the CONSUME side of the cost-killer):
+/// turn a dispatch outcome's propagated `intent_metrics_sig` into a fail-closed
+/// `Attested`/`Unattested(reason)` verdict. Renders nothing.
+pub mod cost_attest;
+
 /// The pinned canonical `CheckDef` for hugit's own CI gate on the moat
 /// check-host (#68 — the verified `toolchain_ref` digest + the gate command).
 pub mod gate;

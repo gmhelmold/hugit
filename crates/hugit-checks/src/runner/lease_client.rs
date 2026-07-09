@@ -490,6 +490,18 @@ pub struct CloseResponse {
     /// MUST NOT claim cost integrity. Frozen with the corelink-runners TL 2026-07-08.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent_metrics_sig: Option<String>,
+
+    /// The fabric key id that produced the attestation signatures
+    /// (`lower_hex(SHA-256(pubkey_bytes))[..16]`, the routing id
+    /// [`crate::attest_keyset::KeyEntry::key_id`] selects on). Modelled now (was a
+    /// tolerated-and-ignored extra) so the off-box cost-attestation verdict can
+    /// carry it out for keyset selection — but NOT consumed by the v1 verdict,
+    /// which is handed the fabric pubkey directly by config. Liberal/additive: the
+    /// DTO keeps NO `deny_unknown_fields`, `#[serde(default)]` makes an ABSENT
+    /// `fabric_key_id` decode to `None` (today's byte-identical close is
+    /// unaffected), and `skip_serializing_if` keeps a `None` off the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fabric_key_id: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
