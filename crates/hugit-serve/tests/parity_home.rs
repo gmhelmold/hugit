@@ -33,7 +33,7 @@ fn sidecar(intent_id: &str, charter: &str) -> IntentSidecar {
 #[test]
 fn empty_log_round_trips() {
     let log = empty_log();
-    let vm = build_home(&log, "hugit", None, None);
+    let vm = build_home(&log, "hugit", None, None, None);
 
     // 1. Serializes without error.
     let json = serde_json::to_string(&vm).expect("RepoHomeVm serializes");
@@ -46,7 +46,7 @@ fn empty_log_round_trips() {
 #[test]
 fn repo_field_is_exact() {
     let log = empty_log();
-    let vm = build_home(&log, "hugit", None, None);
+    let vm = build_home(&log, "hugit", None, None, None);
     assert_eq!(vm.repo, "hugit");
 }
 
@@ -55,7 +55,7 @@ fn stub_files_empty() {
     let log = empty_log();
     // No git content seam (None/None) → the honest-empty file listing (the REAL
     // tree read is covered by the handler's own `root_tree_is_listed_*` unit test).
-    let vm = build_home(&log, "hugit", None, None);
+    let vm = build_home(&log, "hugit", None, None, None);
     assert!(
         vm.files.is_empty(),
         "files must be [] with no git seam threaded (honest default)"
@@ -66,7 +66,7 @@ fn stub_files_empty() {
 fn stub_readme_html_empty() {
     let log = empty_log();
     // No git content seam → no README to render (honest-empty default).
-    let vm = build_home(&log, "hugit", None, None);
+    let vm = build_home(&log, "hugit", None, None, None);
     assert_eq!(
         vm.readme_html, "",
         "readme_html must be \"\" with no git seam threaded (honest default)"
@@ -76,7 +76,7 @@ fn stub_readme_html_empty() {
 #[test]
 fn stub_about_description_empty() {
     let log = empty_log();
-    let vm = build_home(&log, "hugit", None, None);
+    let vm = build_home(&log, "hugit", None, None, None);
     assert_eq!(
         vm.about.description, "",
         "about.description must be \"\" (GitHub-mirror P2 — honest STUB)"
@@ -86,7 +86,7 @@ fn stub_about_description_empty() {
 #[test]
 fn stub_about_topics_empty() {
     let log = empty_log();
-    let vm = build_home(&log, "hugit", None, None);
+    let vm = build_home(&log, "hugit", None, None, None);
     assert!(
         vm.about.topics.is_empty(),
         "about.topics must be [] (GitHub-mirror P2 — honest STUB)"
@@ -96,7 +96,7 @@ fn stub_about_topics_empty() {
 #[test]
 fn stub_about_release_none() {
     let log = empty_log();
-    let vm = build_home(&log, "hugit", None, None);
+    let vm = build_home(&log, "hugit", None, None, None);
     assert!(
         vm.about.release.is_none(),
         "about.release must be None (P2 — honest STUB)"
@@ -106,7 +106,7 @@ fn stub_about_release_none() {
 #[test]
 fn stub_about_stars_empty() {
     let log = empty_log();
-    let vm = build_home(&log, "hugit", None, None);
+    let vm = build_home(&log, "hugit", None, None, None);
     assert_eq!(
         vm.about.stars, "",
         "about.stars must be \"\" (GitHub-mirror P2 — honest STUB)"
@@ -116,7 +116,7 @@ fn stub_about_stars_empty() {
 #[test]
 fn stub_about_forks_empty() {
     let log = empty_log();
-    let vm = build_home(&log, "hugit", None, None);
+    let vm = build_home(&log, "hugit", None, None, None);
     assert_eq!(
         vm.about.forks, "",
         "about.forks must be \"\" (GitHub-mirror P2 — honest STUB)"
@@ -126,7 +126,7 @@ fn stub_about_forks_empty() {
 #[test]
 fn stub_about_license_empty() {
     let log = empty_log();
-    let vm = build_home(&log, "hugit", None, None);
+    let vm = build_home(&log, "hugit", None, None, None);
     assert_eq!(
         vm.about.license, "",
         "about.license must be \"\" (GitHub-mirror P2 — honest STUB)"
@@ -136,7 +136,7 @@ fn stub_about_license_empty() {
 #[test]
 fn stub_about_releases_count_zero() {
     let log = empty_log();
-    let vm = build_home(&log, "hugit", None, None);
+    let vm = build_home(&log, "hugit", None, None, None);
     assert_eq!(
         vm.about.releases_count, 0,
         "about.releases_count must be 0 (P2 — honest STUB)"
@@ -146,7 +146,7 @@ fn stub_about_releases_count_zero() {
 #[test]
 fn stub_about_languages_empty() {
     let log = empty_log();
-    let vm = build_home(&log, "hugit", None, None);
+    let vm = build_home(&log, "hugit", None, None, None);
     assert!(
         vm.about.languages.is_empty(),
         "about.languages must be [] (GitHub-mirror P2 — honest STUB)"
@@ -156,7 +156,7 @@ fn stub_about_languages_empty() {
 #[test]
 fn stub_synergy_lines_empty() {
     let log = empty_log();
-    let vm = build_home(&log, "hugit", None, None);
+    let vm = build_home(&log, "hugit", None, None, None);
     assert!(
         vm.synergy.lines.is_empty(),
         "synergy.lines must be [] (no live AC seam — honest STUB)"
@@ -166,35 +166,35 @@ fn stub_synergy_lines_empty() {
 #[test]
 fn empty_log_branch_count_zero() {
     let log = empty_log();
-    let vm = build_home(&log, "hugit", None, None);
+    let vm = build_home(&log, "hugit", None, None, None);
     assert_eq!(vm.branch_count, 0, "empty log → branch_count 0");
 }
 
 #[test]
 fn empty_log_tag_count_zero() {
     let log = empty_log();
-    let vm = build_home(&log, "hugit", None, None);
+    let vm = build_home(&log, "hugit", None, None, None);
     assert_eq!(vm.tag_count, 0, "empty log → tag_count 0");
 }
 
 #[test]
 fn empty_log_commit_count_zero_string() {
     let log = empty_log();
-    let vm = build_home(&log, "hugit", None, None);
+    let vm = build_home(&log, "hugit", None, None, None);
     assert_eq!(vm.commit_count, "0", "empty log → commit_count \"0\"");
 }
 
 #[test]
 fn empty_log_branches_empty() {
     let log = empty_log();
-    let vm = build_home(&log, "hugit", None, None);
+    let vm = build_home(&log, "hugit", None, None, None);
     assert!(vm.branches.is_empty(), "empty log → branches []");
 }
 
 #[test]
 fn empty_log_last_commit_is_default() {
     let log = empty_log();
-    let vm = build_home(&log, "hugit", None, None);
+    let vm = build_home(&log, "hugit", None, None, None);
     assert_eq!(
         vm.last_commit.author, "",
         "empty log → last_commit.author \"\""
@@ -216,7 +216,7 @@ fn empty_log_last_commit_is_default() {
 #[test]
 fn empty_log_contributors_empty() {
     let log = empty_log();
-    let vm = build_home(&log, "hugit", None, None);
+    let vm = build_home(&log, "hugit", None, None, None);
     assert!(
         vm.about.contributors.is_empty(),
         "empty log → about.contributors []"
@@ -250,7 +250,7 @@ fn secret_matrix_message_author_contributors_redacted() {
     )
     .expect("intent authorship (Push) is allowed for every class");
 
-    let vm = build_home(&log, "hugit", None, None);
+    let vm = build_home(&log, "hugit", None, None, None);
 
     // last_commit.message: the charter carried the PAT → redacted.
     assert!(
@@ -329,7 +329,7 @@ fn populated_log_real_values() {
     )
     .expect("intent authorship is allowed");
 
-    let vm = build_home(&log, "hugit", None, None);
+    let vm = build_home(&log, "hugit", None, None, None);
 
     // Branch (REAL: replay → first refs/heads/* sorted).
     assert_eq!(vm.branch, "main", "real primary branch");

@@ -90,6 +90,13 @@ pub fn serve_on_with(
     // (never a live fetch). Never blocks the loop (this only SPAWNS the bounded builds).
     crate::search_index::bootstrap_search_indexes(&state);
 
+    // Home-render cache: warm each repo's CURRENT-head home (root-tree listing + README)
+    // in the background so the FIRST `/home` read after a boot is a content-addressed
+    // HIT (ZERO CAS) instead of a ~0.5–1 s cold tree-walk on the accept loop. Detached
+    // builds; until one lands the first read walks + populates inline (no regress).
+    // Never blocks the loop (this only SPAWNS the bounded pre-warms).
+    crate::home_cache::bootstrap_home_caches(&state);
+
     let mut incoming = server.incoming_requests();
     loop {
         // Time the BLOCK waiting for the next request: a long wait means the queue
@@ -719,6 +726,7 @@ pub fn route(state: &AppState, method: &Method, url: &str, headers: &[Header]) -
                     refs: r.git_refs.snapshot(),
                     history_index: state.blob_history_index.clone(),
                     search_index: state.search_index.clone(),
+                    home_cache: state.home_cache.clone(),
                 }
             });
             dispatch_repo(
@@ -2143,6 +2151,11 @@ struct RepoGit<'a> {
     /// `/search` read consults it index-ONLY (never a live CAS grep), returning
     /// honest-empty on a MISS.
     search_index: crate::search_index::SearchStore,
+    /// The engine-wide content-addressed home-render cache (keyed by the root tree
+    /// oid). A cheap `Arc` clone; the `/home` read serves the CAS-expensive tree
+    /// listing + README from it (a HIT is ZERO CAS), MISS walks + populates. A push
+    /// yields a new tree oid → a MISS → automatic invalidation.
+    home_cache: crate::home_cache::HomeRenderCache,
 }
 
 /// Dispatch an authenticated `/v1/repos/{repo}/<tail...>` read. `query` is the
@@ -2168,8 +2181,13 @@ fn dispatch_repo(
     // The precomputed per-path blob-history index (#70(a)) — consulted index-first by
     // the blob read, with a live-walk fallback (`None` for a repo with no git seam).
     let history_index = git.map(|g| &g.history_index);
+    // The content-addressed home-render cache (`/home`'s CAS-expensive tree listing +
+    // README): a HIT is ZERO CAS. `None` for a repo with no content seam.
+    let home_cache = git.map(|g| &g.home_cache);
     match tail {
-        ["home"] => ok(&handlers::build_home(log, repo, git_source, root_tree)),
+        ["home"] => ok(&handlers::build_home(
+            log, repo, git_source, root_tree, home_cache,
+        )),
         ["new-pr"] => ok(&handlers::build_new_pr(log, repo)),
         ["knowledge"] => ok(&handlers::build_knowledge(log, repo)),
         ["compare", base, head] => ok(&handlers::build_compare(

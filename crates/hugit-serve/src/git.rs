@@ -1705,6 +1705,11 @@ fn finish_receive_pack(
                         // new tip in the background (a stale index MISSES → honest-empty
                         // until it lands). No-op for a non-public / refless repo.
                         crate::search_index::spawn_search_index_build(state, repo);
+                        // The push produced a NEW root tree → a NEW cache key. The old
+                        // entry is simply never hit again (content-addressed → no stale
+                        // serve); pre-warm the new-tip home OFF the response path so the
+                        // first `/home` after the push is a HIT, not a cold walk.
+                        crate::home_cache::spawn_home_cache_prewarm(state, repo);
                     }
                     Err(crate::cas::CasPushError::Persist(reason)) => {
                         let report = build_report_status(
@@ -1939,6 +1944,9 @@ fn handle_delete_ref(
                     // The delete moved the ref set → rebuild the code-search index
                     // for the new HEAD in the background (honest-empty until it lands).
                     crate::search_index::spawn_search_index_build(state, repo);
+                    // The delete moved HEAD → a new root tree → pre-warm the new-tip
+                    // home OFF the response path (content-addressed → no stale serve).
+                    crate::home_cache::spawn_home_cache_prewarm(state, repo);
                 }
                 Err(crate::cas::CasPushError::Persist(reason)) => {
                     let report = build_report_status(
