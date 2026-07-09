@@ -127,14 +127,36 @@ pub struct RepoState {
 /// (the advertise / clone) and the CAS-mode push finalize, so a pushed tip is
 /// advertised immediately, no reboot. The accept loop (`server::serve_on`) is
 /// single-threaded, so the `RwLock` is uncontended.
+///
+/// The lock also guards a monotonic **local hot-swap generation** counter (WP-B5
+/// refresher race guard): every LOCAL mutation ([`set_ref`](Self::set_ref) /
+/// [`remove_ref`](Self::remove_ref) — a push/delete hot-swap) bumps it under the same
+/// write lock as the map mutation. The background refs refresher captures the
+/// generation at read-START and installs a durable read only if the generation has NOT
+/// advanced during its (slow, network-bound) in-flight R2 GET
+/// ([`replace_if_unchanged`](Self::replace_if_unchanged)) — so a stale in-flight read
+/// can NEVER revert a locally-newer hot-swap. Keeping the counter INSIDE the lock makes
+/// the refresher's compare-and-replace atomic with respect to a concurrent hot-swap.
 #[derive(Clone)]
-pub struct LiveRefs(Arc<RwLock<BTreeMap<String, String>>>);
+pub struct LiveRefs(Arc<RwLock<LiveRefsInner>>);
+
+/// The lock-guarded interior of [`LiveRefs`]: the `ref → oid` map plus the monotonic
+/// local-hot-swap generation (see [`LiveRefs`]).
+struct LiveRefsInner {
+    refs: BTreeMap<String, String>,
+    /// Bumped on every LOCAL hot-swap (`set_ref`/`remove_ref`). A stale refresher read
+    /// captured before a bump is discarded (see [`LiveRefs::replace_if_unchanged`]).
+    generation: u64,
+}
 
 impl LiveRefs {
-    /// Wrap a boot-loaded `ref → oid` map.
+    /// Wrap a boot-loaded `ref → oid` map (generation starts at 0).
     #[must_use]
     pub fn new(refs: BTreeMap<String, String>) -> Self {
-        Self(Arc::new(RwLock::new(refs)))
+        Self(Arc::new(RwLock::new(LiveRefsInner {
+            refs,
+            generation: 0,
+        })))
     }
 
     /// An owned snapshot of the LIVE refs (the advertisement's `RefView` source).
@@ -142,44 +164,88 @@ impl LiveRefs {
     /// is negligible and keeps the read sites working with an owned `BTreeMap`.
     #[must_use]
     pub fn snapshot(&self) -> BTreeMap<String, String> {
-        self.0.read().unwrap_or_else(|e| e.into_inner()).clone()
+        self.0
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .refs
+            .clone()
     }
 
     /// Whether the LIVE ref set is empty (a not-loaded / refless repo).
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.0.read().unwrap_or_else(|e| e.into_inner()).is_empty()
+        self.0
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .refs
+            .is_empty()
     }
 
-    /// Atomically set `ref_name`'s tip to `oid` in the LIVE map (a push hot-swap).
+    /// The current local hot-swap generation — captured by the refresher at read-START
+    /// (BEFORE its R2 GET) and handed back to [`replace_if_unchanged`](Self::replace_if_unchanged).
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.0.read().unwrap_or_else(|e| e.into_inner()).generation
+    }
+
+    /// Atomically set `ref_name`'s tip to `oid` in the LIVE map (a push hot-swap) and
+    /// bump the local generation (so a refresher read in flight over this bump is
+    /// discarded rather than reverting this tip).
     pub fn set_ref(&self, ref_name: &str, oid: &str) {
-        self.0
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(ref_name.to_string(), oid.to_string());
+        let mut inner = self.0.write().unwrap_or_else(|e| e.into_inner());
+        inner.refs.insert(ref_name.to_string(), oid.to_string());
+        inner.generation = inner.generation.wrapping_add(1);
     }
 
-    /// Atomically remove `ref_name` from the LIVE map (a delete-ref hot-swap). A
-    /// no-op if the ref is absent (the durable finalize already validated presence;
-    /// this only mirrors the committed removal into the in-memory advertise).
+    /// Atomically remove `ref_name` from the LIVE map (a delete-ref hot-swap) and bump
+    /// the local generation. A no-op on the map if the ref is absent (the durable
+    /// finalize already validated presence; this only mirrors the committed removal into
+    /// the in-memory advertise) — but the generation still bumps, so a concurrent
+    /// refresher read cannot revert the delete.
     pub fn remove_ref(&self, ref_name: &str) {
-        self.0
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(ref_name);
+        let mut inner = self.0.write().unwrap_or_else(|e| e.into_inner());
+        inner.refs.remove(ref_name);
+        inner.generation = inner.generation.wrapping_add(1);
     }
 
-    /// Atomically REPLACE the whole LIVE map with `refs` (WP-B5 read-after-write): the
-    /// background refresher loads the authoritative durable `refs.json` and installs it, so
-    /// a second engine instance picks up another instance's push/delete within the refresh
-    /// window (bounded staleness, ≤ the TTL). A full replace (not a merge) is correct
-    /// because the durable manifest is the COMPLETE authoritative ref set — an add
-    /// propagates, and a ref deleted on another instance (dropped from the manifest) drops
-    /// here too. Safe against this instance's own in-flight push: the push finalize writes
-    /// the durable manifest BEFORE its `set_ref` hot-swap, so a replace can never lose a
-    /// locally-pushed ref (it is already in the manifest it reads).
+    /// Atomically REPLACE the whole LIVE map with `refs`, UNCONDITIONALLY. The
+    /// generation is left UNCHANGED (a durable-sync install is not a local hot-swap).
+    /// The production refresher uses the generation-guarded
+    /// [`replace_if_unchanged`](Self::replace_if_unchanged) instead; this unconditional
+    /// form is retained for test seeding of an "another instance advanced" scenario.
     pub fn replace(&self, refs: BTreeMap<String, String>) {
-        *self.0.write().unwrap_or_else(|e| e.into_inner()) = refs;
+        self.0.write().unwrap_or_else(|e| e.into_inner()).refs = refs;
+    }
+
+    /// Atomically REPLACE the whole LIVE map with `refs` (WP-B5 read-after-write) — the
+    /// background refresher installs the authoritative durable `refs.json` so a second
+    /// engine instance picks up another instance's push/delete within the refresh window
+    /// (bounded staleness, ≤ the interval). A full replace (not a merge) is correct
+    /// because the durable manifest is the COMPLETE authoritative ref set — an add
+    /// propagates, and a ref deleted on another instance (dropped from the manifest)
+    /// drops here too.
+    ///
+    /// **MONOTONIC GUARD (the W2 race fix).** The install is applied ONLY when the local
+    /// generation still equals `expected_generation` (the value the refresher captured
+    /// BEFORE it issued its R2 GET). If ANY local hot-swap advanced the generation during
+    /// the in-flight read, the install is SKIPPED — so a stale snapshot read (issued
+    /// before a concurrent push's conditional PUT landed, arriving after that push's
+    /// `set_ref` hot-swap) can NEVER clobber the just-applied newer tip. The check and
+    /// the replace run under ONE write lock, so they are atomic against a concurrent
+    /// hot-swap. Returns `true` if the durable map was installed, `false` if it was
+    /// skipped because a local hot-swap raced in.
+    pub fn replace_if_unchanged(
+        &self,
+        refs: BTreeMap<String, String>,
+        expected_generation: u64,
+    ) -> bool {
+        let mut inner = self.0.write().unwrap_or_else(|e| e.into_inner());
+        if inner.generation == expected_generation {
+            inner.refs = refs;
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -763,13 +829,21 @@ impl AppState {
         slug: &str,
         live: &LiveRefs,
     ) {
+        // W2 MONOTONIC GUARD: capture the local hot-swap generation BEFORE the (slow,
+        // network-bound) R2 read, so a push hot-swap that lands DURING this in-flight read
+        // is detected and the stale read discarded — a stale in-flight read can never
+        // revert a locally-newer hot-swap (see `LiveRefs::replace_if_unchanged`).
+        let gen_at_read_start = live.generation();
         // Install the durable manifest ONLY on a clean read+parse; an absent manifest
         // (`Ok(None)`), a read fault (`Err`), or a parse fault all keep the current live
         // cache (retry next tick) — never install a corrupt/empty map.
         if let Ok(Some(bytes)) = r2.get_object(&crate::cas::refs_manifest_key(tenant, slug))
             && let Ok(manifest) = crate::cas::parse_refs_manifest(&bytes)
         {
-            live.replace(manifest.refs);
+            // Skip the install if a local hot-swap advanced the generation while this read
+            // was in flight (the durable snapshot we just read is now stale w.r.t. a newer
+            // local tip). The next tick re-reads the merged durable state and installs it.
+            live.replace_if_unchanged(manifest.refs, gen_at_read_start);
         }
     }
 
@@ -3961,6 +4035,77 @@ mod tests {
             live.snapshot().get("refs/heads/main").map(String::as_str),
             Some("v1"),
             "a malformed manifest never installs a corrupt/empty map"
+        );
+    }
+
+    /// W2 race guard: an R2 double whose `get_object` performs a LOCAL push hot-swap as
+    /// a side effect — modeling a concurrent push that lands DURING the refresher's
+    /// in-flight read (the exact window that used to revert the tip). It returns the OLD
+    /// (pre-push) refs.json snapshot, so an UNGUARDED replace would clobber the new tip.
+    struct RaceOnReadR2 {
+        live: LiveRefs,
+        new_tip: String,
+        old_manifest: Vec<u8>,
+    }
+    impl crate::cas::R2Get for RaceOnReadR2 {
+        fn get_object(&self, _key: &str) -> Result<Option<Vec<u8>>, String> {
+            // The concurrent push's `set_ref` hot-swap lands (durably PUT first, per the
+            // finalize ordering) — bumping the local generation the refresher captured
+            // BEFORE this read.
+            self.live.set_ref("refs/heads/main", &self.new_tip);
+            Ok(Some(self.old_manifest.clone()))
+        }
+    }
+
+    #[test]
+    fn refresh_stale_read_cannot_revert_a_concurrent_hot_swap() {
+        // The live cache starts at main=v1. The refresher captures the generation, then
+        // its (slow) R2 read returns the STALE v1 snapshot — but WHILE that read is in
+        // flight a concurrent push hot-swaps main→v2. The monotonic guard must detect the
+        // generation advance and DISCARD the stale read: v2 SURVIVES, never reverted.
+        let live = seed_live(&[("refs/heads/main", "v1")]);
+        let stale_manifest =
+            br#"{"head":"refs/heads/main","refs":{"refs/heads/main":"v1"}}"#.to_vec();
+        let r2 = RaceOnReadR2 {
+            live: live.clone(),
+            new_tip: "v2".to_string(),
+            old_manifest: stale_manifest,
+        };
+        AppState::refresh_repo_refs_once(&r2, "t", "alpha", &live);
+        assert_eq!(
+            live.snapshot().get("refs/heads/main").map(String::as_str),
+            Some("v2"),
+            "a stale in-flight read must NOT revert the concurrent push's newer tip"
+        );
+    }
+
+    #[test]
+    fn replace_if_unchanged_installs_only_on_a_matching_generation() {
+        // Direct unit of the guard: a matching generation installs; a stale one (after a
+        // local hot-swap bumped the generation) is refused.
+        let live = seed_live(&[("refs/heads/main", "v1")]);
+        let gen0 = live.generation();
+        // A stale expected-generation is refused once a local hot-swap advances it.
+        live.set_ref("refs/heads/main", "v2");
+        let stale = BTreeMap::from([("refs/heads/main".to_string(), "v1".to_string())]);
+        assert!(
+            !live.replace_if_unchanged(stale, gen0),
+            "a stale generation must be refused"
+        );
+        assert_eq!(
+            live.snapshot().get("refs/heads/main").map(String::as_str),
+            Some("v2")
+        );
+        // A fresh generation installs the durable set.
+        let gen1 = live.generation();
+        let durable = BTreeMap::from([("refs/heads/main".to_string(), "v3".to_string())]);
+        assert!(
+            live.replace_if_unchanged(durable, gen1),
+            "a matching generation installs"
+        );
+        assert_eq!(
+            live.snapshot().get("refs/heads/main").map(String::as_str),
+            Some("v3")
         );
     }
 

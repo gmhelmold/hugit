@@ -165,7 +165,18 @@ pub fn serve_on_with(
         // never an indefinite wedge. GET/HEAD carry no body, so reads keep the
         // zero-overhead inline path.
         let (request, body) = if method == Method::Post {
-            match read_body_bounded(request, io_budget) {
+            // W3: the git-receive-pack (push) route carries a packfile up to the git pack
+            // ceiling (16 MiB), well above the 8 MiB generic `/v1` JSON write-door cap — so
+            // give the push body its own larger cap, else a legit 8–16 MiB push (under the
+            // advertised 16 MiB ceiling) is truncated here at the transport layer and fails
+            // deep in the pack parser as a confusing MalformedPack. Every OTHER POST keeps
+            // the 8 MiB generic cap (the JSON write door is unchanged). Both stay BOUNDED.
+            let body_cap = if crate::git::is_receive_pack_path(&url) {
+                crate::git::RECEIVE_PACK_BODY_CAP
+            } else {
+                writes::MAX_BODY_BYTES
+            };
+            match read_body_bounded(request, io_budget, body_cap) {
                 Some(pair) => pair,
                 None => {
                     // Slow-loris body dribble (or thread exhaustion under a flood): the
@@ -886,14 +897,21 @@ fn route_delete(state: &AppState, url: &str, headers: &[Header]) -> (u16, String
     }
 }
 
-/// Read a request body, capped at the door's `MAX_BODY_BYTES` (+1 byte so the
-/// door detects + rejects an over-cap body without buffering the whole thing).
-fn read_body_capped(request: &mut Request) -> Vec<u8> {
+/// Read a request body, capped at `cap` (+1 byte so the door detects + rejects an
+/// over-cap body without buffering the whole thing). `cap` is the generic
+/// `writes::MAX_BODY_BYTES` (8 MiB) for the `/v1` JSON write door, or the larger
+/// `git::RECEIVE_PACK_BODY_CAP` (16 MiB) for a git-push body (W3).
+fn read_body_capped(request: &mut Request, cap: usize) -> Vec<u8> {
+    read_capped_from(request.as_reader(), cap)
+}
+
+/// Read at most `cap`+1 bytes from `reader`. The +1-byte overshoot lets the caller
+/// detect an over-cap body (`len > cap`) and reject it cleanly WITHOUT buffering the
+/// whole (possibly huge) stream. Pure over `impl Read` so the cap behavior is
+/// hermetically testable without constructing a `tiny_http::Request`.
+fn read_capped_from<R: Read>(reader: R, cap: usize) -> Vec<u8> {
     let mut buf = Vec::new();
-    let _ = request
-        .as_reader()
-        .take(writes::MAX_BODY_BYTES as u64 + 1)
-        .read_to_end(&mut buf);
+    let _ = reader.take(cap as u64 + 1).read_to_end(&mut buf);
     buf
 }
 
@@ -976,10 +994,10 @@ where
 /// [`run_bounded`]: `Some((request, body))` when it completes in time (the `Request`
 /// is moved back intact, ready to respond); `None` on timeout — the loop drops the
 /// connection and returns to accept.
-fn read_body_bounded(request: Request, budget: Duration) -> Option<(Request, Vec<u8>)> {
+fn read_body_bounded(request: Request, budget: Duration, cap: usize) -> Option<(Request, Vec<u8>)> {
     run_bounded(budget, move || {
         let mut request = request;
-        let body = read_body_capped(&mut request);
+        let body = read_body_capped(&mut request, cap);
         (request, body)
     })
 }
@@ -2891,6 +2909,70 @@ mod io_timeout_tests {
             elapsed < Duration::from_secs(2),
             "the caller must be freed near the deadline, not wait for the slow op \
              (elapsed = {elapsed:?}, op = 5s, budget = 100ms)"
+        );
+    }
+
+    /// W3: the git-push body cap (16 MiB pack ceiling) is strictly larger than the
+    /// generic `/v1` write-door cap (8 MiB), and equals the proto pack ceiling — so an
+    /// 8–16 MiB push fits under the git cap but would be truncated under the generic one.
+    #[test]
+    fn receive_pack_body_cap_exceeds_the_generic_write_door_cap() {
+        // Compile-time invariants (const, so a future edit that breaks them fails to
+        // BUILD): the git-push body cap equals the pack ceiling and is strictly larger
+        // than the 8 MiB generic write-door cap — so an 8–16 MiB push fits under the git
+        // cap but would be truncated under the generic one.
+        const _: () = assert!(
+            crate::git::RECEIVE_PACK_BODY_CAP
+                == hugit_proto::write::receive::DEFAULT_MAX_PACK_BYTES,
+            "the git-push body cap must equal the pack ceiling"
+        );
+        const _: () = assert!(
+            crate::git::RECEIVE_PACK_BODY_CAP > writes::MAX_BODY_BYTES,
+            "a legit 8–16 MiB push must fit under the git cap but not the 8 MiB generic cap"
+        );
+    }
+
+    /// W3: only the `git-receive-pack` (push) route selects the larger cap; the read
+    /// routes and the generic `/v1` write door keep the 8 MiB cap.
+    #[test]
+    fn only_receive_pack_route_selects_the_larger_cap() {
+        assert!(crate::git::is_receive_pack_path("/hugit/git-receive-pack"));
+        assert!(!crate::git::is_receive_pack_path("/hugit/git-upload-pack"));
+        assert!(!crate::git::is_receive_pack_path(
+            "/hugit/info/refs?service=git-receive-pack"
+        ));
+        assert!(!crate::git::is_receive_pack_path("/v1/repos/hugit/pr"));
+    }
+
+    /// W3: an 8–16 MiB receive-pack body is read WHOLE under the git cap (not truncated),
+    /// so it reaches the pack parser intact — while the same body IS truncated under the
+    /// 8 MiB generic cap (proving the old bug and the fix). An over-cap body reads exactly
+    /// `cap+1` (the overshoot the handler uses to reject cleanly, never a MalformedPack).
+    #[test]
+    fn read_capped_from_git_cap_admits_8_to_16_mib_and_flags_over_cap() {
+        let twelve_mib = vec![b'p'; 12 * 1024 * 1024];
+        // Under the git push cap: the full 12 MiB survives (not truncated).
+        let under_git = read_capped_from(twelve_mib.as_slice(), crate::git::RECEIVE_PACK_BODY_CAP);
+        assert_eq!(
+            under_git.len(),
+            twelve_mib.len(),
+            "an 8–16 MiB push must reach the parser intact under the git cap"
+        );
+        // Under the generic 8 MiB door: the SAME body would be truncated (the old bug).
+        let under_generic = read_capped_from(twelve_mib.as_slice(), writes::MAX_BODY_BYTES);
+        assert_eq!(
+            under_generic.len(),
+            writes::MAX_BODY_BYTES + 1,
+            "the 8 MiB generic cap truncates a 12 MiB push (the W3 bug it fixes)"
+        );
+        // An over-cap body (git cap + 100) reads exactly cap+1 → len > cap, the clean
+        // over-limit signal the receive-pack handler rejects with a 413.
+        let over = vec![b'p'; crate::git::RECEIVE_PACK_BODY_CAP + 100];
+        let read = read_capped_from(over.as_slice(), crate::git::RECEIVE_PACK_BODY_CAP);
+        assert_eq!(read.len(), crate::git::RECEIVE_PACK_BODY_CAP + 1);
+        assert!(
+            read.len() > crate::git::RECEIVE_PACK_BODY_CAP,
+            "an over-cap body is detected (len > cap) → a clean 413, never a MalformedPack"
         );
     }
 

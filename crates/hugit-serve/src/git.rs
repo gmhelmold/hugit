@@ -119,6 +119,30 @@ pub fn is_git_path(url: &str) -> bool {
     )
 }
 
+/// The body cap for a `git-receive-pack` (push) POST: the git pack ceiling
+/// ([`hugit_proto::write::receive::DEFAULT_MAX_PACK_BYTES`], 16 MiB), NOT the 8 MiB
+/// generic `/v1` JSON write-door cap ([`crate::writes::MAX_BODY_BYTES`]).
+///
+/// W3 FIX: the accept loop reads every POST body up-front with a single cap. Applying
+/// the 8 MiB generic cap to a push truncated a legit 8–16 MiB pack (under the advertised
+/// 16 MiB ceiling) at the transport layer, so it failed deep in the pack parser as a
+/// confusing `MalformedPack`/400 and the 16 MiB ceiling was dead on the serving path.
+/// Giving the push route its own 16 MiB body cap lets an 8–16 MiB push REACH the pack
+/// parser, which then applies its own honest size/format checks. Still BOUNDED (never
+/// unbounded); an over-cap body is cleanly rejected in [`handle_receive_pack`] with a
+/// clear 413, not a `MalformedPack`.
+pub const RECEIVE_PACK_BODY_CAP: usize = hugit_proto::write::receive::DEFAULT_MAX_PACK_BYTES;
+
+/// Whether `url` is the `git-receive-pack` (push) route SPECIFICALLY — the one POST body
+/// that gets the larger [`RECEIVE_PACK_BODY_CAP`]. ([`is_git_path`] also matches the read
+/// routes `info/refs` + `git-upload-pack`, which keep the generic 8 MiB cap.)
+#[must_use]
+pub fn is_receive_pack_path(url: &str) -> bool {
+    let path = url.split('?').next().unwrap_or("");
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    matches!(segs.as_slice(), [_repo, "git-receive-pack"])
+}
+
 /// Handle a git smart-HTTP request inline (binary-safe), consuming `request` in
 /// every branch. Mirrors `respond_sse`: it owns the whole response because a
 /// packfile is a `Vec<u8>` body with a git-specific Content-Type. `body` is the
@@ -1093,6 +1117,14 @@ fn handle_receive_pack(
         return respond_not_found(request, io_budget);
     }
 
+    // W3: the accept loop read this body under the larger git-push cap
+    // ([`RECEIVE_PACK_BODY_CAP`] = the 16 MiB pack ceiling) with a +1-byte overshoot, so
+    // an OVER-cap body is detectable HERE and rejected with a CLEAR 413 — never left to
+    // fail deep in the pack parser as a confusing `MalformedPack`/400 on a truncated pack.
+    if body.len() > RECEIVE_PACK_BODY_CAP {
+        return respond_push_too_large(request, io_budget);
+    }
+
     // Parse the wire. A framing/command error → 400 (a malformed push).
     let wire = match parse_receive_pack_body(body) {
         Ok(w) => w,
@@ -1904,6 +1936,27 @@ fn respond_push_bad_request(request: Request, detail: &str, io_budget: Duration)
     send(
         request,
         Response::from_data(body).with_status_code(400).with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..])
+                .expect("static content-type"),
+        ),
+        body_len,
+        io_budget,
+    );
+}
+
+/// 413 for a push whose body exceeds the git pack ceiling ([`RECEIVE_PACK_BODY_CAP`],
+/// 16 MiB). A CLEAR over-limit message (W3) — NOT a `MalformedPack`/400 from a pack that
+/// was silently truncated at the transport layer.
+fn respond_push_too_large(request: Request, io_budget: Duration) {
+    let body = format!(
+        "push rejected: pack body exceeds the {} MiB limit\n",
+        RECEIVE_PACK_BODY_CAP / (1024 * 1024)
+    )
+    .into_bytes();
+    let body_len = body.len();
+    send(
+        request,
+        Response::from_data(body).with_status_code(413).with_header(
             tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..])
                 .expect("static content-type"),
         ),
