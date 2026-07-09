@@ -1097,6 +1097,14 @@ fn route_write(state: &AppState, url: &str, headers: &[Header], body: &[u8]) -> 
             Some(c) => crate::token::handle_token_exchange(c, &state.token_store, body),
             None => err(EngineErr::not_found()),
         },
+        // POST /v1/github/webhook — the GitHub App webhook ingress (WP-1). A
+        // PRE-AUTH route (like `/v1/token`): GitHub authenticates via the HMAC
+        // `X-Hub-Signature-256`, NOT a Bearer, so it deliberately does NOT call
+        // `write_auth`. The handler verifies the signature, DURABLY enqueues the
+        // envelope, and returns 202 — it NEVER runs ingest/mirror/git-push inline
+        // (that would starve this single-threaded loop). Absent webhook secret →
+        // the route is disabled (404). Rides the loop's bounded body-read + shed.
+        ["v1", "github", "webhook"] => handlers::github_webhook::handle(headers, body),
         // POST /v1/repos — self-service repo CREATE (W-PROVISION, v0 create-empty).
         // A NEW repo has no head to load/gate on, so it does NOT ride the
         // `dispatch_repo_write` → `with_write` door (which 404s an absent log +
