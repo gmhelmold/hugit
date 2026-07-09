@@ -210,8 +210,45 @@ impl AppAuth {
     /// app-id). Used by the live lane to decide live-vs-PARTIAL; reads metadata
     /// only, never the key bytes into anything observable.
     pub fn credentials_present(&self) -> bool {
-        self.secret_dir.join("private-key.pem").is_file()
-            && self.secret_dir.join("app-id").is_file()
+        let env_set = |k: &str| {
+            std::env::var(k)
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false)
+        };
+        (self.secret_dir.join("private-key.pem").is_file()
+            && self.secret_dir.join("app-id").is_file())
+            || (env_set("HUGIT_GITHUB_APP_PRIVATE_KEY") && env_set("HUGIT_GITHUB_APP_ID"))
+    }
+
+    /// Resolve the App private key (PEM): the on-disk `private-key.pem` (preferred,
+    /// dev/local) or the `HUGIT_GITHUB_APP_PRIVATE_KEY` env var (the DEPLOYED engine —
+    /// no on-disk secret dir; the PEM arrives as a wrangler-forwarded env secret).
+    /// NEVER logged / returned / formatted. `None` → `CredentialsUnavailable`.
+    fn resolve_private_key(&self) -> Option<Vec<u8>> {
+        if let Ok(k) = std::fs::read(self.secret_dir.join("private-key.pem"))
+            && !k.is_empty()
+        {
+            return Some(k);
+        }
+        std::env::var("HUGIT_GITHUB_APP_PRIVATE_KEY")
+            .ok()
+            .map(|s| s.into_bytes())
+            .filter(|b| !b.is_empty())
+    }
+
+    /// Resolve the App id (a NON-secret coordinate): the on-disk `app-id` file or the
+    /// `HUGIT_GITHUB_APP_ID` env var (container path).
+    fn resolve_app_id(&self) -> Option<String> {
+        if let Ok(s) = std::fs::read_to_string(self.secret_dir.join("app-id")) {
+            let t = s.trim().to_string();
+            if !t.is_empty() {
+                return Some(t);
+            }
+        }
+        std::env::var("HUGIT_GITHUB_APP_ID")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
     }
 
     /// Resolve the installation id: the `installation-id` file in the secret dir
@@ -290,18 +327,19 @@ impl AppAuth {
         if !self.credentials_present() {
             return Err(AppAuthError::CredentialsUnavailable);
         }
-        let key = std::fs::read(self.secret_dir.join("private-key.pem"))
-            .map_err(|_| AppAuthError::CredentialsUnavailable)?;
-        let app_id_raw = std::fs::read_to_string(self.secret_dir.join("app-id"))
-            .map_err(|_| AppAuthError::CredentialsUnavailable)?;
-        let app_id = app_id_raw.trim();
+        let key = self
+            .resolve_private_key()
+            .ok_or(AppAuthError::CredentialsUnavailable)?;
+        let app_id = self
+            .resolve_app_id()
+            .ok_or(AppAuthError::CredentialsUnavailable)?;
         if key.is_empty() || app_id.is_empty() {
             return Err(AppAuthError::CredentialsUnavailable);
         }
 
         // ── Sign the short-lived App JWT (RS256). ──
         let now_secs = now_ms / 1000;
-        let jwt = sign_app_jwt(&key, app_id, now_secs)?;
+        let jwt = sign_app_jwt(&key, &app_id, now_secs)?;
 
         self.exchange_and_cache(installation_id, &jwt, transport, now_ms)
     }

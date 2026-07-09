@@ -271,6 +271,16 @@ impl WebhookIngress {
 /// `None` when the dir/file is absent or the secret is empty — the route is then
 /// DISABLED (404), never a forgeable half-config.
 fn resolve_webhook_secret() -> Option<Vec<u8>> {
+    // Container/env secret path (takes precedence): the DEPLOYED engine has no on-disk
+    // secret dir — the App webhook secret arrives as a wrangler-forwarded env var. A
+    // non-empty `HUGIT_GITHUB_APP_WEBHOOK_SECRET` is used directly; empty/absent falls
+    // through to the on-disk dir (the dev/local path). Fail-closed either way.
+    if let Ok(s) = std::env::var("HUGIT_GITHUB_APP_WEBHOOK_SECRET") {
+        let t = s.trim();
+        if !t.is_empty() {
+            return Some(t.as_bytes().to_vec());
+        }
+    }
     let dir = if let Ok(p) = std::env::var("HUGIT_GITHUB_APP_SECRET_DIR") {
         let p = p.trim().to_string();
         if p.is_empty() {
