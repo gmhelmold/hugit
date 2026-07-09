@@ -32,6 +32,7 @@ pub mod merge_hook;
 pub mod metrics;
 pub mod ratelimit;
 pub mod receive_wire;
+pub mod search_index;
 pub mod server;
 pub mod sigv4;
 pub mod state;
