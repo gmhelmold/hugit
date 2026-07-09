@@ -36,5 +36,6 @@ pub mod search_index;
 pub mod server;
 pub mod sigv4;
 pub mod state;
+pub mod tenant_registry;
 pub mod token;
 pub mod writes;

@@ -1138,6 +1138,19 @@ fn execute_account_erasure_inner(
         // answer. A stale-cache leak here would be a private/erased-content
         // exposure, not merely a perf regression.
         state.refresh_repo_meta_cache(&leg.repo);
+        // WP-1: DECREMENT the tenant's durable repo registry — the cap is a HOLD-count
+        // (erasable-down), matching the account model. Best-effort + idempotent: an
+        // erased repo no longer counts, so a decrement fault leaves the SAFE direction (a
+        // transient OVER-count → the cap is momentarily conservative, never bypassed) and
+        // self-heals on a re-run; it must NEVER fail the irreversible erase cascade.
+        if let Err(e) = state.unregister_repo_from_tenant(account, &leg.repo, &principal_chain, at)
+        {
+            eprintln!(
+                "[hugit-serve] erase: repo {:?} tombstoned, but the tenant-registry \
+                 decrement failed ({}); the cap over-counts until a re-run heals it",
+                leg.repo, e.code
+            );
+        }
         tombstoned += 1;
     }
 
