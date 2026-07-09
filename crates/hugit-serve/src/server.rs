@@ -2033,7 +2033,13 @@ fn dispatch_repo(
         )),
         ["landing"] => ok(&handlers::build_landing(log, repo)),
         ["checks"] => ok(&handlers::build_checks(log, repo)),
-        ["commits"] => ok(&handlers::build_commits(log, repo)),
+        ["commits"] => ok(&handlers::build_commits(
+            log,
+            repo,
+            git_source,
+            head_commit,
+            &git_refs,
+        )),
         // Phase-2 collection reads (real engine backbone).
         ["chrome"] => ok(&handlers::build_repo_chrome(log, repo)),
         ["branches"] => ok(&handlers::build_branches(log, repo)),
@@ -2098,10 +2104,12 @@ fn dispatch_repo(
             Some(vm) => ok(&vm),
             None => err(EngineErr::not_found()),
         },
-        ["commit", sha] => match handlers::build_commit_detail(log, repo, sha, git_source) {
-            Some(vm) => ok(&vm),
-            None => err(EngineErr::not_found()),
-        },
+        ["commit", sha] => {
+            match handlers::build_commit_detail(log, repo, sha, git_source, head_commit) {
+                Some(vm) => ok(&vm),
+                None => err(EngineErr::not_found()),
+            }
+        }
         ["campaigns", name] => match handlers::build_campaign(log, repo, name) {
             Some(vm) => ok(&vm),
             None => err(EngineErr::not_found()),

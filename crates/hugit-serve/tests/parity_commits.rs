@@ -7,6 +7,9 @@
 //!   3. Honest defaults on an empty log: `days` is empty, all branch lists empty.
 //!   4. The `repo` field is passed through exactly.
 
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
 use hugit_http_contracts::CommitsVm;
 use hugit_refstore::EventLog;
 use hugit_serve::handlers::build_commits;
@@ -17,12 +20,21 @@ fn empty_log() -> EventLog {
     EventLog::new()
 }
 
+/// No git content seam — these parity tests assert the log-only projection; the
+/// CAS commit-walk (WP2) is exercised by the handler-crate unit tests.
+fn no_git() -> Option<&'static Arc<dyn hugit_proto::ObjectSource + Send + Sync>> {
+    None
+}
+fn no_refs() -> BTreeMap<String, String> {
+    BTreeMap::new()
+}
+
 // ── round-trip ───────────────────────────────────────────────────────────────
 
 #[test]
 fn empty_log_serializes_and_round_trips() {
     let log = empty_log();
-    let vm = build_commits(&log, "hugit");
+    let vm = build_commits(&log, "hugit", no_git(), None, &no_refs());
 
     // 1. Serializes without error.
     let json = serde_json::to_string(&vm).expect("CommitsVm serializes");
@@ -36,7 +48,7 @@ fn empty_log_serializes_and_round_trips() {
 
 #[test]
 fn empty_log_days_empty() {
-    let vm = build_commits(&empty_log(), "hugit");
+    let vm = build_commits(&empty_log(), "hugit", no_git(), None, &no_refs());
     assert!(
         vm.days.is_empty(),
         "empty log → days must be [] (no commit rows)"
@@ -45,13 +57,13 @@ fn empty_log_days_empty() {
 
 #[test]
 fn empty_log_branch_empty_string() {
-    let vm = build_commits(&empty_log(), "hugit");
+    let vm = build_commits(&empty_log(), "hugit", no_git(), None, &no_refs());
     assert_eq!(vm.branch, "", "empty log → branch must be \"\" (no refs)");
 }
 
 #[test]
 fn empty_log_other_branches_empty() {
-    let vm = build_commits(&empty_log(), "hugit");
+    let vm = build_commits(&empty_log(), "hugit", no_git(), None, &no_refs());
     assert!(
         vm.other_branches.is_empty(),
         "empty log → other_branches must be []"
@@ -60,7 +72,7 @@ fn empty_log_other_branches_empty() {
 
 #[test]
 fn empty_log_generated_branches_empty() {
-    let vm = build_commits(&empty_log(), "hugit");
+    let vm = build_commits(&empty_log(), "hugit", no_git(), None, &no_refs());
     assert!(
         vm.generated_branches.is_empty(),
         "empty log → generated_branches must be []"
@@ -71,13 +83,13 @@ fn empty_log_generated_branches_empty() {
 
 #[test]
 fn repo_field_is_exact() {
-    let vm = build_commits(&empty_log(), "hugit");
+    let vm = build_commits(&empty_log(), "hugit", no_git(), None, &no_refs());
     assert_eq!(vm.repo, "hugit");
 }
 
 #[test]
 fn repo_field_other_name() {
-    let vm = build_commits(&empty_log(), "my-repo");
+    let vm = build_commits(&empty_log(), "my-repo", no_git(), None, &no_refs());
     assert_eq!(vm.repo, "my-repo");
 }
 

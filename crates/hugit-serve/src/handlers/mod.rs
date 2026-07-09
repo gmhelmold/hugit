@@ -12,6 +12,7 @@ pub mod branches;
 pub mod campaign;
 pub mod checks;
 pub mod commit_detail;
+pub mod commit_meta;
 pub mod commits;
 pub mod compare;
 pub mod dashboard;
