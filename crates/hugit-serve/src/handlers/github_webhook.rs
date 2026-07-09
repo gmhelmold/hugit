@@ -81,7 +81,12 @@ impl WebhookQueue {
     /// per-request fsync on the single-threaded accept loop (the audit DoS the
     /// convergence re-audit flagged). Fail-closed either way: any I/O error is
     /// returned so a durability-required caller does not ack a non-durable event.
-    fn append_line(&self, file: &str, value: &serde_json::Value, sync: bool) -> std::io::Result<()> {
+    fn append_line(
+        &self,
+        file: &str,
+        value: &serde_json::Value,
+        sync: bool,
+    ) -> std::io::Result<()> {
         use std::io::Write;
         std::fs::create_dir_all(&self.dir)?;
         let mut line = serde_json::to_string(value).map_err(std::io::Error::other)?;
