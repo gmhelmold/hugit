@@ -119,6 +119,46 @@ pub fn is_git_path(url: &str) -> bool {
     )
 }
 
+/// Whether `url` addresses the receive-pack (push) POST route — the ONLY route that
+/// carries a packfile body, so the ONLY one that gets the larger pack-size cap
+/// (`max_pack_bytes`) at body-read time; every other POST keeps the `/v1` JSON door's
+/// [`crate::writes::MAX_BODY_BYTES`] (8 MiB).
+pub fn is_receive_pack_path(url: &str) -> bool {
+    let path = url.split('?').next().unwrap_or("");
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    matches!(segs.as_slice(), [_repo, "git-receive-pack"])
+}
+
+/// Default dedicated ceiling on a received packfile BODY (64 MiB). Distinct from — and
+/// larger than — the `/v1` JSON door's 8 MiB [`crate::writes::MAX_BODY_BYTES`], which
+/// used to (wrongly) TRUNCATE a git push before the proto's own wire cap could reject
+/// it. Overridable via `HUGIT_SERVE_MAX_PACK_BYTES`, clamped to `[1 MiB, 512 MiB]` so a
+/// mis-set env can neither block every real push (floor) nor un-bound the accept-loop's
+/// buffered read (ceiling). This is the FIRST wall (a clean 413 before any unpack); the
+/// proto bomb-caps (32 MiB inflated / 1M objects / delta-pass) are the second.
+pub const DEFAULT_MAX_PACK_BYTES: usize = 64 * 1024 * 1024;
+const MIN_MAX_PACK_BYTES: usize = 1024 * 1024; // 1 MiB floor
+const MAX_MAX_PACK_BYTES: usize = 512 * 1024 * 1024; // 512 MiB ceiling
+
+/// The configured receive-pack body cap: `HUGIT_SERVE_MAX_PACK_BYTES` clamped to
+/// `[1 MiB, 512 MiB]`, defaulting to [`DEFAULT_MAX_PACK_BYTES`].
+#[must_use]
+pub fn max_pack_bytes() -> usize {
+    let raw = std::env::var("HUGIT_SERVE_MAX_PACK_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok());
+    clamp_max_pack_bytes(raw)
+}
+
+/// The pure clamp behind [`max_pack_bytes`] (env-free, hermetically testable): an
+/// unset / unparseable value → the 64 MiB default; any value is clamped to
+/// `[1 MiB, 512 MiB]`.
+#[must_use]
+pub fn clamp_max_pack_bytes(raw: Option<usize>) -> usize {
+    raw.unwrap_or(DEFAULT_MAX_PACK_BYTES)
+        .clamp(MIN_MAX_PACK_BYTES, MAX_MAX_PACK_BYTES)
+}
+
 /// Handle a git smart-HTTP request inline (binary-safe), consuming `request` in
 /// every branch. Mirrors `respond_sse`: it owns the whole response because a
 /// packfile is a `Vec<u8>` body with a git-specific Content-Type. `body` is the
@@ -786,6 +826,44 @@ fn respond_push_overloaded(request: Request, io_budget: Duration) {
     );
 }
 
+/// 413 PAYLOAD_TOO_LARGE — the pushed pack body exceeds the configured pack-size cap
+/// (`max_pack_bytes`) OR the durable storage quota. A clean plain-text remote message
+/// (git surfaces the body), emitted BEFORE any object is durably stored. `detail`
+/// names which limit tripped.
+fn respond_push_payload_too_large(request: Request, detail: &str, io_budget: Duration) {
+    let body = format!("{detail}\n").into_bytes();
+    let body_len = body.len();
+    send(
+        request,
+        Response::from_data(body).with_status_code(413).with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..])
+                .expect("static content-type"),
+        ),
+        body_len,
+        io_budget,
+    );
+}
+
+/// 503 — the durable storage accounting could not be read/determined, so the storage
+/// quota is INDETERMINATE. Fail-closed: the push is refused (never allowed on an
+/// indeterminate read), the client may retry. Mirrors the provision path's fail-closed
+/// `count_owned_repos` → 503.
+fn respond_push_storage_unavailable(request: Request, io_budget: Duration) {
+    let body =
+        b"storage quota could not be determined; push refused (fail-closed), retry shortly\n"
+            .to_vec();
+    let body_len = body.len();
+    send(
+        request,
+        Response::from_data(body).with_status_code(503).with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..])
+                .expect("static content-type"),
+        ),
+        body_len,
+        io_budget,
+    );
+}
+
 /// Whether EVERY `want` oid is an advertised ref tip in `refs` (the map values).
 ///
 /// The `uploadpack.allowReachableSHA1InWant`-OFF default: a client may only fetch
@@ -1093,6 +1171,22 @@ fn handle_receive_pack(
         return respond_not_found(request, io_budget);
     }
 
+    // Pack-size cap (G10): a DEDICATED receive-pack body ceiling
+    // (`HUGIT_SERVE_MAX_PACK_BYTES`, default 64 MiB), enforced HERE — after auth/authz,
+    // BEFORE the wire parse and BEFORE any worker spawn / unpack. The accept loop reads
+    // the receive-pack body capped at `max_pack_bytes()+1` (every other POST keeps the 8
+    // MiB JSON door), so an over-cap push arrives here truncated to cap+1 and is rejected
+    // with a clean 413 — no objects unpacked, no manifest written, the accept loop freed.
+    // The same number is threaded into `RecvLimits` below as the second (proto) wall.
+    let max_pack = max_pack_bytes();
+    if body.len() > max_pack {
+        return respond_push_payload_too_large(
+            request,
+            &format!("pack exceeds the {max_pack}-byte limit"),
+            io_budget,
+        );
+    }
+
     // Parse the wire. A framing/command error → 400 (a malformed push).
     let wire = match parse_receive_pack_body(body) {
         Ok(w) => w,
@@ -1135,6 +1229,7 @@ fn handle_receive_pack(
         token,
         cmd,
         pack: wire.pack,
+        max_pack_bytes: max_pack,
     };
     spawn_receive_pack_worker(plan, request, io_budget);
 }
@@ -1171,6 +1266,9 @@ struct ReceivePlan {
     cmd: crate::receive_wire::ReceiveCommand,
     /// The uploaded pack bytes (empty for a delete, which carries no objects).
     pack: Vec<u8>,
+    /// The pack-size cap that gated this push inline (`max_pack_bytes`), threaded so the
+    /// worker's `RecvLimits` carries the SAME wired number (not a fresh `::default()`).
+    max_pack_bytes: usize,
 }
 
 /// Hand the receive-pack RESPONSE to a DETACHED worker that OWNS `request` and writes
@@ -1212,6 +1310,7 @@ fn serve_receive_pack_response(plan: ReceivePlan, request: Request, io_budget: D
         token,
         cmd,
         pack,
+        max_pack_bytes,
     } = plan;
 
     // Re-resolve the repo's live seam from the CLONED (Arc-sharing) state. Existence +
@@ -1236,8 +1335,99 @@ fn serve_receive_pack_response(plan: ReceivePlan, request: Request, io_budget: D
     }
 
     finish_receive_pack(
-        &state, &repo, repo_state, cmd, principal, log, token, pack, request, io_budget,
+        &state,
+        &repo,
+        repo_state,
+        cmd,
+        principal,
+        log,
+        token,
+        pack,
+        max_pack_bytes,
+        request,
+        io_budget,
     );
+}
+
+/// The outcome of the CAS-mode storage-quota enforcement (G10): either allow the push,
+/// refuse it over-quota (→ 413), or fail closed on an indeterminate accounting read
+/// (→ 503, NEVER allow-on-error).
+enum StorageEnforcement {
+    /// A cap is breached — the plain-text 413 message.
+    Exceeded(String),
+    /// The accounting could not be determined → 503 fail-closed.
+    Unavailable,
+}
+
+/// Enforce the per-repo + per-owner_tenant storage-byte caps (G10) for a CAS-mode push
+/// of `delta` NEW stored bytes, BEFORE any object is flushed. Enumerates the
+/// owner_tenant's owned-repo slug set via the FAIL-CLOSED `owned_repo_logs` (an
+/// indeterminate enumeration → 503), then runs the R2-backed [`crate::cas::check_storage_quota`]
+/// (each `size.json` read fail-closed). A `delta` of 0 is always allowed. A repo with no
+/// `owner_tenant` (legacy/unowned) falls back to a per-repo-only check (no rollup).
+fn enforce_cas_storage_quota(
+    state: &AppState,
+    seam: &crate::state::CasWriteSeam,
+    owner_tenant: &Option<String>,
+    delta: u64,
+) -> Result<(), StorageEnforcement> {
+    if delta == 0 {
+        return Ok(());
+    }
+    let caps = crate::cas::storage_caps_from_env();
+    let owned_slugs: Vec<String> = match owner_tenant {
+        Some(ot) => match state.owned_repo_logs(ot) {
+            Some(logs) => logs.into_iter().map(|(slug, _)| slug).collect(),
+            // Indeterminate ownership enumeration → fail closed (503), never allow.
+            None => return Err(StorageEnforcement::Unavailable),
+        },
+        None => vec![seam.repo_slug.clone()],
+    };
+    match crate::cas::check_storage_quota(
+        &seam.r2,
+        &seam.tenant,
+        &seam.repo_slug,
+        &owned_slugs,
+        delta,
+        &caps,
+    ) {
+        Ok(()) => Ok(()),
+        Err(crate::cas::StorageQuotaError::Exceeded(v)) => {
+            let which = match v {
+                crate::cas::QuotaVerdict::TenantExceeded => "tenant",
+                _ => "repository",
+            };
+            Err(StorageEnforcement::Exceeded(format!(
+                "STORAGE_QUOTA_EXCEEDED: this push would exceed the {which} storage quota"
+            )))
+        }
+        Err(crate::cas::StorageQuotaError::Unavailable(_)) => Err(StorageEnforcement::Unavailable),
+    }
+}
+
+/// The on-disk path of a GIT_DIR-mode repo's stored-byte counter (`hugit-size.json`,
+/// inside the git dir — hugit's private space in local mode).
+fn gitdir_size_path(git_dir: &std::path::Path) -> std::path::PathBuf {
+    git_dir.join("hugit-size.json")
+}
+
+/// Read a GIT_DIR repo's accounted stored bytes. Absent → 0 (never pushed). Any other
+/// read/parse fault is an `Err` (the caller fails closed → 503), NEVER silently 0.
+fn read_gitdir_stored_bytes(git_dir: &std::path::Path) -> Result<u64, String> {
+    match std::fs::read(gitdir_size_path(git_dir)) {
+        Ok(bytes) => Ok(crate::cas::parse_size_manifest(&bytes)?.bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(e) => Err(format!("gitdir size.json read: {e}")),
+    }
+}
+
+/// Write a GIT_DIR repo's stored-byte counter (best-effort accounting; the CHECK is the
+/// fail-closed gate).
+fn write_gitdir_stored_bytes(git_dir: &std::path::Path, bytes: u64) -> Result<(), String> {
+    let body = serde_json::to_vec(&crate::cas::SizeManifest { bytes })
+        .map_err(|e| format!("gitdir size.json serialize: {e}"))?;
+    std::fs::write(gitdir_size_path(git_dir), body)
+        .map_err(|e| format!("gitdir size.json write: {e}"))
 }
 
 /// The create/update tail of a receive-pack, run on the detached worker: build the
@@ -1258,6 +1448,7 @@ fn finish_receive_pack(
     mut log: hugit_refstore::log::EventLog,
     token: crate::writes::CasToken,
     pack: Vec<u8>,
+    max_pack: usize,
     request: Request,
     io_budget: Duration,
 ) {
@@ -1318,14 +1509,44 @@ fn finish_receive_pack(
             cas,
             &mut log,
             &current_refs,
-            RecvLimits::default(),
+            // The proto's compressed-pack wall carries the SAME wired number the inline
+            // 413 gate used (`max_pack`), so the two caps can never disagree; the other
+            // bomb-caps (inflated / objects / delta-pass) keep their proto defaults.
+            RecvLimits {
+                max_pack_bytes: max_pack,
+                ..RecvLimits::default()
+            },
         )
     };
+    // The push's owner_tenant (for the per-owner_tenant storage rollup), projected from
+    // the loaded log. `None` for a legacy/unowned repo → the storage check falls back to
+    // a per-repo-only cap (no rollup).
+    let owner_tenant = crate::authz::project_repo_meta(&log).owner_tenant;
     match recv {
         Ok(_receipt) => match &mut writer {
-            // GIT_DIR mode (UNCHANGED): persist the log (compare-and-swap) then move
-            // the on-disk ref so the upload-pack wire advertises the new tip.
+            // GIT_DIR mode: persist the log (compare-and-swap) then move the on-disk ref
+            // so the upload-pack wire advertises the new tip. Storage-byte cap (G10) is
+            // enforced FIRST, before the durable advance.
             RepoWriter::GitDir { git_dir, .. } => {
+                // Storage-byte cap (G10), GitDir/local mode: a PER-REPO cap enforced
+                // BEFORE the log persist + ref advance. Loose objects may already be on
+                // disk (dangling/unreachable/GC-able) but the ref does NOT advance over
+                // quota. GitDir is the single-tenant local mode, so there is no
+                // owner_tenant rollup here; the delta is the compressed pack size (a
+                // conservative v0 proxy — NOTE). Fail-closed: an unreadable counter → 503.
+                let caps = crate::cas::storage_caps_from_env();
+                let gitdir_delta = req.pack.len() as u64;
+                let gitdir_current = match read_gitdir_stored_bytes(git_dir) {
+                    Ok(n) => n,
+                    Err(_) => return respond_push_storage_unavailable(request, io_budget),
+                };
+                if gitdir_delta > 0 && gitdir_current.saturating_add(gitdir_delta) > caps.per_repo {
+                    return respond_push_payload_too_large(
+                        request,
+                        "STORAGE_QUOTA_EXCEEDED: this push would exceed the repository storage quota",
+                        io_budget,
+                    );
+                }
                 if let Err(e) = state.persist(repo, &log, &token) {
                     let report = build_report_status(
                         Err("log-persist-failed"),
@@ -1350,6 +1571,16 @@ fn finish_receive_pack(
                 }
                 let report = build_report_status(Ok(()), &[RefOutcome::Ok(cmd.ref_name.clone())]);
                 send_report(request, report, io_budget);
+                // POST-DURABLE, POST-`ok`: bump the on-disk storage counter by this
+                // push's delta (best-effort — the push already succeeded; a counter
+                // write fault only under-counts, the fail-open direction on the
+                // BOOKKEEPING while the CHECK above stays fail-closed).
+                if gitdir_delta > 0 {
+                    let _ = write_gitdir_stored_bytes(
+                        git_dir,
+                        gitdir_current.saturating_add(gitdir_delta),
+                    );
+                }
                 // POST-DURABLE, POST-`ok`: best-effort KungFu merge event (WP
                 // W-WEBHOOK) — see the CAS arm below for the full rationale.
                 crate::merge_hook::emit_merge_event(
@@ -1366,6 +1597,20 @@ fn finish_receive_pack(
             // uploaded AND whose ref.update event was not recorded. `finalize_cas_push`
             // owns the flush + manifest steps; the log persist stays our closure.
             RepoWriter::Cas { cas, seam } => {
+                // Storage-byte cap (G10): enforce BEFORE the flush/manifest commit. The
+                // pack is unpacked in memory (bounded by the bomb caps) but NOT yet
+                // stored to CAS, so a refusal here commits NO object and leaves every
+                // manifest unchanged. `delta` is the NEW distinct-object stored bytes.
+                let storage_delta = cas.pending_bytes();
+                match enforce_cas_storage_quota(state, seam, &owner_tenant, storage_delta) {
+                    Ok(()) => {}
+                    Err(StorageEnforcement::Exceeded(msg)) => {
+                        return respond_push_payload_too_large(request, &msg, io_budget);
+                    }
+                    Err(StorageEnforcement::Unavailable) => {
+                        return respond_push_storage_unavailable(request, io_budget);
+                    }
+                }
                 let res = crate::cas::finalize_cas_push(
                     cas.as_mut(),
                     &seam.r2,
@@ -1378,6 +1623,10 @@ fn finish_receive_pack(
                     // conditional refs.json write RE-VALIDATES it against the fresh base,
                     // closing the cross-instance same-ref lost-update (FIX-IFMATCH-REMERGE).
                     req.update.expected.as_deref(),
+                    // The push's NEW stored-byte delta — finalize bumps size.json by this
+                    // AFTER the tip is durably advertised (the quota CHECK already passed
+                    // above, before the flush).
+                    storage_delta,
                     || {
                         state
                             .persist(repo, &log, &token)
@@ -2733,5 +2982,40 @@ mod offloop_tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+}
+
+#[cfg(test)]
+mod pack_cap_tests {
+    use super::*;
+
+    #[test]
+    fn clamp_max_pack_bytes_defaults_and_clamps() {
+        // Unset / unparseable → the 64 MiB default.
+        assert_eq!(clamp_max_pack_bytes(None), DEFAULT_MAX_PACK_BYTES);
+        // A value inside the window is preserved.
+        assert_eq!(
+            clamp_max_pack_bytes(Some(100 * 1024 * 1024)),
+            100 * 1024 * 1024
+        );
+        // Below the 1 MiB floor → clamped up.
+        assert_eq!(clamp_max_pack_bytes(Some(0)), MIN_MAX_PACK_BYTES);
+        assert_eq!(clamp_max_pack_bytes(Some(1)), MIN_MAX_PACK_BYTES);
+        // Above the 512 MiB ceiling → clamped down (an un-bounded read is refused).
+        assert_eq!(
+            clamp_max_pack_bytes(Some(4 * 1024 * 1024 * 1024)),
+            MAX_MAX_PACK_BYTES
+        );
+    }
+
+    #[test]
+    fn is_receive_pack_path_matches_only_the_push_post() {
+        assert!(is_receive_pack_path("/acme/git-receive-pack"));
+        assert!(is_receive_pack_path("/acme/git-receive-pack?foo=bar"));
+        // The clone/fetch routes keep the 8 MiB JSON door (NOT the pack cap).
+        assert!(!is_receive_pack_path("/acme/git-upload-pack"));
+        assert!(!is_receive_pack_path("/acme/info/refs"));
+        assert!(!is_receive_pack_path("/v1/repos/acme/blob"));
+        assert!(!is_receive_pack_path("/acme/git-receive-pack/extra"));
     }
 }
