@@ -499,7 +499,6 @@ fn forward_write_through_the_door_pseudonymises_dedups_and_owner_authz_survives(
     seed_repo_with_pr(&dir, "alpha", ACCOUNT);
     let st = AppState::new(dir.clone(), "dev-token".into());
     let sink: &dyn LogSink = &st;
-    let pseudonymize = |c: &[String]| st.pseudonymize_write_chain(c);
 
     let chain = vec![format!("clerk:{ACCOUNT}:user-1")];
     let req = CommentReq {
@@ -518,7 +517,7 @@ fn forward_write_through_the_door_pseudonymises_dedups_and_owner_authz_survives(
         true,
         chain.clone(),
         10,
-        &pseudonymize,
+        &st,
         |log, p, at| verbs::write_comment::write_comment(log, "alpha", 1, &req, p, at),
     )
     .expect("first comment ok");
@@ -533,7 +532,7 @@ fn forward_write_through_the_door_pseudonymises_dedups_and_owner_authz_survives(
         true,
         chain.clone(),
         11,
-        &pseudonymize,
+        &st,
         |log, p, at| verbs::write_comment::write_comment(log, "alpha", 1, &req, p, at),
     )
     .expect("replay ok");
@@ -597,7 +596,6 @@ fn erase_renders_forward_pseudonymised_records_unrecoverable_no_double_handling(
     seed_account(&dir);
     let st = AppState::new(dir.clone(), "dev-token".into());
     let sink: &dyn LogSink = &st;
-    let pseudonymize = |c: &[String]| st.pseudonymize_write_chain(c);
 
     // A forward pseudonymised comment by the subject.
     let req = CommentReq {
@@ -615,7 +613,7 @@ fn erase_renders_forward_pseudonymised_records_unrecoverable_no_double_handling(
         true,
         vec![format!("clerk:{ACCOUNT}:user-1")],
         10,
-        &pseudonymize,
+        &st,
         |log, p, at| verbs::write_comment::write_comment(log, "alpha", 1, &req, p, at),
     )
     .expect("forward comment ok");
@@ -652,5 +650,64 @@ fn erase_renders_forward_pseudonymised_records_unrecoverable_no_double_handling(
     assert!(
         st.subject_key_for(ACCOUNT).unwrap().is_none(),
         "the key is shredded after a completed erase"
+    );
+}
+
+#[test]
+fn two_users_in_one_org_do_not_collide_in_the_idempotency_ledger() {
+    // MUST-FIX 1 (end-to-end, real key store): the pseudonym is FULL-PRINCIPAL, so two DISTINCT
+    // users in ONE org do NOT share an idem tuple. Same Idempotency-Key + verb + resource + body
+    // by user-1 then user-2 → TWO comments (no silent lost write, no spurious replay); a user-1
+    // resubmit → deduped to ONE for user-1. (Both users own the repo — org == owner_tenant.)
+    let dir = scratch_dir();
+    seed_repo_with_pr(&dir, "alpha", ACCOUNT);
+    let st = AppState::new(dir.clone(), "dev-token".into());
+    let sink: &dyn LogSink = &st;
+    let req = CommentReq {
+        body: "hi".into(),
+        anchor: None,
+    };
+    let body = serde_json::to_vec(&req).unwrap();
+    let post = |user: &str, at: u64| {
+        with_write(
+            sink,
+            "alpha",
+            "comment",
+            "prs/1/comments",
+            "SHARED-KEY",
+            &body,
+            true,
+            vec![format!("clerk:{ACCOUNT}:{user}")],
+            at,
+            &st,
+            |log, p, at| verbs::write_comment::write_comment(log, "alpha", 1, &req, p, at),
+        )
+    };
+    post("user-1", 10).expect("user-1 first ok");
+    post("user-2", 11).expect("user-2 must NOT dedup against user-1 (distinct pseudonyms)");
+    post("user-1", 12).expect("user-1 resubmit replays");
+
+    let (log, _) = sink.load("alpha").expect("repo log loads + verifies");
+    verify_chain(log.records()).expect("chain verifies");
+    let comment_chains: Vec<String> = log
+        .records()
+        .iter()
+        .filter(|r| r.kind == verbs::write_comment::PR_COMMENT_KIND)
+        .flat_map(|r| r.principal_chain.clone())
+        .collect();
+    assert_eq!(
+        comment_chains.len(),
+        2,
+        "two distinct users → TWO comments (no idem collision); user-1 resubmit deduped to one"
+    );
+    assert_ne!(
+        comment_chains[0], comment_chains[1],
+        "user-1 and user-2 get DISTINCT full-principal pseudonyms"
+    );
+    assert!(
+        comment_chains
+            .iter()
+            .all(|p| p.starts_with("subj:") && !p.contains(ACCOUNT)),
+        "both stored pseudonyms are opaque (no cleartext account/user): {comment_chains:?}"
     );
 }

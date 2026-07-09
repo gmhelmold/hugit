@@ -342,8 +342,7 @@ pub fn provision(
     //    field is deliberately LEFT cleartext — the read/write authz gates project it as the
     //    ownership key (leg 3); it is rendered unrecoverable at erase by leg 4's redaction.
     let log = build_genesis_log(&owner_tenant, visibility, principal, at)?;
-    let pseudonymize = |c: &[String]| state.pseudonymize_write_chain(c);
-    let log = crate::writes::repseudonymize_tail(&log, 0, &pseudonymize)?;
+    let log = crate::writes::repseudonymize_tail(&log, 0, state)?;
 
     // 5. THE atomic commit: persist the genesis as a CREATE-ONLY compare-and-swap.
     //    `Absent` → Local content-compare / R2 `If-None-Match: *`. A precondition

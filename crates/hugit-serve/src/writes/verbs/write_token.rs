@@ -362,7 +362,7 @@ fn append_account(
     principal_chain: &[String],
     payload: String,
     at: u64,
-    pseudonymize: crate::writes::ChainPseudonymizer<'_>,
+    identity: &dyn crate::writes::WriteIdentity,
     // A pre-persist guard evaluated against the freshly-loaded log (e.g. the per-account
     // cap, or the "token exists / not already revoked" check) — re-checked on each CAS
     // attempt so it stays correct under contention. `Ok(())` proceeds; `Err` aborts.
@@ -384,7 +384,7 @@ fn append_account(
         .map_err(|d| {
             EngineErr::unavailable(format!("{kind} append denied: {}", d.reason.code()))
         })?;
-        let log = crate::writes::repseudonymize_tail(&log, head_len, pseudonymize)?;
+        let log = crate::writes::repseudonymize_tail(&log, head_len, identity)?;
         match sink.persist_account(account, &log, &token) {
             Ok(()) => return Ok(()),
             Err(e) if e.is_cas_conflict() => continue,
@@ -459,7 +459,6 @@ pub fn token_create(
 
     let sink: &dyn AccountLogSink = state;
     let user_for_guard = user.clone();
-    let pseudonymize = |c: &[String]| state.pseudonymize_write_chain(c);
     append_account(
         sink,
         &account,
@@ -467,7 +466,7 @@ pub fn token_create(
         principal_chain,
         payload,
         at,
-        &pseudonymize,
+        state,
         move |log| {
             if live_pat_count(log, &user_for_guard) >= MAX_PATS_PER_ACCOUNT {
                 return Err(EngineErr {
@@ -569,7 +568,6 @@ pub fn token_revoke(
     let payload_value = serde_json::json!({ "id": id, "user": user });
     let payload = hugit_refstore::canonical_json(&payload_value.to_string())
         .unwrap_or_else(|| payload_value.to_string());
-    let pseudonymize = |c: &[String]| state.pseudonymize_write_chain(c);
     append_account(
         sink,
         &account,
@@ -577,7 +575,7 @@ pub fn token_revoke(
         principal_chain,
         payload,
         at,
-        &pseudonymize,
+        state,
         // Under contention a concurrent revoke may have landed first — treat a
         // now-absent live token as an idempotent no-op (re-check owns the race).
         move |log| {

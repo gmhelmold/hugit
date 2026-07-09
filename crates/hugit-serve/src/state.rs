@@ -4319,6 +4319,20 @@ fn erasure_auto_execute_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// The write doors' identity abstraction (ADR-0004 leg 2). `store_chain` is the FLAG-GATED write
+/// mapper (pseudonym when the kill-switch is ON, cleartext when OFF, may MINT the caller's key);
+/// `lookup_pseudonym` reconstructs a principal's pseudonym READ-ONLY and FLAG-INDEPENDENTLY for
+/// the idempotency match arm (no mint; `None` when there is no key), so a key first executed
+/// while ON still dedups after the kill-switch flips OFF (no double-execute).
+impl crate::writes::WriteIdentity for AppState {
+    fn store_chain(&self, chain: &[String]) -> Result<Vec<String>, EngineErr> {
+        self.pseudonymize_write_chain(chain)
+    }
+    fn lookup_pseudonym(&self, principal: &str) -> Result<Option<String>, EngineErr> {
+        crate::provenance_pii_redact::readonly_principal_pseudonym(self, principal)
+    }
+}
+
 /// The forward write-path pseudonymisation gate (ADR-0004 leg 2), **default ON**. This is an
 /// ops KILL-SWITCH, not a feature flag: it ships ON so cleartext PII stops entering the chain,
 /// and can be turned OFF (`HUGIT_SERVE_PROV_PSEUDONYM=0|false|off`) as a break-glass without a
