@@ -1404,6 +1404,7 @@ fn dispatch_account_erase(
         step_up,
         principal,
         now_ms(),
+        state,
         |log, p, at| verbs::write_account_erase::write_account_erase(log, &req, p, at),
     );
     match result {
@@ -1975,6 +1976,7 @@ fn dispatch_repo_write(
                     step_up,
                     p,
                     at,
+                    state,
                     |log, p, at| verbs::write_land::write_land(log, repo, pr, &req, p, at),
                 )
             }
@@ -1993,6 +1995,7 @@ fn dispatch_repo_write(
                     step_up,
                     p,
                     at,
+                    state,
                     |log, p, at| verbs::write_verdict::write_verdict(log, repo, pr, &req, p, at),
                 )
             }
@@ -2011,6 +2014,7 @@ fn dispatch_repo_write(
                     step_up,
                     p,
                     at,
+                    state,
                     |log, p, at| verbs::write_comment::write_comment(log, repo, pr, &req, p, at),
                 )
             }
@@ -2031,6 +2035,7 @@ fn dispatch_repo_write(
                 step_up,
                 p,
                 at,
+                state,
                 |log, p, at| verbs::write_usage::write_usage(log, repo, &id, &req, p, at),
             )
         }
@@ -2046,6 +2051,7 @@ fn dispatch_repo_write(
                 step_up,
                 p,
                 at,
+                state,
                 |log, p, at| verbs::write_dispatch::write_dispatch(log, repo, &req, p, at),
             )
         }
@@ -2070,6 +2076,7 @@ fn dispatch_repo_write(
                 step_up,
                 p,
                 at,
+                state,
                 |log, p, at| verbs::write_pr_create::write_pr_create(log, repo, &req, &refs, p, at),
             )
         }
@@ -2086,6 +2093,7 @@ fn dispatch_repo_write(
                     step_up,
                     p,
                     at,
+                    state,
                     |log, p, at| {
                         verbs::write_issue_transition::write_issue_transition(
                             log, repo, num, &req, p, at,
@@ -2107,6 +2115,7 @@ fn dispatch_repo_write(
                 step_up,
                 p,
                 at,
+                state,
                 |log, p, at| verbs::write_policy::write_policy(log, repo, &req, p, at),
             )
         }
@@ -2123,6 +2132,7 @@ fn dispatch_repo_write(
                 step_up,
                 p,
                 at,
+                state,
                 |log, p, at| {
                     verbs::write_erasure_decide::write_erasure_decide(log, repo, &id, &req, p, at)
                 },
@@ -2141,6 +2151,7 @@ fn dispatch_repo_write(
                 step_up,
                 p,
                 at,
+                state,
                 |log, p, at| {
                     verbs::write_edit_propose::write_edit_propose(log, repo, &path, &req, p, at)
                 },
@@ -2158,6 +2169,7 @@ fn dispatch_repo_write(
                 step_up,
                 p,
                 at,
+                state,
                 |log, p, at| verbs::write_undo::write_undo(log, repo, &req, p, at),
             )
         }
@@ -2173,6 +2185,7 @@ fn dispatch_repo_write(
                 step_up,
                 p,
                 at,
+                state,
                 |log, p, at| verbs::write_repo_meta::write_repo_meta(log, repo, &req, p, at),
             );
             // Task #74 (W-METENANT scaling follow-up): a successful `repo.meta` write

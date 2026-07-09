@@ -2377,6 +2377,29 @@ impl AppState {
         }
     }
 
+    /// FORWARD write-path pseudonymisation (ADR-0004 leg 2), kill-switch-gated. Map a live
+    /// request's `principal_chain` to its stored, pseudonymous form so a NEW provenance record
+    /// carries `subj:<hmac>` instead of the cleartext `clerk:{org}:{user}` at the point of
+    /// append. Thin gate over [`provenance_pii_redact::pseudonymize_write_principal_chain`]:
+    ///
+    /// - Default **ON**. The ops kill-switch `HUGIT_SERVE_PROV_PSEUDONYM=0|false|off` returns
+    ///   the chain UNCHANGED (identity) — so a deploy can disable forward pseudonymisation
+    ///   without a rollback if it ever needs to (leaves the erase-time redaction untouched).
+    /// - Fail-closed: a durable key-store fault propagates as `Err` (the write aborts rather
+    ///   than storing cleartext or a wrong pseudonym).
+    ///
+    /// AUTHZ-NEUTRAL BY CONSTRUCTION: this rewrites ONLY the stored `principal_chain`, never the
+    /// `owner_tenant`/`user` PAYLOAD fields the authz + PAT readers key on (ADR-0004 leg 3 — the
+    /// gates read the projected `owner_tenant` + the LIVE request principal, never the stored
+    /// chain). A stable pseudonym per org also keeps any principal-keyed idempotency match
+    /// consistent (same org ⇒ same pseudonym while the key lives).
+    pub fn pseudonymize_write_chain(&self, chain: &[String]) -> Result<Vec<String>, EngineErr> {
+        if !prov_pseudonym_enabled() {
+            return Ok(chain.to_vec()); // ops kill-switch: forward pseudonymisation OFF
+        }
+        crate::provenance_pii_redact::pseudonymize_write_principal_chain(self, chain)
+    }
+
     /// SHRED a subject's durable key — the irreversible Art.17 action. Idempotent (an absent
     /// key → `Ok`). After this, [`subject_key_for`](Self::subject_key_for) returns `None` and
     /// every one of the subject's pseudonyms is permanently unrecoverable. `Err` on a durable
@@ -4294,6 +4317,33 @@ fn erasure_auto_execute_enabled() -> bool {
     std::env::var("HUGIT_ERASURE_AUTO_EXECUTE")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+/// The write doors' identity abstraction (ADR-0004 leg 2). `store_chain` is the FLAG-GATED write
+/// mapper (pseudonym when the kill-switch is ON, cleartext when OFF, may MINT the caller's key);
+/// `lookup_pseudonym` reconstructs a principal's pseudonym READ-ONLY and FLAG-INDEPENDENTLY for
+/// the idempotency match arm (no mint; `None` when there is no key), so a key first executed
+/// while ON still dedups after the kill-switch flips OFF (no double-execute).
+impl crate::writes::WriteIdentity for AppState {
+    fn store_chain(&self, chain: &[String]) -> Result<Vec<String>, EngineErr> {
+        self.pseudonymize_write_chain(chain)
+    }
+    fn lookup_pseudonym(&self, principal: &str) -> Result<Option<String>, EngineErr> {
+        crate::provenance_pii_redact::readonly_principal_pseudonym(self, principal)
+    }
+}
+
+/// The forward write-path pseudonymisation gate (ADR-0004 leg 2), **default ON**. This is an
+/// ops KILL-SWITCH, not a feature flag: it ships ON so cleartext PII stops entering the chain,
+/// and can be turned OFF (`HUGIT_SERVE_PROV_PSEUDONYM=0|false|off`) as a break-glass without a
+/// binary rollback. Only an explicit disable value turns it off — any other value (typo, empty,
+/// unset) keeps it ON (fail-safe toward MORE privacy, the opposite polarity of a new-surface
+/// feature gate).
+fn prov_pseudonym_enabled() -> bool {
+    match std::env::var("HUGIT_SERVE_PROV_PSEUDONYM") {
+        Ok(v) => !(v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off")),
+        Err(_) => true, // unset ⇒ ON (default)
+    }
 }
 
 /// PURE spawn guard (testable without env): the auto-executor loop spawns ONLY when it is

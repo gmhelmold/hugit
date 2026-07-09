@@ -79,17 +79,26 @@ fn redact_value_tree(v: Value, account: &str, pseudonym: &SubjectPseudonym) -> V
 /// FORWARD-write pseudonymisation (ADR-0004 leg 2): map a live request's
 /// `principal_chain` to its stored, pseudonymous form, so a NEW record carries `subj:<hmac>`
 /// instead of the cleartext `clerk:{org}:{user}` at the point of append. For each
-/// `clerk:{org}:{user}` entry it ensures the org's durable key and substitutes the
-/// pseudonym; every non-`clerk:` principal (`orchestrator:…`, `agent:…`) is passed through
-/// unchanged. Fail-closed: a durable key-store fault is an `Err` (the write aborts rather
-/// than storing cleartext or a wrong pseudonym).
+/// `clerk:{org}:{user}` entry it ensures the ORG's durable key and substitutes the pseudonym;
+/// every non-`clerk:` principal (`orchestrator:…`, `agent:…`) is passed through unchanged.
+/// Fail-closed: a durable key-store fault is an `Err` (the write aborts rather than storing
+/// cleartext or a wrong pseudonym).
+///
+/// GRANULARITY (FULL-PRINCIPAL, per-ACCOUNT key). The HMAC INPUT is the WHOLE principal string
+/// `clerk:{org}:{user}` — NOT the bare org — so two distinct users in one org
+/// (`clerk:acme:user-1` vs `clerk:acme:user-2`) get DISTINCT pseudonyms. This preserves
+/// per-user granularity in the principal-keyed idempotency ledger (two users sharing an
+/// Idempotency-Key on the same verb+resource do NOT collide) AND per-user audit accountability
+/// (Art.5(2)). The KEY is still fetched per-ORG (`subject_key_ensure(org)`), so an account erase
+/// shreds exactly ONE key and renders ALL of that org's per-user pseudonyms unrecoverable at
+/// once.
 ///
 /// IMPORTANT — this is applied ONLY to what is STORED, AFTER the write-path authz decisions
 /// (which run on the live cleartext chain): authz keys on the projected `owner_tenant` + the
 /// live request principal, never on the stored `principal_chain` (verified — see
 /// `crate::authz`), so pseudonymising the stored chain leaves the read/write authz gates
-/// unaffected. A stable pseudonym per org also keeps any principal-keyed idempotency match
-/// consistent (same org ⇒ same pseudonym while the key lives).
+/// unaffected. A stable pseudonym per (org, user) also keeps the principal-keyed idempotency
+/// match consistent (same principal ⇒ same pseudonym while the key lives).
 pub fn pseudonymize_write_principal_chain(
     state: &AppState,
     chain: &[String],
@@ -99,12 +108,41 @@ pub fn pseudonymize_write_principal_chain(
         out.push(match org_of_clerk(p) {
             Some(org) => {
                 let key = state.subject_key_ensure(org)?;
-                SubjectPseudonym::derive(&key, org).as_str().to_string()
+                // HMAC the FULL principal (per-user distinct), under the per-ORG key.
+                SubjectPseudonym::derive(&key, p).as_str().to_string()
             }
             None => p.clone(),
         });
     }
     Ok(out)
+}
+
+/// READ-ONLY, single-principal pseudonym for the idempotency LOOKUP arm (ADR-0004 leg 2). The
+/// stored pseudonym form of `principal` WITHOUT minting a key:
+/// - a non-`clerk:` principal → `None` (its stored form equals cleartext — the cleartext match
+///   arm already covers it), and
+/// - a `clerk:{org}:{user}` whose account key is ABSENT/shredded → `None` (no pseudonymised
+///   ledger entry could exist for it — writing one requires a minted key).
+///
+/// Used FLAG-INDEPENDENTLY by `idem_lookup`: the lookup ALWAYS considers both the cleartext AND
+/// this pseudonym form regardless of the `HUGIT_SERVE_PROV_PSEUDONYM` kill-switch, so a key
+/// first EXECUTED while pseudonymisation was ON still dedups after the switch flips OFF (no
+/// re-execute on the live forge). The kill-switch governs only whether NEW writes are
+/// pseudonymised, never whether the lookup reconstructs the pseudonym. Fail-closed on a durable
+/// key-store fault (`Err`), so a transient read fault cannot silently drop the pseudonym arm and
+/// re-execute.
+pub fn readonly_principal_pseudonym(
+    state: &AppState,
+    principal: &str,
+) -> Result<Option<String>, EngineErr> {
+    match org_of_clerk(principal) {
+        Some(org) => Ok(state.subject_key_for(org)?.map(|key| {
+            SubjectPseudonym::derive(&key, principal)
+                .as_str()
+                .to_string()
+        })),
+        None => Ok(None),
+    }
 }
 
 /// The org segment of a `clerk:{org}:{user}` principal (non-empty), else `None`.
