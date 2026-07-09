@@ -49,11 +49,16 @@ jobs:
     # Fork-guard: only run for maintainer PRs (same repo) + push events; fork PRs are
     # trusted-source only (kept as defense even on ephemeral hosted runners).
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false
-    # Self-hosted macOS builder (hugit-builder-01). Switched back from GitHub-hosted
-    # ubuntu 2026-06-29 when the hosted-runner pool entered a sustained outage window
-    # (jobs completing-failure with ZERO steps — couldn't acquire a runner). The
-    # workspace is cross-platform; the fork-guard above keeps fork PRs off the box.
-    runs-on: [self-hosted, macOS]
+    # GitHub-hosted ubuntu (re-migrated 2026-07-09). The self-hosted macOS builder
+    # (hugit-builder-01) shares ONE dev box with the local dev session + sibling
+    # runners, so CI serialized behind local `cargo` + sibling CI under contention
+    # (the exact starvation the 2026-06-26 migration fixed; the 2026-06-29 revert was
+    # forced ONLY by a transient hosted-pool outage, now past). Hosted runners are
+    # ephemeral + isolated → CI runs in parallel off the dev box, ~8-min cycle. The
+    # workspace is cross-platform; the fork-guard above keeps fork PRs off any runner.
+    # (If the hosted pool outages again — jobs completing-failure with ZERO steps —
+    # revert this ONE line to `[self-hosted, macOS]`.)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
