@@ -16,6 +16,7 @@ use tiny_http::{Header, Method, Request, Response, Server};
 use crate::error::EngineErr;
 use crate::handlers;
 use crate::metrics::{Metrics, RouteClass, ShedGate};
+use crate::ratelimit::{RateLimiter, RlDecision};
 use crate::state::AppState;
 use crate::writes::{self, AccountLogSink, LogSink, verbs, with_account_write, with_write};
 use hugit_http_contracts::actions::Accepted;
@@ -41,6 +42,19 @@ pub fn serve(state: AppState, addr: &str) -> std::io::Result<()> {
 /// [`Metrics`] + a per-request structured log line. Neither adds meaningful
 /// per-request latency (atomics + one uncontended lock on the single thread).
 pub fn serve_on(state: AppState, server: Server) -> std::io::Result<()> {
+    // G10: the per-PRINCIPAL fairness gate is env-configured for the real binary; a
+    // test injects tight limits via [`serve_on_with`] to stay env-race-free.
+    serve_on_with(state, server, RateLimiter::from_env())
+}
+
+/// [`serve_on`] with an INJECTED [`RateLimiter`] (the only seam a test needs to force
+/// tight per-principal limits without racing the process env). The real binary calls
+/// [`serve_on`], which supplies `RateLimiter::from_env()`.
+pub fn serve_on_with(
+    state: AppState,
+    server: Server,
+    rate_limiter: RateLimiter,
+) -> std::io::Result<()> {
     let metrics = Metrics::new();
     let mut shed_gate = ShedGate::from_env();
     // The single wall-clock deadline that bounds any ONE potentially-socket-blocking
@@ -50,8 +64,9 @@ pub fn serve_on(state: AppState, server: Server) -> std::io::Result<()> {
     let io_budget = io_deadline();
     let loop_start = Instant::now();
     eprintln!(
-        "hugit-serve: accept loop up (load-shed={}, io_deadline={}s)",
+        "hugit-serve: accept loop up (load-shed={}, rate-limit={}, io_deadline={}s)",
         if shed_gate.enabled() { "on" } else { "off" },
+        if rate_limiter.enabled() { "on" } else { "off" },
         io_budget.as_secs()
     );
 
@@ -107,6 +122,35 @@ pub fn serve_on(state: AppState, server: Server) -> std::io::Result<()> {
         }
 
         let headers = request.headers().to_vec();
+
+        // ---- Part A.5: per-principal rate limit (G10) ------------------------
+        // Placed AFTER the principal is resolved (`two_tier_auth`, the SAME two-tier
+        // resolution the handlers run) and BEFORE the POST body is read, so a flood
+        // from one tenant/edge is rejected 429 INLINE — the loop never buffers its
+        // body nor spawns a worker. The gate itself ([`RateLimiter::check`]) is pure
+        // saturating arithmetic + one uncontended lock (no I/O, no per-request alloc
+        // in steady state) — same loop-safety discipline as `should_shed` above. The
+        // operator (`orchestrator:*`) is EXEMPT inside `check`. Liveness (`/readyz`)
+        // + observability (`/metrics`) are exempt here (like the load-shed) so they
+        // stay answerable during a flood. A credential FAILURE resolves to the
+        // anonymous (empty-chain) bucket — never a free pass.
+        if rate_limiter.enabled() && !class.rl_exempt() {
+            let principal = match two_tier_auth(&state, &headers) {
+                Ok((p, _fresh)) => p,
+                Err(_) => Vec::new(), // no/invalid Bearer → the strict anonymous bucket
+            };
+            let peer_ip = request.remote_addr().map(std::net::SocketAddr::ip);
+            let is_push = is_receive_pack(&method, &url);
+            if rate_limiter.check(&principal, peer_ip, is_push, now_ms) == RlDecision::TooMany {
+                respond_rate_limited_429(request);
+                let dur = started.elapsed().as_millis() as u64;
+                metrics.record(class, dur);
+                log_request(req_id, class, 429, dur);
+                metrics.set_in_flight(0);
+                continue;
+            }
+        }
+
         // Read the body ONLY for mutating methods (reads ignore it). Bounded read:
         // at most MAX_BODY_BYTES+1 so the door's size cap rejects an oversize body
         // without us buffering it all.
@@ -261,6 +305,18 @@ fn classify_route(method: &Method, url: &str) -> RouteClass {
     }
 }
 
+/// Whether this request is a git PUSH (`POST /<repo>/git-receive-pack`) — the write
+/// side of the smart-HTTP wire, which the rate limiter throttles with a STRICTER
+/// sub-bucket than ordinary requests. Matched by method + path shape only.
+fn is_receive_pack(method: &Method, url: &str) -> bool {
+    if method != &Method::Post {
+        return false;
+    }
+    let path = url.split('?').next().unwrap_or("");
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    matches!(segs.as_slice(), [_repo, "git-receive-pack"])
+}
+
 /// Whether `url`'s path is exactly `/metrics` (query ignored).
 fn is_metrics_path(url: &str) -> bool {
     let path = url.split('?').next().unwrap_or("");
@@ -291,6 +347,23 @@ fn respond_shed_503(request: Request) {
         && e.kind() != std::io::ErrorKind::BrokenPipe
     {
         eprintln!("hugit-serve: shed respond error: {e}");
+    }
+}
+
+/// Respond with a fast `429 Too Many Requests` + `Retry-After` (the per-principal
+/// rate limit, G10). The body is the standard `{code, reason}` envelope; marked
+/// private/no-store so no intermediary caches the transient throttle.
+fn respond_rate_limited_429(request: Request) {
+    let body = EngineErr::too_many_requests().to_body();
+    let resp = Response::from_string(body)
+        .with_status_code(429)
+        .with_header(json_content_type())
+        .with_header(retry_after_header())
+        .with_header(cache_control_private());
+    if let Err(e) = request.respond(resp)
+        && e.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        eprintln!("hugit-serve: rate-limit respond error: {e}");
     }
 }
 

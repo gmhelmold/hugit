@@ -164,6 +164,14 @@ impl RouteClass {
         matches!(self, RouteClass::Readyz | RouteClass::Metrics)
     }
 
+    /// Whether this class is EXEMPT from the per-principal rate limit (G10). Same
+    /// carve-out as the load-shed: liveness (`/readyz`) and observability
+    /// (`/metrics`) must stay answerable during a flood, so they are never throttled.
+    #[must_use]
+    pub fn rl_exempt(self) -> bool {
+        self.shed_exempt()
+    }
+
     /// The stable render order (so `/metrics` output is deterministic).
     const ALL: [RouteClass; 10] = [
         RouteClass::Readyz,
