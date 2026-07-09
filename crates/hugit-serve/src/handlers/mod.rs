@@ -18,6 +18,7 @@ pub mod dashboard;
 pub mod diff;
 pub mod edit;
 pub mod events;
+pub mod github_webhook;
 pub mod home;
 pub mod insights;
 pub mod intent_detail;

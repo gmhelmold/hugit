@@ -1019,11 +1019,13 @@ dependencies = [
  "hugit-mirror",
  "hugit-proto",
  "hugit-refstore",
+ "jsonwebtoken",
  "serde",
  "serde_json",
  "sha1",
  "sha2",
  "thiserror",
+ "ureq",
 ]
 
 [[package]]
@@ -1085,6 +1087,7 @@ dependencies = [
  "gix-object",
  "hex",
  "hmac",
+ "hugit-app",
  "hugit-cli",
  "hugit-contracts",
  "hugit-http-contracts",
