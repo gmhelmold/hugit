@@ -20,7 +20,7 @@ already paid for — on your existing GitHub repos, migrating nothing.
 run it on itself:
 
 ```sh
-git clone https://github.com/HumanGuardrail/hugit.git
+git clone https://github.com/gmhelmold/hugit.git
 cd hugit
 cargo build --release
 ./target/release/hugit symbol --file crates/hugit-symbols/src/lib.rs
