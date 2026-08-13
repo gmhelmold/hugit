@@ -82,6 +82,7 @@
 //! git-served).
 
 use std::collections::BTreeMap;
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -1617,6 +1618,9 @@ fn finish_receive_pack(
                     &cmd.new_oid,
                     &req.principal_chain,
                 );
+                // Live in-memory ref hot-swap (GitDir mode): advance the advertise
+                // so subsequent clone/ls-remote see the new tip without reboot.
+                repo_state.git_refs.set_ref(&cmd.ref_name, &cmd.new_oid);
             }
             // CAS mode: objects → log → manifests, each fail-closed. The ORDER is the
             // invariant — a manifest never advertises a tip whose closure was not
@@ -2154,16 +2158,48 @@ pub(crate) fn bootstrap_clone_packs(state: &AppState) {
 /// Write the pushed ref into the git dir via `git update-ref`, compare-and-swap on
 /// the expected old value (a create passes the all-zero oid, which git reads as
 /// "must not exist"). Returns a short `ng` reason on failure.
+///
+/// A FORCE push (`--force` / `-f`) carries an all-zero old oid on the wire even
+/// when the ref EXISTS — passing that straight into the 3-arg form would read as
+/// "create" and fail with `reference already exists`. In that case the push's
+/// durability already passed the engine's own compare-and-append (`state.persist`),
+/// so the on-disk move compares against the ref's CURRENT value (the single-writer
+/// disk invariant); a genuine create (ref absent) still uses the all-zero create
+/// form.
 fn update_git_ref(
     git_dir: &std::path::Path,
     ref_name: &str,
     new_oid: &str,
     old_oid: &str,
 ) -> Result<(), String> {
-    let out = std::process::Command::new("git")
+    let is_zero = old_oid.chars().all(|c| c == '0');
+    let ref_exists = Command::new("git")
         .arg("-C")
         .arg(git_dir)
-        .args(["update-ref", ref_name, new_oid, old_oid])
+        .args(["rev-parse", "-q", "--verify", ref_name])
+        .status()
+        .map(|s| s.success())
+        .map_err(|e| format!("rev-parse-spawn:{e}"))?;
+    let mut args: Vec<String> = vec![
+        "update-ref".into(),
+        ref_name.into(),
+        new_oid.into(),
+    ];
+    // A force-update of an existing ref → unconditional on-disk move (no old check).
+    // Anything else → the compare-and-swap form (create via all-zero, or the exact
+    // expected old).
+    let expect_old = if is_zero && ref_exists {
+        None
+    } else {
+        Some(old_oid.to_string())
+    };
+    if let Some(old) = expect_old {
+        args.push(old);
+    }
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(git_dir)
+        .args(&args)
         .output()
         .map_err(|e| format!("update-ref-spawn:{e}"))?;
     if out.status.success() {
