@@ -212,6 +212,8 @@ pub fn run_wave_with_envelope_capture<S: ColdBlobStore>(
             env_manifest: cfg.toolchain_digest.clone(),
             metrics: t.metrics,
             verdicts_ref: None,
+            raw_transcript_ref: None,
+            task_transcript_ref: None,
         };
         let closed = close_envelope(&draft, level, store).expect("intent envelope close");
         let sidecar = IntentSidecar {
@@ -296,6 +298,8 @@ pub fn run_wave_with_envelope_capture<S: ColdBlobStore>(
         env_manifest: cfg.toolchain_digest.clone(),
         metrics: t.metrics.clone(),
         verdicts_ref: None,
+        raw_transcript_ref: None,
+        task_transcript_ref: None,
     };
 
     // The session's OWN envelope (`altitude:"session"`) — the physical HOME

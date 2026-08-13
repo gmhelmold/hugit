@@ -123,6 +123,8 @@ fn secret_bearing_draft(altitude: Altitude) -> EnvelopeDraft {
         env_manifest: "rustc 1.96.0".to_string(),
         metrics: t.metrics,
         verdicts_ref: None,
+        raw_transcript_ref: None,
+        task_transcript_ref: None,
     }
 }
 
