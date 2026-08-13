@@ -2167,7 +2167,7 @@ fn v1_write_repo_provision_pat_account_erase() {
     }
     let app = UserApp::spawn();
     let owner = app.mint("acme", "alice", true);
-    let auth = format!("Bearer {owner}");
+    let _auth = format!("Bearer {owner}");
 
     // Repo provision (self-service create)
     let create = app.post_json("/v1/repos", Some(&owner), r#"{"name":"newrepo"}"#);
@@ -2276,7 +2276,7 @@ fn cli_campaign_open_close_show() {
         seed_meta(dir, "acme", "public", "acme");
         wire_git(s, "acme");
     });
-    let owner = app.mint("acme", "alice", true);
+    let _owner = app.mint("acme", "alice", true);
 
     let mut log = EventLog::new();
     log.append_for_test(
@@ -2318,7 +2318,7 @@ fn cli_intent_new_show_list() {
         seed_meta(dir, "acme", "public", "acme");
         wire_git(s, "acme");
     });
-    let owner = app.mint("acme", "alice", true);
+    let _owner = app.mint("acme", "alice", true);
 
     let mut log = EventLog::new();
     log.append_for_test(
@@ -2372,7 +2372,7 @@ fn cli_issue_transition() {
         seed_meta(dir, "acme", "public", "acme");
         wire_git(s, "acme");
     });
-    let owner = app.mint("acme", "alice", true);
+    let _owner = app.mint("acme", "alice", true);
 
     let mut log = EventLog::new();
     log.append_for_test(
@@ -2408,7 +2408,7 @@ fn cli_pr_open_queue_land_show_list_abandon() {
         seed_meta(dir, "acme", "public", "acme");
         wire_git(s, "acme");
     });
-    let owner = app.mint("acme", "alice", true);
+    let _owner = app.mint("acme", "alice", true);
 
     let mut log = EventLog::new();
     log.append_for_test(
@@ -2451,7 +2451,7 @@ fn cli_land_batch_queue() {
         seed_meta(dir, "acme", "public", "acme");
         wire_git(s, "acme");
     });
-    let owner = app.mint("acme", "alice", true);
+    let _owner = app.mint("acme", "alice", true);
 
     let mut log = EventLog::new();
     log.append_for_test(
@@ -2489,7 +2489,7 @@ fn cli_meta_set() {
         seed_meta(dir, "acme", "public", "acme");
         wire_git(s, "acme");
     });
-    let owner = app.mint("acme", "alice", true);
+    let _owner = app.mint("acme", "alice", true);
 
     let mut log = EventLog::new();
     log.append_for_test(
@@ -2529,7 +2529,7 @@ fn cli_check_run_show_predict() {
         seed_meta(dir, "acme", "public", "acme");
         wire_git(s, "acme");
     });
-    let owner = app.mint("acme", "alice", true);
+    let _owner = app.mint("acme", "alice", true);
 
     let mut log = EventLog::new();
     log.append_for_test(
@@ -2579,7 +2579,7 @@ fn cli_verdict_approve_reject() {
         seed_meta(dir, "acme", "public", "acme");
         wire_git(s, "acme");
     });
-    let owner = app.mint("acme", "alice", true);
+    let _owner = app.mint("acme", "alice", true);
 
     let mut log = EventLog::new();
     log.append_for_test(
@@ -2621,7 +2621,7 @@ fn cli_undo_policy_note_diag() {
         seed_meta(dir, "acme", "public", "acme");
         wire_git(s, "acme");
     });
-    let owner = app.mint("acme", "alice", true);
+    let _owner = app.mint("acme", "alice", true);
 
     let mut log = EventLog::new();
     log.append_for_test(
@@ -2676,7 +2676,7 @@ fn cli_ledger_fleet_watch_symbol_ctx_review() {
         seed_meta(dir, "acme", "public", "acme");
         wire_git(s, "acme");
     });
-    let owner = app.mint("acme", "alice", true);
+    let _owner = app.mint("acme", "alice", true);
 
     let mut log = EventLog::new();
     log.append_for_test(
@@ -2753,7 +2753,7 @@ fn cli_export_why_impact_tournament() {
         seed_meta(dir, "acme", "public", "acme");
         wire_git(s, "acme");
     });
-    let owner = app.mint("acme", "alice", true);
+    let _owner = app.mint("acme", "alice", true);
 
     let mut log = EventLog::new();
     log.append_for_test(
