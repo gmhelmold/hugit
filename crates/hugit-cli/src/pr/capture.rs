@@ -222,6 +222,9 @@ pub struct EnvelopeMetricsArgs {
     /// `cas:` ref to the compacted transcript, when available
     /// (`--compact-transcript-ref`). Honest-`None` at the porcelain altitude.
     pub compact_transcript_ref: Option<String>,
+    /// `cas:` ref to the raw transcript, when available
+    /// (`--raw-transcript-ref`). Honest-`None` at the porcelain altitude.
+    pub raw_transcript_ref: Option<String>,
     /// `cas:` ref to the adversarial-panel verdicts (`--verdicts-ref`).
     pub verdicts_ref: Option<String>,
     /// A complete [`IntentMetrics`] supplied by the runner (the §13.1
@@ -247,6 +250,7 @@ impl EnvelopeMetricsArgs {
             || self.model.as_deref().is_some_and(|m| !m.is_empty())
             || self.context_cas.is_some()
             || self.compact_transcript_ref.is_some()
+            || self.raw_transcript_ref.is_some()
             || self.verdicts_ref.is_some()
             || self.full_metrics.is_some()
     }
@@ -340,6 +344,9 @@ fn pr_draft(opened: &OpenedPr, m: &EnvelopeMetricsArgs) -> EnvelopeDraft {
         // No transcript blobs at this altitude (capture level is `metrics`).
         raw_transcript: vec![],
         task_transcript: vec![],
+        // Pre-existing CAS refs from CLI flags (bypass cold store).
+        raw_transcript_ref: m.raw_transcript_ref.clone(),
+        task_transcript_ref: m.compact_transcript_ref.clone(),
         summary: String::new(),
         journal_ref: None,
         files_read: vec![],
@@ -383,6 +390,9 @@ fn intent_draft(opened: &OpenedPr, intent_id: &str, m: &EnvelopeMetricsArgs) -> 
         parent_intents: vec![],
         raw_transcript: vec![],
         task_transcript: vec![],
+        // Pre-existing CAS refs from CLI flags (bypass cold store).
+        raw_transcript_ref: m.raw_transcript_ref.clone(),
+        task_transcript_ref: m.compact_transcript_ref.clone(),
         summary: String::new(),
         journal_ref: None,
         files_read: vec![],
