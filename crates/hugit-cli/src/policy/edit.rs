@@ -90,6 +90,22 @@ fn do_run(args: EditArgs) -> Result<String, CampaignError> {
         .map(crate::redaction::scrub)
         .unwrap_or_else(|| "user:cli".to_string());
 
+    // ── Fail-closed principal gate BEFORE the D14 append ─────────────────────
+    // policy is Human-only (authz matrix, Endpoint::Policy). The D14 guard below
+    // is caller-asserted (`PrincipalClass::Human`); a non-human `--principal`
+    // would otherwise be recorded as the author of a Human-only change, breaking
+    // the audit trail's honesty. Classify the label here and refuse any actor
+    // that is not a `user:`/`human:` identity, mirroring `undo`'s chain-classified
+    // route. An unrecognized principal is refused too (never defaulted to Human).
+    if PrincipalClass::classify(&principal) != Some(PrincipalClass::Human) {
+        return Err(CampaignError::new(
+            "authz_denied",
+            "policy.edit denied: policy is Human-only and the given principal is not a human",
+            "policy edits must be issued by a human (`--principal user:<name>` or \
+             `human:<name>`); an orchestrator/agent/model principal is refused fail-closed",
+        ));
+    }
+
     // Resolve the default --log ($HUGIT_LOG → .hugit/log.json) once.
     let log_path = crate::log_resolve::resolve_log(args.log.clone());
 
@@ -350,5 +366,56 @@ mod tests {
         .expect_err("missing log must fail");
         let v: serde_json::Value = serde_json::from_str(&err.to_json()).unwrap();
         assert_eq!(v["error"]["kind"], "log_not_found");
+    }
+
+    /// A non-human `--principal` is refused fail-closed BEFORE any append — the
+    /// recorded author of a `policy.change` is always a `user:`/`human:`
+    /// identity (policy is Human-only). Regression: `agent:<id>` used to pass
+    /// the caller-asserted D14 guard and be recorded verbatim, breaking the
+    /// audit trail's honesty.
+    #[test]
+    fn non_human_principal_is_authz_denied_before_append() {
+        for actor in [
+            "agent:runner",
+            "orchestrator:opus",
+            "model:claude",
+            "alien:x",
+        ] {
+            let log = scratch(&format!("deny-{actor}"));
+            let before = records(&log).len();
+            let err = do_run(EditArgs {
+                log: Some(log.clone()),
+                gate: "dco".to_string(),
+                enable: false,
+                disable: true,
+                principal: Some(actor.to_string()),
+            })
+            .expect_err("non-human principal must be refused");
+            let v: serde_json::Value = serde_json::from_str(&err.to_json()).unwrap();
+            assert_eq!(v["error"]["kind"], "authz_denied", "actor {actor}");
+            assert_eq!(
+                records(&log).len(),
+                before,
+                "no record appended for refused actor {actor}"
+            );
+        }
+    }
+
+    /// An unrecognized principal must never be defaulted to Human.
+    #[test]
+    fn unrecognized_principal_is_never_defaulted_to_human() {
+        let log = scratch("unnamed");
+        let before = records(&log).len();
+        let err = do_run(EditArgs {
+            log: Some(log.clone()),
+            gate: "dco".to_string(),
+            enable: false,
+            disable: true,
+            principal: Some("nobody".to_string()),
+        })
+        .expect_err("unrecognized principal must be refused");
+        let v: serde_json::Value = serde_json::from_str(&err.to_json()).unwrap();
+        assert_eq!(v["error"]["kind"], "authz_denied");
+        assert_eq!(records(&log).len(), before, "no append on refusal");
     }
 }
