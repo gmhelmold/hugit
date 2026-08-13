@@ -23,6 +23,10 @@ on:
     paths-ignore:
       - 'docs/**'
       - '**/*.md'
+  # Manual dispatch: lets maintainers run the full gate on a PR branch
+  # directly (bypasses event routing), with the same jobs + secrets scope
+  # as a push/PR run on a trust-source ref.
+  workflow_dispatch:
 
 permissions:
   contents: read
