@@ -170,6 +170,9 @@ pub struct LandCliArgs {
     /// `cas:` ref to the compacted transcript, when available (WP-F2).
     #[arg(long = "compact-transcript-ref")]
     compact_transcript_ref: Option<String>,
+    /// `cas:` ref to the raw transcript, when available (WP-F2).
+    #[arg(long = "raw-transcript-ref")]
+    raw_transcript_ref: Option<String>,
     /// `cas:` ref to the adversarial-panel verdicts, when available (WP-F2).
     #[arg(long = "verdicts-ref")]
     verdicts_ref: Option<String>,
@@ -375,6 +378,7 @@ fn run_land(a: LandCliArgs) -> ExitCode {
         model: a.model,
         context_cas: a.context_cas,
         compact_transcript_ref: a.compact_transcript_ref,
+        raw_transcript_ref: a.raw_transcript_ref,
         verdicts_ref: a.verdicts_ref,
         // The flag path never sets `full_metrics` (no CLI flag for a raw metrics
         // blob); the §13.1 cache-split carrier comes ONLY from `--dispatch`.

@@ -1550,7 +1550,10 @@ impl AppState {
                 for member in split_repo_list(&list) {
                     let (slug, dir) = parse_git_dir_member(member)?;
                     let (cas, root, refs) = load_git_dir(dir)?;
-                    let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(cas);
+                    // Snapshot + LIVE loose-object fallback so a pushed tip
+                    // (object plane updated after boot) clones back with NO reboot.
+                    let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> =
+                        Arc::new(GitDirLooseObjectSource::new(cas, dir));
                     repos.insert(
                         slug,
                         RepoState {
@@ -2280,7 +2283,8 @@ impl AppState {
         dir: &str,
     ) -> Result<(), String> {
         let (cas, root, refs) = load_git_dir(dir)?;
-        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> = Arc::new(cas);
+        let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> =
+            Arc::new(GitDirLooseObjectSource::new(cas, dir));
         self.repos.insert(
             repo.into(),
             RepoState {
@@ -4825,6 +4829,88 @@ fn load_git_dir(
     Ok((cas, root_tree, refs))
 }
 
+/// A GIT_DIR-mode read object source: the boot snapshot (everything reachable at
+/// boot) PLUS a live fallback to the git dir's on-disk LOOSE objects — the exact
+/// sink the receive-pack path writes to ([`GitDirCas`](hugit_proto::write::store::GitDirCas)).
+///
+/// Why the fallback: `load_git_dir` snapshots the object plane once at boot, but
+/// the ref advertisement hot-swaps a freshly-pushed tip immediately (live ref
+/// hot-swap). Without the fallback a pushed tip whose OBJECTS postdate the boot
+/// snapshot would advertise but 404 on clone-back until the next reboot (object
+/// plane ≠ ref plane). The fallback makes GIT_DIR clone-back of a pushed tip work
+/// with NO reboot — the loose file IS the canonical on-disk form git itself reads.
+///
+/// Fail-closed like the snapshot: a loose file whose inflated framing fails to
+/// decode, or whose re-derived git SHA-1 does not equal the requested oid, is an
+/// ERROR, never silently served bytes (`decode_loose` length-checks the header;
+/// the content-address check below is the second verifier).
+struct GitDirLooseObjectSource {
+    /// The boot snapshot (fast path, already content-address-verified on insert).
+    snapshot: hugit_proto::CasObjectSource,
+    /// `<git_dir>/objects` — the fallback's loose-object fan-out directory.
+    objects_dir: PathBuf,
+}
+
+impl GitDirLooseObjectSource {
+    /// Wrap a boot snapshot with its git dir's `<git_dir>/objects` fallback.
+    fn new(snapshot: hugit_proto::CasObjectSource, git_dir: &str) -> Self {
+        Self {
+            snapshot,
+            objects_dir: PathBuf::from(git_dir).join("objects"),
+        }
+    }
+}
+
+impl hugit_proto::ObjectSource for GitDirLooseObjectSource {
+    fn get(
+        &self,
+        oid: &gix_hash::ObjectId,
+    ) -> Result<Option<hugit_proto::GitObject>, hugit_proto::PackError> {
+        // Fast path: the boot snapshot already holds every boot-reachable object.
+        if let Some(obj) = self.snapshot.get(oid)? {
+            return Ok(Some(obj));
+        }
+        // Fallback: a loose object a push landed after the boot snapshot. Git's
+        // loose fan-out is `objects/<first-2>/<rest>`, keyed by full hex.
+        let hex = oid.to_hex().to_string();
+        let (fan, rest) = hex.split_at(2);
+        let path = self.objects_dir.join(fan).join(rest);
+        let compressed = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(hugit_proto::PackError::Source(format!(
+                    "git-dir loose fallback: reading {}: {e}",
+                    path.display()
+                )));
+            }
+        };
+        // The loose file is zlib(<type> <len>\0<body>); inflate to the framing
+        // the CAS decoder expects, then decode length-checked + type-checked.
+        // Reuses the write path's same helper (`hugit-proto`), so the byte shape
+        // is exactly what `receive_pack` lands on disk (and the exact-pin holds).
+        let cas_obj = hugit_proto::write::store::CasObject {
+            oid: hex,
+            bytes: compressed,
+        };
+        let framing = hugit_proto::write::store::inflate_loose_framing(&cas_obj)
+            .map_err(|e| hugit_proto::PackError::Source(format!("git-dir loose inflate: {e}")))?;
+        let (kind, body) = crate::cas::decode_loose(&framing)
+            .map_err(|e| hugit_proto::PackError::Source(format!("git-dir loose decode: {e}")))?;
+        let obj = hugit_proto::GitObject::new(kind, body);
+        // Content-address check (the second verifier): the bytes under `oid` must
+        // hash to `oid`. A mismatch is corrupt storage — never served into a clone.
+        let actual = obj.try_oid()?;
+        if &actual != oid {
+            return Err(hugit_proto::PackError::AddressMismatch {
+                stored: *oid,
+                actual,
+            });
+        }
+        Ok(Some(obj))
+    }
+}
+
 /// `true` iff `principal` is a well-formed TENANT principal (`clerk:{org}:{user}`
 /// with a NON-EMPTY org). Mirrors the tenant arm of `authz`'s (private) `caller`
 /// classifier — kept minimal + fail-closed (an empty chain, an unknown prefix, or
@@ -4924,6 +5010,7 @@ pub fn is_safe_account_slug(account: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hugit_proto::ObjectSource;
     use std::collections::HashMap;
 
     // ── GDPR1 erasure auto-executor spawn guard (pure, env-free) ─────────────────
@@ -5388,6 +5475,91 @@ mod tests {
         assert!(parse_git_dir_member("/srv/git/..").is_err());
         // An empty path is fail-closed.
         assert!(parse_git_dir_member("hugit=").is_err());
+    }
+
+    // ── GIT_DIR loose-object fallback: clone-back of a freshly-pushed tip ──────
+
+    /// Build a REAL zlib-compressed loose object at `<root>/objects/<xx>/<rest>`
+    /// (the exact shape `GitDirCas::put` / `receive_pack` lands on disk), using
+    /// the same exact-pinned `flate2` as the write path. Returns the oid the
+    /// canonical git hash computes over the loose pre-image `<kind> <len>\0<body>`.
+    fn place_loose_object(root: &std::path::Path, body: &[u8]) -> String {
+        use std::io::Write as _;
+        let pre = {
+            let mut framing = format!("blob {}\0", body.len()).into_bytes();
+            framing.extend_from_slice(body);
+            framing
+        };
+        // The oid the canonical store derives for a blob with this body — the DIGEST
+        // is taken from `GitObject::oid()`, so the test asserts byte-identity to the
+        // real content-address (no hand-rolled hash that could drift).
+        let oid = hugit_proto::GitObject::new(hugit_proto::ObjectKind::Blob, body.to_vec())
+            .oid()
+            .to_hex()
+            .to_string();
+        let (fan, rest) = oid.split_at(2);
+        let dir = root.join("objects").join(fan);
+        std::fs::create_dir_all(&dir).expect("mk fan dir");
+        let mut comp = Vec::new();
+        {
+            let mut enc =
+                flate2::write::ZlibEncoder::new(&mut comp, flate2::Compression::default());
+            enc.write_all(&pre).expect("compress");
+            enc.finish().expect("finish");
+        }
+        std::fs::write(dir.join(rest), &comp).expect("write loose object");
+        oid
+    }
+
+    #[test]
+    fn git_dir_loose_fallback_serves_a_post_boot_push_without_reload() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!("gitdirloose-fallback-{nanos}"));
+        std::fs::create_dir_all(root.join("objects")).expect("mk objects");
+        // A boot-time object, already in the snapshot (fast path).
+        let boot_body = b"boot-time blob";
+        let boot_oid = place_loose_object(&root, boot_body);
+        let mut snapshot = hugit_proto::CasObjectSource::new();
+        snapshot.insert_raw(hugit_proto::ObjectKind::Blob, boot_body.to_vec());
+        let src = GitDirLooseObjectSource::new(snapshot, root.to_str().unwrap());
+        // Snapshot hit serves.
+        let boot_id = gix_hash::ObjectId::from_hex(boot_oid.as_bytes()).unwrap();
+        assert_eq!(
+            src.get(&boot_id).unwrap().map(|o| o.data),
+            Some(boot_body.to_vec()),
+            "boot snapshot path unchanged"
+        );
+        // A PUSHED object (post-boot, loose on disk, NOT in the snapshot): the
+        // ref advertisement hot-swaps it into the wire immediately, so the object
+        // source MUST serve it with NO reload — this is the regression this fixes.
+        let pushed_body = b"post-boot pushed blob";
+        let pushed_oid = place_loose_object(&root, pushed_body);
+        let pushed_id = gix_hash::ObjectId::from_hex(pushed_oid.as_bytes()).unwrap();
+        assert!(
+            !src.snapshot.contains(&pushed_id),
+            "the pushed object must NOT be in the boot snapshot (defines the miss)"
+        );
+        let got = src.get(&pushed_id).expect("loose fallback serves the push");
+        assert_eq!(
+            got.map(|o| o.data),
+            Some(pushed_body.to_vec()),
+            "clone-back of a freshly-pushed tip resolves WITHOUT a reboot"
+        );
+        // A garbage loose file (corrupt storage) fails CLOSED, never serves bytes.
+        let (fan, rest) = pushed_oid.split_at(2);
+        std::fs::write(
+            root.join("objects").join(fan).join(rest),
+            b"\x00\x01\x02not-zlib",
+        )
+        .expect("write corrupt loose");
+        assert!(
+            src.get(&pushed_id).is_err(),
+            "a corrupt loose object must error (fail-closed), not serve junk"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     // ── WP-IFMATCH: the multi-instance boot guard + conditional-PUT fail-closed ──

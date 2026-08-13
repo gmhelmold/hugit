@@ -377,8 +377,12 @@ pub struct EnvelopeDraft {
     pub parent_intents: Vec<String>,
     /// The raw born → die transcript (one event per line, unredacted).
     pub raw_transcript: Vec<String>,
+    /// Pre-existing CAS ref for the raw transcript (bypasses cold store write).
+    pub raw_transcript_ref: Option<String>,
     /// The task-scoped transcript (one event per line, unredacted).
     pub task_transcript: Vec<String>,
+    /// Pre-existing CAS ref for the task transcript (bypasses cold store write).
+    pub task_transcript_ref: Option<String>,
     /// The inline LLM digest for the drawer (unredacted).
     pub summary: String,
     /// `cas:` ref to the D11 ledger Journal (the human-annotation track),
@@ -458,12 +462,18 @@ pub fn close_envelope<S: ColdBlobStore>(
     // not a real transcript. Under `full` that null is exactly the silent
     // omission the two-transcript imperative forbids — caught below — so an
     // empty transcript can never masquerade as a captured one.
-    let raw_transcript_ref = if level >= CaptureLevel::Full && !draft.raw_transcript.is_empty() {
+    // Pre-existing CAS refs (from CLI flags --raw-transcript-ref / --compact-transcript-ref)
+    // bypass the cold store write and are used verbatim.
+    let raw_transcript_ref = if let Some(ref r) = draft.raw_transcript_ref {
+        Some(r.clone())
+    } else if level >= CaptureLevel::Full && !draft.raw_transcript.is_empty() {
         Some(store.put(redact_transcript(&draft.raw_transcript).as_bytes())?)
     } else {
         None
     };
-    let task_transcript_ref = if level >= CaptureLevel::Task && !draft.task_transcript.is_empty() {
+    let task_transcript_ref = if let Some(ref r) = draft.task_transcript_ref {
+        Some(r.clone())
+    } else if level >= CaptureLevel::Task && !draft.task_transcript.is_empty() {
         Some(store.put(redact_transcript(&draft.task_transcript).as_bytes())?)
     } else {
         None
@@ -722,6 +732,8 @@ mod tests {
                 cost_usd_micros: 0,
             },
             verdicts_ref: None,
+            raw_transcript_ref: None,
+            task_transcript_ref: None,
         }
     }
 

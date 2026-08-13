@@ -1,0 +1,150 @@
+{
+  "name": "corner_walk",
+  "goal": "Um agente de QA percorre CADA canto do hugit: acesso público anônimo (home + git clone), isolamento de repo privado (404 no-oracle pro anon, 200 pro dono), blob servindo bytes REAIS do git seedado, memoização de checks, custo atestado com spend_proof cas:, write recusado p/ anon (read≠write), e consistência CLI↔/v1 no MESMO log. Cada canto declara a expectativa -> o wire produz o valor e o relatório confronta projetado × produzido.",
+  "identity": { "org": "acme", "user": "alice", "fresh_auth": true },
+  "setup": [
+    { "kind": "seed_meta", "repo": "acme", "visibility": "public", "owner_tenant": "acme" },
+    { "kind": "wire_git", "repo": "acme" },
+    {
+      "kind": "seed_envelope_world",
+      "repo": "acme",
+      "campaign": "wave-1",
+      "pr_id": "1",
+      "intent_ids": ["i1"],
+      "cost_usd_micros": 4200000
+    },
+    {
+      "kind": "seed_records",
+      "repo": "acme",
+      "records": [
+        {
+          "kind": "check.recorded",
+          "payload": { "name": "lint", "exit": 0, "cache_hit": true, "duration_ms": 12, "memo_key": "mk-lint-1" }
+        }
+      ]
+    },
+    { "kind": "seed_meta", "repo": "internal", "visibility": "private", "owner_tenant": "acme" },
+    { "kind": "wire_git", "repo": "internal" }
+  ],
+  "steps": [
+    {
+      "action": "api_get",
+      "name": "home-anon-public",
+      "goal": "Canto 1a: home de repo PUBLICO legível anonimamente (forge visibility posture)",
+      "path": "/v1/repos/acme/home",
+      "auth": "anon",
+      "expect": { "status": 200 }
+    },
+    {
+      "action": "git",
+      "name": "clone-public-anon",
+      "goal": "Canto 1b: stock git clona o repo publico anônimo (git-native, sem conta)",
+      "repo": "acme",
+      "args": ["clone"],
+      "expect": { "exit": 0 }
+    },
+    {
+      "action": "git",
+      "name": "clone-private-denied",
+      "goal": "Canto 2a: clone anônimo de repo PRIVADO é negado (private≠public, no-oracle)",
+      "repo": "internal",
+      "args": ["clone"],
+      "expect": { "exit": 128 }
+    },
+    {
+      "action": "api_get",
+      "name": "private-anon-404",
+      "goal": "Canto 2b: /v1 home do repo privado anonimamente é 404 uniforme (sem oracle de existência)",
+      "path": "/v1/repos/internal/home",
+      "auth": "anon",
+      "expect": { "status": 404 }
+    },
+    {
+      "action": "api_get",
+      "name": "private-owner-200",
+      "goal": "Canto 2c: o dono autenticado ainda lê o repo privado (ownership ≠ anon)",
+      "path": "/v1/repos/internal/home",
+      "auth": "owner",
+      "expect": { "status": 200 }
+    },
+    {
+      "action": "api_get",
+      "name": "blob-real-bytes",
+      "goal": "Canto 3: o blob README serve os bytes REAIS do git seedado (vindos do objeto, não inventados)",
+      "path": "/v1/repos/acme/blob/README",
+      "auth": "owner",
+      "expect": { "status": 200, "body_contains": "hello hugit, again" }
+    },
+    {
+      "action": "api_get",
+      "name": "checks-memoized",
+      "goal": "Canto 4: aggregate de checks reflete o hit de cache seedado (memoização por conteúdo)",
+      "path": "/v1/repos/acme/checks",
+      "auth": "owner",
+      "expect": { "status": 200, "body_json": { "cache_hit_rate_pct": 100 } }
+    },
+    {
+      "action": "api_get",
+      "name": "insights-attested-cost",
+      "goal": "Canto 5: insights rende o custo atestado NÃO-zero somando os envelopes seedados (2×$4.20=$8.40) + spend_proof cas:",
+      "path": "/v1/repos/acme/insights",
+      "auth": "owner",
+      "expect": {
+        "status": 200,
+        "body_contains": "cas:",
+        "body_json": {
+          "cost_xray": [ { "cost_total_micros": 8400000, "cost_total": "$8.40" } ],
+          "cost_xray_totals": { "cost_micros": 8400000, "cost": "$8.40" }
+        }
+      }
+    },
+    {
+      "action": "api_get",
+      "name": "checks-bisect-honest",
+      "goal": "Canto 5b: o aggregate NÃO inventa métrica sem seam (bisect honesto null, cache_saved_usd honesto vazio)",
+      "path": "/v1/repos/acme/checks",
+      "auth": "owner",
+      "expect": { "status": 200, "body_json": { "bisect": null } }
+    },
+    {
+      "action": "api_post",
+      "name": "anon-write-refused",
+      "goal": "Canto 6: write anônimo recusado — read≠write (leitura abre, escrita não)",
+      "path": "/v1/repos",
+      "auth": "anon",
+      "body": { "name": "x" },
+      "expect": { "status": 401, "world_unchanged": true }
+    },
+    {
+      "action": "cli",
+      "name": "pr-open-via-cli",
+      "goal": "Canto 7a: o CLI real abre um PR #2 — pr.opened persiste no log canônico que o /v1 serve",
+      "repo": "acme",
+      "args": ["pr", "open", "--log", "acme.json", "--pr", "2", "--campaign", "wave-1", "--author-kind", "human", "--principal", "human:alice", "--intent", "i1"],
+      "expect": { "exit": 0, "world_adds": { "pr.opened": 1 } }
+    },
+    {
+      "action": "cli",
+      "name": "pr-open-idempotent",
+      "goal": "Canto 7b: re-abrir o MESMO PR é no-op (already_exists) — log inalterado",
+      "repo": "acme",
+      "args": ["pr", "open", "--log", "acme.json", "--pr", "2", "--campaign", "wave-1", "--author-kind", "human", "--principal", "human:alice", "--intent", "i1"],
+      "expect": { "exit": 0, "world_unchanged": true }
+    },
+    {
+      "action": "api_get",
+      "name": "pr2-cli-visible-on-v1",
+      "goal": "Canto 7c: o PR aberto pelo CLI aparece no /v1 (prs/2) — UMA fonte de verdade, qualquer superfície",
+      "path": "/v1/repos/acme/prs/2",
+      "auth": "owner",
+      "expect": { "status": 200, "body_json": { "number": 2, "campaign": { "id": "wave-1" } } }
+    }
+  ],
+  "analyze": [
+    { "rule": "expectation_fidelity" },
+    { "rule": "correctness" },
+    { "rule": "ux" },
+    { "rule": "efficiency" },
+    { "rule": "consistency" }
+  ]
+}

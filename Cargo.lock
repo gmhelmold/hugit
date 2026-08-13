@@ -1056,6 +1056,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "hugit-qa"
+version = "0.1.0"
+dependencies = [
+ "gix-hash",
+ "hugit-contracts",
+ "hugit-proto",
+ "hugit-refstore",
+ "hugit-serve",
+ "serde",
+ "serde_json",
+ "tiny_http",
+]
+
+[[package]]
 name = "hugit-queue"
 version = "0.1.0"
 dependencies = [

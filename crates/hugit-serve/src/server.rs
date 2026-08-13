@@ -2173,7 +2173,7 @@ fn dispatch_repo_write(
                 |log, p, at| verbs::write_undo::write_undo(log, repo, &req, p, at),
             )
         }
-        ["repo", "meta"] => {
+        ["meta"] => {
             let req = parse!(wr::RepoMetaReq);
             let outcome = with_write(
                 sink,
