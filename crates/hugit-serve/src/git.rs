@@ -2180,11 +2180,7 @@ fn update_git_ref(
         .status()
         .map(|s| s.success())
         .map_err(|e| format!("rev-parse-spawn:{e}"))?;
-    let mut args: Vec<String> = vec![
-        "update-ref".into(),
-        ref_name.into(),
-        new_oid.into(),
-    ];
+    let mut args: Vec<String> = vec!["update-ref".into(), ref_name.into(), new_oid.into()];
     // A force-update of an existing ref → unconditional on-disk move (no old check).
     // Anything else → the compare-and-swap form (create via all-zero, or the exact
     // expected old).

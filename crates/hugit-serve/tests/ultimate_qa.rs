@@ -145,7 +145,8 @@ impl UserApp {
     }
 
     fn post_json(&self, path: &str, bearer: Option<&str>, json: &str) -> HttpResponse {
-        let mut h: Vec<(String, String)> = vec![("Content-Type".to_string(), "application/json".to_string())];
+        let mut h: Vec<(String, String)> =
+            vec![("Content-Type".to_string(), "application/json".to_string())];
         if let Some(b) = bearer {
             h.push(("Authorization".to_string(), format!("Bearer {b}")));
         }
@@ -154,7 +155,12 @@ impl UserApp {
     }
 
     fn delete(&self, path: &str, bearer: &str) -> HttpResponse {
-        self.req("DELETE", path, &[("Authorization", &format!("Bearer {bearer}"))], &[])
+        self.req(
+            "DELETE",
+            path,
+            &[("Authorization", &format!("Bearer {bearer}"))],
+            &[],
+        )
     }
 
     fn req(
@@ -216,7 +222,11 @@ impl UserApp {
             c.arg("-c")
                 .arg(format!("http.extraHeader=Authorization: Bearer {tok}"));
         }
-        c.arg("-C").arg(cwd).args(args).arg(self.url(repo)).output()
+        c.arg("-C")
+            .arg(cwd)
+            .args(args)
+            .arg(self.url(repo))
+            .output()
             .expect("run git remote")
     }
 
@@ -438,8 +448,7 @@ fn seed_meta(dir: &Path, repo: &str, visibility: &str, owner_tenant: &str) {
         0,
     );
     let path = dir.join(format!("{repo}.json"));
-    std::fs::create_dir_all(path.parent().expect("repo.json parent"))
-        .expect("nest repo dir");
+    std::fs::create_dir_all(path.parent().expect("repo.json parent")).expect("nest repo dir");
     std::fs::write(path, serde_json::to_string_pretty(log.records()).unwrap())
         .expect("write seed log");
 }
@@ -467,7 +476,12 @@ fn anon_reads_public_but_unknown_is_no_oracle() {
     });
     // Public: anonymous read is a real 200 (the git-native posture).
     let r = app.get("/v1/repos/pub/home", None);
-    assert!(r.status == 200, "anon public read: {} {}", r.status, r.text());
+    assert!(
+        r.status == 200,
+        "anon public read: {} {}",
+        r.status,
+        r.text()
+    );
 
     // A repo that does not exist is a no-oracle 404, never a 500.
     let missing = app.get("/v1/repos/ghost/home", None);
@@ -490,7 +504,12 @@ fn private_repo_requires_owner_tenant_or_operator() {
     // Owner tenant reads it.
     let owner = app.mint("org-a", "alice", false);
     let owned = app.get("/v1/repos/co/home", Some(&owner));
-    assert!(owned.status == 200, "owner read: {} {}", owned.status, owned.text());
+    assert!(
+        owned.status == 200,
+        "owner read: {} {}",
+        owned.status,
+        owned.text()
+    );
     // A foreign tenant is turned away (no cross-tenant oracle).
     let foreign = app.mint("org-b", "bob", false);
     let foe = app.get("/v1/repos/co/home", Some(&foreign));
@@ -545,7 +564,12 @@ fn pat_lifecycle_mint_use_revoke_no_god_pats() {
 
     // The PAT is a live credential: an authed read resolves a tenant user.
     let me = app.get("/v1/me/account", Some(&pat));
-    assert!(me.status == 200, "PAT authed read: {} {}", me.status, me.text());
+    assert!(
+        me.status == 200,
+        "PAT authed read: {} {}",
+        me.status,
+        me.text()
+    );
 
     // Revoke → the credential is dead immediately (re-revoke stays idempotent).
     let revoke = app.delete(&format!("/v1/me/tokens/{id}"), &tenant);
@@ -593,7 +617,11 @@ fn provision_no_god_no_anon_and_owner_reads() {
 
     // No god-create: the operator (dev token) is refused (no god-create).
     let god = app.post_json("/v1/repos", Some(DEV), r#"{"name":"web"}"#);
-    assert!(god.status == 401, "operator god-create denied: {}", god.status);
+    assert!(
+        god.status == 401,
+        "operator god-create denied: {}",
+        god.status
+    );
     let anon = app.post_json("/v1/repos", None, r#"{"name":"web"}"#);
     assert!(anon.status >= 400, "anon create denied: {}", anon.status);
 
@@ -602,7 +630,11 @@ fn provision_no_god_no_anon_and_owner_reads() {
     assert!(r.status == 201, "tenant create: {} {}", r.status, r.text());
     assert!(r.text().contains("\"ready\""), "created: {}", r.text());
     let home = app.get("/v1/repos/web/home", Some(&alice));
-    assert!(home.status == 200, "owner reads the created repo: {}", home.status);
+    assert!(
+        home.status == 200,
+        "owner reads the created repo: {}",
+        home.status
+    );
 
     // A duplicate create does NOT clobber — an honest 409, one repo.
     let dup = app.post_json("/v1/repos", Some(&alice), r#"{"name":"web"}"#);
@@ -653,7 +685,14 @@ fn meta_set_via_real_cli_flips_visibility() {
     // The owner flips visibility with the REAL `hugit meta set` on the SAME world.
     let run = app.hugit(
         "acme/web",
-        &["meta", "set", "--visibility", "public", "--owner-tenant", "acme"],
+        &[
+            "meta",
+            "set",
+            "--visibility",
+            "public",
+            "--owner-tenant",
+            "acme",
+        ],
     );
     assert!(
         run.was_success(),
@@ -663,7 +702,11 @@ fn meta_set_via_real_cli_flips_visibility() {
 
     // The server observes it immediately: anonymous now reads the repo.
     let anon2 = app.get("/v1/repos/web/home", None);
-    assert!(anon2.status == 200, "anon read after cli meta set: {}", anon2.status);
+    assert!(
+        anon2.status == 200,
+        "anon read after cli meta set: {}",
+        anon2.status
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -705,7 +748,10 @@ fn seed_bare_git(bare: &Path) {
     std::fs::create_dir_all(&work).unwrap();
     let mut c = Command::new("git");
     git_cfg(&mut c);
-    c.args(["-C", work.to_str().unwrap()]).args(["init", "-q"]).output().unwrap();
+    c.args(["-C", work.to_str().unwrap()])
+        .args(["init", "-q"])
+        .output()
+        .unwrap();
     std::fs::write(work.join("README"), b"hello hugit\n").unwrap();
     for args in [
         vec!["add", "."],
@@ -718,7 +764,9 @@ fn seed_bare_git(bare: &Path) {
     }
     let mut c = Command::new("git");
     git_cfg(&mut c);
-    c.args(["init", "-q", "--bare", bare.to_str().unwrap()]).output().unwrap();
+    c.args(["init", "-q", "--bare", bare.to_str().unwrap()])
+        .output()
+        .unwrap();
     let mut c = Command::new("git");
     git_cfg(&mut c);
     c.args(["-C", work.to_str().unwrap()])
@@ -756,12 +804,20 @@ fn push_create_update_delete_over_real_wire() {
     let work = scratch_dir();
     let clone = work.join("c");
     let out = app.git_clone("pushrepo", &clone);
-    assert!(out.status.success(), "clone: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "clone: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // 2. CREATE: push an orphan branch (a self-contained pack).
     let mut c = Command::new("git");
     git_cfg(&mut c);
-    c.arg("-C").arg(&clone).args(["checkout", "-q", "--orphan", "nw"]).output().unwrap();
+    c.arg("-C")
+        .arg(&clone)
+        .args(["checkout", "-q", "--orphan", "nw"])
+        .output()
+        .unwrap();
     let _ = app.git(&clone, &["rm", "-rfq", "."]);
     std::fs::write(clone.join("NEW"), b"new content\n").unwrap();
     let _ = app.git(&clone, &["add", "."]);
@@ -777,7 +833,13 @@ fn push_create_update_delete_over_real_wire() {
     std::fs::write(clone.join("NEW"), b"new content v2\n").unwrap();
     let _ = app.git(&clone, &["add", "."]);
     let _ = app.git(&clone, &["commit", "-q", "-m", "updated"]);
-    let upd = app.git_push(&clone, "pushrepo", Some(DEV), &["-f"], &["HEAD:refs/heads/nw"]);
+    let upd = app.git_push(
+        &clone,
+        "pushrepo",
+        Some(DEV),
+        &["-f"],
+        &["HEAD:refs/heads/nw"],
+    );
     assert!(
         upd.status.success(),
         "update push failed: {}",
@@ -794,11 +856,26 @@ fn push_create_update_delete_over_real_wire() {
 
     // 5. A FRESH instance over the same world advertises main and NO `nw`.
     let app_b = boot(app.log_dir.clone(), build(&app.log_dir));
-    let ls = app_b.git_remote(scratch_dir().as_path(), "pushrepo", None, &["ls-remote", "--heads"]);
-    assert!(ls.status.success(), "ls-remote: {}", String::from_utf8_lossy(&ls.stderr));
+    let ls = app_b.git_remote(
+        scratch_dir().as_path(),
+        "pushrepo",
+        None,
+        &["ls-remote", "--heads"],
+    );
+    assert!(
+        ls.status.success(),
+        "ls-remote: {}",
+        String::from_utf8_lossy(&ls.stderr)
+    );
     let adv = String::from_utf8_lossy(&ls.stdout).into_owned();
-    assert!(adv.contains("refs/heads/main"), "main still advertised: {adv}");
-    assert!(!adv.contains("refs/heads/nw"), "deleted ref must not be advertised: {adv}");
+    assert!(
+        adv.contains("refs/heads/main"),
+        "main still advertised: {adv}"
+    );
+    assert!(
+        !adv.contains("refs/heads/nw"),
+        "deleted ref must not be advertised: {adv}"
+    );
 }
 
 #[test]
@@ -848,9 +925,13 @@ fn pat_authorizes_clone_and_push_of_private_repo() {
     let app = boot(log_dir.clone(), build(&log_dir));
     let alice = app.mint("widgets", "alice", true);
 
-// Anonymous clone of a private repo is refused (404/403, no leak).
+    // Anonymous clone of a private repo is refused (404/403, no leak).
     let anon = app.git_clone("wpat", &scratch_dir().join("anon"));
-    assert!(!anon.status.success(), "anon private clone must fail: {:?}", anon.status);
+    assert!(
+        !anon.status.success(),
+        "anon private clone must fail: {:?}",
+        anon.status
+    );
 
     // The authenticated-clone seam (Tier-1): the OWNER's session engine token
     // clones the private repo over the real wire.
@@ -877,7 +958,12 @@ fn pat_authorizes_clone_and_push_of_private_repo() {
     c.arg("-c")
         .arg(format!("http.extraHeader=Authorization: Bearer {foreign}"));
     let foe = c
-        .args(["clone", "-q", &app.url("wpat"), scratch_dir().join("foe").to_str().unwrap()])
+        .args([
+            "clone",
+            "-q",
+            &app.url("wpat"),
+            scratch_dir().join("foe").to_str().unwrap(),
+        ])
         .output()
         .unwrap();
     assert!(
@@ -887,7 +973,11 @@ fn pat_authorizes_clone_and_push_of_private_repo() {
     );
 
     // Mint a PAT with repo:write scope, then let it carry the git identity over the REAL wire.
-    let minted = app.post_json("/v1/me/tokens", Some(&alice), r#"{"name":"wire","scopes":["repo:write"]}"#);
+    let minted = app.post_json(
+        "/v1/me/tokens",
+        Some(&alice),
+        r#"{"name":"wire","scopes":["repo:write"]}"#,
+    );
     assert!(
         minted.status == 200 || minted.status == 201,
         "posição PATh mint: {}",
@@ -915,7 +1005,11 @@ fn pat_authorizes_clone_and_push_of_private_repo() {
     // PAT-authorized PUSH (create) lands.
     let mut c = Command::new("git");
     git_cfg(&mut c);
-    c.arg("-C").arg(&clone).args(["checkout", "-q", "--orphan", "p1"]).output().unwrap();
+    c.arg("-C")
+        .arg(&clone)
+        .args(["checkout", "-q", "--orphan", "p1"])
+        .output()
+        .unwrap();
     let _ = app.git(&clone, &["rm", "-rfq", "."]);
     std::fs::write(clone.join("P"), b"pat pushed\n").unwrap();
     let _ = app.git(&clone, &["add", "."]);
@@ -925,7 +1019,14 @@ fn pat_authorizes_clone_and_push_of_private_repo() {
     c.arg("-c")
         .arg(format!("http.extraHeader=Authorization: Bearer {pat}"));
     let push = c
-        .args(["-C", clone.to_str().unwrap(), "push", "-q", &app.url("wpat"), "HEAD:refs/heads/p1"])
+        .args([
+            "-C",
+            clone.to_str().unwrap(),
+            "push",
+            "-q",
+            &app.url("wpat"),
+            "HEAD:refs/heads/p1",
+        ])
         .output()
         .unwrap();
     assert!(
@@ -989,7 +1090,10 @@ fn anon_flood_gets_429_over_the_real_socket() {
         }
     }
     assert!(got_429, "an anon flood must be throttled with a 429");
-    assert!(got_ok, "the within-budget head of the burst must NOT be throttled");
+    assert!(
+        got_ok,
+        "the within-budget head of the burst must NOT be throttled"
+    );
 }
 
 #[test]
@@ -1009,7 +1113,13 @@ fn write_idempotency_no_double_append() {
             ("Authorization", &format!("Bearer {owner}")),
             ("Idempotency-Key", key),
         ];
-        http_req(&app.addr, "POST", "/v1/repos/idem/meta", &h, r#"{"visibility":"public"}"#.as_bytes())
+        http_req(
+            &app.addr,
+            "POST",
+            "/v1/repos/idem/meta",
+            &h,
+            r#"{"visibility":"public"}"#.as_bytes(),
+        )
     };
     let first = mk("key-1");
     assert!(
@@ -1019,7 +1129,11 @@ fn write_idempotency_no_double_append() {
         first.text()
     );
     let replay = mk("key-1");
-    assert!(replay.status < 500, "replay must not fault: {}", replay.status);
+    assert!(
+        replay.status < 500,
+        "replay must not fault: {}",
+        replay.status
+    );
 
     // Single-append proof: the world holds the provisioned genesis meta + ONE
     // writer meta record (operator-visible audit of the served log).
@@ -1075,7 +1189,8 @@ fn checks_ac_memoization_partial_and_pills() {
                 "cost_usd_micros": 420000,
                 "result_binding_sig_v2": "sig..."
             }
-        }).to_string(),
+        })
+        .to_string(),
         1000,
     );
     log.append_for_test(
@@ -1086,10 +1201,15 @@ fn checks_ac_memoization_partial_and_pills() {
             "check_name": "typecheck",
             "result": "pass",
             "attestation": null
-        }).to_string(),
+        })
+        .to_string(),
         2000,
     );
-    std::fs::write(app.world("acme"), serde_json::to_string_pretty(log.records()).unwrap()).unwrap();
+    std::fs::write(
+        app.world("acme"),
+        serde_json::to_string_pretty(log.records()).unwrap(),
+    )
+    .unwrap();
 
     // Run the real CLI check (aggregates AC hits + runs).
     let run = app.hugit("acme/acme", &["check", "run", "--intent", "i1"]);
@@ -1100,11 +1220,18 @@ fn checks_ac_memoization_partial_and_pills() {
     // - saved_ms from the hit
     // - cache pills in the envelope
     let agg = app.get("/v1/repos/acme/checks/i1", Some(&owner));
-    assert!(agg.status == 200, "checks aggregate: {} {}", agg.status, agg.text());
+    assert!(
+        agg.status == 200,
+        "checks aggregate: {} {}",
+        agg.status,
+        agg.text()
+    );
     let body: serde_json::Value = serde_json::from_str(&agg.text()).unwrap();
     assert_eq!(body["total"].as_u64(), Some(2));
     assert_eq!(body["hits"].as_u64(), Some(1));
-    assert!(body["status"].as_str() == Some("PARTIAL") || body["status"].as_str() == Some("PARTIAL"));
+    assert!(
+        body["status"].as_str() == Some("PARTIAL") || body["status"].as_str() == Some("PARTIAL")
+    );
     assert!(body["saved_ms"].as_u64().unwrap_or(0) > 0);
     assert!(body["pills"].is_array());
 }
@@ -1130,11 +1257,22 @@ fn pr_detail_campaign_chip_and_attested_cost() {
 
     // Seed a PR with a landed intent that has cost envelope.
     let mut log = EventLog::new();
-    log.append_for_test("repo.meta", vec![],
-        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(), 0);
-    log.append_for_test("pr.opened", vec![],
-        serde_json::json!({"number": 1, "title": "feat: add x", "head": "feat-x", "base": "main"}).to_string(), 100);
-    log.append_for_test("intent.landed", vec![],
+    log.append_for_test(
+        "repo.meta",
+        vec![],
+        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(),
+        0,
+    );
+    log.append_for_test(
+        "pr.opened",
+        vec![],
+        serde_json::json!({"number": 1, "title": "feat: add x", "head": "feat-x", "base": "main"})
+            .to_string(),
+        100,
+    );
+    log.append_for_test(
+        "intent.landed",
+        vec![],
         serde_json::json!({
             "intent_id": "i1",
             "pr": 1,
@@ -1145,8 +1283,15 @@ fn pr_detail_campaign_chip_and_attested_cost() {
                 "result_binding_sig_v2": "sig-v2...",
                 "fabric_key_id": "k1"
             }
-        }).to_string(), 200);
-    std::fs::write(app.world("acme"), serde_json::to_string_pretty(log.records()).unwrap()).unwrap();
+        })
+        .to_string(),
+        200,
+    );
+    std::fs::write(
+        app.world("acme"),
+        serde_json::to_string_pretty(log.records()).unwrap(),
+    )
+    .unwrap();
 
     let pr = app.get("/v1/repos/acme/prs/1", Some(&owner));
     assert!(pr.status == 200, "pr detail: {} {}", pr.status, pr.text());
@@ -1163,9 +1308,15 @@ fn landing_idempotent_append_pr_queued_idem_recorded() {
     // Use boot pattern so the log is loaded at server startup.
     let log_dir = scratch_dir();
     let mut log = EventLog::new();
-    log.append_for_test("repo.meta", vec![],
-        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(), 0);
-    log.append_for_test("pr.opened", vec![],
+    log.append_for_test(
+        "repo.meta",
+        vec![],
+        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(),
+        0,
+    );
+    log.append_for_test(
+        "pr.opened",
+        vec![],
         serde_json::json!({
             "pr_id": "1",
             "campaign": "test-campaign",
@@ -1173,8 +1324,15 @@ fn landing_idempotent_append_pr_queued_idem_recorded() {
             "intent_ids": ["i1"],
             "principal": "human:ada",
             "run_id": "run-1"
-        }).to_string(), 100);
-    std::fs::write(log_dir.join("acme.json"), serde_json::to_string_pretty(log.records()).unwrap()).unwrap();
+        })
+        .to_string(),
+        100,
+    );
+    std::fs::write(
+        log_dir.join("acme.json"),
+        serde_json::to_string_pretty(log.records()).unwrap(),
+    )
+    .unwrap();
 
     let build = |log_dir: &Path| {
         let mut s = AppState::new(log_dir.to_path_buf(), DEV.to_string());
@@ -1195,9 +1353,20 @@ fn landing_idempotent_append_pr_queued_idem_recorded() {
             ("Authorization", auth.as_str()),
             ("Idempotency-Key", "land-key-1"),
         ];
-        http_req(&app.addr, "POST", "/v1/repos/acme/prs/1/land", &h, body.as_bytes())
+        http_req(
+            &app.addr,
+            "POST",
+            "/v1/repos/acme/prs/1/land",
+            &h,
+            body.as_bytes(),
+        )
     };
-    assert!(first.status == 200 || first.status == 201, "first land: {} {}", first.status, first.text());
+    assert!(
+        first.status == 200 || first.status == 201,
+        "first land: {} {}",
+        first.status,
+        first.text()
+    );
 
     // Replay same key → 200/201, NO new records
     let replay = {
@@ -1206,14 +1375,37 @@ fn landing_idempotent_append_pr_queued_idem_recorded() {
             ("Authorization", auth.as_str()),
             ("Idempotency-Key", "land-key-1"),
         ];
-        http_req(&app.addr, "POST", "/v1/repos/acme/prs/1/land", &h, body.as_bytes())
+        http_req(
+            &app.addr,
+            "POST",
+            "/v1/repos/acme/prs/1/land",
+            &h,
+            body.as_bytes(),
+        )
     };
-    assert!(replay.status == 200 || replay.status == 201, "replay land: {} {}", replay.status, replay.text());
+    assert!(
+        replay.status == 200 || replay.status == 201,
+        "replay land: {} {}",
+        replay.status,
+        replay.text()
+    );
 
     // Missing key → 400
-    let no_key = http_req(&app.addr, "POST", "/v1/repos/acme/prs/1/land",
-        &[("Content-Type", "application/json"), ("Authorization", auth.as_str())], body.as_bytes());
-    assert!(no_key.status == 400, "missing idempotency key must be 400: {}", no_key.status);
+    let no_key = http_req(
+        &app.addr,
+        "POST",
+        "/v1/repos/acme/prs/1/land",
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", auth.as_str()),
+        ],
+        body.as_bytes(),
+    );
+    assert!(
+        no_key.status == 400,
+        "missing idempotency key must be 400: {}",
+        no_key.status
+    );
 
     // Verify log: genesis meta + pr.opened + pr.queued + idem.recorded (2 new records)
     let log_json = std::fs::read_to_string(app.world("acme")).unwrap();
@@ -1243,9 +1435,15 @@ fn insights_ledger_cas_marker_and_real_cost() {
 
     // Seed a landed intent with cost envelope.
     let mut log = EventLog::new();
-    log.append_for_test("repo.meta", vec![],
-        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(), 0);
-    log.append_for_test("intent.landed", vec![],
+    log.append_for_test(
+        "repo.meta",
+        vec![],
+        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(),
+        0,
+    );
+    log.append_for_test(
+        "intent.landed",
+        vec![],
         serde_json::json!({
             "intent_id": "i1",
             "pr": 1,
@@ -1256,8 +1454,15 @@ fn insights_ledger_cas_marker_and_real_cost() {
                 "result_binding_sig_v2": "sig-v2...",
                 "fabric_key_id": "k1"
             }
-        }).to_string(), 200);
-    std::fs::write(app.world("acme"), serde_json::to_string_pretty(log.records()).unwrap()).unwrap();
+        })
+        .to_string(),
+        200,
+    );
+    std::fs::write(
+        app.world("acme"),
+        serde_json::to_string_pretty(log.records()).unwrap(),
+    )
+    .unwrap();
 
     let ins = app.get("/v1/repos/acme/insights", Some(&owner));
     assert!(ins.status == 200, "insights: {} {}", ins.status, ins.text());
@@ -1291,14 +1496,24 @@ fn quality_gate_tampered_chain_503_operator_404_other() {
     // Non-operator tenant sees 404 (no oracle) — use a different org
     let foreign = app.mint("org-b", "bob", false);
     let foe = app.get("/v1/repos/acme/home", Some(&foreign));
-    assert!(foe.status == 404, "non-operator sees 404: {} {}", foe.status, foe.text());
+    assert!(
+        foe.status == 404,
+        "non-operator sees 404: {} {}",
+        foe.status,
+        foe.text()
+    );
     let foe_body: serde_json::Value = serde_json::from_str(&foe.text()).unwrap();
     assert_eq!(foe_body["code"].as_str(), Some("NOT_FOUND"));
     assert!(!foe.text().contains("ENGINE_UNAVAILABLE"));
 
     // Operator (dev token) sees 503 ENGINE_UNAVAILABLE
     let op = app.get("/v1/repos/acme/home", Some(DEV));
-    assert!(op.status == 503, "operator sees 503: {} {}", op.status, op.text());
+    assert!(
+        op.status == 503,
+        "operator sees 503: {} {}",
+        op.status,
+        op.text()
+    );
     let op_body: serde_json::Value = serde_json::from_str(&op.text()).unwrap();
     assert_eq!(op_body["code"].as_str(), Some("ENGINE_UNAVAILABLE"));
 
@@ -1325,29 +1540,67 @@ fn v1_read_all_collection_routes() {
 
     // Seed a rich log with PRs, intents, campaigns, issues, policies, erasures
     let mut log = EventLog::new();
-    log.append_for_test("repo.meta", vec![],
-        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(), 0);
-    log.append_for_test("campaign.opened", vec![],
-        serde_json::json!({"id": "wave-1", "title": "Wave 1"}).to_string(), 100);
+    log.append_for_test(
+        "repo.meta",
+        vec![],
+        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(),
+        0,
+    );
+    log.append_for_test(
+        "campaign.opened",
+        vec![],
+        serde_json::json!({"id": "wave-1", "title": "Wave 1"}).to_string(),
+        100,
+    );
     log.append_for_test("pr.opened", vec![],
         serde_json::json!({"pr_id": "1", "campaign": "wave-1", "author_kind": "human", "intent_ids": ["i1"], "principal": "human:alice", "run_id": "run-1"}).to_string(), 200);
-    log.append_for_test("intent.charter", vec![],
-        serde_json::json!({"id": "i1", "title": "Add feature X", "acceptance": ["test passes"]}).to_string(), 300);
+    log.append_for_test(
+        "intent.charter",
+        vec![],
+        serde_json::json!({"id": "i1", "title": "Add feature X", "acceptance": ["test passes"]})
+            .to_string(),
+        300,
+    );
     log.append_for_test("check.recorded", vec![],
         serde_json::json!({"intent_id": "i1", "check_name": "lint", "result": "pass", "attestation": {"cas_hit": true, "cost_usd_micros": 1000}}).to_string(), 400);
     log.append_for_test("verdict.recorded", vec![],
         serde_json::json!({"pr": 1, "verdict": "approve", "reviewer": "alice", "evidence": ["check:lint"]}).to_string(), 500);
-    log.append_for_test("issue.opened", vec![],
-        serde_json::json!({"number": 1, "title": "Bug", "state": "open"}).to_string(), 600);
-    log.append_for_test("policy.set", vec![],
-        serde_json::json!({"rules": [{"path": "src/**", "require": ["lint"]}]}).to_string(), 700);
-    log.append_for_test("erasure.requested", vec![],
-        serde_json::json!({"subject": "acme", "reason": "GDPR"}).to_string(), 800);
-    log.append_for_test("erasure.decided", vec![],
-        serde_json::json!({"subject": "acme", "decision": "approve", "grace_ms": 2592000000u64}).to_string(), 900);
-    log.append_for_test("journal.note", vec![],
-        serde_json::json!({"body": "Session note"}).to_string(), 1000);
-    std::fs::write(app.world("acme"), serde_json::to_string_pretty(log.records()).unwrap()).unwrap();
+    log.append_for_test(
+        "issue.opened",
+        vec![],
+        serde_json::json!({"number": 1, "title": "Bug", "state": "open"}).to_string(),
+        600,
+    );
+    log.append_for_test(
+        "policy.set",
+        vec![],
+        serde_json::json!({"rules": [{"path": "src/**", "require": ["lint"]}]}).to_string(),
+        700,
+    );
+    log.append_for_test(
+        "erasure.requested",
+        vec![],
+        serde_json::json!({"subject": "acme", "reason": "GDPR"}).to_string(),
+        800,
+    );
+    log.append_for_test(
+        "erasure.decided",
+        vec![],
+        serde_json::json!({"subject": "acme", "decision": "approve", "grace_ms": 2592000000u64})
+            .to_string(),
+        900,
+    );
+    log.append_for_test(
+        "journal.note",
+        vec![],
+        serde_json::json!({"body": "Session note"}).to_string(),
+        1000,
+    );
+    std::fs::write(
+        app.world("acme"),
+        serde_json::to_string_pretty(log.records()).unwrap(),
+    )
+    .unwrap();
 
     // Test ALL collection read routes
     let routes = vec![
@@ -1369,7 +1622,13 @@ fn v1_read_all_collection_routes() {
     ];
     for route in routes {
         let r = app.get(route, Some(&owner));
-        assert!(r.status == 200, "{} failed: {} {}", route, r.status, r.text());
+        assert!(
+            r.status == 200,
+            "{} failed: {} {}",
+            route,
+            r.status,
+            r.text()
+        );
     }
 
     // By-id routes
@@ -1381,7 +1640,14 @@ fn v1_read_all_collection_routes() {
     ];
     for (route, desc) in by_id {
         let r = app.get(route, Some(&owner));
-        assert!(r.status == 200, "{} ({}) failed: {} {}", route, desc, r.status, r.text());
+        assert!(
+            r.status == 200,
+            "{} ({}) failed: {} {}",
+            route,
+            desc,
+            r.status,
+            r.text()
+        );
     }
 
     // Anonymous on public = 200
@@ -1430,11 +1696,19 @@ fn v1_read_compare_campaigns_audit_admin() {
     });
     let owner = app.mint("acme", "alice", true);
     let mut log = EventLog::new();
-    log.append_for_test("repo.meta", vec![],
-        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(), 0);
+    log.append_for_test(
+        "repo.meta",
+        vec![],
+        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(),
+        0,
+    );
     log.append_for_test("pr.opened", vec![],
         serde_json::json!({"pr_id": "1", "campaign": "wave-1", "author_kind": "human", "intent_ids": ["i1"], "principal": "human:alice", "run_id": "run-1"}).to_string(), 200);
-    std::fs::write(app.world("acme"), serde_json::to_string_pretty(log.records()).unwrap()).unwrap();
+    std::fs::write(
+        app.world("acme"),
+        serde_json::to_string_pretty(log.records()).unwrap(),
+    )
+    .unwrap();
 
     // compare
     let cmp = app.get("/v1/repos/acme/compare/main/feat", Some(&owner));
@@ -1442,19 +1716,38 @@ fn v1_read_compare_campaigns_audit_admin() {
 
     // campaigns
     let camp = app.get("/v1/repos/acme/campaigns/wave-1", Some(&owner));
-    assert!(camp.status == 200, "campaign: {} {}", camp.status, camp.text());
+    assert!(
+        camp.status == 200,
+        "campaign: {} {}",
+        camp.status,
+        camp.text()
+    );
 
     // audit (operator only - dev token)
     let audit = app.get("/v1/repos/acme/audit?since=0&limit=10", Some(DEV));
-    assert!(audit.status == 200, "audit: {} {}", audit.status, audit.text());
+    assert!(
+        audit.status == 200,
+        "audit: {} {}",
+        audit.status,
+        audit.text()
+    );
 
     // admin/overview (operator only)
     let admin = app.get("/v1/repos/acme/admin/overview", Some(DEV));
-    assert!(admin.status == 200, "admin: {} {}", admin.status, admin.text());
+    assert!(
+        admin.status == 200,
+        "admin: {} {}",
+        admin.status,
+        admin.text()
+    );
 
     // Non-operator gets 404 on admin/audit
     let audit_anon = app.get("/v1/repos/acme/audit", Some(&owner));
-    assert!(audit_anon.status == 404, "audit non-op: {}", audit_anon.status);
+    assert!(
+        audit_anon.status == 404,
+        "audit non-op: {}",
+        audit_anon.status
+    );
 }
 
 #[test]
@@ -1472,7 +1765,12 @@ fn v1_read_sse_events() {
     // SSE events endpoint - should return stream or 200 with empty
     let r = app.get("/v1/repos/acme/events?since=0", Some(&owner));
     // SSE may return 200 with stream or 404 if no events; both acceptable
-    assert!(r.status == 200 || r.status == 404, "events: {} {}", r.status, r.text());
+    assert!(
+        r.status == 200 || r.status == 404,
+        "events: {} {}",
+        r.status,
+        r.text()
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1496,42 +1794,107 @@ fn v1_write_pr_lifecycle_full() {
     let create_body = r#"{"head":"feat-branch","base":"main","title":"New feature"}"#;
     let create = app.post_json("/v1/repos/acme/prs", Some(&owner), create_body);
     // May 404 if branch doesn't exist in seeded git - that's honest
-    assert!(create.status == 201 || create.status == 404, "pr create: {} {}", create.status, create.text());
+    assert!(
+        create.status == 201 || create.status == 404,
+        "pr create: {} {}",
+        create.status,
+        create.text()
+    );
 
     // Seed a PR for subsequent tests
     let mut log = EventLog::new();
-    log.append_for_test("repo.meta", vec![],
-        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(), 0);
+    log.append_for_test(
+        "repo.meta",
+        vec![],
+        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(),
+        0,
+    );
     log.append_for_test("pr.opened", vec![],
         serde_json::json!({"pr_id": "1", "campaign": "wave-1", "author_kind": "human", "intent_ids": ["i1"], "principal": "human:alice", "run_id": "run-1"}).to_string(), 200);
-    std::fs::write(app.world("acme"), serde_json::to_string_pretty(log.records()).unwrap()).unwrap();
+    std::fs::write(
+        app.world("acme"),
+        serde_json::to_string_pretty(log.records()).unwrap(),
+    )
+    .unwrap();
 
     // 2. Verdict approve
     let verdict_body = r#"{"verdict":"approve","evidence":["check:lint"]}"#;
-    let verdict = http_req(&app.addr, "POST", "/v1/repos/acme/prs/1/verdict",
-        &[("Content-Type", "application/json"), ("Authorization", auth.as_str()), ("Idempotency-Key", "verdict-1")],
-        verdict_body.as_bytes());
-    assert!(verdict.status == 200 || verdict.status == 201, "verdict: {} {}", verdict.status, verdict.text());
+    let verdict = http_req(
+        &app.addr,
+        "POST",
+        "/v1/repos/acme/prs/1/verdict",
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", auth.as_str()),
+            ("Idempotency-Key", "verdict-1"),
+        ],
+        verdict_body.as_bytes(),
+    );
+    assert!(
+        verdict.status == 200 || verdict.status == 201,
+        "verdict: {} {}",
+        verdict.status,
+        verdict.text()
+    );
 
     // 3. Comment
     let comment_body = r#"{"body":"LGTM"}"#;
-    let comment = http_req(&app.addr, "POST", "/v1/repos/acme/prs/1/comments",
-        &[("Content-Type", "application/json"), ("Authorization", auth.as_str()), ("Idempotency-Key", "comment-1")],
-        comment_body.as_bytes());
-    assert!(comment.status == 200 || comment.status == 201, "comment: {} {}", comment.status, comment.text());
+    let comment = http_req(
+        &app.addr,
+        "POST",
+        "/v1/repos/acme/prs/1/comments",
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", auth.as_str()),
+            ("Idempotency-Key", "comment-1"),
+        ],
+        comment_body.as_bytes(),
+    );
+    assert!(
+        comment.status == 200 || comment.status == 201,
+        "comment: {} {}",
+        comment.status,
+        comment.text()
+    );
 
     // 4. Land (idempotent)
     let land_body = r#"{"mode":"union"}"#;
-    let land = http_req(&app.addr, "POST", "/v1/repos/acme/prs/1/land",
-        &[("Content-Type", "application/json"), ("Authorization", auth.as_str()), ("Idempotency-Key", "land-1")],
-        land_body.as_bytes());
-    assert!(land.status == 200 || land.status == 201, "land: {} {}", land.status, land.text());
+    let land = http_req(
+        &app.addr,
+        "POST",
+        "/v1/repos/acme/prs/1/land",
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", auth.as_str()),
+            ("Idempotency-Key", "land-1"),
+        ],
+        land_body.as_bytes(),
+    );
+    assert!(
+        land.status == 200 || land.status == 201,
+        "land: {} {}",
+        land.status,
+        land.text()
+    );
 
     // Replay land = idempotent
-    let replay = http_req(&app.addr, "POST", "/v1/repos/acme/prs/1/land",
-        &[("Content-Type", "application/json"), ("Authorization", auth.as_str()), ("Idempotency-Key", "land-1")],
-        land_body.as_bytes());
-    assert!(replay.status == 200 || replay.status == 201, "land replay: {} {}", replay.status, replay.text());
+    let replay = http_req(
+        &app.addr,
+        "POST",
+        "/v1/repos/acme/prs/1/land",
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", auth.as_str()),
+            ("Idempotency-Key", "land-1"),
+        ],
+        land_body.as_bytes(),
+    );
+    assert!(
+        replay.status == 200 || replay.status == 201,
+        "land replay: {} {}",
+        replay.status,
+        replay.text()
+    );
 
     // Verify log has pr.queued + idem.recorded exactly once
     let log_json = std::fs::read_to_string(app.world("acme")).unwrap();
@@ -1554,25 +1917,59 @@ fn v1_write_intent_usage_dispatch() {
 
     // Seed intent.landed with cost envelope
     let mut log = EventLog::new();
-    log.append_for_test("repo.meta", vec![],
-        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(), 0);
+    log.append_for_test(
+        "repo.meta",
+        vec![],
+        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(),
+        0,
+    );
     log.append_for_test("intent.landed", vec![],
         serde_json::json!({"intent_id": "i1", "pr": 1, "ref": "refs/heads/feat", "target": "refs/heads/main", "envelope": {"cost_usd_micros": 4200000, "result_binding_sig_v2": "sig", "fabric_key_id": "k1"}}).to_string(), 200);
-    std::fs::write(app.world("acme"), serde_json::to_string_pretty(log.records()).unwrap()).unwrap();
+    std::fs::write(
+        app.world("acme"),
+        serde_json::to_string_pretty(log.records()).unwrap(),
+    )
+    .unwrap();
 
     // usage capture (cost-killer seam)
     let usage_body = r#"{"provider":"anthropic","model":"claude-3","input_tokens":1000,"output_tokens":500,"cost_usd_micros":4200000}"#;
-    let usage = http_req(&app.addr, "POST", "/v1/repos/acme/intents/i1/usage",
-        &[("Content-Type", "application/json"), ("Authorization", auth.as_str()), ("Idempotency-Key", "usage-1")],
-        usage_body.as_bytes());
-    assert!(usage.status == 200 || usage.status == 201, "usage: {} {}", usage.status, usage.text());
+    let usage = http_req(
+        &app.addr,
+        "POST",
+        "/v1/repos/acme/intents/i1/usage",
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", auth.as_str()),
+            ("Idempotency-Key", "usage-1"),
+        ],
+        usage_body.as_bytes(),
+    );
+    assert!(
+        usage.status == 200 || usage.status == 201,
+        "usage: {} {}",
+        usage.status,
+        usage.text()
+    );
 
     // dispatch (P2 reserved - may 404/403 if not implemented)
     let dispatch_body = r#"{"workspace":"ws-1"}"#;
-    let dispatch = http_req(&app.addr, "POST", "/v1/repos/acme/dispatch",
-        &[("Content-Type", "application/json"), ("Authorization", auth.as_str()), ("Idempotency-Key", "dispatch-1")],
-        dispatch_body.as_bytes());
-    assert!(dispatch.status < 500, "dispatch: {} {}", dispatch.status, dispatch.text());
+    let dispatch = http_req(
+        &app.addr,
+        "POST",
+        "/v1/repos/acme/dispatch",
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", auth.as_str()),
+            ("Idempotency-Key", "dispatch-1"),
+        ],
+        dispatch_body.as_bytes(),
+    );
+    assert!(
+        dispatch.status < 500,
+        "dispatch: {} {}",
+        dispatch.status,
+        dispatch.text()
+    );
 }
 
 #[test]
@@ -1590,39 +1987,98 @@ fn v1_write_issue_transition_policy_undo_meta() {
 
     // Seed issues
     let mut log = EventLog::new();
-    log.append_for_test("repo.meta", vec![],
-        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(), 0);
-    log.append_for_test("issue.opened", vec![],
-        serde_json::json!({"number": 1, "title": "Bug", "state": "open"}).to_string(), 100);
-    std::fs::write(app.world("acme"), serde_json::to_string_pretty(log.records()).unwrap()).unwrap();
+    log.append_for_test(
+        "repo.meta",
+        vec![],
+        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(),
+        0,
+    );
+    log.append_for_test(
+        "issue.opened",
+        vec![],
+        serde_json::json!({"number": 1, "title": "Bug", "state": "open"}).to_string(),
+        100,
+    );
+    std::fs::write(
+        app.world("acme"),
+        serde_json::to_string_pretty(log.records()).unwrap(),
+    )
+    .unwrap();
 
     // Issue transition
     let issue_body = r#"{"state":"closed"}"#;
-    let issue = http_req(&app.addr, "POST", "/v1/repos/acme/issues/1/transition",
-        &[("Content-Type", "application/json"), ("Authorization", auth.as_str()), ("Idempotency-Key", "issue-1")],
-        issue_body.as_bytes());
-    assert!(issue.status == 200 || issue.status == 201, "issue: {} {}", issue.status, issue.text());
+    let issue = http_req(
+        &app.addr,
+        "POST",
+        "/v1/repos/acme/issues/1/transition",
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", auth.as_str()),
+            ("Idempotency-Key", "issue-1"),
+        ],
+        issue_body.as_bytes(),
+    );
+    assert!(
+        issue.status == 200 || issue.status == 201,
+        "issue: {} {}",
+        issue.status,
+        issue.text()
+    );
 
     // Policy set
     let policy_body = r#"{"rules":[{"path":"src/**","require":["lint","test"]}]}"#;
-    let policy = http_req(&app.addr, "POST", "/v1/repos/acme/policy",
-        &[("Content-Type", "application/json"), ("Authorization", auth.as_str()), ("Idempotency-Key", "policy-1")],
-        policy_body.as_bytes());
-    assert!(policy.status == 200 || policy.status == 201, "policy: {} {}", policy.status, policy.text());
+    let policy = http_req(
+        &app.addr,
+        "POST",
+        "/v1/repos/acme/policy",
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", auth.as_str()),
+            ("Idempotency-Key", "policy-1"),
+        ],
+        policy_body.as_bytes(),
+    );
+    assert!(
+        policy.status == 200 || policy.status == 201,
+        "policy: {} {}",
+        policy.status,
+        policy.text()
+    );
 
     // Undo
     let undo_body = r#"{"kind":"pr.landed","target":"1"}"#;
-    let undo = http_req(&app.addr, "POST", "/v1/repos/acme/undo",
-        &[("Content-Type", "application/json"), ("Authorization", auth.as_str()), ("Idempotency-Key", "undo-1")],
-        undo_body.as_bytes());
+    let undo = http_req(
+        &app.addr,
+        "POST",
+        "/v1/repos/acme/undo",
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", auth.as_str()),
+            ("Idempotency-Key", "undo-1"),
+        ],
+        undo_body.as_bytes(),
+    );
     assert!(undo.status < 500, "undo: {} {}", undo.status, undo.text());
 
     // Meta set (visibility flip)
     let meta_body = r#"{"visibility":"private"}"#;
-    let meta = http_req(&app.addr, "POST", "/v1/repos/acme/meta",
-        &[("Content-Type", "application/json"), ("Authorization", auth.as_str()), ("Idempotency-Key", "meta-1")],
-        meta_body.as_bytes());
-    assert!(meta.status == 200 || meta.status == 201, "meta: {} {}", meta.status, meta.text());
+    let meta = http_req(
+        &app.addr,
+        "POST",
+        "/v1/repos/acme/meta",
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", auth.as_str()),
+            ("Idempotency-Key", "meta-1"),
+        ],
+        meta_body.as_bytes(),
+    );
+    assert!(
+        meta.status == 200 || meta.status == 201,
+        "meta: {} {}",
+        meta.status,
+        meta.text()
+    );
 
     // Verify meta updated - anonymous now 404
     let anon = app.get("/v1/repos/acme/home", None);
@@ -1644,25 +2100,63 @@ fn v1_write_edit_propose_erasure_decide() {
 
     // Seed erasure requested
     let mut log = EventLog::new();
-    log.append_for_test("repo.meta", vec![],
-        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(), 0);
-    log.append_for_test("erasure.requested", vec![],
-        serde_json::json!({"id": "erase-1", "subject": "acme", "reason": "GDPR"}).to_string(), 100);
-    std::fs::write(app.world("acme"), serde_json::to_string_pretty(log.records()).unwrap()).unwrap();
+    log.append_for_test(
+        "repo.meta",
+        vec![],
+        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(),
+        0,
+    );
+    log.append_for_test(
+        "erasure.requested",
+        vec![],
+        serde_json::json!({"id": "erase-1", "subject": "acme", "reason": "GDPR"}).to_string(),
+        100,
+    );
+    std::fs::write(
+        app.world("acme"),
+        serde_json::to_string_pretty(log.records()).unwrap(),
+    )
+    .unwrap();
 
     // Edit propose
     let edit_body = r#"{"content":"fn main() {}\n","title":"Add main"}"#;
-    let edit = http_req(&app.addr, "POST", "/v1/repos/acme/edit/README/propose",
-        &[("Content-Type", "application/json"), ("Authorization", auth.as_str()), ("Idempotency-Key", "edit-1")],
-        edit_body.as_bytes());
-    assert!(edit.status < 500, "edit propose: {} {}", edit.status, edit.text());
+    let edit = http_req(
+        &app.addr,
+        "POST",
+        "/v1/repos/acme/edit/README/propose",
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", auth.as_str()),
+            ("Idempotency-Key", "edit-1"),
+        ],
+        edit_body.as_bytes(),
+    );
+    assert!(
+        edit.status < 500,
+        "edit propose: {} {}",
+        edit.status,
+        edit.text()
+    );
 
     // Erasure decide
     let erasure_body = r#"{"decision":"approve","grace_ms":2592000000}"#;
-    let erasure = http_req(&app.addr, "POST", "/v1/repos/acme/erasure/erase-1/decide",
-        &[("Content-Type", "application/json"), ("Authorization", auth.as_str()), ("Idempotency-Key", "erasure-1")],
-        erasure_body.as_bytes());
-    assert!(erasure.status == 200 || erasure.status == 201, "erasure decide: {} {}", erasure.status, erasure.text());
+    let erasure = http_req(
+        &app.addr,
+        "POST",
+        "/v1/repos/acme/erasure/erase-1/decide",
+        &[
+            ("Content-Type", "application/json"),
+            ("Authorization", auth.as_str()),
+            ("Idempotency-Key", "erasure-1"),
+        ],
+        erasure_body.as_bytes(),
+    );
+    assert!(
+        erasure.status == 200 || erasure.status == 201,
+        "erasure decide: {} {}",
+        erasure.status,
+        erasure.text()
+    );
 }
 
 #[test]
@@ -1677,7 +2171,12 @@ fn v1_write_repo_provision_pat_account_erase() {
 
     // Repo provision (self-service create)
     let create = app.post_json("/v1/repos", Some(&owner), r#"{"name":"newrepo"}"#);
-    assert!(create.status == 201, "repo create: {} {}", create.status, create.text());
+    assert!(
+        create.status == 201,
+        "repo create: {} {}",
+        create.status,
+        create.text()
+    );
     let body: serde_json::Value = serde_json::from_str(&create.text()).unwrap();
     assert!(body["ready"].as_bool().unwrap_or(false));
 
@@ -1690,8 +2189,17 @@ fn v1_write_repo_provision_pat_account_erase() {
     assert!(god.status == 401, "god create: {}", god.status);
 
     // PAT mint + use + revoke
-    let mint = app.post_json("/v1/me/tokens", Some(&owner), r#"{"name":"ci","scopes":["repo:read","repo:write"]}"#);
-    assert!(mint.status == 200 || mint.status == 201, "pat mint: {} {}", mint.status, mint.text());
+    let mint = app.post_json(
+        "/v1/me/tokens",
+        Some(&owner),
+        r#"{"name":"ci","scopes":["repo:read","repo:write"]}"#,
+    );
+    assert!(
+        mint.status == 200 || mint.status == 201,
+        "pat mint: {} {}",
+        mint.status,
+        mint.text()
+    );
     let pat = find_pat_secret(&mint.text()).expect("pat");
     let pat_id = find_pat_id(&mint.text());
 
@@ -1699,15 +2207,28 @@ fn v1_write_repo_provision_pat_account_erase() {
     assert!(pat_read.status == 200, "pat read: {}", pat_read.status);
 
     let revoke = app.delete(&format!("/v1/me/tokens/{pat_id}"), &owner);
-    assert!(revoke.status == 200 || revoke.status == 204, "revoke: {}", revoke.status);
+    assert!(
+        revoke.status == 200 || revoke.status == 204,
+        "revoke: {}",
+        revoke.status
+    );
 
     let dead = app.get("/v1/repos/newrepo/home", Some(&pat));
-    assert!(dead.status == 401 || dead.status == 403, "revoked pat: {}", dead.status);
+    assert!(
+        dead.status == 401 || dead.status == 403,
+        "revoked pat: {}",
+        dead.status
+    );
 
     // Account erase (self-only, step-up required)
     let erase = app.post_json("/v1/account/erase", Some(&owner), r#""#);
     // 403 if no fresh_auth step-up, 201 if staged
-    assert!(erase.status == 201 || erase.status == 403, "erase: {} {}", erase.status, erase.text());
+    assert!(
+        erase.status == 201 || erase.status == 403,
+        "erase: {} {}",
+        erase.status,
+        erase.text()
+    );
 }
 
 #[test]
@@ -1724,11 +2245,21 @@ fn v1_write_github_webhook_token_exchange() {
 
     // Token exchange (Clerk) - requires exchange configured, else 503
     let exchange = app.post_json("/v1/token", None, r#"{"code":"fake"}"#);
-    assert!(exchange.status == 503 || exchange.status == 400 || exchange.status == 404, "exchange: {} {}", exchange.status, exchange.text());
+    assert!(
+        exchange.status == 503 || exchange.status == 400 || exchange.status == 404,
+        "exchange: {} {}",
+        exchange.status,
+        exchange.text()
+    );
 
     // /v1/me/login - requires exchange configured
     let login = app.post_json("/v1/me/login", None, r#"{"code":"fake"}"#);
-    assert!(login.status == 503 || login.status == 400 || login.status == 404, "login: {} {}", login.status, login.text());
+    assert!(
+        login.status == 503 || login.status == 400 || login.status == 404,
+        "login: {} {}",
+        login.status,
+        login.text()
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1748,12 +2279,23 @@ fn cli_campaign_open_close_show() {
     let owner = app.mint("acme", "alice", true);
 
     let mut log = EventLog::new();
-    log.append_for_test("repo.meta", vec![],
-        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(), 0);
-    std::fs::write(app.world("acme"), serde_json::to_string_pretty(log.records()).unwrap()).unwrap();
+    log.append_for_test(
+        "repo.meta",
+        vec![],
+        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(),
+        0,
+    );
+    std::fs::write(
+        app.world("acme"),
+        serde_json::to_string_pretty(log.records()).unwrap(),
+    )
+    .unwrap();
 
     // campaign open
-    let open = app.hugit("acme/acme", &["campaign", "open", "--id", "wave-2", "--title", "Wave 2"]);
+    let open = app.hugit(
+        "acme/acme",
+        &["campaign", "open", "--id", "wave-2", "--title", "Wave 2"],
+    );
     assert!(open.was_success(), "campaign open: {}", open.text());
 
     // campaign show
@@ -1779,14 +2321,38 @@ fn cli_intent_new_show_list() {
     let owner = app.mint("acme", "alice", true);
 
     let mut log = EventLog::new();
-    log.append_for_test("repo.meta", vec![],
-        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(), 0);
-    log.append_for_test("campaign.opened", vec![],
-        serde_json::json!({"id": "wave-1", "title": "Wave 1"}).to_string(), 100);
-    std::fs::write(app.world("acme"), serde_json::to_string_pretty(log.records()).unwrap()).unwrap();
+    log.append_for_test(
+        "repo.meta",
+        vec![],
+        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(),
+        0,
+    );
+    log.append_for_test(
+        "campaign.opened",
+        vec![],
+        serde_json::json!({"id": "wave-1", "title": "Wave 1"}).to_string(),
+        100,
+    );
+    std::fs::write(
+        app.world("acme"),
+        serde_json::to_string_pretty(log.records()).unwrap(),
+    )
+    .unwrap();
 
     // intent new
-    let new = app.hugit("acme/acme", &["intent", "new", "--campaign", "wave-1", "--title", "Add feature", "--acceptance", "tests pass"]);
+    let new = app.hugit(
+        "acme/acme",
+        &[
+            "intent",
+            "new",
+            "--campaign",
+            "wave-1",
+            "--title",
+            "Add feature",
+            "--acceptance",
+            "tests pass",
+        ],
+    );
     assert!(new.was_success(), "intent new: {}", new.text());
 
     // intent list
@@ -1809,11 +2375,23 @@ fn cli_issue_transition() {
     let owner = app.mint("acme", "alice", true);
 
     let mut log = EventLog::new();
-    log.append_for_test("repo.meta", vec![],
-        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(), 0);
-    log.append_for_test("issue.opened", vec![],
-        serde_json::json!({"number": 1, "title": "Bug", "state": "open"}).to_string(), 100);
-    std::fs::write(app.world("acme"), serde_json::to_string_pretty(log.records()).unwrap()).unwrap();
+    log.append_for_test(
+        "repo.meta",
+        vec![],
+        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(),
+        0,
+    );
+    log.append_for_test(
+        "issue.opened",
+        vec![],
+        serde_json::json!({"number": 1, "title": "Bug", "state": "open"}).to_string(),
+        100,
+    );
+    std::fs::write(
+        app.world("acme"),
+        serde_json::to_string_pretty(log.records()).unwrap(),
+    )
+    .unwrap();
 
     // issue transition
     let trans = app.hugit("acme/acme", &["issue", "transition", "1", "closed"]);
@@ -1833,9 +2411,17 @@ fn cli_pr_open_queue_land_show_list_abandon() {
     let owner = app.mint("acme", "alice", true);
 
     let mut log = EventLog::new();
-    log.append_for_test("repo.meta", vec![],
-        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(), 0);
-    std::fs::write(app.world("acme"), serde_json::to_string_pretty(log.records()).unwrap()).unwrap();
+    log.append_for_test(
+        "repo.meta",
+        vec![],
+        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(),
+        0,
+    );
+    std::fs::write(
+        app.world("acme"),
+        serde_json::to_string_pretty(log.records()).unwrap(),
+    )
+    .unwrap();
 
     // pr list (empty)
     let list = app.hugit("acme/acme", &["pr", "list"]);
@@ -1843,7 +2429,11 @@ fn cli_pr_open_queue_land_show_list_abandon() {
 
     // pr show (non-existent = error)
     let show = app.hugit("acme/acme", &["pr", "show", "999"]);
-    assert!(!show.was_success(), "pr show missing should fail: {}", show.text());
+    assert!(
+        !show.was_success(),
+        "pr show missing should fail: {}",
+        show.text()
+    );
 
     // pr open (requires branch - skip for seeded test)
     // pr queue (requires PR number)
@@ -1864,13 +2454,21 @@ fn cli_land_batch_queue() {
     let owner = app.mint("acme", "alice", true);
 
     let mut log = EventLog::new();
-    log.append_for_test("repo.meta", vec![],
-        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(), 0);
+    log.append_for_test(
+        "repo.meta",
+        vec![],
+        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(),
+        0,
+    );
     log.append_for_test("pr.opened", vec![],
         serde_json::json!({"pr_id": "1", "campaign": "wave-1", "author_kind": "human", "intent_ids": ["i1"], "principal": "human:alice", "run_id": "run-1"}).to_string(), 200);
     log.append_for_test("intent.landed", vec![],
         serde_json::json!({"intent_id": "i1", "pr": 1, "ref": "refs/heads/feat", "target": "refs/heads/main", "envelope": {"cost_usd_micros": 4200000, "result_binding_sig_v2": "sig", "fabric_key_id": "k1"}}).to_string(), 300);
-    std::fs::write(app.world("acme"), serde_json::to_string_pretty(log.records()).unwrap()).unwrap();
+    std::fs::write(
+        app.world("acme"),
+        serde_json::to_string_pretty(log.records()).unwrap(),
+    )
+    .unwrap();
 
     // land (batch)
     let land = app.hugit("acme/acme", &["land"]);
@@ -1894,12 +2492,30 @@ fn cli_meta_set() {
     let owner = app.mint("acme", "alice", true);
 
     let mut log = EventLog::new();
-    log.append_for_test("repo.meta", vec![],
-        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(), 0);
-    std::fs::write(app.world("acme"), serde_json::to_string_pretty(log.records()).unwrap()).unwrap();
+    log.append_for_test(
+        "repo.meta",
+        vec![],
+        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(),
+        0,
+    );
+    std::fs::write(
+        app.world("acme"),
+        serde_json::to_string_pretty(log.records()).unwrap(),
+    )
+    .unwrap();
 
     // meta set
-    let set = app.hugit("acme/acme", &["meta", "set", "--visibility", "private", "--owner-tenant", "acme"]);
+    let set = app.hugit(
+        "acme/acme",
+        &[
+            "meta",
+            "set",
+            "--visibility",
+            "private",
+            "--owner-tenant",
+            "acme",
+        ],
+    );
     assert!(set.was_success(), "meta set: {}", set.text());
 }
 
@@ -1916,13 +2532,26 @@ fn cli_check_run_show_predict() {
     let owner = app.mint("acme", "alice", true);
 
     let mut log = EventLog::new();
-    log.append_for_test("repo.meta", vec![],
-        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(), 0);
-    log.append_for_test("intent.charter", vec![],
-        serde_json::json!({"id": "i1", "title": "Add X", "acceptance": ["test passes"]}).to_string(), 100);
+    log.append_for_test(
+        "repo.meta",
+        vec![],
+        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(),
+        0,
+    );
+    log.append_for_test(
+        "intent.charter",
+        vec![],
+        serde_json::json!({"id": "i1", "title": "Add X", "acceptance": ["test passes"]})
+            .to_string(),
+        100,
+    );
     log.append_for_test("check.recorded", vec![],
         serde_json::json!({"intent_id": "i1", "check_name": "lint", "result": "pass", "attestation": {"cas_hit": true, "cost_usd_micros": 1000}}).to_string(), 200);
-    std::fs::write(app.world("acme"), serde_json::to_string_pretty(log.records()).unwrap()).unwrap();
+    std::fs::write(
+        app.world("acme"),
+        serde_json::to_string_pretty(log.records()).unwrap(),
+    )
+    .unwrap();
 
     // check run
     let run = app.hugit("acme/acme", &["check", "run", "--intent", "i1"]);
@@ -1933,7 +2562,10 @@ fn cli_check_run_show_predict() {
     assert!(show.was_success(), "check show: {}", show.text());
 
     // check predict (memo key)
-    let predict = app.hugit("acme/acme", &["check", "predict", "--intent", "i1", "--name", "lint"]);
+    let predict = app.hugit(
+        "acme/acme",
+        &["check", "predict", "--intent", "i1", "--name", "lint"],
+    );
     assert!(predict.was_success(), "check predict: {}", predict.text());
 }
 
@@ -1950,18 +2582,32 @@ fn cli_verdict_approve_reject() {
     let owner = app.mint("acme", "alice", true);
 
     let mut log = EventLog::new();
-    log.append_for_test("repo.meta", vec![],
-        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(), 0);
+    log.append_for_test(
+        "repo.meta",
+        vec![],
+        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(),
+        0,
+    );
     log.append_for_test("pr.opened", vec![],
         serde_json::json!({"pr_id": "1", "campaign": "wave-1", "author_kind": "human", "intent_ids": ["i1"], "principal": "human:alice", "run_id": "run-1"}).to_string(), 200);
-    std::fs::write(app.world("acme"), serde_json::to_string_pretty(log.records()).unwrap()).unwrap();
+    std::fs::write(
+        app.world("acme"),
+        serde_json::to_string_pretty(log.records()).unwrap(),
+    )
+    .unwrap();
 
     // verdict approve
-    let approve = app.hugit("acme/acme", &["verdict", "approve", "1", "--evidence", "check:lint"]);
+    let approve = app.hugit(
+        "acme/acme",
+        &["verdict", "approve", "1", "--evidence", "check:lint"],
+    );
     assert!(approve.was_success(), "verdict approve: {}", approve.text());
 
     // verdict reject
-    let reject = app.hugit("acme/acme", &["verdict", "reject", "1", "--reason", "fails tests"]);
+    let reject = app.hugit(
+        "acme/acme",
+        &["verdict", "reject", "1", "--reason", "fails tests"],
+    );
     assert!(reject.was_success(), "verdict reject: {}", reject.text());
 }
 
@@ -1978,15 +2624,30 @@ fn cli_undo_policy_note_diag() {
     let owner = app.mint("acme", "alice", true);
 
     let mut log = EventLog::new();
-    log.append_for_test("repo.meta", vec![],
-        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(), 0);
+    log.append_for_test(
+        "repo.meta",
+        vec![],
+        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(),
+        0,
+    );
     log.append_for_test("pr.opened", vec![],
         serde_json::json!({"pr_id": "1", "campaign": "wave-1", "author_kind": "human", "intent_ids": ["i1"], "principal": "human:alice", "run_id": "run-1"}).to_string(), 200);
-    std::fs::write(app.world("acme"), serde_json::to_string_pretty(log.records()).unwrap()).unwrap();
+    std::fs::write(
+        app.world("acme"),
+        serde_json::to_string_pretty(log.records()).unwrap(),
+    )
+    .unwrap();
 
     // undo (human-only compensating event)
-    let undo = app.hugit("acme/acme", &["undo", "--kind", "pr.landed", "--target", "1"]);
-    assert!(undo.was_success() || !undo.was_success(), "undo: {}", undo.text()); // may fail if no landed
+    let undo = app.hugit(
+        "acme/acme",
+        &["undo", "--kind", "pr.landed", "--target", "1"],
+    );
+    assert!(
+        undo.was_success() || !undo.was_success(),
+        "undo: {}",
+        undo.text()
+    ); // may fail if no landed
 
     // policy preview
     let policy = app.hugit("acme/acme", &["policy", "preview", "--path", "src/main.rs"]);
@@ -1998,7 +2659,11 @@ fn cli_undo_policy_note_diag() {
 
     // diag (bisect read-only)
     let diag = app.hugit("acme/acme", &["diag", "--check", "lint"]);
-    assert!(diag.was_success() || !diag.was_success(), "diag: {}", diag.text());
+    assert!(
+        diag.was_success() || !diag.was_success(),
+        "diag: {}",
+        diag.text()
+    );
 }
 
 #[test]
@@ -2014,15 +2679,27 @@ fn cli_ledger_fleet_watch_symbol_ctx_review() {
     let owner = app.mint("acme", "alice", true);
 
     let mut log = EventLog::new();
-    log.append_for_test("repo.meta", vec![],
-        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(), 0);
-    log.append_for_test("campaign.opened", vec![],
-        serde_json::json!({"id": "wave-1", "title": "Wave 1"}).to_string(), 100);
+    log.append_for_test(
+        "repo.meta",
+        vec![],
+        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(),
+        0,
+    );
+    log.append_for_test(
+        "campaign.opened",
+        vec![],
+        serde_json::json!({"id": "wave-1", "title": "Wave 1"}).to_string(),
+        100,
+    );
     log.append_for_test("pr.opened", vec![],
         serde_json::json!({"pr_id": "1", "campaign": "wave-1", "author_kind": "human", "intent_ids": ["i1"], "principal": "human:alice", "run_id": "run-1"}).to_string(), 200);
     log.append_for_test("intent.landed", vec![],
         serde_json::json!({"intent_id": "i1", "pr": 1, "ref": "refs/heads/feat", "target": "refs/heads/main", "envelope": {"cost_usd_micros": 4200000, "result_binding_sig_v2": "sig", "fabric_key_id": "k1"}}).to_string(), 300);
-    std::fs::write(app.world("acme"), serde_json::to_string_pretty(log.records()).unwrap()).unwrap();
+    std::fs::write(
+        app.world("acme"),
+        serde_json::to_string_pretty(log.records()).unwrap(),
+    )
+    .unwrap();
 
     // ledger (default forge history view)
     let ledger = app.hugit("acme/acme", &["ledger"]);
@@ -2040,15 +2717,30 @@ fn cli_ledger_fleet_watch_symbol_ctx_review() {
     // symbol (semantic outline)
     let symbol = app.hugit("acme/acme", &["symbol", "--file", "README"]);
     // may fail if no symbols in seeded repo
-    assert!(symbol.was_success() || !symbol.was_success(), "symbol: {}", symbol.text());
+    assert!(
+        symbol.was_success() || !symbol.was_success(),
+        "symbol: {}",
+        symbol.text()
+    );
 
     // ctx resume (short-horizon session resume)
     let ctx = app.hugit("acme/acme", &["ctx", "resume"]);
-    assert!(ctx.was_success() || !ctx.was_success(), "ctx: {}", ctx.text());
+    assert!(
+        ctx.was_success() || !ctx.was_success(),
+        "ctx: {}",
+        ctx.text()
+    );
 
     // review (grounded Q&A)
-    let review = app.hugit("acme/acme", &["review", "--pr", "1", "--q", "What does this PR do?"]);
-    assert!(review.was_success() || !review.was_success(), "review: {}", review.text());
+    let review = app.hugit(
+        "acme/acme",
+        &["review", "--pr", "1", "--q", "What does this PR do?"],
+    );
+    assert!(
+        review.was_success() || !review.was_success(),
+        "review: {}",
+        review.text()
+    );
 }
 
 #[test]
@@ -2064,13 +2756,21 @@ fn cli_export_why_impact_tournament() {
     let owner = app.mint("acme", "alice", true);
 
     let mut log = EventLog::new();
-    log.append_for_test("repo.meta", vec![],
-        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(), 0);
+    log.append_for_test(
+        "repo.meta",
+        vec![],
+        serde_json::json!({"visibility": "public", "owner_tenant": "acme"}).to_string(),
+        0,
+    );
     log.append_for_test("pr.opened", vec![],
         serde_json::json!({"pr_id": "1", "campaign": "wave-1", "author_kind": "human", "intent_ids": ["i1"], "principal": "human:alice", "run_id": "run-1"}).to_string(), 200);
     log.append_for_test("intent.landed", vec![],
         serde_json::json!({"intent_id": "i1", "pr": 1, "ref": "refs/heads/feat", "target": "refs/heads/main", "envelope": {"cost_usd_micros": 4200000, "result_binding_sig_v2": "sig", "fabric_key_id": "k1"}}).to_string(), 300);
-    std::fs::write(app.world("acme"), serde_json::to_string_pretty(log.records()).unwrap()).unwrap();
+    std::fs::write(
+        app.world("acme"),
+        serde_json::to_string_pretty(log.records()).unwrap(),
+    )
+    .unwrap();
 
     // export (anti-lock-in exit proof)
     let export = app.hugit("acme/acme", &["export"]);

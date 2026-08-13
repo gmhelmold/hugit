@@ -47,7 +47,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use gix_hash::ObjectId;
 use hugit_cli::pr::{INTENT_ENVELOPE_KIND, PR_ENVELOPE_KIND};
-use hugit_http_contracts::{ChecksVm, InsightsVm, LandingItemVm, LandingVm, PrDetailVm, RepoHomeVm};
+use hugit_http_contracts::{
+    ChecksVm, InsightsVm, LandingItemVm, LandingVm, PrDetailVm, RepoHomeVm,
+};
 use hugit_ledger::envelope::cold_ref_for;
 use hugit_proto::{CasObjectSource, GitObject, ObjectKind};
 use hugit_refstore::EventLog;
@@ -203,8 +205,12 @@ fn write_forge_history(dir: &std::path::Path) -> String {
     );
     // The "Auth Hardening spine": two landed intents (a real `intent.landed`
     // carries `ref`/`target` like a ref.update — replay/unify reads them).
-    for (i, (id, charter)) in
-        [("i-001", "rate-limit per tenant"), ("i-002", "auth hardening")].iter().enumerate()
+    for (i, (id, charter)) in [
+        ("i-001", "rate-limit per tenant"),
+        ("i-002", "auth hardening"),
+    ]
+    .iter()
+    .enumerate()
     {
         let target = format!("00000000000000000000000000000000000000{:02}", i + 1);
         log.append_for_test(
@@ -246,9 +252,21 @@ fn write_forge_history(dir: &std::path::Path) -> String {
     log.append_for_test(INTENT_ENVELOPE_KIND, vec![], intent_env.to_string(), 6_000);
     // The memoized CI: 3 cache HITs + 1 fresh EXECUTED (the AC spine).
     for (i, (memo_key, duration_ms, name)) in [
-        ("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", 1_200_u64, "fmt"),
-        ("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 850_u64, "clippy"),
-        ("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", 300_u64, "test"),
+        (
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+            1_200_u64,
+            "fmt",
+        ),
+        (
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            850_u64,
+            "clippy",
+        ),
+        (
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            300_u64,
+            "test",
+        ),
     ]
     .iter()
     .enumerate()
@@ -299,7 +317,11 @@ fn write_forge_history(dir: &std::path::Path) -> String {
         12_000,
     );
 
-    std::fs::write(dir.join("forge.json"), serde_json::to_vec(log.records()).unwrap()).unwrap();
+    std::fs::write(
+        dir.join("forge.json"),
+        serde_json::to_vec(log.records()).unwrap(),
+    )
+    .unwrap();
     expected_pr_cas
 }
 
@@ -349,13 +371,23 @@ fn story_home_renders_a_real_tree_and_readme() {
     let vm: RepoHomeVm = serde_json::from_str(&body).expect("home body is RepoHomeVm");
 
     assert_eq!(vm.repo, "forge");
-    assert_eq!(vm.branch, "main", "default-branch picker on the seeded refs");
+    assert_eq!(
+        vm.branch, "main",
+        "default-branch picker on the seeded refs"
+    );
     assert_eq!(vm.branch_count, 1, "one seeded branch, honestly counted");
     // A REAL tree read (seeded CAS), not a stub listing.
     assert!(!vm.files.is_empty(), "files must be a real tree listing");
-    let readme = vm.files.iter().find(|f| f.name == "README").expect("README in the tree");
+    let readme = vm
+        .files
+        .iter()
+        .find(|f| f.name == "README")
+        .expect("README in the tree");
     assert!(!readme.is_dir, "README is a file");
-    assert!(vm.files.iter().any(|f| f.name == "src/handler.rs"), "nested path is listed");
+    assert!(
+        vm.files.iter().any(|f| f.name == "src/handler.rs"),
+        "nested path is listed"
+    );
     // The README is rendered from real blob bytes.
     assert!(
         vm.readme_html.contains("forge for agent fleets"),
@@ -368,7 +400,12 @@ fn story_home_renders_a_real_tree_and_readme() {
 
 fn git_cfg_prefix() -> Vec<&'static str> {
     vec![
-        "-c", "user.email=t@t", "-c", "user.name=t", "-c", "protocol.version=0",
+        "-c",
+        "user.email=t@t",
+        "-c",
+        "user.name=t",
+        "-c",
+        "protocol.version=0",
     ]
 }
 
@@ -453,7 +490,10 @@ fn story_fleet_clone_and_push_land_and_clone_back() {
         "clone failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(clone_a.join("README").exists(), "the seeded file clones back");
+    assert!(
+        clone_a.join("README").exists(),
+        "the seeded file clones back"
+    );
 
     // 2. An agent branch: one commit.
     git_in(&clone_a, &["checkout", "-q", "-b", "feat/rate-limit"]);
@@ -470,7 +510,10 @@ fn story_fleet_clone_and_push_land_and_clone_back() {
         .arg("-c")
         .arg(&auth)
         .args([
-            "push", "-q", &format!("http://{addr_a}/wireforge"), "HEAD:refs/heads/feat/rate-limit",
+            "push",
+            "-q",
+            &format!("http://{addr_a}/wireforge"),
+            "HEAD:refs/heads/feat/rate-limit",
         ])
         .output()
         .unwrap();
@@ -514,7 +557,12 @@ fn story_fleet_clone_and_push_land_and_clone_back() {
 #[test]
 fn story_checks_render_cached_intent_memoization() {
     let (state, _expect) = state_with_forge();
-    let (status, body) = route(&state, &Method::Get, "/v1/repos/forge/checks", &bearer(TOKEN));
+    let (status, body) = route(
+        &state,
+        &Method::Get,
+        "/v1/repos/forge/checks",
+        &bearer(TOKEN),
+    );
     assert_eq!(status, 200, "checks serves: {body}");
     let vm: ChecksVm = serde_json::from_str(&body).expect("checks body is ChecksVm");
 
@@ -523,7 +571,11 @@ fn story_checks_render_cached_intent_memoization() {
     assert_eq!(vm.kpis.executed, 1, "one freshly executed check");
     assert_eq!(vm.kpis.shape, "PARTIAL", "honest shape label");
     assert_eq!(vm.kpis.hit_rate_pct, 75.0, "3 of 4 hits — the REAL rate");
-    assert_eq!(vm.kpis.saved_ms, 1_200 + 850 + 300, "execution time the cache saved");
+    assert_eq!(
+        vm.kpis.saved_ms,
+        1_200 + 850 + 300,
+        "execution time the cache saved"
+    );
     assert_eq!(vm.cpills.len(), 3, "one cache pill per HIT row");
     assert!(vm.checks.len() >= 4, "all four check rows projected");
     assert!(vm.hero.green, "all rows exit 0 → green hero");
@@ -534,13 +586,21 @@ fn story_checks_render_cached_intent_memoization() {
 #[test]
 fn story_pr_detail_renders_attested_cost() {
     let (state, _expect) = state_with_forge();
-    let (status, body) = route(&state, &Method::Get, "/v1/repos/forge/prs/1", &bearer(TOKEN));
+    let (status, body) = route(
+        &state,
+        &Method::Get,
+        "/v1/repos/forge/prs/1",
+        &bearer(TOKEN),
+    );
     assert_eq!(status, 200, "pr detail serves: {body}");
     let vm: PrDetailVm = serde_json::from_str(&body).expect("pr detail body is PrDetailVm");
 
     assert_eq!(vm.number, 1);
     assert_eq!(vm.change_id, "1", "the PR's stable id (REAL)");
-    let chip = vm.campaign.as_ref().expect("the PR carries its campaign chip");
+    let chip = vm
+        .campaign
+        .as_ref()
+        .expect("the PR carries its campaign chip");
     assert_eq!(chip.id, "auth-hardening");
     // The captured PR-altitude envelope drives a NON-ZERO cost block (real spend,
     // never an honest-zero stub): the envelope carried cost_usd_micros = 420_000.
@@ -557,7 +617,12 @@ fn story_pr_detail_renders_attested_cost() {
 fn story_landing_is_idempotent_end_to_end() {
     // (a) The landing VIEW projects the open PR card + campaign chip.
     let (state, _expect) = state_with_forge();
-    let (status, body) = route(&state, &Method::Get, "/v1/repos/forge/landing", &bearer(TOKEN));
+    let (status, body) = route(
+        &state,
+        &Method::Get,
+        "/v1/repos/forge/landing",
+        &bearer(TOKEN),
+    );
     assert_eq!(status, 200, "landing serves: {body}");
     let vm: LandingVm = serde_json::from_str(&body).expect("landing body is LandingVm");
     assert_eq!(vm.open_count, 1, "one opened, non-terminal PR");
@@ -573,7 +638,10 @@ fn story_landing_is_idempotent_end_to_end() {
             })
         })
         .collect();
-    assert!(cards.contains(&1), "the open PR card is on a column: {cards:?}");
+    assert!(
+        cards.contains(&1),
+        "the open PR card is on a column: {cards:?}"
+    );
 
     // (b) A real POST land with an Idempotency-Key lands ONCE — replay appends
     // NOTHING (the land one-position invariant through load→mutate→persist→reload).
@@ -628,7 +696,11 @@ fn story_landing_is_idempotent_end_to_end() {
 
     let (s, b) = land("k1");
     assert_eq!(s, 200, "idempotent replay stays 200: {b}");
-    assert_eq!(count(&dir), after_first, "replaying the SAME key appends nothing");
+    assert_eq!(
+        count(&dir),
+        after_first,
+        "replaying the SAME key appends nothing"
+    );
 
     let (s, b) = land("k2");
     assert_eq!(s, 200, "a fresh key lands: {b}");
@@ -653,7 +725,12 @@ fn story_landing_is_idempotent_end_to_end() {
 #[test]
 fn story_insights_ledger_renders_validated_attested_cost() {
     let (state, expected_pr_cas) = state_with_forge();
-    let (status, body) = route(&state, &Method::Get, "/v1/repos/forge/insights", &bearer(TOKEN));
+    let (status, body) = route(
+        &state,
+        &Method::Get,
+        "/v1/repos/forge/insights",
+        &bearer(TOKEN),
+    );
     assert_eq!(status, 200, "insights serves: {body}");
     let vm: InsightsVm = serde_json::from_str(&body).expect("insights body is InsightsVm");
 
@@ -676,7 +753,10 @@ fn story_insights_ledger_renders_validated_attested_cost() {
     assert_eq!(vm.cost_xray.len(), 1, "the campaign has a cost-xray row");
     let row = &vm.cost_xray[0];
     let sp = row.spend_proof.as_ref().expect("spend_proof present");
-    assert!(sp.starts_with("cas:"), "spend_proof is a content-address ref: {sp}");
+    assert!(
+        sp.starts_with("cas:"),
+        "spend_proof is a content-address ref: {sp}"
+    );
     assert_eq!(
         sp, &expected_pr_cas,
         "spend_proof byte-identically pins the raw envelope"
@@ -701,7 +781,10 @@ fn story_quality_gate_rejects_tampered_and_leaks_nothing() {
     // The operator (dev-token with the dev/seed break-glass) gets the honest 503.
     let (s, b) = route(&state, &Method::Get, "/v1/repos/acme/home", &bearer(TOKEN));
     assert_eq!(s, 503, "tampered chain must be 503 for the operator: {b}");
-    assert!(b.contains("ENGINE_UNAVAILABLE"), "fail-closed code exposed to the operator: {b}");
+    assert!(
+        b.contains("ENGINE_UNAVAILABLE"),
+        "fail-closed code exposed to the operator: {b}"
+    );
 
     // A non-operator gets a UNIFORM 404 — no integrity/existence oracle.
     let tok_b = state
@@ -715,7 +798,10 @@ fn story_quality_gate_rejects_tampered_and_leaks_nothing() {
     let (s, b) = route(&state, &Method::Get, "/v1/repos/acme/home", &bearer(&tok_b));
     assert_eq!(s, 404, "non-operator gets the uniform 404, not 503: {b}");
     assert!(b.contains("NOT_FOUND"));
-    assert!(!b.contains("ENGINE_UNAVAILABLE"), "no integrity detail leaks: {b}");
+    assert!(
+        !b.contains("ENGINE_UNAVAILABLE"),
+        "no integrity detail leaks: {b}"
+    );
 }
 
 // ── story 8: visibility enforced, reads never open writes ─────────────────────
@@ -737,6 +823,11 @@ fn story_visibility_public_reads_open_private_hidden() {
     assert!(b.contains("NOT_FOUND"), "no existence oracle: {b}");
 
     // read-authz ≠ write-authz: the open public read NEVER opens a write.
-    let (s, b) = post(&priv_state, "/v1/repos/priv/prs/1/land", &[], br#"{"mode":"union"}"#);
+    let (s, b) = post(
+        &priv_state,
+        "/v1/repos/priv/prs/1/land",
+        &[],
+        br#"{"mode":"union"}"#,
+    );
     assert_eq!(s, 401, "an anonymous write is always denied: {b}");
 }
