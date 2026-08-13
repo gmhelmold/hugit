@@ -1,0 +1,48 @@
+[package]
+name = "hugit-qa"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+license.workspace = true
+
+# The real-user simulator harness. NOT a test framework in the pytest sense —
+# it drives multi-step journeys the way a human/agent would (through the REAL
+# git wire, the `/v1` HTTP API, and the REAL `hugit` CLI binary), collects
+# IMMUTABLE evidence (stdout/stderr, timings, world snapshots), and only then
+# ANALYZES quality (correctness invariants, UX latency, efficiency, consistency)
+# into an audit report. There are no hardcoded `assert!(status == 200)`s in the
+# executor — a deviation is evidence, not a broken assertion.
+#
+# Supply-chain posture (X4): every dep below is ALREADY in the workspace lock at
+# the exact pin used by the engine — no new package enters the graph (`--locked`
+# stays clean, `multiple-versions = "deny"` stays untripped).
+
+[[bin]]
+name = "hugit-qa"
+path = "src/main.rs"
+
+[dependencies]
+# The engine under test: boot a real accept loop (`serve_on`), mint the exact
+# credentials a real user holds (`TokenStore`/`ClerkPrincipal`).
+hugit-serve = { path = "../hugit-serve" }
+# Seed the real git object graph the wire serves (CasObjectSource / GitObject /
+# ObjectKind) — the same shapes `gix` + `git` both read.
+hugit-proto = { path = "../hugit-proto" }
+# The canonical event-log the world lives in (chain-verified appends).
+hugit-refstore = { path = "../hugit-refstore", features = ["test-support"] }
+# `EventRecord` — the frozen log-envelope type (also the deserialization target
+# when composing a seeded log with a prior `seed_meta`). Already in the lock (a
+# dep of hugit-refstore), so no new package enters the graph.
+hugit-contracts = { path = "../hugit-contracts" }
+# `ObjectId` — the canonical git oid key type. Pinned to the same 0.22 the engine
+# resolves, so the ban is not tripped.
+gix-hash = "0.22"
+# The accept loop's server — minimal synchronous, no async, no TLS (same as the
+# engine's own test harness). Exact-pinned to the engine's pin.
+tiny_http = { version = "0.12.0", default-features = false }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

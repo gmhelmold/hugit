@@ -1,0 +1,50 @@
+{
+  "name": "pr_cli_v1_consistency",
+  "goal": "Um orquestrador abre um PR via o CLI real (hugit pr open) e o MESMO PR aparece no /v1 (prs/1) — prova que CLI e /v1 leem/gravam o MESMO log canônico (uma fonte de verdade, qualquer superfície).",
+  "identity": { "org": "acme", "user": "alice" },
+  "setup": [
+    { "kind": "seed_meta", "repo": "acme", "visibility": "public", "owner_tenant": "acme" },
+    { "kind": "wire_git", "repo": "acme" },
+    {
+      "kind": "seed_envelope_world",
+      "repo": "acme",
+      "campaign": "wave-1",
+      "pr_id": "1",
+      "intent_ids": ["i1"],
+      "cost_usd_micros": 4200000
+    }
+  ],
+  "steps": [
+    {
+      "action": "cli",
+      "name": "pr-open-cli",
+      "goal": "Abre um PR #2 via o CLI real — o pr.opened é persistido no log canônico que o /v1 serve",
+      "repo": "acme",
+      "args": ["pr", "open", "--log", "acme.json", "--pr", "2", "--campaign", "wave-1", "--author-kind", "human", "--principal", "human:alice", "--intent", "i1"],
+      "expect": { "exit": 0, "world_adds": { "pr.opened": 1 } }
+    },
+    {
+      "action": "cli",
+      "name": "pr-open-idempotent",
+      "goal": "Re-abre o mesmo PR #2 — deve ser um no-op (already_exists), log inalterado",
+      "repo": "acme",
+      "args": ["pr", "open", "--log", "acme.json", "--pr", "2", "--campaign", "wave-1", "--author-kind", "human", "--principal", "human:alice", "--intent", "i1"],
+      "expect": { "exit": 0, "world_unchanged": true }
+    },
+    {
+      "action": "api_get",
+      "name": "pr2-via-v1",
+      "goal": "O PR aberto pelo CLI aparece no /v1 (prs/2) — CLI e /v1 compartilham o log",
+      "path": "/v1/repos/acme/prs/2",
+      "auth": "owner",
+      "expect": { "status": 200, "body_contains": "wave-1" }
+    }
+  ],
+  "analyze": [
+    { "rule": "expectation_fidelity" },
+    { "rule": "correctness" },
+    { "rule": "ux" },
+    { "rule": "efficiency" },
+    { "rule": "consistency" }
+  ]
+}
