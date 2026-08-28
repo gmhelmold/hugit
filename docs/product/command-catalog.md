@@ -119,7 +119,7 @@ forge thesis is re-examined before another dollar of effort.
 |---|---|---|
 | `hugit ledger [--live]` | D | default history view |
 | `hugit review <intent>` | D | 🔧 grounded-evidence answers; never self-defense |
-| `hugit approve / reject` | D | policy decides what reaches you |
+| `hugit verdict approve / reject` | D | policy decides what reaches you |
 | `hugit watch` | D | TUI; web Mission Control deferred |
 | `hugit why <line\|symbol\|intent>` | D | provenance query |
 | `hugit undo <op>` | D | forge-level, event-sourced |
@@ -146,7 +146,7 @@ forge thesis is re-examined before another dollar of effort.
 | `hugit ws spawn/attach/snap/gc` | C | claim-fenced (security) |
 | `hugit ctx snap / resume` | D | 🔧 short-horizon; journals first-class |
 | `hugit intent seal` | D | the one ceremony verb |
-| `hugit journal note` | D | understanding outlives the session |
+| `hugit note` | D | understanding outlives the session |
 
 ### Unchanged forever
 **Every `git` command, byte-for-byte** (catalog A of v1 stands in full) — plus

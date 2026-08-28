@@ -6,9 +6,11 @@
 2. Make your changes. Keep commits focused and atomic.
 3. Build and test locally:
    ```sh
+   cargo fmt --all --check
    cargo build --workspace --locked
    cargo test --workspace --locked
    cargo clippy --workspace --all-targets --locked -- -D warnings
+   cargo deny check
    ```
 4. Sign off your commits with `-s` (DCO — Developer Certificate of Origin):
    ```sh
