@@ -4599,7 +4599,9 @@ fn parse_git_dir_member(member: &str) -> Result<(String, &str), String> {
                 .file_name()
                 .and_then(|s| s.to_str())
                 .ok_or_else(|| format!("HUGIT_SERVE_GIT_DIR has no repo basename: {dir:?}"))?;
-            (base.to_string(), dir)
+            // git convention: bare dir's trailing ".git" is not part of served slug
+            let slug = base.strip_suffix(".git").unwrap_or(base);
+            (slug.to_string(), dir)
         }
     };
     if dir.is_empty() {
@@ -5465,6 +5467,21 @@ mod tests {
             parse_git_dir_member("hugit=/var/checkouts/launch-repo").expect("explicit slug");
         assert_eq!(slug, "hugit");
         assert_eq!(dir, "/var/checkouts/launch-repo");
+    }
+
+    #[test]
+    fn git_dir_member_bare_path_strips_dot_git_suffix() {
+        let (slug, dir) = parse_git_dir_member("/srv/git/src.git").expect("bare .git path");
+        assert_eq!(slug, "src");
+        assert_eq!(dir, "/srv/git/src.git");
+        // bare ".git" alone → empty slug → is_safe fails
+        assert!(parse_git_dir_member("/srv/git/.git").is_err());
+        // double suffix only strips one
+        let (slug2, _) = parse_git_dir_member("/srv/git/repo.git.git").expect("double suffix");
+        assert_eq!(slug2, "repo.git");
+        // non-suffix preserved
+        let (slug3, _) = parse_git_dir_member("/srv/git/my.git-tools").expect("non-suffix");
+        assert_eq!(slug3, "my.git-tools");
     }
 
     #[test]
