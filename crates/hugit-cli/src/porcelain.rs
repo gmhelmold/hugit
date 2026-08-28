@@ -37,8 +37,8 @@
 //!
 //! Module WPs converge on this law by constructing [`PorcelainError`] (or the
 //! [`internal`] helper) and rendering with [`PorcelainError::to_json`] /
-//! [`PorcelainError::exit_code`]. The PC0 stub shape ([`not_implemented`]) is a
-//! `PorcelainError` of `kind:"not_implemented"` carrying the owning `wp`.
+//! [`PorcelainError::exit_code`]. PR-6 removed the `not_implemented` PC0 stub
+//! shape (every reserved verb has graduated to a real projection).
 
 use std::process::ExitCode;
 
@@ -562,37 +562,6 @@ pub fn scrub_to_canonical(mut value: Value) -> String {
     hugit_refstore::canonical_json(&compact).unwrap_or(compact)
 }
 
-/// Emit the canonical NOT-IMPLEMENTED error as JSON on **stdout** and return the
-/// structured-error exit code.
-///
-/// Shape (stable contract for callers): `{"error":{"kind":"not_implemented",
-/// "wp":"…","message":…,"fix":…}}`. Honest stub — never a fake success. `wp`
-/// names the work package that will replace the stub with the real projection.
-pub fn not_implemented(wp: &str) -> ExitCode {
-    println!("{}", not_implemented_json(wp));
-    ExitCode::from(PORCELAIN_ERROR_EXIT)
-}
-
-/// The canonical NOT-IMPLEMENTED [`PorcelainError`] for `wp` — a `PorcelainError`
-/// of `kind:"not_implemented"` carrying the owning WP token as flat context.
-fn not_implemented_error(wp: &str) -> PorcelainError {
-    PorcelainError::new(
-        "not_implemented",
-        "this verb is a scaffold stub; its projection is not implemented yet",
-        "track the owning work package; the stub never returns a fake success",
-    )
-    .with_context("wp", json!(wp))
-}
-
-/// The canonical NOT-IMPLEMENTED JSON line for `wp` (the stable wire shape).
-///
-/// Split out from [`not_implemented`] so the exact contract can be asserted in
-/// tests without capturing stdout. `wp` is a fixed ASCII WP token, never
-/// untrusted input.
-pub fn not_implemented_json(wp: &str) -> String {
-    not_implemented_error(wp).to_json()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -654,14 +623,6 @@ mod tests {
         let v: Value = serde_json::from_str(&e.to_json()).unwrap();
         assert_eq!(v["error"]["kind"], "parse_log");
         assert_eq!(v["error"]["path"], "/x/log.json");
-    }
-
-    #[test]
-    fn not_implemented_json_is_the_canonical_envelope() {
-        let v: Value = serde_json::from_str(&not_implemented_json("WB2")).unwrap();
-        assert_eq!(v["error"]["kind"], "not_implemented");
-        assert_eq!(v["error"]["wp"], "WB2");
-        assert!(v["error"]["fix"].is_string());
     }
 
     // ── WG-SCRUB: scrub-on-append structural seam ────────────────────────────

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/*", "crates/hugit-app/ui", "crates/hugit-app/exit", "crates/hugit-dogfood"]
+members = ["crates/*", "crates/hugit-app/exit", "crates/hugit-dogfood"]
 resolver = "2"
 
 [workspace.package]

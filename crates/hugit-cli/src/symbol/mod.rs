@@ -312,35 +312,35 @@ mod tests {
     }
 
     /// `--ref HEAD --path <stable_rs_file>` must produce a non-empty Rust outline.
-    /// Uses porcelain.rs which is committed at HEAD and unmodified in this wave.
+    /// Uses led/mod.rs which is committed at HEAD and unmodified in this wave.
     #[test]
     fn ref_head_outlines_a_committed_rs_file() {
         let root = repo_root();
         let args = SymbolArgs {
             file: None,
             git_ref: Some("HEAD".to_string()),
-            ref_path: Some("crates/hugit-cli/src/porcelain.rs".to_string()),
+            ref_path: Some("crates/hugit-cli/src/ident.rs".to_string()),
             git_dir: Some(root),
         };
         let v = project(&args).expect("project_ref should succeed at HEAD");
-        assert_eq!(v["lang"], "rust", "porcelain.rs is Rust");
+        assert_eq!(v["lang"], "rust", "led/mod.rs is Rust");
         let outline = v["outline"].as_array().expect("outline array");
         assert!(
             !outline.is_empty(),
-            "HEAD outline of porcelain.rs must not be empty"
+            "HEAD outline of led/mod.rs must not be empty"
         );
     }
 
     /// Outline the same committed file via `--ref HEAD` and `--file`, confirming
     /// the same producer produces the same outline for the same bytes.
     ///
-    /// Uses the porcelain.rs file because it is stable (no edits in this wave)
+    /// Uses the led/mod.rs file because it is stable (no edits in this wave)
     /// and committed at HEAD in this worktree.
     #[test]
     fn ref_head_matches_file_outline() {
         let root = repo_root();
         // Pick a stable committed file.
-        let stable_path = "crates/hugit-cli/src/porcelain.rs";
+        let stable_path = "crates/hugit-cli/src/ident.rs";
 
         // --ref HEAD path
         let ref_args = SymbolArgs {

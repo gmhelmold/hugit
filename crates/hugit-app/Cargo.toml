@@ -9,7 +9,8 @@ license.workspace = true
 [dependencies]
 hugit-contracts = { path = "../hugit-contracts" }
 hugit-refstore = { path = "../hugit-refstore" }
-hugit-app-sidecar = { path = "sidecar" }
+# PR-6: hugit-app-sidecar removed (dead — superseded by hugit-contracts::IntentSidecar).
+# hugit-app-exit kept (PR-8 hardens it in-place — not deleted).
 serde = { workspace = true }
 serde_json = { workspace = true }
 hmac = { workspace = true }
