@@ -3,8 +3,8 @@
 **Version:** v0  
 **WP:** E4  
 **Status:** PUBLISHED — every feature listed here is proven-to-execute by a
-passing fixture in `crates/hugit-runner/tests/acceptance_e4.rs`.  
-**Machine-readable source of truth:** `crates/hugit-runner/src/shim/subset.rs`
+passing fixture in `<transferred to ../corelink-runners/tests/acceptance_e4.rs>`.  
+**Machine-readable source of truth:** `<transferred to ../corelink-runners/src/shim/subset.rs>`
 
 ---
 
