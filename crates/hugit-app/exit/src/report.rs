@@ -142,9 +142,17 @@ impl ExitReport {
 }
 
 /// PR-8: compute the body_digest of a report (same algorithm as
-/// `ExitReport::verify`). Exposed so callers (the gate) can recompute
-/// the expected value without exposing the serializer.
-pub fn compute_body_digest(report: &ExitReport) -> String {
+/// `ExitReport::verify`). Exposed so the gate can recompute the
+/// expected value without exposing the serializer. Uses serde_json +
+/// Sha256 (sha2 already transitively present, now a direct dep).
+///
+/// PR-8 honesty: `pub(crate)` (not `pub`). PR-8 forge-proof is a TRIPWIRE,
+/// not a proof — a caller with this function (i.e. another piece of code
+/// inside this crate) can compute a matching digest for a hand-built
+/// `Pass` literal and bypass the gate. The tripwire catches callers
+/// OUTSIDE this crate (or outside the forge path) — the real forge-proof
+/// awaits the Ed25519 `attestation` seam (currently `None`, future work).
+pub(crate) fn compute_body_digest(report: &ExitReport) -> String {
     let mut hasher = Sha256::new();
     hasher.update(
         serde_json::to_string(&report.status)
