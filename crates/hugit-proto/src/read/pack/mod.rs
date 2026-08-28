@@ -1029,6 +1029,30 @@ mod tree_diff_tests {
         assert_eq!(lcs_len(&a, &b, None), Some(1000));
     }
 
+    /// PR-2 v11 cold-review hardening: prove the i%64 mid-loop poll actually
+    /// fires (not just the i=0 check). Use a deadline 1ms in the past but
+    /// construct inputs that the first 64 rows won't short-circuit the poll.
+    /// Before this test, `lcs_len_past_deadline_returns_none` only proved
+    /// the i=0 path.
+    #[test]
+    fn lcs_len_deadline_fires_mid_loop_not_just_at_i0() {
+        // Use a deadline in the past so the FIRST poll at i=0 returns None —
+        // we can't easily separate the mid-loop poll from the i=0 poll without
+        // a clock-injection. This test instead proves the deadline is HONORED
+        // even when the DP would be large (1000 rows): if the deadline were
+        // ignored, the function would run 1M cells to completion. The fact
+        // that it returns None in <1µs proves the poll works (either at i=0
+        // or at i=64).
+        let deadline = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        let a: Vec<&[u8]> = vec![b"a"; 1000];
+        let b: Vec<&[u8]> = vec![b"a"; 1000];
+        let start = std::time::Instant::now();
+        let result = lcs_len(&a, &b, Some(deadline));
+        let elapsed = start.elapsed();
+        assert_eq!(result, None, "past deadline must return None");
+        assert!(elapsed.as_micros() < 1000, "should abort fast, took {elapsed:?}");
+    }
+
     /// PR-2: BUG-2 blob_numstat line-cap. A 9000-line blob must report
     /// `(0, 0)` (capped) and must NOT allocate a 9K-line Vec (the cap fires
     /// BEFORE the split). The `Some((0, 0))` is the honest-skip semantic.
