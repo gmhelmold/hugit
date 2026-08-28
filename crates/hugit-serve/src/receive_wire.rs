@@ -388,18 +388,20 @@ mod tests {
     /// through strip_want_have_caps was not).
     #[test]
     fn strip_want_have_caps_oversize_returns_err() {
-        // Body = "ffff" + 65536 bytes of "want aaaa...a\n" — the inner
-        // pkt_line() sees len = 65536 + 4 = 65540 > 0xffff → returns Err.
-        // The first 4 bytes "ffff" = 65535 (legitimate), but len > body.len()
-        // check passes only because we made the body long enough (65536 ≥ 65535).
-        let payload = format!("want {}\n", "a".repeat(65_531));
-        // 4 chars (65535) + 65536-byte payload = 65540 bytes total
-        let body = format!("{}{}", "ffff", payload).into_bytes();
-        // Make payload big enough to match the length prefix
-        let mut big_payload = payload.as_bytes().to_vec();
-        big_payload.resize(65_536, b'a');
-        let body = format!("{}{}", "ffff", std::str::from_utf8(&big_payload).unwrap()).into_bytes();
-        assert_eq!(body.len(), 65_540);
+        // Build a body whose inner pkt_line() receives len = 65536 + 4 = 65540
+        // > 0xffff → returns Err. The first 4 bytes "ffff" = 65535
+        // (legitimate), and the payload is large enough that the
+        // `i + len > body.len()` truncation check in the loop also passes.
+        // We start with the 65 536-byte "want" payload, then size it up to
+        // 65 540 bytes (matching the 4-byte length prefix + 65 536-byte
+        // payload) by padding the rest of the "want" line with 'a' so the
+        // oversize case is actually exercised.
+        let mut payload = b"want ".to_vec();
+        payload.resize(65_536, b'a');
+        payload.push(b'\n');
+        // 4 chars (65535 prefix) + 65 537-byte payload = 65 541 bytes total
+        let body = format!("{}{}", "ffff", std::str::from_utf8(&payload).unwrap()).into_bytes();
+        assert_eq!(body.len(), 65_541);
         assert_eq!(
             crate::git::strip_want_have_caps_for_test(&body),
             Err(crate::receive_wire::PktTooLong)

@@ -1036,13 +1036,20 @@ mod tree_diff_tests {
     /// the i=0 path.
     #[test]
     fn lcs_len_deadline_fires_mid_loop_not_just_at_i0() {
-        // Use a deadline in the past so the FIRST poll at i=0 returns None —
-        // we can't easily separate the mid-loop poll from the i=0 poll without
-        // a clock-injection. This test instead proves the deadline is HONORED
-        // even when the DP would be large (1000 rows): if the deadline were
-        // ignored, the function would run 1M cells to completion. The fact
-        // that it returns None in <1µs proves the poll works (either at i=0
-        // or at i=64).
+        // Use a deadline 1ms in the past but inputs large enough that the
+        // lcs_len outer loop must run 64+ rows before noticing (8192 rows of
+        // identical lines = 8192 cell-comparisons per inner iteration * 8192
+        // inner = 67M cells; the i=0 poll happens BEFORE the 8192 inner
+        // iterations run, so the deadline fires at the first poll — to prove the
+        // mid-loop poll works we need a deadline that is NOT expired at i=0
+        // but IS expired by i=64+). Without a clock-injection we can't do
+        // that directly; instead we prove the i=0 path is reached: deadline
+        // is 1s in the past, which the i=0 poll sees; if the poll were
+        // REMOVED, lcs_len would run all 1M cells (1000^2) to completion and
+        // return Some(1000) — but it returns None fast. So the poll is
+        // exercised at i=0 (proves it works, not that it specifically fires
+        // mid-loop). For a true mid-loop proof we'd need a clock that
+        // advances between rows, which Rust's std doesn't expose.
         let deadline = std::time::Instant::now() - std::time::Duration::from_secs(1);
         let a: Vec<&[u8]> = vec![b"a"; 1000];
         let b: Vec<&[u8]> = vec![b"a"; 1000];

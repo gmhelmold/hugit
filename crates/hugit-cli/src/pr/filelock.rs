@@ -345,13 +345,35 @@ mod tests {
     /// `create_dir_all("")` which returns NotFound on POSIX; the filter
     /// avoids that and the lock still works.
     #[test]
-    fn file_lock_acquire_bare_filename_skips_empty_parent() {
-        let dir = scratch("lock-bare");
-        // Make the bare-filename target a sibling of an existing dir.
-        // The parent of "log.json" here is `dir`, which exists.
-        let target = dir.join("log.json");
+    fn file_lock_acquire_creates_lock_in_subdir() {
+        // The target's PARENT (a subdir of scratch) does NOT exist —
+        // `acquire` must `create_dir_all` it before `try_create`. This
+        // exercises the PR-4 auto-init happy path.
+        let dir = scratch("lock-subdir");
+        let target = dir.join("missing_deep/log.json");
         let lock_path = target.with_file_name("log.json.lock");
         let _lock = FileLock::acquire(&target).unwrap();
+        assert!(lock_path.exists(), "lock file must exist at <target>.lock");
+        assert!(dir.join("missing_deep").is_dir(), "parent must be created");
+    }
+
+    /// PR-4: `acquire` with `target.parent() == Path::new("")` (truly empty,
+    /// i.e. bare filename in CWD) must NOT call `create_dir_all("")`
+    /// (which returns NotFound on POSIX). The lock is created in CWD.
+    /// `scratch` reuses a per-test tmp dir, so we change the CWD to it
+    /// to keep the lock out of the developer's CWD.
+    #[test]
+    fn file_lock_acquire_bare_filename_in_cwd_skips_create_dir_all() {
+        let dir = scratch("lock-cwd-bare");
+        let prev_cwd = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(&dir).expect("chdir");
+        let target = std::path::PathBuf::from("log.json");
+        let lock_path = dir.join("log.json.lock");
+        let result = FileLock::acquire(&target);
+        // Restore CWD before asserting (Drop of dir would chdir back, but
+        // we restore explicitly to avoid leaks if assert fails).
+        std::env::set_current_dir(&prev_cwd).expect("restore cwd");
+        assert!(result.is_ok(), "acquire with bare filename must succeed: {result:?}");
         assert!(lock_path.exists(), "lock file must exist at <target>.lock");
     }
 

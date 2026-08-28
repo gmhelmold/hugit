@@ -103,30 +103,10 @@ impl ExitReport {
         if self.team_count == 0 {
             return Err(VerifyError::EmptyCohort);
         }
-        // Re-canonicalize the data fields (must match `compute_body_digest`).
-        let mut hasher = Sha256::new();
-        hasher.update(
-            serde_json::to_string(&self.status).map_err(|_| VerifyError::DigestMismatch {
-                expected: self.body_digest.clone(),
-                actual: String::new(),
-            })?.as_bytes(),
-        );
-        hasher.update(self.team_count.to_le_bytes());
-        hasher.update(self.min_weeks_real_use.to_le_bytes());
-        hasher.update(
-            self.days_since_anchor
-                .map(u64::to_le_bytes)
-                .unwrap_or([0u8; 8])
-                .as_ref(),
-        );
-        hasher.update(self.unprompted_count.to_le_bytes());
-        hasher.update(self.total_signals.to_le_bytes());
-        hasher.update(corpus_seal.as_bytes());
-        let actual = format!("{:x}", hasher.finalize());
-        if actual != self.body_digest {
+        if self.body_digest != hash_fields(self, corpus_seal) {
             return Err(VerifyError::DigestMismatch {
                 expected: self.body_digest.clone(),
-                actual,
+                actual: hash_fields(self, corpus_seal),
             });
         }
         // The signature seam is unimplemented — when set, a real Ed25519 key
@@ -141,10 +121,10 @@ impl ExitReport {
     }
 }
 
-/// PR-8: compute the body_digest of a report (same algorithm as
-/// `ExitReport::verify`). Exposed so the gate can recompute the
-/// expected value without exposing the serializer. Uses serde_json +
-/// Sha256 (sha2 already transitively present, now a direct dep).
+/// PR-8: SHA-256 over the canonical projection of the data fields +
+/// `corpus_seal`. This is the SINGLE source of truth for body_digest —
+/// `verify` and `compute_body_digest` both call this. Adding a field to
+/// `ExitReport` requires updating only this function.
 ///
 /// PR-8 honesty: `pub(crate)` (not `pub`). PR-8 forge-proof is a TRIPWIRE,
 /// not a proof — a caller with this function (i.e. another piece of code
@@ -152,12 +132,10 @@ impl ExitReport {
 /// `Pass` literal and bypass the gate. The tripwire catches callers
 /// OUTSIDE this crate (or outside the forge path) — the real forge-proof
 /// awaits the Ed25519 `attestation` seam (currently `None`, future work).
-pub(crate) fn compute_body_digest(report: &ExitReport) -> String {
+pub(crate) fn hash_fields(report: &ExitReport, corpus_seal: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(
-        serde_json::to_string(&report.status)
-            .unwrap_or_default()
-            .as_bytes(),
+        serde_json::to_string(&report.status).unwrap_or_default().as_bytes(),
     );
     hasher.update(report.team_count.to_le_bytes());
     hasher.update(report.min_weeks_real_use.to_le_bytes());
@@ -170,7 +148,16 @@ pub(crate) fn compute_body_digest(report: &ExitReport) -> String {
     );
     hasher.update(report.unprompted_count.to_le_bytes());
     hasher.update(report.total_signals.to_le_bytes());
+    hasher.update(corpus_seal.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+/// Backwards-compat alias for the in-process callers that don't thread
+/// `corpus_seal` (the gate's `verify("")` matches this empty seal). The
+/// `hash_fields` function is the single source of truth — adding a field
+/// here + in `verify` is the only way to keep them in sync.
+pub(crate) fn compute_body_digest(report: &ExitReport) -> String {
+    hash_fields(report, "")
 }
 
 /// The threshold for the unprompted gate (⑤/R4): must be ≥ 3.
@@ -267,10 +254,10 @@ pub fn generate_report(
         body_digest: String::new(),
         attestation: None,
     };
-    // PR-8: seal the data fields. `verify("")` (no corpus seal) is what the
-    // gate's "in-process" path uses; the deploy path threads the cohort
-    // seal through the same constructor. Either way, a hand-built literal
-    // without a matching `body_digest` fails `verify` fail-closed.
+    // PR-8: seal the data fields. `verify(corpus_seal)` is what the
+    // gate calls; the deploy path threads the cohort seal. Either way,
+    // a hand-built literal without a matching `body_digest` fails `verify`
+    // fail-closed.
     report.body_digest = compute_body_digest(&report);
     report
 }
