@@ -355,6 +355,7 @@ mod tests {
 
     /// PR-3: build_report_status with a 512-byte ref name + longest reason — the
     /// bounded worst case: 3 + 512 + 1 + 18 + 1 = 535 bytes payload, well under 65531.
+    /// Decodes every emitted pkt-line and asserts its length fits in 16 bits.
     #[test]
     fn build_report_status_roundtrip_bounded() {
         let max_ref = "refs/heads/".to_string() + &"a".repeat(512 - "refs/heads/".len());
@@ -365,10 +366,55 @@ mod tests {
                 RefOutcome::Ng { ref_name: max_ref.clone(), reason: "ref-target-invalid".to_string() },
             ],
         );
-        // First 4 bytes = length of first pkt-line (unpack ng log-persist-failed = 28 bytes)
-        // 4 bytes prefix + 28 bytes payload = 32 → 0x0020
-        let first_len = u32::from_str_radix(std::str::from_utf8(&body[0..4]).unwrap(), 16).unwrap();
-        assert!(first_len <= 0xffff, "first pkt-line must fit in 16-bit length");
+        // Every 4-byte prefix must be `<= ffff`; collect into a vec.
+        let mut lens = Vec::new();
+        let mut i = 0;
+        while i < body.len() {
+            // Flush is "0000" — terminate.
+            if &body[i..i + 4] == b"0000" { break; }
+            let l = u32::from_str_radix(std::str::from_utf8(&body[i..i + 4]).unwrap(), 16).unwrap();
+            assert!(l <= 0xffff, "pkt-line length {l} > 0xffff");
+            assert!(l >= 4, "pkt-line length {l} < 4 (no payload)");
+            lens.push(l);
+            i += l as usize;
+        }
+        // We expect: 1 (unpack) + 2 (ok/ng per ref) = 3 pkt-lines.
+        assert_eq!(lens.len(), 3, "expected 3 pkt-lines, got {} ({lens:?})", lens.len());
+    }
+
+    /// PR-3: strip_want_have_caps returns `Err(PktTooLong)` when a want line
+    /// exceeds 65516 bytes of payload. Closes the unit-test gap (the leaf
+    /// `put_pkt_size_boundary` was tested; the higher-level `?` propagation
+    /// through strip_want_have_caps was not).
+    #[test]
+    fn strip_want_have_caps_oversize_returns_err() {
+        // Body = "ffff" + 65536 bytes of "want aaaa...a\n" — the inner
+        // pkt_line() sees len = 65536 + 4 = 65540 > 0xffff → returns Err.
+        // The first 4 bytes "ffff" = 65535 (legitimate), but len > body.len()
+        // check passes only because we made the body long enough (65536 ≥ 65535).
+        let payload = format!("want {}\n", "a".repeat(65_531));
+        // 4 chars (65535) + 65536-byte payload = 65540 bytes total
+        let body = format!("{}{}", "ffff", payload).into_bytes();
+        // Make payload big enough to match the length prefix
+        let mut big_payload = payload.as_bytes().to_vec();
+        big_payload.resize(65_536, b'a');
+        let body = format!("{}{}", "ffff", std::str::from_utf8(&big_payload).unwrap()).into_bytes();
+        assert_eq!(body.len(), 65_540);
+        assert_eq!(
+            crate::git::strip_want_have_caps_for_test(&body),
+            Err(crate::receive_wire::PktTooLong)
+        );
+    }
+
+    /// PR-3: strip_want_have_caps returns Ok for a normal want line.
+    #[test]
+    fn strip_want_have_caps_normal_want_line_succeeds() {
+        let oid = "a".repeat(40);
+        let payload = format!("want {oid}\n");
+        let body = format!("{:04x}{}", payload.len() + 4, payload).into_bytes();
+        let cleaned = crate::git::strip_want_have_caps_for_test(&body).expect("ok");
+        // The cleaned buffer is the same pkt-line minus trailing caps.
+        assert_eq!(cleaned, body);
     }
 
     /// Frame `data` as a pkt-line (4-hex length prefix including itself).

@@ -636,11 +636,11 @@ mod tests {
         // (If the store file does exist but is empty/no entry, that's also fine —
         // the assertion above already covers the absence of the specific entry.)
 
-        // --- create the log dir so the retry can succeed ---
+        // --- create the log dir so the retry can succeed (remove the
+        // blocking file so the parent is a writable empty dir).
+        std::fs::remove_file(&blocking_file).expect("remove blocking file");
         std::fs::create_dir_all(blocking_file.parent().unwrap())
             .expect("create log dir for retry");
-        // Remove the blocking file so the dir is empty.
-        std::fs::remove_file(&blocking_file).ok();
 
         let input2 = NewIntent {
             charter: "divergence safety test".to_string(),

@@ -294,11 +294,11 @@ fn log_append_failure_leaves_no_orphan_store_entry() {
     std::fs::create_dir_all(&store_dir).expect("create store dir");
     let store = store_dir.join("intents.json");
 
-    // --log inside a path whose PARENT is a file (not a dir) — the lock+create
-    // inside land_intent cannot create a child of a non-directory (PR-4 auto-
-    // creates missing dirs, so the previous "non-existent dir" assertion no
-    // longer triggers an I/O error; we use parent-as-file which is unambiguously
-    // unwritable).
+    // --log inside a path whose PARENT is a FILE (not a dir) — the
+    // lock+create inside land_intent cannot create a child of a non-directory
+    // (PR-4 auto-creates missing dirs, so the previous "non-existent dir"
+    // assertion no longer triggers an I/O error; we use parent-as-file which
+    // is unambiguously unwritable).
     let blocking_file = s.path("blocking_file");
     std::fs::write(&blocking_file, b"i am a file").expect("write blocking file");
     let bad_log = blocking_file.join("events.json");
@@ -319,8 +319,9 @@ fn log_append_failure_leaves_no_orphan_store_entry() {
         );
     }
 
-    // Retry once the log dir exists → converges, both agree. (Remove the
-    // blocking file so the parent is a writable empty dir.)
+    // Retry once the log dir exists → converges, both agree.
+    // --- create the log dir so the retry can succeed (remove the
+    // blocking file so the parent is a writable empty dir).
     std::fs::remove_file(&blocking_file).expect("remove blocking file");
     std::fs::create_dir_all(blocking_file.parent().unwrap())
         .expect("create log dir for retry");

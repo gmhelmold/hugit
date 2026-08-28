@@ -165,7 +165,7 @@
       </div>
     </div>
     <div class="pull">O commit é o <b>RESULTADO</b> do intent. O intent é a história que produziu aquele commit — e o hugit <b>gera o commit git</b> a partir dele. Por isso continua 100% compatível com git.</div>
-    <p>Dois jeitos de olhar a <b>mesma coisa</b>: <code>git log</code> mostra os <b>commits</b> (as respostas finais); <code>hugit log</code> mostra os <b>intents</b> (as histórias completas). Mesma store, dois zooms — nunca discordam, porque um é gerado do outro.</p>
+    <p>Dois jeitos de olhar a <b>mesma coisa</b>: <code>git log</code> mostra os <b>commits</b> (as respostas finais); <code>hugit ledger</code> mostra os <b>intents</b> (as histórias completas). Mesma store, dois zooms — nunca discordam, porque um é gerado do outro.</p>
   </section>
 
   <div class="switch">
@@ -271,7 +271,7 @@
         <tr><td>Blob/Tree/Commit</td><td>objetos do git, byte-exatos — <b>a projeção</b></td></tr>
       </tbody>
     </table>
-    <p><b>Projection rule:</b> todo intent que pousa emite commits git determinísticos (mensagem gerada embutindo o <code>intent_id</code>). <code>git log</code> é a altitude-máquina; <code>hugit log</code> é a altitude-intent. Mesma store, dois zooms — nunca discordam porque um é derivado do outro. <span class="note">(O sidecar de intent — <code>IntentSidecar.context_ref</code> — já está construído no crate <code>hugit-app-sidecar</code>, não-autoritativo por design; o verbo <code>ctx snap/resume</code> está reservado.)</span></p>
+    <p><b>Projection rule:</b> todo intent que pousa emite commits git determinísticos (mensagem gerada embutindo o <code>intent_id</code>). <code>git log</code> é a altitude-máquina; <code>hugit ledger</code> é a altitude-intent. Mesma store, dois zooms — nunca discordam porque um é derivado do outro. <span class="note">(O sidecar de intent — <code>IntentSidecar.context_ref</code> — vive no crate <code>hugit-contracts::IntentSidecar</code>, não-autoritativo por design; o verbo <code>ctx snap/resume</code> está reservado.)</span></p>
 
     <h2><span class="n">02</span>Claims &amp; conflito-no-dispatch</h2>
     <pre>claims(I) = fecho sobre o build-graph de {paths ∪ targets ∪ contracts}
@@ -355,7 +355,7 @@ intents de claims disjuntas pousam em lanes paralelas</pre>
       <li><code>hugit intent seal</code> — <b>o único verbo de cerimônia.</b> Anexa diff + evidência + o context snapshot. Daqui pra frente é tudo o sistema.</li>
       <li><b>Verdicts</b>: painéis de reviewers adversariais (máquina) + o humano <b>interroga</b> a mudança (<code>hugit review</code>) — em vez de ler linha por linha.</li>
       <li>A <b>fila de landing</b> testa o intent <i>em union</i> com os outros (só a novidade executa; o resto é cache-hit). Verde ⇒ pousa atômico.</li>
-      <li>O sistema <b>emite o commit git</b> com mensagem gerada embutindo o <code>intent_id</code>. <code>git log</code> mostra o commit; <code>hugit log</code> mostra o intent. Mesma store, dois zooms.</li>
+      <li>O sistema <b>emite o commit git</b> com mensagem gerada embutindo o <code>intent_id</code>. <code>git log</code> mostra o commit; <code>hugit ledger</code> mostra o intent. Mesma store, dois zooms.</li>
     </ol>
 
     <h2><span class="n">02</span>Antes → Depois</h2>
