@@ -118,6 +118,18 @@ impl FileLock {
     /// A **stale** lock (mtime older than [`STALE_LOCK_SECS`] — a dead holder)
     /// is reclaimed transparently: removed, then re-created as ours.
     pub fn acquire(target: &Path) -> Result<Self, LockError> {
+        // PR-4: auto-create parent dirs (git-proximate auto-init doctrine). The
+        // first verb on a fresh CWD (e.g. `hugit campaign open`) used to fail
+        // with `create lock .hugit/log.json.lock: No such file or directory`
+        // because `try_create` requires the parent to exist. The fix is
+        // best-effort: a subsequent `try_create` failure is the canonical
+        // signal of a real I/O error (permission denied, etc.), so silently
+        // ignoring the mkdir result is safe. Skipped if `target.parent()` is
+        // empty (a bare-filename target like `log.json` in CWD — `create_dir_all("")`
+        // returns NotFound on POSIX, so we skip).
+        if let Some(parent) = target.parent().filter(|p| !p.as_os_str().is_empty()) {
+            let _ = std::fs::create_dir_all(parent);
+        }
         let lock_path = lock_path_for(target);
         match Self::try_create(&lock_path) {
             Ok(()) => Ok(FileLock { lock_path }),
@@ -186,6 +198,13 @@ impl Drop for FileLock {
 /// most platforms refuse it), so the temp MUST share the target's filesystem.
 pub fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), LockError> {
     let dir = target.parent().unwrap_or_else(|| Path::new("."));
+    // PR-4: best-effort create the parent (skipped if `dir` is empty —
+    // `create_dir_all("")` returns NotFound on POSIX). The downstream
+    // `File::create` will surface a real I/O error if mkdir legitimately
+    // failed (e.g. permission denied).
+    if !dir.as_os_str().is_empty() {
+        let _ = std::fs::create_dir_all(dir);
+    }
     let file_name = target
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -299,6 +318,41 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
             .collect();
         assert!(leftovers.is_empty(), "temp files must be renamed away");
+    }
+
+    /// PR-4: atomic_write creates missing parent dirs (auto-init doctrine).
+    #[test]
+    fn atomic_write_creates_missing_parent_dirs() {
+        let dir = scratch("atomic-parent");
+        let target = dir.join("missing/deep/log.json");
+        // Parent dirs do NOT exist — atomic_write should create them.
+        atomic_write(&target, b"hello").unwrap();
+        assert!(target.exists());
+        assert_eq!(std::fs::read(&target).unwrap(), b"hello");
+    }
+
+    /// PR-4: FileLock::acquire creates missing parent dirs.
+    #[test]
+    fn file_lock_acquire_creates_missing_parent_dirs() {
+        let dir = scratch("lock-parent");
+        let target = dir.join("missing/deep/log.json");
+        // Parent dirs do NOT exist.
+        let _lock = FileLock::acquire(&target).unwrap();
+        assert!(dir.join("missing/deep").exists());
+    }
+
+    /// PR-4: bare-filename target (parent IS CWD-ish) does not trigger
+    /// `create_dir_all("")` which returns NotFound on POSIX; the filter
+    /// avoids that and the lock still works.
+    #[test]
+    fn file_lock_acquire_bare_filename_skips_empty_parent() {
+        let dir = scratch("lock-bare");
+        // Make the bare-filename target a sibling of an existing dir.
+        // The parent of "log.json" here is `dir`, which exists.
+        let target = dir.join("log.json");
+        let lock_path = target.with_file_name("log.json.lock");
+        let _lock = FileLock::acquire(&target).unwrap();
+        assert!(lock_path.exists(), "lock file must exist at <target>.lock");
     }
 
     #[test]
