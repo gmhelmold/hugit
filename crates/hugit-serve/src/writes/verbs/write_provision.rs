@@ -119,6 +119,16 @@ pub fn validate_name(name: &str) -> Result<(), EngineErr> {
     if name == "refs" || name == "oid-index" {
         return bad("\"refs\" e \"oid-index\" são nomes reservados");
     }
+    // PR-1b: forbid storing a `.git` suffix in the user-visible name. The
+    // engine normalizes to the bare form (see `normalize_repo_slug`); storing
+    // the suffixed form creates an orphaned key (`org-a/foo.git` distinct from
+    // the resolved `org-a/foo` the engine serves). Fail-closed: API must store
+    // the canonical bare form.
+    if name.ends_with(".git") {
+        return bad(
+            "o nome do repositório não pode terminar com \".git\" (sufixo reservado da convenção bare git; o slug servido é a forma canônica sem sufixo)",
+        );
+    }
     Ok(())
 }
 
@@ -533,6 +543,8 @@ mod tests {
             "UPPER",                 // uppercase not allowed
             "a b",                   // space
             "wat?",                  // punctuation
+            "foo.git",               // PR-1b: trailing .git forbidden (canonical bare form)
+            "foo.GIT",               // case-sensitive: still rejected
         ] {
             let e = validate_name(bad).expect_err("must reject");
             assert_eq!(e.status, 400, "{bad:?} → 400");

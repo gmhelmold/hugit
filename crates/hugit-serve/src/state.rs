@@ -1790,8 +1790,12 @@ impl AppState {
     /// single-segment git wire — the documented v0 limitation).
     #[must_use]
     pub fn resolve_repo_slug(&self, name: &str, principal: &[String]) -> String {
+        let name = normalize_repo_slug(name);
+        if name.is_empty() {
+            return String::new();
+        }
         if name.contains('/') {
-            return name.to_string();
+            return name;
         }
         if let Some(tenant) = tenant_org(principal) {
             let scoped = format!("{tenant}/{name}");
@@ -4992,6 +4996,32 @@ pub fn is_safe_repo_slug(repo: &str) -> bool {
     }
 }
 
+/// Normalize a repo slug: case-sensitive strip of exactly ONE trailing `.git`
+/// from a bare slug or the LEAF of a scoped `<owner>/<name>` slug. Central
+/// single source of truth so every entrypoint (boot GIT_DIR loop, runtime
+/// set_repo_git/insert_runtime_repo, resolve_repo_slug, validate_name
+/// provision) sees the same canonical form.
+///
+/// Cases (exhaustive — see test `normalize_repo_slug_cases`):
+/// - `"src"` → `"src"`
+/// - `"src.git"` → `"src"`
+/// - `"repo.git.git"` → `"repo.git"` (single strip, leaves second segment)
+/// - `"my.git-tools"` → `"my.git-tools"` (suffix-only)
+/// - `"src.GIT"` → `"src.GIT"` (case-sensitive, NOT stripped)
+/// - `".git"` → `""` (empty — caller rejects via is_safe_repo_slug)
+/// - `"a/b"` → `"a/b"` (owner normalized only if leaf ends with .git)
+/// - `"a/b.git"` → `"a/b"` (strip leaf)
+/// - `"a/b/c"` → `"a/b/c"` (only ONE split; multi-slash rejected by is_safe_repo_slug)
+#[must_use]
+pub fn normalize_repo_slug(slug: &str) -> String {
+    if let Some((owner, leaf)) = slug.split_once('/') {
+        let leaf = leaf.strip_suffix(".git").unwrap_or(leaf);
+        format!("{owner}/{leaf}")
+    } else {
+        slug.strip_suffix(".git").unwrap_or(slug).to_string()
+    }
+}
+
 /// Whether `account` is a safe account slug for the reserved `_accounts/{slug}` store
 /// key (GDPR1). STRICTER than [`is_safe_repo_slug`]: the Clerk-org shape `[a-z0-9-]`,
 /// 1..=64, NO dot (so a slug can never be `.`/`..` or embed a traversal), no path
@@ -5492,6 +5522,27 @@ mod tests {
         assert!(parse_git_dir_member("/srv/git/..").is_err());
         // An empty path is fail-closed.
         assert!(parse_git_dir_member("hugit=").is_err());
+    }
+
+    #[test]
+    fn normalize_repo_slug_cases() {
+        // Bare slugs
+        assert_eq!(normalize_repo_slug("src"), "src");
+        assert_eq!(normalize_repo_slug("src.git"), "src");
+        assert_eq!(normalize_repo_slug("repo.git.git"), "repo.git"); // single strip
+        assert_eq!(normalize_repo_slug("my.git-tools"), "my.git-tools"); // suffix-only
+        assert_eq!(normalize_repo_slug("src.GIT"), "src.GIT"); // case-sensitive
+        assert_eq!(normalize_repo_slug(".git"), ""); // empty → fail-closed
+        assert_eq!(normalize_repo_slug(""), ""); // empty stays empty
+        // Scoped slugs
+        assert_eq!(normalize_repo_slug("a/b"), "a/b");
+        assert_eq!(normalize_repo_slug("a/b.git"), "a/b");
+        assert_eq!(normalize_repo_slug("org-a/foo"), "org-a/foo");
+        assert_eq!(normalize_repo_slug("org-a/foo.git"), "org-a/foo");
+        assert_eq!(
+            normalize_repo_slug("org-a/my.git-tools"),
+            "org-a/my.git-tools"
+        );
     }
 
     // ── GIT_DIR loose-object fallback: clone-back of a freshly-pushed tip ──────
