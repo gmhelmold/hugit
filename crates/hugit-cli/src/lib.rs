@@ -207,9 +207,10 @@ pub const HUGIT_RESERVED_VERBS: &[&str] = &[
     // the canonical `--log` via `hugit_ledger::Ledger`; `fleet` + `watch`
     // graduated alongside it — `hugit_ledger::FleetState` / `WatchDisplay`;
     // `review` graduated — grounded-evidence Q&A over the log via `verdict::qa`.)
-    // (`undo`, `policy`, `approve`, `reject`, `journal` graduated to HUGIT_VERBS
-    // at W3 — stakeholder + session verbs, REAL-wired. `policy` ships `test` only;
-    // `policy edit` stays deferred.)
+    // (`undo`, `policy`, `verdict approve`, `verdict reject`, `note` graduated
+    // to HUGIT_VERBS at W3 — stakeholder + session verbs, REAL-wired. `policy`
+    // ships `test` only; `policy edit` stays deferred. `note` replaces the old
+    // `journal note` sub-verb.)
     "dispatch", // hugit dispatch <intent>  — workspace + context packet
 ];
 

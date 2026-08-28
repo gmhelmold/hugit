@@ -21,7 +21,10 @@ use crate::porcelain::PORCELAIN_ERROR_EXIT;
 /// A structured campaign error — emitted as `{"error":{...}}` JSON on stdout,
 /// the SAME canonical shape as [`crate::porcelain::PorcelainError`] (context
 /// folded flat, never under `detail`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// PR-5: `internal: bool` distinguishes a **bug-class** fault (exit 1) from a
+/// **user/domain** error (exit 2). Use [`CampaignError::internal_with_kind`]
+/// to flag an internal fault while keeping the wire `kind` stable.
+#[derive(Debug, Clone)]
 pub struct CampaignError {
     /// Stable machine kind (e.g. `"in_flight_prs"`, `"io"`, `"parse"`).
     kind: &'static str,
@@ -33,17 +36,65 @@ pub struct CampaignError {
     /// (e.g. `("path", …)`, `("in_flight", …)`) — matching the canonical
     /// [`crate::porcelain::PorcelainError`]. Insertion order preserved.
     context: Vec<(&'static str, Value)>,
+    /// PR-5: whether this is a bug-class internal fault (exit 1) vs a domain/user
+    /// error (exit 2). NOT in PartialEq — two errors with identical wire fields
+    /// compare equal regardless of this flag.
+    internal: bool,
 }
+
+// PR-5: hand-rolled PartialEq / Eq that ignore the `internal` flag.
+impl PartialEq for CampaignError {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind
+            && self.message == other.message
+            && self.fix == other.fix
+            && self.context == other.context
+    }
+}
+impl Eq for CampaignError {}
 
 impl CampaignError {
     /// A `kind` + `message` + suggested `fix` error, no extra context.
+    /// PR-5: domain (exit 2) by default.
     pub fn new(kind: &'static str, message: impl Into<String>, fix: impl Into<String>) -> Self {
         CampaignError {
             kind,
             message: message.into(),
             fix: fix.into(),
             context: Vec::new(),
+            internal: false,
         }
+    }
+
+    /// An internal fault (a bug, not bad input). `kind = "internal"`, exit 1.
+    pub fn internal(message: impl Into<String>, fix: impl Into<String>) -> Self {
+        CampaignError {
+            kind: "internal",
+            message: message.into(),
+            fix: fix.into(),
+            context: Vec::new(),
+            internal: true,
+        }
+    }
+
+    /// An internal fault while preserving the wire `kind`.
+    pub fn internal_with_kind(
+        kind: &'static str,
+        message: impl Into<String>,
+        fix: impl Into<String>,
+    ) -> Self {
+        CampaignError {
+            kind,
+            message: message.into(),
+            fix: fix.into(),
+            context: Vec::new(),
+            internal: true,
+        }
+    }
+
+    /// True iff this is a bug-class internal fault (exit 1).
+    pub fn is_internal(&self) -> bool {
+        self.internal
     }
 
     /// Fold a flat structured context key into the `error` object (e.g.
@@ -105,9 +156,15 @@ impl CampaignError {
         json!({ "error": error }).to_string()
     }
 
-    /// The process exit code for a structured error.
+    /// PR-5: exit code under the one exit-code law. `internal:true` (a bug-class
+    /// fault) returns `INTERNAL_FAULT_EXIT` (1); domain errors return
+    /// `PORCELAIN_ERROR_EXIT` (2).
     pub fn exit_code(&self) -> ExitCode {
-        ExitCode::from(PORCELAIN_ERROR_EXIT)
+        if self.internal {
+            ExitCode::from(crate::porcelain::INTERNAL_FAULT_EXIT)
+        } else {
+            ExitCode::from(PORCELAIN_ERROR_EXIT)
+        }
     }
 }
 
@@ -125,6 +182,22 @@ mod tests {
         // Uniformity: context is folded FLAT, never under a `detail` sub-object.
         assert!(v["error"].get("detail").is_none());
         assert!(v.get("kind").is_none(), "must be nested, never flat");
+        // PR-5: domain error → not internal.
+        assert!(!e.is_internal());
+    }
+
+    /// PR-5: internal fault → flag set, wire `kind` preserved via
+    /// `internal_with_kind`. Hand-rolled PartialEq ignores the flag.
+    #[test]
+    fn internal_fault_preserves_kind_and_equals_domain() {
+        let e = CampaignError::internal_with_kind("serialize", "boom", "report it");
+        assert!(e.is_internal());
+        let v: Value = serde_json::from_str(&e.to_json()).unwrap();
+        assert_eq!(v["error"]["kind"], "serialize");
+        assert_eq!(v["error"]["message"], "boom");
+        // Hand-rolled PartialEq ignores the `internal` flag (same wire = equal).
+        let same_domain = CampaignError::new("serialize", "boom", "report it");
+        assert_eq!(e, same_domain);
     }
 
     #[test]

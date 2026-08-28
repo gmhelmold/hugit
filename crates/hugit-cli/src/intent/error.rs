@@ -23,8 +23,11 @@ use super::store::StoreError;
 
 /// A structured, fix-carrying porcelain error emitted as one JSON object — the
 /// SAME canonical shape as [`crate::porcelain::PorcelainError`] (context folded
-/// flat, never under `detail`).
-#[derive(Debug, Clone, PartialEq)]
+/// flat, never under `detail`). PR-5: `internal: bool` distinguishes a
+/// bug-class internal fault (exit 1) from a user/domain error (exit 2). Hand-
+/// rolled `PartialEq` ignores it (the wire `to_json` is identical for both;
+/// the flag is a routing decision).
+#[derive(Debug, Clone)]
 pub struct PorcelainError {
     /// Machine-stable error class (e.g. `"invalid_argument"`, `"not_found"`).
     pub kind: String,
@@ -36,6 +39,17 @@ pub struct PorcelainError {
     /// — matching the canonical [`crate::porcelain::PorcelainError`]. Insertion
     /// order preserved.
     pub context: Vec<(&'static str, serde_json::Value)>,
+    /// PR-5: bug-class internal fault (exit 1) flag. NOT in `PartialEq`.
+    pub internal: bool,
+}
+
+impl PartialEq for PorcelainError {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind
+            && self.message == other.message
+            && self.fix == other.fix
+            && self.context == other.context
+    }
 }
 
 impl PorcelainError {
@@ -50,7 +64,26 @@ impl PorcelainError {
             message: message.into(),
             fix: fix.into(),
             context: Vec::new(),
+            internal: false,
         }
+    }
+
+    /// An internal fault (a bug, not bad input). `kind = "internal"`, exit 1.
+    /// Matches the porcelain signature (single `message` arg) — `fix` is set
+    /// to the canonical internal-fault remediation.
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self {
+            kind: "internal".into(),
+            message: message.into(),
+            fix: "this is an internal hugit bug; report it with the command + inputs".into(),
+            context: Vec::new(),
+            internal: true,
+        }
+    }
+
+    /// True iff this is a bug-class internal fault (exit 1).
+    pub fn is_internal(&self) -> bool {
+        self.internal
     }
 
     /// Fold a flat structured context key into the `error` object — the ONE
@@ -115,5 +148,16 @@ impl PorcelainError {
             &self.context,
         );
         format!(r#"{{"error":{inner}}}"#)
+    }
+
+    /// PR-5: exit code under the one exit-code law. `internal:true` (a bug-class
+    /// fault) returns `INTERNAL_FAULT_EXIT` (1); domain errors return
+    /// `PORCELAIN_ERROR_EXIT` (2).
+    pub fn exit_code(&self) -> std::process::ExitCode {
+        if self.internal {
+            std::process::ExitCode::from(crate::porcelain::INTERNAL_FAULT_EXIT)
+        } else {
+            std::process::ExitCode::from(crate::porcelain::PORCELAIN_ERROR_EXIT)
+        }
     }
 }

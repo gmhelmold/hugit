@@ -38,7 +38,6 @@ use std::process::ExitCode;
 
 use clap::Subcommand;
 
-use crate::porcelain::PORCELAIN_ERROR_EXIT;
 
 /// The default store path when `--store` is not given (local, hermetic).
 const DEFAULT_STORE: &str = ".hugit/intents.json";
@@ -174,12 +173,10 @@ fn print_ok<T: serde::Serialize>(result: &T) -> ExitCode {
             println!("{json}");
             ExitCode::SUCCESS
         }
-        // A serialisation failure of our own type is an internal fault.
-        Err(e) => print_err(&error::PorcelainError::new(
-            "internal",
-            format!("serialise result: {e}"),
-            "this is an internal bug; report it",
-        )),
+        // A serialisation failure of our own type is an internal fault (exit 1).
+        Err(e) => print_err(&error::PorcelainError::internal(format!(
+            "serialise result: {e}"
+        ))),
     }
 }
 
@@ -187,7 +184,8 @@ fn print_ok<T: serde::Serialize>(result: &T) -> ExitCode {
 /// structured-error exit code.
 fn print_err(e: &error::PorcelainError) -> ExitCode {
     println!("{}", e.to_json());
-    ExitCode::from(PORCELAIN_ERROR_EXIT)
+    // PR-5: respect the internal flag — bug-class faults exit 1, domain 2.
+    e.exit_code()
 }
 
 #[cfg(test)]
