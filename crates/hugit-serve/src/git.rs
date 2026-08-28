@@ -334,7 +334,8 @@ fn advertise_refs(state: &AppState, repo: &str, principal: &[String]) -> Option<
     let head_branch = pick_default_branch(&refs);
 
     let mut out = Vec::new();
-    pkt_line(&mut out, format!("# service={UPLOAD_PACK}\n").as_bytes());
+    pkt_line(&mut out, format!("# service={UPLOAD_PACK}\n").as_bytes())
+        .expect("constant pkt-line under 0xffff");
     pkt_flush(&mut out);
 
     // The FIRST advertised line carries the capability list after a NUL (v1
@@ -348,7 +349,8 @@ fn advertise_refs(state: &AppState, repo: &str, principal: &[String]) -> Option<
     {
         let mut line = format!("{tip} HEAD\0{ADVERTISED_CAPS} symref=HEAD:{branch}");
         line.push('\n');
-        pkt_line(&mut out, line.as_bytes());
+        pkt_line(&mut out, line.as_bytes())
+            .expect("HEAD advertise line bounded by tip(40)+HEAD+NULL+CAPS+symref<512 bytes");
         first = false;
     }
 
@@ -362,7 +364,8 @@ fn advertise_refs(state: &AppState, repo: &str, principal: &[String]) -> Option<
             first = false;
         }
         line.push('\n');
-        pkt_line(&mut out, line.as_bytes());
+        pkt_line(&mut out, line.as_bytes())
+            .expect("ref advertise line bounded by oid(40)+name(512)+newline");
     }
     pkt_flush(&mut out);
     Some(out)
@@ -487,7 +490,7 @@ fn prepare_upload_pack(
     // trailing caps as a bad oid — so we re-frame the body first, trimming each
     // `want`/`have` line to its leading oid token. The result is byte-clean
     // pkt-lines the proto parses faithfully.
-    let cleaned = strip_want_have_caps(body);
+    let cleaned = strip_want_have_caps(body).ok()?;
     let request = hugit_proto::WantHave::parse(&cleaned).ok()?;
 
     // Resolve the effective, OWNED request to hand the worker. A clone sends wants
@@ -558,7 +561,8 @@ fn build_upload_pack_bytes(
     // Smart-HTTP v1 upload-pack result: the NAK pkt-line (we run no multi-ack
     // negotiation — single round, "done"), then the raw packfile bytes.
     let mut out = Vec::new();
-    pkt_line(&mut out, b"NAK\n");
+    pkt_line(&mut out, b"NAK\n")
+        .expect("constant NAK under 0xffff");
     out.extend_from_slice(&pack.bytes);
     Some(out)
 }
@@ -591,14 +595,16 @@ fn build_shallow_pack_bytes(
     };
     let mut out = Vec::new();
     for oid in &boundary {
-        pkt_line(&mut out, format!("shallow {oid}\n").as_bytes());
+        pkt_line(&mut out, format!("shallow {oid}\n").as_bytes())
+            .expect("shallow line bounded: 'shallow '+40hex+'\\n' = 49 bytes");
     }
     pkt_flush(&mut out); // ends the shallow section (empty section = bare flush)
     // Gate the pack on `done`: a shallow request WITHOUT `done` is round-1 negotiation —
     // the client wants ONLY the boundary and will send `done` in round 2 for the pack.
     // Sending the pack now makes the client die on the follow-up round.
     if plan.done {
-        pkt_line(&mut out, b"NAK\n");
+        pkt_line(&mut out, b"NAK\n")
+            .expect("constant NAK under 0xffff");
         out.extend_from_slice(&pack.bytes);
     }
     Some(out)
@@ -676,7 +682,8 @@ fn serve_upload_pack_response(
                 // cached bytes are the raw packfile the walk would produce for this
                 // tip-set.
                 let mut out = Vec::with_capacity(8 + pack_bytes.len());
-                pkt_line(&mut out, b"NAK\n");
+                pkt_line(&mut out, b"NAK\n")
+                    .expect("constant NAK under 0xffff");
                 out.extend_from_slice(&pack_bytes);
                 let body_len = out.len();
                 let resp = Response::from_data(out)
@@ -935,7 +942,9 @@ fn git_refs_for(
 /// flush/delim/response-end markers, copied verbatim). A malformed/over-running
 /// length stops the walk (the caller then gets whatever was parsed — an empty
 /// `WantHave` at worst, which is treated as a full clone upstream).
-fn strip_want_have_caps(body: &[u8]) -> Vec<u8> {
+/// PR-3: returns `Result<Vec<u8>, PktTooLong>` so an oversized want/have line
+/// (attacker-controlled) maps to 400 Bad Request rather than 404.
+fn strip_want_have_caps(body: &[u8]) -> Result<Vec<u8>, crate::receive_wire::PktTooLong> {
     let mut out = Vec::with_capacity(body.len());
     let mut i = 0;
     while i + 4 <= body.len() {
@@ -961,14 +970,16 @@ fn strip_want_have_caps(body: &[u8]) -> Vec<u8> {
         // Trim a want/have line to `<verb> <oid>\n`; everything else verbatim.
         let trimmed = trim_oid_line(payload, b"want ").or_else(|| trim_oid_line(payload, b"have "));
         match trimmed {
-            Some(clean) => pkt_line(&mut out, &clean),
+            // PR-3: propagate oversize so the caller returns 400 instead of
+            // emitting a 5-digit-hex corrupt frame.
+            Some(clean) => pkt_line(&mut out, &clean)?,
             None => {
                 out.extend_from_slice(len_hex);
                 out.extend_from_slice(payload);
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// If `payload` starts with `verb` (e.g. `b"want "`), return `<verb><oid>\n` with
@@ -999,15 +1010,17 @@ fn query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
 /// Append one pkt-line: a 4-hex big-endian length prefix (length INCLUDES the 4
 /// prefix bytes) followed by `data`. This is git's pkt-line framing; no library
 /// needed for the trivial encode direction (the proto owns decode of want/have).
-fn pkt_line(out: &mut Vec<u8>, data: &[u8]) {
+/// PR-3: returns `Result<(), PktTooLong>` so the caller (`strip_want_have_caps`)
+/// can return 400 on a malicious oversized `want` line instead of emitting a
+/// 5-digit-hex corrupt frame (the debug_assert was release-noop = silent wire break).
+pub(super) fn pkt_line(out: &mut Vec<u8>, data: &[u8]) -> Result<(), crate::receive_wire::PktTooLong> {
     let len = data.len() + 4;
-    // pkt-line length is a 16-bit field; a single git ref/line is far under 65516.
-    debug_assert!(
-        len <= 0xffff,
-        "pkt-line payload exceeds the 65516-byte limit"
-    );
+    if len > 0xffff {
+        return Err(crate::receive_wire::PktTooLong);
+    }
     out.extend_from_slice(format!("{len:04x}").as_bytes());
     out.extend_from_slice(data);
+    Ok(())
 }
 
 /// Append a flush packet (`0000`).
@@ -1080,7 +1093,8 @@ fn handle_receive_advertise(state: &AppState, repo: &str, request: Request, io_b
     }
 
     let mut out = Vec::new();
-    pkt_line(&mut out, b"# service=git-receive-pack\n");
+    pkt_line(&mut out, b"# service=git-receive-pack\n")
+        .expect("constant service line under 0xffff");
     pkt_flush(&mut out);
     let mut first = true;
     // A snapshot of the LIVE refs (a prior CAS push in this lifetime is reflected).
@@ -1088,7 +1102,8 @@ fn handle_receive_advertise(state: &AppState, repo: &str, request: Request, io_b
     if refs.is_empty() {
         // No refs yet: the zero-id capabilities line (so the client can still create).
         let line = format!("{} capabilities^{{}}\0{RECEIVE_CAPS}\n", "0".repeat(40));
-        pkt_line(&mut out, line.as_bytes());
+        pkt_line(&mut out, line.as_bytes())
+            .expect("zero-id capabilities line bounded by 40+CAPS<200");
     } else {
         for (name, oid) in &refs {
             let mut line = format!("{oid} {name}");
@@ -1098,7 +1113,8 @@ fn handle_receive_advertise(state: &AppState, repo: &str, request: Request, io_b
                 first = false;
             }
             line.push('\n');
-            pkt_line(&mut out, line.as_bytes());
+            pkt_line(&mut out, line.as_bytes())
+                .expect("receive advertise line bounded by oid(40)+name(512)+NUL+CAPS+newline");
         }
     }
     pkt_flush(&mut out);
