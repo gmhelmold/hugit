@@ -1,4 +1,4 @@
-//! `hugit journal note --log <path> --note <text> [--principal <p>] [--workspace
+//! `hugit note --log <path> --note <text> [--principal <p>] [--workspace
 //! <id>] [--intent <id>]` — append a session note onto the canonical event log.
 //!
 //! Mirrors the `issue.transition` write path exactly (the freshly-merged
@@ -35,7 +35,7 @@ use crate::porcelain::scrub_to_canonical;
 /// The event kind this verb appends.
 pub const JOURNAL_NOTE_KIND: &str = "journal.note";
 
-/// Arguments for `hugit journal note`.
+/// Arguments for `hugit note`.
 #[derive(clap::Args, Debug)]
 pub struct NoteArgs {
     /// Path to the JSON event log. Defaults to $HUGIT_LOG, else .hugit/log.json.
@@ -60,7 +60,7 @@ pub struct NoteArgs {
     pub intent: Option<String>,
 }
 
-/// Run `hugit journal note` — append a `journal.note` record, exit 0 on success
+/// Run `hugit note` — append a `journal.note` record, exit 0 on success
 /// or exit 2 on a structured domain error.
 pub fn run(args: NoteArgs) -> ExitCode {
     match do_run(args) {

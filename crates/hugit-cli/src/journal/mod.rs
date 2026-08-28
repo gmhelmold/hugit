@@ -1,6 +1,6 @@
 //! `hugit journal` — session journal.
 //!
-//! Ships `note` (`hugit journal note --log <path> --note <text> [--principal <p>]
+//! Ships `note` (`hugit note --log <path> --note <text> [--principal <p>]
 //! [--workspace <id>] [--intent <id>]`), which appends a `journal.note` record
 //! onto the CANONICAL `--log` (the same `[EventRecord, …]` hash chain every
 //! porcelain verb writes through) — NOT a separate journal file. One source of
