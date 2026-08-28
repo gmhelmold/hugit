@@ -735,17 +735,20 @@ mod tests {
     #[test]
     fn persist_log_io_fault_emits_structured_io_error_exit_2() {
         use std::process::ExitCode;
-        // Point the log path at a non-existent directory so the atomic write
-        // (temp-then-rename) cannot create the temp file.
-        let non_existent_dir = std::env::temp_dir().join(format!(
-            "hugit-ro-dir-{}-{}-nonexistent",
+        // PR-4 auto-creates missing parent dirs, so a non-existent dir is no
+        // longer a fault. Use a path where the PARENT is a file (not a dir) —
+        // the temp-then-rename inside atomic_write cannot create a child of a
+        // non-directory.
+        let parent_file = std::env::temp_dir().join(format!(
+            "hugit-persist-io-fault-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.subsec_nanos())
                 .unwrap_or(0)
         ));
-        let log_path = non_existent_dir.join("log.json");
+        std::fs::write(&parent_file, b"i am a file, not a dir").unwrap();
+        let log_path = parent_file.join("log.json"); // child of a file — IO err
 
         let log = EventLog::new();
         let exit = persist_log(&log_path, &log);

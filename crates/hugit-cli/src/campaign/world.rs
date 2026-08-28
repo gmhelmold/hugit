@@ -745,7 +745,7 @@ pub fn append_authorized_and_persist(
 /// [`persist_log`] caller relies on the atomic write alone for truncation-safety.
 pub fn persist_log(path: &Path, log: &EventLog) -> Result<(), CampaignError> {
     let bytes = serde_json::to_vec_pretty(log.records()).map_err(|e| {
-        CampaignError::new(
+        CampaignError::internal_with_kind(
             "serialize",
             format!("could not serialise the event log: {e}"),
             "this is an internal error — report it",
