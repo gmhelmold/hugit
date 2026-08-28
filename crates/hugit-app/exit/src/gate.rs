@@ -77,6 +77,15 @@ impl MoneyGate {
     ///
     /// Any other combination → `Block(reason)`.
     pub fn evaluate(&self, report: &ExitReport) -> MoneyGateDecision {
+        // PR-8: verify the report's body_digest (and attestation if set)
+        // BEFORE honoring it — a hand-built `Pass` literal with a fabricated
+        // digest is caught here, fail-closed. In-process callers use
+        // `corpus_seal=""`; the deploy path threads the cohort corpus seal.
+        if let Err(e) = report.verify("") {
+            return MoneyGateDecision::Block(format!(
+                "exit report forge check failed: {e:?} — billing blocked (fail closed)"
+            ));
+        }
         // DEGRADED evaluator → fail closed (treat as insufficient).
         if self.evaluator_state == GateEvaluatorState::Degraded {
             return MoneyGateDecision::Block(

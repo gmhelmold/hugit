@@ -1,6 +1,6 @@
 //! Acceptance — `hugit ctx resume` (D11 short-horizon session resume).
 //!
-//! Drives the REAL binary end-to-end: `hugit journal note` WRITES the records,
+//! Drives the REAL binary end-to-end: `hugit note` WRITES the records,
 //! `hugit ctx resume` READS them back — proving the scrubbed-binding join works
 //! across the writer→reader seam. Pins: within-horizon reconstruction, the
 //! documented `beyond_horizon` / `empty_journal` refusals (never a silent stale
@@ -32,7 +32,7 @@ fn run(args: &[&str]) -> (i32, Value) {
     (out.status.code().unwrap_or(-1), v)
 }
 
-/// Seed an empty canonical log (the bootstrap a `journal note` requires).
+/// Seed an empty canonical log (the bootstrap a `note` requires).
 fn empty_log(path: &Path) {
     std::fs::write(path, "[]").unwrap();
 }
@@ -50,7 +50,7 @@ fn note(log: &str, note: &str, ws: &str, intent: &str) {
         "--intent",
         intent,
     ]);
-    assert_eq!(code, 0, "journal note must succeed: {v}");
+    assert_eq!(code, 0, "note must succeed: {v}");
 }
 
 #[test]

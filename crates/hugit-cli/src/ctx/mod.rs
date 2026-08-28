@@ -14,7 +14,7 @@
 //! [`crate::porcelain`] envelopes (exit 2), never a fabricated context.
 //!
 //! # The scrubbed-binding join (the silent-miss guard)
-//! `hugit journal note` scrubs `workspace_id`/`intent_id` through
+//! `hugit note` scrubs `workspace_id`/`intent_id` through
 //! [`crate::redaction::scrub`] BEFORE they land on the forever-log, so the stored
 //! binding is the SCRUBBED form. This verb scrubs the caller's `--workspace` /
 //! `--intent` the SAME way before matching — otherwise a secret-shaped binding
@@ -22,7 +22,7 @@
 //! silently reconstruct nothing.
 //!
 //! # The time base (`--now-ms`) — an honest caveat
-//! The horizon is `now_ms − last_note_recorded_at`. `hugit journal note` writes
+//! The horizon is `now_ms − last_note_recorded_at`. `hugit note` writes
 //! its records with `recorded_at = 0` (the canonical forever-log is
 //! clock-untrusted — time is not part of the content address), so against a
 //! LOCALLY-written log the wall-clock default for `--now-ms` (~1.7e12 ms) is
@@ -185,7 +185,7 @@ fn resume_error(e: ResumeError) -> PorcelainError {
             "empty_journal",
             "no journal.note entries match this workspace/intent binding on the log",
             "check --workspace/--intent match a recorded journal.note (record one with \
-             `hugit journal note --workspace … --intent …`)",
+             `hugit note --workspace … --intent …`)",
         ),
         ResumeError::BeyondHorizon { age_ms, horizon_ms } => PorcelainError::new(
             "beyond_horizon",

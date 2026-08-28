@@ -41,8 +41,8 @@ the hugit repo itself. The rest is honest about where it stands:
 | Capability | Status | What you get today |
 |---|---|---|
 | `hugit symbol` — symbol outline | **LIVE** | `hugit symbol --file <path>` against any TS/JS/Python/Go/Java/C/C++/Ruby file |
-| `hugit export` — exit guarantee | **LIVE** | full git + JSON snapshot; run `hugit export` from any repo; zero dependencies |
-| `hugit import` — bring your repo | **LIVE** | `hugit import` pulls a GitHub repo into the forge without leaving GitHub |
+| `hugit export` — exit guarantee | **LIVE** | full git + JSON snapshot; requires `--log <path> --out <dir>`; zero dependencies |
+| `hugit import` — bring your repo | **ROADMAP** | reserved verb (`hugit import` is not in the CLI surface yet); tracked for the next wave. |
 | `/v1` read+write API | **LIVE (2 repos)** | multi-repo (`hugit` + `githugr`); 11/20 reads serve chain-verified data; 9 POST verbs CAS-persisted + authz-gated; SSE replay |
 | `hugit check` / `hugit verdict` | **LIVE** | real policy-engine EXECUTE paths; `hugit policy test` runs local≡forge |
 | `hugit verdict approve` / `hugit verdict reject` | **LIVE** | single-lens wrappers over the canonical verdict record |
@@ -84,9 +84,9 @@ hugit's answer is three properties working together:
    the waste; hugit deletes it.
 
 3. **Intent + context versioning.** Every commit carries the charter that
-   produced it, the model and cost that executed it, and the claims that
-   bounded its blast radius. `git log` shows you the diff; `hugit log` shows
-   you the intent. Same store, two altitudes, always consistent.
+    produced it, the model and cost that executed it, and the claims that
+    bounded its blast radius. `git log` shows you the diff; `hugit ledger` shows
+    you the intent. Same store, two altitudes, always consistent.
 
 ---
 
@@ -95,8 +95,8 @@ hugit's answer is three properties working together:
 These are real today, not roadmap:
 
 - **Event-sourced refs** — every ref mutation is an append-only log event.
-  `hugit undo` walks it backwards with a compensating event. Refs cannot be
-  force-pushed to oblivion. Data loss is structurally unexpressible.
+  `hugit undo --seq <N>` walks it backwards with a compensating event. Refs
+  cannot be force-pushed to oblivion. Data loss is structurally unexpressible.
 - **Claim fences** — a workspace materializes only the paths the intent
   declared. Writing outside the claim is physically impossible (the file is not
   present), not merely forbidden by policy.
@@ -114,7 +114,7 @@ These are real today, not roadmap:
 ## The exit guarantee
 
 ```sh
-hugit export
+hugit export --log .hugit/log.json --out <dir>
 ```
 
 Produces a full git bundle + JSON proof of every intent, verdict, and claim.
@@ -126,7 +126,8 @@ the exit proof is also the disaster-recovery plan.
 ## Bring your existing repo
 
 ```sh
-hugit import <github-org>/<repo>
+# hugit import is reserved/ROADMAP (PR-7): see status table above
+# hugit import <github-org>/<repo>
 ```
 
 Your GitHub repo stays where it is. hugit attaches without migration. The
@@ -163,16 +164,17 @@ For GitHub to match hugit's economics it must destroy its own P&L.
 hugit symbol --file src/main.rs
 
 # Export the repo as a portable proof bundle
-hugit export
+hugit export --log .hugit/log.json --out <dir>
 
-# Show the intent log (forge-connected)
-hugit log
+# Show the intent log (forge-connected; `hugit log` is not a verb — use
+# `hugit ledger --log .hugit/log.json`)
+hugit ledger --log .hugit/log.json
 
 # Run local policy check (forge-identical)
 hugit policy test
 
-# Undo the last event-sourced operation
-hugit undo
+# Undo the last event-sourced operation (requires --seq <N>)
+hugit undo --seq <N>
 ```
 
 See `hugit --help` and [`docs/product/command-catalog.md`](docs/product/command-catalog.md)

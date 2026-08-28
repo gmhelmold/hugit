@@ -77,7 +77,7 @@ adversarial round (1–13) + a SOTA sweep. The integrity spine is genuinely soli
   (the CoreLink exchange endpoint is live), gated on the deploy env (`HUGIT_SESSION_EXCHANGE_URL`)
   + a stale deployed image + `hugit-prod-d1`.
 - **Symbol outline IS wired** (W6, #161 + follow-up): `hugit_symbols::outline_blob`
-  is called from `blob.rs:80` (`compute_outline`) and the `hugit symbol --file` CLI
+  is called from `handlers/blob.rs:181` (`compute_outline`) and the `hugit symbol --file` CLI
   verb is real. The `hugit-symbols` tree-sitter crate supports TS/JS/Python/Go/Java/C/C++/Ruby.
 - **Still reserved-unimplemented CLI verbs:** `ws`/`dispatch` only — P2/transferred
   (workspace exec core → `corelink-runners`; need the runner fabric). `ctx resume` +
@@ -90,9 +90,10 @@ adversarial round (1–13) + a SOTA sweep. The integrity spine is genuinely soli
 **Update 2026-06-18 (W3 + W5 landed — built, gate-green on `main`; live-serving still
 deploy-gated):** five reserved CLI verbs graduated to REAL (no stubs): `hugit undo`
 (event-sourced compensating undo, D14 Human-only — #145), `hugit policy test` (runs the
-real `Engine::house()`, local≡forge — #145), `hugit approve`/`hugit reject` (single-lens
-wrappers over `verdict::record`, serve-parity — #146), `hugit journal note` (appends a
-`journal.note` record to the canonical log — #146). File-content reads went REAL (PS-18
+real `Engine::house()`, local≡forge — #145), `hugit verdict approve`/`hugit verdict reject`
+(single-lens wrappers over `verdict::record`, serve-parity — #146), `hugit note` (appends a
+`journal.note` record to the canonical log — the verb is top-level `note`, not
+`journal note`; #146). File-content reads went REAL (PS-18
 reversed): `hugit_proto::resolve_blob_at_path` (path→blob git tree-walk, traversal-safe —
 #147) + `GET /v1/repos/{repo}/blob|edit/{*path}` serve actual file bytes, secret-scrubbed
 on read, 404-no-oracle, fail-closed boot loader (#148). **All hermetically tested; blob/edit
@@ -235,11 +236,11 @@ status table + tracked seams: the audit doc above.
 
 **Gate + CI:** `main` green by the local gate (fmt + clippy `--workspace --all-targets
 --locked -D warnings` + test `--workspace --locked` + `cargo deny`) AND runner-verified
-per code push (docs-only pushes skip CI via `paths-ignore`). **CI runner: SELF-HOSTED macOS
-again (`hugit-builder-01`, #219, 2026-06-29)** — switched back from GitHub-hosted ubuntu when
-the hosted pool entered a sustained outage (jobs completing-failure with ZERO steps). It runs
-on THIS dev box (start it: `cd ~/actions-runner-hugit && nohup ./run.sh &`), so the
-runner-is-local-machine rule applies: **don't run local `cargo` —esp. `--workspace`— while a
+per code push (docs-only pushes skip CI via `paths-ignore`). **CI runner: GitHub-hosted
+ubuntu-latest** (re-migrated 2026-07-09 — see `crates/hugit-app/Cargo.toml` CI history).
+The 2026-06-29 self-hosted macOS revert was a transient hosted-pool outage, now past.
+If the hosted pool outages again (jobs completing-failure with ZERO steps), revert
+one line in `.github/workflows/ci.yml:65` to `[self-hosted, macOS]`.
 PR's CI is in-flight** (it starves the runner). A hosted-runner failure with empty failed-steps
 is infra, not code. A `conformance/manifest.sha256` change must run the full-workspace
 `hugit-invariants/x4` validator, not just the touched crate (it pins the exact VECTORS set +

@@ -351,7 +351,7 @@ intents de claims disjuntas pousam em lanes paralelas</pre>
     <ol class="flow">
       <li>O <b>orchestrator</b> planeja a wave e <b>declara claims</b> (os paths/targets de cada intent). Claims que se cruzam ⇒ o planner re-slice ou serializa <i>antes</i> de começar.</li>
       <li>Faz <b>dispatch</b> do intent pro agente num <b>workspace fenced</b> (materializa só as claims; escrever fora é fisicamente impossível).</li>
-      <li>O agente trabalha. Salva o raciocínio com <code>ctx snap</code> / <code>journal note</code>, roda <code>hugit check</code> local (memoizado, byte-idêntico ao do forge).</li>
+      <li>O agente trabalha. Salva o raciocínio com <code>ctx snap</code> / <code>note</code>, roda <code>hugit check</code> local (memoizado, byte-idêntico ao do forge).</li>
       <li><code>hugit intent seal</code> — <b>o único verbo de cerimônia.</b> Anexa diff + evidência + o context snapshot. Daqui pra frente é tudo o sistema.</li>
       <li><b>Verdicts</b>: painéis de reviewers adversariais (máquina) + o humano <b>interroga</b> a mudança (<code>hugit review</code>) — em vez de ler linha por linha.</li>
       <li>A <b>fila de landing</b> testa o intent <i>em union</i> com os outros (só a novidade executa; o resto é cache-hit). Verde ⇒ pousa atômico.</li>
@@ -413,7 +413,7 @@ intents de claims disjuntas pousam em lanes paralelas</pre>
         <tr><td><code>hugit ws spawn/attach/snap/gc</code></td><td>workspaces fenced por claim</td><td>C · <span class="reserved">reservado</span></td></tr>
         <tr><td><code>hugit ctx snap / resume</code></td><td>snapshot/resume de contexto curto-horizonte</td><td>D · <span class="reserved">reservado</span></td></tr>
         <tr><td><code>hugit intent seal</code></td><td><b>o único verbo de cerimônia</b></td><td>D · <span class="reserved">reservado</span></td></tr>
-        <tr><td><code>hugit journal note</code></td><td>o entendimento sobrevive à sessão</td><td>D · <span class="reserved">reservado</span></td></tr>
+        <tr><td><code>hugit note</code></td><td>o entendimento sobrevive à sessão</td><td>D · <span class="reserved">reservado</span></td></tr>
         <tr><td><code>hugit export</code></td><td>dump anti-lock-in + prova de saída</td><td>D · <span class="live">live</span></td></tr>
       </tbody>
     </table>

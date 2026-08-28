@@ -128,3 +128,6 @@ Workflows that fail the determinism precondition return
 | Version | Change |
 |---|---|
 | v0 (WP-E4) | Initial published contract — 15 features, proven-to-execute by acceptance_e4 |
+
+
+> **Note (2026-06-10):** The runner crate (`hugit-runner`) was transferred to `../corelink-runners` per CLAUDE.md. References in this doc are historical.

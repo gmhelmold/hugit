@@ -62,7 +62,10 @@ version = "0.3"
 name = "r-efi"
 version = "5"
 
-# windows-sys: broad ecosystem split between 0.52/0.59 and 0.61.
+# windows-sys: broad ecosystem split between 0.52/0.59 and 0.61. PR-7:
+# KEEP the 0.59 skip dormant (no current transitive 0.59 in Cargo.lock) to
+# avoid `cargo update` reintroducing it and breaking the deny gate; document
+# the dormancy here.
 [[bans.skip]]
 name = "windows-sys"
 version = "0.52"

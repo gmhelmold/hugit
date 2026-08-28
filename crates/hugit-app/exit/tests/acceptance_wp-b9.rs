@@ -484,3 +484,55 @@ fn item_6_money_gate_blocks_billing_until_pass() {
     assert!(event.payload.contains("PASS"), "payload must contain PASS");
     assert!(event.recorded_at > 0, "event must have a timestamp");
 }
+
+// ─── PR-8: forge-check — a hand-built `Pass` literal without a matching
+// body_digest is fail-closed at the gate (Block, not Allow).
+#[test]
+fn pr8_forged_pass_literal_is_blocked_by_body_digest_check() {
+    use hugit_app_exit::report::ExitReport;
+    use hugit_app_exit::retention::RetentionMetrics;
+    // A report built by hand, with status=Pass and a deliberately WRONG
+    // body_digest. The gate's evaluate() must verify BEFORE honoring and
+    // return Block(forge check failed). This is the regression for the
+    // "field is private but a hand literal still passes" failure mode.
+    let hand = ExitReport {
+        status: ExitReportStatus::Pass,
+        team_count: 5,
+        min_weeks_real_use: 3,
+        days_since_anchor: Some(30),
+        cohort_guard: CohortGuardResult::Satisfied,
+        retention_rate: Some(0.5),
+        retention_result: RetentionResult::Pass {
+            metrics: RetentionMetrics {
+                total_installs_at_week3: 10,
+                active_at_week3: 5,
+                retention_rate: Some(0.5),
+            },
+        },
+        unprompted_count: 3,
+        total_signals: 3,
+        body_digest: "0".repeat(64), // WRONG — a real report would have a real SHA-256
+        attestation: None,
+    };
+    let gate = MoneyGate::new();
+    let decision = gate.evaluate(&hand);
+    assert!(!decision.is_allow(), "forged digest must Block, got {:?}", decision);
+    let s = format!("{:?}", decision);
+    assert!(s.contains("forge check failed"), "expected forge check, got: {s}");
+}
+
+// ─── PR-8: a generated Pass report carries a valid body_digest and verify() passes.
+#[test]
+fn pr8_generated_pass_report_passes_own_verify() {
+    let pass_report = generate_report(
+        &valid_cohort(),
+        &events_full_retention(),
+        &three_unprompted(),
+    );
+    assert!(!pass_report.body_digest.is_empty(), "body_digest must be set");
+    assert!(
+        pass_report.verify("").is_ok(),
+        "generated report's body_digest must verify against empty corpus_seal; got {:?}",
+        pass_report.verify("")
+    );
+}
