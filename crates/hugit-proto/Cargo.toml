@@ -18,6 +18,12 @@ gix-hash = "0.22"
 gix-object = "0.55"
 gix-pack = "0.65"
 gix-packetline = { version = "0.21", features = ["blocking-io"] }
+# PR-2: BUG-2 LCS DoS guard. Pre-alloc-free line count via memchr (avoids 15.6MB
+# Vec of &str slices per blob before the cap check). memchr >= 2.7 is present
+# transitively today (via bstr/gix-*); the version floor prevents older
+# transitive resolution. `multiple-versions = "deny"` in deny.toml pins the
+# upper bound to 2.x — floor matches what the lock already has.
+memchr = "2.8"
 thiserror = { workspace = true }
 # zlib inflate for the push WRITE path: a received git object's verbatim on-disk
 # loose bytes are zlib-compressed; the CoreLink CAS stores the UNCOMPRESSED
