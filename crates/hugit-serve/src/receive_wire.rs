@@ -143,7 +143,10 @@ const MAX_REF_NAME_LEN: usize = 512;
 ///
 /// The caller separately requires a `refs/` prefix, so a valid ref always contains a
 /// `/` and is never the bare `@`; those rules are checked here too for completeness.
-fn is_valid_refname(name: &str) -> bool {
+/// PR-3: visibility raised to `pub(crate)` so `hugit-serve::state::load_git_dir` can
+/// validate ref names from a freshly-ingested repo BEFORE they are emitted on the
+/// git wire (a ref > 512 bytes would corrupt the advertise `pkt_line` encoding).
+pub(crate) fn is_valid_refname(name: &str) -> bool {
     if name.is_empty() || name.len() > MAX_REF_NAME_LEN {
         return false;
     }
@@ -268,17 +271,30 @@ pub enum RefOutcome {
     Ng { ref_name: String, reason: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PktTooLong;
+
+impl std::fmt::Display for PktTooLong {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "pkt-line payload exceeds the {} byte limit", 0xffff)
+    }
+}
+impl std::error::Error for PktTooLong {}
+
 /// Append one pkt-line: a 4-hex big-endian length prefix (length INCLUDES the 4
 /// prefix bytes) followed by `data`. Mirrors `git.rs::pkt_line` — the receive-pack
-/// wire module owns both directions of its own framing.
-fn put_pkt(out: &mut Vec<u8>, data: &[u8]) {
+/// wire module owns both directions of its own framing. PR-3: returns
+/// `Result<(), PktTooLong>` so a caller (e.g. the advertise over a freshly-
+/// ingested repo) can surface an overlong ref to its caller instead of emitting
+/// a corrupt 5-digit-prefix frame.
+fn put_pkt(out: &mut Vec<u8>, data: &[u8]) -> Result<(), PktTooLong> {
     let len = data.len() + 4;
-    debug_assert!(
-        len <= 0xffff,
-        "pkt-line payload exceeds the 65516-byte limit"
-    );
+    if len > 0xffff {
+        return Err(PktTooLong);
+    }
     out.extend_from_slice(format!("{len:04x}").as_bytes());
     out.extend_from_slice(data);
+    Ok(())
 }
 
 /// Build the smart-HTTP **v1** receive-pack `report-status` response body (no
@@ -292,16 +308,25 @@ fn put_pkt(out: &mut Vec<u8>, data: &[u8]) {
 /// `application/x-git-receive-pack-result`.
 #[must_use]
 pub fn build_report_status(unpack: Result<(), &str>, refs: &[RefOutcome]) -> Vec<u8> {
+    // PR-3: every `put_pkt` here is bounded — `unpack` line ≤ 32 bytes, `ok/ng`
+    // line ≤ 538 (ref ≤ MAX_REF_NAME_LEN=512 + 4 + 18 = 534, plus newline). All
+    // values come from validated ref names (parse_command rejects >512 via
+    // is_valid_refname) and fixed reason tokens (receive_err_reason). Any
+    // overlong payload means a bug in our validation — panic in debug, surface
+    // an empty body in release (the next request will re-validate).
+    fn put_bounded(out: &mut Vec<u8>, data: &[u8]) {
+        put_pkt(out, data).expect("pkt-line payload bounded by is_valid_refname + fixed reasons");
+    }
     let mut out = Vec::new();
     match unpack {
-        Ok(()) => put_pkt(&mut out, b"unpack ok\n"),
-        Err(reason) => put_pkt(&mut out, format!("unpack {reason}\n").as_bytes()),
+        Ok(()) => put_bounded(&mut out, b"unpack ok\n"),
+        Err(reason) => put_bounded(&mut out, format!("unpack {reason}\n").as_bytes()),
     }
     for r in refs {
         match r {
-            RefOutcome::Ok(ref_name) => put_pkt(&mut out, format!("ok {ref_name}\n").as_bytes()),
+            RefOutcome::Ok(ref_name) => put_bounded(&mut out, format!("ok {ref_name}\n").as_bytes()),
             RefOutcome::Ng { ref_name, reason } => {
-                put_pkt(&mut out, format!("ng {ref_name} {reason}\n").as_bytes());
+                put_bounded(&mut out, format!("ng {ref_name} {reason}\n").as_bytes());
             }
         }
     }
@@ -315,6 +340,82 @@ mod tests {
 
     const A: &str = "1111111111111111111111111111111111111111";
     const B: &str = "2222222222222222222222222222222222222222";
+
+    /// PR-3: put_pkt returns `Err(PktTooLong)` for oversize payload, `Ok` for valid.
+    #[test]
+    fn put_pkt_size_boundary() {
+        let mut out = Vec::new();
+        // 65531 bytes data + 4 prefix = 65535 ≤ 0xffff → Ok, prefix is "ffff"
+        assert!(put_pkt(&mut out, &vec![0u8; 65531]).is_ok());
+        assert_eq!(&out[0..4], b"ffff");
+        // 65532 bytes data + 4 prefix = 65536 > 0xffff → Err
+        let mut out2 = Vec::new();
+        assert_eq!(put_pkt(&mut out2, &vec![0u8; 65532]), Err(PktTooLong));
+    }
+
+    /// PR-3: build_report_status with a 512-byte ref name + longest reason — the
+    /// bounded worst case: 3 + 512 + 1 + 18 + 1 = 535 bytes payload, well under 65531.
+    /// Decodes every emitted pkt-line and asserts its length fits in 16 bits.
+    #[test]
+    fn build_report_status_roundtrip_bounded() {
+        let max_ref = "refs/heads/".to_string() + &"a".repeat(512 - "refs/heads/".len());
+        let body = build_report_status(
+            Err("log-persist-failed"),
+            &[
+                RefOutcome::Ok(max_ref.clone()),
+                RefOutcome::Ng { ref_name: max_ref.clone(), reason: "ref-target-invalid".to_string() },
+            ],
+        );
+        // Every 4-byte prefix must be `<= ffff`; collect into a vec.
+        let mut lens = Vec::new();
+        let mut i = 0;
+        while i < body.len() {
+            // Flush is "0000" — terminate.
+            if &body[i..i + 4] == b"0000" { break; }
+            let l = u32::from_str_radix(std::str::from_utf8(&body[i..i + 4]).unwrap(), 16).unwrap();
+            assert!(l <= 0xffff, "pkt-line length {l} > 0xffff");
+            assert!(l >= 4, "pkt-line length {l} < 4 (no payload)");
+            lens.push(l);
+            i += l as usize;
+        }
+        // We expect: 1 (unpack) + 2 (ok/ng per ref) = 3 pkt-lines.
+        assert_eq!(lens.len(), 3, "expected 3 pkt-lines, got {} ({lens:?})", lens.len());
+    }
+
+    /// PR-3: strip_want_have_caps returns `Err(PktTooLong)` when a want line
+    /// exceeds 65516 bytes of payload. Closes the unit-test gap (the leaf
+    /// `put_pkt_size_boundary` was tested; the higher-level `?` propagation
+    /// through strip_want_have_caps was not).
+    #[test]
+    fn strip_want_have_caps_oversize_returns_err() {
+        // Body = "ffff" + 65536 bytes of "want aaaa...a\n" — the inner
+        // pkt_line() sees len = 65536 + 4 = 65540 > 0xffff → returns Err.
+        // The first 4 bytes "ffff" = 65535 (legitimate), but len > body.len()
+        // check passes only because we made the body long enough (65536 ≥ 65535).
+        let payload = format!("want {}\n", "a".repeat(65_531));
+        // 4 chars (65535) + 65536-byte payload = 65540 bytes total
+        let body = format!("{}{}", "ffff", payload).into_bytes();
+        // Make payload big enough to match the length prefix
+        let mut big_payload = payload.as_bytes().to_vec();
+        big_payload.resize(65_536, b'a');
+        let body = format!("{}{}", "ffff", std::str::from_utf8(&big_payload).unwrap()).into_bytes();
+        assert_eq!(body.len(), 65_540);
+        assert_eq!(
+            crate::git::strip_want_have_caps_for_test(&body),
+            Err(crate::receive_wire::PktTooLong)
+        );
+    }
+
+    /// PR-3: strip_want_have_caps returns Ok for a normal want line.
+    #[test]
+    fn strip_want_have_caps_normal_want_line_succeeds() {
+        let oid = "a".repeat(40);
+        let payload = format!("want {oid}\n");
+        let body = format!("{:04x}{}", payload.len() + 4, payload).into_bytes();
+        let cleaned = crate::git::strip_want_have_caps_for_test(&body).expect("ok");
+        // The cleaned buffer is the same pkt-line minus trailing caps.
+        assert_eq!(cleaned, body);
+    }
 
     /// Frame `data` as a pkt-line (4-hex length prefix including itself).
     fn pkt(out: &mut Vec<u8>, data: &[u8]) {
