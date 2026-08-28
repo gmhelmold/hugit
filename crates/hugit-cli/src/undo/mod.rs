@@ -106,7 +106,7 @@ fn do_run(args: UndoArgs) -> Result<String, CampaignError> {
             persist_log(&log_path, &log)?;
             // The compensator is the last record on the now-extended chain.
             let appended_seq = log.records().last().map(|r| r.seq).ok_or_else(|| {
-                CampaignError::new("internal", "undo appended no record", "report this bug")
+                CampaignError::internal("undo appended no record", "report this bug")
             })?;
             let out = json!({
                 "undone_seq": args.seq,

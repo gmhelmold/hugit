@@ -61,7 +61,7 @@ pub fn run(args: CloseArgs) -> Result<String, CampaignError> {
         let rollup = world.build_rollup(key, &phases)?;
         let rollup_json = match &rollup {
             Some(r) => serde_json::to_value(r).map_err(|e| {
-                CampaignError::new(
+                CampaignError::internal_with_kind(
                     "serialize",
                     format!("rollup did not serialise: {e}"),
                     "internal error — report it",
@@ -161,7 +161,7 @@ pub fn run(args: CloseArgs) -> Result<String, CampaignError> {
     let rollup = world.build_rollup(key, &phases)?;
     let rollup_json = match &rollup {
         Some(r) => serde_json::to_value(r).map_err(|e| {
-            CampaignError::new(
+            CampaignError::internal_with_kind(
                 "serialize",
                 format!("rollup did not serialise: {e}"),
                 "internal error — report it",

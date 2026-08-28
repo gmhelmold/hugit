@@ -272,11 +272,8 @@ fn load(path: &Path) -> Result<EventLog, PorcelainError> {
 /// a half-written, truncated log.
 fn persist(path: &Path, log: &EventLog) -> Result<(), PorcelainError> {
     let bytes = serde_json::to_vec_pretty(log.records()).map_err(|e| {
-        PorcelainError::new(
-            "internal",
-            format!("serialise log: {e}"),
-            "this is an internal bug; report it",
-        )
+        // PR-5: this is a bug-class internal fault — exit 1 via the internal flag.
+        PorcelainError::internal(format!("serialise log: {e}"))
     })?;
     filelock::atomic_write(path, &bytes).map_err(lock_porcelain_error)
 }

@@ -595,11 +595,14 @@ mod tests {
         std::fs::create_dir_all(&store_dir).expect("create store dir");
         let store_path: PathBuf = store_dir.join("intents.json");
 
-        // Log is inside a subdirectory that does NOT exist → the lock+create
-        // inside `canonical_log::land_intent` will fail with an I/O error.
-        let log_dir = base.join("log_nonexistent_subdir");
-        // deliberately do NOT create log_dir
-        let log_path: PathBuf = log_dir.join("events.json");
+        // Log is inside a path whose PARENT is a FILE (not a dir) — the
+        // lock+create inside `canonical_log::land_intent` cannot create a
+        // child of a non-directory (PR-4 auto-creates missing dirs, so the
+        // previous "non-existent dir" assertion no longer triggers an I/O
+        // error; we use parent-as-file which is unambiguously unwritable).
+        let blocking_file = base.join("blocking_file");
+        std::fs::write(&blocking_file, b"i am a file").expect("write blocking file");
+        let log_path: PathBuf = blocking_file.join("events.json");
 
         let input = NewIntent {
             charter: "divergence safety test".to_string(),
@@ -634,7 +637,10 @@ mod tests {
         // the assertion above already covers the absence of the specific entry.)
 
         // --- create the log dir so the retry can succeed ---
-        std::fs::create_dir_all(&log_dir).expect("create log dir for retry");
+        std::fs::create_dir_all(blocking_file.parent().unwrap())
+            .expect("create log dir for retry");
+        // Remove the blocking file so the dir is empty.
+        std::fs::remove_file(&blocking_file).ok();
 
         let input2 = NewIntent {
             charter: "divergence safety test".to_string(),
