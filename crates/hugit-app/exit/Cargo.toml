@@ -12,6 +12,10 @@ hugit-refstore = { path = "../../hugit-refstore" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+# PR-8: SHA-256 for ExitReport body_digest. Already in the lock transitively
+# (via sha2 inside hugit-checks / hugit-ledger), but a direct dep pins the
+# path and makes the security boundary explicit.
+sha2 = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
