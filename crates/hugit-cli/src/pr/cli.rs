@@ -735,10 +735,9 @@ mod tests {
     #[test]
     fn persist_log_io_fault_emits_structured_io_error_exit_2() {
         use std::process::ExitCode;
-        // PR-4 auto-creates missing parent dirs, so a non-existent dir is no
-        // longer a fault. Use a path where the PARENT is a file (not a dir) —
-        // the temp-then-rename inside atomic_write cannot create a child of a
-        // non-directory.
+        // Point the log path at a parent that is a FILE (not a dir) — PR-4
+        // auto-creates missing dirs, so a non-existent dir no longer
+        // triggers the IO error; parent-as-file is unambiguously unwritable.
         let parent_file = std::env::temp_dir().join(format!(
             "hugit-persist-io-fault-{}-{}",
             std::process::id(),

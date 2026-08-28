@@ -943,7 +943,11 @@ fn git_refs_for(
 /// length stops the walk (the caller then gets whatever was parsed — an empty
 /// `WantHave` at worst, which is treated as a full clone upstream).
 /// PR-3: returns `Result<Vec<u8>, PktTooLong>` so an oversized want/have line
-/// (attacker-controlled) maps to 400 Bad Request rather than 404.
+/// (attacker-controlled) is fail-closed. `prepare_upload_pack` collapses
+/// `Err` to `None` via `.ok()?` → outer caller returns **404** (the
+/// no-oracle discipline for anon upload-pack: don't leak that the
+/// body was malformed vs. the repo is absent). 400 mapping would
+/// require a different return type — owner-gated scope.
 fn strip_want_have_caps(body: &[u8]) -> Result<Vec<u8>, crate::receive_wire::PktTooLong> {
     let mut out = Vec::with_capacity(body.len());
     let mut i = 0;
@@ -980,6 +984,15 @@ fn strip_want_have_caps(body: &[u8]) -> Result<Vec<u8>, crate::receive_wire::Pkt
         }
     }
     Ok(out)
+}
+
+/// PR-3: test-only wrapper exposing `strip_want_have_caps` for the unit
+/// tests in `receive_wire.rs`. NOT a public API — tests only.
+#[cfg(test)]
+pub(crate) fn strip_want_have_caps_for_test(
+    body: &[u8],
+) -> Result<Vec<u8>, crate::receive_wire::PktTooLong> {
+    strip_want_have_caps(body)
 }
 
 /// If `payload` starts with `verb` (e.g. `b"want "`), return `<verb><oid>\n` with
