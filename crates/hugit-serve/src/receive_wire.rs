@@ -324,7 +324,9 @@ pub fn build_report_status(unpack: Result<(), &str>, refs: &[RefOutcome]) -> Vec
     }
     for r in refs {
         match r {
-            RefOutcome::Ok(ref_name) => put_bounded(&mut out, format!("ok {ref_name}\n").as_bytes()),
+            RefOutcome::Ok(ref_name) => {
+                put_bounded(&mut out, format!("ok {ref_name}\n").as_bytes())
+            }
             RefOutcome::Ng { ref_name, reason } => {
                 put_bounded(&mut out, format!("ng {ref_name} {reason}\n").as_bytes());
             }
@@ -363,7 +365,10 @@ mod tests {
             Err("log-persist-failed"),
             &[
                 RefOutcome::Ok(max_ref.clone()),
-                RefOutcome::Ng { ref_name: max_ref.clone(), reason: "ref-target-invalid".to_string() },
+                RefOutcome::Ng {
+                    ref_name: max_ref.clone(),
+                    reason: "ref-target-invalid".to_string(),
+                },
             ],
         );
         // Every 4-byte prefix must be `<= ffff`; collect into a vec.
@@ -371,7 +376,9 @@ mod tests {
         let mut i = 0;
         while i < body.len() {
             // Flush is "0000" — terminate.
-            if &body[i..i + 4] == b"0000" { break; }
+            if &body[i..i + 4] == b"0000" {
+                break;
+            }
             let l = u32::from_str_radix(std::str::from_utf8(&body[i..i + 4]).unwrap(), 16).unwrap();
             assert!(l <= 0xffff, "pkt-line length {l} > 0xffff");
             assert!(l >= 4, "pkt-line length {l} < 4 (no payload)");
@@ -379,7 +386,12 @@ mod tests {
             i += l as usize;
         }
         // We expect: 1 (unpack) + 2 (ok/ng per ref) = 3 pkt-lines.
-        assert_eq!(lens.len(), 3, "expected 3 pkt-lines, got {} ({lens:?})", lens.len());
+        assert_eq!(
+            lens.len(),
+            3,
+            "expected 3 pkt-lines, got {} ({lens:?})",
+            lens.len()
+        );
     }
 
     /// PR-3: strip_want_have_caps returns `Err(PktTooLong)` when a want line
@@ -388,18 +400,20 @@ mod tests {
     /// through strip_want_have_caps was not).
     #[test]
     fn strip_want_have_caps_oversize_returns_err() {
-        // Body = "ffff" + 65536 bytes of "want aaaa...a\n" — the inner
-        // pkt_line() sees len = 65536 + 4 = 65540 > 0xffff → returns Err.
-        // The first 4 bytes "ffff" = 65535 (legitimate), but len > body.len()
-        // check passes only because we made the body long enough (65536 ≥ 65535).
-        let payload = format!("want {}\n", "a".repeat(65_531));
-        // 4 chars (65535) + 65536-byte payload = 65540 bytes total
-        let body = format!("{}{}", "ffff", payload).into_bytes();
-        // Make payload big enough to match the length prefix
-        let mut big_payload = payload.as_bytes().to_vec();
-        big_payload.resize(65_536, b'a');
-        let body = format!("{}{}", "ffff", std::str::from_utf8(&big_payload).unwrap()).into_bytes();
-        assert_eq!(body.len(), 65_540);
+        // Build a body whose inner pkt_line() receives len = 65536 + 4 = 65540
+        // > 0xffff → returns Err. The first 4 bytes "ffff" = 65535
+        // (legitimate), and the payload is large enough that the
+        // `i + len > body.len()` truncation check in the loop also passes.
+        // We start with the 65 536-byte "want" payload, then size it up to
+        // 65 540 bytes (matching the 4-byte length prefix + 65 536-byte
+        // payload) by padding the rest of the "want" line with 'a' so the
+        // oversize case is actually exercised.
+        let mut payload = b"want ".to_vec();
+        payload.resize(65_536, b'a');
+        payload.push(b'\n');
+        // 4 chars (65535 prefix) + 65 537-byte payload = 65 541 bytes total
+        let body = format!("{}{}", "ffff", std::str::from_utf8(&payload).unwrap()).into_bytes();
+        assert_eq!(body.len(), 65_541);
         assert_eq!(
             crate::git::strip_want_have_caps_for_test(&body),
             Err(crate::receive_wire::PktTooLong)

@@ -516,9 +516,16 @@ fn pr8_forged_pass_literal_is_blocked_by_body_digest_check() {
     };
     let gate = MoneyGate::new();
     let decision = gate.evaluate(&hand);
-    assert!(!decision.is_allow(), "forged digest must Block, got {:?}", decision);
+    assert!(
+        !decision.is_allow(),
+        "forged digest must Block, got {:?}",
+        decision
+    );
     let s = format!("{:?}", decision);
-    assert!(s.contains("forge check failed"), "expected forge check, got: {s}");
+    assert!(
+        s.contains("forge check failed"),
+        "expected forge check, got: {s}"
+    );
 }
 
 // ─── PR-8: a generated Pass report carries a valid body_digest and verify() passes.
@@ -529,10 +536,165 @@ fn pr8_generated_pass_report_passes_own_verify() {
         &events_full_retention(),
         &three_unprompted(),
     );
-    assert!(!pass_report.body_digest.is_empty(), "body_digest must be set");
+    assert!(
+        !pass_report.body_digest.is_empty(),
+        "body_digest must be set"
+    );
     assert!(
         pass_report.verify("").is_ok(),
         "generated report's body_digest must verify against empty corpus_seal; got {:?}",
         pass_report.verify("")
     );
+}
+
+// ─── PR-8 v12: corpus_seal actually affects the digest (regression for
+// the v11 bug where verify and compute_body_digest had different hashes).
+#[test]
+fn pr8_corpus_seal_affects_digest() {
+    use sha2::{Digest, Sha256};
+    let pass_report = generate_report(
+        &valid_cohort(),
+        &events_full_retention(),
+        &three_unprompted(),
+    );
+    // Manually hash with two different corpus_seals (verify and compute_body_digest
+    // are pub(crate); tests must not bypass the tripwire).
+    let hash_with_seal = |seal: &[u8]| -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(
+            serde_json::to_string(&pass_report.status)
+                .unwrap()
+                .as_bytes(),
+        );
+        hasher.update(pass_report.team_count.to_le_bytes());
+        hasher.update(pass_report.min_weeks_real_use.to_le_bytes());
+        hasher.update(
+            pass_report
+                .days_since_anchor
+                .map(u64::to_le_bytes)
+                .unwrap_or([0u8; 8])
+                .as_ref(),
+        );
+        hasher.update(pass_report.unprompted_count.to_le_bytes());
+        hasher.update(pass_report.total_signals.to_le_bytes());
+        hasher.update(seal);
+        format!("{:x}", hasher.finalize())
+    };
+    let sealed_empty = hash_with_seal(b"");
+    let sealed_deploy = hash_with_seal(b"deploy-seal-2026");
+    assert_ne!(
+        sealed_empty, sealed_deploy,
+        "corpus_seal must change the digest"
+    );
+    // generate_report uses empty seal → verify("") should pass
+    assert!(pass_report.verify("").is_ok());
+    // A different seal must fail (DigestMismatch)
+    let err = pass_report.verify("deploy-seal-2026");
+    assert!(
+        matches!(
+            err,
+            Err(hugit_app_exit::report::VerifyError::DigestMismatch { .. })
+        ),
+        "verify with wrong seal must DigestMismatch, got {:?}",
+        err
+    );
+}
+
+// ─── PR-8 v12: attestation = Some(_) returns AttestationInvalid (regression
+// for the v11 gap where the AttestationInvalid branch was untested).
+#[test]
+fn pr8_attestation_some_is_rejected() {
+    use hugit_app_exit::cohort::CohortGuardResult;
+    use hugit_app_exit::report::ExitReport;
+    use hugit_app_exit::report::{ExitReportStatus, VerifyError};
+    use hugit_app_exit::retention::RetentionMetrics;
+    use sha2::{Digest, Sha256};
+    // Build a report with a body_digest that matches verify's expectation
+    // (corpus_seal = "") so the digest check passes and the attestation check
+    // is the one that fires.
+    let body_digest = {
+        let r = ExitReport {
+            status: ExitReportStatus::Pass,
+            team_count: 5,
+            min_weeks_real_use: 3,
+            days_since_anchor: Some(30),
+            cohort_guard: CohortGuardResult::Satisfied,
+            retention_rate: Some(0.5),
+            retention_result: RetentionResult::Pass {
+                metrics: RetentionMetrics {
+                    total_installs_at_week3: 10,
+                    active_at_week3: 5,
+                    retention_rate: Some(0.5),
+                },
+            },
+            unprompted_count: 3,
+            total_signals: 3,
+            body_digest: String::new(),
+            attestation: None,
+        };
+        let mut hasher = Sha256::new();
+        hasher.update(serde_json::to_string(&r.status).unwrap().as_bytes());
+        hasher.update(r.team_count.to_le_bytes());
+        hasher.update(r.min_weeks_real_use.to_le_bytes());
+        hasher.update(
+            r.days_since_anchor
+                .map(u64::to_le_bytes)
+                .unwrap_or([0u8; 8])
+                .as_ref(),
+        );
+        hasher.update(r.unprompted_count.to_le_bytes());
+        hasher.update(r.total_signals.to_le_bytes());
+        hasher.update(b"");
+        format!("{:x}", hasher.finalize())
+    };
+    let report = ExitReport {
+        status: ExitReportStatus::Pass,
+        team_count: 5,
+        min_weeks_real_use: 3,
+        days_since_anchor: Some(30),
+        cohort_guard: CohortGuardResult::Satisfied,
+        retention_rate: Some(0.5),
+        retention_result: RetentionResult::Pass {
+            metrics: RetentionMetrics {
+                total_installs_at_week3: 10,
+                active_at_week3: 5,
+                retention_rate: Some(0.5),
+            },
+        },
+        unprompted_count: 3,
+        total_signals: 3,
+        body_digest: body_digest.clone(),
+        attestation: Some("not-a-real-sig".to_string()),
+    };
+    assert_eq!(report.verify(""), Err(VerifyError::AttestationInvalid));
+}
+
+// ─── PR-8 v12: EmptyCohort (team_count=0) returns EmptyCohort (regression
+// for the v11 gap where this branch was untested).
+#[test]
+fn pr8_empty_cohort_is_rejected() {
+    use hugit_app_exit::cohort::CohortGuardResult;
+    use hugit_app_exit::report::ExitReport;
+    use hugit_app_exit::report::{ExitReportStatus, VerifyError};
+    use hugit_app_exit::retention::RetentionMetrics;
+    let report = ExitReport {
+        status: ExitReportStatus::Pass,
+        team_count: 0, // ← empty cohort
+        min_weeks_real_use: 3,
+        days_since_anchor: Some(30),
+        cohort_guard: CohortGuardResult::Satisfied,
+        retention_rate: Some(0.5),
+        retention_result: RetentionResult::Pass {
+            metrics: RetentionMetrics {
+                total_installs_at_week3: 10,
+                active_at_week3: 5,
+                retention_rate: Some(0.5),
+            },
+        },
+        unprompted_count: 3,
+        total_signals: 3,
+        body_digest: "f".repeat(64), // body_digest value doesn't matter — EmptyCohort is checked first
+        attestation: None,
+    };
+    assert_eq!(report.verify(""), Err(VerifyError::EmptyCohort));
 }

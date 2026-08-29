@@ -1432,21 +1432,32 @@ impl AppState {
     /// # Errors
     /// `409 CAS_CONFLICT` — the slug already has a loaded seam.
     pub fn insert_runtime_repo(&self, slug: &str, repo: RepoState) -> Result<(), EngineErr> {
-        if self.repos.contains_key(slug) {
+        // PR-1b: normalize slug so a caller passing "foo.git" stores under "foo",
+        // matching `resolve_repo_slug`'s lookup. `normalize_repo_slug` is defined
+        // below (alongside `is_safe_repo_slug`); we use it here to ensure
+        // `insert_runtime_repo` agrees with `resolve_repo_slug` on the canonical
+        // form. The empty result is invalid — is_safe_repo_slug rejects "".
+        let normalized = crate::state::normalize_repo_slug(slug);
+        if normalized.is_empty() {
+            return Err(EngineErr::invalid_request(
+                "repository slug normalizes to empty",
+            ));
+        }
+        if self.repos.contains_key(&normalized) {
             return Err(EngineErr::cas_conflict());
         }
         let mut guard = self
             .repos_runtime
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        if guard.contains_key(slug) {
+        if guard.contains_key(&normalized) {
             return Err(EngineErr::cas_conflict());
         }
         // Leak: a provisioned forge repo is served for the engine's whole lifetime
         // (no runtime de-provision in v0), so the box is never freed — this is exact,
         // not a mistake, and is what lets `repo_state` return a `&RepoState`.
         let leaked: &'static RepoState = Box::leak(Box::new(repo));
-        guard.insert(slug.to_string(), leaked);
+        guard.insert(normalized, leaked);
         Ok(())
     }
 
@@ -2244,6 +2255,9 @@ impl AppState {
     /// Wire (or replace) a repo's git content seam — the test/seed entrypoint. The
     /// live boot path populates `repos` from env; tests use this to seed a repo's
     /// git source + refs without an on-disk git dir.
+    ///
+    /// PR-1b: normalizes the slug via `normalize_repo_slug` so a caller passing
+    /// "foo.git" stores under "foo" (matching `resolve_repo_slug`'s lookup).
     pub fn set_repo_git(
         &mut self,
         repo: impl Into<String>,
@@ -2251,8 +2265,9 @@ impl AppState {
         git_root_tree: gix_hash::ObjectId,
         git_refs: BTreeMap<String, String>,
     ) {
+        let normalized = crate::state::normalize_repo_slug(&repo.into());
         self.repos.insert(
-            repo.into(),
+            normalized,
             RepoState {
                 git_source,
                 git_root_tree,
@@ -2289,8 +2304,9 @@ impl AppState {
         let (cas, root, refs) = load_git_dir(dir)?;
         let src: Arc<dyn hugit_proto::ObjectSource + Send + Sync> =
             Arc::new(GitDirLooseObjectSource::new(cas, dir));
+        let normalized = crate::state::normalize_repo_slug(&repo.into());
         self.repos.insert(
-            repo.into(),
+            normalized,
             RepoState {
                 git_source: src,
                 git_root_tree: root,
