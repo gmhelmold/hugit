@@ -14,8 +14,8 @@ use crate::{
     cohort::{CohortGuardResult, CohortState, evaluate_cohort_guards},
     retention::{ActivityEvent, RetentionResult, compute_retention},
 };
-use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// A report that fails the gate for trivial reasons (digest mismatch, empty
 /// status, zero team). The [`crate::gate::MoneyGate::evaluate`] maps these
@@ -135,7 +135,9 @@ impl ExitReport {
 pub(crate) fn hash_fields(report: &ExitReport, corpus_seal: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(
-        serde_json::to_string(&report.status).unwrap_or_default().as_bytes(),
+        serde_json::to_string(&report.status)
+            .unwrap_or_default()
+            .as_bytes(),
     );
     hasher.update(report.team_count.to_le_bytes());
     hasher.update(report.min_weeks_real_use.to_le_bytes());

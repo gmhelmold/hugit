@@ -324,7 +324,9 @@ pub fn build_report_status(unpack: Result<(), &str>, refs: &[RefOutcome]) -> Vec
     }
     for r in refs {
         match r {
-            RefOutcome::Ok(ref_name) => put_bounded(&mut out, format!("ok {ref_name}\n").as_bytes()),
+            RefOutcome::Ok(ref_name) => {
+                put_bounded(&mut out, format!("ok {ref_name}\n").as_bytes())
+            }
             RefOutcome::Ng { ref_name, reason } => {
                 put_bounded(&mut out, format!("ng {ref_name} {reason}\n").as_bytes());
             }
@@ -363,7 +365,10 @@ mod tests {
             Err("log-persist-failed"),
             &[
                 RefOutcome::Ok(max_ref.clone()),
-                RefOutcome::Ng { ref_name: max_ref.clone(), reason: "ref-target-invalid".to_string() },
+                RefOutcome::Ng {
+                    ref_name: max_ref.clone(),
+                    reason: "ref-target-invalid".to_string(),
+                },
             ],
         );
         // Every 4-byte prefix must be `<= ffff`; collect into a vec.
@@ -371,7 +376,9 @@ mod tests {
         let mut i = 0;
         while i < body.len() {
             // Flush is "0000" — terminate.
-            if &body[i..i + 4] == b"0000" { break; }
+            if &body[i..i + 4] == b"0000" {
+                break;
+            }
             let l = u32::from_str_radix(std::str::from_utf8(&body[i..i + 4]).unwrap(), 16).unwrap();
             assert!(l <= 0xffff, "pkt-line length {l} > 0xffff");
             assert!(l >= 4, "pkt-line length {l} < 4 (no payload)");
@@ -379,7 +386,12 @@ mod tests {
             i += l as usize;
         }
         // We expect: 1 (unpack) + 2 (ok/ng per ref) = 3 pkt-lines.
-        assert_eq!(lens.len(), 3, "expected 3 pkt-lines, got {} ({lens:?})", lens.len());
+        assert_eq!(
+            lens.len(),
+            3,
+            "expected 3 pkt-lines, got {} ({lens:?})",
+            lens.len()
+        );
     }
 
     /// PR-3: strip_want_have_caps returns `Err(PktTooLong)` when a want line

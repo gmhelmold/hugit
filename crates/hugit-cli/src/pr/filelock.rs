@@ -373,7 +373,10 @@ mod tests {
         // Restore CWD before asserting (Drop of dir would chdir back, but
         // we restore explicitly to avoid leaks if assert fails).
         std::env::set_current_dir(&prev_cwd).expect("restore cwd");
-        assert!(result.is_ok(), "acquire with bare filename must succeed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "acquire with bare filename must succeed: {result:?}"
+        );
         assert!(lock_path.exists(), "lock file must exist at <target>.lock");
     }
 

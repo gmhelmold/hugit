@@ -38,7 +38,6 @@ use std::process::ExitCode;
 
 use clap::Subcommand;
 
-
 /// The default store path when `--store` is not given (local, hermetic).
 const DEFAULT_STORE: &str = ".hugit/intents.json";
 

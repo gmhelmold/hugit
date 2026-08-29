@@ -902,7 +902,10 @@ fn blob_numstat(
     let old_lines: Vec<&[u8]> = split_lines(&old.data);
     let new_lines: Vec<&[u8]> = split_lines(&new.data);
     match lcs_len(&old_lines, &new_lines, deadline) {
-        Some(lcs) => Ok(Some(((new_lines.len() - lcs) as u32, (old_lines.len() - lcs) as u32))),
+        Some(lcs) => Ok(Some((
+            (new_lines.len() - lcs) as u32,
+            (old_lines.len() - lcs) as u32,
+        ))),
         None => Ok(None), // deadline fired; caller treats as "stop walk" or skip
     }
 }
@@ -941,7 +944,10 @@ fn lcs_len(a: &[&[u8]], b: &[&[u8]], deadline: Option<Instant>) -> Option<usize>
         // from the top-level `tree_diff_inner` loop; same granularity → no
         // inner/outer timing skew, and the `Instant::now()` syscall is ~20-50ns,
         // amortized <0.1% of the 1K-1M-cell inner work.
-        if i % 64 == 0 && let Some(dl) = deadline && Instant::now() >= dl {
+        if i % 64 == 0
+            && let Some(dl) = deadline
+            && Instant::now() >= dl
+        {
             return None;
         }
         for (j, bj) in b.iter().enumerate() {
@@ -1057,7 +1063,10 @@ mod tree_diff_tests {
         let result = lcs_len(&a, &b, Some(deadline));
         let elapsed = start.elapsed();
         assert_eq!(result, None, "past deadline must return None");
-        assert!(elapsed.as_micros() < 1000, "should abort fast, took {elapsed:?}");
+        assert!(
+            elapsed.as_micros() < 1000,
+            "should abort fast, took {elapsed:?}"
+        );
     }
 
     /// PR-2: BUG-2 blob_numstat line-cap. A 9000-line blob must report

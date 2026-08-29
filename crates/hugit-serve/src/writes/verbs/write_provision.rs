@@ -544,7 +544,7 @@ mod tests {
             "a b",                   // space
             "wat?",                  // punctuation
             "foo.git",               // PR-1b: trailing .git forbidden (canonical bare form)
-            "FOO.GIT",               // uppercase — rejected by charset rule `[a-z0-9._-]` (NOT by the new .git check)
+            "FOO.GIT", // uppercase — rejected by charset rule `[a-z0-9._-]` (NOT by the new .git check)
         ] {
             let e = validate_name(bad).expect_err("must reject");
             assert_eq!(e.status, 400, "{bad:?} → 400");

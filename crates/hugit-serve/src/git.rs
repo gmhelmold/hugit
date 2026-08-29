@@ -561,8 +561,7 @@ fn build_upload_pack_bytes(
     // Smart-HTTP v1 upload-pack result: the NAK pkt-line (we run no multi-ack
     // negotiation — single round, "done"), then the raw packfile bytes.
     let mut out = Vec::new();
-    pkt_line(&mut out, b"NAK\n")
-        .expect("constant NAK under 0xffff");
+    pkt_line(&mut out, b"NAK\n").expect("constant NAK under 0xffff");
     out.extend_from_slice(&pack.bytes);
     Some(out)
 }
@@ -603,8 +602,7 @@ fn build_shallow_pack_bytes(
     // the client wants ONLY the boundary and will send `done` in round 2 for the pack.
     // Sending the pack now makes the client die on the follow-up round.
     if plan.done {
-        pkt_line(&mut out, b"NAK\n")
-            .expect("constant NAK under 0xffff");
+        pkt_line(&mut out, b"NAK\n").expect("constant NAK under 0xffff");
         out.extend_from_slice(&pack.bytes);
     }
     Some(out)
@@ -682,8 +680,7 @@ fn serve_upload_pack_response(
                 // cached bytes are the raw packfile the walk would produce for this
                 // tip-set.
                 let mut out = Vec::with_capacity(8 + pack_bytes.len());
-                pkt_line(&mut out, b"NAK\n")
-                    .expect("constant NAK under 0xffff");
+                pkt_line(&mut out, b"NAK\n").expect("constant NAK under 0xffff");
                 out.extend_from_slice(&pack_bytes);
                 let body_len = out.len();
                 let resp = Response::from_data(out)
@@ -1026,7 +1023,10 @@ fn query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
 /// PR-3: returns `Result<(), PktTooLong>` so the caller (`strip_want_have_caps`)
 /// can return 400 on a malicious oversized `want` line instead of emitting a
 /// 5-digit-hex corrupt frame (the debug_assert was release-noop = silent wire break).
-pub(super) fn pkt_line(out: &mut Vec<u8>, data: &[u8]) -> Result<(), crate::receive_wire::PktTooLong> {
+pub(super) fn pkt_line(
+    out: &mut Vec<u8>,
+    data: &[u8],
+) -> Result<(), crate::receive_wire::PktTooLong> {
     let len = data.len() + 4;
     if len > 0xffff {
         return Err(crate::receive_wire::PktTooLong);

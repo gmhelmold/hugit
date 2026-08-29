@@ -323,8 +323,7 @@ fn log_append_failure_leaves_no_orphan_store_entry() {
     // --- create the log dir so the retry can succeed (remove the
     // blocking file so the parent is a writable empty dir).
     std::fs::remove_file(&blocking_file).expect("remove blocking file");
-    std::fs::create_dir_all(blocking_file.parent().unwrap())
-        .expect("create log dir for retry");
+    std::fs::create_dir_all(blocking_file.parent().unwrap()).expect("create log dir for retry");
     let r2 = run(
         new_input("intent-m3-noorphan", "no orphan", &bad_log),
         &store,
