@@ -5,11 +5,11 @@
 > built, what is proven, and what remains — so a fresh session can resume
 > with zero archaeology.
 
-## Baseline
+## Baseline (updated 2026-09-03)
 
-- **Repo:** `github.com/gmhelmold/hugit`, `main` at **`ab37af9`** (merged #333 + #334).
-- Clone is fresh; history intact; remote `origin` is the real repo.
-- Local worktree clean, only `main` branch checked out.
+- **Repo:** `github.com/gmhelmold/hugit`, `main` at **`11d3326`** (merged #333-#339).
+- Remote `origin` is the real repo; local worktree clean, only `main`.
+- **History of merged PRs:** #333 (features/legacy: init git-proximate + scope docs) · #334 (git-local journey suite) · #335 (PR-landing journey + quickstart) · #336 (**silent git hooks via `hugit capture`**) · #337 (watch classifies `git-activity`) · #338 (captured activity watchable end-to-end) · #339 (**the git-local backlog: fleet/PR/undo/check/local-only + journeys**).
 
 ## Owner direction (verbatim, 2026-09-02)
 
@@ -58,10 +58,20 @@ it as a top-level verb.
 
 ## Facts verified about the codebase (use these, don't re-discover)
 
-- CLI is **already 100% local by default**: `check` default AC is `FileAc`
-  (`checks/run.rs:29`, `:1265`), `HttpAcClient` (CoreLink) is only an explicit
-  env opt-in, never a silent network call. Zero runtime CLI reference to
-  `HttpAcClient`/`HUGIT_CORELINK_*`/`fabricd`.
+- CLI is **100% local by design** (post-backlog): `check` and `land` use only
+  the file-backed AC (`FileAc`) — `HttpAcClient`/CoreLink is removed from the
+  runtime paths; env `HUGIT_CORELINK_*` is INERT (proven by journeys
+  `corelink_env_is_inert_*`).
+- **Silent hooks** (installed by `hugit init`): `post-commit` `post-checkout`
+  `pre-push` `post-merge` → detach `hugit capture --kind <k>` (nohup, exit-0
+  always, never blocks git). `capture` is X5-safe (not a git command).
+- **Watch classes**: `landing | verdict | policy-change | ws-state |
+  git-activity | other`. `ref.update`/`ref.delete` → `git-activity`.
+- **`hugit fleet`** reports `git_activity` (per-branch entries, qualifiers
+  checkout/attempt/merge, redacted).
+- **`hugit pr open --commit <oid>`** accepts captured commits as external PR
+  members (`commit_ids`; `commit_not_found` distinct; never forged).
+- **`hugit undo`** compensates a captured `ref.update` (human-only).
 - 24 verbs real in the CLI dispatch (`main.rs`): why impact tournament export
   campaign intent issue pr land meta queue check verdict undo policy note diag
   ledger fleet watch symbol ctx review.
@@ -74,34 +84,31 @@ it as a top-level verb.
   `Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>`).
 - `gh` authenticated as `gmhelmold`.
 
-## What remains (open work for next session)
+## What remains (open work, after the backlog kill)
 
-### A. The 3 open scope decisions (from quarantine §5)
-1. **`check` verb scope**: keep local-only (memo on your repo, execute on your
-   machine) or re-sit as CI (→ corelink-runners)? Current: local-by-default and
-   it works; not yet owner-decided whether "CI é outra coisa" also excludes the
-   local memo path.
-2. **`hugit serve`**: optional remote/forge host (separate binary) — in or out
-   of the git-local product scope? Docs positioned as optional; owner consent
-   pending.
-3. **git-proximate UX beyond init**: e.g. checkout/branch ergonomics, wrapping
-   `git` commands with the intent layer — not yet scoped.
+### A. Scope decisions — all CLOSED (2026-09-03)
+1. **`check` = local memo only** (decided). No CoreLink in the runtime path.
+2. **`hugit serve` = out of v1** (separate binary, optional remote).
+3. **Hooks = how hugit observes the LLM** (decided): NOT githooks-as-append; the
+   LLM uses git normally; hooks capture silently; the intent bundle lives on the
+   log and rides along via `pr open --commit`.
 
-### B. Candidate next moves (git-local direction)
-- **Check-resident decisions** per A.1.
-- **More git-local journeys**: e.g. `hugit pr open` → `land queue` (union) →
-  `watch`; `hugit symbol` on a real repo; `hugit why` provenance walk.
-- **`hugit serve` as optional remote**: document "attach a server to a local
-  repo" path; verify read-only vs push posture.
-- **Docs for first user**: `quickstart-local.md` (download → init → check →
-  export) using only local providers.
+### B. Candidate next moves (post-backlog)
+- **jj first-class** (D2⑦): stacked-changes round-trip; change-ids stable.
+- **GitHub App live mirror** (`HUGIT_GH_TEST_REPO`): needs owner/infra App
+  registration; the code is ready, the live gate is not ours.
+- **`hugit serve` remote attach** (optional, out of v1): document "attach a
+  server to a local repo".
+- **More journeys**: `hugit why` provenance walk over hook-captured commits;
+  `land queue` with captured raw pushes.
+- **Reserved verbs `ws` / `dispatch`**: need the runner fabric (corelink-runners);
+  not git-local scope.
 
 ### C. Known non-goals (do not re-litigate without owner)
 - No docker/podman runner in the CLI runtime (CI = corelink-runners).
-- No `hugit-*-local` crates / `providers.toml` / `ProviderKind` (the superseded
-  self-hosted-forge decoupling plan — quarantined, not deleted).
-- No cost-honesty / multi-tenant boot-reconcile scaffold as CLI verbs (forge
-  scope).
+- No `hugit-*-local` crates / `providers.toml` / `ProviderKind` (superseded
+  self-hosted-forge decoupling — quarantined, not deleted).
+- No multi-tenant boot-reconcile scaffold as CLI verbs (forge scope).
 
 ## Verification commands (all green at baseline)
 
@@ -109,7 +116,9 @@ it as a top-level verb.
 cargo fmt --check
 cargo clippy --workspace --all-targets --locked 2>&1 | grep -cE "^warning|^error"  # 0
 cargo test -p hugit-cli --test acceptance_gitlocal_journey   # 4 passed
-cargo test --workspace --locked                               # 201 suites ok (heavy/bundle)
+cargo test -p hugit-cli --test acceptance_capture            # 8 passed (hooks/silent)
+cargo test -p hugit-cli --test acceptance_fleet_journey      # 1 passed (fleet journey)
+cargo test --workspace --locked                               # 204 suites ok (heavy/bundle)
 ```
 
 ## Machine state
