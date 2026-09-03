@@ -451,12 +451,8 @@ mod tests {
     #[test]
     fn human_undo_of_captured_ref_update_enriches_and_restores() {
         let log = scratch_captures("captured-ok");
-        let mut el = hugit_refstore::EventLog::new();
-        for r in records(&log) {
-            let rec: hugit_contracts::event_record::EventRecord =
-                serde_json::from_value(r).unwrap();
-            el.push_record(rec).unwrap();
-        }
+        // Route through the chokepoint (PS-13): load_event_log reads + verifies.
+        let el = crate::checks::load_event_log(&log).expect("captured log loads");
         let before = el.len();
         let state_before = hugit_refstore::replay(&el).unwrap();
         let second_capture = "b".repeat(40);
@@ -493,14 +489,9 @@ mod tests {
         );
 
         // Chain still valid; the ref is recorded as undone (back at the
-        // seq-0 capture's target).
-        let mut final_el = hugit_refstore::EventLog::new();
-        for r in &after {
-            let rec: hugit_contracts::event_record::EventRecord =
-                serde_json::from_value(r.clone()).unwrap();
-            final_el.push_record(rec).unwrap();
-        }
-        hugit_refstore::verify_chain(final_el.records()).expect("chain verifies after the undo");
+        // seq-0 capture's target). Reading through the chokepoint verifies the
+        // chain (PS-13).
+        let final_el = crate::checks::load_event_log(&log).expect("post-undo log verifies");
         let final_state = hugit_refstore::replay(&final_el).unwrap();
         let first_capture = "a".repeat(40);
         assert_eq!(

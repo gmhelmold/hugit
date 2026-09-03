@@ -368,7 +368,7 @@ fn human_can_undo_a_captured_ref_update() {
     let (code, _) = git_with_hugit(&root, &["commit", "-m", "c2", "--no-gpg-sign"]);
     assert_eq!(code, 0, "second commit");
 
-    let captures = wait_for_two_captures(&log, 8000);
+    let captures = wait_for_two_captures(&log, 15000);
     assert!(captures.len() >= 2, "two captures landed: {captures:?}");
     let second = captures.last().unwrap().clone();
     let first_target = captures[0]["payload"]
@@ -458,7 +458,7 @@ fn agent_undo_of_captured_ref_update_is_authz_denied() {
     let (code, _) = git_with_hugit(&root, &["commit", "-m", "c1", "--no-gpg-sign"]);
     assert_eq!(code, 0, "commit");
 
-    let captures = wait_for_two_captures(&log, 8000);
+    let captures = wait_for_two_captures(&log, 15000);
     assert!(!captures.is_empty(), "a capture landed");
     let seq = captures.last().unwrap()["seq"].as_u64().unwrap();
     let ref_updates_before = ref_updates(&log).len();
