@@ -240,7 +240,11 @@ fn corelink_env_is_inert_land_stays_local() {
         .env("HUGIT_CORELINK_PAT", "clp_secret")
         .output()
         .expect("land runs with hostile CoreLink env");
-    assert_eq!(out.status.code(), Some(0), "land succeeds with hostile CoreLink env (local-only)");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "land succeeds with hostile CoreLink env (local-only)"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         !stderr.to_lowercase().contains("hostile"),
