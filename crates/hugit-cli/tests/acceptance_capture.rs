@@ -58,6 +58,19 @@ fn git_with_hugit(cwd: &Path, args: &[&str]) -> (i32, String) {
     )
 }
 
+/// Run `hugit <args>` in `cwd` (the capture journey uses the real binary via
+/// CARGO_BIN_EXE_hugit) — returns (exit, parsed stdout JSON).
+fn run_in(cwd: &Path, args: &[&str]) -> (i32, Value) {
+    let out = Command::new(env!("CARGO_BIN_EXE_hugit"))
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("hugit runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v = serde_json::from_str(stdout.trim()).unwrap_or(Value::Null);
+    (out.status.code().unwrap_or(-1), v)
+}
+
 fn git_in(cwd: &Path, args: &[&str]) -> (i32, String) {
     let out = Command::new("git")
         .args(args)
@@ -238,5 +251,55 @@ fn missing_bin_never_blocks_git() {
         out.status.code(),
         Some(0),
         "commit succeeds even with missing hugit"
+    );
+}
+
+// ── 6. The captured git activity is watchable by class ───────────────────────
+
+#[test]
+fn captured_activity_is_watchable_as_git_activity() {
+    let root = scratch("watch");
+    lib_init(&root);
+    set_git_identity(&root);
+    std::fs::write(root.join("a.txt"), "a").unwrap();
+    let log = root.join(".hugit/log.json");
+
+    // Two REAL commits (the LLM's normal actions) — each fires post-commit.
+    git_in(&root, &["add", "a.txt"]);
+    let (code, _) = git_with_hugit(&root, &["commit", "-m", "c1", "--no-gpg-sign"]);
+    assert_eq!(code, 0, "first commit");
+    std::fs::write(root.join("a.txt"), "a2").unwrap();
+    git_in(&root, &["add", "a.txt"]);
+    let (code, _) = git_with_hugit(&root, &["commit", "-m", "c2", "--no-gpg-sign"]);
+    assert_eq!(code, 0, "second commit");
+
+    // Wait for the async hooks to have captured both commits.
+    let got = wait_for_ref_update(
+        &log,
+        |p| !p["target"].as_str().unwrap_or("").is_empty(),
+        8000,
+    );
+    assert!(got, "hooks captured a commit");
+
+    // `hugit watch --class git-activity` renders the captured trace.
+    let (code, v) = run_in(
+        &root,
+        &[
+            "watch",
+            "--log",
+            log.to_str().unwrap(),
+            "--class",
+            "git-activity",
+        ],
+    );
+    assert_eq!(code, 0, "watch --class git-activity exits 0");
+    assert!(
+        v["count"].as_u64().unwrap_or(0) >= 1,
+        "git-activity lines rendered: {v}"
+    );
+    assert_eq!(
+        v["lines"][0]["class"].as_str(),
+        Some("git-activity"),
+        "line class is git-activity"
     );
 }

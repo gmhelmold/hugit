@@ -9,7 +9,7 @@
 //!
 //! `hugit watch --log <path> [--class <c>]` emits stable JSON: the ordered lines
 //! (`class`, `seq`, redacted `text`) + a `count`. `--class` filters to one of
-//! `landing | verdict | policy-change | ws-state | other`. Render latency is
+//! `landing | verdict | policy-change | ws-state | git-activity | other`. Render latency is
 //! deliberately NOT surfaced here — it is a live-TUI SLA measurement, not stream
 //! content, and would make a static replay non-reproducible.
 //!
@@ -35,7 +35,8 @@ pub struct WatchArgs {
     #[arg(long, help = crate::log_resolve::LOG_FLAG_HELP)]
     pub log: Option<PathBuf>,
     /// Optional class filter: `landing` | `verdict` | `policy-change` |
-    /// `ws-state` | `other`. Unmatched ⇒ an empty (honest) line set.
+    /// `ws-state` | `git-activity` | `other`. Unmatched ⇒ an empty (honest)
+    /// line set.
     #[arg(long)]
     pub class: Option<String>,
 }
