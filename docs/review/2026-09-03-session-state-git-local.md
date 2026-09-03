@@ -7,9 +7,9 @@
 
 ## Baseline (updated 2026-09-03)
 
-- **Repo:** `github.com/gmhelmold/hugit`, `main` at **`1879154`** (merged #333-#340).
+- **Repo:** `github.com/gmhelmold/hugit`, `main` at **`ba93053`** (merged #333-#341).
 - Remote `origin` is the real repo; local worktree clean, only `main`.
-- **History of merged PRs:** #333 (init git-proximate + scope docs) · #334 (git-local journey suite) · #335 (PR-landing journey + quickstart) · #336 (**silent git hooks via `hugit capture`**) · #337 (watch classifies `git-activity`) · #338 (captured activity watchable) · #339 (**git-local backlog: fleet/PR/undo/check/land local-only + journeys**) · #340 (**why resolves a path to the captured commit that touched it** — post-commit hook records touched paths → `resolve_why` answers provenance on the raw graph).
+- **History of merged PRs:** #333 (init git-proximate + scope docs) · #334 (git-local journey suite) · #335 (PR-landing journey + quickstart) · #336 (**silent git hooks via `hugit capture`**) · #337 (watch classifies `git-activity`) · #338 (captured activity watchable) · #339 (**git-local backlog: fleet/PR/undo/check/land local-only + journeys**) · #340 (**why resolves a path to the captured commit** — post-commit records touched paths → `resolve_why` answers on the raw graph) · #341 (**commits-only PRs are fully landable** — pr queue accepts `commit_ids`, land content = intents ∪ commits, `commit_ids` scrub-preserved as identifier-address).
 
 ## Owner direction (verbatim, 2026-09-02)
 
@@ -119,7 +119,7 @@ it as a top-level verb.
 cargo fmt --check
 cargo clippy --workspace --all-targets --locked 2>&1 | grep -cE "^warning|^error"  # 0
 cargo test -p hugit-cli --test acceptance_gitlocal_journey   # 4 passed
-cargo test -p hugit-cli --test acceptance_capture            # 10 passed (hooks/silent + why)
+cargo test -p hugit-cli --test acceptance_capture            # 11 passed (hooks serialized; full loop)
 cargo test -p hugit-cli --test acceptance_fleet_journey      # 1 passed (fleet journey)
 cargo test --workspace --locked                               # 204 suites ok (heavy/bundle)
 ```
