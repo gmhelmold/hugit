@@ -140,7 +140,12 @@ ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 LOG="$ROOT/.hugit/log.json"
 [ -f "$LOG" ] || exit 0
 (
-  "$HUGIT_BIN" capture --kind commit --top-level "$ROOT" --log "$LOG" --hook-log "$ROOT/.hugit/hooks.log"     --oid "$(git rev-parse HEAD 2>/dev/null)"     --branch "$(git branch --show-current 2>/dev/null)"     --recorded-at "$(git log -1 --format=%ct 2>/dev/null)"
+  FILES="$(git diff-tree --root --name-only -r --no-commit-id HEAD 2>/dev/null)"
+  FILE_ARGS=""
+  for f in $FILES; do
+    FILE_ARGS="$FILE_ARGS --files $f"
+  done
+  "$HUGIT_BIN" capture --kind commit --top-level "$ROOT" --log "$LOG" --hook-log "$ROOT/.hugit/hooks.log"     --oid "$(git rev-parse HEAD 2>/dev/null)"     --branch "$(git branch --show-current 2>/dev/null)"     --recorded-at "$(git log -1 --format=%ct 2>/dev/null)" $FILE_ARGS
 ) >>"$ROOT/.hugit/hooks.log" 2>&1 &
 exit 0
 "#.to_string(),

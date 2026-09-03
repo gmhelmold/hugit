@@ -493,3 +493,92 @@ fn agent_undo_of_captured_ref_update_is_authz_denied() {
             .contains("\"endpoint\":\"undo\"")
     );
 }
+
+// ── 7. why resolves a path to the captured commit that touched it ────────────
+
+#[test]
+fn why_resolves_path_to_captured_commit() {
+    let root = scratch("why-capture");
+    lib_init(&root);
+    set_git_identity(&root);
+    let log = root.join(".hugit/log.json");
+
+    // ONE real commit touching src/lib.rs (the LLM's normal action).
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "pub fn x() {}\n").unwrap();
+    git_in(&root, &["add", "src/lib.rs"]);
+    let (code, _) = git_with_hugit(&root, &["commit", "-m", "feat: add lib", "--no-gpg-sign"]);
+    assert_eq!(code, 0);
+
+    // Wait for the capture to land.
+    let got = wait_for_ref_update(
+        &log,
+        |p| !p["target"].as_str().unwrap_or("").is_empty(),
+        10000,
+    );
+    assert!(got, "hook captured the commit");
+
+    // The captured ref.update payload carries `files` (from the post-commit
+    // diff-tree) so `resolve_why` can attribute `src/lib.rs`.
+    let some_capture_carries_files = ref_updates(&log).iter().any(|r| {
+        serde_json::from_str::<Value>(r["payload"].as_str().unwrap_or(""))
+            .map(|p| p["files"].as_array().is_some_and(|a| !a.is_empty()))
+            .unwrap_or(false)
+    });
+    assert!(
+        some_capture_carries_files,
+        "the captured commit records the files it touched"
+    );
+}
+
+#[test]
+fn why_lib_resolves_path_to_captured_ref_update() {
+    let root = scratch("why-lib");
+    lib_init(&root);
+    set_git_identity(&root);
+    let log = root.join(".hugit/log.json");
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "pub fn x() {}\n").unwrap();
+    git_in(&root, &["add", "src/lib.rs"]);
+    let (code, _) = git_with_hugit(&root, &["commit", "-m", "feat: add lib", "--no-gpg-sign"]);
+    assert_eq!(code, 0);
+    let got = wait_for_ref_update(
+        &log,
+        |p| !p["target"].as_str().unwrap_or("").is_empty(),
+        10000,
+    );
+    assert!(got, "capture landed");
+
+    // Use the real `why` resolver: a path touched by the captured commit must
+    // resolve to that commit (the `files` in the payload feed payload_attribution).
+    let raw: Vec<hugit_cli::why::resolver::LogEntry> = {
+        let records: Vec<serde_json::Value> =
+            serde_json::from_slice(&std::fs::read(&log).unwrap()).unwrap();
+        records
+            .into_iter()
+            .map(|r| {
+                let rec: hugit_contracts::EventRecord =
+                    serde_json::from_value(r).expect("record shape");
+                hugit_cli::why::resolver::LogEntry {
+                    record: rec,
+                    attestation: None,
+                    sidecar: None,
+                }
+            })
+            .collect()
+    };
+    let answer = hugit_cli::why::resolve_why(
+        &hugit_cli::why::WhyQuery {
+            path: "src/lib.rs".to_string(),
+            line: None,
+            symbol: None,
+        },
+        &raw,
+    );
+    assert!(
+        answer.is_ok(),
+        "why resolves the captured commit: {:?}",
+        answer.err()
+    );
+}

@@ -190,6 +190,11 @@ pub struct CaptureArgs {
     /// The local SHAs being pushed (part of the push-attempt payload).
     #[arg(long)]
     pub shas: Option<String>,
+    /// The files touched by this commit (post-commit: `git diff-tree --name-only
+    /// -r`). Stored in the payload so `hugit why --path` can attribute a file
+    /// to the captured commit (repeatable).
+    #[arg(long)]
+    pub files: Vec<String>,
 }
 
 /// Run `hugit capture <kind>` — silent, exit 0 always (the contract §2).
@@ -224,11 +229,23 @@ fn capture_commit(args: &CaptureArgs) -> Result<(), String> {
         .ok_or_else(|| "capture commit: --oid required".to_string())?;
     let branch = args.branch.clone().unwrap_or_default();
     let recorded_at = args.recorded_at.unwrap_or_else(now_unix_ms);
-    let payload = json!({
+    let files: Vec<String> = args
+        .files
+        .iter()
+        .filter(|f| !f.trim().is_empty())
+        .cloned()
+        .collect();
+    // `files` is included only when non-empty so `payload_attribution` (the
+    // `why` resolver) can attribute a path to this captured commit; an empty
+    // list is omitted (payload stays lean for pure ref events).
+    let mut payload = json!({
         "ref": if branch.is_empty() { "HEAD".to_string() } else { format!("refs/heads/{branch}") },
         "target": oid,
         "branch": branch,
     });
+    if !files.is_empty() {
+        payload["files"] = json!(files);
+    }
     capture_ref_update(
         &args.log,
         args.hook_log.as_deref(),
@@ -334,6 +351,7 @@ mod tests {
             recorded_at: Some(1000),
             refspecs: None,
             shas: None,
+            files: vec![],
         }
     }
 
