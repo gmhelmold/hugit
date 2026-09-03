@@ -474,6 +474,7 @@ mod tests {
                 run_id: Some("run-orq".to_string()),
                 principal: None,
                 intent_ids: vec!["i-a".to_string(), "i-b".to_string()],
+                commit_ids: Vec::new(),
                 recorded_at: 1000,
             },
         )
