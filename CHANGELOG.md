@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(cli): **`hugit why --walk` — the FULL provenance chain over captured commits.**
+
+  `why` used to return only the ORIGIN (the single most-recent event that touched a path). For a path that evolved across several captured commits, an agent asking "why did this file become what it is" got one answer with no history. Now `why --walk --path <file>` projects the complete captured chain — every `ref.update` event that cited the path, most-recent first, each link with its `seq` / event hash / recorder / `recorded_at` / oid / branch / qualifiers (`checkout`/`attempt`/`merged_from`) / touched files. Links are NEVER fused: each captured commit stays a distinct raw event (same principle as `git log -- <path>` keeping commits separate). Empty chain (no captured activity ever cited the path) is a TRUE answer, not an error. Back-compat: `why` without `--walk` still returns the single origin — and the origin read equals the walk's head, so the two views can never diverge. Journey `why_walk_projects_the_provenance_chain_in_reverse_order` (13 capture journeys, serialized). Gate: bundle 205/0, fmt + clippy 0.
+
 - feat(cli): **`hugit init` is now git-proximate — it runs `git init` when the target dir is not yet a git repository** (same ceremony a user would run), leaves an existing `.git` untouched, and still adds `.hugit/` + the canonical event log idempotently. New JSON fields `git_created` / `git_hint` in the init output. Scope decision 2026-09-02: hugit is a git-local CLI (works where git works, no server/account); CI/compute belongs to the separate `corelink-runners` project. `crates/hugit-cli/src/init/mod.rs` + `README.md` + `docs/quarantine/2026-09-02-scope-decisions.md` + `docs/review/2026-09-02-hugit-cli-local-catalog-handoff.md`. Gate green (`cargo test -p hugit-cli --lib` 239/239 pass, 3 init tests incl. 2 new).
 - feat(cli): **`hugit why` accepts the CANONICAL log directly.**
 

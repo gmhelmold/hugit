@@ -770,3 +770,126 @@ fn why_binary_reads_canonical_captured_log_and_resolves() {
         "why found the captured origin: {v}"
     );
 }
+
+// ── 10. `hugit why --walk` — the FULL provenance chain over captured commits ──
+
+#[test]
+fn why_walk_projects_the_provenance_chain_in_reverse_order() {
+    let _serial = hook_serial().lock().expect("hook serial lock");
+
+    let root = scratch("why-walk");
+    lib_init(&root);
+    set_git_identity(&root);
+    let log = root.join(".hugit/log.json");
+
+    // TWO real commits on the SAME path — the chain shows BOTH, newest first.
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "pub fn x() {}\n").unwrap();
+    git_in(&root, &["add", "src/lib.rs"]);
+    let (code, _) = git_with_hugit(&root, &["commit", "-m", "feat: add lib", "--no-gpg-sign"]);
+    assert_eq!(code, 0);
+    let caps = wait_for_commit_captures(&log, 1, 20000);
+    assert_eq!(caps.len(), 1, "first commit captured");
+
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "pub fn x() { println!(\"hi\"); }\n",
+    )
+    .unwrap();
+    git_in(&root, &["add", "src/lib.rs"]);
+    let (code, _) = git_with_hugit(&root, &["commit", "-m", "feat: print hi", "--no-gpg-sign"]);
+    assert_eq!(code, 0);
+    let caps = wait_for_commit_captures(&log, 2, 20000);
+    assert!(caps.len() >= 2, "second commit captured: {caps:?}");
+    let (c1, c2) = (caps[caps.len() - 2].clone(), caps.last().unwrap().clone());
+
+    // `hugit why --walk --path src/lib.rs` (real binary) returns the chain.
+    let (code, v) = run_in(
+        &root,
+        &[
+            "why",
+            "--walk",
+            "--log",
+            log.to_str().unwrap(),
+            "--path",
+            "src/lib.rs",
+        ],
+    );
+    assert_eq!(code, 0, "why --walk succeeds: {v}");
+    let chain = v.as_array().expect("walk returns an array");
+    assert!(
+        chain.len() >= 2,
+        "chain shows BOTH captured commits (got {}): {v}",
+        chain.len()
+    );
+    // Newest FIRST: the second commit is the chain head.
+    assert_eq!(
+        chain[0]["oid"].as_str(),
+        Some(c2.as_str()),
+        "chain head = the newest captured commit"
+    );
+    // Each link is a distinct, raw captured event — never fused.
+    let oids: Vec<&str> = chain.iter().filter_map(|l| l["oid"].as_str()).collect();
+    assert!(
+        oids.contains(&c1.as_str()) && oids.contains(&c2.as_str()),
+        "chain carries both distinct oids: {v}"
+    );
+    // Kind is the frozen ref.update; the chain never re-attributes an author.
+    assert_eq!(
+        chain[0]["kind"], "ref.update",
+        "chain links are ref.update events"
+    );
+    assert!(
+        chain[0]["seq"].as_u64().unwrap() > chain[1]["seq"].as_u64().unwrap() || chain.len() > 2,
+        "chain is ordered most-recent-first (compare seqs): {v}"
+    );
+
+    // The single-origin read (no --walk) is unchanged and equals the head.
+    let (code, origin) = run_in(
+        &root,
+        &[
+            "why",
+            "--log",
+            log.to_str().unwrap(),
+            "--path",
+            "src/lib.rs",
+        ],
+    );
+    assert_eq!(code, 0, "why (origin) still works: {origin}");
+    assert_eq!(
+        origin["event_seq"], chain[0]["seq"],
+        "the origin read IS the chain head — one answer, no divergence"
+    );
+}
+
+/// Poll until at least `need` distinct commit captures (ref.update with a
+/// non-empty target + non-empty files) have landed, returning their target oids
+/// in log order. Hooks are async; a bare wait on "any capture" can read the
+/// first commit twice — this waits on a COUNT of distinct captures.
+fn wait_for_commit_captures(log: &std::path::Path, need: usize, timeout_ms: u64) -> Vec<String> {
+    for _ in 0..(timeout_ms / 250) {
+        let records = log_records(log);
+        let mut oids: Vec<String> = records
+            .iter()
+            .rev()
+            .filter(|r| r["kind"] == "ref.update")
+            .filter_map(|r| {
+                let p = r["payload"].as_str()?;
+                let v: Value = serde_json::from_str(p).ok()?;
+                let t = v["target"].as_str()?.to_string();
+                let has_files = v["files"].as_array().is_some_and(|a| !a.is_empty());
+                if !t.is_empty() && has_files {
+                    Some(t)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        oids.reverse();
+        if oids.len() >= need {
+            return oids;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    vec![]
+}

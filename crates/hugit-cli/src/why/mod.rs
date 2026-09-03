@@ -8,4 +8,6 @@
 
 pub mod resolver;
 
-pub use resolver::{AuthorKind, ProvenanceAnswer, WhyError, WhyQuery, resolve_why};
+pub use resolver::{
+    AuthorKind, ChainEntry, ProvenanceAnswer, WhyError, WhyQuery, resolve_why, resolve_why_chain,
+};

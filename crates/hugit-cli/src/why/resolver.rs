@@ -152,6 +152,131 @@ pub const INTENT_LANDED_KIND: &str = "intent.landed";
 pub const REGEN_DERIVED_KIND: &str = "regen.derived";
 
 // ---------------------------------------------------------------------------
+// Provenance chain (the `why --walk` view)
+// ---------------------------------------------------------------------------
+
+/// One link in the provenance chain for a queried path: an event that captured
+/// the path, projected raw (the walk does NOT merge/attribute — the CLI does).
+///
+/// The chain is the answer to "how did this path evolve": every captured commit
+/// / checkout / merge / push-attempt that touched it, most-recent first. The
+/// single-event [`ProvenanceAnswer`] (origin) is the head of this chain.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChainEntry {
+    /// Log sequence number of the captured event.
+    pub seq: u64,
+    /// SHA-256 hex digest of the event (from the log).
+    pub event_hash: String,
+    /// Event kind (always `ref.update` for captured git activity).
+    pub kind: String,
+    /// The recorder principal (defaults to `orchestrator:hugit-hook`).
+    pub author: Vec<String>,
+    /// Wall-clock recorded_at (committer date for commit/merge, delivery time
+    /// for checkout/push-attempt).
+    pub recorded_at: u64,
+    /// The ref/branch the event describes (`refs/heads/<branch>` or `HEAD`).
+    pub reference: Option<String>,
+    /// The target oid: commit/merge `target`, checkout `to`.
+    pub oid: Option<String>,
+    /// The branch name, when the event carries one.
+    pub branch: Option<String>,
+    /// Qualifiers: `checkout`, `attempt`, `merged_from`, as recorded — the
+    /// frozen `ref.update` kind distinguishes hook source by these.
+    pub qualifiers: Option<serde_json::Value>,
+    /// The files the event touched (commit `files` list; empty for checkout /
+    /// merge / push-attempt which do not scrub paths).
+    pub files: Vec<String>,
+}
+
+/// Resolve a [`WhyQuery`] to the FULL provenance chain: every event on the log
+/// that cites `query.path`, most-recent first, projected raw.
+///
+/// The walk is the provenance history behind the single-event origin. It never
+/// flattens or fuses events — each captured commit stays a distinct link
+/// (identical to how `git log -- <path>` keeps each commit separate). A path
+/// that no event ever cites yields an empty chain (NOT an error): "no captured
+/// git activity touched this" is a true, distinct answer from "corrupt log".
+///
+/// The chain is only meaningful for captured git activity (the hooks write kind
+/// `ref.update` + a `files` array), so attribution reuses the same
+/// [`payload_attribution`] resolver a path-only query uses; the walk is
+/// strictly path-level (no line/symbol narrowing).
+pub fn resolve_why_chain(query: &WhyQuery, entries: &[LogEntry]) -> Vec<ChainEntry> {
+    entries
+        .iter()
+        .rev()
+        .filter_map(|entry| {
+            payload_attribution(&entry.record.payload, &query.path)?;
+            let payload: serde_json::Value =
+                serde_json::from_str(&entry.record.payload).unwrap_or(serde_json::Value::Null);
+            let qualifiers = {
+                let mut q = serde_json::Map::new();
+                if payload.get("checkout").is_some() {
+                    q.insert(
+                        "checkout".into(),
+                        payload
+                            .get("checkout")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Bool(true)),
+                    );
+                }
+                if payload.get("attempt").is_some() {
+                    q.insert(
+                        "attempt".into(),
+                        payload
+                            .get("attempt")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Bool(true)),
+                    );
+                }
+                if let Some(from) = payload.get("merged_from") {
+                    q.insert("merged_from".into(), from.clone());
+                }
+                if q.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::Value::Object(q))
+                }
+            };
+            Some(ChainEntry {
+                seq: entry.record.seq,
+                event_hash: entry.record.this_hash.clone(),
+                kind: entry.record.kind.clone(),
+                author: entry.record.principal_chain.clone(),
+                recorded_at: entry.record.recorded_at,
+                reference: payload
+                    .get("ref")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                oid: payload
+                    .get("target")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| payload.get("to").and_then(|v| v.as_str()))
+                    .map(String::from),
+                branch: payload
+                    .get("branch")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                qualifiers,
+                files: parse_files(&payload),
+            })
+        })
+        .collect()
+}
+
+/// Extract the `files` array from a payload, if present.
+fn parse_files(v: &serde_json::Value) -> Vec<String> {
+    v.get("files")
+        .and_then(|x| x.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|f| f.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
 // resolve_why
 // ---------------------------------------------------------------------------
 
