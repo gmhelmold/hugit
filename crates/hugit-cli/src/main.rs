@@ -47,7 +47,7 @@ use hugit_cli::undo::{self, UndoArgs};
 use hugit_cli::verdict::{self, VerdictArgs};
 use hugit_cli::watch::{self, WatchArgs};
 use hugit_cli::why::resolver::LogEntry;
-use hugit_cli::why::{WhyQuery, resolve_why};
+use hugit_cli::why::{WhyQuery, resolve_why, resolve_why_chain};
 
 use hugit_checks::affected::{BuildGraph, Ecosystem, PackageNode};
 use hugit_contracts::{AttestationChain, EventRecord, IntentSidecar};
@@ -133,6 +133,11 @@ struct WhyArgs {
     /// Optional symbol name to attribute.
     #[arg(long)]
     symbol: Option<String>,
+    /// Walk the FULL provenance chain (every captured event that touched the
+    /// path, most-recent first) instead of only the origin. The chain is the
+    /// "why did this file evolve" answer the single origin cannot give.
+    #[arg(long)]
+    walk: bool,
 }
 
 /// The on-disk JSON shape for a single `why` log entry (the CLI's input
@@ -224,6 +229,12 @@ fn run_why(args: WhyArgs) -> Result<String, PorcelainError> {
         line: args.line,
         symbol: args.symbol,
     };
+    // The walk (--walk) projects the FULL chain, most recent first; the origin
+    // answer is the head of that chain for the "single attribution" read.
+    if args.walk {
+        return serde_json::to_string(&resolve_why_chain(&query, &entries))
+            .map_err(|e| PorcelainError::internal(format!("serialise why chain: {e}")));
+    }
     let answer = resolve_why(&query, &entries).map_err(|e| {
         PorcelainError::new(
             "unresolved",
