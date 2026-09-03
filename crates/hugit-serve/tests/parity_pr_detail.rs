@@ -47,6 +47,7 @@ fn log_with_open_pr(n: u32) -> EventLog {
         run_id: None,
         principal: Some("human:owner".to_string()),
         intent_ids: vec![],
+        commit_ids: vec![],
         recorded_at: 1_700_000_000_000,
     };
     open(&mut log, &args).expect("pr.opened append succeeds on a fresh log");

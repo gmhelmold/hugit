@@ -5,12 +5,18 @@
 //! schema is validated on every emission.
 //!
 //! # Schema version
-//! Schema version is `"1"`.  Any breaking change bumps the version.
+//! Schema version is `"1"`.  Any breaking change bumps the version.  The
+//! `git_activity` / `git_activity_count` fields were added ADDITIVELY (new
+//! fields, existing fields unchanged in type or meaning), so the version stays
+//! `"1"`.
 //!
 //! # State derivation
 //! Fleet state is a projection of the event log:
 //! - `ws.state.*` events advance workspace state.
 //! - `agent.assigned` / `agent.completed` / `agent.failed` events track agents.
+//! - `ref.update` / `ref.delete` events (the raw git trace — the silent capture
+//!   hooks of `hugit capture` + the receive-pack push path) fold into
+//!   `git_activity`, one entry per record, in log order.
 //! - All other events are ignored.
 
 use schemars::JsonSchema;
@@ -70,6 +76,12 @@ pub struct FleetState {
     pub workspaces: Vec<WorkspaceEntry>,
     /// All known agents and their current states.
     pub agents: Vec<AgentEntry>,
+    /// The captured git activity (`ref.update` / `ref.delete` — the raw git
+    /// trace), one entry per record, in log order.
+    pub git_activity: Vec<GitActivityEntry>,
+    /// Number of git activity entries (mirrors `git_activity.len()`; kept
+    /// explicit so summary consumers can read one number).
+    pub git_activity_count: u64,
     /// Log sequence of the last event consumed.
     pub last_seq: u64,
     /// Total number of events consumed.
@@ -88,6 +100,33 @@ pub struct WorkspaceEntry {
     pub workspace_id: String,
     /// Current workspace state.
     pub state: WorkspaceState,
+}
+
+/// One captured git activity entry — a raw `ref.update` / `ref.delete` record
+/// folded from the git trace (the silent capture hooks of `hugit capture` +
+/// the receive-pack push path, the same events `watch` classifies as
+/// `GitActivity`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct GitActivityEntry {
+    /// Branch the activity happened on. Derived from the payload `branch`
+    /// field, else from the `ref` field (`refs/heads/<b>` stripped). Empty
+    /// when the payload carries neither (e.g. a push attempt).
+    pub branch: String,
+    /// Full ref name — the payload `ref` field, else `refs/heads/<branch>`
+    /// derived from the `branch` field. Empty when neither is present.
+    pub ref_name: String,
+    /// The commit the ref points at after the activity — the payload `target`
+    /// field (commit/merge/raw push), the `to` field (checkout). Empty for
+    /// push attempts and deletes, which carry no target.
+    pub target: String,
+    /// Log sequence of the capturing event.
+    pub seq: u64,
+    /// Capture-source qualifier, mirroring the silent-hook payloads (#336):
+    /// `"checkout"` (`checkout:true`), `"attempt"` (`attempt:true`),
+    /// `"merge"` (`merged_from`), else `None` (post-commit / raw push).
+    pub qualifier: Option<String>,
+    /// Unix epoch milliseconds when the git event was recorded.
+    pub recorded_at: u64,
 }
 
 impl FleetState {
@@ -114,6 +153,9 @@ impl FleetState {
             std::collections::HashMap::new();
         let mut agents: std::collections::HashMap<String, (String, AgentState)> =
             std::collections::HashMap::new();
+        // git activity is inherently sequential (one entry per record, in log
+        // order — the raw git trace), so it folds as a plain Vec, not a map.
+        let mut git_activity: Vec<GitActivityEntry> = Vec::new();
         let mut last_seq = 0u64;
         let event_count = records.len() as u64;
         let mut malformed = 0u64;
@@ -176,6 +218,11 @@ impl FleetState {
                         entry.1 = AgentState::Failed;
                     }
                 }
+                // The raw git trace — the same classification watch uses
+                // (EventClass::GitActivity). Each record folds into one entry.
+                "ref.update" | "ref.delete" => {
+                    git_activity.push(Self::git_activity_entry(r, &payload));
+                }
                 _ => {} // inert event; advances the chain, no fleet state change.
             }
         }
@@ -202,13 +249,93 @@ impl FleetState {
             .collect();
         agent_vec.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
 
+        // git_activity is already in log order (seq-ascending by construction).
+        let git_activity_count = git_activity.len() as u64;
+
         FleetState {
             schema_version: FLEET_SCHEMA_VERSION.to_string(),
             workspaces: workspace_vec,
             agents: agent_vec,
+            git_activity,
+            git_activity_count,
             last_seq,
             event_count,
             malformed,
+        }
+    }
+
+    /// Fold one `ref.update` / `ref.delete` record into a `GitActivityEntry`.
+    ///
+    /// Recognises the same payloads the silent capture hooks (#336) write and
+    /// the receive-pack push path writes:
+    /// - commit:    `{"ref","target","branch"}`
+    /// - checkout:  `{"checkout":true,"from","to","branch"}`
+    /// - attempt:   `{"attempt":true,"refspecs","shas"}`
+    /// - merge:     `{"merged_from","target"}`
+    /// - raw push:  `{"ref","target"}`
+    /// - delete:    `{"ref"}`
+    ///
+    /// Qualifier mirrors the hook source (`checkout` / `attempt` / `merge`),
+    /// `None` for post-commit and raw push/delete. Surfaced strings are routed
+    /// through the view-boundary redaction filter (④) — these are not
+    /// structural hash fields, so a secret-shaped branch/target redacts exactly
+    /// like the ids above.
+    pub fn git_activity_entry(r: &EventRecord, payload: &serde_json::Value) -> GitActivityEntry {
+        let qualifier =
+            if payload.get("checkout").and_then(serde_json::Value::as_bool) == Some(true) {
+                Some("checkout".to_string())
+            } else if payload.get("attempt").and_then(serde_json::Value::as_bool) == Some(true) {
+                Some("attempt".to_string())
+            } else if payload.get("merged_from").is_some() {
+                Some("merge".to_string())
+            } else {
+                None
+            };
+
+        let payload_ref = payload
+            .get("ref")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let payload_branch = payload
+            .get("branch")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+
+        // Derive from the RAW payload values (like the map-key discipline
+        // above: raw first, redact only at the emission point).
+        let branch: String = if !payload_branch.is_empty() {
+            payload_branch.to_string()
+        } else {
+            payload_ref
+                .strip_prefix("refs/heads/")
+                .unwrap_or("")
+                .to_string()
+        };
+        // Ref name: the payload `ref`, else the branch-derived ref (the same
+        // derivation the commit hook applies to a bare branch).
+        let ref_name: String = if !payload_ref.is_empty() {
+            payload_ref.to_string()
+        } else if !branch.is_empty() {
+            format!("refs/heads/{branch}")
+        } else {
+            String::new()
+        };
+
+        // Target: payload `target` (commit/merge/raw push), `to` (checkout),
+        // else empty (attempt/delete carry none).
+        let target = payload
+            .get("target")
+            .or_else(|| payload.get("to"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+
+        GitActivityEntry {
+            branch: redact::apply(&branch),
+            ref_name: redact::apply(&ref_name),
+            target: redact::apply(target),
+            seq: r.seq,
+            qualifier,
+            recorded_at: r.recorded_at,
         }
     }
 

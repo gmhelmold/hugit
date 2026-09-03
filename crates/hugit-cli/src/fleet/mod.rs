@@ -8,11 +8,14 @@
 //! the fleet view AGREES with every other surface by construction.
 //!
 //! `hugit fleet --log <path>` emits the schema-valid `FleetState` JSON
-//! (`schema_version`, `workspaces`, `agents`, `last_seq`, `event_count`,
-//! `malformed`). Workspace/agent identifiers are redacted at the view boundary;
-//! malformed payloads are COUNTED (`malformed`), never fabricated into "unknown"
-//! entries. On a log with no fleet events the workspaces/agents are honestly
-//! empty — never invented.
+//! (`schema_version`, `workspaces`, `agents`, `git_activity`,
+//! `git_activity_count`, `last_seq`, `event_count`, `malformed`). Workspace/
+//! agent/branch/target identifiers are redacted at the view boundary; malformed
+//! payloads are COUNTED (`malformed`), never fabricated into "unknown" entries.
+//! On a log with no fleet events the workspaces/agents are honestly empty —
+//! never invented. `git_activity` carries the captured raw git trace
+//! (`ref.update` / `ref.delete` from the silent hooks + the push path), one
+//! entry per record in log order, so an operator sees what agents committed.
 //!
 //! Every output is stable JSON on stdout under the WB0 one-error/one-exit law
 //! ([`crate::porcelain`]): `log_not_found` / `parse_log` are the canonical

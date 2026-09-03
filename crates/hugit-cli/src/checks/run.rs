@@ -23,16 +23,17 @@
 //! The zero-execution-on-hit guarantee is structural — it is enforced inside
 //! `run_memoized`, which returns BEFORE the runner is ever touched on a hit.
 //!
-//! # AC selection (local default, live-swappable)
+//! # AC selection — local-only by design (owner decision, W5)
 //!
 //! The cache backend is chosen behind the [`ActionCache`] seam — never
-//! hardcoded. The default is a **file-backed local AC** ([`FileAc`]) so the wedge
-//! works WITHOUT P2 AND a warm re-run in a SEPARATE process is still a hit (an
-//! in-memory cache would lose its entries between binary invocations). The live
-//! [`HttpAcClient`](hugit_checks::client::ac::HttpAcClient) over CoreLink swaps
-//! in behind the same trait when the P2 tenant + PAT exist — the surrounding
-//! `run_memoized` logic does not change. [`select_ac`] is the one place the
-//! backend is chosen.
+//! hardcoded. The default — and ONLY — backend is the **file-backed local AC**
+//! ([`FileAc`]), so the wedge works deterministically with no network AND a warm
+//! re-run in a SEPARATE process is still a hit (an in-memory cache would lose
+//! its entries between binary invocations). `hugit check` is **local-only by
+//! design**: the CoreLink HTTP AC is NEVER in the runtime path (no
+//! `HUGIT_CORELINK_*` env var has any effect), because CI/compute is the runner
+//! fabric — a shared/CI cache belongs to `corelink-runners`.
+//! [`select_ac`] is the one place the backend is chosen.
 //!
 //! # The canonical-log seam (D14-guarded, atomic, lock-serialized)
 //!
@@ -50,7 +51,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use hugit_checks::client::ac::{ActionCache, HttpAcClient};
+use hugit_checks::client::ac::ActionCache;
 use hugit_checks::client::executor::{self, CheckRunner, ExecError};
 use hugit_checks::client::memo_key::{FileContent, frame_file_with_mode};
 use hugit_contracts::{CheckDef, CheckResult};
@@ -1253,42 +1254,13 @@ fn now_unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// The Action-Cache backend chosen for this run, behind the [`ActionCache`] seam.
-///
-/// The local default ([`FileAc`]) makes the wedge work WITHOUT P2 and survives
-/// across processes. The live `HttpAcClient` is the same trait — a `Live` arm is
-/// the documented swap-in point once P2 is provisioned; until then it is not
-/// constructed here (the verb never silently makes a network call).
-enum AcBackend {
-    /// File-backed local AC (default) — persists across binary invocations so a
-    /// warm re-run is a real cross-process HIT.
-    Local(FileAc),
-    /// Live CoreLink AC over HTTP — the hot, shared, content-addressed cache.
-    /// Selected only when the CoreLink runtime config is fully present (explicit
-    /// opt-in via `HUGIT_CORELINK_AC_URL` + `HUGIT_CORELINK_TENANT` + the PAT
-    /// file); never a silent network call on an unconfigured box.
-    Live(HttpAcClient),
-}
-
-impl ActionCache for AcBackend {
-    fn lookup(&self, key: &str) -> Result<Option<CheckResult>, hugit_checks::client::ac::AcError> {
-        match self {
-            AcBackend::Local(ac) => ac.lookup(key),
-            AcBackend::Live(ac) => ac.lookup(key),
-        }
-    }
-    fn store(&self, result: &CheckResult) -> Result<(), hugit_checks::client::ac::AcError> {
-        match self {
-            AcBackend::Local(ac) => ac.store(result),
-            AcBackend::Live(ac) => ac.store(result),
-        }
-    }
-}
-
-/// Choose the AC backend (the ONE place the backend is selected — never
-/// hardcoded at the call site). Defaults to the file-backed local AC at `--ac`
-/// (or `<log>.ac`). The live CoreLink `HttpAcClient::from_runtime` swaps in
-/// behind the same [`ActionCache`] trait at P2 — `run_memoized` does not change.
+/// Choose the AC backend — the ONE place the backend is selected (never
+/// hardcoded at the call site). ALWAYS the file-backed local AC at `--ac`
+/// (or `<log>.ac`): `hugit check` is **local-only by design** (owner decision,
+/// W5) — the CoreLink HTTP AC is NEVER in the runtime path, so a
+/// `HUGIT_CORELINK_*` env var has NO effect and a network call is structurally
+/// impossible. A shared/CI cache belongs to the runner fabric in
+/// `corelink-runners`.
 ///
 /// The returned [`FileAc`] locks the cache file ONLY during each individual
 /// `lookup`/`store` op (acquire→read/write→release), NOT across the unbounded
@@ -1298,25 +1270,13 @@ impl ActionCache for AcBackend {
 /// window the original lookup-then-store TOCTOU already had — strictly better
 /// than a lock-poison hang; the canonical `--log` append still serializes via its
 /// own lock, and `check --store`'s memo_key dedup keeps the log idempotent so a
-/// double-exec records at most ONE `check.recorded`. A live AC over HTTP needs no
-/// local lock — that arm would not take one.
-fn select_ac(args: &CheckRunArgs) -> Result<AcBackend, PorcelainError> {
-    // Prefer the live CoreLink AC when its runtime config is fully present
-    // (HUGIT_CORELINK_AC_URL + HUGIT_CORELINK_TENANT + the PAT file). This is an
-    // explicit opt-in — `from_runtime()` returns NotConfigured on an unset box, in
-    // which case we fall back silently to the file-backed local AC (so the wedge
-    // still works without P2 and the verb never makes a network call unconfigured).
-    // An explicit `--ac <path>` forces the local file AC (operator override).
-    if args.ac.is_none()
-        && let Ok(live) = HttpAcClient::from_runtime()
-    {
-        return Ok(AcBackend::Live(live));
-    }
+/// double-exec records at most ONE `check.recorded`.
+fn select_ac(args: &CheckRunArgs) -> FileAc {
     let store = args
         .ac
         .clone()
         .unwrap_or_else(|| with_extension(&args.log_path(), "ac"));
-    Ok(AcBackend::Local(FileAc::new(store)))
+    FileAc::new(store)
 }
 
 /// The default file-backed Action-Cache path for a `--log`: `<log>.ac`. The ONE
@@ -1350,8 +1310,9 @@ fn with_extension(path: &Path, ext: &str) -> PathBuf {
 /// This detects ACCIDENTAL or LOCAL tampering of the on-disk cache — the
 /// `.ac`-file false-green vector. It is NOT cross-tenant cryptographic
 /// authenticity: an attacker who can edit the cache can recompute the self-hash.
-/// Cross-tenant authenticity is the P2 CoreLink AC (HMAC/auth over the wire) —
-/// Seam A. The two layers compose: this closes the LOCAL hole today; P2 closes
+/// Cross-tenant authenticity is the runner-side shared AC in `corelink-runners`
+/// (HMAC/auth over the wire) — the local-only verb never reaches it. The two
+/// layers compose: this closes the LOCAL hole today; the runner fabric closes
 /// the REMOTE one. Both lookups additionally run `verify_hit` (the axis↔key
 /// content-address guard), so a record keyed to a different action is rejected
 /// regardless of the self-hash.
@@ -1377,9 +1338,9 @@ fn entry_self_hash(result: &CheckResult) -> String {
 
 /// A file-backed local Action Cache implementing the reference [`ActionCache`]
 /// semantics (content-keyed, store-then-hit) over a single JSON file holding a
-/// `{ memo_key: CachedEntry }` map. It is the local default so the wedge survives
-/// across processes WITHOUT P2; the live HTTP client is the P2 swap behind the
-/// same trait.
+/// `{ memo_key: CachedEntry }` map. It is the LOCAL-ONLY backend: `hugit check`
+/// never reaches a network cache by design (owner decision, W5) — a shared/CI
+/// cache belongs to the runner fabric in `corelink-runners`.
 ///
 /// # Lock scope (WH-CHECK lock-poison fix)
 ///
@@ -1622,7 +1583,7 @@ pub fn run(args: &CheckRunArgs) -> Result<Value, PorcelainError> {
         .unwrap_or_else(|| with_extension(&args.log_path(), "ac"));
     let excluded = state_file_exclusions(&[&args.log_path(), &ac_path]);
     let files = snapshot_tree(&root, &def.glob_set, &excluded);
-    let ac = select_ac(args)?;
+    let ac = select_ac(args);
     let runner = ProcessRunner {
         timeout: Duration::from_secs(args.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS)),
         root: Some(canonical_root),
@@ -1879,16 +1840,18 @@ fn map_lock_error(e: LockError) -> PorcelainError {
 /// be consciously classified retryable-or-terminal — a retryable case can never
 /// again silently collapse to a terminal kind under fleet-shared-cache contention
 /// (the flaky-gate failure mode that broke the contention loser's expected kind
-/// under `--workspace` parallel load).
+/// under `--workspace` parallel load). The verb is local-only (W5); the HTTP
+/// 429/503-from-a-live-AC arms classify the SHARED `AcError` type so the runner
+/// fabric's cache maps identically if it is ever plumbed there.
 fn map_exec_error(e: ExecError) -> PorcelainError {
     use hugit_checks::client::ac::AcError;
     match e {
-        // RETRYABLE: AC-file lock exhaustion or an HTTP 429/503 from the live AC.
+        // RETRYABLE: AC-file lock exhaustion (the local-only path).
         // A typed arm — no `starts_with("ac_busy:")` string-sniff (deleted).
         ExecError::Ac(AcError::Busy { detail }) => PorcelainError::new(
             "ac_busy",
             format!("the Action Cache is busy (retryable): {detail}"),
-            "another hugit check holds the AC store, or the live AC is rate-limited; \
+            "another hugit check holds the AC store; \
              retry shortly",
         ),
         // TERMINAL: every other AcError is a genuine fault, not contention. The
@@ -1905,8 +1868,8 @@ fn map_exec_error(e: ExecError) -> PorcelainError {
         ) => PorcelainError::new(
             "ac_error",
             format!("the Action Cache layer failed: {ac}"),
-            "the local AC store is unreadable/unwritable, or the live AC is \
-             misconfigured; check --ac and the AC config",
+            "the local AC store is unreadable/unwritable; \
+             check the --ac path",
         ),
         ExecError::Run(msg) => PorcelainError::new(
             "exec_failed",

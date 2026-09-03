@@ -219,3 +219,35 @@ fn rerun_is_a_cross_process_cache_hit() {
         "the file-backed AC persisted across the binary invocations"
     );
 }
+
+// ── local-only determinism (owner decision) ────────────────────────────────
+
+#[test]
+fn corelink_env_is_inert_land_stays_local() {
+    let dir = std::env::temp_dir().join(format!("hugit-land-localonly-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("log.json"), b"[]\n").unwrap();
+    let log = dir.join("log.json").to_str().unwrap().to_string();
+
+    // Set hostile CoreLink env — must have NO effect (the local FileAc is the
+    // only backend; no network is ever attempted).
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_hugit"))
+        .args(["land", "queue", "--log", &log])
+        .current_dir(&dir)
+        .env("HUGIT_CORELINK_AC_URL", "https://hostile.example.invalid")
+        .env("HUGIT_CORELINK_TENANT", "hugit")
+        .env("HUGIT_CORELINK_PAT", "clp_secret")
+        .output()
+        .expect("land runs with hostile CoreLink env");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "land succeeds with hostile CoreLink env (local-only)"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.to_lowercase().contains("hostile"),
+        "no network/hostile resolution happened: {stderr}"
+    );
+}

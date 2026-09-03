@@ -24,6 +24,7 @@ fn orch_args(pr: &str, campaign: &str, intents: &[&str]) -> OpenArgs {
         run_id: Some("run-orch".to_string()),
         principal: None,
         intent_ids: intents.iter().map(|s| s.to_string()).collect(),
+        commit_ids: Vec::new(),
         recorded_at: 1_000,
     }
 }
@@ -36,6 +37,7 @@ fn human_args(pr: &str, campaign: &str, principal: Option<&str>) -> OpenArgs {
         run_id: None,
         principal: principal.map(str::to_string),
         intent_ids: vec!["i1".to_string()],
+        commit_ids: Vec::new(),
         recorded_at: 1_000,
     }
 }

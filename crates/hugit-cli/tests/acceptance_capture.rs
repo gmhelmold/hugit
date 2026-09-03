@@ -303,3 +303,193 @@ fn captured_activity_is_watchable_as_git_activity() {
         "line class is git-activity"
     );
 }
+
+// ── 7. W7: a human may undo a hook-captured ref.update ───────────────────────
+
+/// The capture records currently on the log: `ref.update`s under the hook
+/// principal, each carrying its `seq` + branch ref + target oid.
+fn captured_commits(log: &Path) -> Vec<Value> {
+    log_records(log)
+        .into_iter()
+        .filter(|r| {
+            r["kind"] == "ref.update"
+                && r["principal_chain"]
+                    .as_array()
+                    .map(|c| {
+                        c.iter()
+                            .any(|p| p.as_str() == Some("orchestrator:hugit-hook"))
+                    })
+                    .unwrap_or(false)
+        })
+        .filter(|r| {
+            r["payload"]
+                .as_str()
+                .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                .map(|p| p["ref"].is_string() && !p["target"].as_str().unwrap_or("").is_empty())
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
+/// Wait until at least two hook-captured commit records are on the log (the
+/// async hooks may still be catching up).
+fn wait_for_two_captures(log: &Path, timeout_ms: u64) -> Vec<Value> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    while std::time::Instant::now() < deadline {
+        let caps = captured_commits(log);
+        if caps.len() >= 2 {
+            return caps;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    captured_commits(log)
+}
+
+/// The mocked `hugit undo` journey: a REAL `git commit` is captured silently,
+/// then a HUMAN (`--actor user:human`) undoes that captured `ref.update`. The
+/// compensating event lands with the supersession marker (`capture_undone_seq`
+/// naming the undone seq + the ref + the restored target), and the chain still
+/// verifies (watch loads it through the verify path, exit 0).
+#[test]
+fn human_can_undo_a_captured_ref_update() {
+    let root = scratch("undo-capture");
+    lib_init(&root);
+    set_git_identity(&root);
+    std::fs::write(root.join("a.txt"), "a").unwrap();
+    let log = root.join(".hugit/log.json");
+
+    // TWO REAL commits on the same branch: undoing the second capture restores
+    // the ref to the first capture's target (a real compensator).
+    git_in(&root, &["add", "a.txt"]);
+    let (code, _) = git_with_hugit(&root, &["commit", "-m", "c1", "--no-gpg-sign"]);
+    assert_eq!(code, 0, "first commit");
+    std::fs::write(root.join("a.txt"), "a2").unwrap();
+    git_in(&root, &["add", "a.txt"]);
+    let (code, _) = git_with_hugit(&root, &["commit", "-m", "c2", "--no-gpg-sign"]);
+    assert_eq!(code, 0, "second commit");
+
+    let captures = wait_for_two_captures(&log, 15000);
+    assert!(captures.len() >= 2, "two captures landed: {captures:?}");
+    let second = captures.last().unwrap().clone();
+    let first_target = captures[0]["payload"]
+        .as_str()
+        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        .unwrap()["target"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let seq = second["seq"].as_u64().expect("capture carries its seq");
+    let branch_ref =
+        serde_json::from_str::<Value>(second["payload"].as_str().unwrap()).unwrap()["ref"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+    // The HUMAN undoes the captured ref.update.
+    let (code, v) = run_in(
+        &root,
+        &[
+            "undo",
+            "--log",
+            log.to_str().unwrap(),
+            "--seq",
+            &seq.to_string(),
+            "--actor",
+            "user:human",
+        ],
+    );
+    assert_eq!(code, 0, "a human may undo a captured ref.update: {v}");
+    assert_eq!(v["undone_seq"].as_u64(), Some(seq));
+    assert_eq!(v["compensation_kind"], "ref.update");
+    assert_eq!(v["ref"].as_str(), Some(branch_ref.as_str()));
+
+    // The compensating event landed, naming the superseded capture.
+    let after = log_records(&log);
+    let comp = after.last().expect("a compensator was appended");
+    assert_eq!(comp["kind"], "ref.update");
+    assert_eq!(
+        comp["principal_chain"].as_array().map(|c| {
+            c.iter()
+                .map(|p| p.as_str().unwrap_or(""))
+                .collect::<Vec<_>>()
+        }),
+        Some(vec!["user:human"]),
+        "the compensator is attributed to the human"
+    );
+    let p: Value = serde_json::from_str(comp["payload"].as_str().unwrap()).unwrap();
+    assert_eq!(p["ref"].as_str(), Some(branch_ref.as_str()));
+    assert_eq!(p["target"].as_str(), Some(first_target.as_str()));
+    assert_eq!(
+        p["capture_undone_seq"].as_u64(),
+        Some(seq),
+        "the compensator on-record names the superseded capture seq"
+    );
+
+    // The chain still verifies end-to-end: watch loads through the verify path.
+    let (code, v) = run_in(
+        &root,
+        &[
+            "watch",
+            "--log",
+            log.to_str().unwrap(),
+            "--class",
+            "git-activity",
+        ],
+    );
+    assert_eq!(code, 0, "watch (chain verify) still exits 0 after the undo");
+    assert!(
+        v["count"].as_u64().unwrap_or(0) >= 3,
+        "2 captures + the compensator render as git-activity: {v}"
+    );
+}
+
+/// W7 gate: the D14 Human-only rule is unchanged for captured `ref.update`s —
+/// a non-human principal (`--actor agent:x`) is denied `authz_denied`, the
+/// denial is audited, and NO compensator lands.
+#[test]
+fn agent_undo_of_captured_ref_update_is_authz_denied() {
+    let root = scratch("undo-capture-denied");
+    lib_init(&root);
+    set_git_identity(&root);
+    std::fs::write(root.join("a.txt"), "a").unwrap();
+    let log = root.join(".hugit/log.json");
+
+    git_in(&root, &["add", "a.txt"]);
+    let (code, _) = git_with_hugit(&root, &["commit", "-m", "c1", "--no-gpg-sign"]);
+    assert_eq!(code, 0, "commit");
+
+    let captures = wait_for_two_captures(&log, 15000);
+    assert!(!captures.is_empty(), "a capture landed");
+    let seq = captures.last().unwrap()["seq"].as_u64().unwrap();
+    let ref_updates_before = ref_updates(&log).len();
+
+    let (code, v) = run_in(
+        &root,
+        &[
+            "undo",
+            "--log",
+            log.to_str().unwrap(),
+            "--seq",
+            &seq.to_string(),
+            "--actor",
+            "agent:runner-03",
+        ],
+    );
+    assert_eq!(code, 2, "a non-human undo is denied (exit 2): {v}");
+    assert_eq!(v["error"]["kind"], "authz_denied");
+
+    // The denial is audited; no compensator landed.
+    let after = log_records(&log);
+    assert_eq!(
+        ref_updates(&log).len(),
+        ref_updates_before,
+        "no compensating ref.update on a denied undo"
+    );
+    assert_eq!(after.last().unwrap()["kind"], "authz.denied");
+    assert!(
+        after.last().unwrap()["payload"]
+            .as_str()
+            .unwrap()
+            .contains("\"endpoint\":\"undo\"")
+    );
+}

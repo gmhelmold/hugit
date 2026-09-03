@@ -24,3 +24,10 @@ ingest.env
 
 # Ephemeral cross-TL courier correspondence (kept on disk, not tracked)
 docs/handoff/
+
+# Test-journey litter: a journey test that runs git init / hugit init in the
+# WRONG cwd (a cargo test's crate dir) can leave a stray .git/.hugit inside a
+# crate. NEVER track these — they break repo_root() and the bundle gate.
+crates/*/.git/
+crates/*/.hugit/
+crates/*/.gitignore

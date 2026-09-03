@@ -62,7 +62,9 @@ use crate::porcelain::PorcelainError;
 
 /// Event kind: a PR was proposed (PROPOSED state). Additive over the D1 log,
 /// same store as `intent.landed`. Payload (canonical JSON):
-/// `{"pr_id","campaign","author_kind","run_id","principal","intent_ids":[...]}`.
+/// `{"pr_id","campaign","author_kind","run_id","principal","intent_ids":[...],
+/// "commit_ids":[...]}`. `commit_ids` is the additive W2 field: captured
+/// raw-commit members (see [`OpenArgs::commit_ids`]).
 pub const PR_OPENED_KIND: &str = "pr.opened";
 
 /// Event kind: a PR entered the landing queue. Payload (canonical JSON):
@@ -216,6 +218,18 @@ pub enum PrError {
         /// The author kind whose binding flag is missing.
         author_kind: AuthorKind,
     },
+    /// `open` referenced `--commit` oids (or `--commit-ref` targets) the log
+    /// does NOT carry as captured `ref.update` targets. This is the honest
+    /// `commit_not_found` — distinct from [`PrError::MissingIntents`]: a raw
+    /// commit bundled into a PR must be PROVABLY captured by the hooks, never
+    /// assumed. Naming the missing ids so the agent can retry after the capture
+    /// lands.
+    MissingCommits {
+        /// The PR id being opened.
+        pr_id: String,
+        /// The commit oids (or unresolved `--commit-ref` refs) not on the log.
+        missing: Vec<String>,
+    },
     /// `open --campaign X` named a campaign the log does NOT carry, on a log that
     /// DOES carry campaign vocabulary (`campaign.opened` records). A log with no
     /// campaign records at all keeps the old permissive behavior (no error).
@@ -265,6 +279,7 @@ impl PrError {
             PrError::NotFound { .. } => "pr_not_found",
             PrError::MissingIntents { .. } => "missing_intents",
             PrError::MissingAuthorBinding { .. } => "missing_author_binding",
+            PrError::MissingCommits { .. } => "commit_not_found",
             PrError::UnknownCampaign { .. } => "unknown_campaign",
             PrError::AbandonUnknownPr { .. } => "unknown_pr",
             PrError::AbandonLanded { .. } => "pr_already_landed",
@@ -342,6 +357,18 @@ impl PrError {
             )
             .with_context("pr_id", json!(pr_id))
             .with_context("missing_intents", json!(missing)),
+            PrError::MissingCommits { pr_id, missing } => PorcelainError::new(
+                self.code(),
+                format!(
+                    "pr '{pr_id}' references commit(s) not captured on the log: {}",
+                    missing.join(", ")
+                ),
+                "the commit must be captured by the silent hooks first \
+                 (a real git commit fires ref.update); re-run once the capture \
+                 is on the log",
+            )
+            .with_context("pr_id", json!(pr_id))
+            .with_context("missing_commits", json!(missing)),
             PrError::MissingAuthorBinding { author_kind } => {
                 let (got_flag, needs) = match author_kind {
                     AuthorKind::Orchestrator => ("--author-kind orchestrator", "--run-id <id>"),
@@ -430,6 +457,14 @@ pub struct OpenArgs {
     pub principal: Option<String>,
     /// Bundled intent ids (`--intent <id>…`, repeatable).
     pub intent_ids: Vec<String>,
+    /// Captured commit oids (`--commit <oid>…`, repeatable) — raw-commit
+    /// members of the PR bundle, recorded **externally** (the `pr.opened`
+    /// payload carries them under `commit_ids`, NEVER forged into an intent;
+    /// the no-fake-intent invariant). Every oid MUST be present on the log as a
+    /// `ref.update` payload `target` ([`PrError::MissingCommits`] otherwise).
+    /// The `--commit-ref <ref>` shape is resolved to its captured target oid by
+    /// the CLI layer before this struct is built, so this field is oids only.
+    pub commit_ids: Vec<String>,
     /// Unix ms to stamp the appended event with.
     pub recorded_at: u64,
 }
@@ -450,6 +485,14 @@ pub struct OpenArgs {
 /// [`PrError::MissingIntents`] refusal naming the gaps. An intent-less log opts
 /// out (an intent-less fixture stays valid), so the check never breaks a log
 /// that does not yet use the intent seam.
+///
+/// **Commit validation (W2).** Every `--commit` oid MUST be present on the log
+/// as the `target` of a captured `ref.update` record — the silent hooks
+/// (post-commit) are the ONLY prover a raw commit is real. A missing oid is a
+/// [`PrError::MissingCommits`] refusal (`commit_not_found`), deliberately
+/// distinct from `missing_intents`: a raw commit is an EXTERNAL PR member, never
+/// forged into an intent. Unlike the intent check there is NO opt-out — an
+/// uncaptured commit is unprovable and must fail closed.
 ///
 /// **Referential symmetry (audit P5).** `--author-kind orchestrator` REQUIRES
 /// `--run-id` and `--author-kind human` REQUIRES `--principal` — a missing
@@ -487,6 +530,7 @@ pub fn open(log: &mut EventLog, args: &OpenArgs) -> Result<Value, PrError> {
     validate_campaign(log, &args.pr_id, &args.campaign)?;
 
     validate_intents(log, args)?;
+    validate_commits(log, args)?;
 
     // `args` is already WG-SCRUB-scrubbed at entry, so the principal chain and
     // payload are both built from redacted user strings.
@@ -579,6 +623,72 @@ fn validate_intents(log: &EventLog, args: &OpenArgs) -> Result<(), PrError> {
         Ok(())
     } else {
         Err(PrError::MissingIntents {
+            pr_id: args.pr_id.clone(),
+            missing,
+        })
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// W2 — captured raw commits as external PR members (`--commit` / `--commit-ref`).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The shared canonical event kind a silent-hook / receive-pack capture is
+/// recorded under — the read-side mirror of the raw external-change vocabulary
+/// ([`hugit_refstore::intent::model::ExternalChangeKind::RefUpdate`], appended
+/// by `hugit capture commit` and `hugit-proto`'s `record_ref_update`), restated
+/// so the commit lookup keys on the EXACT same raw record vocabulary the capture
+/// path writes. No projection in between — the same raw-vocabulary discipline
+/// [`validate_intents`] uses.
+const REF_UPDATE_KIND: &str = "ref.update";
+
+/// Whether the log carries a captured `ref.update` whose payload `target` is
+/// exactly `oid` — the W2 existence rule for a `--commit` member. Reads the raw
+/// `ref.update` payloads straight off the records (never through a fail-closed
+/// projection), matching the raw-vocabulary discipline of [`intent_landed_on_log`].
+fn commit_ref_target_on_log(log: &EventLog, oid: &str) -> bool {
+    log.records()
+        .iter()
+        .filter(|r| r.kind == REF_UPDATE_KIND)
+        .filter_map(|r| serde_json::from_str::<Value>(&r.payload).ok())
+        .any(|v| v.get("target").and_then(Value::as_str) == Some(oid))
+}
+
+/// Resolve the `target` of the LATEST `ref.update` record whose payload `ref` is
+/// exactly `ref_name` — the `--commit-ref` lookup. `None` when the ref was never
+/// captured (or its payload carries no `target`), so an unresolvable
+/// `--commit-ref` is honestly a missing capture, surfaced as
+/// [`PrError::MissingCommits`] by the CLI layer.
+pub fn commit_ref_target_for_ref(log: &EventLog, ref_name: &str) -> Option<String> {
+    log.records()
+        .iter()
+        .filter(|r| r.kind == REF_UPDATE_KIND)
+        .filter_map(|r| serde_json::from_str::<Value>(&r.payload).ok())
+        .filter(|v| v.get("ref").and_then(Value::as_str) == Some(ref_name))
+        .filter_map(|v| v.get("target").and_then(Value::as_str).map(str::to_string))
+        .next_back()
+}
+
+/// Validate that every `--commit` oid is PROVABLY captured on the log — present
+/// as the `target` of a raw `ref.update` record.
+///
+/// **W2 fail-closed rule.** Unlike [`validate_intents`] there is NO vocabulary
+/// opt-out: the silent hooks are the only prover a raw commit exists, so an
+/// uncaptured oid is unprovable and MUST refuse ([`PrError::MissingCommits`],
+/// exit-2, `kind:"commit_not_found"`). A raw commit is never forged into an
+/// intent — the no-fake-intent invariant is structural (the `pr.opened` payload
+/// carries commits under `commit_ids`, separate from `intent_ids`).
+fn validate_commits(log: &EventLog, args: &OpenArgs) -> Result<(), PrError> {
+    let missing: Vec<String> = args
+        .commit_ids
+        .iter()
+        .filter(|oid| !commit_ref_target_on_log(log, oid))
+        .cloned()
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(PrError::MissingCommits {
             pr_id: args.pr_id.clone(),
             missing,
         })
@@ -1141,6 +1251,8 @@ pub fn show(log: &EventLog, args: &ShowArgs) -> Result<Value, PrError> {
         "author_kind": opened.author_kind.as_str(),
         "intent_ids": opened.intent_ids,
         "intent_count": opened.intent_ids.len(),
+        "commit_ids": opened.commit_ids,
+        "commit_count": opened.commit_ids.len(),
         "queue": queue_state,
         "cost": cost,
     }))
@@ -1219,6 +1331,8 @@ pub fn list(log: &EventLog, args: &ListArgs) -> Value {
                 "author_kind": o.author_kind.as_str(),
                 "intent_ids": o.intent_ids,
                 "intent_count": o.intent_ids.len(),
+                "commit_ids": o.commit_ids,
+                "commit_count": o.commit_ids.len(),
                 "state": state,
                 "position": position,
             }))
@@ -1248,6 +1362,9 @@ pub struct OpenedPr {
     pub author_kind: AuthorKind,
     /// Bundled intent ids.
     pub intent_ids: Vec<String>,
+    /// Captured raw-commit members (`commit_ids` — external, never intents).
+    /// Empty for a PR opened before W2 (the field is additive-optional on read).
+    pub commit_ids: Vec<String>,
     /// Log seq of the `pr.opened` event.
     pub seq: u64,
 }
@@ -1313,11 +1430,23 @@ fn parse_opened(r: &EventRecord) -> Option<OpenedPr> {
         .iter()
         .filter_map(|x| x.as_str().map(str::to_string))
         .collect();
+    // W2 additive read: a pre-W2 `pr.opened` payload has no `commit_ids` key —
+    // default to empty (never fail a legacy PR over the new additive field).
+    let commit_ids = v
+        .get("commit_ids")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
     Some(OpenedPr {
         pr_id,
         campaign,
         author_kind,
         intent_ids,
+        commit_ids,
         seq: r.seq,
     })
 }
@@ -1418,6 +1547,8 @@ fn open_json(opened: &OpenedPr, already_exists: bool) -> Value {
         "author_kind": opened.author_kind.as_str(),
         "intent_ids": opened.intent_ids,
         "intent_count": opened.intent_ids.len(),
+        "commit_ids": opened.commit_ids,
+        "commit_count": opened.commit_ids.len(),
         "state": "proposed",
         "already_exists": already_exists,
     })
@@ -1510,6 +1641,15 @@ fn scrub_open_args(args: &OpenArgs) -> OpenArgs {
             .as_deref()
             .map(crate::porcelain::structural_secret_scrub),
         intent_ids: crate::redaction::scrub_all(&args.intent_ids),
+        // Captured commit oids are identifier ADDRESSES (40-hex) — structural
+        // scrub (bare hex survives verbatim; a prefixed secret redacts), so the
+        // LOOKUP key (`commit_ref_target_on_log`) stays symmetric with the raw
+        // `target` the capture path stored.
+        commit_ids: args
+            .commit_ids
+            .iter()
+            .map(|oid| crate::porcelain::structural_secret_scrub(oid))
+            .collect(),
         recorded_at: args.recorded_at,
     }
 }
@@ -1517,9 +1657,10 @@ fn scrub_open_args(args: &OpenArgs) -> OpenArgs {
 /// Build the canonical-JSON `pr.opened` payload (sorted keys, no insignificant
 /// whitespace — the hash chain covers these bytes verbatim), SCRUBBED-ON-APPEND
 /// (WG-SCRUB): every user-supplied string value (`campaign`, `intent_ids`,
-/// `pr_id`, `principal`, `run_id`) is routed through the redaction engine BEFORE
-/// the bytes reach the chain, so a secret in any flag never leaks to the forever
-/// log. None of these are digest fields, so all scrub.
+/// `commit_ids`, `pr_id`, `principal`, `run_id`) is routed through the
+/// redaction engine BEFORE the bytes reach the chain, so a secret in any flag
+/// never leaks to the forever log. None of these are digest fields, so all
+/// scrub.
 fn canonical_open_payload(args: &OpenArgs) -> String {
     // Optional fields are emitted as null when absent so the payload is
     // self-describing; the scrub + canonicalisation sorts keys deterministically.
@@ -1528,9 +1669,15 @@ fn canonical_open_payload(args: &OpenArgs) -> String {
         .iter()
         .map(|s| Value::String(s.clone()))
         .collect();
+    let commit_ids: Vec<Value> = args
+        .commit_ids
+        .iter()
+        .map(|s| Value::String(s.clone()))
+        .collect();
     let payload = json!({
         "author_kind": args.author_kind.as_str(),
         "campaign": args.campaign,
+        "commit_ids": commit_ids,
         "intent_ids": intent_ids,
         "pr_id": args.pr_id,
         "principal": args.principal.clone(),
@@ -1551,8 +1698,35 @@ mod tests {
             run_id: Some("run-1".to_string()),
             principal: None,
             intent_ids: intents.iter().map(|s| s.to_string()).collect(),
+            commit_ids: Vec::new(),
             recorded_at: 1000,
         }
+    }
+
+    /// Seed a captured `ref.update` (`{"ref","target"}`) + an `intent.landed`
+    /// (`{"intent_id"}`) raw record onto a fresh log — the W2 precondition for
+    /// `--commit`/`--intent` validation (both raw vocabularies in use).
+    fn seeded_capture_log() -> EventLog {
+        let mut log = EventLog::new();
+        log.append_authorized(
+            hugit_refstore::PrincipalClass::Orchestrator,
+            hugit_refstore::Endpoint::Push,
+            INTENT_LANDED_KIND.to_string(),
+            vec!["orchestrator:test".to_string()],
+            r#"{"intent_id":"i1"}"#.to_string(),
+            1,
+        )
+        .expect("seed intent.landed");
+        log.append_authorized(
+            hugit_refstore::PrincipalClass::Orchestrator,
+            hugit_refstore::Endpoint::Push,
+            REF_UPDATE_KIND.to_string(),
+            vec!["orchestrator:test".to_string()],
+            r#"{"ref":"refs/heads/main","target":"aaaa1111"}"#.to_string(),
+            2,
+        )
+        .expect("seed ref.update");
+        log
     }
 
     #[test]
@@ -1682,6 +1856,147 @@ mod tests {
             shown["queue"]["queued"],
             json!(false),
             "pr show queue.queued must be false after landing: {shown}"
+        );
+    }
+
+    // ── W2 — captured raw commits as external PR members (--commit / --commit-ref).
+
+    /// W2 happy path: a captured commit oid is accepted as an EXTERNAL member —
+    /// recorded under `commit_ids`, never merged into `intent_ids`.
+    #[test]
+    fn open_records_captured_commit_as_external_member() {
+        let mut log = seeded_capture_log();
+        let out = open(
+            &mut log,
+            &OpenArgs {
+                commit_ids: vec!["aaaa1111".to_string()],
+                ..open_args("7", "camp-a", &["i1"])
+            },
+        )
+        .expect("captured commit accepted");
+        assert_eq!(out["intent_ids"], json!(["i1"]), "intent stays an intent");
+        assert_eq!(
+            out["commit_ids"],
+            json!(["aaaa1111"]),
+            "captured commit rides as an external member"
+        );
+        // The payload on the log is the source of truth.
+        let opened = find_pr_opened(&log, "7").expect("opened");
+        assert_eq!(opened.intent_ids, vec!["i1"]);
+        assert_eq!(opened.commit_ids, vec!["aaaa1111"]);
+        // Intent vocabulary unchanged: exactly the one seeded record, no forging.
+        let landed: Vec<_> = log
+            .records()
+            .iter()
+            .filter(|r| r.kind == INTENT_LANDED_KIND)
+            .collect();
+        assert_eq!(
+            landed.len(),
+            1,
+            "no intent.landed forged for the raw commit"
+        );
+    }
+
+    /// W2 fail-closed: an oid NOT captured on the log is `commit_not_found` —
+    /// the honest distinction from `missing_intents`.
+    #[test]
+    fn open_uncaptured_commit_is_commit_not_found() {
+        let mut log = seeded_capture_log();
+        let e = open(
+            &mut log,
+            &OpenArgs {
+                commit_ids: vec!["bbbb2222".to_string()],
+                ..open_args("7", "camp-a", &["i1"])
+            },
+        )
+        .expect_err("uncaptured commit must refuse");
+        assert!(
+            matches!(e, PrError::MissingCommits { ref missing, .. } if missing == &["bbbb2222"])
+        );
+        assert_eq!(e.code(), "commit_not_found");
+        assert_eq!(
+            e.to_porcelain().exit_code(),
+            std::process::ExitCode::from(crate::porcelain::PORCELAIN_ERROR_EXIT)
+        );
+        // Nothing appended — a refusal, never a partial PR.
+        assert_eq!(log.len(), seeded_capture_log().len());
+    }
+
+    /// W2 no-fake-intent invariant: a PR bundling ONLY commits carries an empty
+    /// `intent_ids` and appends no `intent.landed` — a raw commit is never
+    /// forged into an intent, even when no intent accompanies it.
+    #[test]
+    fn open_commits_only_never_forges_intent() {
+        let mut log = seeded_capture_log();
+        let out = open(
+            &mut log,
+            &OpenArgs {
+                intent_ids: Vec::new(),
+                commit_ids: vec!["aaaa1111".to_string()],
+                ..open_args("7", "camp-a", &[])
+            },
+        )
+        .expect("commits-only PR opens");
+        assert_eq!(out["intent_ids"], json!([]), "no intent forged");
+        assert_eq!(out["commit_ids"], json!(["aaaa1111"]));
+        assert_eq!(
+            log.records()
+                .iter()
+                .filter(|r| r.kind == INTENT_LANDED_KIND)
+                .count(),
+            1,
+            "intent.landed set unchanged — no forged intent"
+        );
+    }
+
+    /// W2 `--commit-ref` resolution reads the LATEST captured target of a ref.
+    #[test]
+    fn commit_ref_resolves_to_latest_captured_target() {
+        let mut log = EventLog::new();
+        for (seq, target) in ["aaaa1111", "cccc3333"].iter().enumerate() {
+            log.append_authorized(
+                hugit_refstore::PrincipalClass::Orchestrator,
+                hugit_refstore::Endpoint::Push,
+                REF_UPDATE_KIND.to_string(),
+                vec!["orchestrator:test".to_string()],
+                serde_json::json!({"ref": "refs/heads/main", "target": target}).to_string(),
+                seq as u64 + 1,
+            )
+            .expect("seed ref.update");
+        }
+        assert_eq!(
+            commit_ref_target_for_ref(&log, "refs/heads/main").as_deref(),
+            Some("cccc3333"),
+            "latest capture wins"
+        );
+        assert_eq!(
+            commit_ref_target_for_ref(&log, "refs/heads/never"),
+            None,
+            "uncaptured ref resolves to None"
+        );
+    }
+
+    /// W2 backward compat: a pre-W2 `pr.opened` payload without `commit_ids`
+    /// still projects — the field defaults to empty.
+    #[test]
+    fn parse_opened_tolerates_missing_commit_ids() {
+        let mut log = EventLog::new();
+        log.append_authorized(
+            hugit_refstore::PrincipalClass::Orchestrator,
+            hugit_refstore::Endpoint::Land,
+            PR_OPENED_KIND.to_string(),
+            vec!["orchestrator:test".to_string()],
+            r#"{"pr_id":"old","campaign":"c","author_kind":"orchestrator",
+                "intent_ids":["i0"],"principal":null,"run_id":"r"}"#
+                .to_string(),
+            1,
+        )
+        .expect("seed pre-W2 pr.opened");
+        let opened = find_pr_opened(&log, "old").expect("legacy PR projects");
+        assert_eq!(opened.intent_ids, vec!["i0"]);
+        assert!(
+            opened.commit_ids.is_empty(),
+            "legacy commit_ids default empty"
         );
     }
 }

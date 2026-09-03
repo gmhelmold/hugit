@@ -31,7 +31,8 @@ pub mod watch;
 
 pub use deeplink::{ResolveResult, resolve};
 pub use fleet::{
-    AgentEntry, AgentState, FLEET_SCHEMA_VERSION, FleetState, WorkspaceEntry, WorkspaceState,
+    AgentEntry, AgentState, FLEET_SCHEMA_VERSION, FleetState, GitActivityEntry, WorkspaceEntry,
+    WorkspaceState,
 };
 pub use ledger::{Ledger, LedgerEntry, REDACTED, VerdictView};
 pub use redact::apply as redact_apply;
