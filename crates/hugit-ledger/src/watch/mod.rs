@@ -30,7 +30,11 @@ pub enum EventClass {
     Verdict,
     PolicyChange,
     WsState,
-    /// Any event kind not covered by the four primary classes.
+    /// Git activity — raw ref changes (`ref.update` / `ref.delete`), the
+    /// captures produced by `hugit capture` (the silent git hooks). Distinct
+    /// from Landing (an intent) — this is the raw graph trace.
+    GitActivity,
+    /// Any event kind not covered by the primary classes.
     Other,
 }
 
@@ -47,6 +51,8 @@ impl EventClass {
             EventClass::PolicyChange
         } else if kind.starts_with("ws.state") {
             EventClass::WsState
+        } else if kind == "ref.update" || kind == "ref.delete" {
+            EventClass::GitActivity
         } else {
             EventClass::Other
         }
@@ -59,6 +65,7 @@ impl EventClass {
             EventClass::Verdict => "verdict",
             EventClass::PolicyChange => "policy-change",
             EventClass::WsState => "ws-state",
+            EventClass::GitActivity => "git-activity",
             EventClass::Other => "other",
         }
     }
