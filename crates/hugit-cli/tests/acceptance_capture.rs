@@ -723,3 +723,50 @@ fn commits_only_pr_lands_via_queue() {
         "PR left the queue after landing"
     );
 }
+
+// ── 9. `hugit why` (the BINARY) resolves against the CANONICAL captured log ──
+
+#[test]
+fn why_binary_reads_canonical_captured_log_and_resolves() {
+    let root = scratch("why-bin");
+    lib_init(&root);
+    set_git_identity(&root);
+    let log = root.join(".hugit/log.json");
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "pub fn x() {}\n").unwrap();
+    git_in(&root, &["add", "src/lib.rs"]);
+    let (code, _) = git_with_hugit(&root, &["commit", "-m", "feat: add lib", "--no-gpg-sign"]);
+    assert_eq!(code, 0);
+    let got = wait_for_ref_update(
+        &log,
+        |p| !p["target"].as_str().unwrap_or("").is_empty(),
+        20000,
+    );
+    assert!(got, "capture landed");
+
+    // `hugit why --log <canonical>` (real binary) resolves the touched path.
+    // The canonical log is the bare [EventRecord, ...] the hooks wrote; the why
+    // binary now accepts it directly (no wrapper transcription needed).
+    let (code, v) = run_in(
+        &root,
+        &[
+            "why",
+            "--log",
+            log.to_str().unwrap(),
+            "--path",
+            "src/lib.rs",
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "hugit why reads the canonical log and resolves: {v}"
+    );
+    // The answer identifies the captured ref.update as the origin.
+    assert!(
+        v["origin"] != Value::Null
+            || v.to_string().contains("capture")
+            || v.to_string().contains("ref.update"),
+        "why found the captured origin: {v}"
+    );
+}

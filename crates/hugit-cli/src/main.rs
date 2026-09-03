@@ -146,47 +146,49 @@ struct WhyLogEntryInput {
     sidecar: Option<IntentSidecar>,
 }
 
-/// Read a `--log`/input file under the one input-error law: a missing FILE is an
-/// explicit `log_not_found` (NEVER silently an empty world — the P5 finding); a
-/// malformed/truncated file is a `parse_log` error. Both are exit-2 structured
-/// errors. `parse` deserialises the read bytes into the verb's input type.
-///
-/// `shape` is the verb's OWN expected on-disk shape (P3, P-WHY-FORMAT): `why`
-/// reads a `[{record, attestation?, sidecar?}, …]` array and `export` reads an
-/// `{events:[…]}` object — NEITHER is the canonical `[EventRecord, …]` array the
-/// flow porcelain shares. The shared error helper used to claim the canonical
-/// shape for both, misleading the agent about the file format; the caller now
-/// supplies the truthful shape so the `fix` hint is correct per verb.
-fn read_log<T: for<'de> Deserialize<'de>>(
-    path: &std::path::Path,
-    shape: &str,
-) -> Result<T, PorcelainError> {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(PorcelainError::log_not_found(path));
-        }
-        Err(e) => return Err(PorcelainError::io("read log", path, &e)),
-    };
-    serde_json::from_slice(&bytes).map_err(|e| {
-        PorcelainError::new(
-            "parse_log",
-            format!("--log file {} is not valid JSON: {e}", path.display()),
-            format!("the --log file for this verb must be {shape}"),
-        )
-        .with_context("path", json!(path.display().to_string()))
-    })
-}
-
-/// The on-disk shape `hugit why` reads — its own wrapper array, NOT the shared
-/// canonical `[EventRecord, …]` log (P3 / P-WHY-FORMAT honest hint).
-const WHY_LOG_SHAPE: &str = "a JSON array of why-log entries \
-     [{\"record\":<EventRecord>, \"attestation\"?:<chain>, \"sidecar\"?:<IntentSidecar>}, …] \
-     — note this is `why`'s own wrapper shape, NOT the bare [EventRecord, …] array \
-     the flow porcelain (campaign/intent/pr) shares";
-
 fn run_why(args: WhyArgs) -> Result<String, PorcelainError> {
-    let raw: Vec<WhyLogEntryInput> = read_log(&args.log, WHY_LOG_SHAPE)?;
+    // `hugit why` accepts BOTH the canonical log (a bare `[EventRecord, ...]`
+    // — what the silent hooks + `hugit capture` write) AND the legacy wrapper
+    // shape (`[{record, attestation?, sidecar?}, ...]`). Detect by item shape:
+    // an item carrying a top-level `kind` is a bare EventRecord; an item with a
+    // nested `record` is the wrapper. Fail-closed on anything else.
+    let bytes = std::fs::read(&args.log).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            PorcelainError::log_not_found(&args.log)
+        } else {
+            PorcelainError::io("read log", &args.log, &e)
+        }
+    })?;
+    let raw: Vec<WhyLogEntryInput> = {
+        let resolved: Vec<serde_json::Value> = serde_json::from_slice(&bytes).map_err(|e| {
+            PorcelainError::new(
+                "parse_log",
+                format!("--log file {} is not valid JSON: {e}", args.log.display()),
+                "the --log file must be a canonical [EventRecord, ...] or the why wrapper \
+                 [{record, ...}, ...]",
+            )
+        })?;
+        resolved
+            .into_iter()
+            .map(|item| {
+                if item.get("kind").is_some() {
+                    // Bare EventRecord: wrap it with no attestation/sidecar.
+                    serde_json::from_value::<WhyLogEntryInput>(serde_json::json!({
+                        "record": item,
+                    }))
+                } else {
+                    serde_json::from_value::<WhyLogEntryInput>(item)
+                }
+            })
+            .collect::<Result<_, _>>()
+            .map_err(|e| {
+                PorcelainError::new(
+                    "parse_log",
+                    format!("--log items are neither EventRecord nor why-wrapper: {e}"),
+                    "the --log file must be [EventRecord, ...] or [{record, ...}, ...]",
+                )
+            })?
+    };
 
     // K-CHAIN: verify the hash chain of the embedded EventRecords BEFORE
     // projecting provenance. Every other read verb (campaign show, checks show,
