@@ -23,6 +23,7 @@
 //!   - `log_resolve` — the ONE shared default-`--log` resolver
 
 pub mod campaign;
+pub mod capture;
 pub mod checks;
 pub mod ctx;
 pub mod diag;
@@ -86,6 +87,7 @@ pub const HUGIT_VERBS: &[&str] = &[
     // at PC0; PC1/PC2/PC3 fill the bodies. The verb is LIVE the moment main.rs
     // routes it (the no-drift oracle asserts dispatched == registry), so these
     // belong here, not in HUGIT_RESERVED_VERBS.
+    "capture",
     "campaign", // hugit campaign open/close/show — campaign lifecycle (PC1)
     "intent",   // hugit intent new/show         — intent ceremony (PC2)
     "pr",       // hugit pr open/land/show        — pull-request lifecycle (PC3)

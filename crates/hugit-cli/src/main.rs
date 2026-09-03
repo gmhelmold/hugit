@@ -23,6 +23,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 use hugit_cli::campaign::{self, CampaignArgs};
+use hugit_cli::capture::{self, CaptureArgs};
 use hugit_cli::checks::{self, CheckArgs};
 use hugit_cli::ctx::{self, CtxArgs};
 use hugit_cli::diag::{self, DiagArgs};
@@ -76,6 +77,8 @@ enum Command {
     Export(ExportArgs),
     /// Campaign lifecycle: open / close (seal) / show.
     Campaign(CampaignArgs),
+    /// Silent capture (git hooks call this) — never blocks git, exit 0 always.
+    Capture(CaptureArgs),
     /// Intent ceremony: new / show / list.
     Intent(IntentArgs),
     /// Issue lifecycle: transition — move an issue's state.
@@ -552,6 +555,7 @@ fn main() -> ExitCode {
         Command::Tournament(a) => run_tournament(a),
         Command::Export(a) => run_export(a),
         Command::Campaign(a) => return campaign::run(a),
+        Command::Capture(a) => return capture::run(a),
         Command::Intent(a) => return intent::run(a),
         Command::Issue(a) => return issue::run(a),
         Command::Pr(a) => return pr::run(a),
