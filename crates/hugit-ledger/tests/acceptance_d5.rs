@@ -648,6 +648,41 @@ fn item_4f_unknown_event_class_is_other_not_landing() {
     );
 }
 
+/// The hook-captured raw ref events (`hugit capture` -> `ref.update`) are
+/// classified as GitActivity — the raw graph trace, distinct from Landing.
+#[test]
+fn git_activity_hook_captures_are_classified() {
+    use hugit_ledger::watch::{EventClass, WatchDisplay};
+
+    let events: &[(&str, Vec<&str>, String)] = &[
+        // post-commit capture (branch master).
+        (
+            "ref.update",
+            vec!["orchestrator:hugit-hook"],
+            r#"{"ref":"refs/heads/master","target":"aaaa1111","branch":"master"}"#.to_string(),
+        ),
+        // pre-push capture (attempt qualifier).
+        (
+            "ref.update",
+            vec!["orchestrator:hugit-hook"],
+            r#"{"attempt":true,"refspecs":"origin","shas":"aaaa1111"}"#.to_string(),
+        ),
+    ];
+
+    let records = build_log(events);
+    let mut display = WatchDisplay::new();
+    let lines = display.process_batch(&records);
+
+    for line in &lines {
+        assert_eq!(
+            line.class,
+            EventClass::GitActivity,
+            "hook-captured ref.update must be GitActivity (the raw git trace): {:?}",
+            line.class
+        );
+    }
+}
+
 // ── ⑤ two-zoom toggle mutually consistent (one store) ────────────────────────
 
 #[test]
