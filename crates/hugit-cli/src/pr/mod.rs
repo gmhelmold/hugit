@@ -833,7 +833,10 @@ pub fn land(log: &mut EventLog, args: &LandArgs) -> Result<Value, PrError> {
         }));
     }
 
-    if opened.intent_ids.is_empty() {
+    // A PR is landable iff it bundles ANY content: intents OR captured-commit
+    // members (W2: a commits-only PR — the LLM's raw git activity — must be
+    // queueable; its commit_ids ARE the content, not feel-behind).
+    if opened.intent_ids.is_empty() && opened.commit_ids.is_empty() {
         return Err(PrError::EmptyPr {
             pr_id: args.pr_id.clone(),
         });
@@ -1669,10 +1672,14 @@ fn canonical_open_payload(args: &OpenArgs) -> String {
         .iter()
         .map(|s| Value::String(s.clone()))
         .collect();
+    // `commit_ids` are ADDRESSES (the captured commits' oids — 40-hex SHA-1
+    // content refs), so they go through the identifier-level scrub that PRESERVES
+    // a content-address shape (like pr_id/campaign), NOT the free-text engine
+    // that would collapse a bare 40-hex run to [REDACTED].
     let commit_ids: Vec<Value> = args
         .commit_ids
         .iter()
-        .map(|s| Value::String(s.clone()))
+        .map(|s| Value::String(crate::porcelain::structural_secret_scrub(s)))
         .collect();
     let payload = json!({
         "author_kind": args.author_kind.as_str(),

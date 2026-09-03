@@ -544,7 +544,12 @@ pub fn is_identifier_key(key: &str) -> bool {
     // so the explicit `--id` address gets the same structural-not-collapse scrub
     // as `intent_id`/`pr_id`/`campaign`/`run_id`. A prefixed secret redacts; a
     // ULID/40-hex/slug address survives — one boundary, every identifier key.
-    matches!(key, "campaign" | "intent_id" | "pr_id" | "run_id" | "id")
+    matches!(
+        key,
+        // Identifier-address fields: pr/campaign/run/id + the W2 captured-commit
+        // members (40-hex oids are addresses, never collapsed).
+        "campaign" | "intent_id" | "pr_id" | "run_id" | "id" | "commit_ids"
+    )
 }
 
 /// Scrub a payload [`Value`] ([`scrub_payload`]) and return it as a **canonical**
@@ -1089,7 +1094,14 @@ mod tests {
 
     #[test]
     fn is_identifier_key_set_is_exact() {
-        for k in ["campaign", "intent_id", "pr_id", "run_id", "id"] {
+        for k in [
+            "campaign",
+            "intent_id",
+            "pr_id",
+            "run_id",
+            "id",
+            "commit_ids",
+        ] {
             assert!(is_identifier_key(k), "`{k}` is an identifier address");
         }
         // Free-text fields are NOT identifiers (`intent` is the reviewed change,
