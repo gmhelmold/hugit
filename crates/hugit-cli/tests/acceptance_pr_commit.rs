@@ -296,3 +296,91 @@ fn pr_open_commits_only_never_forges_intent() {
         .count();
     assert_eq!(landed, 1, "intent.landed set unchanged — nothing forged");
 }
+
+/// A captured push-attempt (`{attempt:true, shas:"<local shas>"}`) is a
+/// captured-commit proof: `pr open --commit <pushed-sha>` must accept the sha
+/// the pre-push hook recorded, exactly like a post-commit `target`.
+///
+/// This closes the gap: a commit that a raw `git push` carries (the LLM's
+/// normal action) is provable even before/without any `pr open --commit` run.
+#[test]
+fn pr_open_accepts_a_pushed_commit_as_captured_proof() {
+    let root = scratch("open-pushed");
+    let log = root.join("log.json");
+    std::fs::write(&log, b"[]\n").expect("empty log file");
+
+    // The pre-push hook records the LOCAL sha under `shas` (whitespace/newline
+    // separated). Simulate its exact call: push-attempt with `--shas`.
+    let (code, _) = run_in(
+        &root,
+        &[
+            "capture",
+            "--kind",
+            "push-attempt",
+            "--top-level",
+            root.to_str().unwrap(),
+            "--log",
+            log.to_str().unwrap(),
+            "--refspecs",
+            "origin https://example.com/repo.git",
+            "--shas",
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        ],
+    );
+    assert_eq!(code, 0, "push-attempt captures");
+
+    // The pushed sha is NOW a captured-commit proof.
+    let (code, v) = run_in(
+        &root,
+        &[
+            "pr",
+            "open",
+            "--pr",
+            "PR-PUSHED",
+            "--campaign",
+            "camp",
+            "--author-kind",
+            "orchestrator",
+            "--run-id",
+            "r",
+            "--commit",
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            "--log",
+            log.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "pr open accepts the pushed sha as captured proof: {v}"
+    );
+    assert_eq!(
+        v["commit_ids"],
+        json!(["deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"])
+    );
+
+    // A sha never seen (neither target nor shas) is still commit_not_found.
+    let (code, v) = run_in(
+        &root,
+        &[
+            "pr",
+            "open",
+            "--pr",
+            "PR-PUSHED2",
+            "--campaign",
+            "camp",
+            "--author-kind",
+            "orchestrator",
+            "--run-id",
+            "r",
+            "--commit",
+            "cafebabecafebabecafebabecafebabecafebabe",
+            "--log",
+            log.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 2, "an unseen sha refuses: {v}");
+    assert_eq!(
+        v["error"]["kind"], "commit_not_found",
+        "unseen sha is commit_not_found: {v}"
+    );
+}
