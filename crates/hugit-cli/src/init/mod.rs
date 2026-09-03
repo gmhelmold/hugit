@@ -17,6 +17,31 @@ use serde_json::json;
 use crate::log_resolve::DEFAULT_LOG_PATH;
 use crate::porcelain::PorcelainError;
 
+/// True if `root` already contains a git repository (`.git` dir or worktree).
+fn is_git_repo(root: &std::path::Path) -> bool {
+    let dotgit = root.join(".git");
+    dotgit.is_dir() || dotgit.is_file() // worktree: .git is a file pointing at the gitdir
+}
+
+/// Run `git init` in `root` (git-proximate ceremony), leaving errors as a
+/// structured `PorcelainError`.
+fn git_init(root: &std::path::Path) -> Result<(), PorcelainError> {
+    let output = std::process::Command::new("git")
+        .arg("init")
+        .arg(root)
+        .output()
+        .map_err(|e| PorcelainError::io("run git init", root, &e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(PorcelainError::new(
+            "git_init_failed",
+            format!("`git init` in {:?} failed: {}", root, stderr.trim()),
+            "install git and add it to PATH, then re-run `hugit init`",
+        ));
+    }
+    Ok(())
+}
+
 /// Arguments for `hugit init`.
 #[derive(clap::Args, Debug)]
 pub struct InitArgs {
@@ -47,6 +72,16 @@ fn do_run(args: &InitArgs) -> Result<serde_json::Value, PorcelainError> {
     std::fs::create_dir_all(&hugit_dir)
         .map_err(|e| PorcelainError::io("create .hugit directory", &hugit_dir, &e))?;
 
+    // Git-proximate ceremony: ensure a git repo exists. If `root` is not yet
+    // a git repository, shell out to `git init` (same CLI a user would run);
+    // if it already is (`.git` dir or worktree file) leave it untouched.
+    let git_created = if is_git_repo(&root) {
+        false
+    } else {
+        git_init(&root)?;
+        true
+    };
+
     // Idempotent: never clobber an existing log (it carries the hash-chained,
     // append-only history — re-init must be safe to run in a live repo).
     let created = if log_path.exists() {
@@ -68,8 +103,16 @@ fn do_run(args: &InitArgs) -> Result<serde_json::Value, PorcelainError> {
          verb's --log defaults to .hugit/log.json"
     };
 
+    let git_hint = if git_created {
+        "git repository created (`git init` ran)"
+    } else {
+        "git repository already present"
+    };
+
     Ok(json!({
         "initialized": created,
+        "git_created": git_created,
+        "git_hint": git_hint,
         "hugit_dir": hugit_dir.display().to_string(),
         "log": log_path.display().to_string(),
         "hint": hint,
@@ -95,13 +138,17 @@ mod tests {
     }
 
     #[test]
-    fn init_creates_dir_and_empty_log_array() {
+    fn init_creates_dir_and_empty_log_array_and_git_repo() {
         let root = scratch("create");
         let v = do_run(&InitArgs {
             dir: Some(root.clone()),
         })
         .expect("init ok");
         assert_eq!(v["initialized"], true);
+        assert_eq!(
+            v["git_created"], true,
+            "git init should have run on a bare dir"
+        );
         let log = root.join(".hugit/log.json");
         assert!(log.is_file(), "log file created");
         let bytes = std::fs::read(&log).unwrap();
@@ -111,6 +158,39 @@ mod tests {
             "log is an empty JSON array"
         );
         assert!(root.join(".hugit").is_dir(), ".hugit dir created");
+        assert!(
+            root.join(".git").is_dir(),
+            "git repo created by `hugit init`"
+        );
+    }
+
+    #[test]
+    fn init_leaves_existing_git_repo_untouched() {
+        let root = scratch("existing-git");
+        // Pre-create a git repo (git init).
+        let status = std::process::Command::new("git")
+            .arg("init")
+            .arg(&root)
+            .status();
+        if status.map(|s| !s.success()).unwrap_or(true) {
+            eprintln!("SKIP: system `git` unavailable");
+            return;
+        }
+        // Seed a git commit marker file so we can prove git state was not clobbered.
+        std::fs::write(root.join("tracked.txt"), "x").unwrap();
+        std::process::Command::new("git")
+            .args(["-C", root.to_str().unwrap(), "add", "tracked.txt"])
+            .status()
+            .unwrap();
+
+        let v = do_run(&InitArgs {
+            dir: Some(root.clone()),
+        })
+        .expect("init ok on existing git repo");
+        assert_eq!(v["git_created"], false, "existing repo left alone");
+        assert!(root.join(".git").is_dir(), ".git still there");
+        assert!(root.join(".hugit").is_dir(), ".hugit added");
+        assert!(root.join(".hugit/log.json").is_file(), "log created");
     }
 
     #[test]
