@@ -165,8 +165,9 @@ pub struct CheckRunArgs {
     #[arg(long)]
     pub principal: Option<String>,
     /// The local file-backed Action Cache path. Defaults to `<log>.ac` so a warm
-    /// re-run (a separate process) is a HIT over the same wedge state. The live
-    /// CoreLink AC swaps in behind the same `ActionCache` seam at P2.
+    /// re-run (a separate process) is a HIT over the same wedge state. hugit
+    /// check is local-only by design (W5); a shared/CI cache belongs to
+    /// corelink-runners.
     #[arg(long)]
     pub ac: Option<PathBuf>,
     /// Bound the check execution to this many seconds (default 300). A command

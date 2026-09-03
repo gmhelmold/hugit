@@ -1574,3 +1574,80 @@ fn concurrent_show_is_not_locked_out_during_a_flood_check() {
         "the flood check itself completed successfully: {flood_v}"
     );
 }
+
+// ── W5 — local-only determinism: CoreLink is NEVER in the runtime path ────────
+
+/// Owner decision: `hugit check` runs LOCAL-ONLY — a `HUGIT_CORELINK_*` env var
+/// must have NO effect, the wire must never happen. The local `FileAc` is always
+/// used: a cold run MISSES + executes, a warm re-run HITs with `duration_ms:0`
+/// (zero local execution) — byte-equivalent behavior to running without the env.
+#[test]
+fn corelink_env_has_no_effect_check_stays_local() {
+    let dir = scratch("local-only");
+    let log = dir.join("log.json");
+    let ac = dir.join("ac.json");
+    write_empty_log(&log);
+    let root = seed_tree(&dir);
+
+    let args = check_args("local-only-check", "true", &log, &ac, &root);
+    let r: Vec<&str> = args.iter().map(String::as_str).collect();
+
+    // Set the full CoreLink AC runtime config as if a live AC were provisioned.
+    // If the runtime path still swapped in `HttpAcClient::from_runtime`, this
+    // would attempt a wire call (and fail / miss against the dead URL, and the
+    // warm re-run would NOT be a local HIT). With the local-only decision the
+    // env is inert — the file AC answers both runs.
+    let run = |args: &[&str]| {
+        let out = Command::new(hugit_bin())
+            .args(args)
+            .env(
+                "HUGIT_CORELINK_AC_URL",
+                "http://127.0.0.1:1/zzz-not-a-real-ac",
+            )
+            .env("HUGIT_CORELINK_TENANT", "tenant-w5")
+            .env("HUGIT_CORELINK_PAT", "pat-w5")
+            .output()
+            .expect("hugit binary runs");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let v: Value = serde_json::from_str(stdout.trim()).unwrap_or(Value::Null);
+        (out.status.code().unwrap_or(-1), v)
+    };
+
+    let (code, cold) = run(&r);
+    assert_eq!(
+        code, 0,
+        "cold run with HUGIT_CORELINK_* set exits 0: {cold}"
+    );
+    assert_eq!(
+        cold["cache_hit"], false,
+        "the cold run is a local MISS — the env had no effect: {cold}"
+    );
+    assert_eq!(
+        cold["local_executions"], 1,
+        "the cold run executed locally exactly once: {cold}"
+    );
+    let cold_key = cold["memo_key"].as_str().unwrap().to_string();
+
+    let (code, warm) = run(&r);
+    assert_eq!(
+        code, 0,
+        "warm run with HUGIT_CORELINK_* set exits 0: {warm}"
+    );
+    assert_eq!(
+        warm["cache_hit"], true,
+        "the warm re-run is a LOCAL HIT (the local FileAc served it): {warm}"
+    );
+    assert_eq!(
+        warm["local_executions"], 0,
+        "a hit performs zero local execution: {warm}"
+    );
+    assert_eq!(
+        warm["duration_ms"], 0,
+        "a hit re-spends zero wall-clock: {warm}"
+    );
+    assert_eq!(
+        warm["memo_key"].as_str().unwrap(),
+        cold_key,
+        "identical inputs key identically — the env is NOT a memo-axis: {warm}"
+    );
+}
