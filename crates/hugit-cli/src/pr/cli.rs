@@ -93,6 +93,15 @@ pub struct OpenCliArgs {
     /// Bundled intent ids (`--intent <id>`, repeatable).
     #[arg(long = "intent")]
     intent: Vec<String>,
+    /// Captured commit oid bundled as an EXTERNAL PR member (`--commit <oid>`,
+    /// repeatable) — must be present on the log as a `ref.update` target.
+    #[arg(long = "commit")]
+    commit: Vec<String>,
+    /// A ref whose latest captured target becomes the PR's commit member
+    /// (`--commit-ref <ref>`, repeatable) — resolves via the log's `ref.update`
+    /// records; an uncaptured ref is `commit_not_found`.
+    #[arg(long = "commit-ref")]
+    commit_ref: Vec<String>,
     /// Unix-ms timestamp to stamp the appended `pr.opened` event with.
     #[arg(long = "recorded-at", default_value_t = 0)]
     recorded_at: u64,
@@ -307,6 +316,25 @@ fn run_open(a: OpenCliArgs) -> ExitCode {
         return code;
     }
 
+    // W2: resolve every `--commit-ref <ref>` to its captured target oid through
+    // the log's `ref.update` records. An UNCAPTURED ref is an honest
+    // `commit_not_found` (the hooks never saw it) — the ref token is named in
+    // the missing list so the agent knows WHICH ref failed to resolve.
+    let mut commit_ids = a.commit;
+    let mut unresolved_refs: Vec<String> = Vec::new();
+    for r in &a.commit_ref {
+        match super::commit_ref_target_for_ref(&log, r) {
+            Some(oid) => commit_ids.push(oid),
+            None => unresolved_refs.push(r.clone()),
+        }
+    }
+    if !unresolved_refs.is_empty() {
+        return emit_error(&PrError::MissingCommits {
+            pr_id: a.pr_id.clone(),
+            missing: unresolved_refs,
+        });
+    }
+
     let open_args = OpenArgs {
         pr_id: a.pr_id,
         campaign: a.campaign,
@@ -314,6 +342,7 @@ fn run_open(a: OpenCliArgs) -> ExitCode {
         run_id: a.run_id,
         principal: a.principal,
         intent_ids: a.intent,
+        commit_ids,
         recorded_at: a.recorded_at,
     };
 
