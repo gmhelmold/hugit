@@ -19,6 +19,20 @@
 //! error (exit 2). The default `--actor` is `user:cli` (the human at the
 //! terminal); pass `--actor` to attribute the undo explicitly.
 //!
+//! ## Hook-captured `ref.update` (W7)
+//!
+//! The silent hooks (`hugit capture`, principal `orchestrator:hugit-hook`)
+//! append `ref.update` captures of what the agent did to the git graph. A human
+//! may undo a captured `ref.update` exactly like any other ref mutation — it is
+//! a raw graph trace, NOT an intent (`intent.landed` maps to a landing undo;
+//! a capture never has an intent to map). The compensator for a capture is the
+//! same restore-the-prior-ref machinery (`compute_compensation`), but its
+//! payload is **enriched**: it records the supersession explicitly —
+//! `{"ref", "target", "capture_undone_seq": <undone seq>}` — so "captured
+//! `ref.update` at seq=N is superseded/undone" is on-record, not implicit.
+//! The D14 Human-only gate is untouched: the enriched append routes through
+//! the same guard under [`Endpoint::Undo`] (denied + audited for a non-human).
+//!
 //! ## Hermetic file seam
 //!
 //! Operates on a local `--log <path>` JSON `[EventRecord, …]` array — the same
@@ -31,8 +45,17 @@ use std::process::ExitCode;
 
 use serde_json::json;
 
+use hugit_refstore::authz::{AuditedGuard, Decision, Endpoint, PrincipalClass};
+use hugit_refstore::{Compensation, UndoError, compute_compensation};
+
 use crate::campaign::CampaignError;
 use crate::campaign::world::{World, persist_log};
+
+/// The recorder identity hook-captured `ref.update` events carry
+/// (`hugit capture` → [`crate::capture`]). A `ref.update` under this principal
+/// is a **capture** (a silent record of what the agent did), not an explicit
+/// push and never an intent.
+const CAPTURED_PRINCIPAL: &str = "orchestrator:hugit-hook";
 
 /// Arguments for `hugit undo`.
 #[derive(clap::Args, Debug)]
@@ -97,8 +120,19 @@ fn do_run(args: UndoArgs) -> Result<String, CampaignError> {
     // through the AuditedGuard under Endpoint::Undo, and on Allow appends the
     // compensating event. `recorded_at = 0` mirrors the CLI convention every
     // other porcelain verb uses (deterministic; the live clock is the P2 seam).
+    //
+    // A **hook-captured** `ref.update` (W7) takes the explicit capture path:
+    // the same machinery computes the restore-the-prior-ref compensator, but
+    // the appended payload records the supersession (`capture_undone_seq`) and
+    // still routes through the D14 guard under Endpoint::Undo — the Human-only
+    // gate is untouched, denials are audited exactly as on the generic path.
     let mut log = world.log.clone();
-    match hugit_refstore::undo(&mut log, args.seq, vec![actor.clone()], 0) {
+    let result = if captured_ref_update_at(&log, args.seq) {
+        undo_captured_ref_update(&mut log, args.seq, vec![actor.clone()], 0)
+    } else {
+        hugit_refstore::undo(&mut log, args.seq, vec![actor.clone()], 0)
+    };
+    match result {
         Ok(comp) => {
             // ── Atomic persist (WC1 — truncation-proof) ──────────────────────
             // `_lock` (bound above) stays held across compute→append→persist
@@ -126,6 +160,88 @@ fn do_run(args: UndoArgs) -> Result<String, CampaignError> {
             Err(map_undo_error(&e, args.seq))
         }
         Err(e) => Err(map_undo_error(&e, args.seq)),
+    }
+}
+
+/// Whether the record at `seq` is a **hook-captured** `ref.update` — a silent
+/// graph capture (`hugit capture`, principal [`CAPTURED_PRINCIPAL`]), not an
+/// explicit push and never an intent. Identity is by seq + kinds semantics:
+/// the KIND is the frozen raw-push `ref.update`; the principal chain marks it
+/// as captured. A captured event has no intent, so undoing it can never map to
+/// a landing undo — the compensator is the plain prior-ref restore.
+fn captured_ref_update_at(log: &hugit_refstore::EventLog, seq: u64) -> bool {
+    let Some(record) = log.records().get(seq as usize) else {
+        return false;
+    };
+    record.kind == "ref.update"
+        && record
+            .principal_chain
+            .iter()
+            .any(|p| p == CAPTURED_PRINCIPAL)
+}
+
+/// Undo a hook-captured `ref.update` (W7): append the compensating event that
+/// records "captured `ref.update` at seq=N is superseded/undone".
+///
+/// Reuses the existing undo machinery — [`compute_compensation`] re-verifies
+/// the chain and recovers the ref's prior value from the log prefix — then
+/// enriches the compensator payload to name the supersession explicitly:
+///
+/// ```json
+/// {"ref": <name>, "target": <prior oid>, "capture_undone_seq": <seq>}
+/// ```
+///
+/// (`target` is absent when the ref did not exist before the capture, so the
+/// compensator is a `ref.delete`.) The append routes through the same D14
+/// guard under [`Endpoint::Undo`] the generic path uses — a non-human actor is
+/// denied fail-closed and an `authz.denied` audit record is written (③). The
+/// gate is unchanged: Human-only.
+fn undo_captured_ref_update(
+    log: &mut hugit_refstore::EventLog,
+    target: u64,
+    principal_chain: Vec<String>,
+    recorded_at: u64,
+) -> Result<Compensation, UndoError> {
+    // The existing machinery: chain verify (fail-closed) + prior-ref recovery.
+    let comp = compute_compensation(log, target)?;
+
+    // Enrich the compensator payload with the supersession marker.
+    let comp_payload: serde_json::Value =
+        serde_json::from_str(&comp.payload).map_err(|_| UndoError::BadTargetPayload {
+            target,
+            kind: comp.kind.clone(),
+        })?;
+    let mut body = serde_json::Map::new();
+    body.insert("ref".to_string(), json!(comp.ref_name));
+    if let Some(prior) = comp_payload
+        .get("target")
+        .and_then(serde_json::Value::as_str)
+    {
+        body.insert("target".to_string(), json!(prior));
+    }
+    body.insert("capture_undone_seq".to_string(), json!(target));
+    let payload = serde_json::Value::Object(body).to_string();
+
+    // The SAME D14 gate the generic undo path uses: chain-classified
+    // authorization under Endpoint::Undo, denials audited (③). Human-only.
+    let mut guard = AuditedGuard::new(log);
+    let (decision, _audit) = guard.authorize(&principal_chain, Endpoint::Undo, recorded_at);
+    match decision {
+        Decision::Allow => {
+            // (Human, Undo) is pinned Allow by the frozen matrix, so this
+            // guarded append cannot be denied after the allow decision above.
+            log.append_authorized(
+                PrincipalClass::Human,
+                Endpoint::Undo,
+                comp.kind.clone(),
+                principal_chain,
+                payload,
+                recorded_at,
+            )
+            .map_err(|denied| UndoError::Denied(denied.reason))?;
+            Ok(comp)
+        }
+        Decision::Deny(reason) => Err(UndoError::Denied(reason)),
     }
 }
 
@@ -290,6 +406,192 @@ mod tests {
             "no compensating ref.update on a denied undo"
         );
         assert_eq!(after.last().unwrap()["kind"], "authz.denied");
+    }
+
+    /// A scratch log with two hook-captured `ref.update`s on the same ref, so a
+    /// captured commit is followed by a later captured commit and undoing the
+    /// second has a real compensator (restore the ref to the first capture's
+    /// target). Built via the capture principal + the real append path so the
+    /// hash chain is valid and the record reads exactly like a hook capture.
+    fn scratch_captures(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "hugit-undo-captured-{}-{}-{:?}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("log.json");
+        let mut el = EventLog::new();
+        let r = "refs/heads/main";
+        let capture =
+            |target: &str| json!({ "ref": r, "target": target, "branch": "main" }).to_string();
+        el.append_for_test(
+            "ref.update",
+            vec![super::CAPTURED_PRINCIPAL.to_string()],
+            capture(&"a".repeat(40)),
+            1,
+        );
+        el.append_for_test(
+            "ref.update",
+            vec![super::CAPTURED_PRINCIPAL.to_string()],
+            capture(&"b".repeat(40)),
+            2,
+        );
+        std::fs::write(&log, serde_json::to_string_pretty(el.records()).unwrap()).unwrap();
+        log
+    }
+
+    /// A human may undo a hook-captured `ref.update`: the compensator restores
+    /// the ref to its prior target AND records the supersession — `{"ref",
+    /// "target", "capture_undone_seq"}` — while the chain still verifies.
+    #[test]
+    fn human_undo_of_captured_ref_update_enriches_and_restores() {
+        let log = scratch_captures("captured-ok");
+        let mut el = hugit_refstore::EventLog::new();
+        for r in records(&log) {
+            let rec: hugit_contracts::event_record::EventRecord =
+                serde_json::from_value(r).unwrap();
+            el.push_record(rec).unwrap();
+        }
+        let before = el.len();
+        let state_before = hugit_refstore::replay(&el).unwrap();
+        let second_capture = "b".repeat(40);
+        assert_eq!(
+            state_before.get("refs/heads/main"),
+            Some(second_capture.as_str())
+        );
+
+        let result = do_run(UndoArgs {
+            log: Some(log.clone()),
+            seq: 1,
+            actor: Some("user:alice".to_string()),
+        })
+        .expect("a human may undo a captured ref.update");
+
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["undone_seq"], 1);
+        assert_eq!(v["compensation_kind"], "ref.update");
+        assert_eq!(v["ref"], "refs/heads/main");
+
+        let after = records(&log);
+        assert_eq!(after.len(), before + 1, "exactly one compensator appended");
+        let comp = after.last().unwrap();
+        assert_eq!(comp["kind"], "ref.update");
+        assert_eq!(comp["principal_chain"][0], "user:alice");
+        let p: serde_json::Value = serde_json::from_str(comp["payload"].as_str().unwrap()).unwrap();
+        assert_eq!(p["ref"], "refs/heads/main");
+        assert_eq!(p["target"], "a".repeat(40)); // prior value restored
+        assert_eq!(p["capture_undone_seq"], 1); // supersession on-record
+        assert_eq!(
+            p["branch"],
+            serde_json::Value::Null,
+            "enriched payload is the canonical restore + marker"
+        );
+
+        // Chain still valid; the ref is recorded as undone (back at the
+        // seq-0 capture's target).
+        let mut final_el = hugit_refstore::EventLog::new();
+        for r in &after {
+            let rec: hugit_contracts::event_record::EventRecord =
+                serde_json::from_value(r.clone()).unwrap();
+            final_el.push_record(rec).unwrap();
+        }
+        hugit_refstore::verify_chain(final_el.records()).expect("chain verifies after the undo");
+        let final_state = hugit_refstore::replay(&final_el).unwrap();
+        let first_capture = "a".repeat(40);
+        assert_eq!(
+            final_state.get("refs/heads/main"),
+            Some(first_capture.as_str())
+        );
+    }
+
+    /// A hook-captured `ref.update` at genesis (the ref did not exist before)
+    /// compenses as a `ref.delete` — still marked with the superseded seq.
+    #[test]
+    fn captured_ref_update_at_genesis_compenses_as_ref_delete() {
+        let dir = std::env::temp_dir().join(format!(
+            "hugit-undo-captured-genesis-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("log.json");
+        let mut el = EventLog::new();
+        el.append_for_test(
+            "ref.update",
+            vec![super::CAPTURED_PRINCIPAL.to_string()],
+            json!({ "ref": "refs/heads/main", "target": "a".repeat(40), "branch": "main" })
+                .to_string(),
+            1,
+        );
+        std::fs::write(&log, serde_json::to_string_pretty(el.records()).unwrap()).unwrap();
+
+        let result = do_run(UndoArgs {
+            log: Some(log.clone()),
+            seq: 0,
+            actor: Some("user:alice".to_string()),
+        })
+        .expect("a human may undo a genesis capture");
+
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["compensation_kind"], "ref.delete");
+        let after = records(&log);
+        let comp = after.last().unwrap();
+        let p: serde_json::Value = serde_json::from_str(comp["payload"].as_str().unwrap()).unwrap();
+        assert_eq!(p["ref"], "refs/heads/main");
+        assert_eq!(p["capture_undone_seq"], 0);
+        assert!(p.get("target").is_none(), "no target on a ref.delete");
+    }
+
+    /// A non-human principal attempting to undo a captured `ref.update` is
+    /// denied by the unchanged D14 gate: `authz_denied`, an audit record lands,
+    /// and NO compensator is appended.
+    #[test]
+    fn non_human_undo_of_captured_ref_update_is_authz_denied() {
+        let log = scratch_captures("captured-denied");
+        let before_updates = records(&log)
+            .iter()
+            .filter(|r| r["kind"] == "ref.update")
+            .count();
+
+        let err = do_run(UndoArgs {
+            log: Some(log.clone()),
+            seq: 1,
+            actor: Some("agent:runner-03".to_string()),
+        })
+        .expect_err("a non-human undo of a capture must be denied");
+
+        let v: serde_json::Value = serde_json::from_str(&err.to_json()).unwrap();
+        assert_eq!(v["error"]["kind"], "authz_denied");
+
+        let after = records(&log);
+        assert_eq!(
+            after.iter().filter(|r| r["kind"] == "ref.update").count(),
+            before_updates,
+            "no compensating ref.update on a denied undo"
+        );
+        let last = after.last().unwrap();
+        assert_eq!(last["kind"], "authz.denied");
+        assert!(
+            last["payload"]
+                .as_str()
+                .unwrap()
+                .contains("\"endpoint\":\"undo\"")
+        );
+        // No capture_undone_seq marker slipped onto the log.
+        assert!(!after.iter().any(|r| {
+            r["payload"]
+                .as_str()
+                .unwrap_or("")
+                .contains("capture_undone_seq")
+        }));
     }
 
     /// An out-of-range `--seq` is `out_of_range`/exit-2 and appends nothing.
