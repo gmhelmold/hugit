@@ -7,9 +7,9 @@
 
 ## Baseline (updated 2026-09-03)
 
-- **Repo:** `github.com/gmhelmold/hugit`, `main` at **`ba93053`** (merged #333-#341).
+- **Repo:** `github.com/gmhelmold/hugit`, `main` at **`19f3271`** (merged #333-#342).
 - Remote `origin` is the real repo; local worktree clean, only `main`.
-- **History of merged PRs:** #333 (init git-proximate + scope docs) · #334 (git-local journey suite) · #335 (PR-landing journey + quickstart) · #336 (**silent git hooks via `hugit capture`**) · #337 (watch classifies `git-activity`) · #338 (captured activity watchable) · #339 (**git-local backlog: fleet/PR/undo/check/land local-only + journeys**) · #340 (**why resolves a path to the captured commit** — post-commit records touched paths → `resolve_why` answers on the raw graph) · #341 (**commits-only PRs are fully landable** — pr queue accepts `commit_ids`, land content = intents ∪ commits, `commit_ids` scrub-preserved as identifier-address).
+- **History of merged PRs:** #333 (init git-proximate + scope docs) · #334 (git-local journey suite) · #335 (PR-landing journey + quickstart) · #336 (**silent git hooks via `hugit capture`**) · #337 (watch classifies `git-activity`) · #338 (captured activity watchable) · #339 (**git-local backlog: fleet/PR/undo/check/land local-only + journeys**) · #340 (**why resolves a path to the captured commit**) · #341 (**commits-only PRs are fully landable** — land content = intents ∪ commits) · #342 (**jj first-class LIVE-proven against the real `jj` binary** — D2b⑦ on-wire, fail-closed SKIP when jj absent).
 
 ## Owner direction (verbatim, 2026-09-02)
 
@@ -97,7 +97,7 @@ it as a top-level verb.
    log and rides along via `pr open --commit`.
 
 ### B. Candidate next moves (post-backlog)
-- **jj first-class** (D2⑦): stacked-changes round-trip; change-ids stable.
+- ~~**jj first-class** (D2⑦)~~ **DONE (#342)** — live-proven against the real jj binary.
 - **GitHub App live mirror** (`HUGIT_GH_TEST_REPO`): needs owner/infra App
   registration; the code is ready, the live gate is not ours.
 - **`hugit serve` remote attach** (optional, out of v1): document "attach a
@@ -120,6 +120,7 @@ cargo fmt --check
 cargo clippy --workspace --all-targets --locked 2>&1 | grep -cE "^warning|^error"  # 0
 cargo test -p hugit-cli --test acceptance_gitlocal_journey   # 4 passed
 cargo test -p hugit-cli --test acceptance_capture            # 11 passed (hooks serialized; full loop)
+cargo test -p hugit-proto --test acceptance_jj_live        # 1 passed (jj live, SKIPs w/o jj)
 cargo test -p hugit-cli --test acceptance_fleet_journey      # 1 passed (fleet journey)
 cargo test --workspace --locked                               # 204 suites ok (heavy/bundle)
 ```
