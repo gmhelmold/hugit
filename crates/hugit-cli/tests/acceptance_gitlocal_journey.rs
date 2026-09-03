@@ -226,3 +226,96 @@ fn journey_export_roundtrip_restores() {
     );
     assert_eq!(gcode, 0, "exported artifact is a usable git repo");
 }
+
+// ── 4. The PR landing journey is git-local ────────────────────────────────────
+
+/// Run `hugit <args>` in `cwd` and assert exit 0, returning parsed stdout JSON.
+fn run_ok(cwd: &Path, args: &[&str]) -> Value {
+    let (code, v) = run_in(cwd, args);
+    assert_eq!(code, 0, "`hugit {}` exits 0 (err: {:?})", args.join(" "), v);
+    v
+}
+
+#[test]
+fn journey_pr_cycle_lands_locally() {
+    let root = scratch("pr-cycle");
+    lib_init(&root);
+    let log = root.join(".hugit/log.json");
+
+    // 1. Record an intent.
+    let v = run_ok(
+        &root,
+        &[
+            "intent",
+            "new",
+            "--charter",
+            "journey feature",
+            "--campaign",
+            "camp",
+            "--log",
+            log.to_str().unwrap(),
+        ],
+    );
+    let intent_id = v["intent_id"].as_str().expect("intent id").to_string();
+
+    // 2. Open a PR bundling that intent.
+    let v = run_ok(
+        &root,
+        &[
+            "pr",
+            "open",
+            "--pr",
+            "PR-1",
+            "--campaign",
+            "camp",
+            "--author-kind",
+            "orchestrator",
+            "--run-id",
+            "run-1",
+            "--intent",
+            &intent_id,
+            "--log",
+            log.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(v["state"], "proposed", "PR opens as proposed");
+
+    // 3. Queue it for the union-testing landing queue.
+    let v = run_ok(
+        &root,
+        &[
+            "pr",
+            "queue",
+            "--pr",
+            "PR-1",
+            "--log",
+            log.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(v["queued"], true, "PR enters the landing queue");
+
+    // 4. Batch-land the queue (union engine: green → lands).
+    let v = run_ok(
+        &root,
+        &[
+            "land",
+            "queue",
+            "--campaign",
+            "camp",
+            "--log",
+            log.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(v["verdict"], "green", "union verdict is green");
+    assert_eq!(v["landed"][0], "PR-1", "PR lands in the green set");
+
+    // 5. Show the PR reflects the terminal LANDED state.
+    let v = run_ok(
+        &root,
+        &["pr", "show", "--pr", "PR-1", "--log", log.to_str().unwrap()],
+    );
+    assert_eq!(
+        v["queue"]["queued"], false,
+        "PR left the queue after landing"
+    );
+}
