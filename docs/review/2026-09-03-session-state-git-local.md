@@ -7,9 +7,9 @@
 
 ## Baseline (updated 2026-09-03)
 
-- **Repo:** `github.com/gmhelmold/hugit`, `main` at **`19f3271`** (merged #333-#342).
+- **Repo:** `github.com/gmhelmold/hugit`, `main` at **`99d14d8`** (merged #333-#343).
 - Remote `origin` is the real repo; local worktree clean, only `main`.
-- **History of merged PRs:** #333 (init git-proximate + scope docs) · #334 (git-local journey suite) · #335 (PR-landing journey + quickstart) · #336 (**silent git hooks via `hugit capture`**) · #337 (watch classifies `git-activity`) · #338 (captured activity watchable) · #339 (**git-local backlog: fleet/PR/undo/check/land local-only + journeys**) · #340 (**why resolves a path to the captured commit**) · #341 (**commits-only PRs are fully landable** — land content = intents ∪ commits) · #342 (**jj first-class LIVE-proven against the real `jj` binary** — D2b⑦ on-wire, fail-closed SKIP when jj absent).
+- **History of merged PRs:** #333 (init git-proximate + scope docs) · #334 (git-local journey suite) · #335 (PR-landing journey + quickstart) · #336 (**silent git hooks via `hugit capture`**) · #337 (watch classifies `git-activity`) · #338 (captured activity watchable) · #339 (**git-local backlog: fleet/PR/undo/check/land local-only + journeys**) · #340 (**why resolves a path to the captured commit**) · #341 (**commits-only PRs are fully landable** — land content = intents ∪ commits) · #342 (**jj first-class LIVE-proven** against the real `jj` binary) · #343 (**`hugit why` accepts the CANONICAL log** — the bare `[EventRecord,...]` the hooks write; auto-detects the legacy wrapper).
 
 ## Owner direction (verbatim, 2026-09-02)
 
@@ -67,7 +67,9 @@ it as a top-level verb.
   always, never blocks git). `capture` is X5-safe (not a git command).
   `post-commit` records the touched paths (`git diff-tree --root --name-only -r
   --no-commit-id HEAD` → `files` in the payload) so `hugit why --path <file>`
-  answers "which captured commit changed this".
+  answers "which captured commit changed this". `hugit why` accepts BOTH the
+  canonical log (bare `[EventRecord,...]` — the hooks' output) AND the legacy
+  wrapper (`[{record,...},...]`), auto-detected by item shape.
 - **Watch classes**: `landing | verdict | policy-change | ws-state |
   git-activity | other`. `ref.update`/`ref.delete` → `git-activity`.
 - **`hugit fleet`** reports `git_activity` (per-branch entries, qualifiers
@@ -100,8 +102,8 @@ it as a top-level verb.
 - ~~**jj first-class** (D2⑦)~~ **DONE (#342)** — live-proven against the real jj binary.
 - **GitHub App live mirror** (`HUGIT_GH_TEST_REPO`): needs owner/infra App
   registration; the code is ready, the live gate is not ours.
-- **`hugit serve` remote attach** (optional, out of v1): document "attach a
-  server to a local repo".
+- ~~**`hugit serve` remote attach**~~ **NOT in v1 (out of scope, decided)**.
+- **why on captures is LIVE** (#340, #343): `why --log .hugit/log.json --path <file>` answers from the raw graph, canonical-log direct.
 - **More journeys**: `hugit why` provenance walk over hook-captured commits;
   `land queue` with captured raw pushes.
 - **Reserved verbs `ws` / `dispatch`**: need the runner fabric (corelink-runners);
@@ -119,7 +121,7 @@ it as a top-level verb.
 cargo fmt --check
 cargo clippy --workspace --all-targets --locked 2>&1 | grep -cE "^warning|^error"  # 0
 cargo test -p hugit-cli --test acceptance_gitlocal_journey   # 4 passed
-cargo test -p hugit-cli --test acceptance_capture            # 11 passed (hooks serialized; full loop)
+cargo test -p hugit-cli --test acceptance_capture            # 12 passed (hooks serialized; full loop)
 cargo test -p hugit-proto --test acceptance_jj_live        # 1 passed (jj live, SKIPs w/o jj)
 cargo test -p hugit-cli --test acceptance_fleet_journey      # 1 passed (fleet journey)
 cargo test --workspace --locked                               # 204 suites ok (heavy/bundle)
@@ -138,3 +140,42 @@ cargo test --workspace --locked                               # 204 suites ok (h
 | 1 | `check` scope | **Local memo only.** It verifies on your machine (FileAc memo, `duration_ms:0` on HIT); CI/compute is corelink-runners. The CoreLink swap stays an env opt-in, never silent. |
 | 2 | `hugit serve` | **Out of v1 scope.** Code stays, documented as a separate forge-host binary that is NOT part of the git-local CLI flow. No pruning. |
 | 3 | "async detect when LLM uses git" | **NOT githooks.** Owner insight: the intent bundle must ride ALONG WITH commit/PR/push (not post-hoc), and githooks can't cover everything. Direction = hugit exposes **LLM tool-call tools** (via the existing `hugit-mcp` crate) that the agent calls INSTEAD of raw `git commit`/`pr` — hugit does the git + attaches the intent/context bundle + records, all in one tool call. This is "hugit as the agent layer" (MCP tools), not a git-hook append. |
+
+---
+
+## POST-COMPACTION RESUME CHEAT-SHEET (2026-09-03)
+
+Everything below is the state at `main 99d14d8`. Next session: read THIS file, verify the repo matches, then continue.
+
+### To verify the baseline (60s)
+```bash
+cd /Users/gustavoschneiter/Documents/HuGR/hugit-main
+git log --oneline -1     # expect 99d14d8
+git status --short       # expect empty
+git branch --show-current  # main
+```
+
+### What exists (proven, all merged)
+- **Silent hooks**: `hugit init` installs post-commit/checkout/pre-push/merge → `hugit capture --kind <k>` (async, exit-0 always, never blocks git, records `ref.update` + touched `files`).
+- **Read layer**: `hugit watch --class git-activity`, `hugit fleet` (git_activity), `hugit why --log <canonical> --path <file>` (resolves to the captured commit).
+- **PR layer**: `pr open --commit <oid>` (external member), `pr queue`/`land queue` accept commits-only PRs (content = intents ∪ commits).
+- **Undo**: compensates a captured `ref.update` (human-only). **Local-only**: check + land use only FileAc (CoreLink env inert).
+- **jj**: live-proven D2b⑦ (change-ids stable across `jj squash`).
+- **journeys**: acceptance_capture (12, serialized), acceptance_fleet_journey (1), acceptance_gitlocal_journey (4), acceptance_pr_commit (4), acceptance_jj_live (1).
+- **Bundle**: `cargo test --workspace --locked` = 205 suites ok / 0 failed.
+
+### Test gotchas (do NOT rediscover)
+- Hook journeys MUST be serialized (shared Mutex in acceptance_capture.rs — async captures compete for the FileLock under parallel load → flaky).
+- Async hooks: use `wait_for_ref_update(wait_for_two_captures)` with 15-25s timeouts.
+- Git identity: `set_git_identity` in every journey (CI has none).
+- `CARGO_BIN_EXE_hugit` for the real binary; `lib_init` for init (the binary verb is X5-reserved).
+- Test litter (.git inside crates) is gitignore'd now; if a test leaves it, `rm -rf crates/*/.git`.
+
+### Remaining backlog (owner/infra-gated mostly)
+1. **GitHub App mirror** — needs `HUGIT_GH_TEST_REPO` + a registered GitHub App (owner/infra). Code is ready in `hugit-mirror`.
+2. **js understood**: D2b⑦ live; the capture-hooks model is git-specific — jj exports don't fire post-commit (the export writes refs directly). A "jj-aware capture" (detect ref changes after `jj git export`) is a design decision, not a quick fix.
+3. **First-user docs** — quickstart-local.md + quickstart-hooks.md exist; polish welcome.
+4. **`hugit serve`** — out of v1 (decided), code stays.
+
+### Cash the state
+Commit this doc (docs-only, CI skips), push. Done.
