@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(cli): **a tracked push (`git push`) is now a captured-commit proof.**
+
+  The pre-push hook now extracts the LOCAL shas from its refspec stdin and
+  records them under `shas` in the push-attempt payload (`{attempt:true,
+  refspecs, shas}`), and `pr open --commit <sha>` accepts a pushed sha as a
+  captured-commit proof — a commit the push hook SAW is as provable as one the
+  post-commit hook `target`ed. Closes: a raw `git push` (the LLM's normal
+  action) made its commits landable via `pr open --commit` even when the
+  post-commit capture was missed. A sha never seen (neither target nor shas)
+  stays `commit_not_found` — the W2 fail-closed rule holds. Journeys:
+  `pr_open_accepts_a_pushed_commit_as_captured_proof` (accept + refuse,
+  acceptance_pr_commit 5/5) + `real_git_push` now asserts the pushed shas are
+  recorded (acceptance_capture 13/13). Gate: bundle 205/0, fmt + clippy 0.
+
 - feat(cli): **`hugit why --walk` — the FULL provenance chain over captured commits.**
 
   `why` used to return only the ORIGIN (the single most-recent event that touched a path). For a path that evolved across several captured commits, an agent asking "why did this file become what it is" got one answer with no history. Now `why --walk --path <file>` projects the complete captured chain — every `ref.update` event that cited the path, most-recent first, each link with its `seq` / event hash / recorder / `recorded_at` / oid / branch / qualifiers (`checkout`/`attempt`/`merged_from`) / touched files. Links are NEVER fused: each captured commit stays a distinct raw event (same principle as `git log -- <path>` keeping commits separate). Empty chain (no captured activity ever cited the path) is a TRUE answer, not an error. Back-compat: `why` without `--walk` still returns the single origin — and the origin read equals the walk's head, so the two views can never diverge. Journey `why_walk_projects_the_provenance_chain_in_reverse_order` (13 capture journeys, serialized). Gate: bundle 205/0, fmt + clippy 0.

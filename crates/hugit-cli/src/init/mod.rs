@@ -164,15 +164,19 @@ exit 0
 "#.to_string(),
         "pre-push" => r#"#!/bin/sh
 # hugit-hook (managed by hugit init)
-# Silent capture: a push is attempted; records ref.update {attempt:true}.
+# Silent capture: a push is attempted; records ref.update {attempt:true} with
+# the LOCAL shas being pushed (the 2nd field of each refspec stdin line), so a
+# `git push` is a captured-commit proof too (pr open --commit <pushed-sha>).
 # ALWAYS exits 0 — this is a PRE hook; a non-zero exit would BLOCK the push.
 HUGIT_BIN="${HUGIT_BIN:-hugit}"
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 LOG="$ROOT/.hugit/log.json"
 [ -f "$LOG" ] || exit 0
-STDIN_REFS="$(cat)"   # remote-name + url, then <local-ref> <local-sha> <remote-ref> <remote-sha> per line
+STDIN_REFS="$(cat)"   # first line: remote-name + url; then <local-ref> <local-sha> <remote-ref> <remote-sha> per line
+# Extract the LOCAL sha (2nd field) from each refspec line that has 4 fields.
+SHAS="$(echo "$STDIN_REFS" | awk 'NF>=4 {print $2}')"
 (
-  "$HUGIT_BIN" capture --kind push-attempt --top-level "$ROOT" --log "$LOG" --hook-log "$ROOT/.hugit/hooks.log"     --refspecs "$STDIN_REFS"
+  "$HUGIT_BIN" capture --kind push-attempt --top-level "$ROOT" --log "$LOG" --hook-log "$ROOT/.hugit/hooks.log"     --refspecs "$STDIN_REFS" --shas "$SHAS"
 ) >>"$ROOT/.hugit/hooks.log" 2>&1 &
 exit 0
 "#.to_string(),

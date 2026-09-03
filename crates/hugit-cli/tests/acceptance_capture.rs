@@ -244,6 +244,19 @@ fn real_git_push_attempts_capture_attempt_true() {
         }),
         "a push attempt:true capture exists"
     );
+
+    // The captured push-attempt now records the LOCAL shas being pushed (the
+    // pre-push hook extracts field #2 of each refspec line) — so the pushed
+    // commit is a captured-commit proof, not just "a push happened".
+    let pushed_has_shas = updates.iter().any(|r| {
+        serde_json::from_str::<Value>(r["payload"].as_str().unwrap())
+            .map(|p| p["shas"].as_str().is_some_and(|s| !s.trim().is_empty()))
+            .unwrap_or(false)
+    });
+    assert!(
+        pushed_has_shas,
+        "the push-attempt capture records the local shas (hook extracts them)"
+    );
 }
 
 #[test]
