@@ -7,9 +7,9 @@
 
 ## Baseline (updated 2026-09-03)
 
-- **Repo:** `github.com/gmhelmold/hugit`, `main` at **`99d14d8`** (merged #333-#343).
+- **Repo:** `github.com/gmhelmold/hugit`, `main` at **`e1f03d3`** (merged #333-#344).
 - Remote `origin` is the real repo; local worktree clean, only `main`.
-- **History of merged PRs:** #333 (init git-proximate + scope docs) · #334 (git-local journey suite) · #335 (PR-landing journey + quickstart) · #336 (**silent git hooks via `hugit capture`**) · #337 (watch classifies `git-activity`) · #338 (captured activity watchable) · #339 (**git-local backlog: fleet/PR/undo/check/land local-only + journeys**) · #340 (**why resolves a path to the captured commit**) · #341 (**commits-only PRs are fully landable** — land content = intents ∪ commits) · #342 (**jj first-class LIVE-proven** against the real `jj` binary) · #343 (**`hugit why` accepts the CANONICAL log** — the bare `[EventRecord,...]` the hooks write; auto-detects the legacy wrapper).
+- **History of merged PRs:** #333 (init git-proximate + scope docs) · #334 (git-local journey suite) · #335 (PR-landing journey + quickstart) · #336 (**silent git hooks via `hugit capture`**) · #337 (watch classifies `git-activity`) · #338 (captured activity watchable) · #339 (**git-local backlog: fleet/PR/undo/check/land local-only + journeys**) · #340 (**why resolves a path to the captured commit**) · #341 (**commits-only PRs are fully landable** — land content = intents ∪ commits) · #342 (**jj first-class LIVE-proven** against the real `jj` binary) · #343 (**`hugit why` accepts the CANONICAL log** — the bare `[EventRecord,...]` the hooks write; auto-detects the legacy wrapper) · #344 (**`hugit why --walk`** — the FULL provenance chain: every captured `ref.update` that cited the path, most-recent first, links never fused; origin read == walk head, never diverge).
 
 ## Owner direction (verbatim, 2026-09-02)
 
@@ -70,6 +70,10 @@ it as a top-level verb.
   answers "which captured commit changed this". `hugit why` accepts BOTH the
   canonical log (bare `[EventRecord,...]` — the hooks' output) AND the legacy
   wrapper (`[{record,...},...]`), auto-detected by item shape.
+  `why --walk --path <file>` projects the FULL captured chain (every `ref.update`
+  that cited the path, most-recent first; each link seq/hash/author/recorded_at/
+  oid/branch/qualifiers/files; links never fused) — the "why did this file evolve"
+  answer. Back-compat: `why` without `--walk` = origin, which == walk head.
 - **Watch classes**: `landing | verdict | policy-change | ws-state |
   git-activity | other`. `ref.update`/`ref.delete` → `git-activity`.
 - **`hugit fleet`** reports `git_activity` (per-branch entries, qualifiers
@@ -121,10 +125,10 @@ it as a top-level verb.
 cargo fmt --check
 cargo clippy --workspace --all-targets --locked 2>&1 | grep -cE "^warning|^error"  # 0
 cargo test -p hugit-cli --test acceptance_gitlocal_journey   # 4 passed
-cargo test -p hugit-cli --test acceptance_capture            # 12 passed (hooks serialized; full loop)
+cargo test -p hugit-cli --test acceptance_capture            # 13 passed (hooks serialized; full loop)
 cargo test -p hugit-proto --test acceptance_jj_live        # 1 passed (jj live, SKIPs w/o jj)
 cargo test -p hugit-cli --test acceptance_fleet_journey      # 1 passed (fleet journey)
-cargo test --workspace --locked                               # 204 suites ok (heavy/bundle)
+cargo test --workspace --locked                               # 205 suites ok (heavy/bundle)
 ```
 
 ## Machine state
@@ -145,12 +149,12 @@ cargo test --workspace --locked                               # 204 suites ok (h
 
 ## POST-COMPACTION RESUME CHEAT-SHEET (2026-09-03)
 
-Everything below is the state at `main 99d14d8`. Next session: read THIS file, verify the repo matches, then continue.
+Everything below is the state at `main e1f03d3`. Next session: read THIS file, verify the repo matches, then continue.
 
 ### To verify the baseline (60s)
 ```bash
 cd /Users/gustavoschneiter/Documents/HuGR/hugit-main
-git log --oneline -1     # expect 99d14d8
+git log --oneline -1     # expect e1f03d3
 git status --short       # expect empty
 git branch --show-current  # main
 ```
@@ -161,7 +165,7 @@ git branch --show-current  # main
 - **PR layer**: `pr open --commit <oid>` (external member), `pr queue`/`land queue` accept commits-only PRs (content = intents ∪ commits).
 - **Undo**: compensates a captured `ref.update` (human-only). **Local-only**: check + land use only FileAc (CoreLink env inert).
 - **jj**: live-proven D2b⑦ (change-ids stable across `jj squash`).
-- **journeys**: acceptance_capture (12, serialized), acceptance_fleet_journey (1), acceptance_gitlocal_journey (4), acceptance_pr_commit (4), acceptance_jj_live (1).
+- **journeys**: acceptance_capture (13, serialized), acceptance_fleet_journey (1), acceptance_gitlocal_journey (4), acceptance_pr_commit (4), acceptance_jj_live (1).
 - **Bundle**: `cargo test --workspace --locked` = 205 suites ok / 0 failed.
 
 ### Test gotchas (do NOT rediscover)
@@ -173,7 +177,8 @@ git branch --show-current  # main
 
 ### Remaining backlog (owner/infra-gated mostly)
 1. **GitHub App mirror** — needs `HUGIT_GH_TEST_REPO` + a registered GitHub App (owner/infra). Code is ready in `hugit-mirror`.
-2. **js understood**: D2b⑦ live; the capture-hooks model is git-specific — jj exports don't fire post-commit (the export writes refs directly). A "jj-aware capture" (detect ref changes after `jj git export`) is a design decision, not a quick fix.
+2. **jj understood**: D2b⑦ live; the capture-hooks model is git-specific — jj exports don't fire post-commit (the export writes refs directly). A "jj-aware capture" (detect ref changes after `jj git export`) is a design decision, not a quick fix.
+3. **land queue with captured raw pushes** (IN PROGRESS 2026-09-03): does `pr open --commit <sha>` resolve a captured push-attempt (`attempt:true` + `shas`, NO `target`)? `commit_ref_target_on_log` (`pr/mod.rs:649`) only matches payload `target` — a pre-push capture carries `shas`, so the pushed sha likely ISN'T provable today. Explore + decide: a push-attempt sha IS a valid captured commit proof (the pre-push hook saw it), so `pr open --commit <sha>` should accept it. Fix = extend the presence rule to also scan `shas` (without forging intent).
 3. **First-user docs** — quickstart-local.md + quickstart-hooks.md exist; polish welcome.
 4. **`hugit serve`** — out of v1 (decided), code stays.
 
