@@ -32,6 +32,27 @@ C++, Ruby.
 
 ---
 
+## hugit is a git-local CLI (CI lives elsewhere)
+
+`hugit` is designed to work **where git works** — in a repository, on a laptop,
+no server, no account. The runtime is local-only by default:
+
+- **`hugit init`** runs the same ceremony as `git init` (initializes `.git/` when
+  absent) and adds `.hugit/` + the versioned intent/context log.
+- Every verb reads/writes the **canonical local log** (`.hugit/log.json`) with a
+  verifiable hash chain — `why`, `impact`, `intent`, `pr`, `verdict`, `undo`,
+  `policy`, `ledger`, `watch`, `symbol`, `ctx`, `review`, `export`, and more all
+  work with zero CoreLink credentials.
+- **`hugit check`** memoizes locally by default (file-backed AC); a CoreLink
+  shared cache is an explicit opt-in via env, never a silent network call.
+- **CI / compute execution is a separate project** (`corelink-runners`). hugit
+  records the *demand*; the runner fabric is not rebuilt here.
+
+`hugit serve` is the **optional remote / forge host** (smart-HTTP clone/fetch/push
++ the `/v1` API) — a separate binary, not part of the git-local CLI flow.
+
+---
+
 ## Where hugit is today
 
 The integrity spine (Ed25519/SHA-256 crypto, policy engine, platform safety
