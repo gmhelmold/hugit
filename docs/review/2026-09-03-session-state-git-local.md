@@ -7,9 +7,9 @@
 
 ## Baseline (updated 2026-09-03)
 
-- **Repo:** `github.com/gmhelmold/hugit`, `main` at **`11d3326`** (merged #333-#339).
+- **Repo:** `github.com/gmhelmold/hugit`, `main` at **`1879154`** (merged #333-#340).
 - Remote `origin` is the real repo; local worktree clean, only `main`.
-- **History of merged PRs:** #333 (features/legacy: init git-proximate + scope docs) · #334 (git-local journey suite) · #335 (PR-landing journey + quickstart) · #336 (**silent git hooks via `hugit capture`**) · #337 (watch classifies `git-activity`) · #338 (captured activity watchable end-to-end) · #339 (**the git-local backlog: fleet/PR/undo/check/local-only + journeys**).
+- **History of merged PRs:** #333 (init git-proximate + scope docs) · #334 (git-local journey suite) · #335 (PR-landing journey + quickstart) · #336 (**silent git hooks via `hugit capture`**) · #337 (watch classifies `git-activity`) · #338 (captured activity watchable) · #339 (**git-local backlog: fleet/PR/undo/check/land local-only + journeys**) · #340 (**why resolves a path to the captured commit that touched it** — post-commit hook records touched paths → `resolve_why` answers provenance on the raw graph).
 
 ## Owner direction (verbatim, 2026-09-02)
 
@@ -65,6 +65,9 @@ it as a top-level verb.
 - **Silent hooks** (installed by `hugit init`): `post-commit` `post-checkout`
   `pre-push` `post-merge` → detach `hugit capture --kind <k>` (nohup, exit-0
   always, never blocks git). `capture` is X5-safe (not a git command).
+  `post-commit` records the touched paths (`git diff-tree --root --name-only -r
+  --no-commit-id HEAD` → `files` in the payload) so `hugit why --path <file>`
+  answers "which captured commit changed this".
 - **Watch classes**: `landing | verdict | policy-change | ws-state |
   git-activity | other`. `ref.update`/`ref.delete` → `git-activity`.
 - **`hugit fleet`** reports `git_activity` (per-branch entries, qualifiers
@@ -116,7 +119,7 @@ it as a top-level verb.
 cargo fmt --check
 cargo clippy --workspace --all-targets --locked 2>&1 | grep -cE "^warning|^error"  # 0
 cargo test -p hugit-cli --test acceptance_gitlocal_journey   # 4 passed
-cargo test -p hugit-cli --test acceptance_capture            # 8 passed (hooks/silent)
+cargo test -p hugit-cli --test acceptance_capture            # 10 passed (hooks/silent + why)
 cargo test -p hugit-cli --test acceptance_fleet_journey      # 1 passed (fleet journey)
 cargo test --workspace --locked                               # 204 suites ok (heavy/bundle)
 ```
