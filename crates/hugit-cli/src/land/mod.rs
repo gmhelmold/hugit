@@ -260,7 +260,15 @@ pub fn batch_land<A: ActionCache>(
             (
                 LandableEntry {
                     item_id: q.pr_id.clone(),
-                    intent_id: o.intent_ids.first().cloned().unwrap_or_default(),
+                    // A PR's member id: the first intent, else the first
+                    // captured commit (W2: a commits-only PR must still land —
+                    // its raw-commit members ARE the content).
+                    intent_id: o
+                        .intent_ids
+                        .first()
+                        .or_else(|| o.commit_ids.first())
+                        .cloned()
+                        .unwrap_or_default(),
                     tree_hash: String::new(),
                     order_index: q.order_index,
                 },
@@ -275,7 +283,14 @@ pub fn batch_land<A: ActionCache>(
     // HIT on re-run (the wedge). The oracle owns the run_memoized wire.
     let content: BTreeMap<String, Vec<String>> = members
         .iter()
-        .map(|(_, o)| (o.pr_id.clone(), o.intent_ids.clone()))
+        .map(|(_, o)| {
+            // The PR's full content for the memo/union oracle: intents + the
+            // captured commits (W2). An intent-less PR is NOT empty — its
+            // commits are the content.
+            let mut ids = o.intent_ids.clone();
+            ids.extend(o.commit_ids.iter().cloned());
+            (o.pr_id.clone(), ids)
+        })
         .collect();
 
     // The conflict relation, derived HONESTLY from PR content: an intent of the

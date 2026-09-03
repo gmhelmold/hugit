@@ -24,6 +24,15 @@ use serde_json::Value;
 
 use hugit_cli::init::{InitArgs, run as run_init};
 
+/// Serializes the hook journeys. They run REAL `git commit`s whose async hooks
+/// (background `hugit capture` children) compete for the log FileLock + system
+/// resources; running them in PARALLEL makes the async capture flaky under
+/// load (the bundle gate). One journey at a time — held for the whole test.
+fn hook_serial() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 fn scratch(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "hugit-capture-journey-{tag}-{}",
@@ -139,6 +148,8 @@ fn init_installs_the_4_hooks() {
 
 #[test]
 fn real_git_commit_captures_ref_update() {
+    let _serial = hook_serial().lock().expect("hook serial lock");
+
     let root = scratch("commit");
     lib_init(&root);
     set_git_identity(&root);
@@ -162,7 +173,7 @@ fn real_git_commit_captures_ref_update() {
             p["ref"].as_str() == Some(&format!("refs/heads/{branch}"))
                 && !p["target"].as_str().unwrap_or("").is_empty()
         },
-        5000,
+        20000,
     );
     assert!(
         got,
@@ -172,6 +183,8 @@ fn real_git_commit_captures_ref_update() {
 
 #[test]
 fn real_git_checkout_captures_checkout_true() {
+    let _serial = hook_serial().lock().expect("hook serial lock");
+
     let root = scratch("checkout");
     lib_init(&root);
     set_git_identity(&root);
@@ -198,6 +211,8 @@ fn real_git_checkout_captures_checkout_true() {
 
 #[test]
 fn real_git_push_attempts_capture_attempt_true() {
+    let _serial = hook_serial().lock().expect("hook serial lock");
+
     let root = scratch("push");
     lib_init(&root);
     set_git_identity(&root);
@@ -233,6 +248,8 @@ fn real_git_push_attempts_capture_attempt_true() {
 
 #[test]
 fn missing_bin_never_blocks_git() {
+    let _serial = hook_serial().lock().expect("hook serial lock");
+
     let root = scratch("missing-bin");
     lib_init(&root);
     set_git_identity(&root);
@@ -258,6 +275,8 @@ fn missing_bin_never_blocks_git() {
 
 #[test]
 fn captured_activity_is_watchable_as_git_activity() {
+    let _serial = hook_serial().lock().expect("hook serial lock");
+
     let root = scratch("watch");
     lib_init(&root);
     set_git_identity(&root);
@@ -277,7 +296,7 @@ fn captured_activity_is_watchable_as_git_activity() {
     let got = wait_for_ref_update(
         &log,
         |p| !p["target"].as_str().unwrap_or("").is_empty(),
-        8000,
+        20000,
     );
     assert!(got, "hooks captured a commit");
 
@@ -352,6 +371,8 @@ fn wait_for_two_captures(log: &Path, timeout_ms: u64) -> Vec<Value> {
 /// verifies (watch loads it through the verify path, exit 0).
 #[test]
 fn human_can_undo_a_captured_ref_update() {
+    let _serial = hook_serial().lock().expect("hook serial lock");
+
     let root = scratch("undo-capture");
     lib_init(&root);
     set_git_identity(&root);
@@ -368,7 +389,7 @@ fn human_can_undo_a_captured_ref_update() {
     let (code, _) = git_with_hugit(&root, &["commit", "-m", "c2", "--no-gpg-sign"]);
     assert_eq!(code, 0, "second commit");
 
-    let captures = wait_for_two_captures(&log, 15000);
+    let captures = wait_for_two_captures(&log, 25000);
     assert!(captures.len() >= 2, "two captures landed: {captures:?}");
     let second = captures.last().unwrap().clone();
     let first_target = captures[0]["payload"]
@@ -448,6 +469,8 @@ fn human_can_undo_a_captured_ref_update() {
 /// denial is audited, and NO compensator lands.
 #[test]
 fn agent_undo_of_captured_ref_update_is_authz_denied() {
+    let _serial = hook_serial().lock().expect("hook serial lock");
+
     let root = scratch("undo-capture-denied");
     lib_init(&root);
     set_git_identity(&root);
@@ -458,7 +481,7 @@ fn agent_undo_of_captured_ref_update_is_authz_denied() {
     let (code, _) = git_with_hugit(&root, &["commit", "-m", "c1", "--no-gpg-sign"]);
     assert_eq!(code, 0, "commit");
 
-    let captures = wait_for_two_captures(&log, 15000);
+    let captures = wait_for_two_captures(&log, 25000);
     assert!(!captures.is_empty(), "a capture landed");
     let seq = captures.last().unwrap()["seq"].as_u64().unwrap();
     let ref_updates_before = ref_updates(&log).len();
@@ -498,6 +521,8 @@ fn agent_undo_of_captured_ref_update_is_authz_denied() {
 
 #[test]
 fn why_resolves_path_to_captured_commit() {
+    let _serial = hook_serial().lock().expect("hook serial lock");
+
     let root = scratch("why-capture");
     lib_init(&root);
     set_git_identity(&root);
@@ -514,7 +539,7 @@ fn why_resolves_path_to_captured_commit() {
     let got = wait_for_ref_update(
         &log,
         |p| !p["target"].as_str().unwrap_or("").is_empty(),
-        10000,
+        20000,
     );
     assert!(got, "hook captured the commit");
 
@@ -533,6 +558,8 @@ fn why_resolves_path_to_captured_commit() {
 
 #[test]
 fn why_lib_resolves_path_to_captured_ref_update() {
+    let _serial = hook_serial().lock().expect("hook serial lock");
+
     let root = scratch("why-lib");
     lib_init(&root);
     set_git_identity(&root);
@@ -546,7 +573,7 @@ fn why_lib_resolves_path_to_captured_ref_update() {
     let got = wait_for_ref_update(
         &log,
         |p| !p["target"].as_str().unwrap_or("").is_empty(),
-        10000,
+        20000,
     );
     assert!(got, "capture landed");
 
@@ -580,5 +607,119 @@ fn why_lib_resolves_path_to_captured_ref_update() {
         answer.is_ok(),
         "why resolves the captured commit: {:?}",
         answer.err()
+    );
+}
+
+// ── 8. A commits-only PR (captured raw commits) lands via land queue ────────
+
+#[test]
+fn commits_only_pr_lands_via_queue() {
+    let _serial = hook_serial().lock().expect("hook serial lock");
+
+    let root = scratch("land-commits");
+    lib_init(&root);
+    set_git_identity(&root);
+    let log = root.join(".hugit/log.json");
+
+    // ONE real commit (the LLM's normal action) — captured by the hook.
+    std::fs::write(root.join("a.txt"), "a").unwrap();
+    git_in(&root, &["add", "a.txt"]);
+    let (code, _) = git_with_hugit(&root, &["commit", "-m", "feat: a", "--no-gpg-sign"]);
+    assert_eq!(code, 0);
+    let got = wait_for_ref_update(
+        &log,
+        |p| !p["target"].as_str().unwrap_or("").is_empty(),
+        20000,
+    );
+    assert!(got, "capture landed");
+
+    // Open a PR bundling ONLY the captured commit (no intents).
+    let target = ref_updates(&log).last().unwrap()["payload"]
+        .as_str()
+        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        .unwrap()["target"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (code, v) = run_in(
+        &root,
+        &[
+            "pr",
+            "open",
+            "--pr",
+            "PR-C1",
+            "--campaign",
+            "camp-c",
+            "--author-kind",
+            "orchestrator",
+            "--run-id",
+            "run-1",
+            "--commit",
+            &target,
+            "--log",
+            log.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "pr open with a captured commit: {v}");
+
+    // pr show reflects the captured commit as an external PR member.
+    let (code, v) = run_in(
+        &root,
+        &[
+            "pr",
+            "show",
+            "--pr",
+            "PR-C1",
+            "--log",
+            log.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "pr show works");
+    assert_eq!(v["commit_ids"][0], target, "PR carries the captured commit");
+
+    // Queue + land: the commits-only PR must land (its raw-commit members are
+    // the content, not an empty PR).
+    run_in(
+        &root,
+        &[
+            "pr",
+            "queue",
+            "--pr",
+            "PR-C1",
+            "--log",
+            log.to_str().unwrap(),
+        ],
+    );
+    let (code, v) = run_in(
+        &root,
+        &[
+            "land",
+            "queue",
+            "--campaign",
+            "camp-c",
+            "--log",
+            log.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "land queue succeeds with a commits-only PR: {v}");
+    assert_eq!(v["landed"][0], "PR-C1", "the commits-only PR lands");
+
+    // pr show reflects the terminal landed state.
+    let (code, v) = run_in(
+        &root,
+        &[
+            "pr",
+            "show",
+            "--pr",
+            "PR-C1",
+            "--log",
+            log.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0);
+    assert_eq!(
+        v["queue"]["queued"], false,
+        "PR left the queue after landing"
     );
 }
