@@ -950,3 +950,191 @@ fn item_6_fleet_emits_valid_schema_vs_fixture() {
     println!("--- D5⑥ fleet schema emission ---");
     println!("{}", json);
 }
+
+// ── ⑥-b: fleet folds the captured git activity (the raw git trace) ───────────
+
+/// ⑥-b: `ref.update` / `ref.delete` records (the silent capture hooks #336 +
+/// the receive-pack push path) fold into `git_activity`, one entry per record
+/// in log order, with the correct qualifier per hook source — so a fleet
+/// operator sees what agents committed.
+#[test]
+fn item_6b_fleet_folds_git_activity_from_ref_events() {
+    use hugit_ledger::fleet::FleetState;
+
+    let events: &[(&str, Vec<&str>, String)] = &[
+        (
+            "ws.state.active",
+            vec!["system"],
+            r#"{"workspace_id":"ws-git"}"#.to_string(),
+        ),
+        // post-commit capture: ref + target + branch.
+        (
+            "ref.update",
+            vec!["orchestrator:hugit-hook"],
+            r#"{"ref":"refs/heads/main","target":"aaaa1111","branch":"main"}"#.to_string(),
+        ),
+        // post-checkout capture: checkout qualifier, bare branch, `to` target.
+        (
+            "ref.update",
+            vec!["orchestrator:hugit-hook"],
+            r#"{"checkout":true,"from":"aaaa1111","to":"bbbb2222","branch":"feat"}"#.to_string(),
+        ),
+        // pre-push attempt: no ref/branch/target.
+        (
+            "ref.update",
+            vec!["orchestrator:hugit-hook"],
+            r#"{"attempt":true,"refspecs":"origin","shas":"cccc3333"}"#.to_string(),
+        ),
+        // post-merge: merged_from qualifier + target, no ref/branch.
+        (
+            "ref.update",
+            vec!["orchestrator:hugit-hook"],
+            r#"{"merged_from":"dddd4444","target":"eeee5555"}"#.to_string(),
+        ),
+        // raw receive-pack push: ref + target, no qualifier.
+        (
+            "ref.update",
+            vec!["human"],
+            r#"{"ref":"refs/heads/feature","target":"ffff6666"}"#.to_string(),
+        ),
+        // ref.delete: watch-consistent GitActivity classification, no target.
+        (
+            "ref.delete",
+            vec!["human"],
+            r#"{"ref":"refs/heads/feature"}"#.to_string(),
+        ),
+    ];
+
+    let records = build_log(events);
+    let fleet = FleetState::from_records(&records);
+
+    // Count + array agree.
+    assert_eq!(fleet.git_activity_count, 6, "count must mirror the array");
+    assert_eq!(fleet.git_activity.len(), 6);
+
+    // Log-order preserved (seq ascending).
+    let seqs: Vec<u64> = fleet.git_activity.iter().map(|e| e.seq).collect();
+    let mut sorted = seqs.clone();
+    sorted.sort_unstable();
+    assert_eq!(seqs, sorted, "git_activity must stay in log order");
+    assert_eq!(
+        seqs[0], records[1].seq,
+        "first entry must be the first ref event's seq"
+    );
+
+    // post-commit entry.
+    let e = &fleet.git_activity[0];
+    assert_eq!(e.branch, "main");
+    assert_eq!(e.ref_name, "refs/heads/main");
+    assert_eq!(e.target, "aaaa1111");
+    assert_eq!(
+        e.qualifier.as_deref(),
+        None,
+        "post-commit carries no qualifier"
+    );
+    assert_eq!(e.recorded_at, 1_000_000 + 1);
+
+    // checkout entry: branch-derived ref + `to` target + qualifier.
+    let e = &fleet.git_activity[1];
+    assert_eq!(e.branch, "feat");
+    assert_eq!(
+        e.ref_name, "refs/heads/feat",
+        "checkout must derive the ref from the branch"
+    );
+    assert_eq!(e.target, "bbbb2222", "checkout target must come from `to`");
+    assert_eq!(e.qualifier.as_deref(), Some("checkout"));
+
+    // attempt entry: nothing to identify, qualifier only.
+    let e = &fleet.git_activity[2];
+    assert_eq!(e.branch, "", "attempt carries no branch");
+    assert_eq!(e.ref_name, "", "attempt carries no ref");
+    assert_eq!(e.target, "", "attempt carries no target");
+    assert_eq!(e.qualifier.as_deref(), Some("attempt"));
+
+    // merge entry.
+    let e = &fleet.git_activity[3];
+    assert_eq!(e.target, "eeee5555");
+    assert_eq!(e.qualifier.as_deref(), Some("merge"));
+    assert_eq!(e.ref_name, "");
+
+    // raw push entry: branch derived from ref, no qualifier.
+    let e = &fleet.git_activity[4];
+    assert_eq!(e.branch, "feature", "raw push must derive branch from ref");
+    assert_eq!(e.ref_name, "refs/heads/feature");
+    assert_eq!(e.target, "ffff6666");
+    assert_eq!(e.qualifier.as_deref(), None);
+
+    // delete entry: target empty.
+    let e = &fleet.git_activity[5];
+    assert_eq!(e.ref_name, "refs/heads/feature");
+    assert_eq!(e.target, "", "delete carries no target");
+    assert_eq!(e.qualifier.as_deref(), None);
+
+    // Existing fold untouched: the ws entry is still folded exactly once.
+    assert_eq!(
+        fleet.workspaces.len(),
+        1,
+        "ws fold must be untouched by ref events"
+    );
+    assert_eq!(fleet.workspaces[0].workspace_id, "ws-git");
+
+    // Round-trip carries the new fields.
+    let json = fleet.to_json();
+    let reparsed: FleetState = serde_json::from_str(&json).expect("fleet JSON round-trips");
+    assert_eq!(reparsed, fleet);
+    assert_eq!(reparsed.git_activity_count, 6);
+}
+
+/// ⑥-c: secret-shaped branch/target in `ref.update` payloads render
+/// [REDACTED] at the view boundary; the raw secret never reaches the bytes
+/// of the emitted fleet schema.
+#[test]
+fn item_6c_fleet_redacts_secret_shaped_git_activity() {
+    use hugit_ledger::fleet::FleetState;
+
+    let secret_branch = "SECRET:branch-key-1";
+    let secret_target = "SECRET:target-oid-1";
+    let events: &[(&str, Vec<&str>, String)] = &[
+        // Hook capture with secret-shaped branch + target.
+        (
+            "ref.update",
+            vec!["orchestrator:hugit-hook"],
+            serde_json::json!({
+                "ref": "refs/heads/main",
+                "target": secret_target,
+                "branch": secret_branch,
+            })
+            .to_string(),
+        ),
+        // Raw push whose ref embeds the secret branch.
+        (
+            "ref.update",
+            vec!["human"],
+            serde_json::json!({
+                "ref": format!("refs/heads/{secret_branch}"),
+                "target": "aaaa1111",
+            })
+            .to_string(),
+        ),
+    ];
+
+    let records = build_log(events);
+    let fleet = FleetState::from_records(&records);
+    assert_eq!(fleet.git_activity.len(), 2);
+
+    // Secret-shaped fields fold as [REDACTED], never raw.
+    assert_eq!(fleet.git_activity[0].branch, hugit_ledger::REDACTED);
+    assert_eq!(fleet.git_activity[0].target, hugit_ledger::REDACTED);
+    assert_eq!(fleet.git_activity[1].branch, hugit_ledger::REDACTED);
+    assert_eq!(
+        fleet.git_activity[1].target, "aaaa1111",
+        "non-secret target must pass through"
+    );
+
+    // No raw secret anywhere in the emitted bytes.
+    let raw = fleet.to_json();
+    assert!(
+        !raw.contains("SECRET:"),
+        "no raw secret may leak into the fleet emission: {raw}"
+    );
+}
