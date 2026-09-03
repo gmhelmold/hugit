@@ -118,3 +118,10 @@ cargo test --workspace --locked                               # 201 suites ok (h
   If building big bundles, watch `/` free space.
 - No stray worktrees; `main` only. The 9 wrong-scope `wp/*` worktrees+branches
   were removed (their commits are documented in the quarantine doc, reflog-recoverable).
+## Decisions closed (2026-09-03, this session)
+
+| # | Decision | Ruling |
+|---|---|---|
+| 1 | `check` scope | **Local memo only.** It verifies on your machine (FileAc memo, `duration_ms:0` on HIT); CI/compute is corelink-runners. The CoreLink swap stays an env opt-in, never silent. |
+| 2 | `hugit serve` | **Out of v1 scope.** Code stays, documented as a separate forge-host binary that is NOT part of the git-local CLI flow. No pruning. |
+| 3 | "async detect when LLM uses git" | **NOT githooks.** Owner insight: the intent bundle must ride ALONG WITH commit/PR/push (not post-hoc), and githooks can't cover everything. Direction = hugit exposes **LLM tool-call tools** (via the existing `hugit-mcp` crate) that the agent calls INSTEAD of raw `git commit`/`pr` — hugit does the git + attaches the intent/context bundle + records, all in one tool call. This is "hugit as the agent layer" (MCP tools), not a git-hook append. |
