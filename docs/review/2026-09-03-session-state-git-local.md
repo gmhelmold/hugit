@@ -7,7 +7,7 @@
 
 ## Baseline (updated 2026-09-03)
 
-- **Repo:** `github.com/gmhelmold/hugit`, `main` at **`84e6313`** (merged #333-#347 + runbook doc).
+- **Repo:** `github.com/gmhelmold/hugit`, `main` at **`ebfed79`** (merged #333-#348 + state docs).
 - Remote `origin` is the real repo; local worktree clean, only `main`.
 - **History of merged PRs:** #333 (init git-proximate + scope docs) · #334 (git-local journey suite) · #335 (PR-landing journey + quickstart) · #336 (**silent git hooks via `hugit capture`**) · #337 (watch classifies `git-activity`) · #338 (captured activity watchable) · #339 (**git-local backlog: fleet/PR/undo/check/land local-only + journeys**) · #340 (**why resolves a path to the captured commit**) · #341 (**commits-only PRs are fully landable** — land content = intents ∪ commits) · #342 (**jj first-class LIVE-proven** against the real `jj` binary) · #343 (**`hugit why` accepts the CANONICAL log** — the bare `[EventRecord,...]` the hooks write; auto-detects the legacy wrapper) · #344 (**`hugit why --walk`** — the FULL provenance chain: every captured `ref.update` that cited the path, most-recent first, links never fused; origin read == walk head, never diverge) · #345 (**a tracked push is a captured-commit proof** — the pre-push hook extracts local shas → `shas` in the push-attempt payload; `pr open --commit <pushed-sha>` accepts it; unseen sha stays `commit_not_found`) · #346 (**MCP capture tool — hugit as the agent layer** — a 5th hugit-mcp tool that shells the SAME `hugit capture` seam so an LLM that used `jj` (no post-commit hook) records its git activity; `verify` reads the log backand returns `seq`+`event_hash`, proven e2e live against a real jj commit → `pr open --commit` accepted) · #347 (**capture confirms CHECKOUT + jj checkout/merge proven e2e** — the confirm-read was matching only `target`/`shas`, but a checkout payload carries `to` (not `target`), so `verify` on a checkout FAILED; now it matches `target` OR `to`; a live journey drives the REAL MCP tool → REAL `hugit capture` against REAL `jj` (fires no hooks), recording a checkout (`jj new`) + a merge-ish `jj squash`, confirming both + provingthe captured merge commit lands via `pr open --commit`) · #348 (**live GitHub mirror push lane wired — `LiveGitHubTarget`** — the only `MirrorPushTarget` impl was thein-process `FixtureMirror`; now a real target pushes a ref from a local source repo to the authenticated GitHub remote via the real `git` binary (`push --no-verify` + `ls-remote` re-read), returning the observed oid (writer does the byte-compare); a REAL probe round-trip in `live_landing_attempt` yields `Verified` ONLY on byte-identity within 60s SLA, else honest `Partial`; token never surfaces (scrubbed `<redacted>`, bounded), scratch removed before every return;lib 83/83 (2 hermetic live-target tests against a real local bare git repo),e1a 4/4,bidir 10/10,bundle green)。
 
@@ -154,7 +154,7 @@ Everything below is the state at `main a7be4d5`. Next session: read THIS file, v
 ### To verify the baseline (60s)
 ```bash
 cd /Users/gustavoschneiter/Documents/HuGR/hugit-main
-git log --oneline -1     # expect a7be4d5
+git log --oneline -1     # expect ebfed79
 git status --short       # expect empty
 git branch --show-current  # main
 ```
@@ -259,4 +259,12 @@ go-live runbook carry the whole first-user flow.
 
 
 
-Baseline vaginal — verify: `git log -1` = 84e6313, status empty, main.
+Baseline vaginal — verify: `git log -1` = ebfed79, status empty, main.
+
+---
+
+## DONE — Live GitHub mirror lane (code wired,#348, main ebfed79)
+
+The GitHub App mirror **code** is now WIRED (the #2 backlog item. Before, Othe hugit-mirror had EVERY hermetic piece (AppAuth token mint, MirrorPushTarget trait,, per-push content-hash verify,, FIFO durable queue) BUT no real GitHub target — the only `MirrorPushTarget` impl was the in-process `FixtureMirror`。 NOW `LiveGitHubTarget` pushes a ref from a local source repo to the authenticated GitHub remote via the REAL `git` binary (`git push --no-verify` + `git ls-remote` re-read), returningthe OBSERVED oid — the writer does the byte-compare (fail-closed divergence。 `live_landing_attempt` now performs a REAL probe round-trip (scratch repo + real commit → push `refs/heads/hugit/mirror-probe-<pid>-<nanos>` → re-read), `Verified` ONLY on byte-identity within the 60s SLA;; else honest `Partial` (never fabricated。 Token never surfaces ((sanitised `<redacted>`, bounded), scratch dir removed before every return. Hermetic:: lib 83/83 (2 new live target tests against a real local bare-mirror git repo), e1a 4/4, bidir 10/10,, workspace bundle GREEN (206 ok, 0 falhas,, fmt + clippyy 0,, deny ok。 Merged #348;; docs state pushed (`ebfed79`.
+
+**Remaining (owner/infra-gated,, NO code gap**: register the GitHub App (with push perms on a target repo), place creds ( `~/.hugit/secrets/github-app-dev/`: `private-key.pem` + `app-id` + `installation-id`) or envs `HUGIT_GITHUB_APP_*`, set `HUGIT_GH_TEST_REPO=owner/repo`) → then first-real-user smoke (#1) runs real (`live_landing_attempt` → `Verified`, or honest `Partial` if creds don't cover).
