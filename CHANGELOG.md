@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(dock): **WP-DOCK-1 — the worktree dock is coined by the post-checkout hook**
+  (ADR-0005). `hugit dock coin` (new silent verb: exit 0 always, detached, never
+  blocks git) runs at checkout time and coins the dock: `dock_id = sha256(gitdir
+  NUL branch)`, charter derived from the branch (`feat/rate-limit` → `add rate
+  limit`, `charter_derived:true`), marker `{created_ts,pid}` in the gitdir
+  (reborn key), and a `dock.record` appended to the canonical log. Idempotent
+  (marker ⇒ no-op, one dock per gitdir+branch); R2 env-vs-cwd: HUGIT_DOCK_ID with
+  a differing gitdir is never adopted — parent_id recorded + visible warning;
+  clone-without-hooks coins nothing (honest). Bonus fix: all 4 hooks now resolve
+  the SHARED log via `--git-common-dir` (in a linked worktree `--show-toplevel`
+  is the worktree root — capture+dock silently no-op'd there before).
+
 - feat(mirror): **the live GitHub mirror push lane (`LiveGitHubTarget`) is wired** —the
   E1a ① PARTIAL stub is replaced with a REAL round-trip. `LiveGitHubTarget`
   pushes a ref from a local source repo to the authenticated GitHub remote via
