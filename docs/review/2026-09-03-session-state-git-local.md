@@ -154,7 +154,7 @@ Everything below is the state at `main a7be4d5`. Next session: read THIS file, v
 ### To verify the baseline (60s)
 ```bash
 cd /Users/gustavoschneiter/Documents/HuGR/hugit-main
-git log --oneline -1     # expect ebfed79
+git log --oneline -1     # expect f6f294d (pre-PR: branch fix/live-probe-branch)
 git status --short       # expect empty
 git branch --show-current  # main
 ```
@@ -247,19 +247,28 @@ open --commit(a ccepted captured commits + pushed shas) → land queue
 go-live runbook carry the whole first-user flow.
 
 ### What remains (all outside the local loop, sibling/infra-gated)
-1. **First-real-user smoke** — a human/owner running the runbook on a real
-   repo (the githugr TL or yourself..
-2. ~~**GitHub App mirror**~~ **CODE DONE (#348)** — live lane wired;
-   remaining gate = owner App registration + `HUGIT_GH_TEST_REPO` (infra); então
-   o first-real-user smoke (#1) roda real.
+1. ~~**First-real-user smoke**~~ **DONE — LIVE VERIFIED** (2026-09-04, `gmhelmold/hugit-mirror-probe` in 4.3s within the SLA; first Hermetic-to-live GitHub round-trip. See the DONE section below.)
+2. ~~**GitHub App mirror**~~ **LIVE + PROVEN** (#348 + smoke; the App `hugit-dev` is installed on the whole `gmhelmold` account — `installation-id` wired into `~/.hugit/secrets/github-app-dev/installation-id`.
 3. **Live runner exec** (`ws`/`dispatch`) — needs `corelink-runners` fabricd
-   spawn fix (separate project。
+    spawn fix (separate project.
 4. **Multi-tenant / identity / serve** — forge-surface/githugr lanes, out of
-   v1 (decisão fechada。
+    v1 (decisão fechada。
 
 
 
-Baseline vaginal — verify: `git log -1` = ebfed79, status empty, main.
+Baseline vaginal — verify: `git log -1` = f6f294d, branch fix/live-probe-branch, status a work in flight (fix + state doc commit, pre-PR.
+
+---
+
+## DONE — First-real-user live mirror smoke (LIVE VERIFIED, 2026-09-04) + probe-branch fix
+
+The first **live** GitHub App mirror round-trip rode for REAL and VERIFIED (item	① + the #1 backlog item closed港 A smoke against the scratch repo `gmhelmold/hugit-mirror-probe` (private, created for this purpose — probe refs only) ran the REAL `live_landing_attempt` via the REAL git binary: scratch repo + commit → `git push --no-verify https://x-access-token:***@github.com/gmhelmold/hugit-mirror-probe.git refs/heads/hugit/mirror-probe-<pid>-<nanos>` → `ls-remote` re-read → **① LIVE VERIFIED: gmhelmold/hugit-mirror-probe in 4301ms** (byte-identical oid within the 60s SLA. The probe ref `hugit/mirror-probe-58219-1788497768934541000` lives on the remote (the proof artifact.
+
+**The smoke surfaced + we fixed a REAL bug (hermetic miss.:`live_landing_attempt` scratches a repo + commits,but never created the LOCAL probe branch — `push_ref` uses src refspec `refs/heads/hugit/mirror-probe-…:refs/heads/hugit/mirror-probe-…`, so the src branch must exist locally;the first live push died with "src refspec … does not match any". Hermetics never caught it — `FixtureMirror` ignores src refs; argued the bare-repo lib tests seed the source repo with an existing branch already. Fix:after the commit in `live_landing_with_token`, create the local probe branch (`git branch hugit/mirror-probe-…`) before pushing. Suite mirror re-ran GREEN (136 ok decomposition: 83 lib,10 bidir,4 e1a,10 e1b,9 e2b,9 e1c? + 11,5; clippy/fmt 0).
+
+**Infra now complete (no gate remains for the live lane:** `gh` CLI authenticates as gmhelmold (existing `gho_*` PAT in keyring); GitHub App `hugit-dev` (app-id 3975152) is installed on the WHOLE account (`repository_selection: "all"`, permissions checks/issues/contents/pull_requests write + metadata read, events check_run/check_suite/pull_request/push); `~/.hugit/secrets/github-app-dev/` holds `app-id`+`private-key.pem`+`installation-id`(138297334) + client-creds/webhook-secret (existing since 2026-06-05;. To re-run the smoke: `HUGIT_GH_TEST_REPO=gmhelmold/hugit-mirror-probe cargo test -p hugit-mirror --test acceptance_e1a item_1_landing_hash_verified_within_sla -- --nocapture` (each run leaves 1 probe branch on the scratch repo — by design, the probe ref is the proof;litter is on the scratch only, never the real repos.
+
+**Probe-branch fix + this state doc** ride branch fix/live-probe-branch → PR → merge (main was f6f294d at branch cut.
 
 ---
 

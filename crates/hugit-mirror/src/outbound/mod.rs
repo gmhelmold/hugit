@@ -179,6 +179,8 @@ fn live_landing_with_token(token: &InstallationToken, repo: String) -> LiveLandi
         git_live(&scratch, &["add", "probe.txt"])?;
         git_live(&scratch, &["commit", "-q", "-m", "hugit-live-probe"])?;
         let oid = git_live(&scratch, &["rev-parse", "HEAD"])?;
+        let probe_branch = probe_ref.strip_prefix("refs/heads/").unwrap_or(&probe_ref);
+        git_live(&scratch, &["branch", "-q", probe_branch])?;
 
         // The authenticated remote — the token rides the `x-access-token`
         // username (GitHub's standard). The URL is never surfaced; the push

@@ -20,7 +20,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Hermetic:: lib 83/83 (2 new live target tests against a real local bare
   mirror git repo), e1a  4/4, bidir  10/10, workspace bundle green;
-  fmt + clippy 0.,
+
+- fix(mirror: **the live probe now creates its LOCAL probe branch before pushing —
+  the first real GitHub smoke is LIVE VERIFIED.** `live_landing_with_token` scratched a
+  repo plus committed, never created the local probe branch; `push_ref` pushes the src
+  refspec `refs/heads/hugit/mirror-probe-<pid>-<nanos>:...`, so the src branch must exist
+  locally;; first live GitHub smoke died with "src refspec … does not match any" —
+  `FixtureMirror` ignores src refs +the bare-repo lib tests seedthe source repo with an
+  existing branch already — hermetics never caught it. After the commit,the live lane
+  now runs `git branch hugit/mirror-probe-<pid>-<nanos>` before pushing;; then the smoke
+  re-ran **① LIVE VERIFIED: `gmhelmold/hugit-mirror-probe` in `4301ms`** (byte-identical
+  oid within the 60s SLA;; probe ref landed on the remote —the proof artifact). Mirror
+  suite re-ran GREEN;; clippy/fmt 0.,
+  the first real GitHub smoke is LIVE VERIFIED.** `live_landing_with_token` scratched a
+  repo plus committed, never created the local probe branch; `push_ref` pushes the src
+  refspec `refs/heads/hugit/mirror-probe-<pid>-<nanos>:...`, so the src branch must exist
+  locally;; first live GitHub smoke died with "src refspec … does not match any" —
+  `FixtureMirror` ignores src refs +the bare-repo lib tests seedthe source repo with an
+  existing branch already — hermetics never caught it. After the commit,the live lane
+  now runs `git branch hugit/mirror-probe-<pid>-<nanos>` before pushing;; then the smoke
+  re-ran **① LIVE VERIFIED: `gmhelmold/hugit-mirror-probe` in `4301ms`** (byte-identical
+  oid within the 60s SLA;; probe ref landed on the remote —the proof artifact). Mirror
+  suite re-ran GREEN;; clippy/fmt 0 — first live VERIFIED round-trip.,
 
 
 
