@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(dock): **WP-DOCK-2 — the dock resolver: cwd→gitdir→dock, env fast-path, cwd truth; ghost + self-heal + M5 auto-coin.**
+  `hugit dock ls` / `dock show` (ghost-aware discovery). Resolver (P1) is
+  fail-closed: exactly ONE dock per cwd or a named error (two OPEN docks on the
+  same gitdir ⇒ `AmbiguousDock`, never a guess). (P2/R5) env `HUGIT_DOCK_ID`
+  is honored ONLY when it agrees with the cwd gitdir — a differing env is
+  never adopted, a `dock.reconcile` record lands once per pair (exact-once).
+  (P3/R4) a dock whose gitdir vanished is `ghost` (+`dock.ghost` once), never
+  a live dock. (L2/M5) a repo with a log but no dock auto-coins a repo-scope
+  dock on first read; a marker-less worktree stays `NoDock` — the honest
+  "unlabeled" signal. (R1) a marker-orphan self-heals: re-coins the record,
+  never duplicates. `coin_dock` refactored to a `CoinSpec` (shared path for
+  the hook, self-heal, and M5).
+
 - feat(dock): **WP-DOCK-1 — the worktree dock is coined by the post-checkout hook**
   (ADR-0005). `hugit dock coin` (new silent verb: exit 0 always, detached, never
   blocks git) runs at checkout time and coins the dock: `dock_id = sha256(gitdir
