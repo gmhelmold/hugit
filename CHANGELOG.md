@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(mcp: **`capture` now confirms CHECKOUT captures too — the verify gap closed
+  + the jj checkout/merge capture loop proven END-TO-END against REAL `jj`.**
+
+  The `capture` tool`s `verify` confirm-read matched a `ref.update` only by its
+  `target` or `shas` payload key — but a checkout capture records the new
+  checked-out ref tip under **`to`** (`{checkout:true, to,from,branch}`,not `target`),so
+  `verify:true` on a checkout shell FAILED: it dispatched but could not confirm,
+  returning a hard tool error (fail-closed, never a claim). The confirm-read now
+  matches `target` **or** `to`, so a checkout awards the same `seq` + `event_hash`
+  proof as a commit/merge. Hermetic tests: a checkout payload confirms by its
+  `to` (9 → 10 capture unit cases; hugit-mcp 45/45). NEW live journey
+  `acceptance_capture_jj_checkout_merge` (`hugit-cli/tests/acceptance_capture_jj_
+  checkout_merge.rs`):with a REAL `jj` repo (which fires NO git hooks)it drives
+  the REAL MCP tool → REAL `hugit capture` seam, records a **checkout** (`jj new`
+  — jj`s `git checkout -b` analog) **and** a **merge-ish `jj squash`** (`git
+  merge --squash` analog), confirms both (captured seq+hash), asserts the payloads
+  landed,and proves the captured merge commit lands as a PR member via
+  `hugit pr open --commit` (real CLI, orchestrator args). Fail-closed: absent
+  `jj` → SKIPs loudly (hermetic match tests remain the deterministic gate.
+
 - feat(mcp): **`capture` — the 5th hugit-mcp tool, the jj-aware capture seam.**
 
   Scope decision 2026-09-03 ("hugit as the agent layer"): the LLM that uses
