@@ -137,7 +137,12 @@ fn do_run(args: &InitArgs) -> Result<serde_json::Value, PorcelainError> {
 # Silent capture: the LLM used `git commit`; hugit records ref.update async.
 HUGIT_BIN="${HUGIT_BIN:-hugit}"
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
-LOG="$ROOT/.hugit/log.json"
+# The canonical log lives at the MAIN repo's .hugit (shared across linked
+# worktrees). In a worktree, `--show-toplevel` is the WORKTREE root, so resolve
+# the shared log from the common git dir (the main .git) instead.
+COMMON=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
+LOG="$COMMON/../.hugit/log.json"
+HL="$COMMON/../.hugit/hooks.log"
 [ -f "$LOG" ] || exit 0
 (
   FILES="$(git diff-tree --root --name-only -r --no-commit-id HEAD 2>/dev/null)"
@@ -145,8 +150,8 @@ LOG="$ROOT/.hugit/log.json"
   for f in $FILES; do
     FILE_ARGS="$FILE_ARGS --files $f"
   done
-  "$HUGIT_BIN" capture --kind commit --top-level "$ROOT" --log "$LOG" --hook-log "$ROOT/.hugit/hooks.log"     --oid "$(git rev-parse HEAD 2>/dev/null)"     --branch "$(git branch --show-current 2>/dev/null)"     --recorded-at "$(git log -1 --format=%ct 2>/dev/null)" $FILE_ARGS
-) >>"$ROOT/.hugit/hooks.log" 2>&1 &
+  "$HUGIT_BIN" capture --kind commit --top-level "$ROOT" --log "$LOG" --hook-log "$HL"     --oid "$(git rev-parse HEAD 2>/dev/null)"     --branch "$(git branch --show-current 2>/dev/null)"     --recorded-at "$(git log -1 --format=%ct 2>/dev/null)" $FILE_ARGS
+) >>"$HL" 2>&1 &
 exit 0
 "#.to_string(),
         "post-checkout" => r#"#!/bin/sh
@@ -154,12 +159,23 @@ exit 0
 # Silent capture: branch checkout (flag=1); records ref.update {checkout:true}.
 HUGIT_BIN="${HUGIT_BIN:-hugit}"
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
-LOG="$ROOT/.hugit/log.json"
+# The canonical log lives at the MAIN repo's .hugit (shared across linked
+# worktrees). In a worktree, `--show-toplevel` is the WORKTREE root, so resolve
+# the shared log from the common git dir (the main .git) instead.
+COMMON=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
+LOG="$COMMON/../.hugit/log.json"
+HL="$COMMON/../.hugit/hooks.log"
 [ -f "$LOG" ] || exit 0
 [ "$3" = "1" ] || exit 0   # only branch checkouts (flag=1), not file checkouts
+GITDIR=$(git rev-parse --absolute-git-dir 2>/dev/null) || exit 0
 (
-  "$HUGIT_BIN" capture --kind checkout --top-level "$ROOT" --log "$LOG" --hook-log "$ROOT/.hugit/hooks.log"     --from "$1" --oid "$2" --branch "$(git branch --show-current 2>/dev/null)"
-) >>"$ROOT/.hugit/hooks.log" 2>&1 &
+  "$HUGIT_BIN" capture --kind checkout --top-level "$ROOT" --log "$LOG" --hook-log "$HL"     --from "$1" --oid "$2" --branch "$(git branch --show-current 2>/dev/null)"
+) >>"$HL" 2>&1 &
+# Worktree-dock (ADR-0005, WP-DOCK-1): coin the physical binding at checkout
+# time (idempotent — marker present ⇒ no-op; never blocks git).
+(
+  "$HUGIT_BIN" dock coin --top-level "$ROOT" --gitdir "$GITDIR" --log "$LOG" --hook-log "$HL" --branch "$(git branch --show-current 2>/dev/null)"
+) >>"$HL" 2>&1 &
 exit 0
 "#.to_string(),
         "pre-push" => r#"#!/bin/sh
@@ -170,14 +186,19 @@ exit 0
 # ALWAYS exits 0 — this is a PRE hook; a non-zero exit would BLOCK the push.
 HUGIT_BIN="${HUGIT_BIN:-hugit}"
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
-LOG="$ROOT/.hugit/log.json"
+# The canonical log lives at the MAIN repo's .hugit (shared across linked
+# worktrees). In a worktree, `--show-toplevel` is the WORKTREE root, so resolve
+# the shared log from the common git dir (the main .git) instead.
+COMMON=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
+LOG="$COMMON/../.hugit/log.json"
+HL="$COMMON/../.hugit/hooks.log"
 [ -f "$LOG" ] || exit 0
 STDIN_REFS="$(cat)"   # first line: remote-name + url; then <local-ref> <local-sha> <remote-ref> <remote-sha> per line
 # Extract the LOCAL sha (2nd field) from each refspec line that has 4 fields.
 SHAS="$(echo "$STDIN_REFS" | awk 'NF>=4 {print $2}')"
 (
-  "$HUGIT_BIN" capture --kind push-attempt --top-level "$ROOT" --log "$LOG" --hook-log "$ROOT/.hugit/hooks.log"     --refspecs "$STDIN_REFS" --shas "$SHAS"
-) >>"$ROOT/.hugit/hooks.log" 2>&1 &
+  "$HUGIT_BIN" capture --kind push-attempt --top-level "$ROOT" --log "$LOG" --hook-log "$HL"     --refspecs "$STDIN_REFS" --shas "$SHAS"
+) >>"$HL" 2>&1 &
 exit 0
 "#.to_string(),
         "post-merge" => r#"#!/bin/sh
@@ -185,11 +206,16 @@ exit 0
 # Silent capture: a local merge landed; records ref.update {merged_from}.
 HUGIT_BIN="${HUGIT_BIN:-hugit}"
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
-LOG="$ROOT/.hugit/log.json"
+# The canonical log lives at the MAIN repo's .hugit (shared across linked
+# worktrees). In a worktree, `--show-toplevel` is the WORKTREE root, so resolve
+# the shared log from the common git dir (the main .git) instead.
+COMMON=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
+LOG="$COMMON/../.hugit/log.json"
+HL="$COMMON/../.hugit/hooks.log"
 [ -f "$LOG" ] || exit 0
 (
-  "$HUGIT_BIN" capture --kind merge --top-level "$ROOT" --log "$LOG" --hook-log "$ROOT/.hugit/hooks.log"     --from "$(git rev-parse HEAD~1 2>/dev/null)"     --oid "$(git rev-parse HEAD 2>/dev/null)"     --recorded-at "$(git log -1 --format=%ct 2>/dev/null)"
-) >>"$ROOT/.hugit/hooks.log" 2>&1 &
+  "$HUGIT_BIN" capture --kind merge --top-level "$ROOT" --log "$LOG" --hook-log "$HL"     --from "$(git rev-parse HEAD~1 2>/dev/null)"     --oid "$(git rev-parse HEAD 2>/dev/null)"     --recorded-at "$(git log -1 --format=%ct 2>/dev/null)"
+) >>"$HL" 2>&1 &
 exit 0
 "#.to_string(),
         _ => unreachable!("known hook kind"),

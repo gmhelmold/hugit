@@ -27,6 +27,7 @@ pub mod capture;
 pub mod checks;
 pub mod ctx;
 pub mod diag;
+pub mod dock;
 pub mod export;
 pub mod fleet;
 pub mod ident;
@@ -180,6 +181,14 @@ pub const HUGIT_VERBS: &[&str] = &[
     // Does NOT shadow a git command (git has no `land`; X5-checked). LIVE the
     // moment main.rs routes it; the no-drift oracle requires it here.
     "land", // hugit land queue --log [--campaign] — batch land via the union engine
+    // Worktree-dock (ADR-0005, WP-DOCK-1) — graduated with REAL wiring. `dock
+    // coin` is called by the post-checkout hook at worktree/clone checkout time:
+    // it coins the physical binding (gitdir+branch hash) that later carries cost
+    // and verification. Silent (exit 0 always, never blocks git), idempotent
+    // (marker present ⇒ no-op), R2-env-warning (never silent divergence). Does
+    // NOT shadow a git command (X5-checked: git has no `dock`). LIVE the moment
+    // main.rs routes it; the no-drift oracle requires it here.
+    "dock", // hugit dock coin --top-level --gitdir --branch — hook-born dock
 ];
 
 /// Planned hugit verb tokens that are RESERVED but NOT yet dispatched.

@@ -27,6 +27,7 @@ use hugit_cli::capture::{self, CaptureArgs};
 use hugit_cli::checks::{self, CheckArgs};
 use hugit_cli::ctx::{self, CtxArgs};
 use hugit_cli::diag::{self, DiagArgs};
+use hugit_cli::dock::{self, DockArgs};
 use hugit_cli::export::{self, AccountState, Corpus};
 use hugit_cli::fleet::{self, FleetArgs};
 use hugit_cli::impact::{ImpactQuery, compute_impact};
@@ -115,6 +116,8 @@ enum Command {
     Ctx(CtxArgs),
     /// Grounded-evidence Q&A over the log: cite real check/verdict evidence or refuse.
     Review(ReviewArgs),
+    /// Worktree-dock (ADR-0005): coin the physical binding at checkout time.
+    Dock(DockArgs),
 }
 
 // ── why ────────────────────────────────────────────────────────────────────
@@ -591,6 +594,7 @@ fn main() -> ExitCode {
         Command::Symbol(a) => return symbol::run(a),
         Command::Ctx(a) => return ctx::run(a),
         Command::Review(a) => return review::run(a),
+        Command::Dock(a) => return dock::run(a),
     };
     match result {
         Ok(json) => {
