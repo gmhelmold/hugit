@@ -217,7 +217,12 @@ fn confirm_on_log(
             .and_then(|p| serde_json::from_str(p).ok())
             .unwrap_or(Value::Null);
         let matches = match target {
-            Some(t) => payload.get("target").and_then(Value::as_str) == Some(t),
+            // A commit/merge `ref.update` carries `target`; a checkout carries
+            // `to` (the new checked-out ref tip) — both identify the event's oid.
+            Some(t) => {
+                payload.get("target").and_then(Value::as_str) == Some(t)
+                    || payload.get("to").and_then(Value::as_str) == Some(t)
+            }
             None => false,
         } || match shas {
             Some(s) => payload
@@ -368,6 +373,26 @@ mod tests {
             .expect("sha found");
         assert_eq!(proof.seq, 0);
         assert_eq!(proof.event_hash, "def");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn confirm_reads_a_checkout_ref_update_by_its_to_oid() {
+        let dir = tmp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("log.json");
+        // A checkout capture carries `to` (not `target`) — the confirm read must
+        // match the checked-out oid via that key (the verify=gap #1 fix).
+        std::fs::write(
+            &log,
+            r#"[{"seq":0,"prev_hash":"0","this_hash":"c0ff33","kind":"ref.update","principal_chain":["orchestrator:hugit-hook"],"payload":"{\"checkout\":true,\"from\":\"cafe0000\",\"to\":\"beef0000\",\"branch\":\"feat\"}","recorded_at":1}]"#,
+        )
+        .unwrap();
+        let proof = confirm_on_log(log.to_str().unwrap(), Some("beef0000"), None)
+            .unwrap()
+            .expect("checkout `to` found");
+        assert_eq!(proof.seq, 0);
+        assert_eq!(proof.event_hash, "c0ff33");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

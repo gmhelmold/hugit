@@ -51,6 +51,10 @@ hugit-refstore = { path = "../hugit-refstore", features = ["test-support"] }
 # hand-faked queue or projection state.
 hugit-queue = { path = "../hugit-queue" }
 serde_json = { workspace = true }
+# The acceptance journey for the MCP capture tool (checkout/merge e2e with
+# real jj) drives `hugit_mcp::tools::capture::run` — the REAL MCP tool seam,
+# pointed at THE SAME hugit binary under test (CARGO_BIN_EXE_hugit).
+hugit-mcp = { path = "../hugit-mcp" }
 
 # WP-D9: the attention-queue oracle lives under the module's own tests/ dir
 # (per WP-D9 Claims: crates/hugit-cli/attention/tests/), so it needs an explicit

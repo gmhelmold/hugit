@@ -885,6 +885,7 @@ dependencies = [
  "hugit-contracts",
  "hugit-diag",
  "hugit-ledger",
+ "hugit-mcp",
  "hugit-policy",
  "hugit-proto",
  "hugit-queue",
