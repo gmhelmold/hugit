@@ -9,7 +9,7 @@
 
 - **Repo:** `github.com/gmhelmold/hugit`, `main` at **`84e6313`** (merged #333-#347 + runbook doc).
 - Remote `origin` is the real repo; local worktree clean, only `main`.
-- **History of merged PRs:** #333 (init git-proximate + scope docs) · #334 (git-local journey suite) · #335 (PR-landing journey + quickstart) · #336 (**silent git hooks via `hugit capture`**) · #337 (watch classifies `git-activity`) · #338 (captured activity watchable) · #339 (**git-local backlog: fleet/PR/undo/check/land local-only + journeys**) · #340 (**why resolves a path to the captured commit**) · #341 (**commits-only PRs are fully landable** — land content = intents ∪ commits) · #342 (**jj first-class LIVE-proven** against the real `jj` binary) · #343 (**`hugit why` accepts the CANONICAL log** — the bare `[EventRecord,...]` the hooks write; auto-detects the legacy wrapper) · #344 (**`hugit why --walk`** — the FULL provenance chain: every captured `ref.update` that cited the path, most-recent first, links never fused; origin read == walk head, never diverge) · #345 (**a tracked push is a captured-commit proof** — the pre-push hook extracts local shas → `shas` in the push-attempt payload; `pr open --commit <pushed-sha>` accepts it; unseen sha stays `commit_not_found`) · #346 (**MCP capture tool — hugit as the agent layer** — a 5th hugit-mcp tool that shells the SAME `hugit capture` seam so an LLM that used `jj` (no post-commit hook) records its git activity; `verify` reads the log backand returns `seq`+`event_hash`, proven e2e live against a real jj commit → `pr open --commit` accepted) · #347 (**capture confirms CHECKOUT + jj checkout/merge proven e2e** — the confirm-read was matching only `target`/`shas`, but a checkout payload carries `to` (not `target`), so `verify` on a checkout FAILED; now it matches `target` OR `to`; a live journey drives the REAL MCP tool → REAL `hugit capture` against REAL `jj` (fires no hooks), recording a checkout (`jj new`) + a merge-ish `jj squash`, confirming both + proving the captured merge commit lands via `pr open --commit`).
+- **History of merged PRs:** #333 (init git-proximate + scope docs) · #334 (git-local journey suite) · #335 (PR-landing journey + quickstart) · #336 (**silent git hooks via `hugit capture`**) · #337 (watch classifies `git-activity`) · #338 (captured activity watchable) · #339 (**git-local backlog: fleet/PR/undo/check/land local-only + journeys**) · #340 (**why resolves a path to the captured commit**) · #341 (**commits-only PRs are fully landable** — land content = intents ∪ commits) · #342 (**jj first-class LIVE-proven** against the real `jj` binary) · #343 (**`hugit why` accepts the CANONICAL log** — the bare `[EventRecord,...]` the hooks write; auto-detects the legacy wrapper) · #344 (**`hugit why --walk`** — the FULL provenance chain: every captured `ref.update` that cited the path, most-recent first, links never fused; origin read == walk head, never diverge) · #345 (**a tracked push is a captured-commit proof** — the pre-push hook extracts local shas → `shas` in the push-attempt payload; `pr open --commit <pushed-sha>` accepts it; unseen sha stays `commit_not_found`) · #346 (**MCP capture tool — hugit as the agent layer** — a 5th hugit-mcp tool that shells the SAME `hugit capture` seam so an LLM that used `jj` (no post-commit hook) records its git activity; `verify` reads the log backand returns `seq`+`event_hash`, proven e2e live against a real jj commit → `pr open --commit` accepted) · #347 (**capture confirms CHECKOUT + jj checkout/merge proven e2e** — the confirm-read was matching only `target`/`shas`, but a checkout payload carries `to` (not `target`), so `verify` on a checkout FAILED; now it matches `target` OR `to`; a live journey drives the REAL MCP tool → REAL `hugit capture` against REAL `jj` (fires no hooks), recording a checkout (`jj new`) + a merge-ish `jj squash`, confirming both + provingthe captured merge commit lands via `pr open --commit`) · #348 (**live GitHub mirror push lane wired — `LiveGitHubTarget`** — the only `MirrorPushTarget` impl was thein-process `FixtureMirror`; now a real target pushes a ref from a local source repo to the authenticated GitHub remote via the real `git` binary (`push --no-verify` + `ls-remote` re-read), returning the observed oid (writer does the byte-compare); a REAL probe round-trip in `live_landing_attempt` yields `Verified` ONLY on byte-identity within 60s SLA, else honest `Partial`; token never surfaces (scrubbed `<redacted>`, bounded), scratch removed before every return;lib 83/83 (2 hermetic live-target tests against a real local bare git repo),e1a 4/4,bidir 10/10,bundle green)。
 
 ## Owner direction (verbatim, 2026-09-02)
 
@@ -104,7 +104,7 @@ it as a top-level verb.
 
 ### B. Candidate next moves (post-backlog)
 - ~~**jj first-class** (D2⑦)~~ **DONE (#342)** — live-proven against the real jj binary.
-- **GitHub App live mirror** (`HUGIT_GH_TEST_REPO`): needs owner/infra App
+- ~~**GitHub App live mirror**~~ **CODE DONE (#348)** — `LiveGitHubTarget` wires real push+verify; live gate = owner/infra.
   registration; the code is ready, the live gate is not ours.
 - ~~**`hugit serve` remote attach**~~ **NOT in v1 (out of scope, decided)**.
 - **why on captures is LIVE** (#340, #343): `why --log .hugit/log.json --path <file>` answers from the raw graph, canonical-log direct.
@@ -149,12 +149,12 @@ cargo test --workspace --locked                               # 205 suites ok (h
 
 ## POST-COMPACTION RESUME CHEAT-SHEET (2026-09-03)
 
-Everything below is the state at `main 84e6313`. Next session: read THIS file, verify the repo matches, then continue.
+Everything below is the state at `main a7be4d5`. Next session: read THIS file, verify the repo matches, then continue.
 
 ### To verify the baseline (60s)
 ```bash
 cd /Users/gustavoschneiter/Documents/HuGR/hugit-main
-git log --oneline -1     # expect 84e6313
+git log --oneline -1     # expect a7be4d5
 git status --short       # expect empty
 git branch --show-current  # main
 ```
@@ -176,7 +176,7 @@ git branch --show-current  # main
 - Test litter (.git inside crates) is gitignore'd now; if a test leaves it, `rm -rf crates/*/.git`.
 
 ### Remaining backlog (owner/infra-gated mostly)
-1. **GitHub App mirror** — needs `HUGIT_GH_TEST_REPO` + a registered GitHub App (owner/infra). Code is ready in `hugit-mirror`.
+1. ~~**GitHub App mirror**~~ **CODE DONE (#348)** — live lane wired (real git push+verify round-trip); remaining gate = owner/infra: registar App + `HUGIT_GH_TEST_REPO.). Code is ready in `hugit-mirror`.
 2. **jj understood**: D2b⑦ live; the capture-hooks model is git-specific — jj exports don't fire post-commit (the export writes refs directly). A "jj-aware capture" (detect ref changes after `jj git export`) is a design decision, not a quick fix.
 3. ~~**land queue with captured raw pushes**~~ **DONE (#345)** — pre-push hook extracts local shas → `shas` in the payload; `pr open --commit <pushed-sha>` accepts it; unseen sha → `commit_not_found`. The full capture→push→proof→PR→land loop is COMPLETE.
 3. **First-user docs** — quickstart-local.md + quickstart-hooks.md exist; polish welcome.
@@ -219,7 +219,7 @@ hugit-mcp 44/44 (6 new capture tests), bundle 205/0, fmt + clippy 0..
 tools/list advertises  ​5 tools; stdio round-trip test asserts​ ​5..
 
 ### Backlog unchanged
-1. GitHub App mirror — infra-gated (`HUGIT_GH_TEST_REPO`).
+1. ~~**GitHub App mirror**~~ **CODE DONE (#348)** — live lane wired; remaining gate = App registration + `HUGIT_GH_TEST_REPO` (owner/infra.
 2. jj checkout/merge captures — **DONE (#347)** — a live journey
    drives the REAL MCP tool against REAL `jj` (`jj new` checkout, `jj squash`
    merge-ish), confirms both + PRs them. The `jj`-shim verb is now MOOT
@@ -249,8 +249,9 @@ go-live runbook carry the whole first-user flow.
 ### What remains (all outside the local loop, sibling/infra-gated)
 1. **First-real-user smoke** — a human/owner running the runbook on a real
    repo (the githugr TL or yourself..
-2. **GitHub App mirror** — code ready in `hugit-mirror`; needs owner App
-   registration + `HUGIT_GH_TEST_REPO` (infra).
+2. ~~**GitHub App mirror**~~ **CODE DONE (#348)** — live lane wired;
+   remaining gate = owner App registration + `HUGIT_GH_TEST_REPO` (infra); então
+   o first-real-user smoke (#1) roda real.
 3. **Live runner exec** (`ws`/`dispatch`) — needs `corelink-runners` fabricd
    spawn fix (separate project。
 4. **Multi-tenant / identity / serve** — forge-surface/githugr lanes, out of
