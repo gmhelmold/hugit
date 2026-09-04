@@ -1,8 +1,8 @@
-//! The four hugit MCP tools.
+//! The five hugit MCP tools.
 //!
 //! Each tool is a pure-ish function `(serde_json::Value args) -> ToolOutcome`.
 //! The MCP `tools/call` handler ([`crate::server`]) wraps the outcome into the
-//! MCP content envelope. The four tools, honest scope each:
+//! MCP content envelope. The five tools, honest scope each:
 //!
 //! - [`claim_disjointness`] — wraps the REAL union-engine disjointness primitive
 //!   (`hugit_queue::core::AffectedSet::is_disjoint`). HONEST CAVEAT: the affected
@@ -16,7 +16,13 @@
 //! - [`liveness_probe`] — `/readyz` + a bounded Bearer probe with a git UA;
 //!   disambiguates 404-denied / 404-missing / 401-gate / 403-bot. REFUSES heavy
 //!   reads against the single-thread engine.
+//! - [`capture`] — shells the real `hugit capture` seam (the SAME one the
+//!   silent hooks use) so an LLM that did NOT go through a git hook path (e.g.
+//!   `jj describe` + `jj git export`, which fire no post-commit) can still
+//!   record its git activity on the canonical log. Honest confirm: reads the
+//!   SAME log back to return the landed `seq` + `event_hash` when `verify`.
 
+pub mod capture;
 pub mod claim_disjointness;
 pub mod cost_attest;
 pub mod land_status;

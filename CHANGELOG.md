@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(mcp): **`capture` — the 5th hugit-mcp tool, the jj-aware capture seam.**
+
+  Scope decision 2026-09-03 ("hugit as the agent layer"): the LLM that uses
+  `jj` (which fires NO post-commit hook — `jj describe`/`jj git export` write
+  git refs directly, proven empirically with a real `.git/hooks/post-commit`
+  that did not fire) previously made its git activity invisible to hugit's
+  log. The new MCP tool `capture` closes that: it shells the SAME `hugit
+  capture <kind>` seam the silent hooks use, so a tool-calling agent records
+  commit / checkout / push-attempt / merge on the canonical log exactly like a
+  hook would. HONEST confirm: with `verify` (default true when an oid/shas is
+  given) the tool reads the SAME canonical log back and returns the landed
+  `seq` + `event_hash` — a confirmed capture, never a bare "dispatched"
+  promise; a dispatched-but-unconfirmed capture is a tool error, not a claim.
+  Proven END-TO-END live via stdio: a real `jj` commit (`jj describe` + `jj
+  git export`, commit_id = the git oid) → `tools/call capture {oid, verify:
+  true}` → `status: captured, seq 0, event_hash 0c61944a…` on the repo's
+  `.hugit/log.json` → `hugit pr open --commit <oid>` accepted it as captured
+  proof. hugit-mcp unit tests 44/44 (6 new capture cases); tools/list now
+  advertises 5 tools; the stdio round-trip test asserts 5.
+
 - feat(cli): **a tracked push (`git push`) is now a captured-commit proof.**
 
   The pre-push hook now extracts the LOCAL shas from its refspec stdin and
