@@ -7,9 +7,9 @@
 
 ## Baseline (updated 2026-09-03)
 
-- **Repo:** `github.com/gmhelmold/hugit`, `main` at **`0988a74`** (merged #333-#346 + state doc).
+- **Repo:** `github.com/gmhelmold/hugit`, `main` at **`cb83451`** (merged #333-#347).
 - Remote `origin` is the real repo; local worktree clean, only `main`.
-- **History of merged PRs:** #333 (init git-proximate + scope docs) · #334 (git-local journey suite) · #335 (PR-landing journey + quickstart) · #336 (**silent git hooks via `hugit capture`**) · #337 (watch classifies `git-activity`) · #338 (captured activity watchable) · #339 (**git-local backlog: fleet/PR/undo/check/land local-only + journeys**) · #340 (**why resolves a path to the captured commit**) · #341 (**commits-only PRs are fully landable** — land content = intents ∪ commits) · #342 (**jj first-class LIVE-proven** against the real `jj` binary) · #343 (**`hugit why` accepts the CANONICAL log** — the bare `[EventRecord,...]` the hooks write; auto-detects the legacy wrapper) · #344 (**`hugit why --walk`** — the FULL provenance chain: every captured `ref.update` that cited the path, most-recent first, links never fused; origin read == walk head, never diverge) · #345 (**a tracked push is a captured-commit proof** — the pre-push hook extracts local shas → `shas` in the push-attempt payload; `pr open --commit <pushed-sha>` accepts it; unseen sha stays `commit_not_found`) · #346 (**MCP capture tool — hugit as the agent layer** — a 5th hugit-mcp tool that shells the SAME `hugit capture` seam so an LLM that used `jj` (no post-commit hook) records its git activity; `verify` reads the log backand returns `seq`+`event_hash`, proven e2e live against a real jj commit → `pr open --commit` accepted).
+- **History of merged PRs:** #333 (init git-proximate + scope docs) · #334 (git-local journey suite) · #335 (PR-landing journey + quickstart) · #336 (**silent git hooks via `hugit capture`**) · #337 (watch classifies `git-activity`) · #338 (captured activity watchable) · #339 (**git-local backlog: fleet/PR/undo/check/land local-only + journeys**) · #340 (**why resolves a path to the captured commit**) · #341 (**commits-only PRs are fully landable** — land content = intents ∪ commits) · #342 (**jj first-class LIVE-proven** against the real `jj` binary) · #343 (**`hugit why` accepts the CANONICAL log** — the bare `[EventRecord,...]` the hooks write; auto-detects the legacy wrapper) · #344 (**`hugit why --walk`** — the FULL provenance chain: every captured `ref.update` that cited the path, most-recent first, links never fused; origin read == walk head, never diverge) · #345 (**a tracked push is a captured-commit proof** — the pre-push hook extracts local shas → `shas` in the push-attempt payload; `pr open --commit <pushed-sha>` accepts it; unseen sha stays `commit_not_found`) · #346 (**MCP capture tool — hugit as the agent layer** — a 5th hugit-mcp tool that shells the SAME `hugit capture` seam so an LLM that used `jj` (no post-commit hook) records its git activity; `verify` reads the log backand returns `seq`+`event_hash`, proven e2e live against a real jj commit → `pr open --commit` accepted) · #347 (**capture confirms CHECKOUT + jj checkout/merge proven e2e** — the confirm-read was matching only `target`/`shas`, but a checkout payload carries `to` (not `target`), so `verify` on a checkout FAILED; now it matches `target` OR `to`; a live journey drives the REAL MCP tool → REAL `hugit capture` against REAL `jj` (fires no hooks), recording a checkout (`jj new`) + a merge-ish `jj squash`, confirming both + proving the captured merge commit lands via `pr open --commit`).
 
 ## Owner direction (verbatim, 2026-09-02)
 
@@ -149,12 +149,12 @@ cargo test --workspace --locked                               # 205 suites ok (h
 
 ## POST-COMPACTION RESUME CHEAT-SHEET (2026-09-03)
 
-Everything below is the state at `main 0988a74`. Next session: read THIS file, verify the repo matches, then continue.
+Everything below is the state at `main cb83451`. Next session: read THIS file, verify the repo matches, then continue.
 
 ### To verify the baseline (60s)
 ```bash
 cd /Users/gustavoschneiter/Documents/HuGR/hugit-main
-git log --oneline -1     # expect 0988a74
+git log --oneline -1     # expect cb83451
 git status --short       # expect empty
 git branch --show-current  # main
 ```
@@ -187,7 +187,7 @@ Commit this doc (docs-only, CI skips), push. Done.
 
 ---
 
-## DONE — MCP capture tool (hugit as the agent layer,#346, main 0988a74)
+## DONE — MCP capture tool (hugit as the agent layer,#346, main cb83451)
 
 ### What shipped
 A 5th MCP tool `capture` in `hugit-mcp` (`crates/hugit-mcp/src/tools/capture.rs`,
@@ -220,6 +220,7 @@ tools/list advertises  ​5 tools; stdio round-trip test asserts​ ​5..
 
 ### Backlog unchanged
 1. GitHub App mirror — infra-gated (`HUGIT_GH_TEST_REPO`).
-2. More journeys: `why` walk full,, land with captured pushes — the latter is
-   DONE (#345). Next candidates: checkout/merge jj captures via the same tool,,
-   a `jj`-shim verb if the MCP tool is not enough...
+2. jj checkout/merge captures — **DONE (#347)** — a live journey
+   drives the REAL MCP tool against REAL `jj` (`jj new` checkout, `jj squash`
+   merge-ish), confirms both + PRs them. The `jj`-shim verb is now MOOT
+   (the MCP tool seam provably covers the jj flow — no shim needed).
