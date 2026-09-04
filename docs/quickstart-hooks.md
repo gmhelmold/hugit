@@ -87,3 +87,13 @@ hugit undo --seq <n> --actor user:you   # compensates a captured ref.update
 *Verified on `main` — the capture journeys (`acceptance_capture.rs`,
 `acceptance_fleet_journey.rs`) run these exact steps with REAL git + the REAL
 binary and assert the outcomes (6 + 1 tests, stable).*
+
+---
+
+## See also
+
+- **[`docs/quickstart-golive.md`](quickstart-golive.md)** —the go-live runbook:
+  the complete capture → why → PR → land loop, inclusive jj / MCP `capture`
+  tool, `why --walk` provenance, land of commits-only PRs, exit proof..
+- [`docs/quickstart-local.md`](quickstart-local.md) —the intent-first PR
+  journey (intent new → pr open → queue → land → show).

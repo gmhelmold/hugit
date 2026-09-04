@@ -131,3 +131,17 @@ Everything you can do with the local log:
 
 *Verified on `main` — the journey suite (`acceptance_gitlocal_journey.rs`) runs
 these exact steps and asserts the outcomes.*
+---
+
+## See also
+
+- **[`docs/quickstart-golive.md`](quickstart-golive.md) —the go-live runbook:
+
+  the complete capture → why → PR → land loop, inclusive jj / MCP `capture`
+  tool e2e, `why --walk` provenance, land of commits-only PRs, exit proof..
+- [`docs/quickstart-hooks.md`](quickstart-hooks.md) —the silent-hooks flow:
+
+
+
+  git captures in the background when you use git normally (+ undo a
+  mistaken capture).
