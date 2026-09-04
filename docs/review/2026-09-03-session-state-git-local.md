@@ -7,7 +7,7 @@
 
 ## Baseline (updated 2026-09-03)
 
-- **Repo:** `github.com/gmhelmold/hugit`, `main` at **`cb83451`** (merged #333-#347).
+- **Repo:** `github.com/gmhelmold/hugit`, `main` at **`84e6313`** (merged #333-#347 + runbook doc).
 - Remote `origin` is the real repo; local worktree clean, only `main`.
 - **History of merged PRs:** #333 (init git-proximate + scope docs) · #334 (git-local journey suite) · #335 (PR-landing journey + quickstart) · #336 (**silent git hooks via `hugit capture`**) · #337 (watch classifies `git-activity`) · #338 (captured activity watchable) · #339 (**git-local backlog: fleet/PR/undo/check/land local-only + journeys**) · #340 (**why resolves a path to the captured commit**) · #341 (**commits-only PRs are fully landable** — land content = intents ∪ commits) · #342 (**jj first-class LIVE-proven** against the real `jj` binary) · #343 (**`hugit why` accepts the CANONICAL log** — the bare `[EventRecord,...]` the hooks write; auto-detects the legacy wrapper) · #344 (**`hugit why --walk`** — the FULL provenance chain: every captured `ref.update` that cited the path, most-recent first, links never fused; origin read == walk head, never diverge) · #345 (**a tracked push is a captured-commit proof** — the pre-push hook extracts local shas → `shas` in the push-attempt payload; `pr open --commit <pushed-sha>` accepts it; unseen sha stays `commit_not_found`) · #346 (**MCP capture tool — hugit as the agent layer** — a 5th hugit-mcp tool that shells the SAME `hugit capture` seam so an LLM that used `jj` (no post-commit hook) records its git activity; `verify` reads the log backand returns `seq`+`event_hash`, proven e2e live against a real jj commit → `pr open --commit` accepted) · #347 (**capture confirms CHECKOUT + jj checkout/merge proven e2e** — the confirm-read was matching only `target`/`shas`, but a checkout payload carries `to` (not `target`), so `verify` on a checkout FAILED; now it matches `target` OR `to`; a live journey drives the REAL MCP tool → REAL `hugit capture` against REAL `jj` (fires no hooks), recording a checkout (`jj new`) + a merge-ish `jj squash`, confirming both + proving the captured merge commit lands via `pr open --commit`).
 
@@ -149,12 +149,12 @@ cargo test --workspace --locked                               # 205 suites ok (h
 
 ## POST-COMPACTION RESUME CHEAT-SHEET (2026-09-03)
 
-Everything below is the state at `main cb83451`. Next session: read THIS file, verify the repo matches, then continue.
+Everything below is the state at `main 84e6313`. Next session: read THIS file, verify the repo matches, then continue.
 
 ### To verify the baseline (60s)
 ```bash
 cd /Users/gustavoschneiter/Documents/HuGR/hugit-main
-git log --oneline -1     # expect cb83451
+git log --oneline -1     # expect 84e6313
 git status --short       # expect empty
 git branch --show-current  # main
 ```
@@ -224,3 +224,38 @@ tools/list advertises  ​5 tools; stdio round-trip test asserts​ ​5..
    drives the REAL MCP tool against REAL `jj` (`jj new` checkout, `jj squash`
    merge-ish), confirms both + PRs them. The `jj`-shim verb is now MOOT
    (the MCP tool seam provably covers the jj flow — no shim needed).
+
+---
+
+## DONE — Go-live runbook (docs,#2, main 84e6313)
+
+The first-tenant go-live path is consolided + documented: `docs/quickstart-golive.md`
+(the runbook: capture→why→PR→land, git **or** jj, zero server/account/CoreLink),
++ cross-refs in both quickstarts (`quickstart-hooks` + `quickstart-local` → See
+also). What makes it go-live-grade: every step is a NAMED journey (not a
+plan); a checklist of verification commands (hugit-mcp 45/45, capture
+13, jj checkout/merge 1, gitlocal 4, land-queue); honest scope
+(C I exec → corelink-runners, serve out of v1, multi-tenant →
+githugr infra, owner-gated). Docs-only(pushed `84e6313`, CI skips.
+
+The git-local loop is now COMPLETE + PROVEN + DOCUMENTED:
+capture (silent
+git hooks commit/checkout/push/merge + MCP tool jj-aware, checkout confirm
+`to` fix) → canonical `.hugit/log.json` → why/why --walk provenance → PR
+open --commit(a ccepted captured commits + pushed shas) → land queue
+(commits-only PRs land) → export exit-proof. Two quickstarts + one
+go-live runbook carry the whole first-user flow.
+
+### What remains (all outside the local loop, sibling/infra-gated)
+1. **First-real-user smoke** — a human/owner running the runbook on a real
+   repo (the githugr TL or yourself..
+2. **GitHub App mirror** — code ready in `hugit-mirror`; needs owner App
+   registration + `HUGIT_GH_TEST_REPO` (infra).
+3. **Live runner exec** (`ws`/`dispatch`) — needs `corelink-runners` fabricd
+   spawn fix (separate project。
+4. **Multi-tenant / identity / serve** — forge-surface/githugr lanes, out of
+   v1 (decisão fechada。
+
+
+
+Baseline vaginal — verify: `git log -1` = 84e6313, status empty, main.
