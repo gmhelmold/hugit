@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(mirror): **the live GitHub mirror push lane (`LiveGitHubTarget`) is wired** —the
+  E1a ① PARTIAL stub is replaced with a REAL round-trip. `LiveGitHubTarget`
+  pushes a ref from a local source repo to the authenticated GitHub remote via
+  the real `git` binary (`git push --no-verify` + `git ls-remote` re-read),
+  returning the observed oid. The writer still does the byte-identity compare
+  (fail-closed divergence.). `live_landing_attempt` now performs a REAL probe
+  round-trip (scratch repo with real commit → push
+  `refs/heads/hugit/mirror-probe-<pid>-<nanos>` → re-read), Verified ONLY on
+  byte-identity within 60s SLA, else honest Partial. Token never surfaces;
+  sanitised from every failure detail; scratch dir removed before every return.
+
+  Hermetic:: lib 83/83 (2 new live target tests against a real local bare
+  mirror git repo), e1a  4/4, bidir  10/10, workspace bundle green;
+  fmt + clippy 0.,
+
+
+
+
 - fix(mcp: **`capture` now confirms CHECKOUT captures too — the verify gap closed
   + the jj checkout/merge capture loop proven END-TO-END against REAL `jj`.**
 
