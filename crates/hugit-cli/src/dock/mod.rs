@@ -47,7 +47,9 @@ use std::process::ExitCode;
 
 use serde_json::{Value, json};
 
+pub mod attest;
 pub mod resolve;
+pub mod spool;
 
 use crate::checks::load_event_log;
 use crate::pr::filelock::FileLock;

@@ -58,7 +58,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// vector (contract v1.2.0), and the §7.1 `result_binding_v2` vector (contract
 /// v1.4.0 — the full-outcome attestation signature; fabric-generated, mirrored
 /// byte-identical here under the same drift tripwire).
-const VECTORS: [&str; 13] = [
+const VECTORS: [&str; 14] = [
     "RunnerLease.json",
     "FenceManifest.json",
     "IntentMetrics.json",
@@ -80,6 +80,11 @@ const VECTORS: [&str; 13] = [
     // `intent_metrics_preimage` + `verify_intent_metrics_sig` match the fabric's
     // signer byte-for-byte (the go-signal for lighting `✓ cas:` attested cost).
     "intent_metrics_sig.json",
+    // The per-dock cost metering wire (WP-DOCK-4, ADR-0005): the CostSampleV1
+    // DTO frozen byte-identical so the gateway (Omnirouter) can emit and hugit
+    // can consume the exact same bytes — the same drift tripwire as the lease
+    // DTOs. The irmão will commit the twin vector under the same digest.
+    "CostSampleV1.json",
 ];
 
 // ── ① the manifest pins every vector byte-exactly ────────────────────────────
@@ -187,6 +192,26 @@ fn item_2_intent_metrics_vector_round_trips_through_frozen_type() {
         raw,
         re,
         "IntentMetrics wire round-trip is not byte-exact: hugit's frozen type \
+         and the committed vector disagree (byte difference: raw {} bytes, re {} bytes)",
+        raw.len(),
+        re.len(),
+    );
+}
+
+#[test]
+fn item_2_cost_sample_vector_round_trips_through_frozen_type() {
+    use hugit_contracts::CostSampleV1;
+    let raw = String::from_utf8(read("CostSampleV1.json")).expect("vector is utf-8");
+    let sample: CostSampleV1 = serde_json::from_str(&raw)
+        .expect("CostSampleV1 vector must parse through the frozen type (deny_unknown_fields)");
+    let re = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&sample).expect("frozen CostSampleV1 serializes")
+    );
+    assert_eq!(
+        raw,
+        re,
+        "CostSampleV1 wire round-trip is not byte-exact: hugit's frozen type \
          and the committed vector disagree (byte difference: raw {} bytes, re {} bytes)",
         raw.len(),
         re.len(),

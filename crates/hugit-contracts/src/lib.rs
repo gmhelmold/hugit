@@ -22,6 +22,7 @@ pub mod attestation_chain;
 pub mod check_def;
 pub mod check_result;
 pub mod context_envelope;
+pub mod cost_sample;
 pub mod diagnosis_object;
 pub mod event_record;
 pub mod export_schema;
@@ -45,6 +46,7 @@ pub use context_envelope::{
     Altitude, CONTEXT_ENVELOPE_SCHEMA_VERSION, CampaignRollup, ContextEnvelope, IntentMetrics,
     PrRecord,
 };
+pub use cost_sample::CostSampleV1;
 pub use diagnosis_object::DiagnosisObject;
 pub use event_record::EventRecord;
 pub use export_schema::ExportSchema;

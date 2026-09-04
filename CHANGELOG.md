@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(dock): **WP-DOCK-4 — cost metering wire frozen (CostSampleV1) + offline-safe spool + landed cost.sample.**
+  The gateway (Omnirouter, irmão) emits `CostSampleV1` — the FROZEN wire DTO
+  (in `hugit-contracts`, `deny_unknown_fields`) byte-identical in both repos,
+  pinned by a new conformance vector `CostSampleV1.json` (+ manifest + x4
+  tripwire). `dock::spool` is a bounded, file-backed, per-dock FIFO (NDJSON):
+  samples never drop on outage (back-pressure at capacity), torn tail lines are
+  skipped not poison; `dock::attest` flushes spooled samples into the canonical
+  log as `cost.sample` records — idempotent by `run_id` (exact-once), each with
+  a `content_hash` (M3 integrity) + the honest `is_unlabeled` marker. **M4
+  honesty:** absent a gateway sample, cost is `None`/zero — never derived. The
+  off-box cryptographic attestation (gateway signs) is owner-gated (irmão live);
+  absent it, this is the honest local-integrity floor, never a fabric claim.
+
 - feat(dock): **WP-DOCK-2 — the dock resolver: cwd→gitdir→dock, env fast-path, cwd truth; ghost + self-heal + M5 auto-coin.**
   `hugit dock ls` / `dock show` (ghost-aware discovery). Resolver (P1) is
   fail-closed: exactly ONE dock per cwd or a named error (two OPEN docks on the
