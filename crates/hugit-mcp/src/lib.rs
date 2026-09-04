@@ -99,7 +99,7 @@ mod tests {
         assert_eq!(out.len(), 3);
         assert_eq!(out[0]["id"], serde_json::json!(1));
         assert_eq!(out[0]["result"]["serverInfo"]["name"], "hugit-mcp");
-        assert_eq!(out[1]["result"]["tools"].as_array().unwrap().len(), 4);
+        assert_eq!(out[1]["result"]["tools"].as_array().unwrap().len(), 5);
         assert_eq!(out[2]["result"]["isError"], serde_json::json!(false));
     }
 

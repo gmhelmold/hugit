@@ -63,7 +63,9 @@ fn initialize_result() -> Value {
             queue-show porcelain. cost-attest reads only the engine's attested figures (no \
             hand-stamp; per-PR cost honest-null until the runner fabric). liveness-probe checks \
             /readyz + a bounded authed probe with a git UA and REFUSES heavy reads against the \
-            single-thread engine."
+            single-thread engine. capture records git activity that fires no hook (e.g. jj) via \
+            the same `hugit capture` seam the silent hooks use, with a confirmed seq+event_hash \
+            when verify is set."
     })
 }
 
@@ -90,6 +92,7 @@ fn handle_tools_call(id: Value, params: &Value) -> Response {
         "land-status" => tools::land_status::run(&args),
         "cost-attest" => tools::cost_attest::run(&args),
         "liveness-probe" => tools::liveness_probe::run(&args),
+        "capture" => tools::capture::run(&args),
         other => {
             return Response::err(
                 id,
@@ -189,6 +192,35 @@ fn tool_specs() -> Vec<Value> {
                 "required": ["engine_base"],
             }
         }),
+        json!({
+            "name": "capture",
+            "description": "Record a git event (commit / checkout / push-attempt / merge) on the \
+                canonical event log by shelling the REAL `hugit capture` seam — the SAME one the \
+                silent hooks use. Use when the LLM did a git action whose path fires NO hook \
+                (e.g. `jj describe` + `jj git export` write refs directly): call this tool \
+                IN PLACE of the raw action. With `verify` (default true when an oid/shas is \
+                given) it reads the same log back and returns the landed `seq` + `event_hash` — \
+                a confirmed capture, never a bare dispatch promise.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "kind": { "type": "string", "description": "commit | checkout | push-attempt | merge." },
+                    "top_level": { "type": "string", "description": "Repo top-level dir (git rev-parse --show-toplevel)." },
+                    "log": { "type": "string", "description": "Path to the canonical JSON event log." },
+                    "oid": { "type": "string", "description": "commit target / checkout-to / merge tip." },
+                    "branch": { "type": "string", "description": "Branch name." },
+                    "from": { "type": "string", "description": "checkout/merge from oid." },
+                    "recorded_at": { "type": "string", "description": "Unix seconds (committer date preferred)." },
+                    "refspecs": { "type": "string", "description": "push stdin refspec lines." },
+                    "shas": { "type": "string", "description": "local shas being pushed (whitespace separated)." },
+                    "files": { "type": "array", "items": { "type": "string" }, "description": "files the commit touched (for hugit why --path)." },
+                    "hook_log": { "type": "string", "description": "Optional .hugit/hooks.log path for capture trace." },
+                    "verify": { "type": "boolean", "description": "Read the same log back and confirm the capture landed (default true when oid/shas supplied)." },
+                    "hugit_bin": { "type": "string", "description": "Optional hugit binary path (else $HUGIT_BIN, else `hugit` on PATH)." },
+                },
+                "required": ["kind", "top_level", "log"],
+            }
+        }),
     ]
 }
 
@@ -221,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn initialize_reports_the_four_tools_via_list() {
+    fn initialize_reports_the_tools_via_list() {
         let resp = handle(req("tools/list", json!({}), json!(1))).unwrap();
         let result = resp.result.unwrap();
         let names: Vec<&str> = result["tools"]
@@ -236,7 +268,8 @@ mod tests {
                 "claim-disjointness",
                 "land-status",
                 "cost-attest",
-                "liveness-probe"
+                "liveness-probe",
+                "capture",
             ]
         );
     }
