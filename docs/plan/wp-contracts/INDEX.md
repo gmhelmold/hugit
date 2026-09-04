@@ -71,6 +71,25 @@ metrics+trajectory emission · **WP-F2b** orchestrator/campaign capture ·
 **COMPLETE** (ADR-0001 §7 fully ratified 2026-06-10; F-series built and
 gate-green; schema advanced to 1.2.0 — WA4 integer micro-USD).
 
+## Worktree-dock series (additive — ADR-0005, design 2026-09-04)
+
+The dock (hook-born physical binding for cost + verification) — ADR-0005.
+Contracts + design in `docs/design/2026-09-04-dock-worktree-v1.md`. The
+series is **additive**; register stays frozen; each WP carries the Lamport
+properties (safety/liveness) as the verifiable contract.
+
+- **WP-DOCK-1** hook-born dock coinage (post-checkout auto-dock) · M · opus · 75k
+- **WP-DOCK-2** dock resolver (cwd→gitdir→dock; env fast-path, cwd truth; ghost) · M · opus · 80k
+- **WP-DOCK-3** dock lifecycle + reconciliation (A4 cost↔commit by branch; buckets) · M · opus · 80k
+- **WP-DOCK-4** cost metering contract v1 (frozen DTO + spool + attestation) · L→M · opus · 90k
+- **WP-DOCK-5** insights per-branch (F5) + residual buckets · M · opus · 70k
+- **WP-DOCK-6** landing per-dock (byte-identity + acceptance verification) · M · opus · 80k
+
+**Order:** 1→2→3 (binding spine, hermetic+e2e, fully local) → 4 (contract,
+decoupled from irmão) → 5 (insights) → 6 (land per-dock). DoD + properties
+per WP file; `attest_keyset` + `OutageQueue` + `run_memoized` are existing
+seams reused, not rebuilt.
+
 ## Rules of the register
 1. Every contract carries its acceptance items VERBATIM from decomposition
    v2.0; splits partition the original's items explicitly (no item orphaned —
