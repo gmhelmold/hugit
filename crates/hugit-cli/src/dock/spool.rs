@@ -13,7 +13,7 @@
 //!
 //! # On-disk shape
 //!
-//! ```
+//! ```text
 //! .hugit/cost-spool/
 //!   <dock_id>.ndjson      # one CostSampleV1 per line (newline-delimited JSON)
 //! ```
