@@ -7,9 +7,9 @@
 
 ## Baseline (updated 2026-09-03)
 
-- **Repo:** `github.com/gmhelmold/hugit`, `main` at **`d8021a8`** (merged #333-#345 + state doc).
+- **Repo:** `github.com/gmhelmold/hugit`, `main` at **`e218807`** (merged #333-#346).
 - Remote `origin` is the real repo; local worktree clean, only `main`.
-- **History of merged PRs:** #333 (init git-proximate + scope docs) · #334 (git-local journey suite) · #335 (PR-landing journey + quickstart) · #336 (**silent git hooks via `hugit capture`**) · #337 (watch classifies `git-activity`) · #338 (captured activity watchable) · #339 (**git-local backlog: fleet/PR/undo/check/land local-only + journeys**) · #340 (**why resolves a path to the captured commit**) · #341 (**commits-only PRs are fully landable** — land content = intents ∪ commits) · #342 (**jj first-class LIVE-proven** against the real `jj` binary) · #343 (**`hugit why` accepts the CANONICAL log** — the bare `[EventRecord,...]` the hooks write; auto-detects the legacy wrapper) · #344 (**`hugit why --walk`** — the FULL provenance chain: every captured `ref.update` that cited the path, most-recent first, links never fused; origin read == walk head, never diverge) · #345 (**a tracked push is a captured-commit proof** — the pre-push hook extracts local shas → `shas` in the push-attempt payload; `pr open --commit <pushed-sha>` accepts it; unseen sha stays `commit_not_found`).
+- **History of merged PRs:** #333 (init git-proximate + scope docs) · #334 (git-local journey suite) · #335 (PR-landing journey + quickstart) · #336 (**silent git hooks via `hugit capture`**) · #337 (watch classifies `git-activity`) · #338 (captured activity watchable) · #339 (**git-local backlog: fleet/PR/undo/check/land local-only + journeys**) · #340 (**why resolves a path to the captured commit**) · #341 (**commits-only PRs are fully landable** — land content = intents ∪ commits) · #342 (**jj first-class LIVE-proven** against the real `jj` binary) · #343 (**`hugit why` accepts the CANONICAL log** — the bare `[EventRecord,...]` the hooks write; auto-detects the legacy wrapper) · #344 (**`hugit why --walk`** — the FULL provenance chain: every captured `ref.update` that cited the path, most-recent first, links never fused; origin read == walk head, never diverge) · #345 (**a tracked push is a captured-commit proof** — the pre-push hook extracts local shas → `shas` in the push-attempt payload; `pr open --commit <pushed-sha>` accepts it; unseen sha stays `commit_not_found`) · #346 (**MCP capture tool — hugit as the agent layer** — a 5th hugit-mcp tool that shells the SAME `hugit capture` seam so an LLM that used `jj` (no post-commit hook) records its git activity; `verify` reads the log backand returns `seq`+`event_hash`, proven e2e live against a real jj commit → `pr open --commit` accepted).
 
 ## Owner direction (verbatim, 2026-09-02)
 
@@ -149,12 +149,12 @@ cargo test --workspace --locked                               # 205 suites ok (h
 
 ## POST-COMPACTION RESUME CHEAT-SHEET (2026-09-03)
 
-Everything below is the state at `main d8021a8`. Next session: read THIS file, verify the repo matches, then continue.
+Everything below is the state at `main e218807`. Next session: read THIS file, verify the repo matches, then continue.
 
 ### To verify the baseline (60s)
 ```bash
 cd /Users/gustavoschneiter/Documents/HuGR/hugit-main
-git log --oneline -1     # expect d8021a8
+git log --oneline -1     # expect e218807
 git status --short       # expect empty
 git branch --show-current  # main
 ```
@@ -187,90 +187,39 @@ Commit this doc (docs-only, CI skips), push. Done.
 
 ---
 
-## IN-PROGRESS — MCP capture tool (jj-aware capture direction) — NEEDS RESUME
+## DONE — MCP capture tool (hugit as the agent layer,#346, main e218807)
 
-### ⚠️ STATE AT MAIN `d8021a8`: WORKTREE DIRTY — UNSTAGED, UNCOMMITTED
+### What shipped
+A 5th MCP tool `capture` in `hugit-mcp` (`crates/hugit-mcp/src/tools/capture.rs`,
+387 lines): shells the SAME `hugit capture <kind>` seam the silent hooks use —
+`commit | checkout | push-attempt | merge` — so an LLM that uses `jj` (which
+fires NO post-commit hook) can record its git activity on the canonical log..
+Zero new log kinds / wire contract changes (frozen `ref.update` by Push).
+
+HONEST confirm:with `verify` (default `true` when oid/shas given), reagent
+reads the SAME log backand returns landed `seq` + `event_hash`. A dispatched-but-
+unconfirmed capture is a TOOL ERROR ( fail-closed), never a claim..
+
+### PROVEN end-to-end live (stdio, real jj repo)
 ```
- M crates/hugit-mcp/src/lib.rs          (3-line test: tools list len 4→5)
- M crates/hugit-mcp/src/server.rs       (dispatch capture + spec + instructions)
- M crates/hugit-mcp/src/tools/mod.rs    (mod capture + doc)
-?? crates/hugit-mcp/src/tools/capture.rs (NEW 387-line tool)
+jj git init && jj describe -m "feat: a" && jj git export
+OID=$(jj log -r @ -T 'commit_id ++ "\n"')   # the git oid
+tools/call capture {kind:commit, top_level:$REPO, log:$REPO/.hugit/log.json, oid:$OID, verify:true}
+  → {"status":"captured","seq":0,"event_hash":"0c61944a…"}
+hugit pr open --commit $OID                 # ACCEPTED as captured proof
 ```
-Nothing committed yet. **IMPORTANT: the capture.rs new file is UNTRACKED — any
-stash/reset must preserve it.** Do NOT commit this partial state to main as a
-"half-PR"; finish the work then branch.
+Key facts: jj `commit_id` =the git oid (git cat-file -t confirms a real
+commit object).. jj fires NO hooks; working-copy commit_id re-snapshots when
+files change (submit the oid you actually want tracked). The tool requires a
+repo already initialized (`.hugit/log.json` exists) — a missing log is a
+hard tool error(, honest: no auto-init ceremony).
 
-### What the in-progress work IS
-The **jj-aware capture design decision** got a concrete materialization: a 5th
-MCP tool `capture` in `hugit-mcp` that shells the REAL `hugit capture` seam
-(the same one the silent git hooks use) so an LLM that used `jj` (which fires
-NO post-commit hook — `jj describe` + `jj git export` write refs directly,
-proven empirically with a real `.git/hooks/post-commit` that did NOT fire) can
-record its git activity on the canonical log. This is the start of scope
-decision #3's "hugit as the agent layer" (MCP tools IN PLACE of raw git/jj).
+### Gate
+hugit-mcp 44/44 (6 new capture tests), bundle 205/0, fmt + clippy 0..
+tools/list advertises  ​5 tools; stdio round-trip test asserts​ ​5..
 
-### Done so far (verify each before trusting)
-- `capture.rs`: shells `hugit capture --kind ... --top-level ... --log ...`
-  (all opts: oid/branch/from/recorded_at/refspecs/shas/files/hook_log), silent
-  exit-0 contract honored (non-zero exit → tool error).
-- Honest verify path: with `verify:true` (DEFAULT true), reads the SAME
-  canonical log back and returns the landed ref.update `seq` + `event_hash`
-  (never a bare "dispatched" promise). `confirm_on_log` matches payload
-  `target` OR `shas` (whitespace-separated).
-- server.rs: `capture` routed in tools/call + tool_specs + initialize
-  instructions + tools/list test 4→5 tools.
-- lib.rs stdio round-trip test: tool count 4→5.
-- **ALL hugit-mcp tests pass: 44/44. clippy 0 happened but RE-RUN after resume.**
-- Real-e2e: `cargo build -p hugit-mcp --bin hugit-mcp` compiles.
-
-### What's NOT done (the resume point)
-1. **The e2e journey end-to-end** was STARTED but INTERRUPTED mid-probe: a real
-   jj repo in `/var/folders/lt/z11pyzhj0m17vn798jkk69hh0000gn/T/opencode/hg-jj`
-   (`jj git init` + describes), the jj `commit_id` = git sha (probe succeeded:
-   `jj log -r @ -T 'commit_id ++ "\n"'` → 40-hex git sha). Was about to: create
-   a hugit log, call the real `hugit-mcp` stdio `tools/call capture` with the
-   jj commit_id + verify:true, assert the ref.update lands + why-able.
-2. **No CLI journey added yet** to `acceptance_capture.rs`/`acceptance_pr_commit.rs`
-   proving "a jj commit captured via the MCP capture tool is pr-open-able". The
-   acme of this work: capture a real jj commit through the tool, then
-   `pr open --commit <commit_id>` + `land queue` — closing the jj loop.
-3. **CHANGELOG** not updated.
-4. **fmt/clippy** — run AFTER the e2e journey + any final edits.
-5. **Branch + PR** — `feat/mcp-capture-tool`.
-
-### The jj facts (proven, use them)
-- `jj` v0.42.0 at `/usr/local/bin/jj`. `jj git init` repo has a `.git/` +
-  `.jj/`. **`jj describe` does NOT fire post-commit** even with a hook installed
-  (empirical proof). `jj git export` (or auto-export) writes refs behind.
-- jj `change_id` (stable across squash) ≠ jj `commit_id` (the git sha). For
-  capture we use `commit_id` (the git oid). `pr open --commit` wants the git oid.
-- `jj log -r @ --no-graph -T 'commit_id ++ "\n"'` → the 40-hex git sha.
-
-### How to finish the e2e (the verify path)
-```bash
-# scratch a jj repo
-cd /var/folders/lt/z11pyzhj0m17vn798jkk69hh0000gn/T/opencode && rm -rf hg-jj2 && mkdir hg-jj2 && cd hg-jj2
-jj git init && jj config set --user user.name Test && jj config set --user user.email t@t.com
-echo x > a.txt && jj describe -m "feat: a" && jj git export
-OID=$(jj log -r @ --no-graph -T 'commit_id ++ "\n"' | head -1)
-# init a hugit log at the .git top-level
-(use lib_init / the real hugit binary: the repo top-level is $PWD/.git because jj git init makes $PWD the repo root)
-# pipe a tools/call capture to hugit-mcp stdio:
-printf '%s\n' \
- '{"jsonrpc":"2.0","id":1,"method":"initialize"}' \
- '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
- "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"capture\",\"arguments\":{\"kind\":\"commit\",\"top_level\":\"$PWD/.git\",\"log\":\"<log>\",\"oid\":\"$OID\",\"branch\":\"main\",\"verify\":true}}}" \
- | target/debug/hugit-mcp
-# assert {"status":"captured","seq":0,"event_hash":"..."}
-# then: hugit why --walk ... && pr open --commit $OID
-```
-Note: `top_level` for the MCP tool is the repo dir hugit init created .hugit
-in — for a jj repo the .git lives at $PWD/.git but the log is at
-$PWD/.hugit/log.json (top_level = $PWD). Verify which the hook uses before
-routing.
-
-### Backlog unchanged (from prior resume sheet)
+### Backlog unchanged
 1. GitHub App mirror — infra-gated (`HUGIT_GH_TEST_REPO`).
-2. jj-aware capture — NOW THIS WORK (MCP capture tool materializes it).
-3. More journeys: `why` walk full, land with captured pushes — the latter is
-   DONE (#345).
+2. More journeys: `why` walk full,, land with captured pushes — the latter is
+   DONE (#345). Next candidates: checkout/merge jj captures via the same tool,,
+   a `jj`-shim verb if the MCP tool is not enough...
