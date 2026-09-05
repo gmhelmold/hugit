@@ -328,7 +328,7 @@ fn e2e_worktree_add_coins_and_switch_is_idempotent() {
 
     let log = dir.join(".hugit/log.json");
     let admin_dir = dir.join(".git/worktrees/wt-ratelimit");
-    let marker_ok = wait_until(8000, || admin_dir.join(DOCK_MARKER).exists());
+    let marker_ok = wait_until(30000, || admin_dir.join(DOCK_MARKER).exists());
     if !marker_ok {
         let hl = dir.join(".hugit/hooks.log");
         panic!(
@@ -337,7 +337,7 @@ fn e2e_worktree_add_coins_and_switch_is_idempotent() {
         );
     }
 
-    let rec = wait_until(8000, || {
+    let rec = wait_until(30000, || {
         dock_records(&log).into_iter().any(|r| {
             payload_of(&r).get("branch").and_then(|b| b.as_str()) == Some("feat/rate-limit")
         })

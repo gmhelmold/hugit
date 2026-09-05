@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(dock): **cold-verify audit closed — 10/10 findings fixed with biting regression tests** ·
+  F1 `hugit dock land` now finalizes accounting (close after releasing the land lock, never swallowed);
+  F2 R5 reconcile dedupe keyed on the full env→cwd pair (a second divergence is never silent);
+  F3 `content_hash` is now VERIFIED — `reconcile`/`insights` re-derive the frozen CostSampleV1 wire form
+  and reject forged/bit-rotted samples into a new `tampered` residual bucket (M3 anti-forgery is real,
+  not decoration); F4 branch `commit_count` no longer double-counts multi-head worktrees;
+  F6 close exact-once moved inside the lock (TOCTOU closed);
+  F7 spool `drain` no longer removes the file — `ack` deletes it only after every sample is durably
+  landed (M2 no-loss on partial append failure);
+  F8 `dock ls` now marks vanished-gitdir docks `dock.ghost` exactly once (ghost-mark is operational);
+  F9/F10 per-gitdir coin contract documented + reconciled-late `<=` boundary.
+  Audit: `docs/review/2026-09-05-dock-cold-verify-audit.md`.
+
 - feat(dock): **WP-DOCK-4 — cost metering wire frozen (CostSampleV1) + offline-safe spool + landed cost.sample.**
   The gateway (Omnirouter, irmão) emits `CostSampleV1` — the FROZEN wire DTO
   (in `hugit-contracts`, `deny_unknown_fields`) byte-identical in both repos,

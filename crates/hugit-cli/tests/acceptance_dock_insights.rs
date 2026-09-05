@@ -146,6 +146,27 @@ fn hermetic_insights_i1_i2_i3_l5() {
         "R3 — unknown-dock sample visible"
     );
 
+    // F4 (cold-verify) — branch commit_count is EXACT even across multi-head:
+    // one commit on feat/x (two docks) must report 1, never 2.
+    append_authed(
+        &log,
+        "ref.update",
+        serde_json::json!({
+            "ref": "refs/heads/feat/x", "target": "aaaa", "branch": "feat/x",
+        }),
+    );
+    let doc = compute_insights(&log, None).unwrap();
+    let x = branch_of(&doc, "feat/x").unwrap();
+    assert_eq!(
+        x.commit_count, 1,
+        "F4 — multi-head branch counts its real commits once (was: {})",
+        x.commit_count
+    );
+    assert!(
+        x.cost_usd_micros == 150_000 && x.docks.len() == 2,
+        "F4 fix did not disturb I1/F5"
+    );
+
     // L5 — a NEW sample flips the next read (derived at read, never stale).
     land_cost(&log, "d3", 20_000, "r3", 2600);
     doc_refresh(&log, "feat/y", 20_000);
@@ -204,7 +225,7 @@ fn e2e_insights_verb_reads_real_log() {
     let log = dir.join(".hugit/log.json");
     // The hook-coined dock appears under feat/rate; cost lands via the spool.
     let mut seen = false;
-    for _ in 0..100 {
+    for _ in 0..250 {
         if let Ok(doc) = compute_insights(&log, None)
             && branch_of(&doc, "feat/rate").is_some()
         {

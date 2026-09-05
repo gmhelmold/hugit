@@ -459,10 +459,8 @@ pub fn run(args: DockLandArgs) -> ExitCode {
     );
     match result {
         Ok(res) => {
-            if res.landed {
-                // A4 — landing closes the dock's accounting (idempotent close).
-                let _ = crate::dock::close::close_dock(&log_path, &dock_id);
-            }
+            // Persist the landed state FIRST (the `dock.landed` record is in
+            // the in-memory log), while the lock is still held.
             if let Err(e) = crate::pr::filelock::atomic_write(
                 &log_path,
                 serde_json::to_string_pretty(log.records())
@@ -474,6 +472,25 @@ pub fn run(args: DockLandArgs) -> ExitCode {
                     serde_json::to_string(&format!("io_error: {e}")).unwrap()
                 );
                 return ExitCode::FAILURE;
+            }
+            if res.landed {
+                // A4 — landing closes the dock's accounting (idempotent).
+                // RELEASE the land lock FIRST: `close_dock` re-acquires the
+                // SAME FileLock, which is `create_new` (non-reentrant) — a
+                // nested acquire would retry 30×100ms then fail, silently
+                // dropping the close (the exact defect the cold-verify caught).
+                drop(_guard);
+                let close_result = crate::dock::close::close_dock(&log_path, &dock_id);
+                if let Err(e) = &close_result {
+                    // The land succeeded; a close failure is a REAL accounting
+                    // gap — surface it, never swallow (the dock stays open).
+                    println!(
+                        "{{\"error\":{},\"landed\":true,\"dock_id\":{}}}",
+                        serde_json::to_string(&format!("close_failed: {e}")).unwrap(),
+                        serde_json::to_string(&dock_id).unwrap()
+                    );
+                    return ExitCode::FAILURE;
+                }
             }
             println!("{}", res.to_json());
             ExitCode::SUCCESS

@@ -285,13 +285,32 @@ fn hermetic_ghost_when_gitdir_vanishes_marked_once() {
     assert!(!Path::new(gitdir_str).exists(), "gitdir gone ⇒ ghost");
 
     // The R4 ghost mark fires on OBSERVATION — the resolver only observes its
-    // own cwd's gitdir, so resolve the repo (sees main open dock, no ghost).
+    // own cwd's gitdir (which exists, so resolve alone marks nothing), but the
+    // ENUMERATION horizon (`dock ls` / mark_ghosts) sees ALL docks and marks
+    // the vanished gitdir's dock as ghost ONCE (cold-verify F8).
     let _ = resolve_at(&dir, &log, None);
+    let ghost_recs_after_resolve = kinds(&log)
+        .iter()
+        .filter(|k| k.as_str() == DOCK_GHOST_KIND)
+        .count();
+    assert_eq!(
+        ghost_recs_after_resolve, 0,
+        "resolve alone never touches another gitdir's ghost"
+    );
+
+    let marked = hugit_cli::dock::resolve::mark_ghosts(&log).unwrap();
+    assert_eq!(
+        marked, 1,
+        "R4 — the vanished gitdir's dock is marked ghost ONCE"
+    );
     let ghost_recs = kinds(&log)
         .iter()
         .filter(|k| k.as_str() == DOCK_GHOST_KIND)
         .count();
-    assert_eq!(ghost_recs, 0, "no ghost touched before observation");
+    assert_eq!(ghost_recs, 1, "exactly one dock.ghost record");
+    // Idempotent — a second observation marks nothing new.
+    let marked2 = hugit_cli::dock::resolve::mark_ghosts(&log).unwrap();
+    assert_eq!(marked2, 0, "ghost-mark is exact-once");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -26,7 +26,7 @@
 //!   dock) LINK to the auto-coined repo-scope dock (M5); only when NO
 //!   repo-scope dock exists do they surface as unlabeled.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde_json::Value;
@@ -104,6 +104,10 @@ pub struct AttributionSummary {
     /// Σ cost of samples that raced AHEAD of their dock's coinage (A2 — the
     /// micro-window). Visible as `reconciled-late`, never attributed.
     pub reconciled_late_cost_usd_micros: u64,
+    /// Σ cost of samples whose content_hash FAILED re-verification (M3 — a
+    /// forged/bit-rotted sample). NEVER attributed to any dock; the honesty
+    /// spine refuses to count them.
+    pub tampered_cost_usd_micros: u64,
     /// Σ cost of samples with an empty dock id (never dropped).
     pub unlabeled_cost_usd_micros: u64,
     /// Captured commits on branches with no dock cost and no repo-scope dock.
@@ -134,6 +138,41 @@ pub fn records_from_event_log(log: &hugit_refstore::EventLog) -> Vec<(String, Va
 
 fn as_str(v: &Value) -> &str {
     v.as_str().unwrap_or("")
+}
+
+/// M3 verification (cold-verify F3): re-derive the sample's content hash from
+/// the payload's RAW fields and reject a forged/bit-rotted sample. Returns
+/// true iff the recorded `content_hash` matches a fresh sha256 of the
+/// reconstructed FROZEN wire form (the same serialization the attester uses).
+fn verify_sample_hash(p: &Value) -> bool {
+    let recorded = as_str(&p["content_hash"]);
+    if recorded.is_empty() {
+        return false;
+    }
+    // Reconstruct the FROZEN wire type (CostSampleV1, declared field order) —
+    // the exact object the attester serialized and hashed. A `json!` Value
+    // would NOT match: serde_json sorts Value object keys lexicographically.
+    let sample = hugit_contracts::cost_sample::CostSampleV1 {
+        dock_id: as_str(&p["dock_id"]).to_string(),
+        model: as_str(&p["model"]).to_string(),
+        input_tokens: p.get("input_tokens").and_then(Value::as_u64).unwrap_or(0),
+        output_tokens: p.get("output_tokens").and_then(Value::as_u64).unwrap_or(0),
+        cost_usd_micros: p
+            .get("cost_usd_micros")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        ts_ms: p.get("ts_ms").and_then(Value::as_u64).unwrap_or(0),
+        run_id: as_str(&p["run_id"]).to_string(),
+    };
+    let rendered = serde_json::to_string(&sample).unwrap_or_default();
+    sha256_hex_std(&rendered) == recorded
+}
+
+/// sha256 hex via the std sha2 digest — the same primitive the attester uses.
+fn sha256_hex_std(s: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let h = Sha256::digest(s.as_bytes());
+    h.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn is_branch_commit(p: &Value) -> bool {
@@ -228,10 +267,13 @@ pub fn attribute_on(records: &[(String, Value)]) -> Result<AttributionSummary, S
 
     // 1) Samples: empty dock → unlabeled; unknown dock id → reconciled; a
     //    known dock whose coinage postdates the sample → reconciled-late (A2 —
-    //    cost arrived in the micro-window BEFORE the dock existed); otherwise
-    //    the dock's cost (landing decides the bucket after the commit pass).
+    //    cost arrived in the micro-window BEFORE the dock existed); a sample
+    //    that FAILS the content-hash re-verification → tampered (M3 — forged/
+    //    bit-rotted, never counted, never attributed); otherwise the dock's
+    //    cost (landing decides the bucket after the commit pass).
     let mut reconciled = 0u64;
     let mut reconciled_late = 0u64;
+    let mut tampered = 0u64;
     let mut unlabeled_cost = 0u64;
     for s in &samples {
         let cost = s
@@ -241,12 +283,18 @@ pub fn attribute_on(records: &[(String, Value)]) -> Result<AttributionSummary, S
         if cost == 0 {
             continue;
         }
+        // M3 — a sample whose recorded hash does not re-derive is FORGED or
+        // bit-rotted; the integrity spine must NOT count or attribute it.
+        if !verify_sample_hash(s) {
+            tampered += cost;
+            continue;
+        }
         let dock_id = as_str(&s["dock_id"]);
         if dock_id.is_empty() {
             unlabeled_cost += cost;
         } else if let Some(view) = views.get(dock_id) {
             let sample_ts = s.get("ts_ms").and_then(Value::as_u64).unwrap_or(0);
-            if view.created_ts > 0 && sample_ts > 0 && sample_ts < view.created_ts {
+            if view.created_ts > 0 && sample_ts > 0 && sample_ts <= view.created_ts {
                 // A2 — the sample raced AHEAD of the dock's coinage. Carried
                 // visibly as `reconciled-late`, NEVER attributed to the dock
                 // (it spent before the binding existed).
@@ -282,9 +330,17 @@ pub fn attribute_on(records: &[(String, Value)]) -> Result<AttributionSummary, S
             .map(|d| d.cost_usd_micros)
             .sum();
         if sum > 0 {
+            // The branch's commits are attributable to the branch as a WHOLE,
+            // never per-dock. Assign the count to a single representative dock
+            // (the first on the branch) so a multi-head aggregate sums the
+            // branch's commits EXACTLY once — not N× (cold-verify F4).
             for id in &ids_on_branch {
-                if let Some(d) = docks.iter_mut().find(|d| &d.dock_id == id) {
+                if let Some(d) = docks
+                    .iter_mut()
+                    .find(|d| &d.dock_id == id && d.commit_count == 0)
+                {
                     d.commit_count = *count;
+                    break;
                 }
             }
         } else if ids_on_branch.is_empty() {
@@ -297,19 +353,34 @@ pub fn attribute_on(records: &[(String, Value)]) -> Result<AttributionSummary, S
                 unlabeled_commits += count;
             }
         } else {
+            // Commits on a branch with docks but zero measured cost — R3: the
+            // work is UNLABELED on those docks. Same single-representative rule
+            // (never N× — F4).
             for id in &ids_on_branch {
-                if let Some(d) = docks.iter_mut().find(|d| &d.dock_id == id) {
+                if let Some(d) = docks
+                    .iter_mut()
+                    .find(|d| &d.dock_id == id && d.commit_count == 0)
+                {
                     d.commit_count = *count;
+                    break;
                 }
             }
         }
     }
 
     // 3) Finalize buckets (R1): cost without landing → investigated; cost with
-    //    landing (or zero cost) → matched/unlabeled.
+    //    landing (or zero cost) → matched/unlabeled. The landing signal is
+    //    BRANCH-level (a dock on a branch that landed commits is matched even
+    //    if the per-dock representative got the count — F4 never makes a
+    //    multi-head dock "investigated" just because it is not the counter).
+    let landed_branches: BTreeSet<String> = docks
+        .iter()
+        .filter(|d| d.commit_count > 0)
+        .map(|d| d.branch.clone())
+        .collect();
     for d in docks.iter_mut() {
         if d.cost_usd_micros > 0 {
-            d.bucket = if d.commit_count > 0 {
+            d.bucket = if landed_branches.contains(d.branch.as_str()) {
                 Bucket::Matched
             } else {
                 Bucket::Investigated
@@ -321,6 +392,7 @@ pub fn attribute_on(records: &[(String, Value)]) -> Result<AttributionSummary, S
         docks,
         reconciled_cost_usd_micros: reconciled,
         reconciled_late_cost_usd_micros: reconciled_late,
+        tampered_cost_usd_micros: tampered,
         unlabeled_cost_usd_micros: unlabeled_cost,
         unlabeled_commit_count: unlabeled_commits,
         repo_scope_linked_branches: linked,
@@ -380,7 +452,9 @@ mod tests {
         }
 
         fn dock(&self, id: &str, branch: &str, origin: &str, gitdir: &str) {
-            self.dock_at(id, branch, origin, gitdir, 1000);
+            // created BEFORE the default sample ts (1000) — a normal (non-late)
+            // lane under the `<=` boundary (F10).
+            self.dock_at(id, branch, origin, gitdir, 900);
         }
 
         fn dock_at(&self, id: &str, branch: &str, origin: &str, gitdir: &str, created_ts: u64) {
@@ -399,15 +473,26 @@ mod tests {
         }
 
         fn sample_at(&self, dock_id: &str, cost: u64, run: &str, ts_ms: u64) {
+            let hash = self.true_hash(dock_id, run, cost, ts_ms);
+            self.sample_with_hash(dock_id, cost, run, ts_ms, &hash);
+        }
+
+        /// A sample carrying an EXPLICIT (possibly forged) content hash.
+        fn sample_with_hash(&self, dock_id: &str, cost: u64, run: &str, ts_ms: u64, hash: &str) {
             self.record(
                 COST_SAMPLE_KIND,
                 json!({
                     "run_id": run, "dock_id": dock_id, "model": "m",
                     "input_tokens": 1, "output_tokens": 1,
                     "cost_usd_micros": cost, "ts_ms": ts_ms,
-                    "content_hash": "deadbeef", "is_unlabeled": dock_id.is_empty(),
+                    "content_hash": hash, "is_unlabeled": dock_id.is_empty(),
                 }),
             );
+        }
+
+        /// The re-derivable M3 hash (same wire form as attest).
+        fn true_hash(&self, dock_id: &str, run: &str, cost: u64, ts_ms: u64) -> String {
+            real_sample_hash(dock_id, run, cost, ts_ms)
         }
 
         fn commit(&self, branch: &str, target: &str) {
@@ -423,6 +508,22 @@ mod tests {
 
     fn cost_of<'a>(att: &'a AttributionSummary, dock_id: &str) -> &'a DockAttribution {
         att.docks.iter().find(|d| d.dock_id == dock_id).unwrap()
+    }
+
+    /// Compute the SAME content hash the attester writes: sha256 of the
+    /// CostSampleV1 wire form in declared field order.
+    fn real_sample_hash(dock_id: &str, run: &str, cost: u64, ts_ms: u64) -> String {
+        let sample = hugit_contracts::cost_sample::CostSampleV1 {
+            dock_id: dock_id.to_string(),
+            model: "m".to_string(),
+            input_tokens: 1,
+            output_tokens: 1,
+            cost_usd_micros: cost,
+            ts_ms,
+            run_id: run.to_string(),
+        };
+        let rendered = serde_json::to_string(&sample).unwrap();
+        super::sha256_hex_std(&rendered)
     }
 
     #[test]
@@ -464,8 +565,9 @@ mod tests {
         let sum: u64 = att.docks.iter().map(|d| d.cost_usd_micros).sum();
         assert_eq!(sum, 150, "both docks counted, nothing duplicated");
         assert!(att.docks.iter().all(|d| d.bucket == Bucket::Matched));
-        // Each dock's commit_count = the branch commits (aggregated view).
-        assert!(att.docks.iter().all(|d| d.commit_count == 1));
+        // The branch's 1 commit is attributed ONCE (the first dock), never N×
+        // (F4 — a multi-head branch sums to the real commit count).
+        assert_eq!(att.docks.iter().map(|d| d.commit_count).sum::<u64>(), 1);
     }
 
     #[test]
@@ -545,5 +647,41 @@ mod tests {
             + att.reconciled_cost_usd_micros
             + att.unlabeled_cost_usd_micros;
         assert_eq!(total, 910_000, "every sample counted exactly once");
+    }
+
+    #[test]
+    fn m3_tampered_sample_never_attributed_or_counted_as_real() {
+        let b = LogBuilder::new("tamper");
+        b.dock_at("d-t", "feat/x", "worktree", "/tmp/wt-xt", 1000);
+        // A FORGED sample: same fields, WRONG content_hash (as if an attacker
+        // rewrote cost_usd_micros without re-hashing). The M3 spine must refuse
+        // it — never docked, never unlabeled/reconciled; only `tampered`.
+        b.sample_with_hash("d-t", 500_000, "run-forged", 2000, "deadbeef");
+        // A real sample still counts normally.
+        b.sample_at("d-t", 10_000, "run-real", 2000);
+        b.commit("feat/x", "aaaa");
+
+        let att = attribute(&b.path).unwrap();
+        let dock = cost_of(&att, "d-t");
+        assert_eq!(
+            dock.cost_usd_micros, 10_000,
+            "M3 — the forged sample is NEVER attributed to the dock"
+        );
+        assert_eq!(
+            dock.bucket,
+            Bucket::Matched,
+            "the real sample still lands matched (branch committed)"
+        );
+        assert_eq!(
+            att.tampered_cost_usd_micros, 500_000,
+            "M3 — the forged cost is counted ONLY in the honest tampered bucket"
+        );
+        // R1 — the forged sample is in EXACTLY one place (tampered), never lost.
+        let total = att.docks.iter().map(|d| d.cost_usd_micros).sum::<u64>()
+            + att.tampered_cost_usd_micros
+            + att.reconciled_late_cost_usd_micros
+            + att.reconciled_cost_usd_micros
+            + att.unlabeled_cost_usd_micros;
+        assert_eq!(total, 510_000, "every sample accounted exactly once");
     }
 }

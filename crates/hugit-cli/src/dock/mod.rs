@@ -338,7 +338,16 @@ pub fn coin_dock(spec: &CoinSpec<'_>) -> Result<String, String> {
     let log = spec.log;
     let marker_path = Path::new(gitdir).join(DOCK_MARKER);
     if marker_path.exists() {
-        // Idempotent: a record already exists for this gitdir ⇒ no-op.
+        // Idempotent: a marker exists for this gitdir ⇒ no-op.
+        //
+        // F9 (cold-verify) — SEMANTIC DECISION: idempotency is PER-GITDIR
+        // (a worktree = one lifelong dock regardless of branch switches), NOT
+        // per-(gitdir, branch). The dock_id carries the branch at COIN time;
+        // a later `git switch` in the same worktree keeps the original dock
+        // (the worktree's physical identity does not change). Per-branch cost
+        // attribution stays correct because the DOCK record's branch is what
+        // reconcile/insights read; the worktree is the durable physical unit.
+        // The acceptance e2e asserts this contract explicitly.
         // A marker-orphan (marker present, record lost) is the R1 self-heal
         // case: re-coin — the marker attests the intent, the record is the
         // truth that was lost.
@@ -469,6 +478,10 @@ fn run_coin(coin: CoinArgs) -> ExitCode {
 
 fn run_ls(ls: LsArgs) -> ExitCode {
     let log = crate::log_resolve::resolve_log(ls.log);
+    // R4 observation (cold-verify F8): `dock ls` is the enumeration horizon —
+    // mark every vanished-gitdir dock as ghost ONCE before listing (a closing
+    // gitdir never waits for a specific dock's read).
+    let _ = resolve::mark_ghosts(&log);
     let payloads = all_dock_payloads(&log);
     match payloads {
         Ok(list) => {

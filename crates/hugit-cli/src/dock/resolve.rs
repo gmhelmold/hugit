@@ -151,8 +151,12 @@ pub fn resolve(
             serde_json::json!({
                 "env_dock": env_id,
                 "cwd_gitdir": gitdir,
+                // The exact-once key is the FULL (env→cwd) pair — a SECOND
+                // diff worktree under the same env is a DIFFERENT divergence
+                // and MUST be recorded (R5 never-silent; cold-verify F2).
+                "pair_key": format!("{env_id}→{gitdir}"),
             }),
-            "env_dock",
+            "pair_key",
         );
         // fall through to the cwd-truth path
     }
@@ -293,7 +297,7 @@ fn repo_or_worktree(gitdir: &str) -> &'static str {
     }
 }
 
-fn current_branch(cwd: &Path) -> Option<String> {
+pub fn current_branch(cwd: &Path) -> Option<String> {
     let out = Command::new("git")
         .args(["branch", "--show-current"])
         .current_dir(cwd)
@@ -306,6 +310,51 @@ fn current_branch(cwd: &Path) -> Option<String> {
     } else {
         Some(t.to_string())
     }
+}
+
+/// R4 — mark EVERY dock whose gitdir vanished as `ghost` on the durable log,
+/// exactly ONCE per dock. This is the OBSERVATION point for ghost-marking
+/// (cold-verify F8): the resolver can only see its OWN cwd's gitdir (which by
+/// construction exists); the enumeration horizon (`dock ls` / reconcile) sees
+/// ALL docks and drives the mark. Idempotent via the `pair_key` dedupe.
+pub fn mark_ghosts(log_path: &Path) -> Result<usize, String> {
+    let payloads = super::all_dock_payloads(log_path)?;
+    // Count the ghosts we are about to touch (already-marked are idempotent).
+    let mut marked = 0;
+    for p in &payloads {
+        let id = p.get("dock_id").and_then(Value::as_str).unwrap_or("");
+        let gitdir = p.get("gitdir").and_then(Value::as_str).unwrap_or("");
+        if id.is_empty() || gitdir.is_empty() {
+            continue;
+        }
+        if std::path::Path::new(gitdir).exists() {
+            continue;
+        }
+        let already = log_has_ghost(log_path, id)?;
+        if !already {
+            append_deduped(
+                log_path,
+                DOCK_GHOST_KIND,
+                serde_json::json!({
+                    "dock_id": id,
+                    "gitdir": gitdir,
+                }),
+                "dock_id",
+            )?;
+            marked += 1;
+        }
+    }
+    Ok(marked)
+}
+
+fn log_has_ghost(log_path: &Path, id: &str) -> Result<bool, String> {
+    let log = load_event_log(log_path).map_err(|e| format!("load log: {}", e.to_json()))?;
+    Ok(log
+        .records()
+        .iter()
+        .filter(|r| r.kind == DOCK_GHOST_KIND)
+        .filter_map(|r| serde_json::from_str::<Value>(&r.payload).ok())
+        .any(|p| p.get("dock_id").and_then(Value::as_str) == Some(id)))
 }
 
 fn find_dock_payload(log: &Path, dock_id: &str) -> Result<Option<Value>, String> {
