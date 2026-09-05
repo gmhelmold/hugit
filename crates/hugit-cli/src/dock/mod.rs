@@ -48,6 +48,9 @@ use std::process::ExitCode;
 use serde_json::{Value, json};
 
 pub mod attest;
+pub mod close;
+pub mod insights;
+pub mod reconcile;
 pub mod resolve;
 pub mod spool;
 
@@ -224,7 +227,8 @@ pub struct CoinArgs {
     pub hook_log: Option<PathBuf>,
 }
 
-/// The dock subcommand surface (WP-DOCK-1 coin; WP-DOCK-2 ls/show).
+/// The dock subcommand surface (WP-DOCK-1 coin; WP-DOCK-2 ls/show; WP-DOCK-3
+/// close/reconcile/insight).
 #[derive(clap::Subcommand, Debug)]
 pub enum DockCommand {
     /// Coin a dock for a worktree/repo at checkout time (hooks call this).
@@ -233,6 +237,13 @@ pub enum DockCommand {
     Ls(LsArgs),
     /// Show one dock's full record (WP-DOCK-2).
     Show(ShowArgs),
+    /// Close a dock (WP-DOCK-3 A4): finalize + reconcile, idempotent.
+    Close(close::CloseArgs),
+    /// Auto-close all ghost docks (WP-DOCK-3 L3) — no open dock with a dead
+    /// gitdir remains forever.
+    Reconcile(close::ReconcileArgs),
+    /// The per-branch cost projection (WP-DOCK-3 F5) + residual buckets.
+    Insight(insights::InsightArgs),
 }
 
 /// The `hugit dock` root args.
@@ -434,6 +445,9 @@ pub fn run(args: DockArgs) -> ExitCode {
         DockCommand::Coin(coin) => run_coin(coin),
         DockCommand::Ls(ls) => run_ls(ls),
         DockCommand::Show(show) => run_show(show),
+        DockCommand::Close(close) => close::run_close(close),
+        DockCommand::Reconcile(reconcile) => close::run_reconcile(reconcile),
+        DockCommand::Insight(insight) => insights::run_insight(insight),
     }
 }
 
