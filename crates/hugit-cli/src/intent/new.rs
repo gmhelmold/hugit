@@ -167,31 +167,31 @@ pub fn run(input: NewIntent, store_path: &Path) -> Result<NewResult, PorcelainEr
     // hermetic repo with no log keeps the current create-anywhere behavior
     // (there is nothing to know the status against).
     let default_log = crate::log_resolve::resolve_log(None);
-    if default_log.exists() {
-        if let Ok(log) = crate::checks::load_event_log(&default_log) {
-            let was_sealed = log
-                .records()
-                .iter()
-                .filter(|r| r.kind == crate::campaign::world::KIND_CAMPAIGN_CLOSED)
-                .filter_map(|r| serde_json::from_str::<serde_json::Value>(&r.payload).ok())
-                .any(|p| {
-                    p.get("campaign").and_then(serde_json::Value::as_str)
-                        == Some(input.campaign.as_str())
-                });
-            if was_sealed {
-                return Err(PorcelainError::new(
-                    crate::campaign::seal_guard::SEALED_KIND,
-                    crate::campaign::seal_guard::SealViolation {
-                        campaign: input.campaign.clone(),
-                    }
-                    .message(),
-                    crate::campaign::seal_guard::SealViolation {
-                        campaign: input.campaign.clone(),
-                    }
-                    .fix(),
-                )
-                .with_context("campaign", serde_json::json!(input.campaign.clone())));
-            }
+    if default_log.exists()
+        && let Ok(log) = crate::checks::load_event_log(&default_log)
+    {
+        let was_sealed = log
+            .records()
+            .iter()
+            .filter(|r| r.kind == crate::campaign::world::KIND_CAMPAIGN_CLOSED)
+            .filter_map(|r| serde_json::from_str::<serde_json::Value>(&r.payload).ok())
+            .any(|p| {
+                p.get("campaign").and_then(serde_json::Value::as_str)
+                    == Some(input.campaign.as_str())
+            });
+        if was_sealed {
+            return Err(PorcelainError::new(
+                crate::campaign::seal_guard::SEALED_KIND,
+                crate::campaign::seal_guard::SealViolation {
+                    campaign: input.campaign.clone(),
+                }
+                .message(),
+                crate::campaign::seal_guard::SealViolation {
+                    campaign: input.campaign.clone(),
+                }
+                .fix(),
+            )
+            .with_context("campaign", serde_json::json!(input.campaign.clone())));
         }
     }
 
