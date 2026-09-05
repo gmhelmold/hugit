@@ -167,7 +167,12 @@ fn land_cost(log: &Path, spool_dir: &Path, dock_id: &str, cost_usd_micros: u64, 
         input_tokens: 1,
         output_tokens: 1,
         cost_usd_micros,
-        ts_ms: 1_700_000_000_000,
+        // NOW (real epoch) — always AFTER the dock's real coinage ts, so the
+        // sample is NOT misclassified as the A2 reconciled-late micro-window.
+        ts_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
         run_id: run.to_string(),
     };
     spool.push(&sample).expect("spool push");

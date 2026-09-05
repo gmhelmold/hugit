@@ -74,6 +74,8 @@ struct DockView {
     gitdir: String,
     /// Whether a `dock.close` record already finalized this dock.
     closed: bool,
+    /// The dock's coinage wall-clock (A2 — the `reconciled-late` key).
+    created_ts: u64,
 }
 
 /// Per-dock attribution at the branch/projection level (F5).
@@ -99,6 +101,9 @@ pub struct AttributionSummary {
     pub docks: Vec<DockAttribution>,
     /// Σ cost of samples with a dock id no known record can place (A2).
     pub reconciled_cost_usd_micros: u64,
+    /// Σ cost of samples that raced AHEAD of their dock's coinage (A2 — the
+    /// micro-window). Visible as `reconciled-late`, never attributed.
+    pub reconciled_late_cost_usd_micros: u64,
     /// Σ cost of samples with an empty dock id (never dropped).
     pub unlabeled_cost_usd_micros: u64,
     /// Captured commits on branches with no dock cost and no repo-scope dock.
@@ -109,8 +114,14 @@ pub struct AttributionSummary {
 
 fn load_records(log: &Path) -> Result<Vec<(String, Value)>, String> {
     let log = load_event_log(log).map_err(|e| format!("load log: {}", e.to_json()))?;
-    Ok(log
-        .records()
+    Ok(records_from_event_log(&log))
+}
+
+/// View an `EventLog` as the `(kind, payload)` pair list the attribution core
+/// reads — the in-memory seam the server calls for the dock projection.
+#[must_use]
+pub fn records_from_event_log(log: &hugit_refstore::EventLog) -> Vec<(String, Value)> {
+    log.records()
         .iter()
         .map(|r| {
             (
@@ -118,7 +129,7 @@ fn load_records(log: &Path) -> Result<Vec<(String, Value)>, String> {
                 serde_json::from_str(&r.payload).unwrap_or(Value::Null),
             )
         })
-        .collect())
+        .collect()
 }
 
 fn as_str(v: &Value) -> &str {
@@ -149,8 +160,15 @@ fn state_of(gitdir: &str, closed: bool) -> &'static str {
 /// one lane/bucket (R1), never duplicated (R2).
 #[allow(clippy::too_many_lines)]
 pub fn attribute(log: &Path) -> Result<AttributionSummary, String> {
-    let records = load_records(log)?;
+    attribute_on(&load_records(log)?)
+}
 
+/// Attribution from an ALREADY loading record collection — the in-memory form
+/// the server (which holds a chain-verified `EventLog`) calls, so the serve
+/// projection and the CLI projection share ONE code path (I1 — a single
+/// source of truth; L5 — derived at read, never a parallel stale store).
+#[allow(clippy::too_many_lines)]
+pub fn attribute_on(records: &[(String, Value)]) -> Result<AttributionSummary, String> {
     // Parse the inputs (WP-DOCK-1/2 records, WP-DOCK-4 samples, commits).
     let mut views: BTreeMap<String, DockView> = BTreeMap::new();
     let mut closed_ids: Vec<String> = Vec::new();
@@ -168,6 +186,7 @@ pub fn attribute(log: &Path) -> Result<AttributionSummary, String> {
                             origin: as_str(&p["origin"]).to_string(),
                             gitdir: as_str(&p["gitdir"]).to_string(),
                             closed: false,
+                            created_ts: p.get("created_ts").and_then(Value::as_u64).unwrap_or(0),
                         },
                     );
                 }
@@ -178,8 +197,8 @@ pub fn attribute(log: &Path) -> Result<AttributionSummary, String> {
                     closed_ids.push(id.to_string());
                 }
             }
-            COST_SAMPLE_KIND => samples.push(p),
-            "ref.update" if is_branch_commit(&p) => {
+            COST_SAMPLE_KIND => samples.push(p.clone()),
+            "ref.update" if is_branch_commit(p) => {
                 let b = as_str(&p["branch"]).to_string();
                 *branch_commits.entry(b).or_insert(0) += 1;
             }
@@ -207,20 +226,32 @@ pub fn attribute(log: &Path) -> Result<AttributionSummary, String> {
         });
     }
 
-    // 1) Samples: empty dock → unlabeled; unknown dock id → reconciled; known
-    //    → the dock's cost (landing decides the bucket after the commit pass).
+    // 1) Samples: empty dock → unlabeled; unknown dock id → reconciled; a
+    //    known dock whose coinage postdates the sample → reconciled-late (A2 —
+    //    cost arrived in the micro-window BEFORE the dock existed); otherwise
+    //    the dock's cost (landing decides the bucket after the commit pass).
     let mut reconciled = 0u64;
+    let mut reconciled_late = 0u64;
     let mut unlabeled_cost = 0u64;
     for s in &samples {
         let cost = s
             .get("cost_usd_micros")
             .and_then(Value::as_u64)
             .unwrap_or(0);
+        if cost == 0 {
+            continue;
+        }
         let dock_id = as_str(&s["dock_id"]);
         if dock_id.is_empty() {
             unlabeled_cost += cost;
-        } else if views.contains_key(dock_id) {
-            if let Some(d) = docks.iter_mut().find(|d| d.dock_id == dock_id) {
+        } else if let Some(view) = views.get(dock_id) {
+            let sample_ts = s.get("ts_ms").and_then(Value::as_u64).unwrap_or(0);
+            if view.created_ts > 0 && sample_ts > 0 && sample_ts < view.created_ts {
+                // A2 — the sample raced AHEAD of the dock's coinage. Carried
+                // visibly as `reconciled-late`, NEVER attributed to the dock
+                // (it spent before the binding existed).
+                reconciled_late += cost;
+            } else if let Some(d) = docks.iter_mut().find(|d| d.dock_id == dock_id) {
                 d.cost_usd_micros += cost;
             }
         } else {
@@ -289,6 +320,7 @@ pub fn attribute(log: &Path) -> Result<AttributionSummary, String> {
     Ok(AttributionSummary {
         docks,
         reconciled_cost_usd_micros: reconciled,
+        reconciled_late_cost_usd_micros: reconciled_late,
         unlabeled_cost_usd_micros: unlabeled_cost,
         unlabeled_commit_count: unlabeled_commits,
         repo_scope_linked_branches: linked,
@@ -348,23 +380,31 @@ mod tests {
         }
 
         fn dock(&self, id: &str, branch: &str, origin: &str, gitdir: &str) {
+            self.dock_at(id, branch, origin, gitdir, 1000);
+        }
+
+        fn dock_at(&self, id: &str, branch: &str, origin: &str, gitdir: &str, created_ts: u64) {
             self.record(
                 DOCK_RECORD_KIND,
                 json!({
                     "dock_id": id, "gitdir": gitdir, "branch": branch,
                     "charter": "test", "charter_derived": true, "state": "open",
-                    "origin": origin, "created_ts": 1000, "pid": 1,
+                    "origin": origin, "created_ts": created_ts, "pid": 1,
                 }),
             );
         }
 
         fn sample(&self, dock_id: &str, cost: u64, run: &str) {
+            self.sample_at(dock_id, cost, run, 1000);
+        }
+
+        fn sample_at(&self, dock_id: &str, cost: u64, run: &str, ts_ms: u64) {
             self.record(
                 COST_SAMPLE_KIND,
                 json!({
                     "run_id": run, "dock_id": dock_id, "model": "m",
                     "input_tokens": 1, "output_tokens": 1,
-                    "cost_usd_micros": cost, "ts_ms": 1000,
+                    "cost_usd_micros": cost, "ts_ms": ts_ms,
                     "content_hash": "deadbeef", "is_unlabeled": dock_id.is_empty(),
                 }),
             );
@@ -467,5 +507,43 @@ mod tests {
             att.unlabeled_commit_count, 0,
             "no unlabeled when a repo-scope dock exists"
         );
+    }
+
+    #[test]
+    fn r1_reconciled_late_is_cost_that_raced_ahead_of_the_dock() {
+        let b = LogBuilder::new("late");
+        // A dock coined at t=2000.
+        b.dock_at("d-late", "feat/slow", "worktree", "/tmp/wt-slow", 2000);
+        // A sample that raced AHEAD of the coinage (t=500 < 2000) — the A2
+        // micro-window: cost arrived before the binding existed. It must NOT
+        // attribute to the dock; it shows as `reconciled-late` (never hidden,
+        // never fabricated onto the dock).
+        b.sample_at("d-late", 900_000, "run-early", 500);
+        // A normal sample AFTER coinage (t=2500) attributes normally.
+        b.sample_at("d-late", 10_000, "run-normal", 2500);
+        b.commit("feat/slow", "aaaa");
+
+        let att = attribute(&b.path).unwrap();
+        let dock = cost_of(&att, "d-late");
+        assert_eq!(
+            dock.cost_usd_micros, 10_000,
+            "only the post-coinage sample attributes to the dock"
+        );
+        assert_eq!(
+            dock.bucket,
+            Bucket::Matched,
+            "still matched (commit landed)"
+        );
+        assert_eq!(
+            att.reconciled_late_cost_usd_micros, 900_000,
+            "A2 — the raced-ahead cost is a visible reconciled-late bucket"
+        );
+        // R1 — the raced cost is NOT in the dock, NOT lost: it appears exactly
+        // in the reconciled-late bucket, once.
+        let total = att.docks.iter().map(|d| d.cost_usd_micros).sum::<u64>()
+            + att.reconciled_late_cost_usd_micros
+            + att.reconciled_cost_usd_micros
+            + att.unlabeled_cost_usd_micros;
+        assert_eq!(total, 910_000, "every sample counted exactly once");
     }
 }

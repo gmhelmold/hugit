@@ -18,7 +18,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use super::reconcile::{Bucket, attribute};
+use super::reconcile::{Bucket, attribute_on, records_from_event_log};
+use hugit_refstore::EventLog;
 
 /// The `hugit dock insight` args (WP-DOCK-3 F5).
 #[derive(clap::Args, Debug)]
@@ -52,6 +53,9 @@ pub struct InsightDocument {
     /// Σ cost of samples with an unplaceable dock id (A2) — visible, never
     /// fabricated onto a branch.
     pub reconciled_cost_usd_micros: u64,
+    /// Σ cost of samples that raced AHEAD of their dock's coinage (A2 micro-
+    /// window) — the `reconciled-late` bucket, never hidden.
+    pub reconciled_late_cost_usd_micros: u64,
     /// Σ cost of samples with NO dock binding (empty dock_id).
     pub unlabeled_cost_usd_micros: u64,
     /// Commits on branches with no dock cost and no repo-scope link (R3).
@@ -60,9 +64,20 @@ pub struct InsightDocument {
     pub repo_scope_linked_branches: Vec<String>,
 }
 
-/// Compute the F5 per-branch projection + residuals.
+/// Compute the F5 per-branch projection + residuals from a log PATH (the CLI).
 pub fn compute_insights(log: &Path, only_branch: Option<&str>) -> Result<InsightDocument, String> {
-    let att = attribute(log)?;
+    let event_log =
+        crate::checks::load_event_log(log).map_err(|e| format!("load log: {}", e.to_json()))?;
+    compute_insights_on(&event_log, only_branch)
+}
+
+/// Compute the F5 per-branch projection + residuals from an IN-MEMORY log (the
+/// server) — shares the single attribution core with the CLI (I1, L5).
+pub fn compute_insights_on(
+    log: &EventLog,
+    only_branch: Option<&str>,
+) -> Result<InsightDocument, String> {
+    let att = attribute_on(&records_from_event_log(log))?;
 
     // Aggregate per branch: each dock row appears under its branch, its cost
     // counted once (multi-head worktrees sum — R2 never duplicates).
@@ -101,6 +116,7 @@ pub fn compute_insights(log: &Path, only_branch: Option<&str>) -> Result<Insight
     Ok(InsightDocument {
         branches: by_branch.into_values().collect(),
         reconciled_cost_usd_micros: att.reconciled_cost_usd_micros,
+        reconciled_late_cost_usd_micros: att.reconciled_late_cost_usd_micros,
         unlabeled_cost_usd_micros: att.unlabeled_cost_usd_micros,
         unlabeled_commit_count: att.unlabeled_commit_count,
         repo_scope_linked_branches: att.repo_scope_linked_branches,
@@ -130,6 +146,7 @@ impl InsightDocument {
             "branches": branches,
             "residual": {
                 "reconciled_usd_micros": self.reconciled_cost_usd_micros,
+                "reconciled_late_usd_micros": self.reconciled_late_cost_usd_micros,
                 "unlabeled_usd_micros": self.unlabeled_cost_usd_micros,
                 "unlabeled_commit_count": self.unlabeled_commit_count,
                 "repo_scope_linked_branches": self.repo_scope_linked_branches,

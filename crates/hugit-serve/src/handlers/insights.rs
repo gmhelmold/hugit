@@ -8,6 +8,7 @@
 //! never invented. Every free-text field passes `crate::fmt::scrub`.
 
 use crate::fmt::{PR_CARDS_CAP, humanize_age, pct_u8, scrub};
+use hugit_cli::dock::insights::compute_insights_on;
 use hugit_cli::pr::{
     CAMPAIGN_OPENED_KIND, INTENT_ENVELOPE_KIND, OpenedPr, PR_ENVELOPE_KIND, PR_OPENED_KIND,
     find_pr_opened,
@@ -15,7 +16,8 @@ use hugit_cli::pr::{
 use hugit_contracts::context_envelope::{Altitude, CiCost, ContextEnvelope};
 use hugit_http_contracts::common::{KpiSubKind, KpiVm};
 use hugit_http_contracts::insights::{
-    CostXrayRowVm, LedgerCampaignVm, LedgerRowVm, LedgerViewVm, XrayDrillRowVm, XrayTotalsVm,
+    CostXrayRowVm, DockBranchVm, DockInsightsVm, DockResidualVm, LedgerCampaignVm, LedgerRowVm,
+    LedgerViewVm, XrayDrillRowVm, XrayTotalsVm,
 };
 use hugit_http_contracts::{CampaignChipVm, InsightsVm};
 use hugit_ledger::envelope::cold_ref_for;
@@ -473,6 +475,48 @@ fn build_kpis(ledger: &Ledger) -> Vec<KpiVm> {
     ]
 }
 
+/// The branch-keyed dock projection (WP-DOCK-5 F5) — derived at read from the
+/// SAME verified log, sharing the CLI's single attribution core (I1/L5).
+/// Owner-gated as a whole: the route's gate decides whether this window
+/// renders (the 2026-06-28 hold until cost is non-zero) — the CLI always can.
+fn build_dock_insights(log: &EventLog) -> Option<DockInsightsVm> {
+    let doc = compute_insights_on(log, None).ok()?;
+    if doc.branches.is_empty()
+        && doc.reconciled_cost_usd_micros == 0
+        && doc.reconciled_late_cost_usd_micros == 0
+        && doc.unlabeled_cost_usd_micros == 0
+        && doc.unlabeled_commit_count == 0
+    {
+        return None;
+    }
+    let branches = doc
+        .branches
+        .into_iter()
+        .map(|b| DockBranchVm {
+            branch: b.branch,
+            cost_usd_micros: b.cost_usd_micros,
+            commit_count: b.commit_count,
+            matched_usd_micros: b.matched_cost_usd_micros,
+            investigated_usd_micros: b.investigated_cost_usd_micros,
+            docks: b
+                .docks
+                .into_iter()
+                .filter_map(|d| serde_json::from_value(d).ok())
+                .collect(),
+        })
+        .collect();
+    Some(DockInsightsVm {
+        branches,
+        residual: DockResidualVm {
+            reconciled_usd_micros: doc.reconciled_cost_usd_micros,
+            reconciled_late_usd_micros: doc.reconciled_late_cost_usd_micros,
+            unlabeled_usd_micros: doc.unlabeled_cost_usd_micros,
+            unlabeled_commit_count: doc.unlabeled_commit_count,
+            repo_scope_linked_branches: doc.repo_scope_linked_branches,
+        },
+    })
+}
+
 /// Build the insights view-model from a verified event log.
 pub fn build_insights(log: &EventLog, repo: &str) -> InsightsVm {
     let ledger = Ledger::from_records(log.records());
@@ -498,6 +542,7 @@ pub fn build_insights(log: &EventLog, repo: &str) -> InsightsVm {
 
     InsightsVm {
         repo: repo.to_string(),
+        dock_insights: build_dock_insights(log),
         kpis: build_kpis(&ledger),
         landed_by_day: build_landed_by_day(&ledger),
         tokens_by_campaign: xray.tokens_by_campaign, // REAL — per-campaign raw tokens
@@ -517,6 +562,7 @@ pub fn build_insights(log: &EventLog, repo: &str) -> InsightsVm {
 mod tests {
     use super::*;
     use hugit_cli::ctx::CTX_USAGE_KIND;
+    use hugit_cli::dock::attest::COST_SAMPLE_KIND;
 
     fn push(log: &mut EventLog, kind: &str, payload: serde_json::Value, seq: u64) {
         log.append_for_test(kind, vec!["t".to_string()], payload.to_string(), seq);
@@ -538,6 +584,79 @@ mod tests {
             .flat_map(|c| c.rows.iter())
             .find(|r| r.intent_id == id)
             .expect("row present")
+    }
+
+    #[test]
+    fn dock_insights_lights_with_branch_and_residual_buckets() {
+        // WP-DOCK-5: a dock with a landed commit + cost shows under its branch;
+        // a raced-ahead sample shows as reconciled-late. The window is derived
+        // at read (I1/L5), never a parallel store.
+        let mut log = EventLog::new();
+        push(
+            &mut log,
+            "dock.record",
+            serde_json::json!({
+                "dock_id": "d1", "gitdir": "/tmp/wt-x", "branch": "feat/x",
+                "charter": "add x", "charter_derived": true, "state": "open",
+                "origin": "worktree", "created_ts": 2000, "pid": 1,
+            }),
+            1,
+        );
+        push(
+            &mut log,
+            "ref.update",
+            serde_json::json!({
+                "ref": "refs/heads/feat/x", "target": "aaaa", "branch": "feat/x",
+            }),
+            2,
+        );
+        push(
+            &mut log,
+            COST_SAMPLE_KIND,
+            serde_json::json!({
+                "run_id": "r-1", "dock_id": "d1", "model": "m",
+                "input_tokens": 1, "output_tokens": 1,
+                "cost_usd_micros": 42_000, "ts_ms": 2500,
+                "content_hash": "h", "is_unlabeled": false,
+            }),
+            3,
+        );
+        // A raced-ahead sample (t=500 < dock created 2000) → reconciled-late.
+        push(
+            &mut log,
+            COST_SAMPLE_KIND,
+            serde_json::json!({
+                "run_id": "r-early", "dock_id": "d1", "model": "m",
+                "input_tokens": 1, "output_tokens": 1,
+                "cost_usd_micros": 7_000, "ts_ms": 500,
+                "content_hash": "h2", "is_unlabeled": false,
+            }),
+            4,
+        );
+
+        let vm = build_insights(&log, "hugit");
+        let dock = vm.dock_insights.as_ref().expect("dock window present");
+        assert_eq!(dock.branches.len(), 1);
+        assert_eq!(dock.branches[0].branch, "feat/x");
+        assert_eq!(
+            dock.branches[0].cost_usd_micros, 42_000,
+            "I1 — branch cost == Σ dock cost (raced sample excluded)"
+        );
+        assert_eq!(dock.branches[0].matched_usd_micros, 42_000);
+        assert_eq!(
+            dock.residual.reconciled_late_usd_micros, 7_000,
+            "I2 — the raced-ahead cost is an EXPLICIT bucket, never hidden"
+        );
+    }
+
+    #[test]
+    fn dock_insights_is_none_when_empty_repo() {
+        // An empty/vanilla log (no docks, no samples) → the window is `None`,
+        // not a fabricated all-zero table (I3 — never a silent fabricated zero).
+        let mut log = EventLog::new();
+        land(&mut log, "a31", 1);
+        let vm = build_insights(&log, "hugit");
+        assert!(vm.dock_insights.is_none(), "honest absence");
     }
 
     #[test]

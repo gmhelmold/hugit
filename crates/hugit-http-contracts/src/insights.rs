@@ -249,11 +249,61 @@ pub struct LedgerViewVm {
     pub campaigns: Vec<LedgerCampaignVm>,
 }
 
+/// One dock under a branch — the physical sub-unit (ADR-0005 F5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DockRowVm {
+    pub dock_id: String,
+    pub state: String,
+    pub origin: String,
+    pub cost_usd_micros: u64,
+    pub commit_count: u64,
+    pub bucket: String,
+}
+
+/// One branch row of the dock projection (F5) — the business unit of insight.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DockBranchVm {
+    pub branch: String,
+    /// Σ(docks on branch) — multi-head aggregates, never duplicated (R2).
+    pub cost_usd_micros: u64,
+    pub commit_count: u64,
+    #[serde(default)]
+    pub matched_usd_micros: u64,
+    #[serde(default)]
+    pub investigated_usd_micros: u64,
+    pub docks: Vec<DockRowVm>,
+}
+
+/// The honest residual buckets (R3 — never hidden, never swept away).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DockResidualVm {
+    /// Cost with an unplaceable dock id (A2) — carried visibly off any dock.
+    pub reconciled_usd_micros: u64,
+    /// Cost that raced AHEAD of its dock's coinage (the A2 micro-window).
+    pub reconciled_late_usd_micros: u64,
+    /// Cost with NO dock binding (empty dock id).
+    pub unlabeled_usd_micros: u64,
+    /// Commits on branches with no dock cost and no repo-scope link.
+    pub unlabeled_commit_count: u64,
+    /// Branches whose unbound intents linked to the repo-scope dock (M5).
+    pub repo_scope_linked_branches: Vec<String>,
+}
+
+/// The branch-keyed cost projection (WP-DOCK-5 F5) — a window into the log's
+/// dock records + cost samples, derived at read (no parallel store).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DockInsightsVm {
+    pub branches: Vec<DockBranchVm>,
+    pub residual: DockResidualVm,
+}
+
 /// Top-level insights view-model. `PartialEq` only — matches the canonical
 /// source derive (no `Eq` even though all fields are scalar — copy verbatim).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InsightsVm {
     pub repo: String,
+    #[serde(default)]
+    pub dock_insights: Option<DockInsightsVm>,
     pub kpis: Vec<KpiVm>,
     pub landed_by_day: Vec<(String, u32)>,
     pub tokens_by_campaign: Vec<(CampaignChipVm, u64, String)>,
@@ -380,6 +430,16 @@ mod tests {
         };
         let vm = InsightsVm {
             repo: "corelink-server".to_string(),
+            dock_insights: Some(DockInsightsVm {
+                branches: vec![],
+                residual: DockResidualVm {
+                    reconciled_usd_micros: 0,
+                    reconciled_late_usd_micros: 0,
+                    unlabeled_usd_micros: 0,
+                    unlabeled_commit_count: 0,
+                    repo_scope_linked_branches: vec![],
+                },
+            }),
             kpis: vec![kpi],
             landed_by_day: vec![("09 jun".to_string(), 4u32), ("10 jun".to_string(), 7u32)],
             tokens_by_campaign: vec![(chip.clone(), 5_100_000u64, "$24".to_string())],
