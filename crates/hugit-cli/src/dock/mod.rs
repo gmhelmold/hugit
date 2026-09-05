@@ -50,6 +50,7 @@ use serde_json::{Value, json};
 pub mod attest;
 pub mod close;
 pub mod insights;
+pub mod land;
 pub mod reconcile;
 pub mod resolve;
 pub mod spool;
@@ -244,6 +245,8 @@ pub enum DockCommand {
     Reconcile(close::ReconcileArgs),
     /// The per-branch cost projection (WP-DOCK-3 F5) + residual buckets.
     Insight(insights::InsightArgs),
+    /// Land a dock (WP-DOCK-6): byte-identity + acceptance → union verdict.
+    Land(land::DockLandArgs),
 }
 
 /// The `hugit dock` root args.
@@ -448,6 +451,7 @@ pub fn run(args: DockArgs) -> ExitCode {
         DockCommand::Close(close) => close::run_close(close),
         DockCommand::Reconcile(reconcile) => close::run_reconcile(reconcile),
         DockCommand::Insight(insight) => insights::run_insight(insight),
+        DockCommand::Land(land) => land::run(land),
     }
 }
 
