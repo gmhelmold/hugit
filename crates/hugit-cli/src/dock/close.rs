@@ -59,6 +59,12 @@ pub struct CloseResult {
 }
 
 impl CloseResult {
+    /// Mark this as an already-closed replay (never a second append).
+    fn into_replay(mut self) -> Self {
+        self.already_closed = true;
+        self
+    }
+
     fn to_json(&self) -> Value {
         json!({
             "dock_id": self.dock_id,
@@ -110,6 +116,9 @@ fn existing_close(log: &Path, dock_id: &str) -> Result<Option<Value>, String> {
 /// Close a dock (A4) — idempotent. Runs the branch reconciliation, then
 /// appends `dock.close`. Re-playing a closed dock returns its existing result.
 pub fn close_dock(log_path: &Path, dock_id: &str) -> Result<CloseResult, String> {
+    // Fast-path replay (read-only, best-effort): a closed dock returns its
+    // verdict WITHOUT attribute or lock. This is NOT the race guard — the
+    // authoritative check is FIFO inside the lock below (F6).
     if let Some(existing) = existing_close(log_path, dock_id)? {
         return Ok(existing.into_close_result(true));
     }
@@ -139,6 +148,20 @@ pub fn close_dock(log_path: &Path, dock_id: &str) -> Result<CloseResult, String>
     let _lock = acquire_with_retry(log_path)?;
     let mut event_log =
         load_event_log(log_path).map_err(|e| format!("load log: {}", e.to_json()))?;
+
+    // AUTHORITATIVE exact-once INSIDE the lock (F6 — cold-verify TOCTOU):
+    // whoever wins the lock re-checks; a concurrent close that slipped the
+    // fast-path above is seen here and skipped — never two `dock.close`.
+    if event_log
+        .records()
+        .iter()
+        .filter(|r| r.kind == DOCK_CLOSE_KIND)
+        .filter_map(|r| serde_json::from_str::<Value>(&r.payload).ok())
+        .any(|p| p.get("dock_id").and_then(Value::as_str) == Some(dock_id))
+    {
+        return Ok(result.into_replay());
+    }
+
     let payload = json!({
         "dock_id": result.dock_id,
         "branch": result.branch,
@@ -341,19 +364,35 @@ mod tests {
                 json!({
                     "dock_id": id, "gitdir": gitdir, "branch": branch,
                     "charter": "test", "charter_derived": true, "state": "open",
-                    "origin": origin, "created_ts": 1000, "pid": 1,
+                    "origin": origin, "created_ts": 900, "pid": 1,
                 }),
             );
         }
 
         fn sample(&self, dock_id: &str, cost: u64, run: &str) {
+            // Real M3 hash (re-derivable) — a fake one would be flagged tampered.
+            let sample = hugit_contracts::cost_sample::CostSampleV1 {
+                dock_id: dock_id.to_string(),
+                model: "m".to_string(),
+                input_tokens: 1,
+                output_tokens: 1,
+                cost_usd_micros: cost,
+                ts_ms: 1000,
+                run_id: run.to_string(),
+            };
+            let rendered = serde_json::to_string(&sample).unwrap();
+            let hash = {
+                use sha2::Digest;
+                let h = sha2::Sha256::digest(rendered.as_bytes());
+                h.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            };
             self.record(
                 super::super::attest::COST_SAMPLE_KIND,
                 json!({
                     "run_id": run, "dock_id": dock_id, "model": "m",
                     "input_tokens": 1, "output_tokens": 1,
                     "cost_usd_micros": cost, "ts_ms": 1000,
-                    "content_hash": "x", "is_unlabeled": dock_id.is_empty(),
+                    "content_hash": hash, "is_unlabeled": dock_id.is_empty(),
                 }),
             );
         }

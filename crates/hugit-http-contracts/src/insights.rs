@@ -283,6 +283,10 @@ pub struct DockResidualVm {
     pub reconciled_late_usd_micros: u64,
     /// Cost with NO dock binding (empty dock id).
     pub unlabeled_usd_micros: u64,
+    /// Cost of samples that FAILED M3 content-hash re-verification (forged or
+    /// bit-rotted) — never attributed to any dock, only counted here.
+    #[serde(default)]
+    pub tampered_usd_micros: u64,
     /// Commits on branches with no dock cost and no repo-scope link.
     pub unlabeled_commit_count: u64,
     /// Branches whose unbound intents linked to the repo-scope dock (M5).
@@ -435,6 +439,7 @@ mod tests {
                 residual: DockResidualVm {
                     reconciled_usd_micros: 0,
                     reconciled_late_usd_micros: 0,
+                    tampered_usd_micros: 0,
                     unlabeled_usd_micros: 0,
                     unlabeled_commit_count: 0,
                     repo_scope_linked_branches: vec![],

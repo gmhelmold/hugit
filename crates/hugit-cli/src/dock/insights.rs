@@ -11,7 +11,9 @@
 //! - per-branch — branch total = Σ(docks on branch) (matched + investigated);
 //! - residual buckets (R3 — never hidden, never silently zero):
 //!   `reconciled` (samples whose dock id no record places), `unlabeled`
-//!   (empty-dock samples, or committed work with no dock cost).
+//!   (empty-dock samples, or committed work with no dock cost), and
+//!   `tampered` (samples that FAIL M3 content-hash re-verification — forged or
+//!   bit-rotted, never counted, never attributed).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -56,6 +58,9 @@ pub struct InsightDocument {
     /// Σ cost of samples that raced AHEAD of their dock's coinage (A2 micro-
     /// window) — the `reconciled-late` bucket, never hidden.
     pub reconciled_late_cost_usd_micros: u64,
+    /// Σ cost of samples that FAILED M3 content-hash re-verification (forged/
+    /// bit-rotted) — NEVER attributed, counted only here, honest.
+    pub tampered_cost_usd_micros: u64,
     /// Σ cost of samples with NO dock binding (empty dock_id).
     pub unlabeled_cost_usd_micros: u64,
     /// Commits on branches with no dock cost and no repo-scope link (R3).
@@ -91,7 +96,7 @@ pub fn compute_insights_on(
         let entry = by_branch.entry(d.branch.clone()).or_insert(BranchInsight {
             branch: d.branch.clone(),
             cost_usd_micros: 0,
-            commit_count: d.commit_count,
+            commit_count: 0, // summed below (F4 — never seeded from one dock)
             matched_cost_usd_micros: 0,
             investigated_cost_usd_micros: 0,
             docks: Vec::new(),
@@ -117,6 +122,7 @@ pub fn compute_insights_on(
         branches: by_branch.into_values().collect(),
         reconciled_cost_usd_micros: att.reconciled_cost_usd_micros,
         reconciled_late_cost_usd_micros: att.reconciled_late_cost_usd_micros,
+        tampered_cost_usd_micros: att.tampered_cost_usd_micros,
         unlabeled_cost_usd_micros: att.unlabeled_cost_usd_micros,
         unlabeled_commit_count: att.unlabeled_commit_count,
         repo_scope_linked_branches: att.repo_scope_linked_branches,
@@ -147,6 +153,7 @@ impl InsightDocument {
             "residual": {
                 "reconciled_usd_micros": self.reconciled_cost_usd_micros,
                 "reconciled_late_usd_micros": self.reconciled_late_cost_usd_micros,
+                "tampered_usd_micros": self.tampered_cost_usd_micros,
                 "unlabeled_usd_micros": self.unlabeled_cost_usd_micros,
                 "unlabeled_commit_count": self.unlabeled_commit_count,
                 "repo_scope_linked_branches": self.repo_scope_linked_branches,

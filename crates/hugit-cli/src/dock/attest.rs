@@ -63,22 +63,33 @@ fn append_cost_sample(log_path: &Path, sample: &CostSampleV1) -> Result<(), Stri
     let mut log = load_event_log(log_path).map_err(|e| format!("load log: {}", e.to_json()))?;
 
     // Exact-once (M2): a record with this run_id already landed ⇒ no-op.
+    // The payload carries the RAW run_id; the dedupe key derives run_id:ts_ms.
     let key = sample.dedupe_key();
     let exists = log.records().iter().any(|r| {
         serde_json::from_str::<serde_json::Value>(&r.payload)
             .ok()
-            .and_then(|p| p.get("run_id").and_then(|v| v.as_str()).map(String::from))
-            .as_deref()
-            == Some(key.as_str())
+            .map(|p| {
+                let rid = p
+                    .get("run_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let ts = p.get("ts_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+                format!("{rid}:{ts}") == key
+            })
+            .unwrap_or(false)
     });
     if exists {
         return Ok(());
     }
 
     let sample_json = serde_json::to_string(sample).map_err(|e| format!("serialize: {e}"))?;
+    // The content hash covers the FROZEN wire form (the full CostSampleV1
+    // serialized by serde, field-order-stable) — a reader can RE-DERIVE it from
+    // the payload's raw fields and detect a forged/bit-rotted sample (M3).
     let content_hash = sha256_hex(&sample_json);
     let payload = serde_json::json!({
-        "run_id": key,              // dedupe key (run_id + ts_ms)
+        "run_id": sample.run_id.clone(),  // the RAW gateway run id (dedupe derives run_id:ts)
         "dock_id": sample.dock_id,
         "model": sample.model,
         "input_tokens": sample.input_tokens,
@@ -107,7 +118,8 @@ fn append_cost_sample(log_path: &Path, sample: &CostSampleV1) -> Result<(), Stri
 
 /// Flush a dock's spool into the log (idempotent). Returns how many samples
 /// were NEWLY landed (0 = already flushed / empty). The spool file is removed
-/// ONLY when its samples are durably in the log (M2 — no loss on outage).
+/// ONLY after EVERY drained sample is durably in the log (`ack`) — a partial
+/// append failure keeps the journal (M2 — no loss on outage, cold-verify F7).
 pub fn flush_dock(
     log_path: &Path,
     spool: &super::spool::CostSpool,
@@ -120,6 +132,12 @@ pub fn flush_dock(
     for s in &samples {
         append_cost_sample(log_path, s)?; // idempotent by run_id
         landed += 1;
+    }
+    // Only when EVERY sample is durable, drop the journal.
+    if landed > 0 {
+        spool
+            .ack(dock_id)
+            .map_err(|e| format!("spool ack: {e:?}"))?;
     }
     Ok(landed)
 }

@@ -484,6 +484,7 @@ fn build_dock_insights(log: &EventLog) -> Option<DockInsightsVm> {
     if doc.branches.is_empty()
         && doc.reconciled_cost_usd_micros == 0
         && doc.reconciled_late_cost_usd_micros == 0
+        && doc.tampered_cost_usd_micros == 0
         && doc.unlabeled_cost_usd_micros == 0
         && doc.unlabeled_commit_count == 0
     {
@@ -510,6 +511,7 @@ fn build_dock_insights(log: &EventLog) -> Option<DockInsightsVm> {
         residual: DockResidualVm {
             reconciled_usd_micros: doc.reconciled_cost_usd_micros,
             reconciled_late_usd_micros: doc.reconciled_late_cost_usd_micros,
+            tampered_usd_micros: doc.tampered_cost_usd_micros,
             unlabeled_usd_micros: doc.unlabeled_cost_usd_micros,
             unlabeled_commit_count: doc.unlabeled_commit_count,
             repo_scope_linked_branches: doc.repo_scope_linked_branches,
@@ -568,6 +570,24 @@ mod tests {
         log.append_for_test(kind, vec!["t".to_string()], payload.to_string(), seq);
     }
 
+    /// Re-derivable M3 hash (same wire form as the attester).
+    fn sample_hash(run_id: &str, dock_id: &str, cost: u64, ts_ms: u64) -> String {
+        use hugit_contracts::cost_sample::CostSampleV1;
+        use sha2::Digest;
+        let sample = CostSampleV1 {
+            dock_id: dock_id.to_string(),
+            model: "m".to_string(),
+            input_tokens: 1,
+            output_tokens: 1,
+            cost_usd_micros: cost,
+            ts_ms,
+            run_id: run_id.to_string(),
+        };
+        let rendered = serde_json::to_string(&sample).unwrap();
+        let h = sha2::Sha256::digest(rendered.as_bytes());
+        h.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
     fn land(log: &mut EventLog, id: &str, seq: u64) {
         push(
             log,
@@ -617,7 +637,7 @@ mod tests {
                 "run_id": "r-1", "dock_id": "d1", "model": "m",
                 "input_tokens": 1, "output_tokens": 1,
                 "cost_usd_micros": 42_000, "ts_ms": 2500,
-                "content_hash": "h", "is_unlabeled": false,
+                "content_hash": sample_hash("r-1", "d1", 42_000, 2500), "is_unlabeled": false,
             }),
             3,
         );
@@ -629,7 +649,7 @@ mod tests {
                 "run_id": "r-early", "dock_id": "d1", "model": "m",
                 "input_tokens": 1, "output_tokens": 1,
                 "cost_usd_micros": 7_000, "ts_ms": 500,
-                "content_hash": "h2", "is_unlabeled": false,
+                "content_hash": sample_hash("r-early", "d1", 7_000, 500), "is_unlabeled": false,
             }),
             4,
         );

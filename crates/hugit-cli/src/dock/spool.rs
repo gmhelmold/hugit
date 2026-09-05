@@ -95,11 +95,12 @@ impl CostSpool {
             .len())
     }
 
-    /// Drain ALL pending samples for a dock, IN ORDER, removing the file.
+    /// Drain ALL pending samples for a dock, IN ORDER, WITHOUT removing the file.
     ///
-    /// Returns the samples drained (for flush+attest) — the file is truncated
-    /// only after the caller confirms the flush succeeded (M2: no loss on
-    /// outage).
+    /// The FILE IS NOT TOUCHED — the caller decides when the samples are
+    /// durably landed and calls [`Self::ack`]. This fixes the M2 no-loss
+    /// contract (cold-verify F7): a partial append failure NEVER loses a
+    /// sample — the journal stays on disk for a retry.
     pub fn drain(&self, dock_id: &str) -> Result<Vec<CostSampleV1>, SpoolError> {
         let file = self.file_for(dock_id);
         if !file.exists() {
@@ -111,10 +112,18 @@ impl CostSpool {
             .into_iter()
             .filter_map(|l| serde_json::from_str(&l).ok())
             .collect();
-        // Remove only after the read is complete — the file is the journal;
-        // a torn last line was already skipped, never counted.
-        fs::remove_file(&file).map_err(|e| SpoolError::Io(e.to_string()))?;
         Ok(samples)
+    }
+
+    /// Acknowledge a SUCCESSFUL flush: remove the spool file ONLY NOW, when
+    /// every drained sample is durably in the canonical log (M2 — no loss on
+    /// outage; the ack is the caller's durability proof).
+    pub fn ack(&self, dock_id: &str) -> Result<(), SpoolError> {
+        let file = self.file_for(dock_id);
+        if file.exists() {
+            fs::remove_file(&file).map_err(|e| SpoolError::Io(e.to_string()))?;
+        }
+        Ok(())
     }
 
     /// All dock ids with pending samples (for the flush loop / `/insights`).
@@ -193,7 +202,14 @@ mod tests {
         assert_eq!(drained.len(), 2);
         assert_eq!(drained[0].run_id, "r1");
         assert_eq!(drained[1].run_id, "r2");
-        assert_eq!(spool.len(&docks[0]).unwrap(), 0, "drained file removed");
+        // M2/F7 — drain does NOT remove: the journal survives until ack.
+        assert_eq!(
+            spool.len(&docks[0]).unwrap(),
+            2,
+            "drain leaves the journal (F7 — no loss on partial append failure)"
+        );
+        spool.ack(&docks[0]).unwrap();
+        assert_eq!(spool.len(&docks[0]).unwrap(), 0, "ack removes the file");
         let _ = fs::remove_dir_all(&dir);
     }
 

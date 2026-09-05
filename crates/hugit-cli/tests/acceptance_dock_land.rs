@@ -248,3 +248,69 @@ fn f2_cost_present_and_absent_both_independent_and_report_honest() {
     assert_eq!(res2.cost_usd_micros, 123_456, "F2 — cost reported honestly");
     assert!(res2.landed);
 }
+
+/// F1 regression (cold-verify audit) — the CLI `dock land` shell must persist
+/// the `dock.close` AFTER the `dock.landed`, NOT swallow a lock re-entrancy
+/// failure. This drives the REAL binary, so the `run()` shell (which no
+/// library test covers) is exercised end to end.
+#[test]
+fn f1_cli_dock_land_persists_the_close_record() {
+    let (repo, tip) = real_repo_at("repf1", "feat/f1");
+    let gitdir = repo.join(".git");
+    // Real log on disk (the CLI reads/writes a file, not an in-memory log).
+    let dir = scratch("f1log");
+    let log_path = dir.join(".hugit/log.json");
+    std::fs::create_dir_all(dir.join(".hugit")).unwrap();
+    std::fs::write(&log_path, "[]").unwrap();
+    let mut log = hugit_cli::checks::load_event_log(&log_path).unwrap();
+    seed_log(
+        &mut log,
+        "dock-f1",
+        "feat/f1",
+        gitdir.to_str().unwrap(),
+        &tip,
+    );
+    let bytes = serde_json::to_vec_pretty(log.records()).unwrap();
+    std::fs::write(&log_path, bytes).unwrap();
+    drop(log);
+
+    // Drive the REAL binary via `dock land`.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_hugit"))
+        .args([
+            "dock",
+            "land",
+            "--id",
+            "dock-f1",
+            "--log",
+            log_path.to_str().unwrap(),
+        ])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "CLI dock land exits 0 — stdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // The log now carries BOTH dock.landed AND dock.close (A4 closed).
+    let log = hugit_cli::checks::load_event_log(&log_path).unwrap();
+    let kinds: Vec<&str> = log.records().iter().map(|r| r.kind.as_str()).collect();
+    assert!(
+        log.records().iter().any(|r| r.kind == DOCK_LANDED_KIND),
+        "dock.landed recorded (was: {kinds:?})"
+    );
+    assert!(
+        log.records().iter().any(|r| r.kind == "dock.close"),
+        "F1 — dock.close recorded AFTER land (fixes the swallowed re-entrant close) — was: {kinds:?}"
+    );
+    assert!(
+        log.records()
+            .iter()
+            .filter(|r| r.kind == "dock.close")
+            .count()
+            == 1,
+        "exactly one dock.close (idempotent)"
+    );
+}
