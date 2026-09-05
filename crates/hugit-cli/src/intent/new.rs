@@ -156,6 +156,45 @@ pub fn run(input: NewIntent, store_path: &Path) -> Result<NewResult, PorcelainEr
     crate::ident::validate_identifier(&input.campaign, "--campaign")
         .map_err(|e| PorcelainError::new(e.kind, e.message, e.fix))?;
 
+    // SEAL-PARITY (user-observed loose end): `intent new` must not DECLARE a
+    // sealed campaign, even in `--store`-only mode. The store is local and
+    // cannot know the seal (which lives on the canonical log); but when the
+    // repo's canonical log exists, we resolve it and route the SAME shared
+    // chokepoint `pr open` / `campaign close` / `verdict` use — so a campaign
+    // that is sealed on this log refuses a new intent declaring it, instead of
+    // leaving an orphan sidecar whose `campaign:<sealed-key>` implies
+    // membership it can never get (pr open would refuse it post-seal). A
+    // hermetic repo with no log keeps the current create-anywhere behavior
+    // (there is nothing to know the status against).
+    let default_log = crate::log_resolve::resolve_log(None);
+    if default_log.exists() {
+        if let Ok(log) = crate::checks::load_event_log(&default_log) {
+            let was_sealed = log
+                .records()
+                .iter()
+                .filter(|r| r.kind == crate::campaign::world::KIND_CAMPAIGN_CLOSED)
+                .filter_map(|r| serde_json::from_str::<serde_json::Value>(&r.payload).ok())
+                .any(|p| {
+                    p.get("campaign").and_then(serde_json::Value::as_str)
+                        == Some(input.campaign.as_str())
+                });
+            if was_sealed {
+                return Err(PorcelainError::new(
+                    crate::campaign::seal_guard::SEALED_KIND,
+                    crate::campaign::seal_guard::SealViolation {
+                        campaign: input.campaign.clone(),
+                    }
+                    .message(),
+                    crate::campaign::seal_guard::SealViolation {
+                        campaign: input.campaign.clone(),
+                    }
+                    .fix(),
+                )
+                .with_context("campaign", serde_json::json!(input.campaign.clone())));
+            }
+        }
+    }
+
     // WH-IDENT: validate the explicit --id, when given.  Auto-derived ids are
     // content-hashed by this module (not user input), so they need no check.
     if let Some(id) = &input.id {

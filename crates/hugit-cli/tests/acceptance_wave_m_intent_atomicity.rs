@@ -333,3 +333,98 @@ fn log_append_failure_leaves_no_orphan_store_entry() {
     assert!(log_has(&bad_log, "intent-m3-noorphan"));
     assert!(store_has(&store, "intent-m3-noorphan"));
 }
+
+/// SEAL-PARITY regression (user-observed on real CLI): `intent new` must refuse
+/// to declare a campaign that is sealed on the repo's canonical log, even in
+/// `--store`-only mode. The seal lives on `.hugit/log.json` under the repo; the
+/// guard resolves the DEFAULT log of the process CWD. Driving the REAL binary in
+/// a temp repo (child process cwd, no cross-test global mutation).
+#[test]
+fn intent_new_refuses_campaign_sealed_on_default_log() {
+    use std::process::Command;
+
+    let scratch = Scratch::new("sealparity");
+    let dir = scratch.path("repo");
+    std::fs::create_dir_all(dir.join(".hugit")).expect("mkdir .hugit");
+    std::fs::create_dir_all(dir.join(".git")).expect("mkdir .git");
+    std::fs::write(dir.join(".hugit/log.json"), "[]").expect("write log");
+
+    // Seed the canonical log with campaign.opened + campaign.closed for `c9`.
+    let mut el = EventLog::new();
+    el.append_authorized(
+        hugit_refstore::authz::PrincipalClass::Orchestrator,
+        hugit_refstore::authz::Endpoint::Push,
+        "campaign.opened".to_string(),
+        vec!["orchestrator".to_string()],
+        serde_json::json!({"campaign":"c9"}).to_string(),
+        1,
+    )
+    .unwrap();
+    el.append_authorized(
+        hugit_refstore::authz::PrincipalClass::Orchestrator,
+        hugit_refstore::authz::Endpoint::Push,
+        "campaign.closed".to_string(),
+        vec!["orchestrator".to_string()],
+        serde_json::json!({"campaign":"c9"}).to_string(),
+        2,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join(".hugit/log.json"),
+        serde_json::to_vec_pretty(el.records()).unwrap(),
+    )
+    .unwrap();
+
+    // --store-only (no --log): the guard must STILL read the default repo log
+    // and refuse, exactly like `pr open` on a sealed campaign.
+    let out = Command::new(env!("CARGO_BIN_EXE_hugit"))
+        .args([
+            "intent",
+            "new",
+            "--charter",
+            "late",
+            "--campaign",
+            "c9",
+            "--id",
+            "intent-sealparity-1",
+            "--store",
+            dir.join("intents.json").to_str().unwrap(),
+        ])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("intent new prints JSON");
+    assert_eq!(
+        v["error"]["kind"], "campaign_sealed",
+        "SEAL-PARITY: sealed campaign refused — got {stdout}"
+    );
+    assert!(
+        v["error"]["fix"].as_str().is_some(),
+        "refusal carries a fix hint — got {stdout}"
+    );
+
+    // A NON-sealed campaign still works from the same repo (never over-broad).
+    let out2 = Command::new(env!("CARGO_BIN_EXE_hugit"))
+        .args([
+            "intent",
+            "new",
+            "--charter",
+            "fine",
+            "--campaign",
+            "fresh-c",
+            "--id",
+            "intent-fresh-1",
+            "--store",
+            dir.join("intents.json").to_str().unwrap(),
+        ])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    let stdout2 = String::from_utf8_lossy(&out2.stdout);
+    let v2: serde_json::Value = serde_json::from_str(&stdout2).expect("JSON");
+    assert!(
+        v2.get("intent_id").is_some(),
+        "SEAL-PARITY: a non-sealed campaign still creates — got {stdout2}"
+    );
+}
