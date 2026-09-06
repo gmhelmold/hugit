@@ -111,12 +111,12 @@ fn hermetic_resolve_exact_one_and_ambiguous_fails_closed() {
             wt.to_str().unwrap(),
         ],
     );
-    let wt_gitdir = wt.join(".git");
-    let wt_gitdir = if wt_gitdir.is_dir() {
-        wt_gitdir
-    } else {
-        std::path::PathBuf::from(git_in(&wt, &["rev-parse", "--absolute-git-dir"]).1.trim())
-    };
+    // The worktree's gitdir is the AUTHORITATIVE absolute git dir (in a linked
+    // worktree `.git` is a FILE pointing at it, never the physical gitdir — a
+    // test that assumed `.git` is a directory was Unix-only and failed on the
+    // Windows runner, where the path shape differs). Resolve it via git itself,
+    // which is the only correct answer on every platform.
+    let wt_gitdir = PathBuf::from(git_in(&wt, &["rev-parse", "--absolute-git-dir"]).1.trim());
     let wt_gitdir_s = wt_gitdir.to_string_lossy().to_string();
     coin_dock(&hugit_cli::dock::CoinSpec {
         log: &log,
