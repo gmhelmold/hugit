@@ -10,13 +10,53 @@
 
 ---
 
+## Evidência — onde cada feature é PROVADA
+
+O que segue é a **coluna de evidência** de cada feature: o teste hermético /
+acceptance que a prova (red→green), e se a feature foi **usada de verdade**
+por um humano na walkthrough manual deste repo (validada com o binário real,
+não só nos testes).
+
+Legenda da última coluna: **T** = provada por teste · **U** = usada de verdade
+numa walkthrough manual (binário real, repo real) · **—** = provada só por
+teste/invariante, não exercitável por uso manual simples (requer infra/servidor).
+
+| Grupo | Teste que prova (red→green) | Usada de verdade |
+|---|---|---|
+| hooks + capture (seção 0) | `acceptance_dock_coinage` (e2e worktree) · `crates/hugit-cli/src/capture/mod.rs` (unit) | U (repo real, commit/checkout capturados) |
+| campanhas (1) | `crates/hugit-cli/src/campaign/*` (unit) + `acceptance_*_cli` | U (open/close/selo/abandon + guarda sealed testada com `intent new` fix) |
+| intents (2) | `crates/hugit-cli/src/intent/new.rs` (8 unit) + `acceptance_wave_m_intent_atomicity` | U (new/show/list + fix de selo) |
+| issues (3) | `crates/hugit-cli/src/issue/transition.rs` | U (transition real) |
+| PRs (4) | `crates/hugit-cli/src/pr/cli.rs` unit + acceptance pr | U (open/queue/show/list/abandon, D14, commits-only) |
+| landing (5) | `crates/hugit-cli/src/land/mod.rs` unit | U (land queue real: landed PR-1) |
+| checks/verdict (6) | `crates/hugit-cli/src/checks/mod.rs` + `verdict/mod.rs` unit | U (check run miss→HIT real, verdict approve, policy test) |
+| provenance (7) | `why` unit (`main.rs`) + `acceptance_*` | U (why/export/impact/undo/diag/watch/fleet/symbol/ctx/review) |
+| custo (8) | `crates/hugit-cli/src/ctx/usage.rs` | U (ctx usage verbatim) |
+| dock (9) | `acceptance_dock_{coinage,resolver,reconcile,insights,land}` + dock lib unit | U (coin/ls/land/insight/reconcile num ghost real) |
+| serve rotas (10) | `crates/hugit-serve/src/...` unit + e2e | — (exigem servidor/CAS/deploy: bindings R2/D1/PAT) |
+| contratos (11) | conformance vectors + x4 validator | T (CI) |
+| integridade (12) | `crates/hugit-refstore/src/tamper.rs` + authz unit | U (D14 na prática: `pr open` human exige principal) |
+| extras (13) | `hugit-mirror`/`hugit-policy`/`hugit-fence` unit | — (mirror: smoke live; policy: U via `policy test`) |
+
+**Débitos fechados durante esta walkthrough** (vistos no uso real):
+- `intent new` ignorava campanha selada no modo `--store` → **FIXADO** + teste que morde (`intent_new_refuses_campaign_sealed_on_default_log`, mutation-probed RED).
+- Falso alarme "watch inconsistente" → comportamento correto do detector de bare-hex no sha do commit (40-hex redacta por design).
+- Falso alarme "exit 0 em erro de CLI" → era o pipe; sem pipe o exit é 2 (correto).
+
+**O que NÃO é provado por esta walkthrough** (honesto — está marcado `—`):
+- Rotas do servidor (`/v1/*`, git wire) — exigem `hugit-serve` com CoreLink CAS/R2/D1/PAT provisionado; o código+unit green, mas não há instância live acessível daqui.
+- O lado Omnirouter (irmão) do `CostSampleV1` — só o conformance vector da nossa banda prova a paridade.
+- Redação, mirror, fence, MCP — cobertos por unit/hermético, não por uso manual (precisam de infra ou de ambiente específico).
+
+---
+
 ## 0. Instalação do "sensor" (hooks do git)
 
 | Feature | O que faz | Como validar |
-|---|---|---|---|
-| `hugit init` (library) | Cria `.hugit/` + log vazio + instala hooks do git (post-commit, post-checkout, pre-push, post-merge). | `init/mod.rs` | `hugit init` numa pasta; ver `.git/hooks/post-commit` existe |
-| Capture silencioso | Toda operação do git (commit, checkout, push, merge) é registrada no log SEM travar git — o hook roda em background e sempre sai com sucesso. | `capture` | `git commit` num repo init; ver o evento no `log.json` |
-| Capture por tipo | Registra o quê aconteceu: commit (arquivos novos), checkout (branch nova), push (hashes enviados), merge (origem+dst). | `capture` kinds | Commitar, ramificar, push, merge; conferir cada payload no log |
+|---|---|---|
+| `hugit init` (library) | Cria `.hugit/` + log vazio + instala hooks do git (post-commit, post-checkout, pre-push, post-merge). | `hugit init` numa pasta; ver `.git/hooks/post-commit` existe |
+| Capture silencioso | Toda operação do git (commit, checkout, push, merge) é registrada no log SEM travar git — o hook roda em background e sempre sai com sucesso. | `git commit` num repo init; ver o evento no `log.json` |
+| Capture por tipo | Registra o quê aconteceu: commit (arquivos novos), checkout (branch nova), push (hashes enviados), merge (origem+dst). | Commitar, ramificar, push, merge; conferir cada payload no log |
 
 ## 1. Campanhas (agrupamento de trabalho)
 
