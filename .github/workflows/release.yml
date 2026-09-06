@@ -50,7 +50,10 @@ jobs:
       - name: build release
         run: cargo build --release --locked -p hugit-cli --target ${{ matrix.target }}
       - name: smoke
-        if: runner.os != 'Windows'
+        # Only run the binary when the target arch matches the host (a
+        # cross-compiled macOS x86_64 binary cannot exec on an arm64 runner;
+        # build+package still verify the target compiles and bundles).
+        if: runner.os != 'Windows' && (matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-apple-darwin')
         run: |
           ./target/${{ matrix.target }}/release/hugit -V
           ./target/${{ matrix.target }}/release/hugit --help | head -3
