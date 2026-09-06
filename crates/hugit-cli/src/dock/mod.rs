@@ -401,9 +401,28 @@ pub fn coin_dock(spec: &CoinSpec<'_>) -> Result<String, String> {
     Ok(dock_id(gitdir, spec.branch))
 }
 
+/// Cross-platform worktree-gitdir detection: a linked worktree's gitdir is the
+/// path `<main-git>/worktrees/<name>`. The old `gitdir.contains("/worktrees/")`
+/// broke on Windows (`\worktrees\`), which misclassified a worktree as the main
+/// repo and made the resolver auto-coin a repo-scope dock where it must stay
+/// NoDock (L2). Parse the path by components — separator-agnostic.
+#[must_use]
+pub fn is_worktree_gitdir(gitdir: &str) -> bool {
+    if gitdir.is_empty() {
+        return false;
+    }
+    // Split on BOTH separators so it works on Unix (`/worktrees/`) and Windows
+    // (`\worktrees\`). A linked worktree's gitdir has a `worktrees` component.
+    let norm: String = gitdir
+        .chars()
+        .map(|c| if c == '\\' { '/' } else { c })
+        .collect();
+    norm.split('/').any(|seg| seg == "worktrees")
+}
+
 fn coin_inner(args: &CoinArgs, env_dock_id: Option<String>) -> Result<(), String> {
     let gitdir = args.gitdir.to_string_lossy().to_string();
-    let origin = if gitdir.contains("/worktrees/") {
+    let origin = if is_worktree_gitdir(&gitdir) {
         "worktree"
     } else {
         "repo"

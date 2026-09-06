@@ -456,3 +456,32 @@ fn e2e_resolve_real_worktree_and_env_fastpath() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Cross-platform worktree-gitdir detection (regression for the Windows find):
+/// a linked worktree's gitdir has a `worktrees` path component, detected on
+/// BOTH unix (`/`) and windows (`\`) separators. The old
+/// `gitdir.contains("/worktrees/")` misclassified a Windows worktree as the
+/// main repo (auto-coining a repo-scope dock where it must stay NoDock — L2).
+#[test]
+fn worktree_gitdir_detection_is_separator_agnostic() {
+    assert!(
+        hugit_cli::dock::is_worktree_gitdir("/repo/.git/worktrees/wt-a"),
+        "unix worktree gitdir detected"
+    );
+    assert!(
+        hugit_cli::dock::is_worktree_gitdir(r"C:\repo\.git\worktrees\wt-a"),
+        "windows worktree gitdir detected"
+    );
+    assert!(
+        !hugit_cli::dock::is_worktree_gitdir("/repo/.git"),
+        "main repo gitdir is NOT a worktree"
+    );
+    assert!(
+        !hugit_cli::dock::is_worktree_gitdir(r"C:\repo\.git"),
+        "windows main repo gitdir is NOT a worktree"
+    );
+    assert!(
+        !hugit_cli::dock::is_worktree_gitdir(""),
+        "empty is not a worktree"
+    );
+}

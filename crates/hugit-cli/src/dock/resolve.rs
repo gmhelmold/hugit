@@ -290,7 +290,7 @@ fn current_state(_p: &Value, gitdir: &str) -> DockState {
 }
 
 fn repo_or_worktree(gitdir: &str) -> &'static str {
-    if gitdir.contains("/worktrees/") {
+    if super::is_worktree_gitdir(gitdir) {
         "worktree"
     } else {
         "repo"
