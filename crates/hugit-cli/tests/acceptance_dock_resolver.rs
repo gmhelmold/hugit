@@ -337,18 +337,15 @@ fn hermetic_m5_auto_coin_and_l2_unlabeled_worktree_stays_nodock() {
             wt.to_str().unwrap(),
         ],
     );
-    let wt_git = wt.join(".git");
     // Strip the marker the temp hook may have left (simulate a clone: no hook).
-    if wt_git.is_dir() {
-        let _ = std::fs::remove_file(wt_git.join("hugit-dock"));
-    } else if wt_git.is_file() {
-        // linked worktree: gitdir in main
-        let main_gd = git_in(&dir, &["rev-parse", "--absolute-git-dir"])
-            .1
-            .trim()
-            .to_string();
-        let _ = std::fs::remove_file(Path::new(&main_gd).join("worktrees/wt-no-marker/hugit-dock"));
-    }
+    // The worktree's gitdir is what git itself reports (`.git` there is a FILE
+    // pointing at it on every platform for a linked worktree) — do not assume
+    // the on-disk layout.
+    let wt_gd = git_in(&wt, &["rev-parse", "--absolute-git-dir"])
+        .1
+        .trim()
+        .to_string();
+    let _ = std::fs::remove_file(Path::new(&wt_gd).join("hugit-dock"));
 
     match resolve_at(&wt, &log, None) {
         Err(ResolveError::NoDock) => {} // L2 — honest unlabeled
