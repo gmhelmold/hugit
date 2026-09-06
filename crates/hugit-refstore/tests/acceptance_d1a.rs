@@ -166,3 +166,48 @@ fn item_2_tamper_detected() {
     let pristine = log.records().to_vec();
     verify_chain(&pristine).expect("untouched chain must remain valid");
 }
+
+/// D1 regression (user walkthrough): a captured CHECKOUT (`ref.update` with
+/// `checkout:true` and no `ref`/`target`) is an INERT event for the ref view —
+/// the projection must NOT fail closed on it. Before this fix, `export` on any
+/// repo that had ever captured a checkout died with "malformed payload for
+/// ref.update event".
+#[test]
+fn checkout_ref_update_is_inert_not_malformed() {
+    let mut log = EventLog::new();
+    // A normal commit capture advances refs/heads/main.
+    log.append_for_test(
+        "ref.update",
+        vec!["orchestrator:hugit-hook".to_string()],
+        r#"{"ref":"refs/heads/main","target":"1111111111111111111111111111111111111111"}"#
+            .to_string(),
+        1,
+    );
+    // A CHECKOUT capture — has `checkout:true`, from/to/branch, NO ref/target.
+    log.append_for_test(
+        "ref.update",
+        vec!["orchestrator:hugit-hook".to_string()],
+        r#"{"checkout":true,"from":"1111111111111111111111111111111111111111","to":"2222222222222222222222222222222222222222","branch":"feat/x"}"#.to_string(),
+        2,
+    );
+    // Another commit on the other branch — still inert skip of the checkout.
+    log.append_for_test(
+        "ref.update",
+        vec!["orchestrator:hugit-hook".to_string()],
+        r#"{"ref":"refs/heads/feat/x","target":"3333333333333333333333333333333333333333"}"#
+            .to_string(),
+        3,
+    );
+
+    let state = replay(&log).expect("checkout must not make replay fail");
+    assert_eq!(
+        state.get("refs/heads/main"),
+        Some("1111111111111111111111111111111111111111"),
+        "main ref survives the inert checkout"
+    );
+    assert_eq!(
+        state.get("refs/heads/feat/x"),
+        Some("3333333333333333333333333333333333333333"),
+        "the post-checkout commit ref is the projected value"
+    );
+}

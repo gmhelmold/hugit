@@ -142,6 +142,16 @@ pub fn replay_unchecked(records: &[EventRecord]) -> Result<RefState, ReplayError
             // into the prior-state projection.
             "ref.update" | INTENT_LANDED_KIND => {
                 let v: serde_json::Value = parse_payload(record)?;
+                // A CHECKOUT ref.update (`{checkout:true, from, to, branch}`) is an
+                // INERT event for the ref view: it records that a worktree moved to
+                // an already-existing ref target — it never advances a ref name it
+                // does not carry. Skip it (forward-compatible with the capture
+                // kinds); a ref-view that treats it as `{ref,target}` would fail
+                // closed on a perfectly valid captured checkout (the export gap a
+                // user's walkthrough found).
+                if v.get("checkout").and_then(serde_json::Value::as_bool) == Some(true) {
+                    continue;
+                }
                 let name = field_str(&v, "ref").ok_or_else(|| bad(record))?;
                 let target = field_str(&v, "target").ok_or_else(|| bad(record))?;
                 state.refs.insert(name.to_string(), target.to_string());
