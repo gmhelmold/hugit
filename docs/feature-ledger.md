@@ -273,4 +273,4 @@ hugit CLI (local, sem serviço)   ← lê o log, roda todos os verbos
 ---
 
 ## Próximo passo
-Eu te guio na **validação manual grupo a grupo** — um roteiro `docs/manual-validation.md` com cenário passo-a-passo por feature (preparando o ambiente, o que rodar, o sinal de que deu certo). Começamos?
+Eu te guio na **validação manual grupo a grupo** — o roteiro `docs/manual-validation.md` (user-real simulation, já executada: 37-assert go-live script + walkthrough do binário real; evidência + bugs encontrados documentados lá).
