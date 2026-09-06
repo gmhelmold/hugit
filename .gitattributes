@@ -1,1 +1,8 @@
-CHANGELOG.md merge=union
+# Force LF everywhere: the workspace ships byte-exact pinned vectors (conformance
+# vectors, §13.4 tripwires, serde round-trips) whose byte-identity must NOT
+# depend on the platform's newline convention. Git autocrlf would rewrite .rs
+# sources to CRLF on Windows checkouts and break those byte-exact assertions.
+* text=auto eol=lf
+*.sh text eol=lf
+*.rs text eol=lf
+*.json text eol=lf
