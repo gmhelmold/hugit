@@ -7,7 +7,9 @@ the way a developer would use it. Every step below ran the REAL
 
 ## Instrument: `scripts/validate-go-live.sh`
 
-The reproducible simulation. Deterministic, fail-fast, 7 steps / 37 asserts:
+The reproducible simulation. Deterministic, fail-fast, **11 steps / ~56
+asserts**, covering every behavior that the manual walkthrough proved (the
+user-real session's transcript behaviors are now ASSERTED, not just shown):
 
 1. binary `-V` + `--help` lists verbs + dock
 2. `hugit setup` → template dir + the 4 hooks + `OWNED-BY-HUGIT` marker + git
@@ -19,7 +21,18 @@ The reproducible simulation. Deterministic, fail-fast, 7 steps / 37 asserts:
 5. `pr open` (captured commit) → `pr queue` → `land queue` (union green, lands
    PR-1) → `pr show`
 6. `git worktree add` + `dock ls` (the worktree's dock is `open`)
-7. `export` → `export.json` + `repo.git` bundle
+7. `export` → `export.json` + `repo.git` + redaction manifest **with a listed
+   removal**
+8. D14 (human author without principal → structured error) + campaign seal
+   (close; idempotent `already_closed`; **sealed campaign refuses both `pr
+   open` and `intent new`** with `campaign_sealed`)
+9. `dock land` **`byte_identity:verified` + `landed:true`**; worktree remove →
+   dock shows `ghost` + `dock reconcile` idempotent
+10. `ctx usage` verbatim (input+output total) + `dock insight` honest-zero cost
+    + residual bucket
+11. `policy test` (missing context errs; dco gate evaluated), `symbol` rust fn
+    outline, `why` unresolved (never fabricates), `undo` → nothing_to_
+    compensate (honest), `verdict approve` persists verdict_recorded:true
 
 It never touches the real gitconfig (isolated `HOME`/`XDG_CONFIG_HOME` +
 `GIT_CONFIG_NOSYSTEM`).
@@ -29,12 +42,13 @@ It never touches the real gitconfig (isolated `HOME`/`XDG_CONFIG_HOME` +
 HUGIT_BIN=<release>/hugit ./scripts/validate-go-live.sh
 ```
 
-**Result: `ALL PASS (0 failures)` — twice (reproducible), exit 0.**
+**Result: `ALL PASS (0 failures)` — `hugit 0.1.1`.**
 
 ### Mutation proof that the instrument bites
-A copy with `"verdict":"green"` flipped to `"verdict":"PURPLE"` **failed** on
-step 5 (`FAIL: union verdict green`). The script detects a wrong state; it is
-not vacuously green.
+Two mutations each made a COPY of the script FAIL (fail-fast rc≠0), proving
+the asserts detect a wrong state rather than passing vacuously:
+- `byte_identity` "verified" → "BROKEN": **FAIL** at step 9.
+- `verdict_recorded` true → false: **FAIL** at step 11.
 
 ## Manual walkthrough (this session, real binary)
 
