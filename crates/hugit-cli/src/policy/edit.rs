@@ -219,9 +219,24 @@ mod tests {
     use super::*;
 
     fn scratch(tag: &str) -> std::path::PathBuf {
+        // Sanitize the tag for cross-platform path safety: several tests pass
+        // `agent:runner`-style values, and `:` is ILLEGAL in Windows directory
+        // names (`create_dir_all` would fail with the CI run on
+        // x86_64-pc-windows-msvc). Replace path-hostile chars so the test is
+        // platform-independent, not a silent macOS/Linux-only pass.
+        let safe_tag: String = tag
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
         let dir = std::env::temp_dir().join(format!(
             "hugit-policy-edit-{}-{}-{:?}",
-            tag,
+            safe_tag,
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
