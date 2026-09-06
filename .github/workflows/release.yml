@@ -1,0 +1,46 @@
+name: release
+
+# Build the hugit CLI binary and attach it to the GitHub Release when a
+# `v*` tag is pushed. The plugin is the CLI only (engine crates already in the
+# workspace; the web-window crates are quarantined out of the build).
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable (pinned)
+        with:
+          toolchain: "1.96.0"
+          components: clippy, rustfmt
+      - name: isolate cargo home
+        run: |
+          mkdir -p "$HOME/.cargo-hugit-ci"
+          echo "CARGO_HOME=$HOME/.cargo-hugit-ci" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+      - name: check
+        run: cargo check --workspace --locked
+      - name: test
+        run: cargo test --workspace --locked
+      - name: build release
+        run: cargo build --release --locked -p hugit-cli
+      - name: smoke
+        run: |
+          ./target/release/hugit -V
+          ./target/release/hugit --help | head -3
+      - name: package
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          cp target/release/hugit dist/hugit
+          tar -C dist -czf "hugit-${VERSION}-x86_64-unknown-linux-gnu.tar.gz" hugit
+          echo "RELEASE_TARBALL=hugit-${VERSION}-x86_64-unknown-linux-gnu.tar.gz" >> "$GITHUB_ENV"
+      - name: attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.RELEASE_TARBALL }}
+          generate_release_notes: true
