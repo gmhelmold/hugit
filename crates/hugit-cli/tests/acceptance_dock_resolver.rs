@@ -325,27 +325,26 @@ fn hermetic_m5_auto_coin_and_l2_unlabeled_worktree_stays_nodock() {
 
     // L2: a marker-less worktree stays NoDock (honest unlabeled) — the git
     // model has no hook-born dock there, and we never fabricate one.
+    //
+    // `git worktree add --no-checkout` creates the worktree WITHOUT running
+    // post-checkout, so no hook fires and no dock is coined — the honest
+    // "clone without hooks" state, deterministically (a normal add fires the
+    // async hooked post-checkout, which could coin a dock on fast runners and
+    // made L2 a cross-platform timing race).
     let wt = dir.join("wt-no-marker");
-    git_in(
+    let (rc, out) = git_in(
         &dir,
         &[
             "worktree",
             "add",
             "-q",
+            "--no-checkout",
             "-b",
             "feat/nm",
             wt.to_str().unwrap(),
         ],
     );
-    // Strip the marker the temp hook may have left (simulate a clone: no hook).
-    // The worktree's gitdir is what git itself reports (`.git` there is a FILE
-    // pointing at it on every platform for a linked worktree) — do not assume
-    // the on-disk layout.
-    let wt_gd = git_in(&wt, &["rev-parse", "--absolute-git-dir"])
-        .1
-        .trim()
-        .to_string();
-    let _ = std::fs::remove_file(Path::new(&wt_gd).join("hugit-dock"));
+    assert_eq!(rc, 0, "no-checkout worktree add: {out}");
 
     match resolve_at(&wt, &log, None) {
         Err(ResolveError::NoDock) => {} // L2 — honest unlabeled
