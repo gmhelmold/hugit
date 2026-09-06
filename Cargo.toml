@@ -18,9 +18,7 @@ serde_json = "=1.0.150"
 sha2         = "=0.10.9"
 hmac         = "=0.12.1"
 hex          = "=0.4.3"
-# CoreLink CAS content-address digest: BLAKE3-256 → 64-hex (confirmed contract).
-# Used by `hugit-serve`'s git-from-CAS read path +
-# ingest bin to compute the CAS key over the loose-object framing. SIMD/rayon
+# Content-address digest: BLAKE3-256 → 64-hex (CAS-contract shape). SIMD/rayon
 # default features OFF — we hash small loose objects, not multi-GB streams.
 blake3       = { version = "=1.5.5", default-features = false }
 base64       = "=0.22.1"
