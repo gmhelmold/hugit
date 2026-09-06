@@ -1,10 +1,9 @@
 //! `hugit issue transition <n> <to> [--priority <p>]` — move an issue's state.
 //!
 //! Inline reimplementation of the `issue.transition` write logic for the CLI
-//! (no `hugit-serve` dep — that would be circular; `hugit-serve` is not in
-//! `hugit-cli`'s `[dependencies]`).
+//! (self-contained — no server-side dependency; the CLI is the product).
 //!
-//! Mirrors [`hugit_serve::writes::verbs::write_issue_transition`] exactly:
+//! Mirrors the canonical server-side transition verb exactly:
 //! - the same 4-value `VALID_STATES` slice (`backlog|open|closed|dispatch`),
 //! - priority scrubbed via the CLI redaction seam ([`crate::redaction::scrub`]),
 //! - appended through `append_authorized(PrincipalClass::Orchestrator,

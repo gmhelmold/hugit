@@ -1037,7 +1037,7 @@ fn parse_loose_framing(framing: &[u8]) -> Option<(Kind, Vec<u8>)> {
 /// The [`Cas`] read surface is NOT byte-uniform across implementations: the
 /// trait-documented form (and `InMemoryCas` / `GitDirCas`) returns git's verbatim
 /// **zlib-compressed** loose bytes, while the live serve adapter
-/// (`hugit_serve::cas::CasRw`, backed by the oid-index→R2 read source) returns the
+/// (`the live CAS adapter`, backed by the oid-index→R2 read source) returns the
 /// **uncompressed** `"<type> <len>\0<body>"` framing it serves on the read path. So
 /// this accepts BOTH: it first tries to parse the bytes directly as the loose
 /// framing (the uncompressed form — a zlib stream never parses as a valid framing

@@ -18,10 +18,8 @@ on:
   pull_request:
     paths:
       - 'crates/hugit-contracts/**'
-      - 'crates/hugit-http-contracts/**'
       - 'crates/hugit-refstore/**'
       - 'crates/hugit-invariants/**'
-      - 'crates/hugit-serve/**'
       - 'conformance/**'
       - 'Cargo.toml'
       - 'Cargo.lock'

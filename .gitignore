@@ -31,3 +31,12 @@ docs/handoff/
 crates/*/.git/
 crates/*/.hugit/
 crates/*/.gitignore
+
+# QUARANTINE — the web-window crates (hugit-serve + http-contracts + itself's
+# qa harness). FROZEN by owner decision (2026-09-05): the published plugin is
+# the CLI only, git-native, and must not carry the paid-service window (CoreLink
+# CAS/Clerk). The code is preserved LOCALLY under quarantine/ for reference; it
+# is NOT part of the workspace, the build, or the remote plugin. Do not delete it
+# and do not re-enable it without the owner's explicit call. See
+# quarantine/README.md for the frozen state and how (if ever) to revive it.
+/quarantine/
