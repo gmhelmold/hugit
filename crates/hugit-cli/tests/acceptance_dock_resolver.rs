@@ -118,7 +118,12 @@ fn hermetic_resolve_exact_one_and_ambiguous_fails_closed() {
     // which is the only correct answer on every platform.
     let wt_gitdir = PathBuf::from(git_in(&wt, &["rev-parse", "--absolute-git-dir"]).1.trim());
     let wt_gitdir_s = wt_gitdir.to_string_lossy().to_string();
-    coin_dock(&hugit_cli::dock::CoinSpec {
+    // Coin the worktree dock EXPLICITLY (idempotent: if the hook's async
+    // post-checkout already coined it, this returns the same dock; if not, we
+    // create it deterministically). The test must NOT depend on hook timing —
+    // on a fast Windows runner the async child may not have landed by the time
+    // the code reads, which made this a cross-platform race.
+    let _ = coin_dock(&hugit_cli::dock::CoinSpec {
         log: &log,
         hook_log: None,
         top_level: &dir,
@@ -208,14 +213,11 @@ fn hermetic_env_diff_is_ignored_and_reconcile_recorded_once() {
             wt.to_str().unwrap(),
         ],
     );
-    let wt_gitdir = wt.join(".git");
-    let wt_gitdir = if wt_gitdir.is_dir() {
-        wt_gitdir
-    } else {
-        std::path::PathBuf::from(git_in(&wt, &["rev-parse", "--absolute-git-dir"]).1.trim())
-    };
+    // The worktree's gitdir is what git reports (`.git` there is a FILE at the
+    // physical gitdir on every platform) — same discipline as P1.
+    let wt_gitdir = PathBuf::from(git_in(&wt, &["rev-parse", "--absolute-git-dir"]).1.trim());
     let wt_gitdir_s = wt_gitdir.to_string_lossy().to_string();
-    coin_dock(&hugit_cli::dock::CoinSpec {
+    let _ = coin_dock(&hugit_cli::dock::CoinSpec {
         log: &log,
         hook_log: None,
         top_level: &dir,
@@ -426,12 +428,7 @@ fn e2e_resolve_real_worktree_and_env_fastpath() {
             wt.to_str().unwrap(),
         ],
     );
-    let wt_gitdir = wt.join(".git");
-    let wt_gitdir = if wt_gitdir.is_dir() {
-        wt_gitdir
-    } else {
-        std::path::PathBuf::from(git_in(&wt, &["rev-parse", "--absolute-git-dir"]).1.trim())
-    };
+    let wt_gitdir = PathBuf::from(git_in(&wt, &["rev-parse", "--absolute-git-dir"]).1.trim());
     let wt_gitdir_s = wt_gitdir.to_string_lossy().to_string();
     let wt_id = coin_dock(&hugit_cli::dock::CoinSpec {
         log: &log,

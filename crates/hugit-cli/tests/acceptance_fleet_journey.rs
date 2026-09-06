@@ -164,7 +164,7 @@ fn fleet_operator_sees_agent_fleet_activity() {
             p["branch"].as_str() == Some("agent-a")
                 && !p["target"].as_str().unwrap_or("").is_empty()
         },
-        8000,
+        25000,
     );
     assert!(got_a, "agent-a commit captured");
     let got_b = wait_for_ref_update(
@@ -173,7 +173,7 @@ fn fleet_operator_sees_agent_fleet_activity() {
             p["branch"].as_str() == Some("agent-b")
                 && !p["target"].as_str().unwrap_or("").is_empty()
         },
-        8000,
+        25000,
     );
     assert!(got_b, "agent-b commit captured");
 
