@@ -1,8 +1,9 @@
 name: release
 
-# Build the hugit CLI binary and attach it to the GitHub Release when a
-# `v*` tag is pushed. The plugin is the CLI only (engine crates already in the
-# workspace; the web-window crates are quarantined out of the build).
+# Build the hugit CLI binary for Linux/macOS/Windows and attach every artifact
+# to the GitHub Release when a `v*` tag is pushed. The plugin is the CLI only
+# (engine crates already in the workspace; the web-window crates are quarantined
+# out of the build).
 on:
   push:
     tags:
@@ -10,15 +11,33 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: write
+      actions: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            extra_target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable (pinned)
         with:
           toolchain: "1.96.0"
           components: clippy, rustfmt
+      - name: add cross-compile target
+        if: matrix.extra_target != ''
+        run: rustup target add --toolchain 1.96.0 ${{ matrix.extra_target }}
       - name: isolate cargo home
         run: |
           mkdir -p "$HOME/.cargo-hugit-ci"
@@ -29,20 +48,52 @@ jobs:
       - name: test
         run: cargo test --workspace --locked
       - name: build release
-        run: cargo build --release --locked -p hugit-cli
+        run: cargo build --release --locked -p hugit-cli --target ${{ matrix.target }}
       - name: smoke
+        if: runner.os != 'Windows'
         run: |
-          ./target/release/hugit -V
-          ./target/release/hugit --help | head -3
-      - name: package
+          ./target/${{ matrix.target }}/release/hugit -V
+          ./target/${{ matrix.target }}/release/hugit --help | head -3
+      - name: smoke (windows)
+        if: runner.os == 'Windows'
+        run: |
+          .\target\${{ matrix.target }}\release\hugit.exe -V
+          .\target\${{ matrix.target }}\release\hugit.exe --help
+      - name: package (tar.gz)
+        if: runner.os != 'Windows'
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           mkdir -p dist
-          cp target/release/hugit dist/hugit
-          tar -C dist -czf "hugit-${VERSION}-x86_64-unknown-linux-gnu.tar.gz" hugit
-          echo "RELEASE_TARBALL=hugit-${VERSION}-x86_64-unknown-linux-gnu.tar.gz" >> "$GITHUB_ENV"
+          cp "target/${{ matrix.target }}/release/hugit" dist/hugit
+          tar -C dist -czf "hugit-${VERSION}-${{ matrix.target }}.tar.gz" hugit
+          echo "RELEASE_ARTIFACT=hugit-${VERSION}-${{ matrix.target }}.tar.gz" >> "$GITHUB_ENV"
+      - name: package (zip)
+        if: runner.os == 'Windows'
+        run: |
+          $VERSION = $env:GITHUB_REF_NAME.TrimStart('v')
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\hugit.exe" "dist\hugit.exe"
+          $ZIP = "hugit-$VERSION-${{ matrix.target }}.zip"
+          Compress-Archive -Path "dist\hugit.exe" -DestinationPath $ZIP
+          "RELEASE_ARTIFACT=$ZIP" >> $env:GITHUB_ENV
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ env.RELEASE_ARTIFACT }}
+          path: ${{ env.RELEASE_ARTIFACT }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/download-artifact@484a0b528fb4d7bd804637ccb632e47a0e638317
+        with:
+          path: dist/
+          merge-multiple: true
       - name: attach to release
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ env.RELEASE_TARBALL }}
+          files: dist/*
           generate_release_notes: true
