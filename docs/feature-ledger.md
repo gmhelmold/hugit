@@ -50,6 +50,23 @@ teste/invariante, não exercitável por uso manual simples (requer infra/servido
 
 ---
 
+## Separar serve do núcleo — decisão de arquitetura (plugin open-source)
+
+O hugit **não precisa de `hugit-serve`** para funcionar. O produto é git-native:
+
+```
+repo git (git clone/push/pull normais — qualquer remote)
+  └─ .hugit/log.json     ← versionado, viaja com clone/push/fetch (não está no .gitignore)
+hugit CLI (local, sem serviço)   ← lê o log, roda todos os verbos
+```
+
+- **O CLI e os crates de núcleo não usam `hugit-serve`.** Sentido das dependências: `hugit-serve` → `use hugit-cli` (o serve importa o CLI); nenhum crate de núcleo importa o serve. `hugit-serve` é `publish = false`.
+- **`hugit-serve` é a janela web opcional** (o que a UI githugr lê), e o CAS CoreLink é só o deploy DESTA janela. Nada disso entra no plugin open-source: um repo git + o CLI bastam.
+- **Fluxo sem serve:** clone → `hugit campaign/intent/pr/check/dock` (local) → `git push` (o log vai junto) → outros agentes `git pull` sincronizam.
+- Publicação open-source = CLI + crates de núcleo; serve fica de fora (quem quiser a janela sobe o githugr, opcional).
+
+---
+
 ## 0. Instalação do "sensor" (hooks do git)
 
 | Feature | O que faz | Como validar |
