@@ -45,13 +45,12 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
       - name: check
         run: cargo check --workspace --locked
-      # The full test suite is the CI gate (ubuntu, hooks are shell scripts and
-      # the acceptance suite is Unix-oriented). The release matrix runs the full
-      # suite only on Linux — macOS/Windows verify COMPILE + the binary smoke;
-      # running the hook-shell acceptance there would fail on the shell layer,
-      # not on the product.
+      # The full test suite runs on EVERY platform in the release matrix —
+      # byte-exact determinism, the hook-shell acceptance, and the CLI surface
+      # must be proven where they ship, not just on Linux. git-for-windows
+      # ships its own sh, so the shell hooks execute; this step gives us the
+      # REAL evidence of any platform-specific break instead of assuming one.
       - name: test
-        if: runner.os == 'Linux'
         run: cargo test --workspace --locked
       - name: build release
         run: cargo build --release --locked -p hugit-cli --target ${{ matrix.target }}
