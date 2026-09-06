@@ -64,6 +64,130 @@ pub fn run(args: InitArgs) -> ExitCode {
     }
 }
 
+/// The shell body for each hook, generated deterministically. Every hook:
+/// - resolves the hugit binary ($HUGIT_BIN then `hugit`),
+/// - resolves the repo root via git itself (worktree-safe),
+/// - detaches the capture child (`nohup ... &` + re-direct) then exits 0,
+///   so a hugit failure can NEVER fail/block the git operation.
+pub(crate) fn hook_script(kind: &str) -> String {
+    // The capture invocation for each kind (post-commit takes the new HEAD +
+    // branch; post-checkout passes from/to/branch when flag==1; pre-push reads
+    // refspecs/shas from stdin into the child; post-merge passes the merged tip).
+    match kind {
+    "post-commit" => r#"#!/bin/sh
+# hugit-hook (managed by hugit init)
+# Silent capture: the LLM used `git commit`; hugit records ref.update async.
+HUGIT_BIN="${HUGIT_BIN:-hugit}"
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+# The canonical log lives at the MAIN repo's .hugit (shared across linked
+# worktrees). In a worktree, `--show-toplevel` is the WORKTREE root, so resolve
+# the shared log from the common git dir (the main .git) instead.
+COMMON=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
+LOG="$COMMON/../.hugit/log.json"
+HL="$COMMON/../.hugit/hooks.log"
+[ -f "$LOG" ] || {
+  # LAZY BOOT: no hugit log yet — create one (a template-dir repo that never
+  # ran `hugit init` still becomes active on the FIRST git op). The log is an
+  # empty JSON array; hooks must never block git, so failures are best-effort.
+  mkdir -p "$(dirname "$LOG")" 2>/dev/null
+  printf '[]\n' > "$LOG" 2>/dev/null
+}
+(
+  FILES="$(git diff-tree --root --name-only -r --no-commit-id HEAD 2>/dev/null)"
+  FILE_ARGS=""
+  for f in $FILES; do
+FILE_ARGS="$FILE_ARGS --files $f"
+  done
+  "$HUGIT_BIN" capture --kind commit --top-level "$ROOT" --log "$LOG" --hook-log "$HL"     --oid "$(git rev-parse HEAD 2>/dev/null)"     --branch "$(git branch --show-current 2>/dev/null)"     --recorded-at "$(git log -1 --format=%ct 2>/dev/null)" $FILE_ARGS
+) >>"$HL" 2>&1 &
+exit 0
+"#.to_string(),
+    "post-checkout" => r#"#!/bin/sh
+# hugit-hook (managed by hugit init)
+# Silent capture: branch checkout (flag=1); records ref.update {checkout:true}.
+HUGIT_BIN="${HUGIT_BIN:-hugit}"
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+# The canonical log lives at the MAIN repo's .hugit (shared across linked
+# worktrees). In a worktree, `--show-toplevel` is the WORKTREE root, so resolve
+# the shared log from the common git dir (the main .git) instead.
+COMMON=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
+LOG="$COMMON/../.hugit/log.json"
+HL="$COMMON/../.hugit/hooks.log"
+[ -f "$LOG" ] || {
+  # LAZY BOOT: no hugit log yet — create one (a template-dir repo that never
+  # ran `hugit init` still becomes active on the FIRST git op). The log is an
+  # empty JSON array; hooks must never block git, so failures are best-effort.
+  mkdir -p "$(dirname "$LOG")" 2>/dev/null
+  printf '[]\n' > "$LOG" 2>/dev/null
+}
+[ "$3" = "1" ] || exit 0   # only branch checkouts (flag=1), not file checkouts
+GITDIR=$(git rev-parse --absolute-git-dir 2>/dev/null) || exit 0
+(
+  "$HUGIT_BIN" capture --kind checkout --top-level "$ROOT" --log "$LOG" --hook-log "$HL"     --from "$1" --oid "$2" --branch "$(git branch --show-current 2>/dev/null)"
+) >>"$HL" 2>&1 &
+# Worktree-dock (ADR-0005, WP-DOCK-1): coin the physical binding at checkout
+# time (idempotent — marker present ⇒ no-op; never blocks git).
+(
+  "$HUGIT_BIN" dock coin --top-level "$ROOT" --gitdir "$GITDIR" --log "$LOG" --hook-log "$HL" --branch "$(git branch --show-current 2>/dev/null)"
+) >>"$HL" 2>&1 &
+exit 0
+"#.to_string(),
+    "pre-push" => r#"#!/bin/sh
+# hugit-hook (managed by hugit init)
+# Silent capture: a push is attempted; records ref.update {attempt:true} with
+# the LOCAL shas being pushed (the 2nd field of each refspec stdin line), so a
+# `git push` is a captured-commit proof too (pr open --commit <pushed-sha>).
+# ALWAYS exits 0 — this is a PRE hook; a non-zero exit would BLOCK the push.
+HUGIT_BIN="${HUGIT_BIN:-hugit}"
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+# The canonical log lives at the MAIN repo's .hugit (shared across linked
+# worktrees). In a worktree, `--show-toplevel` is the WORKTREE root, so resolve
+# the shared log from the common git dir (the main .git) instead.
+COMMON=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
+LOG="$COMMON/../.hugit/log.json"
+HL="$COMMON/../.hugit/hooks.log"
+[ -f "$LOG" ] || {
+  # LAZY BOOT: no hugit log yet — create one (a template-dir repo that never
+  # ran `hugit init` still becomes active on the FIRST git op). The log is an
+  # empty JSON array; hooks must never block git, so failures are best-effort.
+  mkdir -p "$(dirname "$LOG")" 2>/dev/null
+  printf '[]\n' > "$LOG" 2>/dev/null
+}
+STDIN_REFS="$(cat)"   # first line: remote-name + url; then <local-ref> <local-sha> <remote-ref> <remote-sha> per line
+# Extract the LOCAL sha (2nd field) from each refspec line that has 4 fields.
+SHAS="$(echo "$STDIN_REFS" | awk 'NF>=4 {print $2}')"
+(
+  "$HUGIT_BIN" capture --kind push-attempt --top-level "$ROOT" --log "$LOG" --hook-log "$HL"     --refspecs "$STDIN_REFS" --shas "$SHAS"
+) >>"$HL" 2>&1 &
+exit 0
+"#.to_string(),
+    "post-merge" => r#"#!/bin/sh
+# hugit-hook (managed by hugit init)
+# Silent capture: a local merge landed; records ref.update {merged_from}.
+HUGIT_BIN="${HUGIT_BIN:-hugit}"
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+# The canonical log lives at the MAIN repo's .hugit (shared across linked
+# worktrees). In a worktree, `--show-toplevel` is the WORKTREE root, so resolve
+# the shared log from the common git dir (the main .git) instead.
+COMMON=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
+LOG="$COMMON/../.hugit/log.json"
+HL="$COMMON/../.hugit/hooks.log"
+[ -f "$LOG" ] || {
+  # LAZY BOOT: no hugit log yet — create one (a template-dir repo that never
+  # ran `hugit init` still becomes active on the FIRST git op). The log is an
+  # empty JSON array; hooks must never block git, so failures are best-effort.
+  mkdir -p "$(dirname "$LOG")" 2>/dev/null
+  printf '[]\n' > "$LOG" 2>/dev/null
+}
+(
+  "$HUGIT_BIN" capture --kind merge --top-level "$ROOT" --log "$LOG" --hook-log "$HL"     --from "$(git rev-parse HEAD~1 2>/dev/null)"     --oid "$(git rev-parse HEAD 2>/dev/null)"     --recorded-at "$(git log -1 --format=%ct 2>/dev/null)"
+) >>"$HL" 2>&1 &
+exit 0
+"#.to_string(),
+    _ => unreachable!("known hook kind"),
+}
+}
+
 fn do_run(args: &InitArgs) -> Result<serde_json::Value, PorcelainError> {
     let root = args.dir.clone().unwrap_or_else(|| PathBuf::from("."));
     let hugit_dir = root.join(".hugit");
@@ -120,106 +244,6 @@ fn do_run(args: &InitArgs) -> Result<serde_json::Value, PorcelainError> {
         } else {
             root.join(rel)
         })
-    }
-
-    /// The shell body for each hook, generated deterministically. Every hook:
-    /// - resolves the hugit binary ($HUGIT_BIN then `hugit`),
-    /// - resolves the repo root via git itself (worktree-safe),
-    /// - detaches the capture child (`nohup ... &` + re-direct) then exits 0,
-    ///   so a hugit failure can NEVER fail/block the git operation.
-    fn hook_script(kind: &str) -> String {
-        // The capture invocation for each kind (post-commit takes the new HEAD +
-        // branch; post-checkout passes from/to/branch when flag==1; pre-push reads
-        // refspecs/shas from stdin into the child; post-merge passes the merged tip).
-        match kind {
-        "post-commit" => r#"#!/bin/sh
-# hugit-hook (managed by hugit init)
-# Silent capture: the LLM used `git commit`; hugit records ref.update async.
-HUGIT_BIN="${HUGIT_BIN:-hugit}"
-ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
-# The canonical log lives at the MAIN repo's .hugit (shared across linked
-# worktrees). In a worktree, `--show-toplevel` is the WORKTREE root, so resolve
-# the shared log from the common git dir (the main .git) instead.
-COMMON=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
-LOG="$COMMON/../.hugit/log.json"
-HL="$COMMON/../.hugit/hooks.log"
-[ -f "$LOG" ] || exit 0
-(
-  FILES="$(git diff-tree --root --name-only -r --no-commit-id HEAD 2>/dev/null)"
-  FILE_ARGS=""
-  for f in $FILES; do
-    FILE_ARGS="$FILE_ARGS --files $f"
-  done
-  "$HUGIT_BIN" capture --kind commit --top-level "$ROOT" --log "$LOG" --hook-log "$HL"     --oid "$(git rev-parse HEAD 2>/dev/null)"     --branch "$(git branch --show-current 2>/dev/null)"     --recorded-at "$(git log -1 --format=%ct 2>/dev/null)" $FILE_ARGS
-) >>"$HL" 2>&1 &
-exit 0
-"#.to_string(),
-        "post-checkout" => r#"#!/bin/sh
-# hugit-hook (managed by hugit init)
-# Silent capture: branch checkout (flag=1); records ref.update {checkout:true}.
-HUGIT_BIN="${HUGIT_BIN:-hugit}"
-ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
-# The canonical log lives at the MAIN repo's .hugit (shared across linked
-# worktrees). In a worktree, `--show-toplevel` is the WORKTREE root, so resolve
-# the shared log from the common git dir (the main .git) instead.
-COMMON=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
-LOG="$COMMON/../.hugit/log.json"
-HL="$COMMON/../.hugit/hooks.log"
-[ -f "$LOG" ] || exit 0
-[ "$3" = "1" ] || exit 0   # only branch checkouts (flag=1), not file checkouts
-GITDIR=$(git rev-parse --absolute-git-dir 2>/dev/null) || exit 0
-(
-  "$HUGIT_BIN" capture --kind checkout --top-level "$ROOT" --log "$LOG" --hook-log "$HL"     --from "$1" --oid "$2" --branch "$(git branch --show-current 2>/dev/null)"
-) >>"$HL" 2>&1 &
-# Worktree-dock (ADR-0005, WP-DOCK-1): coin the physical binding at checkout
-# time (idempotent — marker present ⇒ no-op; never blocks git).
-(
-  "$HUGIT_BIN" dock coin --top-level "$ROOT" --gitdir "$GITDIR" --log "$LOG" --hook-log "$HL" --branch "$(git branch --show-current 2>/dev/null)"
-) >>"$HL" 2>&1 &
-exit 0
-"#.to_string(),
-        "pre-push" => r#"#!/bin/sh
-# hugit-hook (managed by hugit init)
-# Silent capture: a push is attempted; records ref.update {attempt:true} with
-# the LOCAL shas being pushed (the 2nd field of each refspec stdin line), so a
-# `git push` is a captured-commit proof too (pr open --commit <pushed-sha>).
-# ALWAYS exits 0 — this is a PRE hook; a non-zero exit would BLOCK the push.
-HUGIT_BIN="${HUGIT_BIN:-hugit}"
-ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
-# The canonical log lives at the MAIN repo's .hugit (shared across linked
-# worktrees). In a worktree, `--show-toplevel` is the WORKTREE root, so resolve
-# the shared log from the common git dir (the main .git) instead.
-COMMON=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
-LOG="$COMMON/../.hugit/log.json"
-HL="$COMMON/../.hugit/hooks.log"
-[ -f "$LOG" ] || exit 0
-STDIN_REFS="$(cat)"   # first line: remote-name + url; then <local-ref> <local-sha> <remote-ref> <remote-sha> per line
-# Extract the LOCAL sha (2nd field) from each refspec line that has 4 fields.
-SHAS="$(echo "$STDIN_REFS" | awk 'NF>=4 {print $2}')"
-(
-  "$HUGIT_BIN" capture --kind push-attempt --top-level "$ROOT" --log "$LOG" --hook-log "$HL"     --refspecs "$STDIN_REFS" --shas "$SHAS"
-) >>"$HL" 2>&1 &
-exit 0
-"#.to_string(),
-        "post-merge" => r#"#!/bin/sh
-# hugit-hook (managed by hugit init)
-# Silent capture: a local merge landed; records ref.update {merged_from}.
-HUGIT_BIN="${HUGIT_BIN:-hugit}"
-ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
-# The canonical log lives at the MAIN repo's .hugit (shared across linked
-# worktrees). In a worktree, `--show-toplevel` is the WORKTREE root, so resolve
-# the shared log from the common git dir (the main .git) instead.
-COMMON=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
-LOG="$COMMON/../.hugit/log.json"
-HL="$COMMON/../.hugit/hooks.log"
-[ -f "$LOG" ] || exit 0
-(
-  "$HUGIT_BIN" capture --kind merge --top-level "$ROOT" --log "$LOG" --hook-log "$HL"     --from "$(git rev-parse HEAD~1 2>/dev/null)"     --oid "$(git rev-parse HEAD 2>/dev/null)"     --recorded-at "$(git log -1 --format=%ct 2>/dev/null)"
-) >>"$HL" 2>&1 &
-exit 0
-"#.to_string(),
-        _ => unreachable!("known hook kind"),
-    }
     }
 
     /// Install the 4 hugit hooks into the repo's hooks dir. Idempotent: a hook

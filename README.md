@@ -37,8 +37,12 @@ C++, Ruby.
 `hugit` is designed to work **where git works** — in a repository, on a laptop,
 no server, no account. The runtime is local-only by default:
 
-- **`hugit init`** runs the same ceremony as `git init` (initializes `.git/` when
-  absent) and adds `.hugit/` + the versioned intent/context log.
+- **`hugit setup`** (one-time) configures git's global `init.templateDir` so every
+  future `git init` **auto-ships the hugit hooks** — no per-repo ceremony. The
+  hooks lazy-boot: the first `git commit`/`checkout` in a fresh repo creates
+  `.hugit/log.json` (the versioned, hash-chained intent log) automatically.
+  For an EXISTING repo, `hugit init <dir>` (library) adds `.hugit/` + the log,
+  or a first git op lazy-boots it the same way.
 - Every verb reads/writes the **canonical local log** (`.hugit/log.json`) with a
   verifiable hash chain — `why`, `impact`, `intent`, `pr`, `verdict`, `undo`,
   `policy`, `ledger`, `watch`, `symbol`, `ctx`, `review`, `export`, and more all

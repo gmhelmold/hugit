@@ -47,6 +47,7 @@ pub mod pr;
 pub mod queue;
 pub mod redaction;
 pub mod review;
+pub mod setup;
 pub mod symbol;
 pub mod tournament;
 pub mod undo;

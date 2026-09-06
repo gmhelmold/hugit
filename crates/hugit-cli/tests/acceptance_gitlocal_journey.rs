@@ -319,3 +319,128 @@ fn journey_pr_cycle_lands_locally() {
         "PR left the queue after landing"
     );
 }
+
+/// SETUP JOURNEY — `hugit setup` + git's init.templateDir: no per-repo init.
+///
+/// Prove the boot ceremony WITHOUT `hugit init` per repo: `hugit setup` writes
+/// the 4 hooks into a template + points git's GLOBAL `init.templateDir` at it;
+/// a fresh `git init` then ships the hooks automatically, and the FIRST git op
+/// lazy-boots `.hugit/log.json` + captures the real ref.update. Entirely under
+/// an isolated HOME/XDG so the machine's real gitconfig is never touched.
+#[test]
+fn setup_templates_git_init_and_lazy_boots() {
+    // Isolated env: a temp HOME (git global config lands there) + temp XDG
+    // (the hugit template dir).
+    let home = scratch("home");
+    let xdg = scratch("xdg");
+    let repo = scratch("repo");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&xdg).unwrap();
+    std::fs::create_dir_all(&repo).unwrap();
+
+    let mut cmd = Command::new(hugit_bin());
+    let out = cmd
+        .arg("setup")
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &xdg)
+        .env("GIT_CONFIG_GLOBAL", home.join(".gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .expect("hugit setup runs");
+    assert!(
+        out.status.success(),
+        "hugit setup exits 0 — stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The template hooks exist where the config points.
+    let template_dir = xdg.join("hugit/template");
+    assert!(
+        template_dir.join("hooks/post-commit").exists(),
+        "template post-commit written"
+    );
+    assert!(
+        template_dir.join("hooks/post-checkout").exists(),
+        "template post-checkout written"
+    );
+    assert!(
+        template_dir.join("OWNED-BY-HUGIT").exists(),
+        "ownership marker written"
+    );
+
+    // A FRESH repo: plain `git init` must ship the hooks (via templateDir).
+    let mut cmd = Command::new("git");
+    let out = cmd
+        .args(["init", "-q", "-b", "main"])
+        .current_dir(&repo)
+        .env("HOME", &home)
+        .env("GIT_CONFIG_GLOBAL", home.join(".gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .expect("git init runs");
+    assert!(out.status.success(), "git init works");
+    assert!(
+        repo.join(".git/hooks/post-commit").exists(),
+        "git init copied the hugit post-commit hook from the template"
+    );
+
+    // Commit twice under isolated env; the first op lazy-boots the log.
+    let mut cmd = Command::new("git");
+    let _ = cmd
+        .args(["config", "user.email", "t@t"])
+        .current_dir(&repo)
+        .env("GIT_CONFIG_GLOBAL", home.join(".gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output();
+    let mut cmd = Command::new("git");
+    let _ = cmd
+        .args(["config", "user.name", "t"])
+        .current_dir(&repo)
+        .env("GIT_CONFIG_GLOBAL", home.join(".gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output();
+    std::fs::write(repo.join("a.txt"), "a").unwrap();
+
+    let mut cmd = Command::new("git");
+    let _ = cmd
+        .args(["add", "a.txt"])
+        .current_dir(&repo)
+        .env("GIT_CONFIG_GLOBAL", home.join(".gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("HUGIT_BIN", hugit_bin())
+        .output();
+    let mut cmd = Command::new("git");
+    let _ = cmd
+        .args(["commit", "-q", "-m", "first"])
+        .current_dir(&repo)
+        .env("GIT_CONFIG_GLOBAL", home.join(".gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("HUGIT_BIN", hugit_bin())
+        .output();
+
+    // Poll the async capture: the lazy-booted log must hold a ref.update.
+    let log_path = repo.join(".hugit/log.json");
+    let mut landed = false;
+    for _ in 0..60 {
+        if let Ok(bytes) = std::fs::read(&log_path) {
+            if let Ok(v) = serde_json::from_slice::<Value>(&bytes)
+                && let Some(recs) = v.as_array()
+                && !recs.is_empty()
+            {
+                landed = true;
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    assert!(
+        landed,
+        "first commit lazy-booted .hugit/log.json with a captured ref.update"
+    );
+    let bytes = std::fs::read(&log_path).unwrap();
+    let recs: Vec<Value> = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        recs.iter().any(|r| r["kind"] == "ref.update"),
+        "log holds a ref.update record: {recs:?}"
+    );
+}

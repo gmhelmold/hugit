@@ -42,6 +42,7 @@ use hugit_cli::porcelain::PorcelainError;
 use hugit_cli::pr::{self, PrArgs};
 use hugit_cli::queue::{self, QueueArgs};
 use hugit_cli::review::{self, ReviewArgs};
+use hugit_cli::setup::{self};
 use hugit_cli::symbol::{self, SymbolArgs};
 use hugit_cli::tournament::{MAX_N_POLICY, produce_candidates};
 use hugit_cli::undo::{self, UndoArgs};
@@ -76,6 +77,9 @@ enum Command {
     Tournament(TournamentArgs),
     /// Dump a git artifact + JSON envelope (anti-lock-in exit proof).
     Export(ExportArgs),
+    /// One-time install: configure git's global init.templateDir so every future
+    /// `git init` auto-ships the hugit hooks (the boot ceremony, no per-repo init).
+    Setup(setup::SetupArgs),
     /// Campaign lifecycle: open / close (seal) / show.
     Campaign(CampaignArgs),
     /// Silent capture (git hooks call this) — never blocks git, exit 0 always.
@@ -570,6 +574,7 @@ fn main() -> ExitCode {
         Command::Impact(a) => run_impact(a),
         Command::Tournament(a) => run_tournament(a),
         Command::Export(a) => run_export(a),
+        Command::Setup(a) => return setup::run(a),
         Command::Campaign(a) => return campaign::run(a),
         Command::Capture(a) => return capture::run(a),
         Command::Intent(a) => return intent::run(a),
