@@ -81,11 +81,17 @@ CAMP="$("$BIN" campaign open --campaign c1 --charter "first" --owner user:test 2
 printf '%s' "$CAMP" | grep -q '"opened":true'; assert "campaign opened:true"
 IID="$("$BIN" intent new --charter "task" --acceptance "ok" --campaign c1 2>&1 | python3 -c "import sys,json; print(json.load(sys.stdin)['intent_id'])")"
 [ -n "$IID" ];                     assert "intent new gives id"
-R1="$("$BIN" check run --def fmt --store 2>&1)";  assert "check run 1 (miss)"
+# A custom, environment-independent check (exit 0 always) — a GOING-GREEN check.
+# Using the builtin `fmt` would depend on rustfmt being installed and would
+# record a synthetic RED in an uninstalled sandbox; a custom `true` is a stable,
+# toolchain-independent green that still exercises the memo keys + AC.
+R1="$("$BIN" check run --def smoke --cmd "true" --store 2>&1)";  assert "check run 1 (miss)"
 printf '%s' "$R1" | grep -q '"cache_hit":false'; assert "check1 is a MISS"
-R2="$("$BIN" check run --def fmt 2>&1)";          assert "check run 2 (hit)"
+printf '%s' "$R1" | grep -q '"exit":0';          assert "check1 ran green (exit 0)"
+R2="$("$BIN" check run --def smoke --cmd "true" 2>&1)";          assert "check run 2 (hit)"
 printf '%s' "$R2" | grep -q '"cache_hit":true';  assert "check2 is a HIT (memoized)"
 printf '%s' "$R2" | grep -q '"local_executions":0'; assert "zero local exec on hit"
+printf '%s' "$R2" | grep -q '"saved_ms"';        assert "saved_ms reported on hit"
 
 # ── 5. pr open / queue / land (union engine) ────────────────────────────────
 step "5. PR flow + union landing"
