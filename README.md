@@ -16,8 +16,10 @@ already paid for — on your existing GitHub repos, migrating nothing.
 
 ## First: try it now (no server needed)
 
-`hugit symbol` works standalone against any source file. Build the CLI and
-run it on itself:
+Download the **hugit** binary for your platform from
+[GitHub Releases](https://github.com/gmhelmold/hugit/releases) (see
+[docs/installation.md](docs/installation.md) for the exact commands per OS),
+or build it:
 
 ```sh
 git clone https://github.com/gmhelmold/hugit.git
@@ -26,16 +28,19 @@ cargo build --release
 ./target/release/hugit symbol --file crates/hugit-symbols/src/lib.rs
 ```
 
-You get a structured symbol outline — functions, types, impls — extracted by
-tree-sitter. Supported languages: TypeScript, JavaScript, Python, Go, Java, C,
-C++, Ruby.
+`hugit symbol` works standalone against any source file. You get a structured
+symbol outline — functions, types, impls — extracted by tree-sitter. Supported
+languages: TypeScript, JavaScript, Python, Go, Java, C, C++, Ruby.
+
+**One-time boot:** run `hugit setup` to make every future `git init` ship the
+hooks automatically (see [docs/installation.md](docs/installation.md)).
 
 ---
 
-## hugit is a git-local CLI (CI lives elsewhere)
+## hugit is a git-local CLI
 
 `hugit` is designed to work **where git works** — in a repository, on a laptop,
-no server, no account. The runtime is local-only by default:
+no server, no account. The runtime is local-only:
 
 - **`hugit setup`** (one-time) configures git's global `init.templateDir` so every
   future `git init` **auto-ships the hugit hooks** — no per-repo ceremony. The
@@ -46,44 +51,37 @@ no server, no account. The runtime is local-only by default:
 - Every verb reads/writes the **canonical local log** (`.hugit/log.json`) with a
   verifiable hash chain — `why`, `impact`, `intent`, `pr`, `verdict`, `undo`,
   `policy`, `ledger`, `watch`, `symbol`, `ctx`, `review`, `export`, and more all
-  work with zero CoreLink credentials.
-- **`hugit check`** memoizes locally by default (file-backed AC); a CoreLink
-  shared cache is an explicit opt-in via env, never a silent network call.
-- **CI / compute execution is a separate project** (`corelink-runners`). hugit
-  records the *demand*; the runner fabric is not rebuilt here.
-
-`hugit serve` is the **optional remote / forge host** (smart-HTTP clone/fetch/push
-+ the `/v1` API) — a separate binary, not part of the git-local CLI flow.
+  work with no service and no account.
+- **`hugit check`** memoizes locally (file-backed cache): the same check on the
+  same tree+def+toolchain is a cache HIT with zero re-execution.
+- **CI / compute execution is not rebuilt here** — hugit records the *demand*
+  and leaves execution to whatever runs your checks.
 
 ---
 
 ## Where hugit is today
 
-The integrity spine (Ed25519/SHA-256 crypto, policy engine, platform safety
-invariants) is hermetic and hardened. The `/v1` read+write API is live for
-the hugit repo itself. The rest is honest about where it stands:
+Honest status — everything here is the CLI, local, testable now:
 
 | Capability | Status | What you get today |
 |---|---|---|
+| `hugit setup` — boot ceremony | **LIVE** | `git init` in any fresh repo auto-ships the hooks; first git op lazy-boots the log |
 | `hugit symbol` — symbol outline | **LIVE** | `hugit symbol --file <path>` against any TS/JS/Python/Go/Java/C/C++/Ruby file |
 | `hugit export` — exit guarantee | **LIVE** | full git + JSON snapshot; requires `--log <path> --out <dir>`; zero dependencies |
-| `hugit import` — bring your repo | **ROADMAP** | reserved verb (`hugit import` is not in the CLI surface yet); tracked for the next wave. |
-| `/v1` read+write API | **LIVE (2 repos)** | multi-repo (`hugit` + `githugr`); 11/20 reads serve chain-verified data; 9 POST verbs CAS-persisted + authz-gated; SSE replay |
-| `hugit check` / `hugit verdict` | **LIVE** | real policy-engine EXECUTE paths; `hugit policy test` runs local≡forge |
-| `hugit verdict approve` / `hugit verdict reject` | **LIVE** | single-lens wrappers over the canonical verdict record |
-| `hugit undo` | **LIVE** | event-sourced compensating undo; force-push data-loss is unexpressible |
-| `hugit note` | **LIVE** | appends a signed record to the canonical log |
+| `hugit check` / `hugit verdict` | **LIVE** | real policy-engine EXECUTE paths, memoized; `hugit policy test` runs the house gate set |
+| `hugit campaign / intent / pr / land` | **LIVE** | the agent-fleet loop: milestones → tasks → PRs → union landing |
+| `hugit dock` (worktree binding) | **LIVE** | cost per worktree; byte-identity + acceptance verified landing |
+| `hugit verdict approve` / `reject` | **LIVE** | single-lens human decision over the canonical verdict record |
+| `hugit undo` | **LIVE** | event-sourced compensating undo; never rewrites history |
+| `hugit note` | **LIVE** | appends a record to the canonical log |
+| `hugit import` — bring your repo | **ROADMAP** | reserved verb; tracked for the next wave |
 | `hugit fleet` / `hugit ledger` / `hugit watch` | **LIVE** | real log-backed commands |
 | `hugit diag` | **LIVE** | log-backed bisect |
 | `hugit policy edit` | **LIVE** | append-only policy changes over the house baseline |
-| `git clone` / `git fetch` wire protocol | **LIVE (anonymous-gated)** | the smart-HTTP wire is deployed (git-from-CAS, `/readyz git_serving:true`); anonymous clone is gated on the per-repo public-flag (deferred), not `HUGIT_SERVE_GIT_DIR` |
-| File-content reads (`blob` / `edit`) | **LIVE** | path→blob traversal, secret-scrubbed on read; serving in prod via the CAS read path |
-| `git push` (receive-pack) | **LIVE\*** | real push to the prod engine succeeds (#198, git-free gix-pack unpack on the distroless engine); a pushed ref is advertised **immediately** (live ref hot-swap, #201, no reboot); _\*v0 = self-contained packs (an incremental push on server-side history is rejected fail-closed — thin-pack/CAS-base reachability is a tracked follow-up); clone-back needs the per-repo public-flag (deferred)_ |
-| Union-tested landing queue | **ROADMAP** | the core landing algorithm is designed + hermetically tested; EXECUTE needs the runner fabric |
-| Memoized checks (CI dedup) | **ROADMAP** | algorithm built; requires the live runner + AC substrate |
-| Runner fabric | **ROADMAP** | spec'd and in flight in a sibling repo; hugit is anchor tenant |
-| GitHub App mirror | **ROADMAP** | bidirectional mirror design done; needs the App provisioned |
-| Multi-tenant | **ROADMAP** | single-tenant today (the hugit repo); tenancy machinery built, not provisioned |
+| Union-tested landing queue | **LIVE (local)** | the union engine runs locally over the queue — green set lands, red pair bisects |
+| Memoized checks (CI dedup) | **LIVE (local)** | file-backed memo cache: same tree+def+toolchain = HIT, zero re-execution |
+| GitHub App mirror | **ROADMAP** | mirror design done; needs the App provisioned (out of the local product) |
+| Multi-tenant hosting | **OUT OF SCOPE** | hugit is a CLI in your repo; hosting is your git remote |
 
 ---
 
@@ -164,21 +162,20 @@ broken bridge kills trust, so every rung is reversible.
 
 ## How it works / Why it's cheap
 
-hugit is not a greenfield stack. It is the forge layer of **CoreLink** — a
-content-addressed storage and computation platform already in production:
+hugit is git + a small local log. The claimed economics come from structure,
+not a paid substrate:
 
-| Layer | What it is | Status |
-|---|---|---|
-| **CAS** | R2-backed global object store; tenant-isolated; Merkle-verified | in production |
-| **Action Cache** | memoized check results; surfaces: Bazel REAPI v2, Turborepo, sccache | in production |
-| **Workspaces** | snapshot / hydrate / run (AC-memoized) against the live API | phase 1 shipped |
-| **Runners** | ephemeral Firecracker-class compute; cache-warm boot | in flight |
-| **hugit** | intent store, landing engine, policy engine, event-log refs | this repo — see status table above |
+- The **canonical log** (`.hugit/log.json`) is a hash-chained, append-only
+  record inside the repo. It travels with `git push`/`pull` — agents sharing a
+  repo share the history, with no server.
+- The **memo cache** (file-backed) makes a repeated check a lookup: the same
+  tree+def+toolchain is never executed twice.
+- The **union landing engine** tests queued PRs as a batch locally; a red pair
+  is bisected in log-depth over cached results.
 
-The cost physics fall out of the substrate: **zero egress (R2), global
-content-addressed dedup, memoized verification.** GitHub's revenue model bills
-the waste (per-minute CI, usage-billed AI). CoreLink's margin model deletes it.
-For GitHub to match hugit's economics it must destroy its own P&L.
+hugit never charges for your compute. It runs where git runs, on your machine
+or your CI, and deletes the waste git alone cannot see — the second run of the
+same work.
 
 ---
 
