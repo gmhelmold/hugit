@@ -422,14 +422,13 @@ fn setup_templates_git_init_and_lazy_boots() {
     let log_path = repo.join(".hugit/log.json");
     let mut landed = false;
     for _ in 0..60 {
-        if let Ok(bytes) = std::fs::read(&log_path) {
-            if let Ok(v) = serde_json::from_slice::<Value>(&bytes)
-                && let Some(recs) = v.as_array()
-                && !recs.is_empty()
-            {
-                landed = true;
-                break;
-            }
+        if let Ok(bytes) = std::fs::read(&log_path)
+            && let Ok(v) = serde_json::from_slice::<Value>(&bytes)
+            && let Some(recs) = v.as_array()
+            && !recs.is_empty()
+        {
+            landed = true;
+            break;
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
