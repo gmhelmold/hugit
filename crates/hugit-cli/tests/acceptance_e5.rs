@@ -135,7 +135,14 @@ fn git_no_hugit(cwd: &Path, args: &[&str]) -> std::process::Output {
 fn which_git() -> PathBuf {
     let path = std::env::var_os("PATH").expect("PATH set");
     for dir in std::env::split_paths(&path) {
-        let candidate = dir.join("git");
+        let mut candidate = dir.join("git");
+        // Windows: the binary is git.exe; prefer the exact executable present.
+        if !candidate.is_file() {
+            let exe = candidate.with_extension("exe");
+            if exe.is_file() {
+                candidate = exe;
+            }
+        }
         if candidate.is_file() {
             // Confirm it actually runs.
             if let Ok(out) = Command::new(&candidate).arg("--version").output()
