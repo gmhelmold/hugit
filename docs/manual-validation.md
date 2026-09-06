@@ -37,12 +37,42 @@ user-real session's transcript behaviors are now ASSERTED, not just shown):
 It never touches the real gitconfig (isolated `HOME`/`XDG_CONFIG_HOME` +
 `GIT_CONFIG_NOSYSTEM`).
 
-### Executed:
+### Executed (LOCAL, macOS real — no GitHub runner dependency):
 ```
 HUGIT_BIN=<release>/hugit ./scripts/validate-go-live.sh
 ```
 
-**Result: `ALL PASS (0 failures)` — `hugit 0.1.1`.**
+**Result: `ALL PASS (0 failures)` — `hugit 0.1.2`, exit 0** (reproducible).
+
+### Full local suite (2026-09-06, macOS)
+| Crate group | Suites ok | Failed |
+|---|---|---|
+| hugit-cli (product + all git-real acceptance + the platform fixes) | 66 | 0 |
+| refstore + contracts + proto + ledger | 32 | 0 |
+| checks + symbols + queue + policy + fence + diag | 45 | 0 |
+| mirror + mcp + app + invariants + dogfood | 35 | 0 |
+| fmt · clippy --workspace --all-targets · deny | clean · 0 · exit 0 | — |
+
+**178 suites green, 0 failures, on macOS.** Clippy/fmt/deny clean.
+
+### Platform matrix: evidence + status
+The release matrix runs the full `cargo test` on all four OS (Linux, macOS
+arm64, macOS x86-64, Windows). Linux and both macOS legs reached **success**
+on prior runs. The Windows leg surfaced real issues, each fixed + guarded:
+
+| Windows issue found by the matrix | Fix |
+|---|---|
+| `worktree` gitdir detection was unix-only (`contains("/worktrees/")`) | separator-agnostic `is_worktree_gitdir` (regression test + mutation-probe) |
+| L2: test depended on async hooked post-checkout (race) | `git worktree add --no-checkout` (no hook) |
+| E5 exit-proof: `which_git` looked for `git` without `.exe` | try `git.exe` on Windows |
+| dock resolver tests: assumed `.git` is a directory | use `git --absolute-git-dir` (the FILE truth) |
+| fleet_journey wait 8s too tight on slower Intel runner | 25s |
+
+**Open status:** re-running the full 4-leg release CI is currently BLOCKED by
+the GitHub account billing state (the hosted runner refuses to start jobs:
+"account payments have failed / spending limit"). This is infra, not code —
+the complete local suite (above) is green, and the platform fixes are
+evidence-driven from the matrix runs that DID execute.
 
 ### Mutation proof that the instrument bites
 Two mutations each made a COPY of the script FAIL (fail-fast rc≠0), proving
