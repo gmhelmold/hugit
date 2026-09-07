@@ -4,9 +4,16 @@ Context for AI agents working in this repo. Keep it lean + high-signal.
 
 ## What hugit is
 
-The **git-compatible, LLM-native forge** — CoreLink expansion campaign #3.
-VCS + merge + CI designed for orchestrated agent fleets, built on CoreLink's
-production CAS (Cloudflare Workers/R2/D1/DO). Founded 2026-06-05.
+The **git-local, LLM-native CLI** — CoreLink expansion campaign #3.
+Intent capture, provenance, memoized local checks, review, and union landing
+inside an existing Git repository. No server, account, or CoreLink dependency
+in default path. Founded 2026-06-05.
+
+> **Current release mode (2026-09-07):** CLI-local v0.1.2 is shipped on `main`.
+> `hugit-serve`/remote forge, multi-tenant hosting, and runner execution are
+> separate or external products, not current CLI blockers. The older delivery
+> audit below preserves historical forge/serve context; do not treat it as the
+> current CLI backlog.
 
 ## Status — honest delivery reality (double-checked 2026-06-17)
 

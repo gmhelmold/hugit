@@ -175,12 +175,15 @@ git branch --show-current  # main
 - `CARGO_BIN_EXE_hugit` for the real binary; `lib_init` for init (the binary verb is X5-reserved).
 - Test litter (.git inside crates) is gitignore'd now; if a test leaves it, `rm -rf crates/*/.git`.
 
-### Remaining backlog (owner/infra-gated mostly)
-1. ~~**GitHub App mirror**~~ **CODE DONE (#348)** — live lane wired (real git push+verify round-trip); remaining gate = owner/infra: registar App + `HUGIT_GH_TEST_REPO.). Code is ready in `hugit-mirror`.
-2. **jj understood**: D2b⑦ live; the capture-hooks model is git-specific — jj exports don't fire post-commit (the export writes refs directly). A "jj-aware capture" (detect ref changes after `jj git export`) is a design decision, not a quick fix.
-3. ~~**land queue with captured raw pushes**~~ **DONE (#345)** — pre-push hook extracts local shas → `shas` in the payload; `pr open --commit <pushed-sha>` accepts it; unseen sha → `commit_not_found`. The full capture→push→proof→PR→land loop is COMPLETE.
-3. **First-user docs** — quickstart-local.md + quickstart-hooks.md exist; polish welcome.
-4. **`hugit serve`** — out of v1 (decided), code stays.
+### Remaining backlog (reconciled 2026-09-07)
+1. **GitHub App mirror activation** — code + live push/verify lane are done; App registration and test-repo activation remain owner/infra work outside the local CLI.
+2. **`hugit import`** — superseded by `hugit init` on an existing local repo; no migration command is needed.
+3. **`ws`, `dispatch`, and `ctx snap`** — intentionally reserved/P2; execution and JournalStore belong to external runner/forge products.
+4. **Automatic capture after `jj git export`** — optional design question; explicit MCP `capture` already closes the supported jj path.
+5. **`hugit serve`** — out of v1 by decision, not backlog.
+
+The first-user docs and captured-push landing loop are complete. No local CLI
+code blocker remains.
 
 ### Cash the state
 Commit this doc (docs-only, CI skips), push. Done.

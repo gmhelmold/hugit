@@ -74,13 +74,13 @@ Honest status — everything here is the CLI, local, testable now:
 | `hugit verdict approve` / `reject` | **LIVE** | single-lens human decision over the canonical verdict record |
 | `hugit undo` | **LIVE** | event-sourced compensating undo; never rewrites history |
 | `hugit note` | **LIVE** | appends a record to the canonical log |
-| `hugit import` — bring your repo | **ROADMAP** | reserved verb; tracked for the next wave |
+| Existing repo attachment | **LIVE** | run `hugit init` in the repo; no migration/import command is needed |
 | `hugit fleet` / `hugit ledger` / `hugit watch` | **LIVE** | real log-backed commands |
 | `hugit diag` | **LIVE** | log-backed bisect |
 | `hugit policy edit` | **LIVE** | append-only policy changes over the house baseline |
 | Union-tested landing queue | **LIVE (local)** | the union engine runs locally over the queue — green set lands, red pair bisects |
 | Memoized checks (CI dedup) | **LIVE (local)** | file-backed memo cache: same tree+def+toolchain = HIT, zero re-execution |
-| GitHub App mirror | **ROADMAP** | mirror design done; needs the App provisioned (out of the local product) |
+| GitHub App mirror | **CODE DONE / EXTERNAL** | real push+verify lane exists; App registration and test-repo activation are outside the local CLI |
 | Multi-tenant hosting | **OUT OF SCOPE** | hugit is a CLI in your repo; hosting is your git remote |
 
 ---
@@ -149,8 +149,9 @@ the exit proof is also the disaster-recovery plan.
 ## Bring your existing repo
 
 ```sh
-# hugit import is reserved/ROADMAP (PR-7): see status table above
-# hugit import <github-org>/<repo>
+# hugit attaches to an existing local repo; git remains the remote/host
+cd /path/to/your/repo
+hugit init
 ```
 
 Your GitHub repo stays where it is. hugit attaches without migration. The

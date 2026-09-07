@@ -221,8 +221,8 @@ pub const HUGIT_RESERVED_VERBS: &[&str] = &[
     // `review` graduated — grounded-evidence Q&A over the log via `verdict::qa`.)
     // (`undo`, `policy`, `verdict approve`, `verdict reject`, `note` graduated
     // to HUGIT_VERBS at W3 — stakeholder + session verbs, REAL-wired. `policy`
-    // ships `test` only; `policy edit` stays deferred. `note` replaces the old
-    // `journal note` sub-verb.)
+    // ships both REAL `test` and Human-only append-only `edit`. `note` replaces
+    // the old `journal note` sub-verb.)
     "dispatch", // hugit dispatch <intent>  — workspace + context packet
 ];
 
