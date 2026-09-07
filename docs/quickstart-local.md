@@ -17,28 +17,25 @@ cargo build --release
 ./target/release/hugit --version
 ```
 
-## 2. `hugit init` — the git-proximate bootstrap
+## 2. `hugit setup --repo` — attach hooks to existing repo
 
-In a **new** directory, `hugit init` runs the same ceremony as `git init` (it
-creates a real git repository) and then adds the hugit layer:
+Create repo with Git, then attach hugit hooks without changing Git data:
 
 ```sh
 mkdir ~/my-project && cd ~/my-project
-hugit init
-# ✓ creates .git/ (git init) + .hugit/ + .hugit/log.json (the canonical log)
+git init
+hugit setup --repo "$PWD"
+# ✓ installs hooks; first commit creates .hugit/log.json (canonical log)
 ```
 
-In an **existing** git repository it only adds the hugit layer — your `.git`
-is never touched:
+Existing repository:
 
 ```sh
-cd /path/to/existing-repo   # already a git repo
-hugit init                  # adds .hugit/ + log; leaves .git alone
+ hugit setup --repo /path/to/existing-repo
 ```
 
-> **Note:** `hugit init` is exercised through the library entry point; it is
-> not a top-level binary verb because the X5 namespace law forbids a hugit verb
-> that shadows a git command (`git init` exists). The behavior is identical.
+`hugit setup --repo` never runs `git init`, never overwrites non-hugit hooks,
+and reports installed, no-op, and conflict hook names in JSON.
 
 ## 3. `hugit check run` — memoized local verification
 

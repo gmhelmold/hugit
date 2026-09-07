@@ -71,7 +71,7 @@ hugit CLI (local, sem serviço)   ← lê o log, roda todos os verbos
 
 | Feature | O que faz | Como validar |
 |---|---|---|
-| `hugit init` (library) | Cria `.hugit/` + log vazio + instala hooks do git (post-commit, post-checkout, pre-push, post-merge). | `hugit init` numa pasta; ver `.git/hooks/post-commit` existe |
+| `hugit setup --repo <path>` | Instala hooks do git existentes (post-commit, post-checkout, pre-push, post-merge) sem alterar dados Git; primeiro commit cria log. | `hugit setup --repo /path/to/repo`; ver `.git/hooks/post-commit` existe |
 | Capture silencioso | Toda operação do git (commit, checkout, push, merge) é registrada no log SEM travar git — o hook roda em background e sempre sai com sucesso. | `git commit` num repo init; ver o evento no `log.json` |
 | Capture por tipo | Registra o quê aconteceu: commit (arquivos novos), checkout (branch nova), push (hashes enviados), merge (origem+dst). | Commitar, ramificar, push, merge; conferir cada payload no log |
 

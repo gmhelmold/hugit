@@ -318,34 +318,16 @@ fn item_6_canonical_registry_equals_dispatched_surface() {
                 None
             }
         })
-        // Keep only tokens that appear in the live verb set (excludes "help").
-        .filter(|tok| hugit_cli::HUGIT_VERBS.contains(tok))
+        .filter(|tok| *tok != "help")
         .collect();
 
-    // Every dispatched verb visible in --help must be in HUGIT_VERBS.
-    for verb in &dispatched_in_help {
-        assert!(
-            hugit_cli::HUGIT_VERBS.contains(verb),
-            "BINARY→REGISTRY gap: '{verb}' appears in `hugit --help` but NOT in HUGIT_VERBS. \
-             Add it to HUGIT_VERBS or stop dispatching it."
-        );
-    }
-
-    // The count of dispatched verbs visible in --help must equal HUGIT_VERBS.
-    // If HUGIT_VERBS has more entries than --help shows, there are phantom
-    // (unwired) verbs in the registry.
+    let mut dispatched = dispatched_in_help;
+    let mut registry = hugit_cli::HUGIT_VERBS.to_vec();
+    dispatched.sort_unstable();
+    registry.sort_unstable();
     assert_eq!(
-        dispatched_in_help.len(),
-        hugit_cli::HUGIT_VERBS.len(),
-        "EQUALITY VIOLATION: HUGIT_VERBS has {} entries but `hugit --help` shows {} \
-         dispatched verbs matching the registry. \
-         Phantom verbs in HUGIT_VERBS (not wired in main.rs) or dispatched verbs \
-         missing from HUGIT_VERBS are both failures. \
-         HUGIT_VERBS = {:?}, dispatched = {:?}",
-        hugit_cli::HUGIT_VERBS.len(),
-        dispatched_in_help.len(),
-        hugit_cli::HUGIT_VERBS,
-        dispatched_in_help,
+        dispatched, registry,
+        "EQUALITY VIOLATION: HUGIT_VERBS must exactly equal binary dispatched surface"
     );
 
     // hugit_verbs() returns the same canonical list (stable accessor for X5).

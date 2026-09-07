@@ -46,8 +46,8 @@ no server, no account. The runtime is local-only:
   future `git init` **auto-ships the hugit hooks** — no per-repo ceremony. The
   hooks lazy-boot: the first `git commit`/`checkout` in a fresh repo creates
   `.hugit/log.json` (the versioned, hash-chained intent log) automatically.
-  For an EXISTING repo, `hugit init <dir>` (library) adds `.hugit/` + the log,
-  or a first git op lazy-boots it the same way.
+  For an EXISTING repo, `hugit setup --repo /path/to/repo` installs hooks without
+  changing Git data; first git op lazy-boots `.hugit/log.json`.
 - Every verb reads/writes the **canonical local log** (`.hugit/log.json`) with a
   verifiable hash chain — `why`, `impact`, `intent`, `pr`, `verdict`, `undo`,
   `policy`, `ledger`, `watch`, `symbol`, `ctx`, `review`, `export`, and more all
@@ -77,7 +77,7 @@ Honest status — everything here is the CLI, local, testable now:
 | `hugit verdict approve` / `reject` | **LIVE** | single-lens human decision over the canonical verdict record |
 | `hugit undo` | **LIVE** | event-sourced compensating undo; never rewrites history |
 | `hugit note` | **LIVE** | appends a record to the canonical log |
-| Existing repo attachment | **LIVE** | run `hugit init` in the repo; no migration/import command is needed |
+| Existing repo attachment | **LIVE** | run `hugit setup --repo /path/to/repo`; no migration/import command is needed |
 | `hugit fleet` / `hugit ledger` / `hugit watch` | **LIVE** | real log-backed commands |
 | `hugit diag` | **LIVE** | log-backed bisect |
 | `hugit policy edit` | **LIVE** | append-only policy changes over the house baseline |
@@ -155,8 +155,7 @@ the exit proof is also the disaster-recovery plan.
 
 ```sh
 # hugit attaches to an existing local repo; git remains the remote/host
-cd /path/to/your/repo
-hugit init
+hugit setup --repo /path/to/your/repo
 ```
 
 Your GitHub repo stays where it is. hugit attaches without migration. The

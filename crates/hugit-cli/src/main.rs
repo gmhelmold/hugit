@@ -77,8 +77,7 @@ enum Command {
     Tournament(TournamentArgs),
     /// Dump a git artifact + JSON envelope (anti-lock-in exit proof).
     Export(ExportArgs),
-    /// One-time install: configure git's global init.templateDir so every future
-    /// `git init` auto-ships the hugit hooks (the boot ceremony, no per-repo init).
+    /// Install hooks globally, or into an existing repository with `--repo`.
     Setup(setup::SetupArgs),
     /// Campaign lifecycle: open / close (seal) / show.
     Campaign(CampaignArgs),

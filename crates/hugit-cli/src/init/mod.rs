@@ -188,6 +188,82 @@ exit 0
 }
 }
 
+const HUGIT_HOOK_MARKER: &str = "# hugit-hook (managed by hugit init)";
+const HOOK_KINDS: [&str; 4] = ["post-commit", "post-checkout", "pre-push", "post-merge"];
+
+pub(crate) struct HookInstallResult {
+    pub installed: Vec<String>,
+    pub noop: Vec<String>,
+    pub conflict: Vec<String>,
+}
+
+fn resolve_hooks_dir(root: &std::path::Path) -> Result<std::path::PathBuf, PorcelainError> {
+    let out = std::process::Command::new("git")
+        .args([
+            "-C",
+            root.to_str().unwrap_or("."),
+            "rev-parse",
+            "--git-path",
+            "hooks",
+        ])
+        .output()
+        .map_err(|e| PorcelainError::io("resolve hooks dir", root, &e))?;
+    if !out.status.success() {
+        return Err(PorcelainError::new(
+            "git_hooks_dir_failed",
+            format!("`git rev-parse --git-path hooks` in {:?} failed", root),
+            "is this an existing git repository and is `git` on PATH?",
+        ));
+    }
+    let path = String::from_utf8_lossy(&out.stdout);
+    let rel = std::path::PathBuf::from(path.trim());
+    Ok(if rel.is_absolute() {
+        rel
+    } else {
+        root.join(rel)
+    })
+}
+
+/// Install hugit hooks without creating or otherwise changing a git repository.
+pub(crate) fn install_hooks(root: &std::path::Path) -> Result<HookInstallResult, PorcelainError> {
+    let hooks_dir = resolve_hooks_dir(root)?;
+    std::fs::create_dir_all(&hooks_dir)
+        .map_err(|e| PorcelainError::io("create hooks dir", &hooks_dir, &e))?;
+
+    let mut result = HookInstallResult {
+        installed: Vec::new(),
+        noop: Vec::new(),
+        conflict: Vec::new(),
+    };
+    for kind in HOOK_KINDS {
+        let path = hooks_dir.join(kind);
+        if path.exists() {
+            let existing = std::fs::read_to_string(&path)
+                .map_err(|e| PorcelainError::io("read hook", &path, &e))?;
+            if existing.contains(HUGIT_HOOK_MARKER) {
+                result.noop.push(kind.to_string());
+            } else {
+                result.conflict.push(kind.to_string());
+            }
+            continue;
+        }
+        std::fs::write(&path, hook_script(kind))
+            .map_err(|e| PorcelainError::io("write hook", &path, &e))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path)
+                .map_err(|e| PorcelainError::io("stat hook", &path, &e))?
+                .permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms)
+                .map_err(|e| PorcelainError::io("chmod hook", &path, &e))?;
+        }
+        result.installed.push(kind.to_string());
+    }
+    Ok(result)
+}
+
 fn do_run(args: &InitArgs) -> Result<serde_json::Value, PorcelainError> {
     let root = args.dir.clone().unwrap_or_else(|| PathBuf::from("."));
     let hugit_dir = root.join(".hugit");
@@ -206,96 +282,10 @@ fn do_run(args: &InitArgs) -> Result<serde_json::Value, PorcelainError> {
         true
     };
 
-    /// The marker line identifying a hugit-managed hook. Used for idempotent
-    /// install and for clean removal — a pre-existing non-hugit hook with this
-    /// marker means hugit already manages it (no rewrite).
-    const HUGIT_HOOK_MARKER: &str = "# hugit-hook (managed by hugit init)";
-
-    /// The 4 git hooks hugit installs + the capture invocation each runs.
-    const HOOK_KINDS: [&str; 4] = ["post-commit", "post-checkout", "pre-push", "post-merge"];
-
-    /// Resolve the hooks dir via git itself (worktree-safe): `git rev-parse
-    /// --git-path hooks` from the git dir. Returns `Err` if git is missing.
-    fn resolve_hooks_dir(root: &std::path::Path) -> Result<std::path::PathBuf, PorcelainError> {
-        let out = std::process::Command::new("git")
-            .args([
-                "-C",
-                root.to_str().unwrap_or("."),
-                "rev-parse",
-                "--git-path",
-                "hooks",
-            ])
-            .output()
-            .map_err(|e| PorcelainError::io("resolve hooks dir", root, &e))?;
-        if !out.status.success() {
-            return Err(PorcelainError::new(
-                "git_hooks_dir_failed",
-                format!("`git rev-parse --git-path hooks` in {:?} failed", root),
-                "is `git` on PATH?",
-            ));
-        }
-        let path = String::from_utf8_lossy(&out.stdout);
-        let rel = std::path::PathBuf::from(path.trim());
-        // `git rev-parse --git-path hooks` is RELATIVE to the git dir; resolve it
-        // against the repo root so the writer lands in the right place regardless
-        // of the process cwd (hugit init may run from anywhere).
-        Ok(if rel.is_absolute() {
-            rel
-        } else {
-            root.join(rel)
-        })
-    }
-
-    /// Install the 4 hugit hooks into the repo's hooks dir. Idempotent: a hook
-    /// file already containing the hugit marker is left untouched; a pre-existing
-    /// NON-hugit hook (user's own) is preserved (we append the marker + our body
-    /// only when the file does not yet reference hugit — actually we create/append
-    /// carefully: if the file exists and has no marker, we leave it alone and
-    /// report the conflict so a human resolves it; we never clobber a user hook).
-    fn install_hooks(root: &std::path::Path) -> Result<Vec<String>, PorcelainError> {
-        let hooks_dir = resolve_hooks_dir(root)?;
-        std::fs::create_dir_all(&hooks_dir)
-            .map_err(|e| PorcelainError::io("create hooks dir", &hooks_dir, &e))?;
-
-        let mut installed = Vec::new();
-        for kind in HOOK_KINDS {
-            let path = hooks_dir.join(kind);
-            if path.exists() {
-                // A hook already exists. If it's ours (marker present) → no-op
-                // (idempotent). If it's someone else's → DO NOT clobber: report
-                // the conflict, leave it alone (a human resolves).
-                let existing = std::fs::read_to_string(&path)
-                    .map_err(|e| PorcelainError::io("read hook", &path, &e))?;
-                if existing.contains(HUGIT_HOOK_MARKER) {
-                    continue; // already ours, idempotent no-op
-                }
-                // Not ours: preserve + record the conflict honestly.
-                installed.push(format!("{kind}:conflict"));
-                continue;
-            }
-            std::fs::write(&path, hook_script(kind))
-                .map_err(|e| PorcelainError::io("write hook", &path, &e))?;
-            // hooks must be executable for git to run them.
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = std::fs::metadata(&path)
-                    .map_err(|e| PorcelainError::io("stat hook", &path, &e))?
-                    .permissions();
-                perms.set_mode(0o755);
-                std::fs::set_permissions(&path, perms)
-                    .map_err(|e| PorcelainError::io("chmod hook", &path, &e))?;
-            }
-            installed.push(kind.to_string());
-        }
-        Ok(installed)
-    }
-
     // Install the silent git hooks (post-commit/checkout/push/merge) so the
     // LLM using git normally is captured into the log asynchronously. A
     // conflict (a pre-existing non-hugit hook) is reported, never clobbered.
     let hooks = install_hooks(&root)?;
-    let hooks_conflict: Vec<&String> = hooks.iter().filter(|h| h.ends_with(":conflict")).collect();
 
     // Idempotent: never clobber an existing log (it carries the hash-chained,
     // append-only history — re-init must be safe to run in a live repo).
@@ -326,8 +316,9 @@ fn do_run(args: &InitArgs) -> Result<serde_json::Value, PorcelainError> {
 
     Ok(json!({
         "initialized": created,
-        "hooks_installed": hooks.iter().map(|h| h.trim_end_matches(":conflict")).collect::<Vec<_>>(),
-        "hooks_conflict": hooks_conflict.iter().map(|h| h.trim_end_matches(":conflict")).collect::<Vec<_>>(),
+        "hooks_installed": hooks.installed,
+        "hooks_noop": hooks.noop,
+        "hooks_conflict": hooks.conflict,
         "git_created": git_created,
         "git_hint": git_hint,
         "hugit_dir": hugit_dir.display().to_string(),

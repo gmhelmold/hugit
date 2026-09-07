@@ -81,6 +81,7 @@ pub mod attention;
 ///
 /// For planned-but-not-yet-dispatched verbs see [`HUGIT_RESERVED_VERBS`].
 pub const HUGIT_VERBS: &[&str] = &[
+    "setup",      // hugit setup [--repo <path>] — global template or existing-repo hooks
     "why",        // hugit why <line|symbol>  — provenance query
     "impact",     // hugit impact <path|change>   — build-graph blast radius
     "tournament", // hugit tournament -n N    — exploration as a verb

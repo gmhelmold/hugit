@@ -18,23 +18,20 @@
   serve` out of v1). hugit records the **demand**; it does not fabricate the
   execution (honest).
 
-## 1. Build + init
+## 1. Build + hook setup
 
 ```sh
 git clone https://github.com/gmhelmold/hugit.git && cd hugit
 cargo build --release
 ./target/release/hugit --version
 
-# In YOUR project (new dir): the full git-proximate ceremony;
-# in an existing git repo: only the hugit layer (never touches .git):
-cd ~/my-project
-~/hugit/target/release/hugit init
-# → .git/ (if absent) + .hugit/ + .hugit/log.json + the 4 silent git hooks
-#     post-commit / post-checkout / pre-push / post-merge
+# In existing Git repo, install hooks without changing Git data:
+~/hugit/target/release/hugit setup --repo ~/my-project
+# → installs post-commit / post-checkout / pre-push / post-merge;
+#   first Git operation creates .hugit/log.json
 ```
 
-> `hugit init` is exercised via the library entry point (X5 no-shadow law; git
-> init exists). Behavior is identical.
+> `hugit setup --repo` never runs `git init` or overwrites non-hugit hooks.
 
 ## 2. Work normally — git hooks capture silently
 

@@ -63,9 +63,11 @@ in a fresh repo creates the `.hugit/log.json` log by itself.
 hugit setup
 ```
 
-For an **existing** repository you did not create after running `setup`, either
-run `hugit init <dir>` (library) or just make any commit — the hook lazy-boots
-the log the same way.
+For an **existing** repository, install hooks without changing its Git data:
+
+```sh
+hugit setup --repo /path/to/repo
+```
 
 ## Quickstart (a repo of your own)
 
@@ -92,5 +94,5 @@ repo — no server involved.
 - An optional template dir at `~/.config/hugit/template` + one global git
   config key (`init.templateDir`) created by `hugit setup`.
 
-Nothing else writes outside the repo; `hugit setup` never touches an
-existing repo's hooks.
+`hugit setup --repo` writes only missing hugit hooks. Existing non-hugit hooks
+stay byte-identical and are reported as conflicts.

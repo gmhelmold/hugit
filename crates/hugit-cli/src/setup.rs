@@ -12,9 +12,8 @@
 //! `init::hook_script`), so a repo that never ran `hugit init` still becomes
 //! active the moment someone commits/checks out.
 //!
-//! `setup` never touches a repo's hooks directly (that stays `hugit init`'s
-//! job); it only writes ONE global config key + a template directory the user
-//! owns. Idempotent: re-running rewrites the same template + config.
+//! With `--repo`, `setup` installs those same hooks into an existing repository
+//! without running `git init` or changing any non-hugit hook.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -31,8 +30,11 @@ const HOOK_KINDS: [&str; 4] = ["post-commit", "post-checkout", "pre-push", "post
 pub struct SetupArgs {
     /// Optional explicit template dir to install instead of the default
     /// `~/.config/hugit/template` (for tests / custom layouts).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "repo")]
     pub dir: Option<PathBuf>,
+    /// Install hooks into this existing Git repository. Does not run `git init`.
+    #[arg(long, conflicts_with = "dir")]
+    pub repo: Option<PathBuf>,
 }
 
 /// Run `hugit setup`.
@@ -50,6 +52,17 @@ pub fn run(args: SetupArgs) -> ExitCode {
 }
 
 fn do_setup(args: &SetupArgs) -> Result<Value, crate::porcelain::PorcelainError> {
+    if let Some(repo) = &args.repo {
+        let hooks = init::install_hooks(repo)?;
+        return Ok(json!({
+            "repo": repo.display().to_string(),
+            "git_created": false,
+            "hooks_installed": hooks.installed,
+            "hooks_noop": hooks.noop,
+            "hooks_conflict": hooks.conflict,
+            "next": "git operations now capture through installed hugit hooks",
+        }));
+    }
     let template_dir = args.dir.clone().unwrap_or_else(default_template_dir);
     let hooks_dir = template_dir.join("hooks");
     std::fs::create_dir_all(&hooks_dir)
@@ -99,7 +112,7 @@ fn do_setup(args: &SetupArgs) -> Result<Value, crate::porcelain::PorcelainError>
         "template_dir": template_dir.display().to_string(),
         "hooks": HOOK_KINDS,
         "global_init_template_dir": true,
-        "next": "any future `git init` in this machine already ships the hugit hooks; existing repos use `hugit init <dir>` or a first git op lazy-boots them.",
+        "next": "any future `git init` in this machine already ships the hugit hooks; existing repos use `hugit setup --repo <path>`.",
     }))
 }
 

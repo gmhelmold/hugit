@@ -1,25 +1,23 @@
 # hugit quickstart — silent git hooks, zero-friction agent capture
 
-> The complete first-user flow for the git-local hugit: install, init (with
+> The complete first-user flow for git-local hugit: install, hook setup, and
 > the silent hooks), and WATCHING what your agent fleet does to the git graph —
 > with the agents using `git` normally, never learning a hugit command.
 
-## 1. Install + init (hooks installed automatically)
+## 1. Install + hook setup
 
 ```sh
 git clone https://github.com/gmhelmold/hugit.git
 cd hugit
 cargo build --release
 
-# In YOUR project (or any git repo):
-hugit init          # git-proximate: creates .git/ if absent, adds .hugit/ +
-                    # the canonical log AND installs the 4 silent git hooks:
-                    #   post-commit / post-checkout / pre-push / post-merge
+# In an existing Git repo:
+hugit setup --repo /path/to/repo
+# installs post-commit / post-checkout / pre-push / post-merge;
+# first Git operation creates .hugit/log.json
 ```
 
-`hugit init` is exercised through the library entry point — it is not a
-top-level binary verb because the X5 namespace law forbids a verb that shadows
-`git init`. The behavior is identical.
+`hugit setup --repo` never initializes Git or overwrites non-hugit hooks.
 
 ## 2. Use git NORMALLY — hugit captures silently
 
