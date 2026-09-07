@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-09-07
+
 - fix(refstore): captured `push-attempt` `ref.update` events are now inert in
   replay/export, matching checkout captures. Dogfood against an OpenCode clone
   found export rejecting a valid pre-push provenance event; regression coverage
