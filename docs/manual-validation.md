@@ -56,9 +56,11 @@ HUGIT_BIN=<release>/hugit ./scripts/validate-go-live.sh
 **178 suites green, 0 failures, on macOS.** Clippy/fmt/deny clean.
 
 ### Platform matrix: evidence + status
-The release matrix runs the full `cargo test` on all four OS (Linux, macOS
-arm64, macOS x86-64, Windows). Linux and both macOS legs reached **success**
-on prior runs. The Windows leg surfaced real issues, each fixed + guarded:
+The current release matrix runs the full `cargo test` on all four OS (Linux,
+macOS arm64, macOS x86-64, Windows). The last fully green release run
+(`34042599031`, v0.1.1) proved Linux test execution plus build/package/smoke on
+all four targets; its older workflow skipped tests on macOS and Windows. Later
+matrix execution surfaced real Windows issues, each fixed + guarded:
 
 | Windows issue found by the matrix | Fix |
 |---|---|
