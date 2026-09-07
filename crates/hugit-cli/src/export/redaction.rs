@@ -112,10 +112,21 @@ pub fn redact_field(location: &str, text: &str, manifest: &mut RedactionManifest
     redacted
 }
 
-/// Whether canonical text would be changed by export redaction. Canonical event
-/// payloads cannot be redacted in-place without invalidating their hash chain.
+/// Whether canonical payload text would be changed by write-path redaction.
+/// JSON payloads use the exact structural/key-aware scrubber that capture uses;
+/// non-JSON payloads use the existing free-text detector. Canonical event payloads
+/// cannot be redacted in-place without invalidating their hash chain.
 pub fn would_redact(text: &str) -> bool {
-    hugit_ledger::redact::apply(text) != text
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return hugit_ledger::redact::apply(text) != text;
+    };
+    let mut scrubbed = value.clone();
+    crate::porcelain::scrub_payload(&mut scrubbed);
+    let canonical = |value: &serde_json::Value| {
+        let compact = value.to_string();
+        hugit_refstore::canonical_json(&compact).expect("serde_json::Value is canonicalizable")
+    };
+    canonical(&value) != canonical(&scrubbed)
 }
 
 /// Scan text for any residual secret per the UNIFIED ledger engine (WF-4). Used
@@ -283,6 +294,32 @@ mod tests {
         assert!(m.is_empty(), "clean text records no removal");
         assert_eq!(redact_field("loc", REDACTED_TOKEN, &mut m), REDACTED_TOKEN);
         assert!(m.is_empty(), "the sentinel trips no detector");
+    }
+
+    #[test]
+    fn canonical_payload_detection_matches_write_path_scrub() {
+        let safe = serde_json::json!({
+            "target": "0123456789abcdef0123456789abcdef01234567",
+            "ref": "refs/heads/main",
+            "path": "src/lib.rs",
+            "note": REDACTED_TOKEN,
+        })
+        .to_string();
+        assert!(
+            !would_redact(&safe),
+            "safe SHA/ref/path and existing marker survive structural scrub"
+        );
+
+        let secret = serde_json::json!({
+            "target": "0123456789abcdef0123456789abcdef01234567",
+            "note": "token=ghp_DEADBEEFcafef00dSECRET",
+        })
+        .to_string();
+        assert!(
+            would_redact(&secret),
+            "secret leaf changes under the exact write-path scrubber"
+        );
+        assert!(would_redact("token=ghp_DEADBEEFcafef00dSECRET"));
     }
 
     // ── Fix: secret-shaped ref name must be scrubbed via redact_field ────────

@@ -282,6 +282,32 @@ fn canonical_event_with_secret_refuses_before_artifact_write() {
     );
 }
 
+#[test]
+fn canonical_json_payload_with_safe_addresses_exports() {
+    let out = scratch("canonical-safe-addresses");
+    let mut log = EventLog::new();
+    log.append_for_test(
+        "ref.update",
+        vec!["capture".into()],
+        serde_json::json!({
+            "ref": "refs/heads/main",
+            "target": "0123456789abcdef0123456789abcdef01234567",
+            "path": "src/lib.rs",
+            "note": hugit_contracts::REDACTED_MARKER,
+        })
+        .to_string(),
+        1000,
+    );
+    let corpus = Corpus {
+        event_log: log,
+        ..Corpus::default()
+    };
+
+    let artifact = export(&corpus, &out, AccountState::Active)
+        .expect("safe captured SHA/ref/path payload exports");
+    restore(&artifact.json_path).expect("safe canonical payload restores");
+}
+
 // ── ③ machine validation against the versioned ExportSchema ───────────────────
 
 #[test]

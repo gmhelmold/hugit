@@ -503,7 +503,8 @@ pub use hugit_ledger::secret_shape::is_safe_identifier_shape;
 ///
 /// The rule: exact `memo_key` / `tree_hash` / `commit` / capture's `target` /
 /// `from` / `to`, any `*_digest` suffix (`def_digest`, `toolchain_digest`,
-/// `prompt_digest`, …), or a bare `hash` field (`files_read[].hash`).
+/// `prompt_digest`, …), or a bare `hash` field (`files_read[].hash`). Git
+/// addresses remain verbatim only when their values are digest-shaped.
 pub fn is_digest_key(key: &str) -> bool {
     matches!(
         key,
@@ -663,13 +664,14 @@ mod tests {
     fn scrub_payload_exempts_digest_keyed_values() {
         // A content-address / digest VALUE must SURVIVE verbatim — even a bare
         // 64-hex run that free text would (correctly) redact. The exemption is
-        // by KEY: memo_key / tree_hash / commit / *_digest / hash.
+        // by KEY: memo_key / tree_hash / commit / target / *_digest / hash.
         let bare_64 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
         let bare_40 = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
         let mut v = json!({
             "memo_key": bare_64,
             "tree_hash": bare_64,
             "commit": bare_40,
+            "target": bare_40,
             "def_digest": bare_64,
             "toolchain_digest": bare_64,
             "prompt_digest": bare_64,
@@ -682,6 +684,7 @@ mod tests {
             "memo_key",
             "tree_hash",
             "commit",
+            "target",
             "def_digest",
             "toolchain_digest",
             "prompt_digest",
@@ -702,6 +705,7 @@ mod tests {
             "memo_key",
             "tree_hash",
             "commit",
+            "target",
             "hash",
             "def_digest",
             "toolchain_digest",
