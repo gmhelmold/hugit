@@ -198,6 +198,27 @@ pub(crate) struct HookInstallResult {
 }
 
 fn resolve_hooks_dir(root: &std::path::Path) -> Result<std::path::PathBuf, PorcelainError> {
+    let hooks_path = std::process::Command::new("git")
+        .args([
+            "-C",
+            root.to_str().unwrap_or("."),
+            "config",
+            "--get",
+            "core.hooksPath",
+        ])
+        .output()
+        .map_err(|e| PorcelainError::io("check core.hooksPath", root, &e))?;
+    if hooks_path.status.success()
+        && !String::from_utf8_lossy(&hooks_path.stdout)
+            .trim()
+            .is_empty()
+    {
+        return Err(PorcelainError::new(
+            "custom_hooks_path",
+            "refusing to install hooks while core.hooksPath is configured",
+            "unset core.hooksPath or install hugit hooks in that path yourself",
+        ));
+    }
     let out = std::process::Command::new("git")
         .args([
             "-C",
@@ -237,7 +258,19 @@ pub(crate) fn install_hooks(root: &std::path::Path) -> Result<HookInstallResult,
     };
     for kind in HOOK_KINDS {
         let path = hooks_dir.join(kind);
-        if path.exists() {
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(PorcelainError::io("stat hook", &path, &error)),
+        };
+        if let Some(metadata) = metadata {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(PorcelainError::new(
+                    "unsafe_hook_path",
+                    format!("refusing non-regular hook path {:?}", path),
+                    "replace the hook path with a regular file, then rerun setup",
+                ));
+            }
             let existing = std::fs::read_to_string(&path)
                 .map_err(|e| PorcelainError::io("read hook", &path, &e))?;
             if existing.contains(HUGIT_HOOK_MARKER) {

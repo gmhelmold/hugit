@@ -201,11 +201,12 @@ pub fn export(
 
     // Canonical events are emitted byte-for-byte so restore can verify their
     // hashes. Until a separately schema-bound redacted projection exists, refuse
-    // any event whose payload would need redaction rather than leak it or alter it.
+    // any event whose canonical user-controlled fields would need redaction rather
+    // than leak it or alter it.
     if let Some(event) = cut
         .records()
         .iter()
-        .find(|event| redaction::would_redact(&event.payload))
+        .find(|event| redaction::would_redact_event(event))
     {
         return Err(ExportError::SensitiveCanonicalEventPayload { seq: event.seq });
     }

@@ -120,6 +120,9 @@ pub fn would_redact(text: &str) -> bool {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
         return hugit_ledger::redact::apply(text) != text;
     };
+    if json_key_would_redact(&value) {
+        return true;
+    }
     let mut scrubbed = value.clone();
     crate::porcelain::scrub_payload(&mut scrubbed);
     let canonical = |value: &serde_json::Value| {
@@ -127,6 +130,28 @@ pub fn would_redact(text: &str) -> bool {
         hugit_refstore::canonical_json(&compact).expect("serde_json::Value is canonicalizable")
     };
     canonical(&value) != canonical(&scrubbed)
+}
+
+fn json_key_would_redact(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(object) => object.iter().any(|(key, value)| {
+            hugit_ledger::redact::apply(key) != *key || json_key_would_redact(value)
+        }),
+        serde_json::Value::Array(values) => values.iter().any(json_key_would_redact),
+        _ => false,
+    }
+}
+
+/// Whether any user-controlled canonical event field would need redaction.
+/// Event records are exported byte-for-byte, so a sensitive value must refuse
+/// the export before any artifact is written.
+pub fn would_redact_event(event: &hugit_contracts::EventRecord) -> bool {
+    hugit_ledger::redact::apply(&event.kind) != event.kind
+        || event
+            .principal_chain
+            .iter()
+            .any(|principal| hugit_ledger::redact::apply(principal) != *principal)
+        || would_redact(&event.payload)
 }
 
 /// Scan text for any residual secret per the UNIFIED ledger engine (WF-4). Used

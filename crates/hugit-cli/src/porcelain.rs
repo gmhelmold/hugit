@@ -390,11 +390,19 @@ fn scrub_mode(key: &str, value: &Value) -> ScrubMode {
         // non-string (array/object) under a digest key recurses and is decided
         // per descendant, so do not blanket-exempt it here.
         return match value {
-            Value::String(s) if is_digest_shaped(s) => ScrubMode::Verbatim,
+            Value::String(s) if is_digest_value(key, s) => ScrubMode::Verbatim,
             _ => ScrubMode::FreeText,
         };
     }
     ScrubMode::FreeText
+}
+
+fn is_digest_value(key: &str, value: &str) -> bool {
+    if key == "shas" {
+        !value.is_empty() && value.split_whitespace().all(is_digest_shaped)
+    } else {
+        is_digest_shaped(value)
+    }
 }
 
 /// Apply the STRUCTURAL-secret scrub to an identifier-field value (WI-SCRUB).
@@ -502,13 +510,23 @@ pub use hugit_ledger::secret_shape::is_safe_identifier_shape;
 /// longer exempts (WH-SCRUB).
 ///
 /// The rule: exact `memo_key` / `tree_hash` / `commit` / capture's `target` /
-/// `from` / `to`, any `*_digest` suffix (`def_digest`, `toolchain_digest`,
-/// `prompt_digest`, …), or a bare `hash` field (`files_read[].hash`). Git
-/// addresses remain verbatim only when their values are digest-shaped.
+/// `from` / `to` / `merged_from` / `shas` / `dock_id`, any `*_digest` suffix (`def_digest`,
+/// `toolchain_digest`, `prompt_digest`, …), or a bare `hash` field
+/// (`files_read[].hash`). Git addresses remain verbatim only when their values
+/// are digest-shaped.
 pub fn is_digest_key(key: &str) -> bool {
     matches!(
         key,
-        "memo_key" | "tree_hash" | "commit" | "target" | "from" | "to" | "hash"
+        "memo_key"
+            | "tree_hash"
+            | "commit"
+            | "target"
+            | "from"
+            | "to"
+            | "merged_from"
+            | "shas"
+            | "dock_id"
+            | "hash"
     ) || key.ends_with("_digest")
 }
 
@@ -664,7 +682,7 @@ mod tests {
     fn scrub_payload_exempts_digest_keyed_values() {
         // A content-address / digest VALUE must SURVIVE verbatim — even a bare
         // 64-hex run that free text would (correctly) redact. The exemption is
-        // by KEY: memo_key / tree_hash / commit / target / *_digest / hash.
+        // by KEY: memo_key / tree_hash / commit / capture OIDs / *_digest / hash.
         let bare_64 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
         let bare_40 = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
         let mut v = json!({
@@ -672,6 +690,7 @@ mod tests {
             "tree_hash": bare_64,
             "commit": bare_40,
             "target": bare_40,
+            "shas": format!("{bare_40}\n{bare_40}"),
             "def_digest": bare_64,
             "toolchain_digest": bare_64,
             "prompt_digest": bare_64,
@@ -685,6 +704,7 @@ mod tests {
             "tree_hash",
             "commit",
             "target",
+            "shas",
             "def_digest",
             "toolchain_digest",
             "prompt_digest",
@@ -706,6 +726,11 @@ mod tests {
             "tree_hash",
             "commit",
             "target",
+            "from",
+            "to",
+            "merged_from",
+            "shas",
+            "dock_id",
             "hash",
             "def_digest",
             "toolchain_digest",

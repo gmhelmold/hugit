@@ -283,6 +283,48 @@ fn canonical_event_with_secret_refuses_before_artifact_write() {
 }
 
 #[test]
+fn canonical_event_principal_secret_refuses_before_artifact_write() {
+    let out = scratch("canonical-principal");
+    let mut corpus = fixture_corpus();
+    corpus.event_log.append_for_test(
+        "journal.note",
+        vec!["ghp_DEADBEEFcafef00dSECRET".into()],
+        r#"{"note":"clean"}"#,
+        4000,
+    );
+
+    assert!(matches!(
+        export(&corpus, &out, AccountState::Active),
+        Err(ExportError::SensitiveCanonicalEventPayload { seq: 3 })
+    ));
+    assert!(
+        !out.join("export.json").exists(),
+        "refusal writes no artifact"
+    );
+}
+
+#[test]
+fn canonical_event_secret_json_key_refuses_before_artifact_write() {
+    let out = scratch("canonical-json-key");
+    let mut corpus = fixture_corpus();
+    corpus.event_log.append_for_test(
+        "journal.note",
+        vec!["alice".into()],
+        r#"{"ghp_DEADBEEFcafef00dSECRET":"clean"}"#,
+        4000,
+    );
+
+    assert!(matches!(
+        export(&corpus, &out, AccountState::Active),
+        Err(ExportError::SensitiveCanonicalEventPayload { seq: 3 })
+    ));
+    assert!(
+        !out.join("export.json").exists(),
+        "refusal writes no artifact"
+    );
+}
+
+#[test]
 fn canonical_json_payload_with_safe_addresses_exports() {
     let out = scratch("canonical-safe-addresses");
     let mut log = EventLog::new();

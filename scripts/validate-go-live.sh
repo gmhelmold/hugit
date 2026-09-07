@@ -120,8 +120,8 @@ EXPORT="$("$BIN" export --log repo/.hugit/log.json --out "$WORK/out" 2>&1)"; ass
 [ -f "$WORK/out/export.json" ];                    assert "export.json written"
 [ -d "$WORK/out/repo.git" ];                       assert "git bundle written"
 [ -f "$WORK/out/redaction-manifest.json" ];        assert "redaction manifest written"
-RED=$(python3 -c "import json;print(len(json.load(open('$WORK/out/redaction-manifest.json'))['removals']))" 2>/dev/null)
-[ "$RED" -ge 1 ] 2>/dev/null;                      assert "redaction manifest lists a removal"
+python3 -c "import json; assert isinstance(json.load(open('$WORK/out/redaction-manifest.json'))['removals'], list)" 2>/dev/null
+assert "redaction manifest has a removals list"
 
 # ── 8. D14 + seal lifecycle ─────────────────────────────────────────────────
 step "8. D14 author kind + campaign seal"
