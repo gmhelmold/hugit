@@ -97,7 +97,8 @@ pub struct ExportEnvelope {
     pub refs: Vec<RefEntry>,
     /// Native landed intents (the D4 intent altitude).
     pub intents: Vec<IntentSidecar>,
-    /// The full append-only, hash-chained event log (D1), object-for-object.
+    /// The canonical full append-only, hash-chained event log (D1),
+    /// object-for-object. Restore verifies this chain and rejects altered events.
     pub events: Vec<EventRecord>,
     /// Ledger entries.
     pub ledger: Vec<LedgerEntry>,

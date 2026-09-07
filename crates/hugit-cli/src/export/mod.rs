@@ -2,7 +2,8 @@
 //!
 //! One command dumps a git artifact **plus** a documented JSON envelope that
 //! validates against the frozen, versioned [`ExportSchema`], round-trips on
-//! restore, applies redaction (with a manifest), streams multi-GB without OOM,
+//! restore with a verified event chain, applies redaction to non-canonical
+//! fields (with a manifest), streams multi-GB without OOM,
 //! and — THE EXIT PROOF — is fully usable with **ZERO hugit/forge tooling**:
 //! a plain `git clone` / `git log` / `git branch` / `git push` against the
 //! exported artifact all work with no hugit binary on `PATH`.
@@ -30,7 +31,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use hugit_contracts::{AttestationChain, EventRecord, IntentSidecar, VerdictObject};
-use hugit_refstore::{EventLog, intent::intents_from_log};
+use hugit_refstore::{EventLog, intent::intents_from_log, tamper::verify_chain};
 
 use cut::{Cut, CutError};
 use redaction::RedactionManifest;
@@ -166,13 +167,14 @@ impl From<io::Error> for ExportError {
 }
 
 /// THE one command (E5①): export `corpus` to `out_dir`, producing a git
-/// artifact + a documented, schema-validated, redacted JSON envelope.
+/// artifact + a documented, schema-validated JSON envelope.
 ///
 /// Steps, all pre-decided:
 /// 1. take ONE point-in-time-consistent cut of the event log (⑨),
 /// 2. project refs + intents from the cut; assemble all first-class classes
 ///    object-for-object (⑥),
-/// 3. apply the redaction policy at export time, building the manifest (④⑦),
+/// 3. preserve canonical event records byte-for-byte; redact only non-canonical
+///    fields at export time, building the manifest (④⑦),
 /// 4. assert the cut's provenance links resolve (⑨), build + machine-validate
 ///    the envelope against the frozen schema (③⑥),
 /// 5. stream the git artifact + JSON to disk with bounded memory (④),
@@ -254,18 +256,10 @@ pub fn export(
         })
         .collect();
 
-    // Event payloads can carry context blobs; redact them too.
-    let events: Vec<EventRecord> = events
-        .into_iter()
-        .map(|mut e| {
-            e.payload = redaction::redact_field(
-                &format!("events/{}.payload", e.seq),
-                &e.payload,
-                &mut manifest,
-            );
-            e
-        })
-        .collect();
+    // Events are canonical hash-chain records. Altering any field here would
+    // invalidate `this_hash`, so this restorable lane is copied byte-for-byte.
+    // Canonical logs must redact secrets before append; this export has no
+    // redacted-event representation that restore could mistake for canonical.
 
     // Redact git object bytes (commit messages / blobs may carry secrets).
     let git_objects: Vec<(String, Vec<u8>)> = corpus
@@ -317,8 +311,8 @@ pub fn export(
         serde_json::to_vec_pretty(&manifest).map_err(|e| ExportError::Io(e.to_string()))?,
     )?;
 
-    // (6) write a plain bare git repo from the redacted git objects, usable with
-    // NO hugit tooling on PATH.
+    // (6) write a plain bare git snapshot from the redacted git objects, usable
+    // with NO hugit tooling on PATH. This is not source Git-history export.
     write_git_artifact(&git_dir, &git_objects, &envelope.refs)?;
 
     Ok(ExportArtifact {
@@ -469,10 +463,9 @@ fn stream_json_array_field<W: std::io::Write, T: serde::Serialize>(
     Ok(())
 }
 
-/// Write a plain **bare** git repository at `git_dir` from the exported git
-/// objects + refs, then shell to local `git` to materialise a real, hugit-free
-/// repo. The objects are hash-objected into the store and refs set, so a later
-/// `git clone`/`log`/`branch`/`push` works with NO hugit tooling present (⑤).
+/// Write a plain **bare** git snapshot repository at `git_dir` from redacted
+/// exported content + refs. It is a usable hugit-free repo, but its single
+/// synthetic commit is not the source repository's Git history.
 fn write_git_artifact(
     git_dir: &Path,
     git_objects: &[(String, Vec<u8>)],
@@ -481,13 +474,11 @@ fn write_git_artifact(
     std::fs::create_dir_all(git_dir)?;
 
     // Initialise a bare repo with local git (the exit proof consumes it with the
-    // SAME plain git, no hugit). We build real commits so clone/log/branch work.
+    // SAME plain git, no hugit). One synthetic commit makes clone/branch/push work.
     run_git(git_dir, &["init", "--quiet", "--bare"])?;
 
-    // Materialise the exported content into a working clone, commit it, and push
-    // back into the bare repo so it has real history + branches. The git object
-    // bytes are written as files under a deterministic layout so they survive the
-    // round-trip; this keeps the artifact a *plain* git repo (no hugit format).
+    // Materialise redacted exported content into a working clone, then commit and
+    // push it back. This preserves an exit snapshot, not original commits/refs.
     let work = git_dir.with_extension("work");
     std::fs::create_dir_all(&work)?;
     run_git(&work, &["init", "--quiet"])?;
@@ -520,7 +511,7 @@ fn write_git_artifact(
             "commit",
             "--quiet",
             "-m",
-            "hugit export: full-fidelity artifact",
+            "hugit export: synthetic snapshot",
         ],
     )?;
 
@@ -603,6 +594,9 @@ pub enum RestoreError {
     /// The envelope failed machine validation on the way back in (fail-closed:
     /// a restore never silently accepts an inconsistent dump).
     Schema(SchemaError),
+    /// The canonical event log failed hash-chain verification after schema
+    /// validation. Redacted or otherwise altered event records are not restorable.
+    Integrity(String),
     /// Rebuilding the event log from the envelope's events failed (e.g.
     /// non-monotonic seq — a tampered dump).
     Log(String),
@@ -613,6 +607,7 @@ impl std::fmt::Display for RestoreError {
         match self {
             RestoreError::Parse(e) => write!(f, "restore: parse: {e}"),
             RestoreError::Schema(e) => write!(f, "restore: {e}"),
+            RestoreError::Integrity(e) => write!(f, "restore: event chain: {e}"),
             RestoreError::Log(e) => write!(f, "restore: log rebuild: {e}"),
         }
     }
@@ -637,7 +632,11 @@ pub fn restore_from_bytes(bytes: &[u8]) -> Result<Restored, RestoreError> {
     // Fail-closed re-validation on the way back in.
     envelope.validate().map_err(RestoreError::Schema)?;
 
-    // Reproduce the event log object-for-object.
+    // Schema validity only establishes envelope shape. Verify canonical event
+    // integrity before EventLog accepts records (push_record checks seq only).
+    verify_chain(&envelope.events).map_err(|err| RestoreError::Integrity(err.to_string()))?;
+
+    // Reproduce the verified event log object-for-object.
     let mut event_log = EventLog::new();
     for e in &envelope.events {
         event_log

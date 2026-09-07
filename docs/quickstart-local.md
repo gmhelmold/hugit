@@ -64,12 +64,13 @@ Supported: TypeScript, JavaScript, Python, Go, Java, C, C++, Ruby.
 
 ## 5. `hugit export` — the zero-lock-in exit proof
 
-Dump your repo's git artifact + the full JSON envelope. The output is a **real
-git repository**, usable with zero hugit tooling:
+Dump a usable synthetic Git snapshot + canonical JSON envelope. `export.json`
+keeps event records byte-identical; restore verifies their hash chain. Output
+repo is usable with zero hugit tooling, but is not source Git history:
 
 ```sh
 hugit export --log .hugit/log.json --out ./backup
-# creates ./backup/repo.git  (a real git repo)
+# creates ./backup/repo.git  (usable synthetic Git snapshot)
 #          ./backup/export.json
 #          ./backup/redaction-manifest.json
 ```

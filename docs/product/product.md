@@ -94,7 +94,7 @@ Status key: **LIVE** = serving real data today · **BUILT** = gate-green, deploy
 | **Auto-bisect + flake intelligence** | **LIVE** (`hugit diag`) | red → culprit in ≤log₂ probes over memoized checks; flakes quarantined, annotated | bisect is ~free only when checks are memoized |
 | **Event-sourced refs + universal undo** | **LIVE** (`hugit undo`) | force-push data loss is **unexpressible**; every op reversible | agents do dumb things; undo is the trust feature |
 | **Symbol outline** | **LIVE** (`hugit symbol`) | structured symbol map of any source file — TS/JS/Python/Go/Java/C/C++/Ruby | standalone; no server; the "first aha" |
-| **Export / exit guarantee** | **LIVE** (`hugit export`) | full git + JSON snapshot, redaction applied, exit-proof | the exit guarantee is also the DR plan |
+| **Export / exit guarantee** | **LIVE** (`hugit export`) | usable synthetic Git snapshot + canonical chain-verified JSON; redaction excludes canonical events | exit proof is DR plan; source Git history export remains separate |
 | **Import** | **LIVE** (`hugit import`) | bring a GitHub repo without leaving GitHub | zero migration ask; reversible at every rung |
 | **Provenance / attestation** | **LIVE** (object model) | SLSA-class chain **including the model layer**: which model, whose instruction, what cost | falls out of the object model; GitHub cannot express it |
 | **Bidirectional GitHub mirror** | **ROADMAP** | branches round-trip; `main` single-writer via the queue; incidents preserved as refs, never dropped | a broken bridge kills trust — ours is forge-arbitrated by design |

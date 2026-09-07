@@ -70,7 +70,7 @@ Honest status — everything here is the CLI, local, testable now:
 |---|---|---|
 | `hugit setup` — boot ceremony | **LIVE** | `git init` in any fresh repo auto-ships the hooks; first git op lazy-boots the log |
 | `hugit symbol` — symbol outline | **LIVE** | `hugit symbol --file <path>` against any TS/JS/Python/Go/Java/C/C++/Ruby file |
-| `hugit export` — exit guarantee | **LIVE** | full git + JSON snapshot; requires `--log <path> --out <dir>`; zero dependencies |
+| `hugit export` — exit guarantee | **LIVE** | usable synthetic Git snapshot + canonical JSON log; requires `--log <path> --out <dir>`; zero dependencies |
 | `hugit check` / `hugit verdict` | **LIVE** | real policy-engine EXECUTE paths, memoized; `hugit policy test` runs the house gate set |
 | `hugit campaign / intent / pr / land` | **LIVE** | the agent-fleet loop: milestones → tasks → PRs → union landing |
 | `hugit dock` (worktree binding) | **LIVE** | cost per worktree; byte-identity + acceptance verified landing |
@@ -145,9 +145,12 @@ These are real today, not roadmap:
 hugit export --log .hugit/log.json --out <dir>
 ```
 
-Produces a full git bundle + JSON proof of every intent, verdict, and claim.
-Restore to a bare git repo on any hosting provider. No proprietary lock-in —
-the exit proof is also the disaster-recovery plan.
+Produces a usable synthetic Git snapshot plus canonical JSON proof of every
+intent, verdict, and claim. `export.json` keeps event records byte-identical
+and restore verifies their hash chain. Redaction applies only to non-canonical
+fields; canonical logs must redact secrets before append. `repo.git` is not an
+export of original Git commits or refs. Restore snapshot to any hosting
+provider. No proprietary lock-in — exit proof is also disaster-recovery plan.
 
 ---
 

@@ -104,7 +104,7 @@ on scratch repos, capturing each command's JSON output:
 | commit in worktree → `dock land` | **`byte_identity:"verified", landed:true`** |
 | worktree remove → `dock reconcile` | ghost closed onto the log, idempotent |
 | `ctx usage` | recorded verbatim token counts |
-| `export` | envelope JSON + repo.git + redaction manifest |
+| `export` | canonical chain-verified envelope JSON + synthetic `repo.git` snapshot + redaction manifest |
 | `why` on a path | `unresolved` when the capture had no `files` (never fabricates) |
 | `policy test --context` | house gates evaluated: dco/changelog/secrets outcomes real |
 | `undo --seq` on a note | `nothing_to_compensate` (honest) |
@@ -143,3 +143,6 @@ HUGIT_BIN="$PWD/target/release/hugit" ./scripts/validate-go-live.sh
 - Crypto signature verification of attestations: the integrity spine verifies
   hash-chains (proven by tamper tests), but the off-box signer is out of scope
   for the local CLI.
+- Export does not preserve source Git commits, topology, or original refs:
+  `repo.git` is a usable synthetic snapshot. Source-Git-history export is
+  separate work.

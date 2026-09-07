@@ -23,8 +23,8 @@ use hugit_cli::export::schema::{
     ExportEnvelope, FIRST_CLASS_OBJECT_CLASSES, JournalEntry, OUT_OF_SCOPE_CLASSES, ProvenanceLink,
     RefEntry,
 };
-use hugit_cli::export::{AccountState, Corpus, export, restore, restore_from_bytes};
-use hugit_refstore::EventLog;
+use hugit_cli::export::{AccountState, Corpus, RestoreError, export, restore, restore_from_bytes};
+use hugit_refstore::{EventLog, tamper::verify_chain};
 
 // ── fixtures ──────────────────────────────────────────────────────────────────
 
@@ -222,6 +222,56 @@ fn item_2_restore_roundtrip() {
     // The intents projected from the exported log match the original two landed
     // intents (not the raw push).
     assert_eq!(restored.intents.len(), 2, "two intents, raw push excluded");
+    verify_chain(restored.event_log.records()).expect("untouched roundtrip chain verifies");
+}
+
+#[test]
+fn restore_refuses_event_chain_tampering() {
+    let out = scratch("chain-tamper");
+    let artifact = export(&fixture_corpus(), &out, AccountState::Active).unwrap();
+
+    let mut payload_tampered = artifact.envelope.clone();
+    payload_tampered.events[0].payload = "altered".into();
+    assert!(matches!(
+        restore_from_bytes(&serde_json::to_vec(&payload_tampered).unwrap()),
+        Err(RestoreError::Integrity(_))
+    ));
+
+    let mut hash_tampered = artifact.envelope.clone();
+    hash_tampered.events[0].this_hash = "0".repeat(64);
+    assert!(matches!(
+        restore_from_bytes(&serde_json::to_vec(&hash_tampered).unwrap()),
+        Err(RestoreError::Integrity(_))
+    ));
+
+    let mut reordered = artifact.envelope.clone();
+    reordered.events.swap(0, 1);
+    assert!(matches!(
+        restore_from_bytes(&serde_json::to_vec(&reordered).unwrap()),
+        Err(RestoreError::Integrity(_))
+    ));
+}
+
+#[test]
+fn canonical_event_with_secret_is_not_redacted_in_restorable_export() {
+    let out = scratch("canonical-event");
+    let mut corpus = fixture_corpus();
+    corpus.event_log.append_for_test(
+        "journal.note",
+        vec!["alice".into()],
+        r#"{"note":"token=ghp_DEADBEEFcafef00dSECRET"}"#,
+        4000,
+    );
+
+    let artifact = export(&corpus, &out, AccountState::Active).unwrap();
+    assert_eq!(
+        artifact.envelope.events,
+        corpus.event_log.records(),
+        "canonical events remain byte-identical; export never redacts them"
+    );
+    verify_chain(&artifact.envelope.events).expect("canonical export chain verifies");
+    restore_from_bytes(&serde_json::to_vec(&artifact.envelope).unwrap())
+        .expect("canonical event export remains restorable");
 }
 
 // ── ③ machine validation against the versioned ExportSchema ───────────────────
