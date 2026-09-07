@@ -112,6 +112,12 @@ pub fn redact_field(location: &str, text: &str, manifest: &mut RedactionManifest
     redacted
 }
 
+/// Whether canonical text would be changed by export redaction. Canonical event
+/// payloads cannot be redacted in-place without invalidating their hash chain.
+pub fn would_redact(text: &str) -> bool {
+    hugit_ledger::redact::apply(text) != text
+}
+
 /// Scan text for any residual secret per the UNIFIED ledger engine (WF-4). Used
 /// by the red-team proof (E5⑦): after export, NO secret may survive anywhere in
 /// git or JSON.

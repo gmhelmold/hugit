@@ -23,7 +23,9 @@ use hugit_cli::export::schema::{
     ExportEnvelope, FIRST_CLASS_OBJECT_CLASSES, JournalEntry, OUT_OF_SCOPE_CLASSES, ProvenanceLink,
     RefEntry,
 };
-use hugit_cli::export::{AccountState, Corpus, RestoreError, export, restore, restore_from_bytes};
+use hugit_cli::export::{
+    AccountState, Corpus, ExportError, RestoreError, export, restore, restore_from_bytes,
+};
 use hugit_refstore::{EventLog, tamper::verify_chain};
 
 // ── fixtures ──────────────────────────────────────────────────────────────────
@@ -253,7 +255,7 @@ fn restore_refuses_event_chain_tampering() {
 }
 
 #[test]
-fn canonical_event_with_secret_is_not_redacted_in_restorable_export() {
+fn canonical_event_with_secret_refuses_before_artifact_write() {
     let out = scratch("canonical-event");
     let mut corpus = fixture_corpus();
     corpus.event_log.append_for_test(
@@ -263,15 +265,21 @@ fn canonical_event_with_secret_is_not_redacted_in_restorable_export() {
         4000,
     );
 
-    let artifact = export(&corpus, &out, AccountState::Active).unwrap();
-    assert_eq!(
-        artifact.envelope.events,
-        corpus.event_log.records(),
-        "canonical events remain byte-identical; export never redacts them"
+    assert!(matches!(
+        export(&corpus, &out, AccountState::Active),
+        Err(ExportError::SensitiveCanonicalEventPayload { seq: 3 })
+    ));
+    for artifact in ["export.json", "redaction-manifest.json", "repo.git"] {
+        assert!(
+            !out.join(artifact).exists(),
+            "refusal writes no artifact: {}",
+            out.join(artifact).display()
+        );
+    }
+    assert!(
+        redaction::would_redact(&corpus.event_log.records()[3].payload),
+        "canary must trigger the same redaction law export enforces"
     );
-    verify_chain(&artifact.envelope.events).expect("canonical export chain verifies");
-    restore_from_bytes(&serde_json::to_vec(&artifact.envelope).unwrap())
-        .expect("canonical event export remains restorable");
 }
 
 // ── ③ machine validation against the versioned ExportSchema ───────────────────

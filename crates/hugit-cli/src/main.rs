@@ -476,13 +476,18 @@ fn run_export(args: ExportArgs) -> Result<String, PorcelainError> {
         event_log,
         ..Corpus::default()
     };
-    let artifact = export::export(&corpus, &args.out, AccountState::Active).map_err(|e| {
-        PorcelainError::new(
+    let artifact = export::export(&corpus, &args.out, AccountState::Active).map_err(|e| match e {
+        export::ExportError::SensitiveCanonicalEventPayload { .. } => PorcelainError::new(
+            "sensitive_canonical_event",
+            e.to_string(),
+            "scrub sensitive payloads before appending canonical events; export cannot redact them without breaking the hash chain",
+        ),
+        e => PorcelainError::new(
             "export_failed",
             e.to_string(),
             "fix the corpus/out path the error names; export fails closed, \
              never writing a partial artifact",
-        )
+        ),
     })?;
     // The success line is now stable JSON: the artifact paths + the redaction
     // manifest's content digest (the seal) + the bounded-memory proof.

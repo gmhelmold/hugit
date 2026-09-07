@@ -148,8 +148,9 @@ hugit export --log .hugit/log.json --out <dir>
 Produces a usable synthetic Git snapshot plus canonical JSON proof of every
 intent, verdict, and claim. `export.json` keeps event records byte-identical
 and restore verifies their hash chain. Redaction applies only to non-canonical
-fields; canonical logs must redact secrets before append. `repo.git` is not an
-export of original Git commits or refs. Restore snapshot to any hosting
+fields. If a canonical event payload needs redaction, export fails before
+writing output; canonical logs must scrub secrets before append. `repo.git` is
+not an export of original Git commits or refs. Restore snapshot to any hosting
 provider. No proprietary lock-in — exit proof is also disaster-recovery plan.
 
 ---

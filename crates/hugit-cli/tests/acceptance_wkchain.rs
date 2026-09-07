@@ -222,6 +222,42 @@ fn tampered_chain_is_chain_broken_exit_two_on_export() {
     );
 }
 
+/// A valid canonical chain with an unsafely stored secret payload is refused
+/// before output creation. Export must not leak it or redact it in-place.
+#[test]
+fn sensitive_canonical_event_is_named_porcelain_failure_without_output() {
+    let dir = scratch("export-sensitive");
+    let log = dir.join("sensitive.json");
+    let out_dir = dir.join("artifact");
+    write_canonical_log(
+        &log,
+        &[(
+            "journal.note",
+            json!({"note": "token=ghp_DEADBEEFcafef00dSECRET"}),
+        )],
+    );
+
+    let (code, v) = run(&[
+        "export",
+        "--log",
+        log.to_str().unwrap(),
+        "--out",
+        out_dir.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 2, "sensitive canonical payload is exit 2: {v}");
+    assert_eq!(
+        v["error"]["kind"], "sensitive_canonical_event",
+        "porcelain names the canonical-secret refusal: {v}"
+    );
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("hash chain")),
+        "porcelain explains why in-place redaction is refused: {v}"
+    );
+    assert!(!out_dir.exists(), "refusal writes no output directory");
+}
+
 /// A well-formed export log still produces a valid artifact (no regression).
 #[test]
 fn well_formed_export_log_still_exports_after_k_chain() {

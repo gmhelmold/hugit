@@ -129,6 +129,9 @@ pub enum ExportError {
     /// A git object id was not path-safe — it would escape the object directory
     /// (path traversal). Refused before any write (fail-closed).
     UnsafeOid(String),
+    /// A canonical event payload would need redaction. Export cannot alter it
+    /// without breaking its hash chain, so it refuses before writing an artifact.
+    SensitiveCanonicalEventPayload { seq: u64 },
 }
 
 impl std::fmt::Display for ExportError {
@@ -144,6 +147,10 @@ impl std::fmt::Display for ExportError {
                     "export: refusing unsafe (path-traversing) git oid: {oid:?}"
                 )
             }
+            ExportError::SensitiveCanonicalEventPayload { seq } => write!(
+                f,
+                "export: canonical event seq {seq} has a sensitive payload; refusing pre-scrubbed canonical log because redaction would break its hash chain"
+            ),
         }
     }
 }
@@ -191,6 +198,17 @@ pub fn export(
 ) -> Result<ExportArtifact, ExportError> {
     // (1) one point-in-time cut.
     let cut = Cut::take(&corpus.event_log)?;
+
+    // Canonical events are emitted byte-for-byte so restore can verify their
+    // hashes. Until a separately schema-bound redacted projection exists, refuse
+    // any event whose payload would need redaction rather than leak it or alter it.
+    if let Some(event) = cut
+        .records()
+        .iter()
+        .find(|event| redaction::would_redact(&event.payload))
+    {
+        return Err(ExportError::SensitiveCanonicalEventPayload { seq: event.seq });
+    }
 
     // (2) project refs + intents from the cut; assemble first-class classes.
     // A malformed ref payload is a HARD failure (E5 fail-closed) — never an
@@ -258,8 +276,8 @@ pub fn export(
 
     // Events are canonical hash-chain records. Altering any field here would
     // invalidate `this_hash`, so this restorable lane is copied byte-for-byte.
-    // Canonical logs must redact secrets before append; this export has no
-    // redacted-event representation that restore could mistake for canonical.
+    // Pre-scrubbed canonical logs are refused above; this export has no redacted
+    // event representation that restore could mistake for canonical.
 
     // Redact git object bytes (commit messages / blobs may carry secrets).
     let git_objects: Vec<(String, Vec<u8>)> = corpus
