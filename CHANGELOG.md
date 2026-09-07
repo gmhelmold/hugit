@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-09-07
+
+- fix(cli): `hugit setup --repo` now installs hooks safely in existing
+  repositories, rejects `core.hooksPath` configurations it would not activate,
+  and refuses symlink or non-regular hook paths.
+
+- fix(capture): captured hook payloads scrub secrets before append while
+  preserving value-gated Git object addresses, including checkout, merge,
+  pre-push, and dock identifiers.
+
+- fix(export): canonical export preserves event integrity and restore verifies
+  chains. Exports refuse canonical secret payloads, JSON keys, principals, or
+  event kinds rather than leaking or rewriting hash-chained records.
+
 ## [0.1.3] - 2026-09-07
 
 - fix(refstore): captured `push-attempt` `ref.update` events are now inert in
