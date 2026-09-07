@@ -112,7 +112,7 @@ fn capture_ref_update(
     hook_log: Option<&std::path::Path>,
     principal: &str,
     kind: &str,
-    payload: serde_json::Value,
+    mut payload: serde_json::Value,
     recorded_at: u64,
 ) -> Result<(), String> {
     let _lock = acquire_with_retry(log_path)?;
@@ -121,8 +121,11 @@ fn capture_ref_update(
     let mut log =
         load_event_log(log_path).map_err(|e| format!("load log error: {}", e.to_json()))?;
 
-    // Scrub the payload + principal before hitting the chain (WG-SCRUB).
+    // Scrub every payload string leaf + principal before hitting the chain
+    // (WG-SCRUB). Keep JSON structured: redacting serialized bytes would turn
+    // the complete payload into one sentinel rather than a valid ref.update.
     let principal_sc = crate::redaction::scrub(principal);
+    crate::porcelain::scrub_payload(&mut payload);
     let payload_str = payload.to_string();
     let payload_canonical = canonical_json(&payload_str).unwrap_or_else(|| payload_str.clone());
 

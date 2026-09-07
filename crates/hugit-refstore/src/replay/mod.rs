@@ -144,14 +144,18 @@ pub fn replay_unchecked(records: &[EventRecord]) -> Result<RefState, ReplayError
             // into the prior-state projection.
             "ref.update" | INTENT_LANDED_KIND => {
                 let v: serde_json::Value = parse_payload(record)?;
-                // CHECKOUT and PUSH-ATTEMPT ref.updates are INERT observations:
-                // they record worktree movement or a proposed push, but never
-                // advance a ref without the commit capture's ref/target pair.
-                // Treating either as a ref mutation would fail closed on a valid
-                // captured Git activity log during replay/export.
+                // CHECKOUT, PUSH-ATTEMPT, and MERGE ref.updates are INERT
+                // observations: they record worktree movement, a proposed push,
+                // or merge provenance, but never advance a ref without the
+                // commit capture's ref/target pair. Treating any as a ref mutation
+                // would fail closed on a valid captured Git activity log during
+                // replay/export.
                 let inert_capture = ["checkout", "attempt"]
                     .iter()
-                    .any(|key| v.get(key).and_then(serde_json::Value::as_bool) == Some(true));
+                    .any(|key| v.get(key).and_then(serde_json::Value::as_bool) == Some(true))
+                    || v.get("merged_from")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some();
                 if inert_capture {
                     continue;
                 }

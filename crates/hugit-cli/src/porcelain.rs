@@ -501,11 +501,14 @@ pub use hugit_ledger::secret_shape::is_safe_identifier_shape;
 /// [`is_digest_shaped`] (the value gate) before exempting; a digest NAME alone no
 /// longer exempts (WH-SCRUB).
 ///
-/// The rule: exact `memo_key` / `tree_hash` / `commit`, any `*_digest` suffix
-/// (`def_digest`, `toolchain_digest`, `prompt_digest`, …), or a bare `hash`
-/// field (`files_read[].hash`).
+/// The rule: exact `memo_key` / `tree_hash` / `commit` / capture's `target` /
+/// `from` / `to`, any `*_digest` suffix (`def_digest`, `toolchain_digest`,
+/// `prompt_digest`, …), or a bare `hash` field (`files_read[].hash`).
 pub fn is_digest_key(key: &str) -> bool {
-    matches!(key, "memo_key" | "tree_hash" | "commit" | "hash") || key.ends_with("_digest")
+    matches!(
+        key,
+        "memo_key" | "tree_hash" | "commit" | "target" | "from" | "to" | "hash"
+    ) || key.ends_with("_digest")
 }
 
 /// True iff `value` is actually digest-SHAPED — the value gate for the digest

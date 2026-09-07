@@ -92,6 +92,14 @@ fn git_in(cwd: &Path, args: &[&str]) -> (i32, String) {
     )
 }
 
+fn capture_binary(cwd: &Path, args: &[String]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_hugit"))
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("hugit capture runs")
+}
+
 fn log_records(log: &Path) -> Vec<Value> {
     let bytes = std::fs::read(log).expect("log readable");
     serde_json::from_slice(&bytes).unwrap_or_else(|_| vec![])
@@ -282,6 +290,172 @@ fn missing_bin_never_blocks_git() {
         Some(0),
         "commit succeeds even with missing hugit"
     );
+}
+
+#[test]
+fn capture_binary_scrubs_every_payload_leaf_before_append() {
+    const SAFE_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+    const SAFE_FROM: &str = "89abcdef0123456789abcdef0123456789abcdef";
+    const SAFE_PATH: &str = "src/safe_capture.rs";
+    const SAFE_REF: &str = "feature/safe-capture";
+    const CANARY_BRANCH: &str = "ghp_CAPTURE_BRANCH_0123456789abcdefghijklmnop";
+    const CANARY_FILE: &str = "src/ghp_CAPTURE_FILE_0123456789abcdefghijklmnop.rs";
+    const CANARY_OID: &str = "ghp_CAPTURE_OID_0123456789abcdefghijklmnop";
+    const CANARY_FROM: &str = "ghp_CAPTURE_FROM_0123456789abcdefghijklmnop";
+    const CANARY_REFSPEC: &str =
+        "refs/heads/ghp_CAPTURE_REFSPEC_0123456789abcdefghijklmnop:refs/heads/main";
+
+    let root = scratch("payload-scrub");
+    lib_init(&root);
+    let log = root.join(".hugit/log.json");
+    let hook_log = root.join(".hugit/hooks.log");
+    let common = vec![
+        "--top-level".to_string(),
+        root.display().to_string(),
+        "--log".to_string(),
+        log.display().to_string(),
+        "--hook-log".to_string(),
+        hook_log.display().to_string(),
+    ];
+    let run_capture = |kind: &str, fields: &[(&str, &str)]| {
+        let mut args = vec![
+            "capture".to_string(),
+            "--kind".to_string(),
+            kind.to_string(),
+        ];
+        args.extend(common.clone());
+        for (key, value) in fields {
+            args.push((*key).to_string());
+            args.push((*value).to_string());
+        }
+        let out = capture_binary(&root, &args);
+        assert!(out.status.success(), "capture {kind} exits 0: {out:?}");
+        out
+    };
+
+    // Positive controls: structurally valid Git addresses and paths stay useful.
+    run_capture(
+        "commit",
+        &[
+            ("--oid", SAFE_SHA),
+            ("--branch", SAFE_REF),
+            ("--files", SAFE_PATH),
+        ],
+    );
+    run_capture(
+        "checkout",
+        &[
+            ("--oid", SAFE_SHA),
+            ("--from", SAFE_FROM),
+            ("--branch", SAFE_REF),
+        ],
+    );
+
+    // Every capture shape carries secret-shaped values at every hook-controlled
+    // string position. Capture remains nonblocking while persisted payloads scrub.
+    let outputs = [
+        run_capture(
+            "commit",
+            &[
+                ("--oid", CANARY_OID),
+                ("--branch", CANARY_BRANCH),
+                ("--files", CANARY_FILE),
+            ],
+        ),
+        run_capture(
+            "checkout",
+            &[
+                ("--oid", CANARY_OID),
+                ("--from", CANARY_FROM),
+                ("--branch", CANARY_BRANCH),
+            ],
+        ),
+        run_capture(
+            "push-attempt",
+            &[("--refspecs", CANARY_REFSPEC), ("--shas", CANARY_OID)],
+        ),
+        run_capture("merge", &[("--oid", CANARY_OID), ("--from", CANARY_FROM)]),
+    ];
+
+    let log_bytes = std::fs::read(&log).expect("canonical log readable");
+    let hook_bytes = std::fs::read(&hook_log).expect("hooks log readable");
+    for canary in [
+        CANARY_BRANCH,
+        CANARY_FILE,
+        CANARY_OID,
+        CANARY_FROM,
+        CANARY_REFSPEC,
+    ] {
+        assert!(
+            !log_bytes
+                .windows(canary.len())
+                .any(|w| w == canary.as_bytes()),
+            "canonical log must not retain {canary}"
+        );
+        assert!(
+            !hook_bytes
+                .windows(canary.len())
+                .any(|w| w == canary.as_bytes()),
+            "hooks log must not retain {canary}"
+        );
+        for out in &outputs {
+            assert!(
+                !out.stdout
+                    .windows(canary.len())
+                    .any(|w| w == canary.as_bytes())
+                    && !out
+                        .stderr
+                        .windows(canary.len())
+                        .any(|w| w == canary.as_bytes()),
+                "capture stdout/stderr must not retain {canary}"
+            );
+        }
+    }
+
+    let records = log_records(&log);
+    let safe_commit = records.iter().find_map(|r| {
+        let payload: Value = serde_json::from_str(r["payload"].as_str()?).ok()?;
+        (payload["target"].as_str() == Some(SAFE_SHA)).then_some(payload)
+    });
+    let safe_commit = safe_commit.expect("safe commit capture exists");
+    assert_eq!(safe_commit["ref"], format!("refs/heads/{SAFE_REF}"));
+    assert_eq!(safe_commit["files"], serde_json::json!([SAFE_PATH]));
+    let safe_checkout = records.iter().find_map(|r| {
+        let payload: Value = serde_json::from_str(r["payload"].as_str()?).ok()?;
+        (payload["checkout"] == true).then_some(payload)
+    });
+    let safe_checkout = safe_checkout.expect("safe checkout capture exists");
+    assert_eq!(safe_checkout["from"], SAFE_FROM);
+    assert_eq!(safe_checkout["to"], SAFE_SHA);
+
+    let out_dir = root.join("export-out");
+    let export = Command::new(env!("CARGO_BIN_EXE_hugit"))
+        .args([
+            "export",
+            "--log",
+            log.to_str().unwrap(),
+            "--out",
+            out_dir.to_str().unwrap(),
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("export runs");
+    assert!(export.status.success(), "export succeeds: {export:?}");
+    for path in [out_dir.join("export.json"), out_dir.join("repo.work/REFS")] {
+        let bytes = std::fs::read(&path).unwrap_or_else(|_| panic!("artifact exists: {path:?}"));
+        for canary in [
+            CANARY_BRANCH,
+            CANARY_FILE,
+            CANARY_OID,
+            CANARY_FROM,
+            CANARY_REFSPEC,
+        ] {
+            assert!(
+                !bytes.windows(canary.len()).any(|w| w == canary.as_bytes()),
+                "exported artifact {path:?} must not retain {canary}"
+            );
+        }
+    }
 }
 
 // ── 6. The captured git activity is watchable by class ───────────────────────
