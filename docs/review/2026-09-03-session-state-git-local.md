@@ -176,11 +176,16 @@ git branch --show-current  # main
 - Test litter (.git inside crates) is gitignore'd now; if a test leaves it, `rm -rf crates/*/.git`.
 
 ### Remaining backlog (reconciled 2026-09-07)
-1. **GitHub App mirror activation** — code + live push/verify lane are done; App registration and test-repo activation remain owner/infra work outside the local CLI.
-2. **`hugit import`** — superseded by `hugit init` on an existing local repo; no migration command is needed.
-3. **`ws`, `dispatch`, and `ctx snap`** — intentionally reserved/P2; execution and JournalStore belong to external runner/forge products.
-4. **Automatic capture after `jj git export`** — optional design question; explicit MCP `capture` already closes the supported jj path.
-5. **`hugit serve`** — out of v1 by decision, not backlog.
+There is no local CLI backlog for this scope. ADR-0006 closes the old
+forge-era entries as non-goals or external seams:
+
+- GitHub App activation: external owner/infra operation; code and live
+  push/verify lane are complete.
+- `hugit import`: superseded by `hugit init` on an existing local repo.
+- `ws`, `dispatch`, and `ctx snap`: outside CLI v1.
+- Automatic capture after `jj git export`: explicit MCP `capture` is the
+  supported path; automatic observation is optional future design.
+- `hugit serve`: separate product, outside CLI v1.
 
 The first-user docs and captured-push landing loop are complete. No local CLI
 code blocker remains.

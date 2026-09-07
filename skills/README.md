@@ -29,10 +29,10 @@ Three laws run through both skills (they are the product's trust spine):
 2. **The honesty law.** "Built" ≠ "delivered" (hermetic-green is not live); a cost is `null` or
    measured, **never** hand-stamped/estimated/misattributed; a `401`/`404` from the engine is an
    auth/visibility signal, **not** route-existence. The skills refuse every fabrication.
-3. **Honest reserved/deferred state.** The skills describe ONLY the live binary surface
+3. **Honest reserved/non-goal state.** The skills describe ONLY the live binary surface
    (`HUGIT_VERBS`). Reserved verbs (`ws`, `dispatch` — in `HUGIT_RESERVED_VERBS`, not dispatched)
-   are marked **do-not-invoke**; the runner fabric, anonymous clone, multi-tenant identity, and
-   live runner exec are flagged as deferred — never implied to be live.
+   are marked **do-not-invoke**; remote runner execution, `ctx snap`, and automatic jj export
+   capture are outside CLI v1 — never implied to be live or unfinished local work.
 
 ## Supporting docs
 

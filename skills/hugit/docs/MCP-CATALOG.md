@@ -23,7 +23,7 @@ and the honesty caveat that governs what a response *means*.
 | 3 | The `/v1` engine write API | HTTPS POST (`/v1/...`) | Bearer (`authz`-gated) | **LIVE (single-tenant)** | the 9 POST verbs (intent/pr/verdict/… persisted to R2-CAS) |
 | 4 | git over the wire (upload-pack) | git smart-HTTP | Bearer (owner) / anon (public) | **LIVE (owner-clone)** | `git clone`/`fetch` — owner-authed clone of a private repo; anon = public-only |
 | 5 | git over the wire (receive-pack) | git smart-HTTP | `cas:rw` Bearer | **LIVE (push)** | `git push` — create/update/incremental/delete a ref (single-tenant) |
-| 6 | The runner fabric (off-box exec) | corelink-fabricd | runner PAT | **DEFERRED (P2)** | live agent dispatch + real per-PR cost — NOT served from hugit |
+| 6 | The runner fabric (off-box exec) | corelink-fabricd | runner PAT | **EXTERNAL / OUTSIDE CLI V1** | live agent dispatch + real per-PR cost — NOT served from hugit |
 
 ---
 
@@ -96,7 +96,7 @@ consumes it across the frozen lease-DTO contract; it does NOT fork or serve it.
 
 - **State:** the cost WIRE is proven live (acquire→§13 ingest→close, attestation signed), and the
   four lease DTOs are frozen byte-identical across both repos (conformance vectors + tripwire). But
-  **live agent dispatch (merge-as-re-execution) is NOT wired** — `hugit pr land --dispatch` records
+  **live agent dispatch (merge-as-re-execution) is external** — `hugit pr land --dispatch` records
   the demand and submits `cost_usd_micros: None`.
 - **Honesty caveat (the cost law):** a per-PR cost is **honest-zero (`null`)** until a real
   provider-`/usage` source feeds it. An agent MUST NOT substitute a derived `IntentMetrics` COGS or

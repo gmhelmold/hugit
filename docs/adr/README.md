@@ -19,3 +19,5 @@ to reverse** and **cross-cutting** (affect contracts, the forge UI, or both).
 | 0002 | HuGR identity: one account, CoreLink machinery | Accepted | family-wide |
 | 0003 | Owner-scoped repo routing deferred (G11)| Accepted (deferral) | hugit · githugr |
 | 0004 | Art.17 provenance PII erasure (keyed-pseudonym + key-shred) | Accepted (phased; first slice shipped) | hugit · githugr |
+| 0005 | Worktree dock: physical binding for cost and verification | Accepted | hugit |
+| 0006 | CLI-local v1 boundary | Accepted | hugit · corelink-runners |

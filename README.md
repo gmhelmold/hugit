@@ -56,6 +56,9 @@ no server, no account. The runtime is local-only:
   same tree+def+toolchain is a cache HIT with zero re-execution.
 - **CI / compute execution is not rebuilt here** — hugit records the *demand*
   and leaves execution to whatever runs your checks.
+- `ws`, `dispatch`, and `ctx snap` are deliberately outside CLI v1. hugit keeps
+  the tokens reserved or the surface absent rather than pretending remote
+  execution or a second context store is local.
 
 ---
 
@@ -131,6 +134,8 @@ These are real today, not roadmap:
 - **Adversarial hardened** — 13 rounds of adversarial security review on the
   integrity spine (Ed25519/SHA-256 crypto). Redaction at the read boundary.
   Fail-closed boot.
+- jj capture is explicit through the MCP `capture` tool. Automatic observation
+  after `jj git export` is not a v1 feature.
 
 ---
 

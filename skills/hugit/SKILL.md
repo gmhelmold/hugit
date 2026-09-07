@@ -107,14 +107,14 @@ available.
 
 | Verb | Intended shape | Why reserved |
 |---|---|---|
-| `ws` | `ws spawn\|attach\|snap\|gc` | Claim-fenced workspaces — workspace exec core transferred to `corelink-runners` (needs the runner fabric) |
-| `dispatch` | `dispatch <intent>` | Workspace + context packet — P2, gated on the runner fabric |
+| `ws` | `ws spawn\|attach\|snap\|gc` | Claim-fenced workspaces — external runner product, outside CLI v1 |
+| `dispatch` | `dispatch <intent>` | Workspace + context packet — external orchestration product, outside CLI v1 |
 
-> **Honesty caveat (state it when relevant):** `ctx snap` (the JournalStore writer) and
-> `policy edit`-beyond-`test` are deliberately NOT offered yet; `policy` ships `test` only. The
-> distributed runner fabric (live exec for `land queue`/`pr land --dispatch`) is P2 — the union
-> engine runs **single-tenant local** today; a per-PR cost from real off-box exec is honest-zero
-> (`null`) until a real provider-`/usage` source lands (Section 4).
+> **Honesty caveat (state it when relevant):** `ctx snap` (the JournalStore writer) is outside
+> CLI v1; `policy edit` is REAL and Human-only. The distributed runner fabric (live exec for
+> `land queue`/`pr land --dispatch`) is an external product, not unfinished local CLI work. The
+> union engine runs **single-tenant local** today; a per-PR cost from real off-box exec is
+> honest-zero (`null`) when that external path is unavailable (Section 4).
 
 ---
 
@@ -176,9 +176,10 @@ is rejected, never read as empty), `io` (a `--log`/`--store` read/write fault).
    NEITHER proves the route/feature is absent. To prove a route is live: a PAT-authed `200`-vs-`405`,
    or a real-consumer probe (the public www that decodes the engine), NEVER an engine-direct
    privileged proxy and NEVER an unauthed status code.
-4. **Mark reserved/deferred honestly.** `ws`/`dispatch` are reserved (Section 2). The runner
-   fabric, anonymous clone (public-flag), multi-tenant identity, and live runner exec are deferred.
-   Say so — never imply a single-tenant-local capability is a multi-tenant live one.
+4. **Mark reserved/non-goal honestly.** `ws`/`dispatch` are reserved (Section 2). The runner
+   fabric, anonymous clone (public-flag), multi-tenant identity, and live runner exec are
+   external or out of CLI v1. Say so — never imply a single-tenant-local capability is a
+   multi-tenant live one.
 5. **Never fabricate a result.** A grounded verb (`review`, `why`) **refuses** when nothing
    grounds the answer (`kind:"refusal"`/no evidence) — surface the refusal; do not invent an
    answer to fill it. This is the same law the engine enforces server-side.

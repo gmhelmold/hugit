@@ -192,29 +192,29 @@ pub const HUGIT_VERBS: &[&str] = &[
     "dock", // hugit dock coin --top-level --gitdir --branch — hook-born dock
 ];
 
-/// Planned hugit verb tokens that are RESERVED but NOT yet dispatched.
+/// Non-v1 hugit verb tokens that are RESERVED but NOT dispatched.
 ///
-/// These verbs are on the product roadmap and are reserved so that they cannot
-/// be accidentally taken by `git` (or another tool) before hugit claims them.
-/// They are **not** part of the live binary surface: they do not appear in
-/// `main.rs` dispatch, `hugit --help`, or the WP-X5 no-shadow oracle.
+/// These tokens remain reserved so they cannot be accidentally taken by `git`
+/// (or another tool), but they are not CLI v1 commitments. They are **not**
+/// part of the live binary surface: they do not appear in `main.rs` dispatch,
+/// `hugit --help`, or the WP-X5 no-shadow oracle.
 ///
 /// When a verb graduates to a live dispatch, move it from here to
 /// [`HUGIT_VERBS`] and wire it in `main.rs`. (`campaign`, `intent`, and `pr`
 /// graduated in the PC wave — dispatched as honest stubs at PC0.)
 pub const HUGIT_RESERVED_VERBS: &[&str] = &[
-    // Phase B — Orchestrator / Worker (planned)
+    // External orchestration surface — not CLI v1.
     // (`land` graduated to HUGIT_VERBS — `land queue` runs the REAL union-test +
     // bisect + memoize engine over the queue, file-backed-AC + local-memoized at
     // single-tenant altitude; the distributed runner fabric swaps in behind the
     // same MemoCheck trait.)
     // (`check` + `verdict` graduated to HUGIT_VERBS at W0 — wedge EXECUTE wave;
     // `diag` graduated at the diagnosis wave — log-backed bisect.)
-    // Phase C — Workspace + context (planned)
+    // External workspace/context surface — not CLI v1.
     "ws", // hugit ws spawn/attach/snap/gc — claim-fenced workspaces
     // (`ctx` graduated to HUGIT_VERBS — `ctx resume` is REAL over the log's
-    // journal.note records; `ctx snap` stays P2-gated on the DO/R2 JournalStore.)
-    // Phase D — The forge verbs (planned)
+    // journal.note records; `ctx snap` stays outside CLI v1.)
+    // Reserved namespace area — no current CLI v1 commitment.
     // (`ledger` graduated to HUGIT_VERBS — Phase-D read surface, REAL-wired over
     // the canonical `--log` via `hugit_ledger::Ledger`; `fleet` + `watch`
     // graduated alongside it — `hugit_ledger::FleetState` / `WatchDisplay`;
