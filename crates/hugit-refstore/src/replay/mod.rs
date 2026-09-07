@@ -16,8 +16,10 @@
 //! inert (it advances the chain but does not touch ref state — forward-
 //! compatible by construction):
 //!
-//! - `ref.update` — payload is canonical JSON `{"ref": <name>, "target": <oid>}`;
-//!   sets `name -> oid` (insert or overwrite).
+//! - `ref.update` — a commit payload is canonical JSON
+//!   `{"ref": <name>, "target": <oid>}` and sets `name -> oid` (insert or
+//!   overwrite). Hook captures may instead carry `checkout:true` or
+//!   `attempt:true`; those are valid inert observations and do not mutate refs.
 //! - `ref.delete` — payload is canonical JSON `{"ref": <name>}`; removes `name`.
 //! - `intent.landed` — payload is canonical JSON
 //!   `{"intent_id": <id>, "ref": <name>, "target": <oid>, "charter": <text>}`; it
@@ -142,14 +144,15 @@ pub fn replay_unchecked(records: &[EventRecord]) -> Result<RefState, ReplayError
             // into the prior-state projection.
             "ref.update" | INTENT_LANDED_KIND => {
                 let v: serde_json::Value = parse_payload(record)?;
-                // A CHECKOUT ref.update (`{checkout:true, from, to, branch}`) is an
-                // INERT event for the ref view: it records that a worktree moved to
-                // an already-existing ref target — it never advances a ref name it
-                // does not carry. Skip it (forward-compatible with the capture
-                // kinds); a ref-view that treats it as `{ref,target}` would fail
-                // closed on a perfectly valid captured checkout (the export gap a
-                // user's walkthrough found).
-                if v.get("checkout").and_then(serde_json::Value::as_bool) == Some(true) {
+                // CHECKOUT and PUSH-ATTEMPT ref.updates are INERT observations:
+                // they record worktree movement or a proposed push, but never
+                // advance a ref without the commit capture's ref/target pair.
+                // Treating either as a ref mutation would fail closed on a valid
+                // captured Git activity log during replay/export.
+                let inert_capture = ["checkout", "attempt"]
+                    .iter()
+                    .any(|key| v.get(key).and_then(serde_json::Value::as_bool) == Some(true));
+                if inert_capture {
                     continue;
                 }
                 let name = field_str(&v, "ref").ok_or_else(|| bad(record))?;

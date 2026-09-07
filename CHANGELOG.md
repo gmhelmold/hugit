@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(refstore): captured `push-attempt` `ref.update` events are now inert in
+  replay/export, matching checkout captures. Dogfood against an OpenCode clone
+  found export rejecting a valid pre-push provenance event; regression coverage
+  pins the event as non-mutating while preserving the ref projection.
+
 - fix(dock): **cold-verify audit closed — 10/10 findings fixed with biting regression tests** ·
   F1 `hugit dock land` now finalizes accounting (close after releasing the land lock, never swallowed);
   F2 R5 reconcile dedupe keyed on the full env→cwd pair (a second divergence is never silent);

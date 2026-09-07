@@ -211,3 +211,31 @@ fn checkout_ref_update_is_inert_not_malformed() {
         "the post-checkout commit ref is the projected value"
     );
 }
+
+/// A captured PUSH ATTEMPT (`ref.update` with `attempt:true` and no
+/// `ref`/`target`) is also inert. A pre-push hook records the proposed local
+/// shas for provenance, but it must not make replay/export reject the log.
+#[test]
+fn push_attempt_ref_update_is_inert_not_malformed() {
+    let mut log = EventLog::new();
+    log.append_for_test(
+        "ref.update",
+        vec!["orchestrator:hugit-hook".to_string()],
+        r#"{"ref":"refs/heads/main","target":"1111111111111111111111111111111111111111"}"#
+            .to_string(),
+        1,
+    );
+    log.append_for_test(
+        "ref.update",
+        vec!["orchestrator:hugit-hook".to_string()],
+        r#"{"attempt":true,"refspecs":"refs/heads/main 1111111111111111111111111111111111111111 refs/heads/main 1111111111111111111111111111111111111111","shas":["1111111111111111111111111111111111111111"]}"#
+            .to_string(),
+        2,
+    );
+
+    let state = replay(&log).expect("push attempt must not make replay fail");
+    assert_eq!(
+        state.get("refs/heads/main"),
+        Some("1111111111111111111111111111111111111111")
+    );
+}
