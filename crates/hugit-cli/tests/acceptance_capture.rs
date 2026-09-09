@@ -193,6 +193,38 @@ fn real_git_commit_captures_ref_update() {
 }
 
 #[test]
+fn rapid_commits_capture_their_snapshotted_oids() {
+    let _serial = hook_serial().lock().expect("hook serial lock");
+    let root = scratch("rapid-commits");
+    lib_init(&root);
+    set_git_identity(&root);
+    let log = root.join(".hugit/log.json");
+    std::fs::write(root.join("a.txt"), "one\n").unwrap();
+    git_with_hugit(&root, &["add", "a.txt"]);
+    assert_eq!(
+        git_with_hugit(&root, &["commit", "-m", "one", "--no-gpg-sign"]).0,
+        0
+    );
+    let first = git_in(&root, &["rev-parse", "HEAD"]).1.trim().to_string();
+    std::fs::write(root.join("a.txt"), "two\n").unwrap();
+    git_with_hugit(&root, &["add", "a.txt"]);
+    assert_eq!(
+        git_with_hugit(&root, &["commit", "-m", "two", "--no-gpg-sign"]).0,
+        0
+    );
+    let second = git_in(&root, &["rev-parse", "HEAD"]).1.trim().to_string();
+    let captures = wait_for_commit_captures(&log, 2, 20000);
+    assert!(
+        captures.contains(&first),
+        "first commit capture survives rapid successor: {captures:?}"
+    );
+    assert!(
+        captures.contains(&second),
+        "second commit capture exists: {captures:?}"
+    );
+}
+
+#[test]
 fn capture_discovers_newline_path_and_target_hunk_from_real_git() {
     let root = scratch("nul-path");
     lib_init(&root);
@@ -281,13 +313,6 @@ fn capture_discovers_newline_path_and_target_hunk_from_real_git() {
     assert_eq!(
         symbol_answer["contributors"].as_array().map(Vec::len),
         Some(1)
-    );
-    assert!(
-        root.join(".hugit/cache/symbols")
-            .read_dir()
-            .unwrap()
-            .next()
-            .is_some()
     );
 }
 

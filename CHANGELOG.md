@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(cli): `hugit why --line` rejects non-UTF-8 Git paths instead of lossy
+  decoding them, and `hugit why --symbol` derives symbols only from immutable
+  Git blobs. Post-commit hooks snapshot their commit OID before asynchronous
+  capture so rapid commits keep correct provenance.
+
 ## [0.1.4] - 2026-09-07
 
 - fix(cli): `hugit setup --repo` now installs hooks safely in existing
