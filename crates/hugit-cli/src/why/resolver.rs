@@ -104,6 +104,25 @@ pub enum WhyError {
     SymbolUnresolved { path: String, symbol: String },
 }
 
+/// Exact result after Git has blamed a committed-tree line. It never selects an
+/// event by path recency: caller supplies Git's owning commit oid.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PreciseLineResolution {
+    Attributed {
+        commit: String,
+        answer: ProvenanceAnswer,
+    },
+    Unattributed {
+        commit: String,
+    },
+    RangeUnavailable {
+        commit: String,
+    },
+    RangeMismatch {
+        commit: String,
+    },
+}
+
 impl std::fmt::Display for WhyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -270,7 +289,11 @@ fn parse_files(v: &serde_json::Value) -> Vec<String> {
         .and_then(|x| x.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|f| f.as_str().map(String::from))
+                .filter_map(|f| {
+                    f.as_str()
+                        .or_else(|| f.get("path").and_then(|path| path.as_str()))
+                        .map(String::from)
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -368,6 +391,54 @@ pub fn resolve_why(query: &WhyQuery, entries: &[LogEntry]) -> Result<ProvenanceA
 
     Err(WhyError::NotFound {
         path: query.path.clone(),
+    })
+}
+
+pub fn resolve_precise_line(
+    path: &str,
+    line: u64,
+    blamed_commit: &str,
+    entries: &[LogEntry],
+) -> Result<PreciseLineResolution, WhyError> {
+    let event = entries.iter().rev().find(|entry| {
+        let payload: serde_json::Value = match serde_json::from_str(&entry.record.payload) {
+            Ok(payload) => payload,
+            Err(_) => return false,
+        };
+        payload.get("target").and_then(|target| target.as_str()) == Some(blamed_commit)
+            && payload.get("files").is_some()
+    });
+    let Some(event) = event else {
+        return Ok(PreciseLineResolution::Unattributed {
+            commit: blamed_commit.to_string(),
+        });
+    };
+    let payload: serde_json::Value =
+        serde_json::from_str(&event.record.payload).map_err(|_| WhyError::BadPayload {
+            seq: event.record.seq,
+        })?;
+    if payload.get("hunk_capture").and_then(|value| value.as_str()) != Some("complete") {
+        return Ok(PreciseLineResolution::RangeUnavailable {
+            commit: blamed_commit.to_string(),
+        });
+    }
+    let Some(attribution) = payload_attribution(&event.record.payload, path) else {
+        return Ok(PreciseLineResolution::RangeMismatch {
+            commit: blamed_commit.to_string(),
+        });
+    };
+    if attribution.matches(Some(line), None) {
+        return build_answer(event)
+            .map(|answer| PreciseLineResolution::Attributed {
+                commit: blamed_commit.to_string(),
+                answer,
+            })
+            .map_err(|_| WhyError::BadPayload {
+                seq: event.record.seq,
+            });
+    }
+    Ok(PreciseLineResolution::RangeMismatch {
+        commit: blamed_commit.to_string(),
     })
 }
 

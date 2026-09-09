@@ -120,6 +120,16 @@ pub struct SymbolItem {
     pub line: u32,
 }
 
+/// Internal exact declaration span for committed-tree provenance. This is not a
+/// wire-model replacement for [`SymbolItem`]; consumers that need ranges opt in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolRange {
+    pub kind: SymbolKind,
+    pub name: String,
+    pub start_line: u32,
+    pub end_line: u32,
+}
+
 // The queries, embedded so the crate is self-contained (no runtime file read).
 const RUST_QUERY: &str = include_str!("../queries/rust.scm");
 const TYPESCRIPT_QUERY: &str = include_str!("../queries/typescript.scm");
@@ -142,6 +152,19 @@ type Classifier<'a> = dyn Fn(&str, Node, Option<Node>, &[u8]) -> Option<(SymbolK
 /// appearance (declaration start byte). Deterministic; empty on
 /// binary / non-UTF-8 / oversized / unparseable input (never panics).
 pub fn outline_blob(lang: Lang, source: &[u8]) -> Vec<SymbolItem> {
+    outline_blob_ranges(lang, source)
+        .into_iter()
+        .map(|symbol| SymbolItem {
+            kind: symbol.kind,
+            name: symbol.name,
+            line: symbol.start_line,
+        })
+        .collect()
+}
+
+/// Parse `source` as `lang` and return declaration source ranges. Empty means
+/// unsupported, binary, oversized, or unparseable input under existing totality law.
+pub fn outline_blob_ranges(lang: Lang, source: &[u8]) -> Vec<SymbolRange> {
     // Bound the input — a hostile or accidental multi-GB blob must not OOM.
     if source.len() > MAX_INPUT_BYTES {
         return Vec::new();
@@ -164,7 +187,7 @@ pub fn outline_blob(lang: Lang, source: &[u8]) -> Vec<SymbolItem> {
 
 /// Dispatch `text` to the per-language [`outline_with`] engine. Split out from
 /// [`outline_blob`] so the totality `catch_unwind` wraps exactly the parse path.
-fn outline_for_lang(lang: Lang, text: &str) -> Vec<SymbolItem> {
+fn outline_for_lang(lang: Lang, text: &str) -> Vec<SymbolRange> {
     // Compile each grammar's tree-sitter `Query` ONCE per process and reuse it.
     // `Query::new` is expensive (tens of ms — worst for the large C++ grammar) and
     // was previously recompiled on EVERY call: a real `/v1/repos/.../blob` hot-path
@@ -237,7 +260,7 @@ fn outline_with(
     language: tree_sitter::Language,
     query: &Query,
     classify: &Classifier<'_>,
-) -> Vec<SymbolItem> {
+) -> Vec<SymbolRange> {
     let mut parser = Parser::new();
     if parser.set_language(&language).is_err() {
         return Vec::new();
@@ -250,7 +273,7 @@ fn outline_with(
     let name_capture = capture_names.iter().position(|n| *n == "name");
 
     let src = text.as_bytes();
-    let mut items: Vec<(usize, SymbolItem)> = Vec::new();
+    let mut items: Vec<(usize, SymbolRange)> = Vec::new();
 
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, tree.root_node(), src);
@@ -285,8 +308,15 @@ fn outline_with(
             continue;
         }
 
-        let line = decl.start_position().row as u32 + 1; // 1-based
-        items.push((decl.start_byte(), SymbolItem { kind, name, line }));
+        items.push((
+            decl.start_byte(),
+            SymbolRange {
+                kind,
+                name,
+                start_line: decl.start_position().row as u32 + 1,
+                end_line: decl.end_position().row as u32 + 1,
+            },
+        ));
     }
 
     // Deterministic order: by source position, then kind+name to break ties
@@ -845,6 +875,14 @@ mod tests {
     fn deterministic() {
         let src = b"fn a() {}\nstruct B;\nfn c() {}\n";
         assert_eq!(outline_blob(Lang::Rust, src), outline_blob(Lang::Rust, src));
+    }
+
+    #[test]
+    fn ranges_cover_declaration_source_lines() {
+        let ranges = outline_blob_ranges(Lang::Rust, b"fn alpha() {\n    let x = 1;\n}\n");
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].name, "alpha");
+        assert_eq!((ranges[0].start_line, ranges[0].end_line), (1, 3));
     }
 
     /// Every [`Lang`] the outliner supports — keep in lock-step with the enum.

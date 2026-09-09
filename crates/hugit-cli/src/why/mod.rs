@@ -9,5 +9,6 @@
 pub mod resolver;
 
 pub use resolver::{
-    AuthorKind, ChainEntry, ProvenanceAnswer, WhyError, WhyQuery, resolve_why, resolve_why_chain,
+    AuthorKind, ChainEntry, PreciseLineResolution, ProvenanceAnswer, WhyError, WhyQuery,
+    resolve_precise_line, resolve_why, resolve_why_chain,
 };
