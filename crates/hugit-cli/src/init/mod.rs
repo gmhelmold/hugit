@@ -93,8 +93,11 @@ HL="$COMMON/../.hugit/hooks.log"
   mkdir -p "$(dirname "$LOG")" 2>/dev/null
   printf '[]\n' > "$LOG" 2>/dev/null
 }
+OID="$(git rev-parse HEAD 2>/dev/null)" || exit 0
+BRANCH="$(git branch --show-current 2>/dev/null)"
+RECORDED_AT="$(git log -1 --format=%ct 2>/dev/null)"
 (
-  "$HUGIT_BIN" capture --kind commit --top-level "$ROOT" --log "$LOG" --hook-log "$HL"     --oid "$(git rev-parse HEAD 2>/dev/null)"     --branch "$(git branch --show-current 2>/dev/null)"     --recorded-at "$(git log -1 --format=%ct 2>/dev/null)"
+  "$HUGIT_BIN" capture --kind commit --top-level "$ROOT" --log "$LOG" --hook-log "$HL"     --oid "$OID"     --branch "$BRANCH"     --recorded-at "$RECORDED_AT"
 ) >>"$HL" 2>&1 &
 exit 0
 "#.to_string(),

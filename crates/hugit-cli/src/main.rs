@@ -315,10 +315,15 @@ fn run_why(args: WhyArgs) -> Result<String, PorcelainError> {
             ));
         }
         let mut contributors = BTreeMap::new();
-        for line in symbol.start_line..=symbol.end_line {
-            let blamed = git_blame_line(repo, &commit, &query.path, line as u64)?;
-            let resolution = resolve_precise_line(&query.path, line as u64, &blamed, &entries)
-                .map_err(|error| {
+        for (line, blamed) in git_blame_range(
+            repo,
+            &commit,
+            &query.path,
+            symbol.start_line as u64,
+            symbol.end_line as u64,
+        )? {
+            let resolution =
+                resolve_precise_line(&query.path, line, &blamed, &entries).map_err(|error| {
                     PorcelainError::new(
                         "bad_log",
                         error.to_string(),
@@ -327,7 +332,7 @@ fn run_why(args: WhyArgs) -> Result<String, PorcelainError> {
                 })?;
             contributors
                 .entry(blamed)
-                .or_insert_with(|| precise_line_json(&query.path, line as u64, resolution));
+                .or_insert_with(|| precise_line_json(&query.path, line, resolution));
         }
         let contributors = contributors.into_values().collect::<Vec<_>>();
         let status = contributors
@@ -437,6 +442,58 @@ fn git_blame_line(
         })
 }
 
+fn git_blame_range(
+    repo: &std::path::Path,
+    commit: &str,
+    path: &str,
+    start: u64,
+    end: u64,
+) -> Result<Vec<(u64, String)>, PorcelainError> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args([
+            "blame",
+            "--line-porcelain",
+            "-L",
+            &format!("{start},{end}"),
+            commit,
+            "--",
+            path,
+        ])
+        .output()
+        .map_err(|error| PorcelainError::io("blame committed symbol", repo, &error))?;
+    if !output.status.success() {
+        return Err(PorcelainError::new(
+            "line_not_found",
+            format!("symbol range {start}..{end} of `{path}` does not exist at commit `{commit}`"),
+            "query a symbol in selected committed tree",
+        ));
+    }
+    let lines = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if !(fields.len() == 3 || fields.len() == 4)
+                || fields[0].len() != 40
+                || !fields[0].bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return None;
+            }
+            let line = fields[2].parse::<u64>().ok()?;
+            Some((line, fields[0].to_string()))
+        })
+        .collect::<Vec<_>>();
+    if lines.len() == (end - start + 1) as usize {
+        return Ok(lines);
+    }
+    Err(PorcelainError::new(
+        "blame_failed",
+        "git blame returned an incomplete symbol range",
+        "verify repository object integrity",
+    ))
+}
+
 fn cached_symbols(
     repo: &std::path::Path,
     commit: &str,
@@ -468,9 +525,10 @@ fn cached_symbols(
         ));
     }
     let oid = String::from_utf8_lossy(&oid.stdout).trim().to_string();
-    let cache = repo
-        .join(".hugit/cache/symbols")
-        .join(format!("{oid}-v{SYMBOL_CACHE_SCHEMA}.json"));
+    let cache = repo.join(".hugit/cache/symbols").join(format!(
+        "{oid}-{}-v{SYMBOL_CACHE_SCHEMA}.json",
+        lang.as_str()
+    ));
     if let Ok(bytes) = std::fs::read(&cache)
         && let Ok(symbols) = serde_json::from_slice::<Vec<CachedSymbol>>(&bytes)
         && symbols.iter().all(|symbol: &CachedSymbol| {

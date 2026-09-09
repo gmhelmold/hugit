@@ -34,9 +34,10 @@
 //! so it does not shadow git — the X5 no-shadow law holds. (`hook` WOULD shadow
 //! `git hook` — that's why this verb is named `capture`.)
 
+use std::io::Read;
 use std::path::PathBuf;
-use std::process::Command;
 use std::process::ExitCode;
+use std::process::{Command, Stdio};
 
 use serde_json::json;
 
@@ -54,6 +55,8 @@ const HOOK_PRINCIPAL: &str = "orchestrator:hugit-hook";
 /// Bounded hook enrichment: exceeding this preserves file-level facts instead
 /// of making an unbounded number of per-path Git invocations.
 const MAX_HUNK_FILES: usize = 256;
+const MAX_DISCOVERY_BYTES: usize = 1024 * 1024;
+const MAX_PATCH_BYTES: usize = 1024 * 1024;
 
 /// Milliseconds now (unix epoch) — the wall-clock stamp for push-attempts and
 /// checkouts (no committer date available); commits/merges pass `--recorded-at`.
@@ -258,7 +261,7 @@ fn capture_commit_files(
     top_level: &std::path::Path,
     oid: &str,
 ) -> (Vec<serde_json::Value>, &'static str) {
-    let paths = match git_output(
+    let paths = match git_output_limited(
         top_level,
         [
             "diff-tree",
@@ -269,6 +272,7 @@ fn capture_commit_files(
             "-z",
             oid,
         ],
+        MAX_DISCOVERY_BYTES,
     ) {
         Ok(bytes) => bytes
             .split(|byte| *byte == 0)
@@ -305,7 +309,7 @@ fn capture_path_hunks(
     oid: &str,
     path: &str,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let patch = git_output(
+    let patch = git_output_limited(
         top_level,
         [
             "diff-tree",
@@ -317,6 +321,7 @@ fn capture_path_hunks(
             "--",
             path,
         ],
+        MAX_PATCH_BYTES,
     )?;
     parse_target_ranges(&patch).map(|ranges| {
         ranges
@@ -326,17 +331,34 @@ fn capture_path_hunks(
     })
 }
 
-fn git_output<const N: usize>(
+fn git_output_limited<const N: usize>(
     top_level: &std::path::Path,
     args: [&str; N],
+    limit: usize,
 ) -> Result<Vec<u8>, String> {
-    let output = Command::new("git")
+    let mut child = Command::new("git")
         .args(args)
         .current_dir(top_level)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|error| format!("run git diff-tree: {error}"))?;
+    let mut stdout = Vec::new();
+    child
+        .stdout
+        .take()
+        .ok_or_else(|| "git diff-tree stdout unavailable".to_string())?
+        .take((limit + 1) as u64)
+        .read_to_end(&mut stdout)
+        .map_err(|error| format!("read git diff-tree output: {error}"))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("wait for git diff-tree: {error}"))?;
+    if stdout.len() > limit {
+        return Err(format!("git diff-tree output exceeds {limit} byte limit"));
+    }
     if output.status.success() {
-        return Ok(output.stdout);
+        return Ok(stdout);
     }
     Err(format!(
         "git diff-tree failed: {}",
