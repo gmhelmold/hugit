@@ -150,14 +150,14 @@ No agent gets discretion to invent a new event kind, background daemon, transcri
 **Change**
 
 1. Add an internal symbol-range projection from Git blob: `{name, kind, start_line, end_line}`. Current `SymbolItem` exposes only start line, so range is a deliberate new internal contract. Public outline stays unchanged.
-2. Cache this projection under a Hugit-managed local cache keyed by `<blob oid>/<symbol schema version>`. Cache contents are derived and disposable; never append them to canonical log.
+2. Parse the immutable Git blob for each precise symbol query. Do not persist derived symbol data under repository-controlled paths: a cache must never become a provenance input or arbitrary-write primitive.
 3. Resolve `why --symbol` against selected commit blob, then blame the complete symbol range. Group output by blamed commit and return all contributors in deterministic order.
 4. Map each contributor through WP2's captured commit lookup. Uncaptured contributors remain explicit, not dropped.
 5. Reject unsupported language, missing symbol, ambiguous overload, generated/binary blob, and oversized parse according to explicit structured result kinds.
 
 **Acceptance**
 
-- Same blob parses once across repeated symbol queries; test observes cache hit without relying on wall-clock timing.
+- A malformed or repository-supplied derived-data file cannot alter symbol provenance because query answers come from the immutable Git blob.
 - Symbol spanning commits returns multiple contributors, not one fabricated origin.
 - A symbol with bytes from several commits returns contributors deterministically; no test claims rename/move lineage before that contract exists.
 - Unsupported file returns `unsupported_language`, never file-level provenance.

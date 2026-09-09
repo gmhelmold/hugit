@@ -453,4 +453,13 @@ mod tests {
         let bytes = std::fs::read_to_string(&log).unwrap();
         assert!(bytes.contains("\"seq\":0"), "existing log left untouched");
     }
+
+    #[test]
+    fn post_commit_snapshots_head_before_detaching_capture() {
+        let script = hook_script("post-commit");
+        let snapshot = script.find("OID=\"$(git rev-parse HEAD").unwrap();
+        let child = script.find("(\n  \"$HUGIT_BIN\" capture").unwrap();
+        assert!(snapshot < child);
+        assert!(script.contains("--oid \"$OID\""));
+    }
 }

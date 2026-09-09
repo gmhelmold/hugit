@@ -57,7 +57,7 @@ use hugit_cli::why::{
 use hugit_checks::affected::{BuildGraph, Ecosystem, PackageNode};
 use hugit_contracts::{AttestationChain, EventRecord, IntentSidecar};
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 
 /// `hugit` — the git-compatible, LLM-native forge CLI.
@@ -167,10 +167,8 @@ struct WhyLogEntryInput {
     sidecar: Option<IntentSidecar>,
 }
 
-const SYMBOL_CACHE_SCHEMA: u32 = 1;
 const MAX_SYMBOL_LINES: u32 = 10_000;
 
-#[derive(Deserialize, Serialize)]
 struct CachedSymbol {
     name: String,
     start_line: u32,
@@ -525,12 +523,8 @@ fn cached_symbols(
         ));
     }
     let oid = String::from_utf8_lossy(&oid.stdout).trim().to_string();
-    let cache = repo.join(".hugit/cache/symbols").join(format!(
-        "{oid}-{}-v{SYMBOL_CACHE_SCHEMA}.json",
-        lang.as_str()
-    ));
-    // `.hugit` may come from an untrusted checkout. Cache bytes are disposable
-    // derived output, never evidence for a provenance answer.
+    // `.hugit` may come from an untrusted checkout. Do not persist derived
+    // symbol data there: a cache is never worth a provenance write primitive.
     let blob = std::process::Command::new("git")
         .arg("-C")
         .arg(repo)
@@ -552,15 +546,6 @@ fn cached_symbols(
             end_line: symbol.end_line,
         })
         .collect::<Vec<_>>();
-    std::fs::create_dir_all(cache.parent().expect("cache path has parent"))
-        .map_err(|error| PorcelainError::io("create symbol cache", &cache, &error))?;
-    std::fs::write(
-        &cache,
-        serde_json::to_vec(&symbols).map_err(|error| {
-            PorcelainError::internal(format!("serialise symbol cache: {error}"))
-        })?,
-    )
-    .map_err(|error| PorcelainError::io("write symbol cache", &cache, &error))?;
     Ok(symbols)
 }
 
