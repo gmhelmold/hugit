@@ -193,6 +193,38 @@ fn real_git_commit_captures_ref_update() {
 }
 
 #[test]
+fn rapid_commits_capture_their_snapshotted_oids() {
+    let _serial = hook_serial().lock().expect("hook serial lock");
+    let root = scratch("rapid-commits");
+    lib_init(&root);
+    set_git_identity(&root);
+    let log = root.join(".hugit/log.json");
+    std::fs::write(root.join("a.txt"), "one\n").unwrap();
+    git_with_hugit(&root, &["add", "a.txt"]);
+    assert_eq!(
+        git_with_hugit(&root, &["commit", "-m", "one", "--no-gpg-sign"]).0,
+        0
+    );
+    let first = git_in(&root, &["rev-parse", "HEAD"]).1.trim().to_string();
+    std::fs::write(root.join("a.txt"), "two\n").unwrap();
+    git_with_hugit(&root, &["add", "a.txt"]);
+    assert_eq!(
+        git_with_hugit(&root, &["commit", "-m", "two", "--no-gpg-sign"]).0,
+        0
+    );
+    let second = git_in(&root, &["rev-parse", "HEAD"]).1.trim().to_string();
+    let captures = wait_for_commit_captures(&log, 2, 20000);
+    assert!(
+        captures.contains(&first),
+        "first commit capture survives rapid successor: {captures:?}"
+    );
+    assert!(
+        captures.contains(&second),
+        "second commit capture exists: {captures:?}"
+    );
+}
+
+#[test]
 fn capture_discovers_newline_path_and_target_hunk_from_real_git() {
     let root = scratch("nul-path");
     lib_init(&root);
@@ -289,6 +321,94 @@ fn capture_discovers_newline_path_and_target_hunk_from_real_git() {
             .next()
             .is_some()
     );
+    let cache = root
+        .join(".hugit/cache/symbols")
+        .read_dir()
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    std::fs::write(
+        &cache,
+        br#"[{"name":"forged","start_line":1,"end_line":1}]"#,
+    )
+    .unwrap();
+    let (code, answer) = run_in(
+        &root,
+        &[
+            "why",
+            "--log",
+            log.to_str().unwrap(),
+            "--repo",
+            root.to_str().unwrap(),
+            "--commit",
+            "HEAD",
+            "--path",
+            path,
+            "--symbol",
+            "alpha",
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "tampered cache cannot alter symbol provenance: {answer}"
+    );
+    assert_eq!(answer["observed"]["range"], serde_json::json!([1, 3]));
+}
+
+#[cfg(unix)]
+#[test]
+fn capture_refuses_non_utf8_path_without_lossy_attribution() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let root = scratch("non-utf8-path");
+    lib_init(&root);
+    set_git_identity(&root);
+    let path = std::ffi::OsString::from_vec(b"bad-\xff.rs".to_vec());
+    if std::fs::write(root.join(&path), "fn x() {}\n").is_err() {
+        return;
+    }
+    assert!(
+        Command::new("git")
+            .arg("add")
+            .arg(&path)
+            .current_dir(&root)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args(["commit", "-m", "non utf8", "--no-gpg-sign"])
+            .current_dir(&root)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let oid = git_in(&root, &["rev-parse", "HEAD"]).1.trim().to_string();
+    let log = root.join(".hugit/log.json");
+    let args = vec![
+        "capture".to_string(),
+        "--kind".to_string(),
+        "commit".to_string(),
+        "--top-level".to_string(),
+        root.display().to_string(),
+        "--log".to_string(),
+        log.display().to_string(),
+        "--oid".to_string(),
+        oid,
+    ];
+    assert!(capture_binary(&root, &args).status.success());
+    let payload: Value = serde_json::from_str(
+        log_records(&log)
+            .last()
+            .and_then(|record| record["payload"].as_str())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(payload["hunk_capture"], "unavailable");
+    assert!(payload.get("files").is_none());
 }
 
 #[test]

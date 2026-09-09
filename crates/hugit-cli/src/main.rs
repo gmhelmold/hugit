@@ -529,14 +529,8 @@ fn cached_symbols(
         "{oid}-{}-v{SYMBOL_CACHE_SCHEMA}.json",
         lang.as_str()
     ));
-    if let Ok(bytes) = std::fs::read(&cache)
-        && let Ok(symbols) = serde_json::from_slice::<Vec<CachedSymbol>>(&bytes)
-        && symbols.iter().all(|symbol: &CachedSymbol| {
-            symbol.start_line > 0 && symbol.end_line >= symbol.start_line
-        })
-    {
-        return Ok(symbols);
-    }
+    // `.hugit` may come from an untrusted checkout. Cache bytes are disposable
+    // derived output, never evidence for a provenance answer.
     let blob = std::process::Command::new("git")
         .arg("-C")
         .arg(repo)

@@ -274,11 +274,10 @@ fn capture_commit_files(
         ],
         MAX_DISCOVERY_BYTES,
     ) {
-        Ok(bytes) => bytes
-            .split(|byte| *byte == 0)
-            .filter(|path| !path.is_empty())
-            .map(|path| String::from_utf8_lossy(path).into_owned())
-            .collect::<Vec<_>>(),
+        Ok(bytes) => match decode_git_paths(&bytes) {
+            Some(paths) => paths,
+            None => return (vec![], "unavailable"),
+        },
         Err(_) => return (vec![], "unavailable"),
     };
     if paths.len() > MAX_HUNK_FILES {
@@ -302,6 +301,14 @@ fn capture_commit_files(
         })
         .collect();
     (files, if complete { "complete" } else { "partial" })
+}
+
+fn decode_git_paths(bytes: &[u8]) -> Option<Vec<String>> {
+    bytes
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8(path.to_vec()).ok())
+        .collect()
 }
 
 fn capture_path_hunks(
@@ -612,5 +619,10 @@ mod tests {
     #[test]
     fn target_hunk_parser_rejects_malformed_header() {
         assert!(parse_target_ranges(b"@@ -1 +wat @@\n+x\n").is_err());
+    }
+
+    #[test]
+    fn non_utf8_git_path_is_unavailable_not_lossy() {
+        assert_eq!(decode_git_paths(b"safe.rs\0bad-\xff.rs\0"), None);
     }
 }
