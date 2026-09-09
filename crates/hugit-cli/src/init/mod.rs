@@ -70,8 +70,9 @@ pub fn run(args: InitArgs) -> ExitCode {
 /// - detaches the capture child (`nohup ... &` + re-direct) then exits 0,
 ///   so a hugit failure can NEVER fail/block the git operation.
 pub(crate) fn hook_script(kind: &str) -> String {
-    // The capture invocation for each kind (post-commit takes the new HEAD +
-    // branch; post-checkout passes from/to/branch when flag==1; pre-push reads
+    // The capture invocation for each kind (post-commit takes immutable commit
+    // facts only; capture itself discovers paths from that commit with Git;
+    // post-checkout passes from/to/branch when flag==1; pre-push reads
     // refspecs/shas from stdin into the child; post-merge passes the merged tip).
     match kind {
     "post-commit" => r#"#!/bin/sh
@@ -92,13 +93,11 @@ HL="$COMMON/../.hugit/hooks.log"
   mkdir -p "$(dirname "$LOG")" 2>/dev/null
   printf '[]\n' > "$LOG" 2>/dev/null
 }
+OID="$(git rev-parse HEAD 2>/dev/null)" || exit 0
+BRANCH="$(git branch --show-current 2>/dev/null)"
+RECORDED_AT="$(git log -1 --format=%ct 2>/dev/null)"
 (
-  FILES="$(git diff-tree --root --name-only -r --no-commit-id HEAD 2>/dev/null)"
-  FILE_ARGS=""
-  for f in $FILES; do
-FILE_ARGS="$FILE_ARGS --files $f"
-  done
-  "$HUGIT_BIN" capture --kind commit --top-level "$ROOT" --log "$LOG" --hook-log "$HL"     --oid "$(git rev-parse HEAD 2>/dev/null)"     --branch "$(git branch --show-current 2>/dev/null)"     --recorded-at "$(git log -1 --format=%ct 2>/dev/null)" $FILE_ARGS
+  "$HUGIT_BIN" capture --kind commit --top-level "$ROOT" --log "$LOG" --hook-log "$HL"     --oid "$OID"     --branch "$BRANCH"     --recorded-at "$RECORDED_AT"
 ) >>"$HL" 2>&1 &
 exit 0
 "#.to_string(),

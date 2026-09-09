@@ -180,12 +180,114 @@ fn real_git_commit_captures_ref_update() {
         |p| {
             p["ref"].as_str() == Some(&format!("refs/heads/{branch}"))
                 && !p["target"].as_str().unwrap_or("").is_empty()
+                && p["hunk_capture"] == "complete"
+                && p["files"][0]["path"] == "a.txt"
+                && p["files"][0]["ranges"][0] == serde_json::json!({ "start": 1, "end": 1 })
         },
         20000,
     );
     assert!(
         got,
         "post-commit captured ref.update on the branch with a real oid"
+    );
+}
+
+#[test]
+fn capture_discovers_newline_path_and_target_hunk_from_real_git() {
+    let root = scratch("nul-path");
+    lib_init(&root);
+    set_git_identity(&root);
+    let path = "src/line\nbreak.rs";
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join(path), "pub fn alpha() {\n    let value = 1;\n}\n").unwrap();
+    git_in(&root, &["add", "--", path]);
+    assert_eq!(
+        git_in(&root, &["commit", "-m", "newline path", "--no-gpg-sign"]).0,
+        0
+    );
+    let oid = git_in(&root, &["rev-parse", "HEAD"]).1.trim().to_string();
+    let log = root.join(".hugit/log.json");
+    let args = vec![
+        "capture".to_string(),
+        "--kind".to_string(),
+        "commit".to_string(),
+        "--top-level".to_string(),
+        root.display().to_string(),
+        "--log".to_string(),
+        log.display().to_string(),
+        "--oid".to_string(),
+        oid.clone(),
+    ];
+    assert!(capture_binary(&root, &args).status.success());
+    let payload: Value = serde_json::from_str(
+        log_records(&log)
+            .last()
+            .and_then(|record| record["payload"].as_str())
+            .expect("capture event payload"),
+    )
+    .unwrap();
+    assert_eq!(payload["hunk_capture"], "complete");
+    assert_eq!(payload["files"][0]["path"], path);
+    assert_eq!(
+        payload["files"][0]["ranges"],
+        serde_json::json!([{ "start": 1, "end": 3 }])
+    );
+
+    let (code, answer) = run_in(
+        &root,
+        &[
+            "why",
+            "--log",
+            log.to_str().unwrap(),
+            "--repo",
+            root.to_str().unwrap(),
+            "--commit",
+            "HEAD",
+            "--path",
+            path,
+            "--line",
+            "2",
+        ],
+    );
+    assert_eq!(code, 0, "precise why resolves real Git line: {answer}");
+    assert_eq!(answer["status"], "attributed");
+    assert_eq!(answer["observed"]["commit"], oid);
+
+    let (code, symbol_answer) = run_in(
+        &root,
+        &[
+            "why",
+            "--log",
+            log.to_str().unwrap(),
+            "--repo",
+            root.to_str().unwrap(),
+            "--commit",
+            "HEAD",
+            "--path",
+            path,
+            "--symbol",
+            "alpha",
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "precise why resolves committed symbol: {symbol_answer}"
+    );
+    assert_eq!(symbol_answer["status"], "attributed");
+    assert_eq!(
+        symbol_answer["observed"]["range"],
+        serde_json::json!([1, 3])
+    );
+    assert_eq!(
+        symbol_answer["contributors"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert!(
+        root.join(".hugit/cache/symbols")
+            .read_dir()
+            .unwrap()
+            .next()
+            .is_some()
     );
 }
 
@@ -296,10 +398,8 @@ fn missing_bin_never_blocks_git() {
 fn capture_binary_scrubs_every_payload_leaf_before_append() {
     const SAFE_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
     const SAFE_FROM: &str = "89abcdef0123456789abcdef0123456789abcdef";
-    const SAFE_PATH: &str = "src/safe_capture.rs";
     const SAFE_REF: &str = "feature/safe-capture";
     const CANARY_BRANCH: &str = "ghp_CAPTURE_BRANCH_0123456789abcdefghijklmnop";
-    const CANARY_FILE: &str = "src/ghp_CAPTURE_FILE_0123456789abcdefghijklmnop.rs";
     const CANARY_OID: &str = "ghp_CAPTURE_OID_0123456789abcdefghijklmnop";
     const CANARY_FROM: &str = "ghp_CAPTURE_FROM_0123456789abcdefghijklmnop";
     const CANARY_REFSPEC: &str =
@@ -333,15 +433,9 @@ fn capture_binary_scrubs_every_payload_leaf_before_append() {
         out
     };
 
-    // Positive controls: structurally valid Git addresses and paths stay useful.
-    run_capture(
-        "commit",
-        &[
-            ("--oid", SAFE_SHA),
-            ("--branch", SAFE_REF),
-            ("--files", SAFE_PATH),
-        ],
-    );
+    // Positive controls: structurally valid Git addresses remain useful. Commit
+    // paths are Git-discovered, never accepted from hook command arguments.
+    run_capture("commit", &[("--oid", SAFE_SHA), ("--branch", SAFE_REF)]);
     run_capture(
         "checkout",
         &[
@@ -356,11 +450,7 @@ fn capture_binary_scrubs_every_payload_leaf_before_append() {
     let outputs = [
         run_capture(
             "commit",
-            &[
-                ("--oid", CANARY_OID),
-                ("--branch", CANARY_BRANCH),
-                ("--files", CANARY_FILE),
-            ],
+            &[("--oid", CANARY_OID), ("--branch", CANARY_BRANCH)],
         ),
         run_capture(
             "checkout",
@@ -379,13 +469,7 @@ fn capture_binary_scrubs_every_payload_leaf_before_append() {
 
     let log_bytes = std::fs::read(&log).expect("canonical log readable");
     let hook_bytes = std::fs::read(&hook_log).expect("hooks log readable");
-    for canary in [
-        CANARY_BRANCH,
-        CANARY_FILE,
-        CANARY_OID,
-        CANARY_FROM,
-        CANARY_REFSPEC,
-    ] {
+    for canary in [CANARY_BRANCH, CANARY_OID, CANARY_FROM, CANARY_REFSPEC] {
         assert!(
             !log_bytes
                 .windows(canary.len())
@@ -419,7 +503,7 @@ fn capture_binary_scrubs_every_payload_leaf_before_append() {
     });
     let safe_commit = safe_commit.expect("safe commit capture exists");
     assert_eq!(safe_commit["ref"], format!("refs/heads/{SAFE_REF}"));
-    assert_eq!(safe_commit["files"], serde_json::json!([SAFE_PATH]));
+    assert_eq!(safe_commit["hunk_capture"], "unavailable");
     let safe_checkout = records.iter().find_map(|r| {
         let payload: Value = serde_json::from_str(r["payload"].as_str()?).ok()?;
         (payload["checkout"] == true).then_some(payload)
@@ -443,13 +527,7 @@ fn capture_binary_scrubs_every_payload_leaf_before_append() {
     assert!(export.status.success(), "export succeeds: {export:?}");
     for path in [out_dir.join("export.json"), out_dir.join("repo.work/REFS")] {
         let bytes = std::fs::read(&path).unwrap_or_else(|_| panic!("artifact exists: {path:?}"));
-        for canary in [
-            CANARY_BRANCH,
-            CANARY_FILE,
-            CANARY_OID,
-            CANARY_FROM,
-            CANARY_REFSPEC,
-        ] {
+        for canary in [CANARY_BRANCH, CANARY_OID, CANARY_FROM, CANARY_REFSPEC] {
             assert!(
                 !bytes.windows(canary.len()).any(|w| w == canary.as_bytes()),
                 "exported artifact {path:?} must not retain {canary}"

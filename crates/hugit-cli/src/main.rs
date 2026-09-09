@@ -17,6 +17,7 @@
 //! invariant (WP-X5) also consumes, so the CLI surface and the invariant can
 //! never drift.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -49,12 +50,14 @@ use hugit_cli::undo::{self, UndoArgs};
 use hugit_cli::verdict::{self, VerdictArgs};
 use hugit_cli::watch::{self, WatchArgs};
 use hugit_cli::why::resolver::LogEntry;
-use hugit_cli::why::{WhyQuery, resolve_why, resolve_why_chain};
+use hugit_cli::why::{
+    PreciseLineResolution, WhyQuery, resolve_precise_line, resolve_why, resolve_why_chain,
+};
 
 use hugit_checks::affected::{BuildGraph, Ecosystem, PackageNode};
 use hugit_contracts::{AttestationChain, EventRecord, IntentSidecar};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 /// `hugit` — the git-compatible, LLM-native forge CLI.
@@ -139,6 +142,13 @@ struct WhyArgs {
     /// Optional symbol name to attribute.
     #[arg(long)]
     symbol: Option<String>,
+    /// Repository holding the selected committed tree. Required for exact line
+    /// and symbol modes; ignored by legacy path-only mode.
+    #[arg(long)]
+    repo: Option<PathBuf>,
+    /// Commit whose tree is queried in exact line and symbol modes.
+    #[arg(long, default_value = "HEAD")]
+    commit: String,
     /// Walk the FULL provenance chain (every captured event that touched the
     /// path, most-recent first) instead of only the origin. The chain is the
     /// "why did this file evolve" answer the single origin cannot give.
@@ -155,6 +165,16 @@ struct WhyLogEntryInput {
     attestation: Option<AttestationChain>,
     #[serde(default)]
     sidecar: Option<IntentSidecar>,
+}
+
+const SYMBOL_CACHE_SCHEMA: u32 = 1;
+const MAX_SYMBOL_LINES: u32 = 10_000;
+
+#[derive(Deserialize, Serialize)]
+struct CachedSymbol {
+    name: String,
+    start_line: u32,
+    end_line: u32,
 }
 
 fn run_why(args: WhyArgs) -> Result<String, PorcelainError> {
@@ -230,11 +250,98 @@ fn run_why(args: WhyArgs) -> Result<String, PorcelainError> {
         })
         .collect();
 
+    let repo = args.repo;
+    let commit_arg = args.commit;
     let query = WhyQuery {
         path: args.path,
         line: args.line,
         symbol: args.symbol,
     };
+    if let Some(line) = query.line {
+        let repo = repo.as_deref().ok_or_else(|| {
+            PorcelainError::new(
+                "invalid_argument",
+                "why --line requires --repo so provenance never reads implicit worktree bytes",
+                "pass --repo <git working tree> and optionally --commit <oid>",
+            )
+        })?;
+        let commit = git_commit(repo, &commit_arg)?;
+        git_blob_exists(repo, &commit, &query.path)?;
+        let blamed = git_blame_line(repo, &commit, &query.path, line)?;
+        let resolution =
+            resolve_precise_line(&query.path, line, &blamed, &entries).map_err(|error| {
+                PorcelainError::new(
+                    "bad_log",
+                    error.to_string(),
+                    "repair malformed event payloads before querying provenance",
+                )
+            })?;
+        return serde_json::to_string(&precise_line_json(&query.path, line, resolution)).map_err(
+            |error| PorcelainError::internal(format!("serialise precise why answer: {error}")),
+        );
+    }
+    if let Some(symbol) = query.symbol.as_deref() {
+        let repo = repo.as_deref().ok_or_else(|| {
+            PorcelainError::new(
+                "invalid_argument",
+                "why --symbol requires --repo",
+                "pass --repo <git working tree> and optionally --commit <oid>",
+            )
+        })?;
+        let commit = git_commit(repo, &commit_arg)?;
+        let matches = cached_symbols(repo, &commit, &query.path)?
+            .into_iter()
+            .filter(|item| item.name == symbol)
+            .collect::<Vec<_>>();
+        if matches.is_empty() {
+            return Err(PorcelainError::new(
+                "symbol_not_found",
+                format!("symbol `{symbol}` does not exist in `{}`", query.path),
+                "pass an exact symbol name from supported committed source",
+            ));
+        }
+        if matches.len() > 1 {
+            return serde_json::to_string(&json!({ "observed": { "commit": commit, "path": query.path }, "status": "ambiguous_symbol" })).map_err(|error| PorcelainError::internal(format!("serialise symbol answer: {error}")));
+        }
+        let symbol = matches.into_iter().next().expect("nonempty after check");
+        if symbol.end_line - symbol.start_line >= MAX_SYMBOL_LINES {
+            return Err(PorcelainError::new(
+                "symbol_too_large",
+                format!(
+                    "symbol `{}` exceeds {MAX_SYMBOL_LINES} attributable lines",
+                    symbol.name
+                ),
+                "query a smaller symbol or add a bounded range selection",
+            ));
+        }
+        let mut contributors = BTreeMap::new();
+        for (line, blamed) in git_blame_range(
+            repo,
+            &commit,
+            &query.path,
+            symbol.start_line as u64,
+            symbol.end_line as u64,
+        )? {
+            let resolution =
+                resolve_precise_line(&query.path, line, &blamed, &entries).map_err(|error| {
+                    PorcelainError::new(
+                        "bad_log",
+                        error.to_string(),
+                        "repair malformed event payloads before querying provenance",
+                    )
+                })?;
+            contributors
+                .entry(blamed)
+                .or_insert_with(|| precise_line_json(&query.path, line, resolution));
+        }
+        let contributors = contributors.into_values().collect::<Vec<_>>();
+        let status = contributors
+            .iter()
+            .filter_map(|contributor| contributor.get("status").and_then(|status| status.as_str()))
+            .find(|status| *status != "attributed")
+            .unwrap_or("attributed");
+        return serde_json::to_string(&json!({ "observed": { "commit": commit, "path": query.path, "range": [symbol.start_line, symbol.end_line] }, "contributors": contributors, "status": status })).map_err(|error| PorcelainError::internal(format!("serialise symbol answer: {error}")));
+    }
     // The walk (--walk) projects the FULL chain, most recent first; the origin
     // answer is the head of that chain for the "single attribution" read.
     if args.walk {
@@ -251,6 +358,240 @@ fn run_why(args: WhyArgs) -> Result<String, PorcelainError> {
     })?;
     serde_json::to_string(&answer)
         .map_err(|e| PorcelainError::internal(format!("serialise why answer: {e}")))
+}
+
+fn git_commit(repo: &std::path::Path, commit: &str) -> Result<String, PorcelainError> {
+    if commit.starts_with('-') {
+        return Err(PorcelainError::new(
+            "invalid_argument",
+            "--commit must not start with '-'",
+            "pass a commit oid or ref name",
+        ));
+    }
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "--verify", &format!("{commit}^{{commit}}")])
+        .output()
+        .map_err(|error| PorcelainError::io("resolve commit", repo, &error))?;
+    if !output.status.success() {
+        return Err(PorcelainError::new(
+            "commit_not_found",
+            format!("commit `{commit}` is not available in {}", repo.display()),
+            "pass a commit reachable in --repo",
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn git_blob_exists(repo: &std::path::Path, commit: &str, path: &str) -> Result<(), PorcelainError> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["cat-file", "-e", &format!("{commit}:{path}")])
+        .output()
+        .map_err(|error| PorcelainError::io("read committed blob", repo, &error))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(PorcelainError::new(
+        "path_not_found",
+        format!("path `{path}` does not exist at commit `{commit}`"),
+        "pass a path present in selected committed tree",
+    ))
+}
+
+fn git_blame_line(
+    repo: &std::path::Path,
+    commit: &str,
+    path: &str,
+    line: u64,
+) -> Result<String, PorcelainError> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args([
+            "blame",
+            "--line-porcelain",
+            "-L",
+            &format!("{line},{line}"),
+            commit,
+            "--",
+            path,
+        ])
+        .output()
+        .map_err(|error| PorcelainError::io("blame committed line", repo, &error))?;
+    if !output.status.success() {
+        return Err(PorcelainError::new(
+            "line_not_found",
+            format!("line {line} of `{path}` does not exist at commit `{commit}`"),
+            "pass a 1-based line within selected committed blob",
+        ));
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        .filter(|oid| !oid.is_empty())
+        .map(String::from)
+        .ok_or_else(|| {
+            PorcelainError::new(
+                "blame_failed",
+                "git blame returned no commit oid",
+                "verify repository object integrity",
+            )
+        })
+}
+
+fn git_blame_range(
+    repo: &std::path::Path,
+    commit: &str,
+    path: &str,
+    start: u64,
+    end: u64,
+) -> Result<Vec<(u64, String)>, PorcelainError> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args([
+            "blame",
+            "--line-porcelain",
+            "-L",
+            &format!("{start},{end}"),
+            commit,
+            "--",
+            path,
+        ])
+        .output()
+        .map_err(|error| PorcelainError::io("blame committed symbol", repo, &error))?;
+    if !output.status.success() {
+        return Err(PorcelainError::new(
+            "line_not_found",
+            format!("symbol range {start}..{end} of `{path}` does not exist at commit `{commit}`"),
+            "query a symbol in selected committed tree",
+        ));
+    }
+    let lines = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if !(fields.len() == 3 || fields.len() == 4)
+                || fields[0].len() != 40
+                || !fields[0].bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return None;
+            }
+            let line = fields[2].parse::<u64>().ok()?;
+            Some((line, fields[0].to_string()))
+        })
+        .collect::<Vec<_>>();
+    if lines.len() == (end - start + 1) as usize {
+        return Ok(lines);
+    }
+    Err(PorcelainError::new(
+        "blame_failed",
+        "git blame returned an incomplete symbol range",
+        "verify repository object integrity",
+    ))
+}
+
+fn cached_symbols(
+    repo: &std::path::Path,
+    commit: &str,
+    path: &str,
+) -> Result<Vec<CachedSymbol>, PorcelainError> {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default();
+    let lang = hugit_symbols::lang_for_ext(ext).ok_or_else(|| {
+        PorcelainError::new(
+            "unsupported_language",
+            format!("path `{path}` has no supported source language"),
+            "query a supported source extension",
+        )
+    })?;
+    let spec = format!("{commit}:{path}");
+    let oid = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "--verify", &spec])
+        .output()
+        .map_err(|error| PorcelainError::io("resolve committed blob", repo, &error))?;
+    if !oid.status.success() {
+        return Err(PorcelainError::new(
+            "path_not_found",
+            format!("path `{path}` does not exist at commit `{commit}`"),
+            "pass a path present in selected committed tree",
+        ));
+    }
+    let oid = String::from_utf8_lossy(&oid.stdout).trim().to_string();
+    let cache = repo.join(".hugit/cache/symbols").join(format!(
+        "{oid}-{}-v{SYMBOL_CACHE_SCHEMA}.json",
+        lang.as_str()
+    ));
+    if let Ok(bytes) = std::fs::read(&cache)
+        && let Ok(symbols) = serde_json::from_slice::<Vec<CachedSymbol>>(&bytes)
+        && symbols.iter().all(|symbol: &CachedSymbol| {
+            symbol.start_line > 0 && symbol.end_line >= symbol.start_line
+        })
+    {
+        return Ok(symbols);
+    }
+    let blob = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["cat-file", "blob", &oid])
+        .output()
+        .map_err(|error| PorcelainError::io("read committed blob", repo, &error))?;
+    if !blob.status.success() {
+        return Err(PorcelainError::new(
+            "blob_not_found",
+            format!("blob `{oid}` is unavailable"),
+            "verify repository object integrity",
+        ));
+    }
+    let symbols = hugit_symbols::outline_blob_ranges(lang, &blob.stdout)
+        .into_iter()
+        .map(|symbol| CachedSymbol {
+            name: symbol.name,
+            start_line: symbol.start_line,
+            end_line: symbol.end_line,
+        })
+        .collect::<Vec<_>>();
+    std::fs::create_dir_all(cache.parent().expect("cache path has parent"))
+        .map_err(|error| PorcelainError::io("create symbol cache", &cache, &error))?;
+    std::fs::write(
+        &cache,
+        serde_json::to_vec(&symbols).map_err(|error| {
+            PorcelainError::internal(format!("serialise symbol cache: {error}"))
+        })?,
+    )
+    .map_err(|error| PorcelainError::io("write symbol cache", &cache, &error))?;
+    Ok(symbols)
+}
+
+fn precise_line_json(
+    path: &str,
+    line: u64,
+    resolution: PreciseLineResolution,
+) -> serde_json::Value {
+    match resolution {
+        PreciseLineResolution::Attributed { commit, answer } => json!({
+            "observed": { "commit": commit, "path": path, "range": [line, line], "event_hash": answer.event_hash },
+            "declared": answer.intent_id.map(|intent| json!({ "intent": intent, "charter": answer.charter })),
+            "attested": if answer.model.is_empty() && answer.cost.is_empty() { None } else { Some(json!({ "model": answer.model, "cost": answer.cost })) },
+            "status": "attributed",
+        }),
+        PreciseLineResolution::Unattributed { commit } => {
+            json!({ "observed": { "commit": commit, "path": path, "range": [line, line] }, "status": "unattributed" })
+        }
+        PreciseLineResolution::RangeUnavailable { commit } => {
+            json!({ "observed": { "commit": commit, "path": path, "range": [line, line] }, "status": "range_unavailable" })
+        }
+        PreciseLineResolution::RangeMismatch { commit } => {
+            json!({ "observed": { "commit": commit, "path": path, "range": [line, line] }, "status": "range_mismatch" })
+        }
+    }
 }
 
 // ── impact ───────────────────────────────────────────────────────────────────

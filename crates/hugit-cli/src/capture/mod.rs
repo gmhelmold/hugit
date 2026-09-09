@@ -34,8 +34,10 @@
 //! so it does not shadow git — the X5 no-shadow law holds. (`hook` WOULD shadow
 //! `git hook` — that's why this verb is named `capture`.)
 
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::process::{Command, Stdio};
 
 use serde_json::json;
 
@@ -49,6 +51,12 @@ use hugit_refstore::canonical_json;
 /// local recorder default (`orchestrator:hugit` in `check`), but distinct so a
 /// captured (hook) event is never mistaken for an explicit orchestration act.
 const HOOK_PRINCIPAL: &str = "orchestrator:hugit-hook";
+
+/// Bounded hook enrichment: exceeding this preserves file-level facts instead
+/// of making an unbounded number of per-path Git invocations.
+const MAX_HUNK_FILES: usize = 256;
+const MAX_DISCOVERY_BYTES: usize = 1024 * 1024;
+const MAX_PATCH_BYTES: usize = 1024 * 1024;
 
 /// Milliseconds now (unix epoch) — the wall-clock stamp for push-attempts and
 /// checkouts (no committer date available); commits/merges pass `--recorded-at`.
@@ -193,11 +201,6 @@ pub struct CaptureArgs {
     /// The local SHAs being pushed (part of the push-attempt payload).
     #[arg(long)]
     pub shas: Option<String>,
-    /// The files touched by this commit (post-commit: `git diff-tree --name-only
-    /// -r`). Stored in the payload so `hugit why --path` can attribute a file
-    /// to the captured commit (repeatable).
-    #[arg(long)]
-    pub files: Vec<String>,
 }
 
 /// Run `hugit capture <kind>` — silent, exit 0 always (the contract §2).
@@ -232,19 +235,14 @@ fn capture_commit(args: &CaptureArgs) -> Result<(), String> {
         .ok_or_else(|| "capture commit: --oid required".to_string())?;
     let branch = args.branch.clone().unwrap_or_default();
     let recorded_at = args.recorded_at.unwrap_or_else(now_unix_ms);
-    let files: Vec<String> = args
-        .files
-        .iter()
-        .filter(|f| !f.trim().is_empty())
-        .cloned()
-        .collect();
-    // `files` is included only when non-empty so `payload_attribution` (the
-    // `why` resolver) can attribute a path to this captured commit; an empty
-    // list is omitted (payload stays lean for pure ref events).
+    let (files, hunk_capture) = capture_commit_files(&args.top_level, &oid);
+    // `files` is included only when Git identified paths. An unavailable
+    // discovery remains explicit rather than fabricating a complete capture.
     let mut payload = json!({
         "ref": if branch.is_empty() { "HEAD".to_string() } else { format!("refs/heads/{branch}") },
         "target": oid,
         "branch": branch,
+        "hunk_capture": hunk_capture,
     });
     if !files.is_empty() {
         payload["files"] = json!(files);
@@ -257,6 +255,155 @@ fn capture_commit(args: &CaptureArgs) -> Result<(), String> {
         payload,
         recorded_at,
     )
+}
+
+fn capture_commit_files(
+    top_level: &std::path::Path,
+    oid: &str,
+) -> (Vec<serde_json::Value>, &'static str) {
+    let paths = match git_output_limited(
+        top_level,
+        [
+            "diff-tree",
+            "--root",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            "-z",
+            oid,
+        ],
+        MAX_DISCOVERY_BYTES,
+    ) {
+        Ok(bytes) => bytes
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .map(|path| String::from_utf8_lossy(path).into_owned())
+            .collect::<Vec<_>>(),
+        Err(_) => return (vec![], "unavailable"),
+    };
+    if paths.len() > MAX_HUNK_FILES {
+        return (
+            paths.into_iter().map(serde_json::Value::String).collect(),
+            "partial",
+        );
+    }
+
+    let captured = paths
+        .iter()
+        .map(|path| capture_path_hunks(top_level, oid, path))
+        .collect::<Vec<_>>();
+    let complete = captured.iter().all(Result::is_ok);
+    let files = paths
+        .into_iter()
+        .zip(captured)
+        .map(|(path, result)| match result {
+            Ok(ranges) if !ranges.is_empty() => json!({ "path": path, "ranges": ranges }),
+            Ok(_) | Err(_) => serde_json::Value::String(path),
+        })
+        .collect();
+    (files, if complete { "complete" } else { "partial" })
+}
+
+fn capture_path_hunks(
+    top_level: &std::path::Path,
+    oid: &str,
+    path: &str,
+) -> Result<Vec<serde_json::Value>, String> {
+    let patch = git_output_limited(
+        top_level,
+        [
+            "diff-tree",
+            "--root",
+            "--no-commit-id",
+            "--no-ext-diff",
+            "--unified=0",
+            oid,
+            "--",
+            path,
+        ],
+        MAX_PATCH_BYTES,
+    )?;
+    parse_target_ranges(&patch).map(|ranges| {
+        ranges
+            .into_iter()
+            .map(|(start, end)| json!({ "start": start, "end": end }))
+            .collect()
+    })
+}
+
+fn git_output_limited<const N: usize>(
+    top_level: &std::path::Path,
+    args: [&str; N],
+    limit: usize,
+) -> Result<Vec<u8>, String> {
+    let mut child = Command::new("git")
+        .args(args)
+        .current_dir(top_level)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("run git diff-tree: {error}"))?;
+    let mut stdout = Vec::new();
+    child
+        .stdout
+        .take()
+        .ok_or_else(|| "git diff-tree stdout unavailable".to_string())?
+        .take((limit + 1) as u64)
+        .read_to_end(&mut stdout)
+        .map_err(|error| format!("read git diff-tree output: {error}"))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("wait for git diff-tree: {error}"))?;
+    if stdout.len() > limit {
+        return Err(format!("git diff-tree output exceeds {limit} byte limit"));
+    }
+    if output.status.success() {
+        return Ok(stdout);
+    }
+    Err(format!(
+        "git diff-tree failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    ))
+}
+
+/// Parse only unified-zero target hunk headers. `end` is inclusive, matching
+/// the existing `why` resolver contract. A malformed header fails capture;
+/// accepting shifted ranges would forge attribution.
+fn parse_target_ranges(patch: &[u8]) -> Result<Vec<(u64, u64)>, String> {
+    patch
+        .split(|byte| *byte == b'\n')
+        .filter(|line| line.starts_with(b"@@ "))
+        .map(parse_target_range)
+        .collect::<Result<Vec<_>, _>>()
+        .map(|ranges| ranges.into_iter().flatten().collect())
+}
+
+fn parse_target_range(header: &[u8]) -> Result<Option<(u64, u64)>, String> {
+    let plus = header
+        .windows(2)
+        .position(|window| window == b" +")
+        .ok_or_else(|| format!("malformed hunk header: {}", String::from_utf8_lossy(header)))?;
+    let target = &header[plus + 2..];
+    let end = target
+        .windows(3)
+        .position(|window| window == b" @@")
+        .ok_or_else(|| format!("malformed hunk header: {}", String::from_utf8_lossy(header)))?;
+    let target =
+        std::str::from_utf8(&target[..end]).map_err(|_| "non-utf8 hunk header".to_string())?;
+    let (start, count) = match target.split_once(',') {
+        Some((start, count)) => (start, count),
+        None => (target, "1"),
+    };
+    let start = start
+        .parse::<u64>()
+        .map_err(|_| format!("malformed hunk start: {target}"))?;
+    let count = count
+        .parse::<u64>()
+        .map_err(|_| format!("malformed hunk count: {target}"))?;
+    if count == 0 {
+        return Ok(None);
+    }
+    Ok(Some((start, start + count - 1)))
 }
 
 fn capture_checkout(args: &CaptureArgs) -> Result<(), String> {
@@ -354,7 +501,6 @@ mod tests {
             recorded_at: Some(1000),
             refspecs: None,
             shas: None,
-            files: vec![],
         }
     }
 
@@ -455,5 +601,16 @@ mod tests {
         }
         let log = load_event_log(&log).expect("log still verifies after 3 appends");
         assert_eq!(log.len(), 3);
+    }
+
+    #[test]
+    fn target_hunk_parser_uses_inclusive_target_ranges() {
+        let patch = b"@@ -5,2 +9,3 @@\n+one\n+two\n+three\n@@ -11 +15 @@\n+x\n";
+        assert_eq!(parse_target_ranges(patch), Ok(vec![(9, 11), (15, 15)]));
+    }
+
+    #[test]
+    fn target_hunk_parser_rejects_malformed_header() {
+        assert!(parse_target_ranges(b"@@ -1 +wat @@\n+x\n").is_err());
     }
 }
