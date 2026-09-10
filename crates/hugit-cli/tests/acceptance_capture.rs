@@ -1313,21 +1313,28 @@ fn commits_only_pr_lands_via_queue() {
     git_in(&root, &["add", "a.txt"]);
     let (code, _) = git_with_hugit(&root, &["commit", "-m", "feat: a", "--no-gpg-sign"]);
     assert_eq!(code, 0);
+    let committed_oid = git_in(&root, &["rev-parse", "HEAD"]).1.trim().to_string();
     let got = wait_for_ref_update(
         &log,
-        |p| !p["target"].as_str().unwrap_or("").is_empty(),
+        |p| p["target"].as_str() == Some(committed_oid.as_str()),
         20000,
     );
-    assert!(got, "capture landed");
+    assert!(got, "captured commit OID landed: {committed_oid}");
 
-    // Open a PR bundling ONLY the captured commit (no intents).
-    let target = ref_updates(&log).last().unwrap()["payload"]
-        .as_str()
-        .and_then(|s| serde_json::from_str::<Value>(s).ok())
-        .unwrap()["target"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    // Pairing/ref-transaction records can append after capture. Select exact
+    // durable commit fact, never whichever ref.update happens to be last.
+    let target = ref_updates(&log)
+        .into_iter()
+        .filter_map(|record| {
+            record["payload"]
+                .as_str()
+                .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        })
+        .find_map(|payload| {
+            (payload["target"].as_str() == Some(committed_oid.as_str())).then_some(payload)
+        })
+        .and_then(|payload| payload["target"].as_str().map(str::to_string))
+        .expect("durable captured commit target selected by committed OID");
 
     let (code, v) = run_in(
         &root,
