@@ -23,6 +23,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+use hugit_cli::attach::{self, AttachArgs};
 use hugit_cli::campaign::{self, CampaignArgs};
 use hugit_cli::capture::{self, CaptureArgs};
 use hugit_cli::checks::{self, CheckArgs};
@@ -72,6 +73,8 @@ struct Cli {
 /// [`hugit_cli::HUGIT_VERBS`] (asserted by the bin's own oracle).
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Safely attach capture hooks beside adopted foreign hooks.
+    Attach(AttachArgs),
     /// Resolve a line/symbol to its originating intent + provenance.
     Why(WhyArgs),
     /// Compute the build-graph blast radius of changed paths.
@@ -894,6 +897,7 @@ fn main() -> ExitCode {
     // stdout — success line OR the canonical `{"error":{…}}` envelope — under
     // the one exit-code law (0 success · 2 user/domain error · 1 internal).
     let result = match cli.command {
+        Command::Attach(a) => return attach::run(a),
         Command::Why(a) => run_why(a),
         Command::Impact(a) => run_impact(a),
         Command::Tournament(a) => run_tournament(a),

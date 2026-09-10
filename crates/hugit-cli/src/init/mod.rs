@@ -152,7 +152,7 @@ HL="$COMMON/../.hugit/hooks.log"
   mkdir -p "$(dirname "$LOG")" 2>/dev/null
   printf '[]\n' > "$LOG" 2>/dev/null
 }
-STDIN_REFS="$(cat)"   # first line: remote-name + url; then <local-ref> <local-sha> <remote-ref> <remote-sha> per line
+STDIN_REFS="$(if [ -n "$HUGIT_PRE_PUSH_FILE" ]; then cat "$HUGIT_PRE_PUSH_FILE"; else cat; fi)"   # dispatcher may preserve stdin for an adopted foreign hook
 # Extract the LOCAL sha (2nd field) from each refspec line that has 4 fields.
 SHAS="$(echo "$STDIN_REFS" | awk 'NF>=4 {print $2}')"
 (
@@ -187,8 +187,8 @@ exit 0
 }
 }
 
-const HUGIT_HOOK_MARKER: &str = "# hugit-hook (managed by hugit init)";
-const HOOK_KINDS: [&str; 4] = ["post-commit", "post-checkout", "pre-push", "post-merge"];
+pub(crate) const HUGIT_HOOK_MARKER: &str = "# hugit-hook (managed by hugit init)";
+pub(crate) const HOOK_KINDS: [&str; 4] = ["post-commit", "post-checkout", "pre-push", "post-merge"];
 
 pub(crate) struct HookInstallResult {
     pub installed: Vec<String>,
