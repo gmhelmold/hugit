@@ -102,7 +102,13 @@ fn do_run(args: NoteArgs) -> Result<String, CampaignError> {
     let intent = args.intent.as_deref().map(crate::redaction::scrub);
 
     // Resolve the default --log ($HUGIT_LOG → .hugit/log.json) once.
-    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+    let log_path = crate::log_resolve::resolve_log_checked(args.log.clone()).map_err(|e| {
+        CampaignError::new(
+            e.kind(),
+            e.to_json(),
+            "repair blocked migration before appending a journal note",
+        )
+    })?;
 
     // ── Lock BEFORE load (WC1) — bootstrap=false: a note requires an existing log
     // (a missing --log is `log_not_found`/exit-2, never a ghost record). `_lock`

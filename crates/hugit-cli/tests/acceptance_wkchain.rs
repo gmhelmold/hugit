@@ -47,19 +47,13 @@ fn run(args: &[&str]) -> (i32, Value) {
     (out.status.code().unwrap_or(-1), v)
 }
 
-/// Build a `why`-format log `[{record, attestation: null, sidecar: null}, …]`
-/// with a REAL hash chain (via the engine's canonical [`EventLog::append`]).
+/// Build a canonical `[EventRecord, …]` log with a REAL hash chain.
 fn write_why_log(path: &std::path::Path, events: &[(&str, Value)]) {
     let mut log = EventLog::new();
     for (kind, payload) in events {
         log.append_for_test(*kind, vec![], payload.to_string(), 0);
     }
-    let entries: Vec<Value> = log
-        .records()
-        .iter()
-        .map(|r| json!({"record": r, "attestation": null, "sidecar": null}))
-        .collect();
-    std::fs::write(path, serde_json::to_string(&entries).unwrap()).unwrap();
+    std::fs::write(path, serde_json::to_string_pretty(log.records()).unwrap()).unwrap();
 }
 
 /// Build a canonical `[EventRecord, …]` log with a REAL hash chain (for `export`
@@ -111,10 +105,9 @@ fn tampered_chain_is_chain_broken_exit_two_on_why() {
     // Tamper: mutate the first record's payload on disk WITHOUT recomputing the
     // hash chain — the records still parse (monotonic seq intact), but the stored
     // hash no longer matches the payload, so `verify_chain` fails.
-    // The payload is stored as a JSON STRING in the why-format, so the field
-    // name is escaped on disk (`\"parser\"`); match the escaped form.
+    // Payload is stored as a JSON string inside canonical EventRecord.
     let raw = std::fs::read_to_string(&log).unwrap();
-    let tampered = raw.replacen(r#"\"intent-why-1\""#, r#"\"intent-TAMPERED\""#, 1);
+    let tampered = raw.replacen("intent-why-1", "intent-TAMPERED", 1);
     assert_ne!(raw, tampered, "the tamper must actually change a byte");
     std::fs::write(&log, tampered).unwrap();
     let log_s = log.to_str().unwrap();

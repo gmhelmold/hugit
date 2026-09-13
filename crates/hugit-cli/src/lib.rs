@@ -31,6 +31,7 @@ pub mod diag;
 pub mod dock;
 pub mod export;
 pub mod fleet;
+pub mod health;
 pub mod ident;
 pub mod impact;
 pub mod init;
@@ -45,9 +46,11 @@ pub mod note;
 pub mod policy;
 pub mod porcelain;
 pub mod pr;
+pub mod projection;
 pub mod queue;
 pub mod redaction;
 pub mod review;
+pub mod runtime_store;
 pub mod setup;
 pub mod symbol;
 pub mod tournament;
@@ -93,6 +96,8 @@ pub const HUGIT_VERBS: &[&str] = &[
     // routes it (the no-drift oracle asserts dispatched == registry), so these
     // belong here, not in HUGIT_RESERVED_VERBS.
     "capture",
+    "detach",
+    "health",
     "campaign", // hugit campaign open/close/show — campaign lifecycle (PC1)
     "intent",   // hugit intent new/show         — intent ceremony (PC2)
     "pr",       // hugit pr open/land/show        — pull-request lifecycle (PC3)

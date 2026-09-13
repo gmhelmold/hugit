@@ -192,7 +192,7 @@ pub struct CheckRunArgs {
 impl CheckRunArgs {
     /// The resolved `--log` path: the explicit flag, else `$HUGIT_LOG`, else the
     /// conventional `.hugit/log.json` (the ONE shared resolver).
-    pub fn log_path(&self) -> PathBuf {
+    pub fn log_path(&self) -> Result<PathBuf, PorcelainError> {
         crate::log_resolve::resolve_log(self.log.clone())
     }
 }
@@ -376,7 +376,7 @@ impl CheckRow {
 /// When no checks were ever recorded, the rows are `[]` and the KPIs are honest
 /// nulls with a disclosing `note` — never a fabricated hit-rate.
 fn show(args: &ShowArgs) -> Result<Value, PorcelainError> {
-    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+    let log_path = crate::log_resolve::resolve_log(args.log.clone())?;
     let log = load_event_log(&log_path)?;
 
     let rows: Vec<CheckRow> = log

@@ -98,6 +98,14 @@ fn payload_of(rec: &Value) -> Value {
         .unwrap_or(Value::Null)
 }
 
+fn write_event_log(path: &Path, events: &[(&str, Value)]) {
+    let mut log = hugit_refstore::EventLog::new();
+    for (kind, payload) in events {
+        log.append_for_test(*kind, vec![], payload.to_string(), 0);
+    }
+    std::fs::write(path, serde_json::to_vec_pretty(log.records()).unwrap()).unwrap();
+}
+
 /// Poll for a condition on the (async) hooks — hooks detach by design.
 fn wait_until(timeout_ms: u64, f: impl Fn() -> bool) -> bool {
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
@@ -296,6 +304,52 @@ fn hermetic_c1_failure_is_silent_exit_zero_writes_hook_log() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn dock_views_redact_secret_shaped_record_fields() {
+    let dir = scratch("view-redaction");
+    let log = dir.join("log.json");
+    let secret = "SECRET:dock-view";
+    write_event_log(
+        &log,
+        &[(
+            DOCK_RECORD_KIND,
+            json!({
+                "dock_id": "dock-safe-id",
+                "gitdir": format!("/tmp/{secret}"),
+                "branch": "feat/safe",
+                "charter": secret,
+                "charter_derived": true,
+                "state": "open",
+                "origin": "worktree",
+                "created_ts": 1,
+                "pid": 1,
+            }),
+        )],
+    );
+
+    for args in [
+        vec!["dock", "ls", "--log", log.to_str().unwrap()],
+        vec![
+            "dock",
+            "show",
+            "dock-safe-id",
+            "--log",
+            log.to_str().unwrap(),
+        ],
+    ] {
+        let (code, output) = run_hugit(&dir, &args, &[]);
+        assert_eq!(code, 0, "dock view exits 0: {output}");
+        assert!(
+            !output.contains(secret),
+            "dock view must not leak secret: {output}"
+        );
+        assert!(
+            output.contains("[REDACTED]"),
+            "dock view signals redaction: {output}"
+        );
+    }
+}
+
 // ── e2e real git: worktree add coins; re-checkout is idempotent ────────────
 
 #[test]
@@ -326,7 +380,9 @@ fn e2e_worktree_add_coins_and_switch_is_idempotent() {
     );
     assert_eq!(rc, 0, "worktree add: {out}");
 
-    let log = dir.join(".hugit/log.json");
+    let log = hugit_cli::runtime_store::for_repo(&dir)
+        .expect("runtime store resolves")
+        .canonical_log();
     let admin_dir = dir.join(".git/worktrees/wt-ratelimit");
     let marker_ok = wait_until(30000, || admin_dir.join(DOCK_MARKER).exists());
     if !marker_ok {

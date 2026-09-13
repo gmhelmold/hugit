@@ -73,7 +73,7 @@ pub fn run(args: LedgerArgs) -> ExitCode {
 /// straight from [`Ledger`]'s own folds — so this verb is a pure presentation of
 /// the engine's authority, with no second source of truth.
 fn project(args: &LedgerArgs) -> Result<Value, PorcelainError> {
-    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+    let log_path = crate::log_resolve::resolve_log(args.log.clone())?;
     let log = load_event_log(&log_path)?;
     let ledger = Ledger::from_records(log.records());
 

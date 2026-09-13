@@ -261,7 +261,10 @@ pub fn run(args: PrArgs) -> ExitCode {
 }
 
 fn run_open(a: OpenCliArgs) -> ExitCode {
-    let log_path = crate::log_resolve::resolve_log(a.log.clone());
+    let log_path = match resolve_log(a.log.clone()) {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
     // WH-IDENT: validate identifier fields at entry — before they reach the
     // hash-chained forever-log.  Rejects empty and known-credential-prefix shapes.
     // Bare 40/64-hex keys are legitimate addresses and are allowed.
@@ -356,7 +359,10 @@ fn run_open(a: OpenCliArgs) -> ExitCode {
 }
 
 fn run_queue(a: QueueCliArgs) -> ExitCode {
-    let log_path = crate::log_resolve::resolve_log(a.log.clone());
+    let log_path = match resolve_log(a.log.clone()) {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
     let _lock = match acquire_lock(&log_path) {
         Ok(lock) => lock,
         Err(code) => return code,
@@ -394,7 +400,10 @@ fn run_queue(a: QueueCliArgs) -> ExitCode {
 }
 
 fn run_land(a: LandCliArgs) -> ExitCode {
-    let log_path = crate::log_resolve::resolve_log(a.log.clone());
+    let log_path = match resolve_log(a.log.clone()) {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
 
     // WP-F2: the (optional) manual run metrics → the captured envelope. An
     // omitted flag is honest-zero / None, never fabricated.
@@ -480,7 +489,10 @@ fn run_land(a: LandCliArgs) -> ExitCode {
 }
 
 fn run_show(a: ShowCliArgs) -> ExitCode {
-    let log_path = crate::log_resolve::resolve_log(a.log.clone());
+    let log_path = match resolve_log(a.log.clone()) {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
     let log = match load_log(&log_path) {
         Ok(log) => log,
         Err(code) => return code,
@@ -492,7 +504,10 @@ fn run_show(a: ShowCliArgs) -> ExitCode {
 }
 
 fn run_list(a: ListCliArgs) -> ExitCode {
-    let log_path = crate::log_resolve::resolve_log(a.log.clone());
+    let log_path = match resolve_log(a.log.clone()) {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
     let log = match load_log(&log_path) {
         Ok(log) => log,
         Err(code) => return code,
@@ -508,7 +523,10 @@ fn run_list(a: ListCliArgs) -> ExitCode {
 }
 
 fn run_abandon(a: AbandonCliArgs) -> ExitCode {
-    let log_path = crate::log_resolve::resolve_log(a.log.clone());
+    let log_path = match resolve_log(a.log.clone()) {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
     let _lock = match acquire_lock(&log_path) {
         Ok(lock) => lock,
         Err(code) => return code,
@@ -540,6 +558,10 @@ fn run_abandon(a: AbandonCliArgs) -> ExitCode {
 }
 
 // ── the `--log` seam ───────────────────────────────────────────────────────────
+
+fn resolve_log(explicit: Option<PathBuf>) -> Result<PathBuf, ExitCode> {
+    crate::log_resolve::resolve_log(explicit).map_err(|error| emit_porcelain(&error))
+}
 
 /// Load the event log from `path` (a JSON `[EventRecord, …]` array),
 /// rehydrating + verifying the hash chain.

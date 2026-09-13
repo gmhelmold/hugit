@@ -647,28 +647,31 @@ const REF_UPDATE_KIND: &str = "ref.update";
 /// `ref.update` payloads straight off the records (never through a fail-closed
 /// projection), matching the raw-vocabulary discipline of [`intent_landed_on_log`].
 ///
-/// Also matches a captured **push-attempt** payload: `{attempt:true, shas:"<...>"}`
-/// records the LOCAL shas a `git push` is sending (the pre-push hook extracts
-/// them from the refspec stdin). A pushed sha is as much a captured-commit proof
-/// as a post-commit `target` — the push hook SAW it. Without this, a commit that
-/// only ever existed via `git push` (never a local `git commit` captured earlier)
-/// would be unprovable on a repo where the post-commit hook missed.
+/// Also matches a complete captured **push-attempt** payload's typed
+/// `updates[].local_oid`. A pushed OID is as much a captured-commit proof as a
+/// post-commit `target` — the push hook SAW it. An incomplete push capture has
+/// no updates and proves nothing.
 fn commit_ref_target_on_log(log: &EventLog, oid: &str) -> bool {
     log.records()
         .iter()
         .filter(|r| r.kind == REF_UPDATE_KIND)
         .filter_map(|r| serde_json::from_str::<Value>(&r.payload).ok())
-        .any(|v| v.get("target").and_then(Value::as_str) == Some(oid) || push_shas_contain(&v, oid))
+        .any(|v| {
+            v.get("target").and_then(Value::as_str) == Some(oid) || push_updates_contain(&v, oid)
+        })
 }
 
-/// Whether a payload's `shas` field (the push-attempt local-shas string, fields
-/// whitespace/newline-separated) contains `oid` verbatim.
-fn push_shas_contain(payload: &Value, oid: &str) -> bool {
+/// Whether a complete typed push-attempt payload names `oid` as a local update.
+fn push_updates_contain(payload: &Value, oid: &str) -> bool {
     payload
-        .get("shas")
-        .and_then(Value::as_str)
-        .map(|s| s.split_whitespace().any(|sha| sha == oid))
-        .unwrap_or(false)
+        .get("updates")
+        .and_then(Value::as_array)
+        .is_some_and(|updates| {
+            payload.get("attempt").and_then(Value::as_bool) == Some(true)
+                && updates
+                    .iter()
+                    .any(|update| update.get("local_oid").and_then(Value::as_str) == Some(oid))
+        })
 }
 
 /// Resolve the `target` of the LATEST `ref.update` record whose payload `ref` is

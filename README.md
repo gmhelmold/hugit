@@ -32,8 +32,32 @@ cargo build --release
 symbol outline — functions, types, impls — extracted by tree-sitter. Supported
 languages: TypeScript, JavaScript, Python, Go, Java, C, C++, Ruby.
 
-**One-time boot:** run `hugit setup` to make every future `git init` ship the
-hooks automatically (see [docs/installation.md](docs/installation.md)).
+**Quickstart, new repositories:** run `hugit setup` once, then use normal Git:
+
+```sh
+hugit setup
+git init my-project
+cd my-project
+git add . && git commit -m "initial commit"
+git checkout -b feature/example
+git push -u origin feature/example
+hugit health
+```
+
+`setup` installs a Git template for future repositories. `commit`, `checkout`,
+and `push` remain Git commands; hugit observes locally available facts without
+changing their outcome. `health` labels facts as **observed locally**, **attempted push**, **explicit declaration**, or **unsupported**; it reports partial coverage instead of inventing remote confirmation.
+
+**Existing repository:** run `hugit attach`, then normal Git (`commit`,
+`checkout`, `push`), then `hugit health`. Foreign hooks stay preserved; health
+reports partial coverage rather than replacing or guessing about them.
+
+Before attaching a repository with existing tooling, inspect exact hook
+ownership without writes:
+
+```sh
+hugit attach --preview
+```
 
 ---
 
@@ -42,13 +66,13 @@ hooks automatically (see [docs/installation.md](docs/installation.md)).
 `hugit` is designed to work **where git works** — in a repository, on a laptop,
 no server, no account. The runtime is local-only:
 
-- **`hugit setup`** (one-time) configures git's global `init.templateDir` so every
-  future `git init` **auto-ships the hugit hooks** — no per-repo ceremony. The
-  hooks lazy-boot: the first `git commit`/`checkout` in a fresh repo creates
-  `.hugit/log.json` (the versioned, hash-chained intent log) automatically.
-  For an EXISTING repo, `hugit setup --repo /path/to/repo` installs hooks without
-  changing Git data; first git op lazy-boots `.hugit/log.json`.
-- Every verb reads/writes the **canonical local log** (`.hugit/log.json`) with a
+- **`hugit setup`** (one-time) configures Git's global `init.templateDir` so every
+  future `git init` ships hugit hooks. Runtime state lives at
+  `<git-common-dir>/hugit/event-log.json`, outside tracked worktree state and
+  shared by linked worktrees. For an existing repo, run `hugit attach`; it
+  installs only missing hugit-owned hooks.
+- Every verb reads/writes the **canonical local log**
+  (`<git-common-dir>/hugit/event-log.json`) with a
   verifiable hash chain — `why`, `impact`, `intent`, `pr`, `verdict`, `undo`,
   `policy`, `ledger`, `watch`, `symbol`, `ctx`, `review`, `export`, and more all
   work with no service and no account.
@@ -70,14 +94,14 @@ Honest status — everything here is the CLI, local, testable now:
 |---|---|---|
 | `hugit setup` — boot ceremony | **LIVE** | `git init` in any fresh repo auto-ships the hooks; first git op lazy-boots the log |
 | `hugit symbol` — symbol outline | **LIVE** | `hugit symbol --file <path>` against any TS/JS/Python/Go/Java/C/C++/Ruby file |
-| `hugit export` — exit guarantee | **LIVE** | usable synthetic Git snapshot + canonical JSON log; requires `--log <path> --out <dir>`; zero dependencies |
+| `hugit export` — exit guarantee | **LIVE** | full git + JSON snapshot; requires `--log <path> --out <dir>`; zero dependencies |
 | `hugit check` / `hugit verdict` | **LIVE** | real policy-engine EXECUTE paths, memoized; `hugit policy test` runs the house gate set |
 | `hugit campaign / intent / pr / land` | **LIVE** | the agent-fleet loop: milestones → tasks → PRs → union landing |
 | `hugit dock` (worktree binding) | **LIVE** | cost per worktree; byte-identity + acceptance verified landing |
 | `hugit verdict approve` / `reject` | **LIVE** | single-lens human decision over the canonical verdict record |
 | `hugit undo` | **LIVE** | event-sourced compensating undo; never rewrites history |
 | `hugit note` | **LIVE** | appends a record to the canonical log |
-| Existing repo attachment | **LIVE** | run `hugit setup --repo /path/to/repo`; no migration/import command is needed |
+| Existing repo attachment | **LIVE** | run `hugit attach`; missing hooks install, foreign hooks stay untouched |
 | `hugit fleet` / `hugit ledger` / `hugit watch` | **LIVE** | real log-backed commands |
 | `hugit diag` | **LIVE** | log-backed bisect |
 | `hugit policy edit` | **LIVE** | append-only policy changes over the house baseline |
@@ -135,31 +159,31 @@ These are real today, not roadmap:
   integrity spine (Ed25519/SHA-256 crypto). Redaction at the read boundary.
   Fail-closed boot.
 - jj capture is explicit through the MCP `capture` tool. Automatic observation
-  after `jj git export` is not a v1 feature.
+  after `jj git export` is not a v1 feature. `hugit capture` is internal,
+  hook-only; normal onboarding never invokes it. Intent is one explicit
+  declaration or a separately contracted trusted adapter.
 
 ---
 
 ## The exit guarantee
 
 ```sh
-hugit export --log .hugit/log.json --out <dir>
+hugit export --log <git-common-dir>/hugit/event-log.json --out <dir>
 ```
 
-Produces a usable synthetic Git snapshot plus canonical JSON proof of every
-intent, verdict, and claim. `export.json` keeps event records byte-identical
-and restore verifies their hash chain. Redaction applies only to non-canonical
-fields. If a canonical event payload needs redaction, export fails before
-writing output; canonical logs must scrub secrets before append. `repo.git` is
-not an export of original Git commits or refs. Restore snapshot to any hosting
-provider. No proprietary lock-in — exit proof is also disaster-recovery plan.
+Produces a full git bundle + JSON proof of every intent, verdict, and claim.
+Restore to a bare git repo on any hosting provider. No proprietary lock-in —
+the exit proof is also the disaster-recovery plan.
 
 ---
 
 ## Bring your existing repo
 
 ```sh
-# hugit attaches to an existing local repo; git remains the remote/host
-hugit setup --repo /path/to/your/repo
+# hugit attaches to an existing local repo; Git remains the remote/host
+cd /path/to/your/repo
+hugit attach
+hugit health
 ```
 
 Your GitHub repo stays where it is. hugit attaches without migration. The
@@ -174,9 +198,9 @@ broken bridge kills trust, so every rung is reversible.
 hugit is git + a small local log. The claimed economics come from structure,
 not a paid substrate:
 
-- The **canonical log** (`.hugit/log.json`) is a hash-chained, append-only
-  record inside the repo. It travels with `git push`/`pull` — agents sharing a
-  repo share the history, with no server.
+- The **canonical log** (`<git-common-dir>/hugit/event-log.json`) is a
+  hash-chained, append-only local record, outside tracked worktree state and
+  shared by linked worktrees. A push attempt is not remote confirmation.
 - The **memo cache** (file-backed) makes a repeated check a lookup: the same
   tree+def+toolchain is never executed twice.
 - The **union landing engine** tests queued PRs as a batch locally; a red pair
@@ -194,12 +218,12 @@ same work.
 # Inspect any file's symbol structure (works right now, no server)
 hugit symbol --file src/main.rs
 
-# Export the repo as a portable proof bundle
-hugit export --log .hugit/log.json --out <dir>
+# Export the repo as a portable proof bundle. Get canonical log path from health.
+hugit health
+hugit export --log <git-common-dir>/hugit/event-log.json --out <dir>
 
-# Show the intent log (forge-connected; `hugit log` is not a verb — use
-# `hugit ledger --log .hugit/log.json`)
-hugit ledger --log .hugit/log.json
+# Show the local intent log (`hugit log` is not a verb)
+hugit ledger --log <git-common-dir>/hugit/event-log.json
 
 # Run local policy check (forge-identical)
 hugit policy test

@@ -31,6 +31,8 @@ use hugit_refstore::{Endpoint, EventLog, PrincipalClass};
 
 use crate::porcelain::PorcelainError;
 
+use super::sanitized_view;
+
 /// The frozen `dock.landed` event kind — the terminal landing record.
 pub const DOCK_LANDED_KIND: &str = "dock.landed";
 /// The deterministic local acceptance digest for the dock lane.
@@ -96,7 +98,7 @@ pub struct DockLandResult {
 
 impl DockLandResult {
     fn to_json(&self) -> Value {
-        json!({
+        sanitized_view(json!({
             "dock_id": self.dock_id,
             "branch": self.branch,
             "byte_identity": match &self.byte_identity {
@@ -113,7 +115,7 @@ impl DockLandResult {
             },
             "landed": self.landed,
             "cost_usd_micros": self.cost_usd_micros,
-        })
+        }))
     }
 }
 
@@ -404,7 +406,13 @@ fn append_landed(
 
 /// Run `hugit dock land`.
 pub fn run(args: DockLandArgs) -> ExitCode {
-    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+    let log_path = match crate::log_resolve::resolve_log_checked(args.log.clone()) {
+        Ok(log) => log,
+        Err(e) => {
+            println!("{}", e.to_json());
+            return e.exit_code();
+        }
+    };
     let ac_path = args
         .ac
         .clone()

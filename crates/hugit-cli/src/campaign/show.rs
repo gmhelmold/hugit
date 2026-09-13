@@ -11,7 +11,8 @@ use super::output::CampaignError;
 use super::world::{CampaignPrPhase, World};
 
 pub fn run(args: ShowArgs) -> Result<String, CampaignError> {
-    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+    let log_path = crate::log_resolve::resolve_log(args.log.clone())
+        .map_err(|error| CampaignError::new(error.kind(), error.message(), error.fix()))?;
     // Read-only query: a MISSING --log is an explicit `log_not_found` (exit-2),
     // never a silent empty world (P-CAMPAIGN-EMPTY).
     let world = World::load_existing(&log_path)?;

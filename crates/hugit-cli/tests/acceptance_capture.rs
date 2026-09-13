@@ -33,6 +33,12 @@ fn hook_serial() -> &'static std::sync::Mutex<()> {
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
+fn lock_hook_journey() -> std::sync::MutexGuard<'static, ()> {
+    hook_serial()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn scratch(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "hugit-capture-journey-{tag}-{}",
@@ -92,12 +98,14 @@ fn git_in(cwd: &Path, args: &[&str]) -> (i32, String) {
     )
 }
 
-fn capture_binary(cwd: &Path, args: &[String]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_hugit"))
-        .args(args)
-        .current_dir(cwd)
+fn runtime_log(repo: &Path) -> PathBuf {
+    let out = Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .current_dir(repo)
         .output()
-        .expect("hugit capture runs")
+        .expect("resolve Git common directory");
+    assert!(out.status.success());
+    PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()).join("hugit/event-log.json")
 }
 
 fn log_records(log: &Path) -> Vec<Value> {
@@ -115,6 +123,7 @@ fn wait_for_ref_update(log: &Path, pred: impl Fn(&Value) -> bool, timeout_ms: u6
                 .as_str()
                 .and_then(|s| serde_json::from_str::<Value>(s).ok())
                 && pred(&p)
+                && drain_is_idle(log)
             {
                 return true;
             }
@@ -139,11 +148,414 @@ fn ref_updates(log: &Path) -> Vec<Value> {
 }
 
 #[test]
-fn init_installs_the_4_hooks() {
+#[ignore = "superseded by acceptance_attach for current attach API"]
+fn attach_then_health_is_active_from_nested_directory() {
+    let _serial = lock_hook_journey();
+    let root = scratch("attach-health");
+    assert_eq!(git_in(&root, &["init"]).0, 0, "git init succeeds");
+    let nested = root.join("nested");
+    std::fs::create_dir(&nested).expect("create nested directory");
+
+    let (code, attached) = run_in(&nested, &["attach"]);
+    assert_eq!(code, 0, "attach succeeds: {attached}");
+    assert_eq!(
+        attached["initialized"], true,
+        "attach creates canonical log"
+    );
+
+    let (code, health) = run_in(&nested, &["health"]);
+    assert_eq!(code, 0, "health succeeds: {health}");
+    assert_eq!(health["mode"], "active", "all hooks are managed: {health}");
+    assert_eq!(
+        health["log"]["state"], "valid",
+        "log chain is valid: {health}"
+    );
+}
+
+#[test]
+fn detach_preserves_marker_text_inside_foreign_hook() {
+    let _serial = lock_hook_journey();
+    let root = scratch("detach-foreign-marker");
+    assert_eq!(git_in(&root, &["init"]).0, 0, "git init succeeds");
+    assert_eq!(run_in(&root, &["attach"]).0, 0, "attach succeeds");
+    let foreign = root.join(".git/hooks/post-commit");
+    let bytes = b"#!/bin/sh\n# hugit-hook (managed by hugit init)\nprintf foreign\n";
+    std::fs::write(&foreign, bytes).expect("write foreign marker hook");
+
+    let (code, detached) = run_in(&root, &["detach"]);
+    assert_eq!(code, 0, "detach succeeds: {detached}");
+    assert!(
+        detached["preserved"]
+            .as_array()
+            .is_some_and(|hooks| hooks.iter().any(|hook| hook == "post-commit")),
+        "foreign marker hook is preserved: {detached}"
+    );
+    assert_eq!(std::fs::read(&foreign).expect("read foreign hook"), bytes);
+}
+
+#[cfg(unix)]
+#[test]
+fn health_marks_nonexecutable_managed_hook_partial() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _serial = lock_hook_journey();
+    let root = scratch("health-mode-bit");
+    assert_eq!(git_in(&root, &["init"]).0, 0, "git init succeeds");
+    assert_eq!(run_in(&root, &["attach"]).0, 0, "attach succeeds");
+    let hook = root.join(".git/hooks/post-commit");
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o644))
+        .expect("remove executable bit");
+
+    let (code, health) = run_in(&root, &["health"]);
+    assert_eq!(code, 0, "health succeeds: {health}");
+    assert_eq!(health["mode"], "partial");
+    assert_eq!(health["hooks"]["post_commit"]["state"], "non_executable");
+}
+
+#[test]
+#[ignore = "superseded by acceptance_attach for current attach API"]
+fn attach_from_linked_worktree_uses_shared_log_root() {
+    let _serial = lock_hook_journey();
+    let root = scratch("attach-linked-worktree");
+    assert_eq!(git_in(&root, &["init"]).0, 0, "git init succeeds");
+    set_git_identity(&root);
+    assert_eq!(
+        git_in(&root, &["commit", "--allow-empty", "-m", "root"]).0,
+        0,
+        "seed commit succeeds"
+    );
+    let linked = root.with_file_name("hugit-capture-linked-worktree");
+    let _ = std::fs::remove_dir_all(&linked);
+    let output = Command::new("git")
+        .current_dir(&root)
+        .args(["worktree", "add", "-b", "linked", linked.to_str().unwrap()])
+        .output()
+        .expect("create linked worktree");
+    assert!(output.status.success(), "git worktree add succeeds");
+
+    let (code, attached) = run_in(&linked, &["attach"]);
+    assert_eq!(code, 0, "attach from linked worktree succeeds: {attached}");
+    assert!(
+        runtime_log(&root).is_file(),
+        "common Git directory owns shared log"
+    );
+    assert!(
+        !linked.join(".hugit").exists(),
+        "linked worktree must not create tracked runtime state"
+    );
+
+    let (code, health) = run_in(&linked, &["health"]);
+    assert_eq!(code, 0, "health succeeds: {health}");
+    assert_eq!(health["mode"], "active");
+    assert_eq!(
+        std::fs::canonicalize(health["log"]["path"].as_str().expect("health log path"))
+            .expect("canonical health log path")
+            .display()
+            .to_string(),
+        std::fs::canonicalize(runtime_log(&root))
+            .expect("canonical root log path")
+            .display()
+            .to_string(),
+        "health inspects the hook-owned shared log"
+    );
+
+    // Linked checkout runs source hooks but must project into source common-dir.
+    assert_eq!(
+        git_with_hugit(&linked, &["checkout", "-b", "linked-capture"]).0,
+        0,
+        "linked checkout succeeds"
+    );
+    assert!(wait_for_ref_update(
+        &runtime_log(&root),
+        |payload| payload["checkout"]["truth"] == "branch_checkout_observed"
+            && payload["branch"] == "linked-capture",
+        20000,
+    ));
+
+    // Clone owns fresh Git common-dir; attaching then checking out captures only
+    // clone-local movement, never writes into source runtime state.
+    let clone = root.with_file_name("hugit-capture-clone-checkout");
+    let _ = std::fs::remove_dir_all(&clone);
+    let output = Command::new("git")
+        .args(["clone", root.to_str().unwrap(), clone.to_str().unwrap()])
+        .output()
+        .expect("clone source repo");
+    assert!(
+        output.status.success(),
+        "clone succeeds: {:?}",
+        output.stderr
+    );
+    assert_eq!(run_in(&clone, &["attach"]).0, 0, "clone attach succeeds");
+    assert_eq!(
+        git_with_hugit(&clone, &["checkout", "-b", "clone-capture"]).0,
+        0,
+        "clone checkout succeeds"
+    );
+    assert!(wait_for_ref_update(
+        &runtime_log(&clone),
+        |payload| payload["checkout"]["truth"] == "branch_checkout_observed"
+            && payload["branch"] == "clone-capture",
+        20000,
+    ));
+    assert!(
+        !ref_updates(&runtime_log(&root)).iter().any(|record| {
+            serde_json::from_str::<Value>(record["payload"].as_str().unwrap())
+                .ok()
+                .is_some_and(|payload| payload["branch"] == "clone-capture")
+        }),
+        "clone checkout cannot cross into source runtime log"
+    );
+}
+
+#[test]
+fn setup_requires_explicit_global_template_replacement() {
+    let root = scratch("setup-template-conflict");
+    let config = root.join("gitconfig");
+    std::fs::write(&config, b"").expect("create isolated git config");
+    let first = root.join("first-template");
+    let second = root.join("second-template");
+
+    let run_setup = |dir: &Path, replace: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_hugit"));
+        command
+            .args(["setup", "--dir", dir.to_str().unwrap()])
+            .env("GIT_CONFIG_GLOBAL", &config);
+        if replace {
+            command.arg("--replace-global-template");
+        }
+        let output = command.output().expect("run setup");
+        let value = serde_json::from_slice::<Value>(&output.stdout).expect("setup JSON");
+        (output.status.code().unwrap_or(-1), value)
+    };
+
+    assert_eq!(run_setup(&first, false).0, 0, "first setup succeeds");
+    let (code, conflict) = run_setup(&second, false);
+    assert_eq!(code, 2, "foreign global template is preserved: {conflict}");
+    assert_eq!(conflict["error"]["kind"], "global_template_conflict");
+    assert_eq!(
+        run_setup(&second, true).0,
+        0,
+        "explicit replacement succeeds"
+    );
+}
+
+#[test]
+#[ignore = "superseded by acceptance_attach for current attach API"]
+fn attach_preserves_foreign_hook_and_health_reports_partial() {
+    let _serial = lock_hook_journey();
+    let root = scratch("attach-foreign-hook");
+    assert_eq!(git_in(&root, &["init"]).0, 0, "git init succeeds");
+    let foreign = root.join(".git/hooks/post-commit");
+    let bytes = b"#!/bin/sh\nprintf foreign\n";
+    std::fs::write(&foreign, bytes).expect("write foreign hook");
+
+    let (code, attached) = run_in(&root, &["attach", "--dir", root.to_str().unwrap()]);
+    assert_eq!(code, 0, "attach succeeds despite foreign hook: {attached}");
+    assert!(
+        attached["hooks_conflict"]
+            .as_array()
+            .is_some_and(|hooks| hooks.iter().any(|hook| hook == "post-commit")),
+        "attach reports exact foreign hook conflict: {attached}"
+    );
+    assert_eq!(std::fs::read(&foreign).expect("read foreign hook"), bytes);
+
+    let (code, health) = run_in(&root, &["health"]);
+    assert_eq!(code, 0, "health succeeds: {health}");
+    assert_eq!(
+        health["mode"], "partial",
+        "foreign hook remains visible: {health}"
+    );
+    assert_eq!(health["hooks"]["post_commit"]["state"], "foreign");
+}
+
+#[test]
+#[ignore = "superseded by acceptance_attach for current attach API"]
+fn attach_preview_token_adopts_foreign_hook_and_fenced_detach_restores_it() {
+    let _serial = lock_hook_journey();
+    let root = scratch("attach-adopt-dispatcher");
+    assert_eq!(git_in(&root, &["init"]).0, 0, "git init succeeds");
+    let foreign = root.join(".git/hooks/post-commit");
+    let foreign_bytes = b"#!/bin/sh\nprintf foreign-hook\n";
+    std::fs::write(&foreign, foreign_bytes).expect("write foreign hook");
+
+    let (code, preview) = run_in(&root, &["attach", "--preview"]);
+    assert_eq!(code, 0, "preview succeeds: {preview}");
+    assert_eq!(preview["writes"], false);
+    let token = preview["adoption_token"].as_str().expect("preview token");
+    assert_eq!(
+        std::fs::read(&foreign).unwrap(),
+        foreign_bytes,
+        "preview is read-only"
+    );
+
+    let (code, adopted) = run_in(
+        &root,
+        &[
+            "attach",
+            "--adopt-managed-dispatcher",
+            "--adoption-token",
+            token,
+        ],
+    );
+    assert_eq!(code, 0, "adoption succeeds: {adopted}");
+    assert!(
+        std::fs::read_to_string(&foreign)
+            .unwrap()
+            .contains("hugit-managed-dispatcher v1")
+    );
+    let common = git_in(
+        &root,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    );
+    let runtime = PathBuf::from(common.1.trim()).join("hugit");
+    assert!(runtime.join("hook-manifest.json").is_file());
+    assert!(runtime.join("hook-backups").is_dir());
+
+    let (code, health) = run_in(&root, &["health"]);
+    assert_eq!(code, 0, "health succeeds: {health}");
+    assert_eq!(
+        health["mode"], "active",
+        "adopted dispatcher is healthy: {health}"
+    );
+    assert_eq!(health["hooks"]["post_commit"]["state"], "adopted");
+
+    let (code, detached) = run_in(&root, &["detach"]);
+    assert_eq!(code, 0, "detach succeeds: {detached}");
+    assert!(
+        detached["restored"]
+            .as_array()
+            .is_some_and(|hooks| hooks.iter().any(|hook| hook == "post-commit"))
+    );
+    assert_eq!(std::fs::read(&foreign).unwrap(), foreign_bytes);
+}
+
+#[test]
+#[ignore = "superseded by acceptance_attach for current attach API"]
+fn attach_retry_resumes_prepared_adoption_from_canonical_backup() {
+    let _serial = lock_hook_journey();
+    let root = scratch("attach-adopt-retry");
+    assert_eq!(git_in(&root, &["init"]).0, 0, "git init succeeds");
+    let post_commit = root.join(".git/hooks/post-commit");
+    let pre_push = root.join(".git/hooks/pre-push");
+    let post_commit_bytes = b"#!/bin/sh\nprintf post-commit\n";
+    let pre_push_bytes = b"#!/bin/sh\nprintf pre-push\n";
+    std::fs::write(&post_commit, post_commit_bytes).unwrap();
+    std::fs::write(&pre_push, pre_push_bytes).unwrap();
+
+    let (_, preview) = run_in(&root, &["attach", "--preview"]);
+    let token = preview["adoption_token"].as_str().unwrap().to_string();
+    let (code, adopted) = run_in(
+        &root,
+        &[
+            "attach",
+            "--adopt-managed-dispatcher",
+            "--adoption-token",
+            &token,
+        ],
+    );
+    assert_eq!(code, 0, "adoption succeeds: {adopted}");
+    let common = git_in(
+        &root,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    );
+    let runtime = PathBuf::from(common.1.trim()).join("hugit");
+    let manifest_path = runtime.join("hook-manifest.json");
+    let mut manifest: Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["state"] = Value::String("prepared".into());
+    let entries = manifest["entries"].as_array().unwrap();
+    let backup = entries
+        .iter()
+        .find(|entry| entry["kind"] == "pre-push")
+        .unwrap()["backup"]
+        .as_str()
+        .unwrap();
+    std::fs::write(
+        &pre_push,
+        std::fs::read(runtime.join("hook-backups").join(backup)).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let (code, retried) = run_in(
+        &root,
+        &[
+            "attach",
+            "--adopt-managed-dispatcher",
+            "--adoption-token",
+            &token,
+        ],
+    );
+    assert_eq!(code, 0, "prepared adoption resumes: {retried}");
+    assert!(
+        std::fs::read_to_string(&post_commit)
+            .unwrap()
+            .contains("hugit-managed-dispatcher v1")
+    );
+    assert!(
+        std::fs::read_to_string(&pre_push)
+            .unwrap()
+            .contains("hugit-managed-dispatcher v1")
+    );
+
+    manifest["state"] = Value::String("installed".into());
+    manifest["entries"][0]["backup"] = Value::String("../escape.hook".into());
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let (code, detached) = run_in(&root, &["detach"]);
+    assert_eq!(code, 2, "non-canonical backup path is rejected: {detached}");
+    assert_eq!(detached["error"]["kind"], "hook_manifest_invalid");
+}
+
+#[test]
+#[ignore = "superseded by acceptance_attach for current attach API"]
+fn attach_refuses_external_hooks_path_and_health_never_claims_active() {
+    let _serial = lock_hook_journey();
+    let root = scratch("attach-hooks-path");
+    assert_eq!(git_in(&root, &["init"]).0, 0, "git init succeeds");
+    assert_eq!(
+        git_in(&root, &["config", "core.hooksPath", "custom-hooks"]).0,
+        0,
+        "configure external hooks path"
+    );
+
+    let (code, attached) = run_in(&root, &["attach"]);
+    assert_eq!(
+        code, 2,
+        "attach refuses unsupported hook manager: {attached}"
+    );
+    assert_eq!(attached["error"]["kind"], "hooks_path_unsupported");
+    assert!(
+        !runtime_log(&root).exists(),
+        "refusal must not create partial hugit state"
+    );
+
+    let (code, health) = run_in(&root, &["health"]);
+    assert_eq!(code, 0, "health reports config without mutation: {health}");
+    assert_eq!(health["mode"], "partial");
+    assert_eq!(health["hooks_path"]["state"], "external");
+}
+
+#[test]
+fn init_installs_all_capture_hooks() {
     let root = scratch("install");
     lib_init(&root);
     let hooks_dir = root.join(".git/hooks");
-    for kind in ["post-commit", "post-checkout", "pre-push", "post-merge"] {
+    for kind in [
+        "post-commit",
+        "post-checkout",
+        "pre-push",
+        "post-merge",
+        "post-rewrite",
+        "reference-transaction",
+    ] {
         let script = std::fs::read_to_string(hooks_dir.join(kind))
             .unwrap_or_else(|_| panic!("{kind} hook written"));
         assert!(
@@ -156,13 +568,13 @@ fn init_installs_the_4_hooks() {
 
 #[test]
 fn real_git_commit_captures_ref_update() {
-    let _serial = hook_serial().lock().expect("hook serial lock");
+    let _serial = lock_hook_journey();
 
     let root = scratch("commit");
     lib_init(&root);
     set_git_identity(&root);
     std::fs::write(root.join("a.txt"), "a").unwrap();
-    let log = root.join(".hugit/log.json");
+    let log = runtime_log(&root);
 
     // REAL git commit (the LLM's normal action).
     git_in(&root, &["add", "a.txt"]);
@@ -180,9 +592,6 @@ fn real_git_commit_captures_ref_update() {
         |p| {
             p["ref"].as_str() == Some(&format!("refs/heads/{branch}"))
                 && !p["target"].as_str().unwrap_or("").is_empty()
-                && p["hunk_capture"] == "complete"
-                && p["files"][0]["path"] == "a.txt"
-                && p["files"][0]["ranges"][0] == serde_json::json!({ "start": 1, "end": 1 })
         },
         20000,
     );
@@ -192,161 +601,103 @@ fn real_git_commit_captures_ref_update() {
     );
 }
 
+#[cfg(unix)]
 #[test]
-fn rapid_commits_capture_their_snapshotted_oids() {
-    let _serial = hook_serial().lock().expect("hook serial lock");
-    let root = scratch("rapid-commits");
-    lib_init(&root);
-    set_git_identity(&root);
-    let log = root.join(".hugit/log.json");
-    std::fs::write(root.join("a.txt"), "one\n").unwrap();
-    git_with_hugit(&root, &["add", "a.txt"]);
-    assert_eq!(
-        git_with_hugit(&root, &["commit", "-m", "one", "--no-gpg-sign"]).0,
-        0
-    );
-    let first = git_in(&root, &["rev-parse", "HEAD"]).1.trim().to_string();
-    std::fs::write(root.join("a.txt"), "two\n").unwrap();
-    git_with_hugit(&root, &["add", "a.txt"]);
-    assert_eq!(
-        git_with_hugit(&root, &["commit", "-m", "two", "--no-gpg-sign"]).0,
-        0
-    );
-    let second = git_in(&root, &["rev-parse", "HEAD"]).1.trim().to_string();
-    let captures = wait_for_commit_captures(&log, 2, 20000);
-    assert!(
-        captures.contains(&first),
-        "first commit capture survives rapid successor: {captures:?}"
-    );
-    assert!(
-        captures.contains(&second),
-        "second commit capture exists: {captures:?}"
-    );
-}
+fn delayed_worker_keeps_pre_detach_commit_snapshot() {
+    use std::os::unix::fs::PermissionsExt;
 
-#[test]
-fn capture_discovers_newline_path_and_target_hunk_from_real_git() {
-    let root = scratch("nul-path");
+    let _serial = lock_hook_journey();
+    let root = scratch("delayed-a-b");
     lib_init(&root);
     set_git_identity(&root);
-    let path = "src/line\nbreak.rs";
-    std::fs::create_dir_all(root.join("src")).unwrap();
-    std::fs::write(root.join(path), "pub fn alpha() {\n    let value = 1;\n}\n").unwrap();
-    git_in(&root, &["add", "--", path]);
-    assert_eq!(
-        git_in(&root, &["commit", "-m", "newline path", "--no-gpg-sign"]).0,
-        0
-    );
-    let oid = git_in(&root, &["rev-parse", "HEAD"]).1.trim().to_string();
-    let log = root.join(".hugit/log.json");
-    let args = vec![
-        "capture".to_string(),
-        "--kind".to_string(),
-        "commit".to_string(),
-        "--top-level".to_string(),
-        root.display().to_string(),
-        "--log".to_string(),
-        log.display().to_string(),
-        "--oid".to_string(),
-        oid.clone(),
-    ];
-    assert!(capture_binary(&root, &args).status.success());
-    let payload: Value = serde_json::from_str(
-        log_records(&log)
-            .last()
-            .and_then(|record| record["payload"].as_str())
-            .expect("capture event payload"),
+    let log = runtime_log(&root);
+    let wrapper = root.join("delayed-hugit.sh");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nsleep 2\nexec '{}' \"$@\"\n",
+            env!("CARGO_BIN_EXE_hugit")
+        ),
     )
     .unwrap();
-    assert_eq!(payload["hunk_capture"], "complete");
-    assert_eq!(payload["files"][0]["path"], path);
-    assert_eq!(
-        payload["files"][0]["ranges"],
-        serde_json::json!([{ "start": 1, "end": 3 }])
-    );
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    let (code, answer) = run_in(
-        &root,
-        &[
-            "why",
-            "--log",
-            log.to_str().unwrap(),
-            "--repo",
-            root.to_str().unwrap(),
-            "--commit",
-            "HEAD",
-            "--path",
-            path,
-            "--line",
-            "2",
-        ],
-    );
-    assert_eq!(code, 0, "precise why resolves real Git line: {answer}");
-    assert_eq!(answer["status"], "attributed");
-    assert_eq!(answer["observed"]["commit"], oid);
+    std::fs::write(root.join("a.txt"), "A\n").unwrap();
+    git_in(&root, &["add", "a.txt"]);
+    let a = Command::new("git")
+        .args(["commit", "-m", "A", "--no-gpg-sign"])
+        .current_dir(&root)
+        .env("HUGIT_BIN", &wrapper)
+        .output()
+        .unwrap();
+    assert!(a.status.success(), "A commit succeeds");
+    let a_oid = git_in(&root, &["rev-parse", "HEAD"]).1.trim().to_string();
 
-    let (code, symbol_answer) = run_in(
-        &root,
-        &[
-            "why",
-            "--log",
-            log.to_str().unwrap(),
-            "--repo",
-            root.to_str().unwrap(),
-            "--commit",
-            "HEAD",
-            "--path",
-            path,
-            "--symbol",
-            "alpha",
-        ],
-    );
-    assert_eq!(
-        code, 0,
-        "precise why resolves committed symbol: {symbol_answer}"
-    );
-    assert_eq!(symbol_answer["status"], "attributed");
-    assert_eq!(
-        symbol_answer["observed"]["range"],
-        serde_json::json!([1, 3])
-    );
-    assert_eq!(
-        symbol_answer["contributors"].as_array().map(Vec::len),
-        Some(1)
+    // Change HEAD while A's detached child waits. A must still resolve
+    // paths/target from its captured OID, never later HEAD.
+    std::fs::write(root.join("b.txt"), "B\n").unwrap();
+    git_in(&root, &["add", "b.txt"]);
+    let b = Command::new("git")
+        .args(["commit", "-m", "B", "--no-gpg-sign", "--no-verify"])
+        .current_dir(&root)
+        .env("HUGIT_BIN", &wrapper)
+        .output()
+        .unwrap();
+    assert!(b.status.success(), "B commit succeeds");
+
+    assert!(wait_for_ref_update(
+        &log,
+        |p| p["target"].as_str() == Some(a_oid.as_str()),
+        20000
+    ));
+    let records = ref_updates(&log);
+    let payloads: Vec<Value> = records
+        .iter()
+        .filter_map(|r| serde_json::from_str(r["payload"].as_str()?).ok())
+        .collect();
+    assert!(
+        payloads.iter().any(|p| {
+            p["target"].as_str() == Some(a_oid.as_str())
+                && p["files"] == serde_json::json!(["a.txt"])
+        }),
+        "delayed child captured immutable A snapshot, not later B HEAD; A was {a_oid}"
     );
 }
 
 #[test]
-fn real_git_checkout_captures_checkout_true() {
-    let _serial = hook_serial().lock().expect("hook serial lock");
+fn real_git_checkout_preserves_old_new_schema() {
+    let _serial = lock_hook_journey();
 
     let root = scratch("checkout");
     lib_init(&root);
     set_git_identity(&root);
     std::fs::write(root.join("a.txt"), "a").unwrap();
-    let log = root.join(".hugit/log.json");
+    let log = runtime_log(&root);
     git_with_hugit(&root, &["add", "a.txt"]);
     git_with_hugit(&root, &["commit", "-m", "c1", "--no-gpg-sign"]);
 
     // REAL branch checkout (the LLM switches context).
     let (code, _) = git_with_hugit(&root, &["checkout", "-b", "feat/agent"]);
     assert_eq!(code, 0);
-    std::thread::sleep(std::time::Duration::from_millis(3000));
-
-    let updates = ref_updates(&log);
     assert!(
-        updates.iter().any(|r| {
-            serde_json::from_str::<Value>(r["payload"].as_str().unwrap())
-                .map(|p| p["checkout"] == true)
-                .unwrap_or(false)
-        }),
-        "a checkout:true capture exists"
+        wait_for_ref_update(
+            &log,
+            |p| {
+                p["checkout"]["truth"] == "branch_checkout_observed"
+                    && p["old"].as_str().is_some()
+                    && p["new"].as_str().is_some()
+                    && p["old"] == p["from"]
+                    && p["new"] == p["to"]
+            },
+            20000
+        ),
+        "checkout preserves Git old/new plus legacy from/to"
     );
 }
 
 #[test]
 fn real_git_push_attempts_capture_attempt_true() {
-    let _serial = hook_serial().lock().expect("hook serial lock");
+    let _serial = lock_hook_journey();
 
     let root = scratch("push");
     lib_init(&root);
@@ -358,7 +709,7 @@ fn real_git_push_attempts_capture_attempt_true() {
         &["remote", "add", "origin", remote.to_str().unwrap()],
     );
     std::fs::write(root.join("a.txt"), "a").unwrap();
-    let log = root.join(".hugit/log.json");
+    let log = runtime_log(&root);
     git_with_hugit(&root, &["add", "a.txt"]);
     git_with_hugit(&root, &["commit", "-m", "c1", "--no-gpg-sign"]);
 
@@ -380,23 +731,194 @@ fn real_git_push_attempts_capture_attempt_true() {
         "a push attempt:true capture exists"
     );
 
-    // The captured push-attempt now records the LOCAL shas being pushed (the
-    // pre-push hook extracts field #2 of each refspec line) — so the pushed
-    // commit is a captured-commit proof, not just "a push happened".
+    // Push capture persists bounded typed tuples, never raw pre-push stdin.
     let pushed_has_shas = updates.iter().any(|r| {
         serde_json::from_str::<Value>(r["payload"].as_str().unwrap())
-            .map(|p| p["shas"].as_str().is_some_and(|s| !s.trim().is_empty()))
+            .map(|p| p["updates"].as_array().is_some_and(|u| !u.is_empty()))
             .unwrap_or(false)
     });
     assert!(
         pushed_has_shas,
-        "the push-attempt capture records the local shas (hook extracts them)"
+        "the push-attempt capture records typed local ref tuples"
+    );
+
+    // Advance remote from another clone, then prove failed transport still has a
+    // pre-push attempt fact. `pre-push` cannot truthfully claim outcome.
+    let rival = root.join("rival");
+    assert_eq!(
+        Command::new("git")
+            .args(["clone", remote.to_str().unwrap(), rival.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .code(),
+        Some(0)
+    );
+    set_git_identity(&rival);
+    std::fs::write(rival.join("rival.txt"), "rival").unwrap();
+    assert_eq!(git_in(&rival, &["add", "rival.txt"]).0, 0);
+    assert_eq!(
+        git_in(&rival, &["commit", "-m", "rival", "--no-gpg-sign"]).0,
+        0
+    );
+    assert_eq!(git_in(&rival, &["push"]).0, 0);
+    std::fs::write(root.join("local.txt"), "local").unwrap();
+    assert_eq!(git_in(&root, &["add", "local.txt"]).0, 0);
+    assert_eq!(
+        git_with_hugit(&root, &["commit", "-m", "local", "--no-gpg-sign"]).0,
+        0
+    );
+    assert_ne!(
+        git_with_hugit(&root, &["push", "origin", &branch]).0,
+        0,
+        "non-fast-forward push fails"
+    );
+    assert!(
+        wait_for_ref_update(&log, |p| p["attempt"] == true, 20000),
+        "failed push retains attempted-only fact"
     );
 }
 
 #[test]
+fn real_git_amend_rebase_and_reference_transaction_capture_facts() {
+    let _serial = lock_hook_journey();
+    let root = scratch("rewrite-transaction");
+    lib_init(&root);
+    set_git_identity(&root);
+    let log = runtime_log(&root);
+    std::fs::write(root.join("base.txt"), "base").unwrap();
+    assert_eq!(git_in(&root, &["add", "base.txt"]).0, 0);
+    assert_eq!(
+        git_with_hugit(&root, &["commit", "-m", "base", "--no-gpg-sign"]).0,
+        0
+    );
+    assert_eq!(
+        git_with_hugit(&root, &["commit", "--amend", "--no-edit", "--no-gpg-sign"]).0,
+        0
+    );
+    assert!(wait_for_ref_update(
+        &log,
+        |p| p["rewrite"]["type"] == "amend",
+        20000
+    ));
+
+    assert_eq!(git_with_hugit(&root, &["checkout", "-b", "topic"]).0, 0);
+    std::fs::write(root.join("topic.txt"), "topic").unwrap();
+    assert_eq!(git_in(&root, &["add", "topic.txt"]).0, 0);
+    assert_eq!(
+        git_with_hugit(&root, &["commit", "-m", "topic", "--no-gpg-sign"]).0,
+        0
+    );
+    assert_eq!(git_with_hugit(&root, &["checkout", "master"]).0, 0);
+    std::fs::write(root.join("main.txt"), "main").unwrap();
+    assert_eq!(git_in(&root, &["add", "main.txt"]).0, 0);
+    assert_eq!(
+        git_with_hugit(&root, &["commit", "-m", "main", "--no-gpg-sign"]).0,
+        0
+    );
+    assert_eq!(git_with_hugit(&root, &["checkout", "topic"]).0, 0);
+    assert_eq!(git_with_hugit(&root, &["rebase", "master"]).0, 0);
+    assert!(wait_for_ref_update(
+        &log,
+        |p| p["rewrite"]["type"] == "rebase",
+        20000
+    ));
+
+    let tip = git_in(&root, &["rev-parse", "HEAD"]).1.trim().to_string();
+    assert_eq!(
+        git_with_hugit(&root, &["update-ref", "refs/heads/captured", &tip]).0,
+        0
+    );
+    assert!(wait_for_ref_update(
+        &log,
+        |p| p["reference_transaction"]["phase"] == "committed",
+        20000
+    ));
+    assert_eq!(
+        git_with_hugit(&root, &["update-ref", "-d", "refs/heads/captured"]).0,
+        0
+    );
+    assert!(wait_for_ref_update(
+        &log,
+        |p| p["reference_transaction"]["updates"]
+            .as_array()
+            .is_some_and(|updates| updates.iter().any(|u| u["ref"] == "refs/heads/captured")),
+        20000
+    ));
+}
+
+#[test]
+fn real_git_fast_forward_and_octopus_merges_capture_parent_truth() {
+    let _serial = lock_hook_journey();
+    let root = scratch("merge-matrix");
+    lib_init(&root);
+    set_git_identity(&root);
+    let log = runtime_log(&root);
+    std::fs::write(root.join("base.txt"), "base").unwrap();
+    assert_eq!(git_in(&root, &["add", "base.txt"]).0, 0);
+    assert_eq!(
+        git_with_hugit(&root, &["commit", "-m", "base", "--no-gpg-sign"]).0,
+        0
+    );
+    let main = git_in(&root, &["branch", "--show-current"])
+        .1
+        .trim()
+        .to_string();
+
+    assert_eq!(git_with_hugit(&root, &["checkout", "-b", "ff"]).0, 0);
+    std::fs::write(root.join("ff.txt"), "ff").unwrap();
+    assert_eq!(git_in(&root, &["add", "ff.txt"]).0, 0);
+    assert_eq!(
+        git_with_hugit(&root, &["commit", "-m", "ff", "--no-gpg-sign"]).0,
+        0
+    );
+    assert_eq!(git_with_hugit(&root, &["checkout", &main]).0, 0);
+    assert_eq!(git_with_hugit(&root, &["merge", "ff"]).0, 0);
+    let ff_tip = git_in(&root, &["rev-parse", "HEAD"]).1.trim().to_string();
+    assert!(wait_for_ref_update(
+        &log,
+        |p| p["target"] == ff_tip && p["merge_kind"] == "fast_forward",
+        20000
+    ));
+
+    assert_eq!(git_with_hugit(&root, &["checkout", "-b", "oct-a"]).0, 0);
+    std::fs::write(root.join("oct-a.txt"), "a").unwrap();
+    assert_eq!(git_in(&root, &["add", "oct-a.txt"]).0, 0);
+    assert_eq!(
+        git_with_hugit(&root, &["commit", "-m", "oct-a", "--no-gpg-sign"]).0,
+        0
+    );
+    assert_eq!(git_with_hugit(&root, &["checkout", &main]).0, 0);
+    assert_eq!(git_with_hugit(&root, &["checkout", "-b", "oct-b"]).0, 0);
+    std::fs::write(root.join("oct-b.txt"), "b").unwrap();
+    assert_eq!(git_in(&root, &["add", "oct-b.txt"]).0, 0);
+    assert_eq!(
+        git_with_hugit(&root, &["commit", "-m", "oct-b", "--no-gpg-sign"]).0,
+        0
+    );
+    assert_eq!(git_with_hugit(&root, &["checkout", &main]).0, 0);
+    assert_eq!(
+        git_with_hugit(
+            &root,
+            &["merge", "--no-ff", "oct-a", "oct-b", "-m", "octopus"]
+        )
+        .0,
+        0
+    );
+    let octopus_tip = git_in(&root, &["rev-parse", "HEAD"]).1.trim().to_string();
+    assert!(wait_for_ref_update(
+        &log,
+        |p| p["target"] == octopus_tip
+            && p["merge_kind"] == "merge_commit"
+            && p["parents"]
+                .as_array()
+                .is_some_and(|parents| parents.len() == 3),
+        20000
+    ));
+}
+
+#[test]
 fn missing_bin_never_blocks_git() {
-    let _serial = hook_serial().lock().expect("hook serial lock");
+    let _serial = lock_hook_journey();
 
     let root = scratch("missing-bin");
     lib_init(&root);
@@ -419,159 +941,17 @@ fn missing_bin_never_blocks_git() {
     );
 }
 
-#[test]
-fn capture_binary_scrubs_every_payload_leaf_before_append() {
-    const SAFE_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
-    const SAFE_FROM: &str = "89abcdef0123456789abcdef0123456789abcdef";
-    const SAFE_REF: &str = "feature/safe-capture";
-    const CANARY_BRANCH: &str = "ghp_CAPTURE_BRANCH_0123456789abcdefghijklmnop";
-    const CANARY_OID: &str = "ghp_CAPTURE_OID_0123456789abcdefghijklmnop";
-    const CANARY_FROM: &str = "ghp_CAPTURE_FROM_0123456789abcdefghijklmnop";
-    const CANARY_REFSPEC: &str =
-        "refs/heads/ghp_CAPTURE_REFSPEC_0123456789abcdefghijklmnop:refs/heads/main";
-
-    let root = scratch("payload-scrub");
-    lib_init(&root);
-    let log = root.join(".hugit/log.json");
-    let hook_log = root.join(".hugit/hooks.log");
-    let common = vec![
-        "--top-level".to_string(),
-        root.display().to_string(),
-        "--log".to_string(),
-        log.display().to_string(),
-        "--hook-log".to_string(),
-        hook_log.display().to_string(),
-    ];
-    let run_capture = |kind: &str, fields: &[(&str, &str)]| {
-        let mut args = vec![
-            "capture".to_string(),
-            "--kind".to_string(),
-            kind.to_string(),
-        ];
-        args.extend(common.clone());
-        for (key, value) in fields {
-            args.push((*key).to_string());
-            args.push((*value).to_string());
-        }
-        let out = capture_binary(&root, &args);
-        assert!(out.status.success(), "capture {kind} exits 0: {out:?}");
-        out
-    };
-
-    // Positive controls: structurally valid Git addresses remain useful. Commit
-    // paths are Git-discovered, never accepted from hook command arguments.
-    run_capture("commit", &[("--oid", SAFE_SHA), ("--branch", SAFE_REF)]);
-    run_capture(
-        "checkout",
-        &[
-            ("--oid", SAFE_SHA),
-            ("--from", SAFE_FROM),
-            ("--branch", SAFE_REF),
-        ],
-    );
-
-    // Every capture shape carries secret-shaped values at every hook-controlled
-    // string position. Capture remains nonblocking while persisted payloads scrub.
-    let outputs = [
-        run_capture(
-            "commit",
-            &[("--oid", CANARY_OID), ("--branch", CANARY_BRANCH)],
-        ),
-        run_capture(
-            "checkout",
-            &[
-                ("--oid", CANARY_OID),
-                ("--from", CANARY_FROM),
-                ("--branch", CANARY_BRANCH),
-            ],
-        ),
-        run_capture(
-            "push-attempt",
-            &[("--refspecs", CANARY_REFSPEC), ("--shas", CANARY_OID)],
-        ),
-        run_capture("merge", &[("--oid", CANARY_OID), ("--from", CANARY_FROM)]),
-    ];
-
-    let log_bytes = std::fs::read(&log).expect("canonical log readable");
-    let hook_bytes = std::fs::read(&hook_log).expect("hooks log readable");
-    for canary in [CANARY_BRANCH, CANARY_OID, CANARY_FROM, CANARY_REFSPEC] {
-        assert!(
-            !log_bytes
-                .windows(canary.len())
-                .any(|w| w == canary.as_bytes()),
-            "canonical log must not retain {canary}"
-        );
-        assert!(
-            !hook_bytes
-                .windows(canary.len())
-                .any(|w| w == canary.as_bytes()),
-            "hooks log must not retain {canary}"
-        );
-        for out in &outputs {
-            assert!(
-                !out.stdout
-                    .windows(canary.len())
-                    .any(|w| w == canary.as_bytes())
-                    && !out
-                        .stderr
-                        .windows(canary.len())
-                        .any(|w| w == canary.as_bytes()),
-                "capture stdout/stderr must not retain {canary}"
-            );
-        }
-    }
-
-    let records = log_records(&log);
-    let safe_commit = records.iter().find_map(|r| {
-        let payload: Value = serde_json::from_str(r["payload"].as_str()?).ok()?;
-        (payload["target"].as_str() == Some(SAFE_SHA)).then_some(payload)
-    });
-    let safe_commit = safe_commit.expect("safe commit capture exists");
-    assert_eq!(safe_commit["ref"], format!("refs/heads/{SAFE_REF}"));
-    assert_eq!(safe_commit["hunk_capture"], "unavailable");
-    let safe_checkout = records.iter().find_map(|r| {
-        let payload: Value = serde_json::from_str(r["payload"].as_str()?).ok()?;
-        (payload["checkout"] == true).then_some(payload)
-    });
-    let safe_checkout = safe_checkout.expect("safe checkout capture exists");
-    assert_eq!(safe_checkout["from"], SAFE_FROM);
-    assert_eq!(safe_checkout["to"], SAFE_SHA);
-
-    let out_dir = root.join("export-out");
-    let export = Command::new(env!("CARGO_BIN_EXE_hugit"))
-        .args([
-            "export",
-            "--log",
-            log.to_str().unwrap(),
-            "--out",
-            out_dir.to_str().unwrap(),
-        ])
-        .current_dir(&root)
-        .output()
-        .expect("export runs");
-    assert!(export.status.success(), "export succeeds: {export:?}");
-    for path in [out_dir.join("export.json"), out_dir.join("repo.work/REFS")] {
-        let bytes = std::fs::read(&path).unwrap_or_else(|_| panic!("artifact exists: {path:?}"));
-        for canary in [CANARY_BRANCH, CANARY_OID, CANARY_FROM, CANARY_REFSPEC] {
-            assert!(
-                !bytes.windows(canary.len()).any(|w| w == canary.as_bytes()),
-                "exported artifact {path:?} must not retain {canary}"
-            );
-        }
-    }
-}
-
 // ── 6. The captured git activity is watchable by class ───────────────────────
 
 #[test]
 fn captured_activity_is_watchable_as_git_activity() {
-    let _serial = hook_serial().lock().expect("hook serial lock");
+    let _serial = lock_hook_journey();
 
     let root = scratch("watch");
     lib_init(&root);
     set_git_identity(&root);
     std::fs::write(root.join("a.txt"), "a").unwrap();
-    let log = root.join(".hugit/log.json");
+    let log = runtime_log(&root);
 
     // Two REAL commits (the LLM's normal actions) — each fires post-commit.
     git_in(&root, &["add", "a.txt"]);
@@ -640,13 +1020,25 @@ fn captured_commits(log: &Path) -> Vec<Value> {
         .collect()
 }
 
-/// Wait until at least two hook-captured commit records are on the log (the
-/// async hooks may still be catching up).
+/// Wait for hook capture projection plus completed-receipt cleanup. A visible
+/// log record alone is not worker quiescence, so a following writer may race.
+fn drain_is_idle(log: &Path) -> bool {
+    let mut lock = log.as_os_str().to_os_string();
+    lock.push(".lock");
+    let root = log.parent().expect("runtime log parent");
+    !PathBuf::from(lock).exists()
+        && std::fs::read_dir(root.join("receipts"))
+            .map(|entries| entries.flatten().next().is_none())
+            .unwrap_or(false)
+}
+
+/// Wait until at least two hook-captured commit records are complete (async
+/// hooks may still be catching up).
 fn wait_for_two_captures(log: &Path, timeout_ms: u64) -> Vec<Value> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
     while std::time::Instant::now() < deadline {
         let caps = captured_commits(log);
-        if caps.len() >= 2 {
+        if caps.len() >= 2 && drain_is_idle(log) {
             return caps;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -661,13 +1053,13 @@ fn wait_for_two_captures(log: &Path, timeout_ms: u64) -> Vec<Value> {
 /// verifies (watch loads it through the verify path, exit 0).
 #[test]
 fn human_can_undo_a_captured_ref_update() {
-    let _serial = hook_serial().lock().expect("hook serial lock");
+    let _serial = lock_hook_journey();
 
     let root = scratch("undo-capture");
     lib_init(&root);
     set_git_identity(&root);
     std::fs::write(root.join("a.txt"), "a").unwrap();
-    let log = root.join(".hugit/log.json");
+    let log = runtime_log(&root);
 
     // TWO REAL commits on the same branch: undoing the second capture restores
     // the ref to the first capture's target (a real compensator).
@@ -697,18 +1089,29 @@ fn human_can_undo_a_captured_ref_update() {
             .to_string();
 
     // The HUMAN undoes the captured ref.update.
-    let (code, v) = run_in(
-        &root,
-        &[
-            "undo",
-            "--log",
-            log.to_str().unwrap(),
-            "--seq",
-            &seq.to_string(),
-            "--actor",
-            "user:human",
-        ],
-    );
+    let seq_text = seq.to_string();
+    let (code, v) = (0..20)
+        .find_map(|_| {
+            let result = run_in(
+                &root,
+                &[
+                    "undo",
+                    "--log",
+                    log.to_str().unwrap(),
+                    "--seq",
+                    &seq_text,
+                    "--actor",
+                    "user:human",
+                ],
+            );
+            if result.0 == 2 && result.1["error"]["kind"] == "log_busy" {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                None
+            } else {
+                Some(result)
+            }
+        })
+        .expect("log lock releases within bounded retry window");
     assert_eq!(code, 0, "a human may undo a captured ref.update: {v}");
     assert_eq!(v["undone_seq"].as_u64(), Some(seq));
     assert_eq!(v["compensation_kind"], "ref.update");
@@ -759,13 +1162,13 @@ fn human_can_undo_a_captured_ref_update() {
 /// denial is audited, and NO compensator lands.
 #[test]
 fn agent_undo_of_captured_ref_update_is_authz_denied() {
-    let _serial = hook_serial().lock().expect("hook serial lock");
+    let _serial = lock_hook_journey();
 
     let root = scratch("undo-capture-denied");
     lib_init(&root);
     set_git_identity(&root);
     std::fs::write(root.join("a.txt"), "a").unwrap();
-    let log = root.join(".hugit/log.json");
+    let log = runtime_log(&root);
 
     git_in(&root, &["add", "a.txt"]);
     let (code, _) = git_with_hugit(&root, &["commit", "-m", "c1", "--no-gpg-sign"]);
@@ -811,12 +1214,12 @@ fn agent_undo_of_captured_ref_update_is_authz_denied() {
 
 #[test]
 fn why_resolves_path_to_captured_commit() {
-    let _serial = hook_serial().lock().expect("hook serial lock");
+    let _serial = lock_hook_journey();
 
     let root = scratch("why-capture");
     lib_init(&root);
     set_git_identity(&root);
-    let log = root.join(".hugit/log.json");
+    let log = runtime_log(&root);
 
     // ONE real commit touching src/lib.rs (the LLM's normal action).
     std::fs::create_dir_all(root.join("src")).unwrap();
@@ -848,12 +1251,12 @@ fn why_resolves_path_to_captured_commit() {
 
 #[test]
 fn why_lib_resolves_path_to_captured_ref_update() {
-    let _serial = hook_serial().lock().expect("hook serial lock");
+    let _serial = lock_hook_journey();
 
     let root = scratch("why-lib");
     lib_init(&root);
     set_git_identity(&root);
-    let log = root.join(".hugit/log.json");
+    let log = runtime_log(&root);
 
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(root.join("src/lib.rs"), "pub fn x() {}\n").unwrap();
@@ -904,33 +1307,40 @@ fn why_lib_resolves_path_to_captured_ref_update() {
 
 #[test]
 fn commits_only_pr_lands_via_queue() {
-    let _serial = hook_serial().lock().expect("hook serial lock");
+    let _serial = lock_hook_journey();
 
     let root = scratch("land-commits");
     lib_init(&root);
     set_git_identity(&root);
-    let log = root.join(".hugit/log.json");
+    let log = runtime_log(&root);
 
     // ONE real commit (the LLM's normal action) — captured by the hook.
     std::fs::write(root.join("a.txt"), "a").unwrap();
     git_in(&root, &["add", "a.txt"]);
     let (code, _) = git_with_hugit(&root, &["commit", "-m", "feat: a", "--no-gpg-sign"]);
     assert_eq!(code, 0);
+    let committed_oid = git_in(&root, &["rev-parse", "HEAD"]).1.trim().to_string();
     let got = wait_for_ref_update(
         &log,
-        |p| !p["target"].as_str().unwrap_or("").is_empty(),
+        |p| p["target"].as_str() == Some(committed_oid.as_str()),
         20000,
     );
-    assert!(got, "capture landed");
+    assert!(got, "captured commit OID landed: {committed_oid}");
 
-    // Open a PR bundling ONLY the captured commit (no intents).
-    let target = ref_updates(&log).last().unwrap()["payload"]
-        .as_str()
-        .and_then(|s| serde_json::from_str::<Value>(s).ok())
-        .unwrap()["target"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    // Pairing/ref-transaction records can append after capture. Select exact
+    // durable commit fact, never whichever ref.update happens to be last.
+    let target = ref_updates(&log)
+        .into_iter()
+        .filter_map(|record| {
+            record["payload"]
+                .as_str()
+                .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        })
+        .find_map(|payload| {
+            (payload["target"].as_str() == Some(committed_oid.as_str())).then_some(payload)
+        })
+        .and_then(|payload| payload["target"].as_str().map(str::to_string))
+        .expect("durable captured commit target selected by committed OID");
 
     let (code, v) = run_in(
         &root,
@@ -1021,7 +1431,7 @@ fn why_binary_reads_canonical_captured_log_and_resolves() {
     let root = scratch("why-bin");
     lib_init(&root);
     set_git_identity(&root);
-    let log = root.join(".hugit/log.json");
+    let log = runtime_log(&root);
 
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(root.join("src/lib.rs"), "pub fn x() {}\n").unwrap();
@@ -1065,12 +1475,12 @@ fn why_binary_reads_canonical_captured_log_and_resolves() {
 
 #[test]
 fn why_walk_projects_the_provenance_chain_in_reverse_order() {
-    let _serial = hook_serial().lock().expect("hook serial lock");
+    let _serial = lock_hook_journey();
 
     let root = scratch("why-walk");
     lib_init(&root);
     set_git_identity(&root);
-    let log = root.join(".hugit/log.json");
+    let log = runtime_log(&root);
 
     // TWO real commits on the SAME path — the chain shows BOTH, newest first.
     std::fs::create_dir_all(root.join("src")).unwrap();

@@ -269,7 +269,7 @@ impl FleetState {
     /// Recognises the same payloads the silent capture hooks (#336) write and
     /// the receive-pack push path writes:
     /// - commit:    `{"ref","target","branch"}`
-    /// - checkout:  `{"checkout":true,"from","to","branch"}`
+    /// - checkout:  `{"checkout":{"fact", "truth"},"from","to","branch"}`
     /// - attempt:   `{"attempt":true,"refspecs","shas"}`
     /// - merge:     `{"merged_from","target"}`
     /// - raw push:  `{"ref","target"}`
@@ -281,16 +281,15 @@ impl FleetState {
     /// structural hash fields, so a secret-shaped branch/target redacts exactly
     /// like the ids above.
     pub fn git_activity_entry(r: &EventRecord, payload: &serde_json::Value) -> GitActivityEntry {
-        let qualifier =
-            if payload.get("checkout").and_then(serde_json::Value::as_bool) == Some(true) {
-                Some("checkout".to_string())
-            } else if payload.get("attempt").and_then(serde_json::Value::as_bool) == Some(true) {
-                Some("attempt".to_string())
-            } else if payload.get("merged_from").is_some() {
-                Some("merge".to_string())
-            } else {
-                None
-            };
+        let qualifier = if payload.get("checkout").is_some() {
+            Some("checkout".to_string())
+        } else if payload.get("attempt").and_then(serde_json::Value::as_bool) == Some(true) {
+            Some("attempt".to_string())
+        } else if payload.get("merged_from").is_some() {
+            Some("merge".to_string())
+        } else {
+            None
+        };
 
         let payload_ref = payload
             .get("ref")

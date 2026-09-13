@@ -105,7 +105,13 @@ fn do_run(args: UndoArgs) -> Result<String, CampaignError> {
         .unwrap_or_else(|| "user:cli".to_string());
 
     // Resolve the default --log ($HUGIT_LOG → .hugit/log.json) once.
-    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+    let log_path = crate::log_resolve::resolve_log_checked(args.log.clone()).map_err(|e| {
+        CampaignError::new(
+            e.kind(),
+            e.to_json(),
+            "repair blocked migration before appending an undo",
+        )
+    })?;
 
     // ── Lock BEFORE load (WC1 discipline) ────────────────────────────────────
     // `bootstrap = false`: an undo requires the log to already exist (you cannot

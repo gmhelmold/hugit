@@ -830,6 +830,7 @@ name = "hugit-cli"
 version = "0.1.4"
 dependencies = [
  "clap",
+ "getrandom 0.3.4",
  "gix-hash",
  "hex",
  "hugit-checks",
@@ -842,6 +843,7 @@ dependencies = [
  "hugit-queue",
  "hugit-refstore",
  "hugit-symbols",
+ "libc",
  "serde",
  "serde_json",
  "sha2",

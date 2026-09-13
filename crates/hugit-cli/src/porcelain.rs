@@ -174,6 +174,14 @@ impl PorcelainError {
         self.kind
     }
 
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn fix(&self) -> &str {
+        &self.fix
+    }
+
     /// An I/O fault reading/writing a `--log`/`--store` path (user/domain).
     pub fn io(action: &str, path: &std::path::Path, e: &std::io::Error) -> Self {
         PorcelainError::new(
@@ -307,6 +315,30 @@ pub fn scrub_payload(value: &mut Value) {
     scrub_value(value, ScrubMode::FreeText);
 }
 
+/// Recursively apply the structural-secret policy to JSON object keys and
+/// string values. This is for forensic projections whose input may contain
+/// attacker-controlled JSON keys as well as values. Unlike [`scrub_payload`],
+/// it does not run entropy redaction on safe identifier-shaped strings.
+pub fn structural_scrub_json(value: &mut Value) {
+    match value {
+        Value::String(s) => *s = structural_secret_scrub(s),
+        Value::Array(items) => {
+            for item in items {
+                structural_scrub_json(item);
+            }
+        }
+        Value::Object(map) => {
+            let mut scrubbed = serde_json::Map::new();
+            for (key, mut child) in std::mem::take(map) {
+                structural_scrub_json(&mut child);
+                scrubbed.insert(structural_secret_scrub(&key), child);
+            }
+            *map = scrubbed;
+        }
+        _ => {}
+    }
+}
+
 /// Inner recursion. `mode` is the scrub decision for the value reached at this
 /// node (re-evaluated per object child by [`scrub_mode`]):
 /// [`FreeText`](ScrubMode::FreeText) routes the string through the full engine,
@@ -320,6 +352,18 @@ fn scrub_value(value: &mut Value, mode: ScrubMode) {
             ScrubMode::FreeText => *s = crate::redaction::scrub(s),
             ScrubMode::Structural => *s = structural_secret_scrub(s),
             ScrubMode::Verbatim => {}
+            ScrubMode::SerializedPolicyGates => {
+                if serde_json::from_str::<Vec<hugit_policy::GateDescriptor>>(s).is_ok() {
+                    // Policy's old/new wire fields are JSON encoded inside strings.
+                    // Scrub contents, not wrapper, so replay can still parse them.
+                    let mut gates: Value =
+                        serde_json::from_str(s).expect("valid GateDescriptor list is valid JSON");
+                    scrub_value(&mut gates, ScrubMode::FreeText);
+                    *s = gates.to_string();
+                } else {
+                    *s = crate::redaction::scrub(s);
+                }
+            }
         },
         Value::Array(items) => {
             for item in items {
@@ -356,6 +400,10 @@ enum ScrubMode {
     /// identifier REDACTS while a 40/64-hex address or high-entropy slug SURVIVES
     /// (no collapse, stays addressable). [WI-SCRUB]
     Structural,
+    /// A policy.change `old`/`new` field containing a serialized gate list.
+    /// Its wrapper string is not an identifier; preserve parseable authorized
+    /// facts while recursively applying normal redaction to its contents.
+    SerializedPolicyGates,
 }
 
 /// Decide how the string under `key` (carrying `value`) is scrubbed as the tree
@@ -382,6 +430,12 @@ enum ScrubMode {
 /// Identifier exemption is decided as a KEY (an identifier value is always a
 /// string in practice); the digest branch only fires for a string value.
 fn scrub_mode(key: &str, value: &Value) -> ScrubMode {
+    if matches!(key, "old" | "new")
+        && let Value::String(s) = value
+        && serde_json::from_str::<Vec<hugit_policy::GateDescriptor>>(s).is_ok()
+    {
+        return ScrubMode::SerializedPolicyGates;
+    }
     if is_identifier_key(key) {
         return ScrubMode::Structural;
     }
@@ -570,7 +624,20 @@ pub fn is_identifier_key(key: &str) -> bool {
         key,
         // Identifier-address fields: pr/campaign/run/id + the W2 captured-commit
         // members (40-hex oids are addresses, never collapsed).
-        "campaign" | "intent_id" | "pr_id" | "run_id" | "id" | "commit_ids"
+        "campaign"
+            | "intent_id"
+            | "pr_id"
+            | "run_id"
+            | "id"
+            | "commit_ids"
+            | "target"
+            | "from"
+            | "to"
+            | "old"
+            | "new"
+            | "merged_from"
+            | "local_oid"
+            | "remote_oid"
     )
 }
 
@@ -763,6 +830,31 @@ mod tests {
         assert_eq!(v["nested"]["tree_hash"], "abc");
         assert_eq!(v["intent_ids"][0], REDACTED);
         assert_eq!(v["intent_ids"][1], "i-2");
+    }
+
+    #[test]
+    fn token_shaped_old_new_values_remain_redacted() {
+        let mut v = json!({ "old": GHP, "new": GHP });
+        scrub_payload(&mut v);
+        assert_eq!(v["old"], REDACTED);
+        assert_eq!(v["new"], REDACTED);
+    }
+
+    #[test]
+    fn serialized_policy_gate_lists_stay_parseable_and_scrub_contents() {
+        let gates = json!([{
+            "id": "dco",
+            "description": GHP,
+            "enabled": true,
+        }])
+        .to_string();
+        let mut v = json!({ "old": gates, "new": gates });
+        scrub_payload(&mut v);
+        for key in ["old", "new"] {
+            let gates: Value = serde_json::from_str(v[key].as_str().unwrap()).unwrap();
+            assert_eq!(gates[0]["id"], "dco");
+            assert_eq!(gates[0]["description"], REDACTED);
+        }
     }
 
     #[test]
@@ -1133,6 +1225,14 @@ mod tests {
             "run_id",
             "id",
             "commit_ids",
+            "target",
+            "from",
+            "to",
+            "old",
+            "new",
+            "merged_from",
+            "local_oid",
+            "remote_oid",
         ] {
             assert!(is_identifier_key(k), "`{k}` is an identifier address");
         }

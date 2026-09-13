@@ -56,13 +56,14 @@ O hugit **não precisa de `hugit-serve`** para funcionar. O produto é git-nativ
 
 ```
 repo git (git clone/push/pull normais — qualquer remote)
-  └─ .hugit/log.json     ← versionado, viaja com clone/push/fetch (não está no .gitignore)
+  └─ <git-common-dir>/hugit/event-log.json  ← estado local, fora do worktree
 hugit CLI (local, sem serviço)   ← lê o log, roda todos os verbos
 ```
 
 - **O CLI e os crates de núcleo não usam `hugit-serve`.** Sentido das dependências: `hugit-serve` → `use hugit-cli` (o serve importa o CLI); nenhum crate de núcleo importa o serve. `hugit-serve` é `publish = false`.
 - **`hugit-serve` é a janela web opcional** (o que a UI githugr lê), e o CAS CoreLink é só o deploy DESTA janela. Nada disso entra no plugin open-source: um repo git + o CLI bastam.
-- **Fluxo sem serve:** clone → `hugit campaign/intent/pr/check/dock` (local) → `git push` (o log vai junto) → outros agentes `git pull` sincronizam.
+- **Fluxo sem serve:** `hugit setup` ou `hugit attach` → Git normal → `hugit health`.
+  Push é tentativa observada localmente, não confirmação remota.
 - Publicação open-source = CLI + crates de núcleo; serve fica de fora (quem quiser a janela sobe o githugr, opcional).
 
 ---
@@ -71,8 +72,8 @@ hugit CLI (local, sem serviço)   ← lê o log, roda todos os verbos
 
 | Feature | O que faz | Como validar |
 |---|---|---|
-| `hugit setup --repo <path>` | Instala hooks do git existentes (post-commit, post-checkout, pre-push, post-merge) sem alterar dados Git; primeiro commit cria log. | `hugit setup --repo /path/to/repo`; ver `.git/hooks/post-commit` existe |
-| Capture silencioso | Toda operação do git (commit, checkout, push, merge) é registrada no log SEM travar git — o hook roda em background e sempre sai com sucesso. | `git commit` num repo init; ver o evento no `log.json` |
+| `hugit setup` / `hugit attach` | `setup` configura hooks para futuros `git init`; `attach` instala hooks hugit-owned em repo existente e preserva hooks estrangeiros. | Setup/attach, Git normal, `hugit health` |
+| Capture silencioso | Hooks observam commit, checkout, push e merge sem travar Git. `hugit capture` é interno/hook-only, nunca onboarding manual. | `git commit`; confira **observed locally** no health |
 | Capture por tipo | Registra o quê aconteceu: commit (arquivos novos), checkout (branch nova), push (hashes enviados), merge (origem+dst). | Commitar, ramificar, push, merge; conferir cada payload no log |
 
 ## 1. Campanhas (agrupamento de trabalho)

@@ -125,7 +125,7 @@ fn resume_run(args: ResumeArgs) -> ExitCode {
 
 /// Project the reconstructed context from the chain-verified log.
 fn project(args: &ResumeArgs) -> Result<Value, PorcelainError> {
-    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+    let log_path = crate::log_resolve::resolve_log(args.log.clone())?;
     let log = load_event_log(&log_path)?;
 
     // Scrub the caller's binding the SAME way the writer did, so the match lands

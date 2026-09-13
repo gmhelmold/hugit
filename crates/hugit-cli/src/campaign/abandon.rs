@@ -22,7 +22,13 @@ use super::output::CampaignError;
 use super::world::{KIND_CAMPAIGN_ABANDONED, World, append_authorized_and_persist};
 
 pub fn run(args: AbandonArgs) -> Result<String, CampaignError> {
-    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+    let log_path = crate::log_resolve::resolve_log_checked(args.log.clone()).map_err(|e| {
+        CampaignError::new(
+            e.kind(),
+            e.to_json(),
+            "repair blocked migration before appending a campaign event",
+        )
+    })?;
     // Lock BEFORE the load and hold it across the whole load→mutate→persist
     // (WF-CLI2 bug 2). `abandon` is a read-must-exist mutation: a missing `--log`
     // is `log_not_found`/exit-2, never a bootstrapped empty world that would let

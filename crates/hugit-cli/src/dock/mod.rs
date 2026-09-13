@@ -70,6 +70,13 @@ pub const DOCK_RECORD_KIND: &str = "dock.record";
 /// The marker filename inside the gitdir ("this worktree has a dock").
 pub const DOCK_MARKER: &str = "hugit-dock";
 
+/// Scrub user-controlled strings before a dock read model crosses stdout.
+/// Canonical records stay unchanged so resolution and attribution retain raw keys.
+pub(crate) fn sanitized_view(mut value: Value) -> Value {
+    crate::porcelain::scrub_payload(&mut value);
+    value
+}
+
 /// Milliseconds now — the wall-clock stamp.
 fn now_unix_ms() -> u64 {
     std::time::SystemTime::now()
@@ -496,7 +503,13 @@ fn run_coin(coin: CoinArgs) -> ExitCode {
 }
 
 fn run_ls(ls: LsArgs) -> ExitCode {
-    let log = crate::log_resolve::resolve_log(ls.log);
+    let log = match crate::log_resolve::resolve_log(ls.log) {
+        Ok(log) => log,
+        Err(error) => {
+            println!("{}", error.to_json());
+            return error.exit_code();
+        }
+    };
     // R4 observation (cold-verify F8): `dock ls` is the enumeration horizon —
     // mark every vanished-gitdir dock as ghost ONCE before listing (a closing
     // gitdir never waits for a specific dock's read).
@@ -528,7 +541,7 @@ fn run_ls(ls: LsArgs) -> ExitCode {
                 .collect();
             println!(
                 "{}",
-                serde_json::to_string(&out).unwrap_or_else(|_| "[]".into())
+                serde_json::to_string(&sanitized_view(json!(out))).unwrap_or_else(|_| "[]".into())
             );
             ExitCode::SUCCESS
         }
@@ -540,7 +553,13 @@ fn run_ls(ls: LsArgs) -> ExitCode {
 }
 
 fn run_show(show: ShowArgs) -> ExitCode {
-    let log = crate::log_resolve::resolve_log(show.log);
+    let log = match crate::log_resolve::resolve_log(show.log) {
+        Ok(log) => log,
+        Err(error) => {
+            println!("{}", error.to_json());
+            return error.exit_code();
+        }
+    };
     match find_dock_payload(&log, &show.id) {
         Ok(Some(p)) => {
             let gitdir = p
@@ -552,7 +571,7 @@ fn run_show(show: ShowArgs) -> ExitCode {
             if !std::path::Path::new(&gitdir).exists() {
                 p["state"] = json!("ghost");
             }
-            println!("{p}");
+            println!("{}", sanitized_view(p));
             ExitCode::SUCCESS
         }
         Ok(None) => {

@@ -220,7 +220,7 @@ pub fn run(args: QueueArgs) -> ExitCode {
 /// `implicated_pr` are projected from the `verdict.recorded` events via the
 /// shared [`Ledger`] (PS-6) — `null` only until a verdict covers the batch.
 fn show(args: &ShowArgs) -> Result<Value, PorcelainError> {
-    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+    let log_path = crate::log_resolve::resolve_log(args.log.clone())?;
     let log = load_event_log(&log_path)?;
 
     // The queue's own ordered projection — `pr.queued` in queue order. Sorting

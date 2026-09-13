@@ -75,12 +75,24 @@ fn setup_repo_installs_hooks_preserves_git_data_and_reports_conflicts() {
     let value: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(
         value["hooks_installed"],
-        serde_json::json!(["post-commit", "post-checkout", "pre-push"])
+        serde_json::json!([
+            "post-commit",
+            "post-checkout",
+            "pre-push",
+            "post-rewrite",
+            "reference-transaction"
+        ])
     );
     assert_eq!(value["hooks_noop"], serde_json::json!([]));
     assert_eq!(value["hooks_conflict"], serde_json::json!(["post-merge"]));
     assert_eq!(std::fs::read(&conflict).unwrap(), conflict_bytes);
-    for kind in ["post-commit", "post-checkout", "pre-push"] {
+    for kind in [
+        "post-commit",
+        "post-checkout",
+        "pre-push",
+        "post-rewrite",
+        "reference-transaction",
+    ] {
         assert!(
             root.join(".git/hooks").join(kind).is_file(),
             "{kind} installed"
@@ -101,14 +113,23 @@ fn setup_repo_installs_hooks_preserves_git_data_and_reports_conflicts() {
         .status()
         .expect("git commit runs");
     assert!(commit.success(), "installed hook never blocks commit");
-    assert!(wait_for_capture(&root.join(".hugit/log.json"), 20_000));
+    assert!(wait_for_capture(
+        &root.join(".git/hugit/event-log.json"),
+        20_000
+    ));
 
     let rerun = setup_in(&root);
     let value: Value = serde_json::from_slice(&rerun.stdout).unwrap();
     assert_eq!(value["hooks_installed"], serde_json::json!([]));
     assert_eq!(
         value["hooks_noop"],
-        serde_json::json!(["post-commit", "post-checkout", "pre-push"])
+        serde_json::json!([
+            "post-commit",
+            "post-checkout",
+            "pre-push",
+            "post-rewrite",
+            "reference-transaction"
+        ])
     );
     assert_eq!(value["hooks_conflict"], serde_json::json!(["post-merge"]));
     assert_eq!(std::fs::read(&conflict).unwrap(), conflict_bytes);

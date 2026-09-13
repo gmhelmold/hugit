@@ -283,7 +283,7 @@ fn record(args: VerdictRecordArgs) -> Result<Value, PorcelainError> {
     }
 
     // ── Acquire advisory lock + load log ─────────────────────────────────────
-    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+    let log_path = crate::log_resolve::resolve_log(args.log.clone())?;
     let path = &log_path;
     let _lock = FileLock::acquire(path).map_err(|e| lock_error(e, path))?;
     let log = load_event_log(path)?;

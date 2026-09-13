@@ -129,7 +129,10 @@ pub fn run(args: LandArgs) -> ExitCode {
 }
 
 fn run_queue_land(a: QueueLandArgs) -> ExitCode {
-    let log_path = crate::log_resolve::resolve_log(a.log.clone());
+    let log_path = match crate::log_resolve::resolve_log(a.log.clone()) {
+        Ok(path) => path,
+        Err(error) => return emit(Err(error)),
+    };
     let ac_path =
         a.ac.clone()
             .unwrap_or_else(|| crate::checks::run::default_ac_path(&log_path));

@@ -129,7 +129,9 @@ pub fn resolve(
 
     let log = match log_override {
         Some(p) => p.to_path_buf(),
-        None => std::path::PathBuf::from(&top_level).join(".hugit/log.json"),
+        None => crate::runtime_store::for_repo(cwd)
+            .map(|store| store.canonical_log())
+            .map_err(|_| ResolveError::NoLog)?,
     };
     if !log.exists() {
         return Err(ResolveError::NoLog);

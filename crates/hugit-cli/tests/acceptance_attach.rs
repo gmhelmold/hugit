@@ -134,5 +134,8 @@ fn attach_uses_active_core_hooks_path() {
             .unwrap()
             .ends_with("custom-hooks")
     );
-    assert!(preview["changes"].as_array().unwrap().len() == 4);
+    assert_eq!(
+        preview["changes"].as_array().unwrap().len(),
+        hugit_cli::init::HOOK_KINDS.len()
+    );
 }

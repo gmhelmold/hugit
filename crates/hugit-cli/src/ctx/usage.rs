@@ -181,7 +181,13 @@ fn do_run(args: UsageArgs) -> Result<String, CampaignError> {
     let recorded_at = args.recorded_at.unwrap_or(0);
 
     // Resolve the default --log ($HUGIT_LOG → .hugit/log.json) once.
-    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+    let log_path = crate::log_resolve::resolve_log_checked(args.log.clone()).map_err(|e| {
+        CampaignError::new(
+            e.kind(),
+            e.to_json(),
+            "repair blocked migration before appending usage",
+        )
+    })?;
 
     // ── Lock BEFORE load (WC1) — bootstrap=false: a capture requires an existing
     // log (a missing --log is `log_not_found`/exit-2, never a ghost record).

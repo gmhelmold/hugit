@@ -64,8 +64,9 @@ fn initialize_result() -> Value {
             hand-stamp; per-PR cost honest-null until the runner fabric). liveness-probe checks \
             /readyz + a bounded authed probe with a git UA and REFUSES heavy reads against the \
             single-thread engine. capture records git activity that fires no hook (e.g. jj) via \
-            the same `hugit capture` seam the silent hooks use, with a confirmed seq+event_hash \
-            when verify is set."
+            the same `hugit capture` seam the silent hooks use. Capture returns only \
+            `status: dispatched`: no receipt or invocation id exists before WP3, so MCP cannot \
+            confirm that a specific capture landed."
     })
 }
 
@@ -151,11 +152,12 @@ fn tool_specs() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "log": { "type": "string", "description": "Path to the canonical JSON event log." },
+                    "top_level": { "type": "string", "description": "Repository top-level directory. Required only when log and $HUGIT_LOG are both absent." },
+                    "log": { "type": "string", "description": "Explicit event log path. Legacy {log} calls remain supported without top_level." },
                     "campaign": { "type": "string", "description": "Optional: scope to one campaign's batch." },
                     "hugit_bin": { "type": "string", "description": "Optional hugit binary path (else $HUGIT_BIN, else `hugit` on PATH)." },
                 },
-                "required": ["log"],
+                "required": [],
             }
         }),
         json!({
@@ -198,27 +200,23 @@ fn tool_specs() -> Vec<Value> {
                 canonical event log by shelling the REAL `hugit capture` seam — the SAME one the \
                 silent hooks use. Use when the LLM did a git action whose path fires NO hook \
                 (e.g. `jj describe` + `jj git export` write refs directly): call this tool \
-                IN PLACE of the raw action. With `verify` (default true when an oid/shas is \
-                given) it reads the same log back and returns the landed `seq` + `event_hash` — \
-                a confirmed capture, never a bare dispatch promise.",
+                IN PLACE of the raw action. Returns `status: dispatched` only: no receipt or \
+                invocation id exists before WP3, so silent exit-0 cannot prove capture landed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "kind": { "type": "string", "description": "commit | checkout | push-attempt | merge." },
                     "top_level": { "type": "string", "description": "Repo top-level dir (git rev-parse --show-toplevel)." },
-                    "log": { "type": "string", "description": "Path to the canonical JSON event log." },
+                    "log": { "type": "string", "description": "Optional explicit event log path; omitted delegates to CLI default resolution." },
                     "oid": { "type": "string", "description": "commit target / checkout-to / merge tip." },
                     "branch": { "type": "string", "description": "Branch name." },
                     "from": { "type": "string", "description": "checkout/merge from oid." },
                     "recorded_at": { "type": "string", "description": "Unix seconds (committer date preferred)." },
-                    "refspecs": { "type": "string", "description": "push stdin refspec lines." },
-                    "shas": { "type": "string", "description": "local shas being pushed (whitespace separated)." },
-                    "files": { "type": "array", "items": { "type": "string" }, "description": "files the commit touched (for hugit why --path)." },
+                    "push_tuples": { "type": "string", "description": "Bounded typed push tuples: local-ref, local-oid, remote-ref, remote-oid." },
                     "hook_log": { "type": "string", "description": "Optional .hugit/hooks.log path for capture trace." },
-                    "verify": { "type": "boolean", "description": "Read the same log back and confirm the capture landed (default true when oid/shas supplied)." },
                     "hugit_bin": { "type": "string", "description": "Optional hugit binary path (else $HUGIT_BIN, else `hugit` on PATH)." },
                 },
-                "required": ["kind", "top_level", "log"],
+                "required": ["kind", "top_level"],
             }
         }),
     ]
@@ -280,6 +278,32 @@ mod tests {
         let r = resp.result.unwrap();
         assert_eq!(r["protocolVersion"], json!(PROTOCOL_VERSION));
         assert_eq!(r["serverInfo"]["name"], json!(SERVER_NAME));
+    }
+
+    #[test]
+    fn capture_documentation_promises_dispatch_only() {
+        let initialize = initialize_result();
+        let instructions = initialize["instructions"].as_str().unwrap();
+        assert!(instructions.contains("Capture returns only `status: dispatched`"));
+        assert!(instructions.contains("no receipt or invocation id exists before WP3"));
+
+        let capture = tool_specs()
+            .into_iter()
+            .find(|tool| tool["name"] == "capture")
+            .unwrap();
+        assert!(
+            capture["description"]
+                .as_str()
+                .unwrap()
+                .contains("Returns `status: dispatched` only")
+        );
+        assert!(
+            capture["description"]
+                .as_str()
+                .unwrap()
+                .contains("no receipt or invocation id exists before WP3")
+        );
+        assert!(capture["inputSchema"]["properties"].get("verify").is_none());
     }
 
     #[test]

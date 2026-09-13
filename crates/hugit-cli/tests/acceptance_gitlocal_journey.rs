@@ -5,7 +5,7 @@
 //! to end, exactly as a developer would use it:
 //!
 //! 1. `hugit init` in a fresh dir → creates a **git repository** (git init) +
-//!    `.hugit/` + the canonical log (git-proximate ceremony).
+//!    Git-common-dir runtime state + canonical log (git-proximate ceremony).
 //! 2. `hugit check` runs a command locally, memoizes it (file-backed AC), and a
 //!    warm re-run is a HIT with `duration_ms: 0` — zero network, zero CoreLink.
 //! 3. `hugit export` dumps the git artifact + JSON envelope (the zero-lock-in
@@ -68,7 +68,7 @@ fn lib_init(dir: &Path) -> Value {
     });
     assert_eq!(code, std::process::ExitCode::SUCCESS, "lib init exits 0");
     // The verb prints JSON to stdout; capture it via a temp redirect is complex,
-    // so we assert the side effects directly instead (the caller checks .git/.hugit).
+    // so we assert the side effects directly instead (the caller checks runtime state).
     Value::Null
 }
 
@@ -88,9 +88,12 @@ fn journey_init_creates_git_repo_and_hugit_dir() {
     lib_init(&root);
     assert!(root.join(".git").is_dir(), ".git created by hugit init");
     assert!(root.join(".git").is_dir(), ".git created by hugit init");
-    assert!(root.join(".hugit").is_dir(), ".hugit created");
     assert!(
-        root.join(".hugit/log.json").is_file(),
+        root.join(".git/hugit").is_dir(),
+        "runtime directory created"
+    );
+    assert!(
+        root.join(".git/hugit/event-log.json").is_file(),
         "canonical log created"
     );
 
@@ -111,7 +114,10 @@ fn journey_init_leaves_existing_git_repo_untouched() {
 
     lib_init(&root);
     assert!(root.join(".git").is_dir(), ".git still there");
-    assert!(root.join(".hugit/log.json").is_file(), "hugit log added");
+    assert!(
+        root.join(".git/hugit/event-log.json").is_file(),
+        "hugit log added"
+    );
 }
 
 // ── 2. hugit check is local + memoized (zero CoreLink) ──────────────────────
@@ -120,9 +126,9 @@ fn journey_init_leaves_existing_git_repo_untouched() {
 fn journey_check_memoizes_locally() {
     let root = scratch("check");
     let src = seed_tree(&root);
-    let log = root.join(".hugit/log.json");
+    let log = root.join(".git/hugit/event-log.json");
 
-    // `hugit init` creates .hugit/ + the canonical log (git-proximate).
+    // `hugit init` creates runtime state + the canonical log (git-proximate).
     lib_init(&root);
 
     // Cold run: executes for real (MISS), records a check.recorded event.
@@ -174,9 +180,9 @@ fn journey_check_memoizes_locally() {
 #[test]
 fn journey_export_roundtrip_restores() {
     let root = scratch("export");
-    let log = root.join(".hugit/log.json");
+    let log = root.join(".git/hugit/event-log.json");
 
-    // `hugit init` creates .hugit/ + the canonical log (git-proximate).
+    // `hugit init` creates runtime state + the canonical log (git-proximate).
     lib_init(&root);
 
     // Record a landed intent so the export has real content.
@@ -240,7 +246,7 @@ fn run_ok(cwd: &Path, args: &[&str]) -> Value {
 fn journey_pr_cycle_lands_locally() {
     let root = scratch("pr-cycle");
     lib_init(&root);
-    let log = root.join(".hugit/log.json");
+    let log = root.join(".git/hugit/event-log.json");
 
     // 1. Record an intent.
     let v = run_ok(
@@ -323,9 +329,9 @@ fn journey_pr_cycle_lands_locally() {
 /// SETUP JOURNEY — `hugit setup` + git's init.templateDir: no per-repo init.
 ///
 /// Prove the boot ceremony WITHOUT `hugit init` per repo: `hugit setup` writes
-/// the 4 hooks into a template + points git's GLOBAL `init.templateDir` at it;
+/// all six hooks into a template + points git's GLOBAL `init.templateDir` at it;
 /// a fresh `git init` then ships the hooks automatically, and the FIRST git op
-/// lazy-boots `.hugit/log.json` + captures the real ref.update. Entirely under
+/// creates runtime log + captures real ref.update. Entirely under
 /// an isolated HOME/XDG so the machine's real gitconfig is never touched.
 #[test]
 fn setup_templates_git_init_and_lazy_boots() {
@@ -353,16 +359,21 @@ fn setup_templates_git_init_and_lazy_boots() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // The template hooks exist where the config points.
+    // Every supported hook reaches a fresh repository through templateDir.
     let template_dir = xdg.join("hugit/template");
-    assert!(
-        template_dir.join("hooks/post-commit").exists(),
-        "template post-commit written"
-    );
-    assert!(
-        template_dir.join("hooks/post-checkout").exists(),
-        "template post-checkout written"
-    );
+    for kind in [
+        "post-commit",
+        "post-checkout",
+        "pre-push",
+        "post-merge",
+        "post-rewrite",
+        "reference-transaction",
+    ] {
+        assert!(
+            template_dir.join("hooks").join(kind).exists(),
+            "template {kind} written"
+        );
+    }
     assert!(
         template_dir.join("OWNED-BY-HUGIT").exists(),
         "ownership marker written"
@@ -384,7 +395,8 @@ fn setup_templates_git_init_and_lazy_boots() {
         "git init copied the hugit post-commit hook from the template"
     );
 
-    // Commit twice under isolated env; the first op lazy-boots the log.
+    // Commit once under isolated env. Runtime is absent, so template hook must
+    // bootstrap it through central migration gate before capture writes.
     let mut cmd = Command::new("git");
     let _ = cmd
         .args(["config", "user.email", "t@t"])
@@ -400,26 +412,38 @@ fn setup_templates_git_init_and_lazy_boots() {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .output();
     std::fs::write(repo.join("a.txt"), "a").unwrap();
+    let log_path = repo.join(".git/hugit/event-log.json");
+    assert!(
+        !log_path.exists(),
+        "fresh template repo starts without runtime state"
+    );
 
     let mut cmd = Command::new("git");
-    let _ = cmd
+    let out = cmd
         .args(["add", "a.txt"])
         .current_dir(&repo)
         .env("GIT_CONFIG_GLOBAL", home.join(".gitconfig"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("HUGIT_BIN", hugit_bin())
-        .output();
+        .output()
+        .expect("git add runs");
+    assert!(out.status.success(), "git add succeeds");
     let mut cmd = Command::new("git");
-    let _ = cmd
+    let out = cmd
         .args(["commit", "-q", "-m", "first"])
         .current_dir(&repo)
         .env("GIT_CONFIG_GLOBAL", home.join(".gitconfig"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("HUGIT_BIN", hugit_bin())
-        .output();
+        .output()
+        .expect("git commit runs");
+    assert!(
+        out.status.success(),
+        "git commit succeeds: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
-    // Poll the async capture: the lazy-booted log must hold a ref.update.
-    let log_path = repo.join(".hugit/log.json");
+    // Poll async capture: template-created runtime log must hold ref.update.
     let mut landed = false;
     for _ in 0..60 {
         if let Ok(bytes) = std::fs::read(&log_path)
@@ -434,12 +458,23 @@ fn setup_templates_git_init_and_lazy_boots() {
     }
     assert!(
         landed,
-        "first commit lazy-booted .hugit/log.json with a captured ref.update"
+        "first commit created runtime event log with a captured ref.update"
     );
     let bytes = std::fs::read(&log_path).unwrap();
     let recs: Vec<Value> = serde_json::from_slice(&bytes).unwrap();
     assert!(
         recs.iter().any(|r| r["kind"] == "ref.update"),
         "log holds a ref.update record: {recs:?}"
+    );
+    let out = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&repo)
+        .output()
+        .expect("git status runs");
+    assert!(out.status.success(), "git status succeeds");
+    assert!(
+        out.stdout.is_empty(),
+        "template runtime capture never dirties worktree: {}",
+        String::from_utf8_lossy(&out.stdout)
     );
 }

@@ -62,7 +62,9 @@ fn repo(tag: &str) -> PathBuf {
 }
 
 fn log_path(dir: &Path) -> PathBuf {
-    dir.join(".hugit/log.json")
+    hugit_cli::runtime_store::for_repo(dir)
+        .expect("runtime store resolves")
+        .canonical_log()
 }
 
 fn kinds(log: &Path) -> Vec<String> {

@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use super::reconcile::{Bucket, attribute_on, records_from_event_log};
+use super::sanitized_view;
 use hugit_refstore::EventLog;
 
 /// The `hugit dock insight` args (WP-DOCK-3 F5).
@@ -148,7 +149,7 @@ impl InsightDocument {
                 })
             })
             .collect();
-        json!({
+        sanitized_view(json!({
             "branches": branches,
             "residual": {
                 "reconciled_usd_micros": self.reconciled_cost_usd_micros,
@@ -158,13 +159,19 @@ impl InsightDocument {
                 "unlabeled_commit_count": self.unlabeled_commit_count,
                 "repo_scope_linked_branches": self.repo_scope_linked_branches,
             },
-        })
+        }))
     }
 }
 
 /// Run `hugit dock insight` (F5) — the per-branch + residual projection.
 pub fn run_insight(args: InsightArgs) -> std::process::ExitCode {
-    let log = crate::log_resolve::resolve_log(args.log.clone());
+    let log = match crate::log_resolve::resolve_log(args.log.clone()) {
+        Ok(log) => log,
+        Err(error) => {
+            println!("{}", error.to_json());
+            return error.exit_code();
+        }
+    };
     match compute_insights(&log, args.branch.as_deref()) {
         Ok(doc) => {
             println!("{}", doc.to_json());
@@ -179,6 +186,6 @@ pub fn run_insight(args: InsightArgs) -> std::process::ExitCode {
 }
 
 /// The log path helper (used by the CLI wiring; mirrors `ls`).
-pub fn resolve_log(path: Option<PathBuf>) -> PathBuf {
+pub fn resolve_log(path: Option<PathBuf>) -> Result<PathBuf, crate::porcelain::PorcelainError> {
     crate::log_resolve::resolve_log(path)
 }

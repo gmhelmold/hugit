@@ -48,6 +48,57 @@ fn log_records(log: &Path) -> Vec<Value> {
     serde_json::from_slice(&bytes).unwrap_or_else(|_| vec![])
 }
 
+fn wait_for_capture(log: &Path, oid: &str) {
+    for _ in 0..100 {
+        let captured = log_records(log).iter().any(|record| {
+            record["kind"] == "ref.update"
+                && serde_json::from_str::<Value>(record["payload"].as_str().unwrap_or(""))
+                    .ok()
+                    .and_then(|payload| payload["target"].as_str().map(|target| target == oid))
+                    == Some(true)
+        });
+        if captured && worker_is_idle(log) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!("capture worker did not project {oid}");
+}
+
+fn worker_is_idle(log: &Path) -> bool {
+    let mut lock = log.as_os_str().to_os_string();
+    lock.push(".lock");
+    let root = log.parent().unwrap();
+    let receipts = root.join("receipts");
+    let completed = root.join("completed-receipts");
+    !PathBuf::from(lock).exists()
+        && std::fs::read_dir(receipts)
+            .map(|entries| {
+                entries.flatten().all(|entry| {
+                    let path = entry.path();
+                    let Some(receipt_id) = path.file_stem().and_then(|name| name.to_str()) else {
+                        return true;
+                    };
+                    completed.join(format!("{receipt_id}.done")).is_file()
+                })
+            })
+            .unwrap_or(false)
+}
+
+fn wait_for_worker(log: &Path) {
+    for _ in 0..100 {
+        if worker_is_idle(log)
+            && log_records(log)
+                .iter()
+                .any(|record| record["kind"] == "ref.update")
+        {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!("capture worker did not become idle");
+}
+
 /// Seed the log with the two raw vocabularies W2 needs: an `intent.landed`
 /// (via the real `intent new --log` verb) and a captured `ref.update`
 /// (via the real `capture commit` verb — the silent-hook seam).
@@ -90,6 +141,7 @@ fn seed_log(root: &Path, log: &Path, oid: &str, branch: &str) {
         ],
     );
     assert_eq!(code, 0, "capture commit exits 0");
+    wait_for_capture(log, oid);
 }
 
 #[test]
@@ -297,9 +349,9 @@ fn pr_open_commits_only_never_forges_intent() {
     assert_eq!(landed, 1, "intent.landed set unchanged — nothing forged");
 }
 
-/// A captured push-attempt (`{attempt:true, shas:"<local shas>"}`) is a
-/// captured-commit proof: `pr open --commit <pushed-sha>` must accept the sha
-/// the pre-push hook recorded, exactly like a post-commit `target`.
+/// A captured push-attempt (`{attempt:true, updates:[...]}`) is a captured-
+/// commit proof: `pr open --commit <pushed-sha>` must accept the local OID the
+/// pre-push hook recorded, exactly like a post-commit `target`.
 ///
 /// This closes the gap: a commit that a raw `git push` carries (the LLM's
 /// normal action) is provable even before/without any `pr open --commit` run.
@@ -309,8 +361,8 @@ fn pr_open_accepts_a_pushed_commit_as_captured_proof() {
     let log = root.join("log.json");
     std::fs::write(&log, b"[]\n").expect("empty log file");
 
-    // The pre-push hook records the LOCAL sha under `shas` (whitespace/newline
-    // separated). Simulate its exact call: push-attempt with `--shas`.
+    // The pre-push hook records bounded typed LOCAL OIDs. Simulate its exact
+    // call shape; no raw refspec or remote URL reaches capture.
     let (code, _) = run_in(
         &root,
         &[
@@ -321,13 +373,12 @@ fn pr_open_accepts_a_pushed_commit_as_captured_proof() {
             root.to_str().unwrap(),
             "--log",
             log.to_str().unwrap(),
-            "--refspecs",
-            "origin https://example.com/repo.git",
-            "--shas",
-            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            "--push-tuples",
+            "refs/heads/main\tdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef\trefs/heads/main\t0000000000000000000000000000000000000000",
         ],
     );
     assert_eq!(code, 0, "push-attempt captures");
+    wait_for_worker(&log);
 
     // The pushed sha is NOW a captured-commit proof.
     let (code, v) = run_in(
