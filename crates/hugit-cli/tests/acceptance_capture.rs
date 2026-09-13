@@ -407,6 +407,14 @@ fn attach_preview_token_adopts_foreign_hook_and_fenced_detach_restores_it() {
     assert!(runtime.join("hook-manifest.json").is_file());
     assert!(runtime.join("hook-backups").is_dir());
 
+    let (code, health) = run_in(&root, &["health"]);
+    assert_eq!(code, 0, "health succeeds: {health}");
+    assert_eq!(
+        health["mode"], "active",
+        "adopted dispatcher is healthy: {health}"
+    );
+    assert_eq!(health["hooks"]["post_commit"]["state"], "adopted");
+
     let (code, detached) = run_in(&root, &["detach"]);
     assert_eq!(code, 0, "detach succeeds: {detached}");
     assert!(
@@ -415,6 +423,90 @@ fn attach_preview_token_adopts_foreign_hook_and_fenced_detach_restores_it() {
             .is_some_and(|hooks| hooks.iter().any(|hook| hook == "post-commit"))
     );
     assert_eq!(std::fs::read(&foreign).unwrap(), foreign_bytes);
+}
+
+#[test]
+fn attach_retry_resumes_prepared_adoption_from_canonical_backup() {
+    let _serial = lock_hook_journey();
+    let root = scratch("attach-adopt-retry");
+    assert_eq!(git_in(&root, &["init"]).0, 0, "git init succeeds");
+    let post_commit = root.join(".git/hooks/post-commit");
+    let pre_push = root.join(".git/hooks/pre-push");
+    let post_commit_bytes = b"#!/bin/sh\nprintf post-commit\n";
+    let pre_push_bytes = b"#!/bin/sh\nprintf pre-push\n";
+    std::fs::write(&post_commit, post_commit_bytes).unwrap();
+    std::fs::write(&pre_push, pre_push_bytes).unwrap();
+
+    let (_, preview) = run_in(&root, &["attach", "--preview"]);
+    let token = preview["adoption_token"].as_str().unwrap().to_string();
+    let (code, adopted) = run_in(
+        &root,
+        &[
+            "attach",
+            "--adopt-managed-dispatcher",
+            "--adoption-token",
+            &token,
+        ],
+    );
+    assert_eq!(code, 0, "adoption succeeds: {adopted}");
+    let common = git_in(
+        &root,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    );
+    let runtime = PathBuf::from(common.1.trim()).join("hugit");
+    let manifest_path = runtime.join("hook-manifest.json");
+    let mut manifest: Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["state"] = Value::String("prepared".into());
+    let entries = manifest["entries"].as_array().unwrap();
+    let backup = entries
+        .iter()
+        .find(|entry| entry["kind"] == "pre-push")
+        .unwrap()["backup"]
+        .as_str()
+        .unwrap();
+    std::fs::write(
+        &pre_push,
+        std::fs::read(runtime.join("hook-backups").join(backup)).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let (code, retried) = run_in(
+        &root,
+        &[
+            "attach",
+            "--adopt-managed-dispatcher",
+            "--adoption-token",
+            &token,
+        ],
+    );
+    assert_eq!(code, 0, "prepared adoption resumes: {retried}");
+    assert!(
+        std::fs::read_to_string(&post_commit)
+            .unwrap()
+            .contains("hugit-managed-dispatcher v1")
+    );
+    assert!(
+        std::fs::read_to_string(&pre_push)
+            .unwrap()
+            .contains("hugit-managed-dispatcher v1")
+    );
+
+    manifest["state"] = Value::String("installed".into());
+    manifest["entries"][0]["backup"] = Value::String("../escape.hook".into());
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let (code, detached) = run_in(&root, &["detach"]);
+    assert_eq!(code, 2, "non-canonical backup path is rejected: {detached}");
+    assert_eq!(detached["error"]["kind"], "hook_manifest_invalid");
 }
 
 #[test]

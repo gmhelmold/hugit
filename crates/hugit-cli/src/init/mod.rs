@@ -10,6 +10,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -141,7 +142,15 @@ pub fn attach_run(args: AttachArgs) -> ExitCode {
                 "run `hugit attach --preview`, then pass its adoption_token",
             )));
         };
-        if let Err(error) = validate_adoption_token(&root, token) {
+        let runtime = match crate::runtime_store::for_repo(&root) {
+            Ok(runtime) => runtime,
+            Err(error) => return print_attach_result(Err(error)),
+        };
+        // Prepared manifest binds retry to this token after partial replacement.
+        // Fresh adoption still rejects stale previews before init can write state.
+        if !runtime.hook_manifest().exists()
+            && let Err(error) = validate_adoption_token(&root, token)
+        {
             return print_attach_result(Err(error));
         }
     }
@@ -266,44 +275,94 @@ fn dispatcher_script(kind: &str, backup: &std::path::Path) -> String {
     }
 }
 
-/// Backup + manifest complete before any atomic dispatcher replacement.
-fn adopt_managed_dispatchers(root: &std::path::Path, token: &str) -> Result<(), PorcelainError> {
-    validate_adoption_token(root, token)?;
-    let runtime = crate::runtime_store::for_repo(root)?;
-    let hooks_dir = resolve_hooks_dir(root)?;
-    std::fs::create_dir_all(runtime.hook_backups())
-        .map_err(|e| PorcelainError::io("create hook backup dir", &runtime.hook_backups(), &e))?;
-    let mut entries = Vec::new();
-    for kind in HOOK_KINDS {
-        let path = hooks_dir.join(kind);
-        let before = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(PorcelainError::io("read hook", &path, &e)),
-        };
-        let contents = std::str::from_utf8(&before).unwrap_or("");
-        if is_managed_hook(kind, contents) || contents.contains(HUGIT_DISPATCHER_MARKER) {
-            continue;
-        }
-        let backup = runtime
-            .hook_backups()
-            .join(format!("{kind}-{}.hook", sha256_hex(&before)));
-        if !backup.exists() {
-            crate::pr::filelock::atomic_write_unprepared(&backup, &before).map_err(|e| {
-                PorcelainError::new(
-                    "hook_backup_write_failed",
-                    e.to_string(),
-                    "retry `hugit attach`",
-                )
-            })?;
-        }
-        let dispatcher = dispatcher_script(kind, &backup);
-        entries.push(json!({"kind":kind,"backup":backup.display().to_string(),"before_sha256":sha256_hex(&before),"dispatcher_sha256":sha256_hex(dispatcher.as_bytes())}));
+/// Exact dispatcher renderer is ownership proof. Marker alone is not enough.
+pub(crate) fn is_managed_dispatcher(kind: &str, contents: &str) -> bool {
+    contents.contains(HUGIT_DISPATCHER_MARKER)
+        && contents.contains("HUGIT_BIN=\"${HUGIT_BIN:-hugit}\"")
+        && HOOK_KINDS.contains(&kind)
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct AdoptionEntry {
+    kind: String,
+    backup: String,
+    before_sha256: String,
+    dispatcher_sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct AdoptionManifest {
+    version: u8,
+    state: String,
+    adoption_token: String,
+    entries: Vec<AdoptionEntry>,
+}
+
+fn backup_name(kind: &str, before_sha256: &str) -> String {
+    format!("{kind}-{before_sha256}.hook")
+}
+
+/// Resolve a backup from manifest fields, never trusting a manifest path.
+fn manifest_backup(
+    runtime: &crate::runtime_store::RuntimeStore,
+    entry: &AdoptionEntry,
+) -> Result<PathBuf, PorcelainError> {
+    if !HOOK_KINDS.contains(&entry.kind.as_str())
+        || entry.backup != backup_name(&entry.kind, &entry.before_sha256)
+        || entry.before_sha256.len() != 64
+        || !entry
+            .before_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(PorcelainError::new(
+            "hook_manifest_invalid",
+            "hook manifest backup is invalid",
+            "preserve evidence and repair hook-manifest.json before detach",
+        ));
     }
-    let manifest = json!({"version":1,"entries":entries});
+    let backups = std::fs::canonicalize(runtime.hook_backups())
+        .map_err(|e| PorcelainError::io("resolve hook backup dir", &runtime.hook_backups(), &e))?;
+    let backup = runtime.hook_backups().join(&entry.backup);
+    let resolved = std::fs::canonicalize(&backup)
+        .map_err(|e| PorcelainError::io("resolve hook backup", &backup, &e))?;
+    if !resolved.starts_with(&backups) {
+        return Err(PorcelainError::new(
+            "hook_manifest_invalid",
+            "hook backup escapes common-dir runtime",
+            "preserve evidence and repair hook-manifest.json before detach",
+        ));
+    }
+    Ok(resolved)
+}
+
+fn read_adoption_manifest(
+    runtime: &crate::runtime_store::RuntimeStore,
+) -> Result<Option<AdoptionManifest>, PorcelainError> {
+    if !runtime.hook_manifest().exists() {
+        return Ok(None);
+    }
+    serde_json::from_slice(
+        &std::fs::read(runtime.hook_manifest())
+            .map_err(|e| PorcelainError::io("read hook manifest", &runtime.hook_manifest(), &e))?,
+    )
+    .map(Some)
+    .map_err(|e| {
+        PorcelainError::new(
+            "hook_manifest_invalid",
+            e.to_string(),
+            "preserve evidence and repair hook-manifest.json before retrying",
+        )
+    })
+}
+
+fn write_adoption_manifest(
+    runtime: &crate::runtime_store::RuntimeStore,
+    manifest: &AdoptionManifest,
+) -> Result<(), PorcelainError> {
     crate::pr::filelock::atomic_write_unprepared(
         &runtime.hook_manifest(),
-        &serde_json::to_vec_pretty(&manifest).expect("json"),
+        &serde_json::to_vec_pretty(manifest).expect("json"),
     )
     .map_err(|e| {
         PorcelainError::new(
@@ -311,23 +370,141 @@ fn adopt_managed_dispatchers(root: &std::path::Path, token: &str) -> Result<(), 
             e.to_string(),
             "retry `hugit attach`",
         )
-    })?;
-    for entry in manifest["entries"].as_array().expect("entries") {
-        let kind = entry["kind"].as_str().expect("kind");
-        let path = hooks_dir.join(kind);
-        let script = dispatcher_script(
-            kind,
-            &PathBuf::from(entry["backup"].as_str().expect("backup")),
-        );
-        crate::pr::filelock::atomic_write_unprepared(&path, script.as_bytes()).map_err(|e| {
-            PorcelainError::new(
-                "hook_dispatcher_write_failed",
-                e.to_string(),
-                "retry `hugit attach`",
-            )
-        })?;
-        set_hook_executable(&path)?;
+    })
+}
+
+fn rollback_adoption(
+    runtime: &crate::runtime_store::RuntimeStore,
+    hooks_dir: &std::path::Path,
+    entries: &[AdoptionEntry],
+) -> Result<(), PorcelainError> {
+    for entry in entries {
+        let backup = manifest_backup(runtime, entry)?;
+        let path = hooks_dir.join(&entry.kind);
+        if std::fs::read(&path).ok().as_deref()
+            == Some(dispatcher_script(&entry.kind, &backup).as_bytes())
+        {
+            let before = std::fs::read(&backup)
+                .map_err(|e| PorcelainError::io("read hook backup", &backup, &e))?;
+            crate::pr::filelock::atomic_write_unprepared(&path, &before).map_err(|e| {
+                PorcelainError::new("hook_restore_failed", e.to_string(), "retry `hugit attach`")
+            })?;
+            set_hook_executable(&path)?;
+        }
     }
+    Ok(())
+}
+
+/// Backup + manifest complete before any atomic dispatcher replacement.
+fn adopt_managed_dispatchers(root: &std::path::Path, token: &str) -> Result<(), PorcelainError> {
+    let runtime = crate::runtime_store::for_repo(root)?;
+    let hooks_dir = resolve_hooks_dir(root)?;
+    std::fs::create_dir_all(runtime.hook_backups())
+        .map_err(|e| PorcelainError::io("create hook backup dir", &runtime.hook_backups(), &e))?;
+    let mut manifest = match read_adoption_manifest(&runtime)? {
+        Some(manifest) => {
+            if manifest.version != 1
+                || !matches!(manifest.state.as_str(), "prepared" | "installed")
+                || manifest.adoption_token != token
+            {
+                return Err(PorcelainError::new(
+                    "adoption_token_stale",
+                    "adoption state differs from preview",
+                    "run `hugit attach --preview` again and use its new adoption_token",
+                ));
+            }
+            manifest
+        }
+        None => {
+            validate_adoption_token(root, token)?;
+            let mut entries = Vec::new();
+            for kind in HOOK_KINDS {
+                let path = hooks_dir.join(kind);
+                let before = match std::fs::read(&path) {
+                    Ok(bytes) => bytes,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => return Err(PorcelainError::io("read hook", &path, &e)),
+                };
+                let contents = std::str::from_utf8(&before).unwrap_or("");
+                if is_managed_hook(kind, contents) || contents.contains(HUGIT_DISPATCHER_MARKER) {
+                    continue;
+                }
+                let digest = sha256_hex(&before);
+                let backup = runtime.hook_backups().join(backup_name(kind, &digest));
+                if !backup.exists() {
+                    crate::pr::filelock::atomic_write_unprepared(&backup, &before).map_err(
+                        |e| {
+                            PorcelainError::new(
+                                "hook_backup_write_failed",
+                                e.to_string(),
+                                "retry `hugit attach`",
+                            )
+                        },
+                    )?;
+                }
+                let script = dispatcher_script(kind, &backup);
+                entries.push(AdoptionEntry {
+                    kind: kind.into(),
+                    backup: backup
+                        .file_name()
+                        .expect("backup name")
+                        .to_string_lossy()
+                        .into_owned(),
+                    before_sha256: digest,
+                    dispatcher_sha256: sha256_hex(script.as_bytes()),
+                });
+            }
+            let manifest = AdoptionManifest {
+                version: 1,
+                state: "prepared".into(),
+                adoption_token: token.into(),
+                entries,
+            };
+            write_adoption_manifest(&runtime, &manifest)?;
+            manifest
+        }
+    };
+    for entry in &manifest.entries {
+        let backup = manifest_backup(&runtime, entry)?;
+        let before = std::fs::read(&backup)
+            .map_err(|e| PorcelainError::io("read hook backup", &backup, &e))?;
+        if sha256_hex(&before) != entry.before_sha256 {
+            return Err(PorcelainError::new(
+                "hook_manifest_invalid",
+                "hook backup digest differs from manifest",
+                "preserve evidence and repair hook-manifest.json before retrying",
+            ));
+        }
+        let path = hooks_dir.join(&entry.kind);
+        let current = std::fs::read(&path).unwrap_or_default();
+        let dispatcher = dispatcher_script(&entry.kind, &backup);
+        if current == dispatcher.as_bytes() {
+            continue;
+        }
+        if current != before {
+            return Err(PorcelainError::new(
+                "hook_adoption_interrupted",
+                format!("{} changed during adoption", entry.kind),
+                "preserve hook bytes and run `hugit attach --preview`",
+            ));
+        }
+        if let Err(error) =
+            crate::pr::filelock::atomic_write_unprepared(&path, dispatcher.as_bytes())
+        {
+            rollback_adoption(&runtime, &hooks_dir, &manifest.entries)?;
+            return Err(PorcelainError::new(
+                "hook_dispatcher_write_failed",
+                error.to_string(),
+                "retry `hugit attach`",
+            ));
+        }
+        if let Err(error) = set_hook_executable(&path) {
+            rollback_adoption(&runtime, &hooks_dir, &manifest.entries)?;
+            return Err(error);
+        }
+    }
+    manifest.state = "installed".into();
+    write_adoption_manifest(&runtime, &manifest)?;
     Ok(())
 }
 
@@ -366,62 +543,24 @@ pub fn detach_run(args: InitArgs) -> ExitCode {
         let mut removed = Vec::new();
         let mut restored = Vec::new();
         let mut preserved = Vec::new();
-        if runtime.hook_manifest().exists() {
-            let manifest: Value =
-                serde_json::from_slice(&std::fs::read(runtime.hook_manifest()).map_err(|e| {
-                    PorcelainError::io("read hook manifest", &runtime.hook_manifest(), &e)
-                })?)
-                .map_err(|e| {
-                    PorcelainError::new(
-                        "hook_manifest_invalid",
-                        e.to_string(),
-                        "preserve evidence and repair hook-manifest.json before detach",
-                    )
-                })?;
-            let entries = manifest["entries"].as_array().ok_or_else(|| {
-                PorcelainError::new(
+        if let Some(manifest) = read_adoption_manifest(&runtime)? {
+            if manifest.version != 1 || manifest.state != "installed" {
+                return Err(PorcelainError::new(
                     "hook_manifest_invalid",
-                    "hook manifest has no entries array",
+                    "hook manifest is not a completed adoption",
                     "preserve evidence and repair hook-manifest.json before detach",
-                )
-            })?;
-            for entry in entries {
-                let kind = entry["kind"].as_str().ok_or_else(|| {
-                    PorcelainError::new(
-                        "hook_manifest_invalid",
-                        "hook manifest entry has no kind",
-                        "preserve evidence and repair hook-manifest.json before detach",
-                    )
-                })?;
-                if !HOOK_KINDS.contains(&kind) {
-                    return Err(PorcelainError::new(
-                        "hook_manifest_invalid",
-                        "hook manifest contains unknown hook",
-                        "preserve evidence and repair hook-manifest.json before detach",
-                    ));
-                }
-                let backup = PathBuf::from(entry["backup"].as_str().ok_or_else(|| {
-                    PorcelainError::new(
-                        "hook_manifest_invalid",
-                        "hook manifest entry has no backup",
-                        "preserve evidence and repair hook-manifest.json before detach",
-                    )
-                })?);
-                if !backup.starts_with(runtime.hook_backups()) {
-                    return Err(PorcelainError::new(
-                        "hook_manifest_invalid",
-                        "hook backup escapes common-dir runtime",
-                        "preserve evidence and repair hook-manifest.json before detach",
-                    ));
-                }
-                let path = hooks_dir.join(kind);
+                ));
+            }
+            for entry in manifest.entries {
+                let backup = manifest_backup(&runtime, &entry)?;
+                let path = hooks_dir.join(&entry.kind);
                 let current = std::fs::read(&path).unwrap_or_default();
                 let backup_bytes = std::fs::read(&backup)
                     .map_err(|e| PorcelainError::io("read hook backup", &backup, &e))?;
-                if entry["before_sha256"].as_str() != Some(sha256_hex(&backup_bytes).as_str())
-                    || entry["dispatcher_sha256"].as_str() != Some(sha256_hex(&current).as_str())
+                if entry.before_sha256 != sha256_hex(&backup_bytes)
+                    || entry.dispatcher_sha256 != sha256_hex(&current)
                 {
-                    preserved.push(kind.to_string());
+                    preserved.push(entry.kind);
                     continue;
                 }
                 crate::pr::filelock::atomic_write_unprepared(&path, &backup_bytes).map_err(
@@ -433,7 +572,7 @@ pub fn detach_run(args: InitArgs) -> ExitCode {
                         )
                     },
                 )?;
-                restored.push(kind.to_string());
+                restored.push(entry.kind);
             }
         }
         for kind in HOOK_KINDS {

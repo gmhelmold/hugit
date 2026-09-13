@@ -3,8 +3,8 @@
 //!
 //! Git has NO `post-init` hook, but it DOES copy the contents of
 //! `init.templateDir` into every fresh `.git/` on `git init`. `setup` points
-//! that global config at a hugit-owned template containing our 4 hooks
-//! (post-commit / post-checkout / pre-push / post-merge) — so from then on,
+//! that global config at a hugit-owned template containing all capture hooks —
+//! so from then on,
 //! EVERY `git init` on this machine ships the hugit hooks automatically.
 //!
 //! Hooks require `hugit attach` or `hugit init` to provision verified runtime
@@ -20,9 +20,6 @@ use std::process::ExitCode;
 use serde_json::{Value, json};
 
 use super::init;
-
-/// The 4 git hooks (+ the capture kinds they fire).
-const HOOK_KINDS: [&str; 4] = ["post-commit", "post-checkout", "pre-push", "post-merge"];
 
 /// `hugit setup` args.
 #[derive(clap::Args, Debug)]
@@ -75,7 +72,7 @@ fn do_status(args: &SetupArgs) -> Result<Value, crate::porcelain::PorcelainError
         String::new()
     };
     let mut hooks = serde_json::Map::new();
-    for kind in HOOK_KINDS {
+    for kind in init::HOOK_KINDS {
         let path = template_dir.join("hooks").join(kind);
         hooks.insert(
             kind.replace('-', "_"),
@@ -87,7 +84,7 @@ fn do_status(args: &SetupArgs) -> Result<Value, crate::porcelain::PorcelainError
         "owned": template_dir.join("OWNED-BY-HUGIT").is_file(),
         "global_init_template_dir": configured_path,
         "active": configured_path == template_dir.display().to_string()
-            && HOOK_KINDS.iter().all(|kind| hook_is_executable(&template_dir.join("hooks").join(kind))),
+            && init::HOOK_KINDS.iter().all(|kind| hook_is_executable(&template_dir.join("hooks").join(kind))),
         "hooks": hooks,
     }))
 }
@@ -133,7 +130,7 @@ fn do_setup(args: &SetupArgs) -> Result<Value, crate::porcelain::PorcelainError>
     std::fs::create_dir_all(&hooks_dir)
         .map_err(|e| crate::porcelain::PorcelainError::io("create template dir", &hooks_dir, &e))?;
 
-    for kind in HOOK_KINDS {
+    for kind in init::HOOK_KINDS {
         let script = init::hook_script(kind);
         let dest = hooks_dir.join(kind);
         std::fs::write(&dest, script)
@@ -177,7 +174,7 @@ fn do_setup(args: &SetupArgs) -> Result<Value, crate::porcelain::PorcelainError>
 
     Ok(json!({
         "template_dir": template_dir.display().to_string(),
-        "hooks": HOOK_KINDS,
+        "hooks": init::HOOK_KINDS,
         "global_init_template_dir": true,
         "previous_global_init_template_dir": previous_template,
         "next": "any future `git init` in this machine already ships the hugit hooks; existing repos use `hugit init <dir>` or a first git op lazy-boots them.",
@@ -204,7 +201,7 @@ fn owns_template(template_dir: &std::path::Path) -> bool {
     if !template_dir.join("OWNED-BY-HUGIT").is_file() {
         return false;
     }
-    HOOK_KINDS.iter().all(|kind| {
+    init::HOOK_KINDS.iter().all(|kind| {
         std::fs::read_to_string(template_dir.join("hooks").join(kind))
             .is_ok_and(|contents| init::is_managed_hook(kind, &contents))
     })

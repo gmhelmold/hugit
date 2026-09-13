@@ -6,7 +6,8 @@ use std::process::ExitCode;
 use serde_json::{Map, Value, json};
 
 use crate::init::{
-    HOOK_KINDS, configured_hooks_path, git_top_level, is_managed_hook, resolve_hooks_dir,
+    HOOK_KINDS, configured_hooks_path, git_top_level, is_managed_dispatcher, is_managed_hook,
+    resolve_hooks_dir,
 };
 
 /// Arguments for `hugit health`.
@@ -71,11 +72,22 @@ fn health(root: &Path) -> Value {
     for kind in HOOK_KINDS {
         let path = hooks_dir.join(kind);
         let state = match std::fs::read_to_string(&path) {
-            Ok(contents) if is_managed_hook(kind, &contents) && hook_is_executable(&path) => {
+            Ok(contents)
+                if (is_managed_hook(kind, &contents) || is_managed_dispatcher(kind, &contents))
+                    && hook_is_executable(&path) =>
+            {
                 managed += 1;
-                "managed"
+                if is_managed_dispatcher(kind, &contents) {
+                    "adopted"
+                } else {
+                    "managed"
+                }
             }
-            Ok(contents) if is_managed_hook(kind, &contents) => "non_executable",
+            Ok(contents)
+                if is_managed_hook(kind, &contents) || is_managed_dispatcher(kind, &contents) =>
+            {
+                "non_executable"
+            }
             Ok(contents) if contents.contains("# hugit-hook (managed by hugit init)") => "modified",
             Ok(_) => "foreign",
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => "missing",

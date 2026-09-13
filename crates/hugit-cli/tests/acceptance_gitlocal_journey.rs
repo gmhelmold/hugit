@@ -329,7 +329,7 @@ fn journey_pr_cycle_lands_locally() {
 /// SETUP JOURNEY — `hugit setup` + git's init.templateDir: no per-repo init.
 ///
 /// Prove the boot ceremony WITHOUT `hugit init` per repo: `hugit setup` writes
-/// the 4 hooks into a template + points git's GLOBAL `init.templateDir` at it;
+/// all six hooks into a template + points git's GLOBAL `init.templateDir` at it;
 /// a fresh `git init` then ships the hooks automatically, and the FIRST git op
 /// creates runtime log + captures real ref.update. Entirely under
 /// an isolated HOME/XDG so the machine's real gitconfig is never touched.
@@ -359,16 +359,21 @@ fn setup_templates_git_init_and_lazy_boots() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // The template hooks exist where the config points.
+    // Every supported hook reaches a fresh repository through templateDir.
     let template_dir = xdg.join("hugit/template");
-    assert!(
-        template_dir.join("hooks/post-commit").exists(),
-        "template post-commit written"
-    );
-    assert!(
-        template_dir.join("hooks/post-checkout").exists(),
-        "template post-checkout written"
-    );
+    for kind in [
+        "post-commit",
+        "post-checkout",
+        "pre-push",
+        "post-merge",
+        "post-rewrite",
+        "reference-transaction",
+    ] {
+        assert!(
+            template_dir.join("hooks").join(kind).exists(),
+            "template {kind} written"
+        );
+    }
     assert!(
         template_dir.join("OWNED-BY-HUGIT").exists(),
         "ownership marker written"
