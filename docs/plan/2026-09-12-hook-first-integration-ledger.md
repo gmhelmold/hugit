@@ -225,3 +225,17 @@ G7	lint	NOT_RUN	docs-only classification; no Rust source changed
 G8	tests	NOT_RUN	docs-only classification; path-specific integration proofs named above
 G9	ledger/index review	VERIFIED	rows, refs, conflict output, trailers reviewed before commit
 ```
+
+## Post-merge closure
+
+WP-1 through WP-8 are integrated on `main` at merge commit `f505ac7`.
+Post-merge CI run `34779403022` passed; DCO passed on the merge PR. The
+historical G6-G8 `NOT_RUN` values above describe pre-merge ledger classification
+only and do not describe current repository health.
+
+## Post-merge closure
+
+WP-1 through WP-8 are integrated on `main` at merge commit `f505ac7`.
+Post-merge CI run `34779403022` passed; DCO passed on the merge PR. The
+historical G6-G8 `NOT_RUN` values above describe pre-merge ledger classification
+only and do not describe current repository health.
