@@ -29,20 +29,14 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
-/// Build a why-format log `[{record, attestation: null, sidecar: null}, …]`
-/// with a REAL hash chain (K-CHAIN: fake hashes are now rejected by
-/// verify_chain before why projects).
+/// Build a canonical `[EventRecord, …]` log with a REAL hash chain
+/// (K-CHAIN: fake hashes are rejected by verify_chain before why projects).
 fn write_why_log(path: &std::path::Path, events: &[(&str, Value)]) {
     let mut log = EventLog::new();
     for (kind, payload) in events {
         log.append_for_test(*kind, vec![], payload.to_string(), 0);
     }
-    let entries: Vec<Value> = log
-        .records()
-        .iter()
-        .map(|r| json!({"record": r, "attestation": null, "sidecar": null}))
-        .collect();
-    std::fs::write(path, serde_json::to_string(&entries).unwrap()).unwrap();
+    std::fs::write(path, serde_json::to_string_pretty(log.records()).unwrap()).unwrap();
 }
 
 /// Build a canonical `[EventRecord, …]` log with a REAL hash chain for export
