@@ -54,12 +54,15 @@ pub fn resolve_log_for_repo(
     repo: &std::path::Path,
 ) -> Result<PathBuf, PorcelainError> {
     if let Some(path) = explicit {
+        crate::runtime_store::prepare_runtime_log(&path)?;
         return Ok(path);
     }
     if let Some(env) = std::env::var_os(HUGIT_LOG_ENV)
         && !env.is_empty()
     {
-        return Ok(PathBuf::from(env));
+        let path = PathBuf::from(env);
+        crate::runtime_store::prepare_runtime_log(&path)?;
+        return Ok(path);
     }
     if let Ok(store) = crate::runtime_store::for_repo(repo) {
         let canonical = store.canonical_log();

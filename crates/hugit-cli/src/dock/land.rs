@@ -406,7 +406,13 @@ fn append_landed(
 
 /// Run `hugit dock land`.
 pub fn run(args: DockLandArgs) -> ExitCode {
-    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+    let log_path = match crate::log_resolve::resolve_log_checked(args.log.clone()) {
+        Ok(log) => log,
+        Err(e) => {
+            println!("{}", e.to_json());
+            return e.exit_code();
+        }
+    };
     let ac_path = args
         .ac
         .clone()

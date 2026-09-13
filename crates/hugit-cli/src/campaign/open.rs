@@ -12,7 +12,13 @@ use super::output::CampaignError;
 use super::world::{KIND_CAMPAIGN_OPENED, World, append_authorized_and_persist};
 
 pub fn run(args: OpenArgs) -> Result<String, CampaignError> {
-    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+    let log_path = crate::log_resolve::resolve_log_checked(args.log.clone()).map_err(|e| {
+        CampaignError::new(
+            e.kind(),
+            e.to_json(),
+            "repair blocked migration before appending a campaign event",
+        )
+    })?;
     // WH-IDENT: validate identifier fields at entry — BEFORE they reach the
     // hash-chained forever-log.  Identifiers are addresses, not free text;
     // WH-SCRUB exempts them from the scrub engine, so the safety MUST live here.

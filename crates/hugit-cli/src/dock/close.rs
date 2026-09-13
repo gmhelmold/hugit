@@ -261,7 +261,13 @@ pub fn reconcile_ghosts(log: &Path) -> Result<Vec<CloseResult>, String> {
 
 /// Run `hugit dock close` — close the cwd-resolved dock (or `--id`).
 pub fn run_close(args: CloseArgs) -> std::process::ExitCode {
-    let log = crate::log_resolve::resolve_log(args.log.clone());
+    let log = match crate::log_resolve::resolve_log_checked(args.log.clone()) {
+        Ok(log) => log,
+        Err(e) => {
+            println!("{}", e.to_json());
+            return e.exit_code();
+        }
+    };
     let id = match args.id {
         Some(id) => id,
         None => {
@@ -300,7 +306,13 @@ pub fn run_close(args: CloseArgs) -> std::process::ExitCode {
 
 /// Run `hugit dock reconcile` — auto-close all ghosts (L3).
 pub fn run_reconcile(args: ReconcileArgs) -> std::process::ExitCode {
-    let log = crate::log_resolve::resolve_log(args.log);
+    let log = match crate::log_resolve::resolve_log_checked(args.log) {
+        Ok(log) => log,
+        Err(e) => {
+            println!("{}", e.to_json());
+            return e.exit_code();
+        }
+    };
     match reconcile_ghosts(&log) {
         Ok(closed) => {
             let out: Vec<Value> = closed.iter().map(|c| c.to_json()).collect();

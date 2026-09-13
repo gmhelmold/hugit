@@ -112,7 +112,13 @@ fn do_run(args: TransitionArgs) -> Result<String, CampaignError> {
     // `_lock` is held (its Drop releases) until the end of this fn scope — the
     // append→persist critical section. Underscore-prefixed so it is not read but
     // still dropped at scope end (NOT a bare `_`, which would drop immediately).
-    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+    let log_path = crate::log_resolve::resolve_log_checked(args.log.clone()).map_err(|e| {
+        CampaignError::new(
+            e.kind(),
+            e.to_json(),
+            "repair blocked migration before appending an issue transition",
+        )
+    })?;
     let (_lock, world) = World::lock_and_load(&log_path, false)?;
 
     // ── Build + scrub payload (WG/WH-SCRUB structural seam) ──────────────────

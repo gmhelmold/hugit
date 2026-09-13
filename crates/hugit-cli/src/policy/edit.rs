@@ -107,7 +107,13 @@ fn do_run(args: EditArgs) -> Result<String, CampaignError> {
     }
 
     // Resolve the default --log ($HUGIT_LOG → .hugit/log.json) once.
-    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+    let log_path = crate::log_resolve::resolve_log_checked(args.log.clone()).map_err(|e| {
+        CampaignError::new(
+            e.kind(),
+            e.to_json(),
+            "repair blocked migration before appending a policy change",
+        )
+    })?;
 
     // ── Lock BEFORE load (WC1); bootstrap=false (a policy edit needs a log) ───
     let (_lock, world) = World::lock_and_load(&log_path, false)?;

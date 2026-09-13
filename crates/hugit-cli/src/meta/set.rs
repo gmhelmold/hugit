@@ -35,7 +35,13 @@ pub fn run(args: SetMetaArgs) -> Result<String, CampaignError> {
     }
 
     // Resolve the default --log ($HUGIT_LOG → .hugit/log.json) once.
-    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+    let log_path = crate::log_resolve::resolve_log_checked(args.log.clone()).map_err(|e| {
+        CampaignError::new(
+            e.kind(),
+            e.to_json(),
+            "repair blocked migration before appending repository metadata",
+        )
+    })?;
 
     // Lock-before-load across the whole load→mutate→persist (the canonical seam
     // discipline). bootstrap=true: a `repo.meta` may be the FIRST record on a
