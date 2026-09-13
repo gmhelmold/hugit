@@ -12,7 +12,7 @@ asserts**, covering every behavior that the manual walkthrough proved (the
 user-real session's transcript behaviors are now ASSERTED, not just shown):
 
 1. binary `-V` + `--help` lists verbs + dock
-2. `hugit setup` → template dir + the 4 hooks + `OWNED-BY-HUGIT` marker + git
+2. `hugit setup` → template dir + the 6 hooks + `OWNED-BY-HUGIT` marker + git
    global `init.templateDir`; `hugit setup --repo /path/to/repo` installs same
    hooks into an existing repo without changing Git data or non-hugit hooks
 3. fresh `git init` (ships hooks from template) → first commit **lazy-boots**

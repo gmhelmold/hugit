@@ -17,8 +17,8 @@ identity, tenancy, and runner execution are outside this plugin scope.
 
 Unless shown otherwise, `--log` means explicit path, then `$HUGIT_LOG`, then
 `.hugit/log.json`. Commands emit stable JSON. User/domain errors exit 2;
-internal faults exit 1. `hugit capture` is the exception: hook-only, silent,
-best-effort, always exit 0 so Git is never blocked.
+internal faults exit 1. `hugit capture` and `hugit dock coin` are hook-only
+exceptions: silent, best-effort, always exit 0 so Git is never blocked.
 
 Evidence anchors: `scripts/validate-go-live.sh` and
 `docs/manual-validation.md` cover the real-binary path; `crates/hugit-cli/tests/`
@@ -35,7 +35,7 @@ Every row below is dispatched. Subcommands are exact current names.
 | `hugit attach` | Safely adopts hugit-owned hooks in existing repo, preserving foreign hooks. `--repo <path>` selects repo; `--preview` is read-only; `--adopt-managed-dispatcher <preview-token>` adopts exact preview bytes; `--detach` restores only byte-matching managed hooks. | T `acceptance_attach`, `acceptance_capture`; U |
 | `hugit detach` | Removes hugit-owned hooks from an existing repo while retaining captured evidence. `--dir <path>` selects repo; default is current directory. | T `acceptance_capture`; U via attach/detach walkthrough |
 | `hugit health` | Reports hook, log, capture, coverage, and local fact state; distinguishes observed locally, attempted push, explicit declaration, and unsupported. Never claims remote push success. | T `acceptance_gitlocal_journey`, `acceptance_setup`; U |
-| `hugit capture` | Internal hook/worker input for `commit`, `checkout`, `push-attempt`, and `merge`; optional bounded rewrite/reference-transaction receipt fields preserve raw Git facts. Never onboarding; never blocks Git. | T `acceptance_capture`, `acceptance_capture_jj_checkout_merge`; U indirectly through Git |
+| `hugit capture` | Internal hook/worker input for `commit`, `checkout`, `push-attempt`, `merge`, `rewrite`, and `reference-transaction`; bounded receipt fields preserve raw Git facts. Never onboarding; never blocks Git. | T `acceptance_capture`, `acceptance_capture_jj_checkout_merge`; U indirectly through Git |
 | `hugit campaign open` | Appends campaign charter and human owner. | T `acceptance_pc1`, `acceptance_wbcamp`; U |
 | `hugit campaign close` | Seals campaign with proof and rollup; `--allow-rejected` explicitly permits rejected intents; repeat close is idempotent. | T `acceptance_wj_close`, `acceptance_wbcamp`; U |
 | `hugit campaign show` | Projects landed, in-flight, blocked, verdict, and cost state for `--campaign`. | T `acceptance_pc1`; U |
@@ -47,7 +47,7 @@ Every row below is dispatched. Subcommands are exact current names.
 | `hugit issue transition` | Appends issue state transition to `backlog`, `open`, `closed`, or `dispatch`, with issue number and optional priority. | T `acceptance_pc3`; U |
 | `hugit pr open` | Opens PR from repeatable `--intent`, captured `--commit`, or captured `--commit-ref`; requires `--author-kind orchestrator|human`; rejects subagent authors; supports `--run-id`, `--principal`, and `--recorded-at`. | T `acceptance_pc3`, `acceptance_pr_commit`; U |
 | `hugit pr queue` | Appends PR to union landing queue. | T `acceptance_pc3`, `acceptance_wbpr`; U |
-| `hugit pr land` | Settles queued PR as landed and captures metrics/envelopes. Supports `--dispatch` as an explicit external-runner seam that fails closed when unwired; manual metrics use `--tokens`, `--cost-usd-micros`, `--tool-calls`, `--active-ms`, `--model-turns`, `--model`, `--context-cas`, transcript refs, and `--verdicts-ref`. | T `acceptance_wprlanded`, `acceptance_pc3`; U |
+| `hugit pr land` | Settles queued PR as landed and captures metrics/envelopes. Retains `--dispatch` only as a compatibility flag that fails closed; it never performs local or future hugit runner execution. Manual metrics use `--tokens`, `--cost-usd-micros`, `--tool-calls`, `--active-ms`, `--model-turns`, `--model`, `--context-cas`, transcript refs, and `--verdicts-ref`. | T `acceptance_wprlanded`, `acceptance_pc3`; U |
 | `hugit pr show` | Shows PR, bundled intents, queue state, and cost rollup. | T `acceptance_pc3`; U |
 | `hugit pr list` | Lists PRs, optionally filtered by `--campaign` and `--state` (`proposed`, `queued`, `abandoned`, `landed`). | T `acceptance_pc3`; U |
 | `hugit pr abandon` | Idempotently abandons PR with required `--reason`; removes it from queue projection. | T `acceptance_pc3`; U |
@@ -71,7 +71,7 @@ Every row below is dispatched. Subcommands are exact current names.
 | `hugit ledger` | Projects asked → done → proven history from `--log`, optionally `--campaign`. | T `acceptance_ledger`; U |
 | `hugit fleet` | Projects versioned machine-readable workspace/agent state from `--log`. | T `acceptance_fleet`; U |
 | `hugit watch` | Replays classified, redacted event stream from `--log`; optional `--class`. | T `acceptance_watch`; U |
-| `hugit symbol` | Emits tree-sitter symbol outline for local `--file`; supports Rust, TypeScript, TSX, JavaScript, Python, Go, Java, C, C++, and Ruby. | T `acceptance_symbol`; U |
+| `hugit symbol` | Emits tree-sitter symbol outline for local `--file`, or committed tree `--ref <ref> --path <path>` with optional `--git-dir`; supports Rust, TypeScript, TSX, JavaScript, Python, Go, Java, C, C++, and Ruby. | T `acceptance_symbol`; U |
 | `hugit ctx resume` | Reconstructs short-horizon session from matching `journal.note` records using `--workspace`, `--intent`, optional `--tenant`, `--now-ms`. Refuses when evidence/horizon is insufficient. | T `acceptance_ctx`, `acceptance_review`; U |
 | `hugit ctx usage` | Appends provider `/usage` token counts verbatim to `ctx.usage`; exactly one of `--intent` or `--pr`; requires `--model`, `--input`, `--output`, `--cache-read`, `--cache-write`; optional `--model-digest`, `--recorded-at`. Computes only checked token total, never prices or calls network. | T `acceptance_ctx`, unit tests in `ctx/usage.rs`; U |
 | `hugit review` | Answers questions only from logged check/verdict evidence; refuses unsupported claims. Requires `--question`, optional `--intent` and `--log`. | T `acceptance_review`; U |
@@ -114,7 +114,7 @@ Every row below is dispatched. Subcommands are exact current names.
 | `hugit dispatch` | **DISCONTINUED** | Off-box agent execution will never become a hugit CLI feature. Token remains namespace-reserved only. |
 | `hugit ctx snap` | **ABSENT** | No second context store in CLI v1; use canonical log, `hugit note`, `hugit ctx usage`, and `hugit export`. |
 | `hugit init` | **NOT A CLI VERB** | Library-only bootstrap helper. It is not dispatched because `init` would shadow `git init`; use `hugit setup` for global templates or `hugit attach` for an existing repository. Evidence: T `acceptance_gitlocal_journey` library path; no binary evidence. |
-| `hugit serve` / `/v1` / Git smart HTTP | **HISTORICAL/OPTIONAL** | Separate backend product surface. Not required by local CLI and not evidence of CLI behavior. |
+| `hugit serve` / `/v1` / Git smart HTTP | **HISTORICAL, OUT OF SCOPE** | Separate historical backend surface. Not required by local CLI and not a hugit roadmap item. |
 | Remote hosting, identity, and tenancy | **DISCONTINUED** | Git remote remains hosting boundary; hugit will not grow hosting, account, or tenancy features. |
 | GitHub App activation and live mirror deployment | **DISCONTINUED** | Mirror/forge activation and deployment are permanently outside hugit. |
 | Runner execution and remote AC | **DISCONTINUED** | Local file-backed memoization is shipped; remote execution and remote AC will not be added. |
