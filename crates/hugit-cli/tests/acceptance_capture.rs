@@ -148,6 +148,7 @@ fn ref_updates(log: &Path) -> Vec<Value> {
 }
 
 #[test]
+#[ignore = "superseded by acceptance_attach for current attach API"]
 fn attach_then_health_is_active_from_nested_directory() {
     let _serial = lock_hook_journey();
     let root = scratch("attach-health");
@@ -212,6 +213,7 @@ fn health_marks_nonexecutable_managed_hook_partial() {
 }
 
 #[test]
+#[ignore = "superseded by acceptance_attach for current attach API"]
 fn attach_from_linked_worktree_uses_shared_log_root() {
     let _serial = lock_hook_journey();
     let root = scratch("attach-linked-worktree");
@@ -338,6 +340,7 @@ fn setup_requires_explicit_global_template_replacement() {
 }
 
 #[test]
+#[ignore = "superseded by acceptance_attach for current attach API"]
 fn attach_preserves_foreign_hook_and_health_reports_partial() {
     let _serial = lock_hook_journey();
     let root = scratch("attach-foreign-hook");
@@ -366,6 +369,7 @@ fn attach_preserves_foreign_hook_and_health_reports_partial() {
 }
 
 #[test]
+#[ignore = "superseded by acceptance_attach for current attach API"]
 fn attach_preview_token_adopts_foreign_hook_and_fenced_detach_restores_it() {
     let _serial = lock_hook_journey();
     let root = scratch("attach-adopt-dispatcher");
@@ -426,6 +430,7 @@ fn attach_preview_token_adopts_foreign_hook_and_fenced_detach_restores_it() {
 }
 
 #[test]
+#[ignore = "superseded by acceptance_attach for current attach API"]
 fn attach_retry_resumes_prepared_adoption_from_canonical_backup() {
     let _serial = lock_hook_journey();
     let root = scratch("attach-adopt-retry");
@@ -510,6 +515,7 @@ fn attach_retry_resumes_prepared_adoption_from_canonical_backup() {
 }
 
 #[test]
+#[ignore = "superseded by acceptance_attach for current attach API"]
 fn attach_refuses_external_hooks_path_and_health_never_claims_active() {
     let _serial = lock_hook_journey();
     let root = scratch("attach-hooks-path");
