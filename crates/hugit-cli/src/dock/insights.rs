@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use super::reconcile::{Bucket, attribute_on, records_from_event_log};
+use super::sanitized_view;
 use hugit_refstore::EventLog;
 
 /// The `hugit dock insight` args (WP-DOCK-3 F5).
@@ -148,7 +149,7 @@ impl InsightDocument {
                 })
             })
             .collect();
-        json!({
+        sanitized_view(json!({
             "branches": branches,
             "residual": {
                 "reconciled_usd_micros": self.reconciled_cost_usd_micros,
@@ -158,7 +159,7 @@ impl InsightDocument {
                 "unlabeled_commit_count": self.unlabeled_commit_count,
                 "repo_scope_linked_branches": self.repo_scope_linked_branches,
             },
-        })
+        }))
     }
 }
 

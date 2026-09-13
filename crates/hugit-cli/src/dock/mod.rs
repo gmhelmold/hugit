@@ -70,6 +70,13 @@ pub const DOCK_RECORD_KIND: &str = "dock.record";
 /// The marker filename inside the gitdir ("this worktree has a dock").
 pub const DOCK_MARKER: &str = "hugit-dock";
 
+/// Scrub user-controlled strings before a dock read model crosses stdout.
+/// Canonical records stay unchanged so resolution and attribution retain raw keys.
+pub(crate) fn sanitized_view(mut value: Value) -> Value {
+    crate::porcelain::scrub_payload(&mut value);
+    value
+}
+
 /// Milliseconds now — the wall-clock stamp.
 fn now_unix_ms() -> u64 {
     std::time::SystemTime::now()
@@ -528,7 +535,7 @@ fn run_ls(ls: LsArgs) -> ExitCode {
                 .collect();
             println!(
                 "{}",
-                serde_json::to_string(&out).unwrap_or_else(|_| "[]".into())
+                serde_json::to_string(&sanitized_view(json!(out))).unwrap_or_else(|_| "[]".into())
             );
             ExitCode::SUCCESS
         }
@@ -552,7 +559,7 @@ fn run_show(show: ShowArgs) -> ExitCode {
             if !std::path::Path::new(&gitdir).exists() {
                 p["state"] = json!("ghost");
             }
-            println!("{p}");
+            println!("{}", sanitized_view(p));
             ExitCode::SUCCESS
         }
         Ok(None) => {

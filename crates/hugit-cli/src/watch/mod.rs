@@ -60,6 +60,13 @@ pub fn run(args: WatchArgs) -> ExitCode {
 fn project(args: &WatchArgs) -> Result<Value, PorcelainError> {
     let log_path = crate::log_resolve::resolve_log(args.log.clone());
     let log = load_event_log(&log_path)?;
+    let projection = crate::projection::views::load(&log_path).map_err(|error| {
+        PorcelainError::new(
+            "projection_invalid",
+            error,
+            "repair projection status or re-run capture; views never invent derived state",
+        )
+    })?;
     let mut display = WatchDisplay::new();
     let lines = display.process_batch(log.records());
 
@@ -69,5 +76,5 @@ fn project(args: &WatchArgs) -> Result<Value, PorcelainError> {
         .map(|l| json!({ "class": l.class.label(), "seq": l.seq, "text": l.text }))
         .collect();
 
-    Ok(json!({ "count": rows.len(), "lines": rows }))
+    Ok(json!({ "count": rows.len(), "lines": rows, "projection": projection }))
 }

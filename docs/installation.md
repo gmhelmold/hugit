@@ -53,40 +53,32 @@ cargo build --release
 
 ## Enable the hooks (one-time boot ceremony)
 
-hugit works by listening at checkout/commit/push time. **`hugit setup`** does
-the whole ceremony once per machine — it points git's global
-`init.templateDir` at a hugit template, so **every future `git init` ships the
-hooks automatically**. The hooks lazy-boot: the first `git commit` / checkout
-in a fresh repo creates the `.hugit/log.json` log by itself.
+hugit listens at checkout/commit/push time. **`hugit setup`** does whole
+ceremony once per machine: it points Git's global `init.templateDir` at a hugit
+template, so every future `git init` ships hooks automatically. Hooks lazy-boot
+runtime state at `<git-common-dir>/hugit/event-log.json`.
 
 ```sh
 hugit setup
 ```
 
-For an **existing** repository, install hooks without changing its Git data:
-
-```sh
-hugit setup --repo /path/to/repo
-```
+For an **existing** repository, run `hugit attach`. It installs missing
+hugit-owned hooks and preserves foreign hooks. Then use normal Git and run
+`hugit health`; partial coverage remains explicit.
 
 ## Quickstart (a repo of your own)
 
 ```sh
-cd your-repo
-# make an agent task and a milestone
-hugit campaign open --campaign v1 --charter "first release" --owner you
-hugit intent new --charter "add rate limit" --acceptance "tests green" --campaign v1
-
-# work normally (git commit) — the hooks capture it into .hugit/log.json
-# then bundle it into a PR + land it
-hugit pr open --pr PR-1 --campaign v1 --author-kind human --principal user:you --commit HEAD
-hugit pr queue --pr PR-1
-hugit land queue
+hugit setup
+git init my-repo
+cd my-repo
+git add . && git commit -m "initial commit"
+git checkout -b feature/example
+git push -u origin feature/example
+hugit health
 ```
 
-The canonical log (`.hugit/log.json`) is versioned, so it **travels with the
-repo**: `git push` / `git pull` syncs the history between agents sharing a
-repo — no server involved.
+`health` distinguishes **observed locally**, **attempted push**, **explicit declaration**, and **unsupported**. Hook capture is internal/hook-only; do not invoke `hugit capture` during normal onboarding. Intent remains one explicit declaration or a separately contracted trusted adapter.
 
 ## What gets installed
 
@@ -94,5 +86,5 @@ repo — no server involved.
 - An optional template dir at `~/.config/hugit/template` + one global git
   config key (`init.templateDir`) created by `hugit setup`.
 
-`hugit setup --repo` writes only missing hugit hooks. Existing non-hugit hooks
-stay byte-identical and are reported as conflicts.
+Nothing else writes outside the repo; `hugit setup` never touches an
+existing repo's hooks.

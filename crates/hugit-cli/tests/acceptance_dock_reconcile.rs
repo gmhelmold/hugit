@@ -81,23 +81,11 @@ fn wait_until(timeout_ms: u64, f: impl Fn() -> bool) -> bool {
     f()
 }
 
-/// Resolve the SHARED canonical log path (the main repo's `.hugit/log.json`)
-/// from any cwd — worktree-safe, mirrors the hooks' `--git-common-dir` logic.
+/// Resolve the shared runtime log from any cwd, using Git's common directory.
 fn shared_log(cwd: &Path) -> PathBuf {
-    let common = String::from_utf8_lossy(
-        &Command::new("git")
-            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-            .current_dir(cwd)
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .trim()
-    .to_string();
-    PathBuf::from(common)
-        .join("..")
-        .join(".hugit")
-        .join("log.json")
+    hugit_cli::runtime_store::for_repo(cwd)
+        .expect("runtime store resolves")
+        .canonical_log()
 }
 
 /// Commit on the current branch through the REAL post-commit hook (captures a
@@ -260,7 +248,7 @@ fn e2e_two_worktrees_same_branch_aggregate() {
     );
     assert_eq!(rc, 0, "wt1: {out}");
 
-    let log = dir.join(".hugit/log.json");
+    let log = shared_log(&dir);
     // Worktree #2 — its gitdir is real; the dock is coined through the exact
     // seam the hook uses, on the SAME branch (the multi-head arrangement).
     let wt2_gitdir = dir.join(".git/worktrees/wt-sim");
@@ -363,7 +351,7 @@ fn e2e_ghost_is_reconciled_onto_the_durable_log() {
         ],
     );
     assert_eq!(rc, 0, "worktree lands: {out}");
-    let log = dir.join(".hugit/log.json");
+    let log = shared_log(&dir);
     assert!(
         wait_until(25000, || {
             attribute(&log)
@@ -418,7 +406,7 @@ fn e2e_unbound_commit_links_to_repo_scope_dock() {
     lib_init(&dir);
     std::thread::sleep(Duration::from_millis(400));
 
-    let log = dir.join(".hugit/log.json");
+    let log = shared_log(&dir);
     // The repo-scope dock is auto-coined on first RESOLVE (M5, WP-DOCK-2) — a
     // resolve from the main worktree (origin=="repo") triggers it.
     let resolved = hugit_cli::dock::resolve::resolve(&dir, None, None);

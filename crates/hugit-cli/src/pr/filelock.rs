@@ -248,7 +248,14 @@ pub(crate) fn atomic_write_unprepared(target: &Path, bytes: &[u8]) -> Result<(),
     ));
 
     {
-        let mut f = File::create(&temp).map_err(|e| LockError::Io {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut f = options.open(&temp).map_err(|e| LockError::Io {
             action: "create temp file",
             path: temp.clone(),
             source: e.to_string(),
@@ -275,7 +282,17 @@ pub(crate) fn atomic_write_unprepared(target: &Path, bytes: &[u8]) -> Result<(),
             path: target.to_path_buf(),
             source: e.to_string(),
         }
-    })
+    })?;
+    // Directory fsync makes rename durable across power loss, not merely atomic
+    // while this process remains alive.
+    File::open(dir)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|e| LockError::Io {
+            action: "fsync parent directory",
+            path: dir.to_path_buf(),
+            source: e.to_string(),
+        })?;
+    Ok(())
 }
 
 /// The sidecar lock path for a target file: `<target>.lock` (in the same dir, so

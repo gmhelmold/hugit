@@ -222,7 +222,9 @@ fn e2e_insights_verb_reads_real_log() {
     };
     assert_eq!(rc, 0, "wt add failed: {out:?}");
 
-    let log = dir.join(".hugit/log.json");
+    let log = hugit_cli::runtime_store::for_repo(&dir)
+        .expect("runtime store resolves")
+        .canonical_log();
     // The hook-coined dock appears under feat/rate; cost lands via the spool.
     let mut seen = false;
     for _ in 0..250 {

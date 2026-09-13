@@ -10,15 +10,24 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use serde_json::json;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::porcelain::PorcelainError;
 
 /// Marker identifying a hook wholly owned by hugit.
 pub const HUGIT_HOOK_MARKER: &str = "# hugit-hook (managed by hugit init)";
+const HUGIT_DISPATCHER_MARKER: &str = "# hugit-managed-dispatcher v1";
 
 /// Git hook names currently installed by hugit.
-pub const HOOK_KINDS: [&str; 4] = ["post-commit", "post-checkout", "pre-push", "post-merge"];
+pub const HOOK_KINDS: [&str; 6] = [
+    "post-commit",
+    "post-checkout",
+    "pre-push",
+    "post-merge",
+    "post-rewrite",
+    "reference-transaction",
+];
 
 /// True if `root` already contains a git repository (`.git` dir or worktree).
 fn is_git_repo(root: &std::path::Path) -> bool {
@@ -62,6 +71,15 @@ pub struct AttachArgs {
     /// Inspect current attachment without mutating repository state.
     #[arg(long)]
     pub status: bool,
+    /// Show exact hook ownership and planned changes without writing anything.
+    #[arg(long)]
+    pub preview: bool,
+    /// Replace foreign hooks only with a token emitted by a read-only preview.
+    #[arg(long)]
+    pub adopt_managed_dispatcher: bool,
+    /// Hash-bound token from `hugit attach --preview`.
+    #[arg(long, requires = "adopt_managed_dispatcher")]
+    pub adoption_token: Option<String>,
 }
 
 /// Run `hugit init` — create runtime state and an empty canonical event log.
@@ -96,8 +114,11 @@ pub fn attach_run(args: AttachArgs) -> ExitCode {
             return err.exit_code();
         }
     };
+    if args.preview {
+        return print_attach_result(attach_preview(&root));
+    }
     match configured_hooks_path(&root) {
-        Ok(Some(path)) => {
+        Ok(Some(path)) if !args.adopt_managed_dispatcher => {
             let err = PorcelainError::new(
                 "hooks_path_unsupported",
                 format!("effective core.hooksPath is {path:?}"),
@@ -106,10 +127,22 @@ pub fn attach_run(args: AttachArgs) -> ExitCode {
             println!("{}", err.to_json());
             return err.exit_code();
         }
-        Ok(None) => {}
+        Ok(_) => {}
         Err(err) => {
             println!("{}", err.to_json());
             return err.exit_code();
+        }
+    }
+    if args.adopt_managed_dispatcher {
+        let Some(token) = args.adoption_token.as_deref() else {
+            return print_attach_result(Err(PorcelainError::new(
+                "adoption_token_required",
+                "managed-dispatcher adoption requires a preview token",
+                "run `hugit attach --preview`, then pass its adoption_token",
+            )));
+        };
+        if let Err(error) = validate_adoption_token(&root, token) {
+            return print_attach_result(Err(error));
         }
     }
     let log_root = match legacy_log_root(&root) {
@@ -119,9 +152,197 @@ pub fn attach_run(args: AttachArgs) -> ExitCode {
             return err.exit_code();
         }
     };
-    run(InitArgs {
+    let result = do_run(&InitArgs {
         dir: Some(log_root),
     })
+    .and_then(|mut value| {
+        if args.adopt_managed_dispatcher {
+            adopt_managed_dispatchers(&root, args.adoption_token.as_deref().expect("checked"))?;
+            value["adopted_managed_dispatcher"] = Value::Bool(true);
+        }
+        Ok(value)
+    });
+    print_attach_result(result)
+}
+
+fn print_attach_result(result: Result<Value, PorcelainError>) -> ExitCode {
+    match result {
+        Ok(value) => {
+            println!("{value}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            println!("{}", error.to_json());
+            error.exit_code()
+        }
+    }
+}
+
+/// Read-only coexistence report. Foreign hooks are never auto-chained.
+fn attach_preview(root: &std::path::Path) -> Result<Value, PorcelainError> {
+    let hooks_path = configured_hooks_path(root)?;
+    let hooks_dir = resolve_hooks_dir(root)?;
+    let mut hooks = Vec::new();
+    for kind in HOOK_KINDS {
+        let path = hooks_dir.join(kind);
+        let before = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(PorcelainError::io("read hook", &path, &error)),
+        };
+        let owned = std::str::from_utf8(&before).ok().is_some_and(|contents| {
+            is_managed_hook(kind, contents) || contents.contains(HUGIT_DISPATCHER_MARKER)
+        });
+        hooks.push(json!({
+            "kind": kind, "path": path.display().to_string(),
+            "ownership": if before.is_empty() { "missing" } else if owned { "hugit" } else { "foreign" },
+            "before_sha256": sha256_hex(&before), "after_sha256": sha256_hex(hook_script(kind).as_bytes()),
+            "action": if owned { "unchanged" } else if before.is_empty() { "install" } else { "conflict_requires_explicit_adoption" },
+        }));
+    }
+    Ok(json!({
+        "preview": true, "writes": false, "repo": root.display().to_string(),
+        "hooks_path": hooks_path.map(|path| json!({"state":"external","path":path})).unwrap_or_else(|| json!({"state":"default"})),
+        "hooks": hooks, "adoption_token": adoption_token(root)?,
+        "next": "foreign hooks are never chained automatically; explicit managed-dispatcher adoption is required",
+    }))
+}
+
+fn adoption_token(root: &std::path::Path) -> Result<String, PorcelainError> {
+    let mut binding = Vec::new();
+    for kind in HOOK_KINDS {
+        let path = resolve_hooks_dir(root)?.join(kind);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(PorcelainError::io("read hook", &path, &error)),
+        };
+        let contents = std::str::from_utf8(&bytes).unwrap_or("");
+        if !is_managed_hook(kind, contents) && !contents.contains(HUGIT_DISPATCHER_MARKER) {
+            binding.extend_from_slice(kind.as_bytes());
+            binding.push(0);
+            binding.extend_from_slice(&Sha256::digest(&bytes));
+            binding.extend_from_slice(&Sha256::digest(hook_script(kind).as_bytes()));
+        }
+    }
+    Ok(sha256_hex(&binding))
+}
+
+fn validate_adoption_token(root: &std::path::Path, token: &str) -> Result<(), PorcelainError> {
+    (token == adoption_token(root)?)
+        .then_some(())
+        .ok_or_else(|| {
+            PorcelainError::new(
+                "adoption_token_stale",
+                "hook bytes changed since preview",
+                "run `hugit attach --preview` again and use its new adoption_token",
+            )
+        })
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
+fn shell_quote(path: &std::path::Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', "'\"'\"'"))
+}
+
+fn dispatcher_script(kind: &str, backup: &std::path::Path) -> String {
+    let body = hook_script(kind)
+        .lines()
+        .skip(3)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let backup = shell_quote(backup);
+    if kind == "pre-push" {
+        format!(
+            "#!/bin/sh\n{HUGIT_DISPATCHER_MARKER}\nTMP=$(mktemp \"${{TMPDIR:-/tmp}}/hugit-pre-push.XXXXXX\") || {{ {backup} \"$@\"; exit $?; }}\ntrap 'rm -f \"$TMP\"' 0 HUP INT TERM\ndd bs=1 count=8193 <&0 > \"$TMP\" 2>/dev/null\n{{ dd if=\"$TMP\" bs=1 2>/dev/null; dd bs=8192 2>/dev/null; }} | {backup} \"$@\"\nSTATUS=$?\nTUPLES=$(dd if=\"$TMP\" bs=1 count=8193 2>/dev/null; printf .)\nTUPLES=${{TUPLES%.}}\n[ \"$STATUS\" -eq 0 ] || exit \"$STATUS\"\nHUGIT_PRE_PUSH_TUPLES=\"$TUPLES\"; export HUGIT_PRE_PUSH_TUPLES\n{body}\n"
+        )
+    } else {
+        format!(
+            "#!/bin/sh\n{HUGIT_DISPATCHER_MARKER}\n{backup} \"$@\"\nSTATUS=$?\n[ \"$STATUS\" -eq 0 ] || exit \"$STATUS\"\n{body}\n"
+        )
+    }
+}
+
+/// Backup + manifest complete before any atomic dispatcher replacement.
+fn adopt_managed_dispatchers(root: &std::path::Path, token: &str) -> Result<(), PorcelainError> {
+    validate_adoption_token(root, token)?;
+    let runtime = crate::runtime_store::for_repo(root)?;
+    let hooks_dir = resolve_hooks_dir(root)?;
+    std::fs::create_dir_all(runtime.hook_backups())
+        .map_err(|e| PorcelainError::io("create hook backup dir", &runtime.hook_backups(), &e))?;
+    let mut entries = Vec::new();
+    for kind in HOOK_KINDS {
+        let path = hooks_dir.join(kind);
+        let before = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(PorcelainError::io("read hook", &path, &e)),
+        };
+        let contents = std::str::from_utf8(&before).unwrap_or("");
+        if is_managed_hook(kind, contents) || contents.contains(HUGIT_DISPATCHER_MARKER) {
+            continue;
+        }
+        let backup = runtime
+            .hook_backups()
+            .join(format!("{kind}-{}.hook", sha256_hex(&before)));
+        if !backup.exists() {
+            crate::pr::filelock::atomic_write_unprepared(&backup, &before).map_err(|e| {
+                PorcelainError::new(
+                    "hook_backup_write_failed",
+                    e.to_string(),
+                    "retry `hugit attach`",
+                )
+            })?;
+        }
+        let dispatcher = dispatcher_script(kind, &backup);
+        entries.push(json!({"kind":kind,"backup":backup.display().to_string(),"before_sha256":sha256_hex(&before),"dispatcher_sha256":sha256_hex(dispatcher.as_bytes())}));
+    }
+    let manifest = json!({"version":1,"entries":entries});
+    crate::pr::filelock::atomic_write_unprepared(
+        &runtime.hook_manifest(),
+        &serde_json::to_vec_pretty(&manifest).expect("json"),
+    )
+    .map_err(|e| {
+        PorcelainError::new(
+            "hook_manifest_write_failed",
+            e.to_string(),
+            "retry `hugit attach`",
+        )
+    })?;
+    for entry in manifest["entries"].as_array().expect("entries") {
+        let kind = entry["kind"].as_str().expect("kind");
+        let path = hooks_dir.join(kind);
+        let script = dispatcher_script(
+            kind,
+            &PathBuf::from(entry["backup"].as_str().expect("backup")),
+        );
+        crate::pr::filelock::atomic_write_unprepared(&path, script.as_bytes()).map_err(|e| {
+            PorcelainError::new(
+                "hook_dispatcher_write_failed",
+                e.to_string(),
+                "retry `hugit attach`",
+            )
+        })?;
+        set_hook_executable(&path)?;
+    }
+    Ok(())
+}
+
+fn set_hook_executable(path: &std::path::Path) -> Result<(), PorcelainError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(path)
+            .map_err(|e| PorcelainError::io("stat hook", path, &e))?
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions)
+            .map_err(|e| PorcelainError::io("chmod hook", path, &e))?;
+    }
+    Ok(())
 }
 
 /// Remove only hooks wholly owned by hugit, retaining all captured evidence.
@@ -141,17 +362,92 @@ pub fn detach_run(args: InitArgs) -> ExitCode {
     };
     let result = (|| {
         let hooks_dir = resolve_hooks_dir(&root)?;
+        let runtime = crate::runtime_store::for_repo(&root)?;
         let mut removed = Vec::new();
+        let mut restored = Vec::new();
         let mut preserved = Vec::new();
+        if runtime.hook_manifest().exists() {
+            let manifest: Value =
+                serde_json::from_slice(&std::fs::read(runtime.hook_manifest()).map_err(|e| {
+                    PorcelainError::io("read hook manifest", &runtime.hook_manifest(), &e)
+                })?)
+                .map_err(|e| {
+                    PorcelainError::new(
+                        "hook_manifest_invalid",
+                        e.to_string(),
+                        "preserve evidence and repair hook-manifest.json before detach",
+                    )
+                })?;
+            let entries = manifest["entries"].as_array().ok_or_else(|| {
+                PorcelainError::new(
+                    "hook_manifest_invalid",
+                    "hook manifest has no entries array",
+                    "preserve evidence and repair hook-manifest.json before detach",
+                )
+            })?;
+            for entry in entries {
+                let kind = entry["kind"].as_str().ok_or_else(|| {
+                    PorcelainError::new(
+                        "hook_manifest_invalid",
+                        "hook manifest entry has no kind",
+                        "preserve evidence and repair hook-manifest.json before detach",
+                    )
+                })?;
+                if !HOOK_KINDS.contains(&kind) {
+                    return Err(PorcelainError::new(
+                        "hook_manifest_invalid",
+                        "hook manifest contains unknown hook",
+                        "preserve evidence and repair hook-manifest.json before detach",
+                    ));
+                }
+                let backup = PathBuf::from(entry["backup"].as_str().ok_or_else(|| {
+                    PorcelainError::new(
+                        "hook_manifest_invalid",
+                        "hook manifest entry has no backup",
+                        "preserve evidence and repair hook-manifest.json before detach",
+                    )
+                })?);
+                if !backup.starts_with(runtime.hook_backups()) {
+                    return Err(PorcelainError::new(
+                        "hook_manifest_invalid",
+                        "hook backup escapes common-dir runtime",
+                        "preserve evidence and repair hook-manifest.json before detach",
+                    ));
+                }
+                let path = hooks_dir.join(kind);
+                let current = std::fs::read(&path).unwrap_or_default();
+                let backup_bytes = std::fs::read(&backup)
+                    .map_err(|e| PorcelainError::io("read hook backup", &backup, &e))?;
+                if entry["before_sha256"].as_str() != Some(sha256_hex(&backup_bytes).as_str())
+                    || entry["dispatcher_sha256"].as_str() != Some(sha256_hex(&current).as_str())
+                {
+                    preserved.push(kind.to_string());
+                    continue;
+                }
+                crate::pr::filelock::atomic_write_unprepared(&path, &backup_bytes).map_err(
+                    |e| {
+                        PorcelainError::new(
+                            "hook_restore_failed",
+                            e.to_string(),
+                            "retry `hugit detach`",
+                        )
+                    },
+                )?;
+                restored.push(kind.to_string());
+            }
+        }
         for kind in HOOK_KINDS {
             let path = hooks_dir.join(kind);
             match std::fs::read_to_string(&path) {
                 Ok(contents) if is_managed_hook(kind, &contents) => {
                     std::fs::remove_file(&path)
                         .map_err(|e| PorcelainError::io("remove hugit hook", &path, &e))?;
-                    removed.push(kind);
+                    removed.push(kind.to_string());
                 }
-                Ok(_) => preserved.push(kind),
+                Ok(_) if !restored.iter().any(|restored_kind| restored_kind == kind) => {
+                    preserved.push(kind.to_string())
+                }
+                Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(PorcelainError::io("read hook", &path, &error)),
             }
@@ -159,6 +455,7 @@ pub fn detach_run(args: InitArgs) -> ExitCode {
         Ok(serde_json::json!({
             "detached": true,
             "removed": removed,
+            "restored": restored,
             "preserved": preserved,
             "evidence_retained": true,
         }))
@@ -256,13 +553,33 @@ pub(crate) fn install_hooks(root: &std::path::Path) -> Result<HookInstallResult,
                     .map_err(|e| PorcelainError::io("read hook", &path, &e))?;
                 if is_managed_hook(kind, &contents) {
                     result.noop.push(kind.to_string());
+                } else if contents.contains(HUGIT_HOOK_MARKER)
+                    && contents
+                        .lines()
+                        .any(|line| line.starts_with("# hugit-hook-version: "))
+                {
+                    crate::pr::filelock::atomic_write_unprepared(
+                        &path,
+                        hook_script(kind).as_bytes(),
+                    )
+                    .map_err(|e| {
+                        PorcelainError::new(
+                            "hook_upgrade_failed",
+                            e.to_string(),
+                            "retry `hugit attach`",
+                        )
+                    })?;
+                    set_hook_executable(&path)?;
+                    result.installed.push(format!("{kind}:upgraded"));
                 } else {
                     result.conflict.push(kind.to_string());
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::write(&path, hook_script(kind))
-                    .map_err(|e| PorcelainError::io("write hook", &path, &e))?;
+                crate::pr::filelock::atomic_write_unprepared(&path, hook_script(kind).as_bytes())
+                    .map_err(|e| {
+                    PorcelainError::new("hook_write_failed", e.to_string(), "retry `hugit setup`")
+                })?;
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
@@ -343,15 +660,17 @@ pub fn legacy_log_root(path: &std::path::Path) -> Result<PathBuf, PorcelainError
 /// The shell body for each hook, generated deterministically. Every hook:
 /// - resolves the hugit binary ($HUGIT_BIN then `hugit`),
 /// - resolves the repo root via git itself (worktree-safe),
-/// - detaches the capture child (`nohup ... &` + re-direct) then exits 0,
+/// - snapshots immutable facts before detach, then detaches capture with stdin
+///   closed (`... </dev/null &`), then exits 0,
 ///   so a hugit failure can NEVER fail/block the git operation.
 pub(crate) fn hook_script(kind: &str) -> String {
-    // The capture invocation for each kind (post-commit takes the new HEAD +
-    // branch; post-checkout passes from/to/branch when flag==1; pre-push reads
-    // refspecs/shas from stdin into the child; post-merge passes the merged tip).
+    // Shell snapshots hook args plus cheap immutable Git facts before detach.
+    // Rust resolves commit paths from the captured OID; detached children never
+    // query moving HEAD, branch, or stdin.
     match kind {
     "post-commit" => r#"#!/bin/sh
 # hugit-hook (managed by hugit init)
+# hugit-hook-version: 1
 # Silent capture: the LLM used `git commit`; hugit records ref.update async.
 HUGIT_BIN="${HUGIT_BIN:-hugit}"
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
@@ -360,18 +679,15 @@ COMMON=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || e
 RUNTIME="$COMMON/hugit"
 LOG="$RUNTIME/event-log.json"
 HL="$RUNTIME/hooks.log"
-(
-  FILES="$(git diff-tree --root --name-only -r --no-commit-id HEAD 2>/dev/null)"
-  FILE_ARGS=""
-  for f in $FILES; do
-FILE_ARGS="$FILE_ARGS --files $f"
-  done
-  "$HUGIT_BIN" capture --kind commit --top-level "$ROOT" --log "$LOG" --hook-log "$HL"     --oid "$(git rev-parse HEAD 2>/dev/null)"     --branch "$(git branch --show-current 2>/dev/null)"     --recorded-at "$(git log -1 --format=%ct 2>/dev/null)" $FILE_ARGS
-) >/dev/null 2>&1 &
+OID=$(git rev-parse HEAD 2>/dev/null) || exit 0
+BRANCH=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+RECORDED_AT=$(git show -s --format=%ct "$OID" 2>/dev/null) || exit 0
+( "$HUGIT_BIN" capture --kind commit --top-level "$ROOT" --log "$LOG" --hook-log "$HL" --oid "$OID" --branch "$BRANCH" --recorded-at "$RECORDED_AT" </dev/null ) >/dev/null 2>&1 &
 exit 0
 "#.to_string(),
     "post-checkout" => r#"#!/bin/sh
 # hugit-hook (managed by hugit init)
+# hugit-hook-version: 1
 # Silent capture: branch checkout (flag=1); records ref.update {checkout:true}.
 HUGIT_BIN="${HUGIT_BIN:-hugit}"
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
@@ -382,18 +698,16 @@ LOG="$RUNTIME/event-log.json"
 HL="$RUNTIME/hooks.log"
 [ "$3" = "1" ] || exit 0   # only branch checkouts (flag=1), not file checkouts
 GITDIR=$(git rev-parse --absolute-git-dir 2>/dev/null) || exit 0
-(
-  "$HUGIT_BIN" capture --kind checkout --top-level "$ROOT" --log "$LOG" --hook-log "$HL"     --from "$1" --oid "$2" --branch "$(git branch --show-current 2>/dev/null)"
-) >/dev/null 2>&1 &
+BRANCH=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+( "$HUGIT_BIN" capture --kind checkout --top-level "$ROOT" --log "$LOG" --hook-log "$HL" --from "$1" --oid "$2" --branch "$BRANCH" </dev/null ) >/dev/null 2>&1 &
 # Worktree-dock (ADR-0005, WP-DOCK-1): coin the physical binding at checkout
 # time (idempotent — marker present ⇒ no-op; never blocks git).
-(
-  "$HUGIT_BIN" dock coin --top-level "$ROOT" --gitdir "$GITDIR" --log "$LOG" --hook-log "$HL" --branch "$(git branch --show-current 2>/dev/null)"
-) >/dev/null 2>&1 &
+( "$HUGIT_BIN" dock coin --top-level "$ROOT" --gitdir "$GITDIR" --log "$LOG" --hook-log "$HL" --branch "$BRANCH" </dev/null ) >/dev/null 2>&1 &
 exit 0
 "#.to_string(),
     "pre-push" => r#"#!/bin/sh
 # hugit-hook (managed by hugit init)
+# hugit-hook-version: 1
 # Silent capture: a push is attempted; records ref.update {attempt:true} with
 # the LOCAL shas being pushed (the 2nd field of each refspec stdin line), so a
 # `git push` is a captured-commit proof too (pr open --commit <pushed-sha>).
@@ -405,16 +719,20 @@ COMMON=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || e
 RUNTIME="$COMMON/hugit"
 LOG="$RUNTIME/event-log.json"
 HL="$RUNTIME/hooks.log"
-STDIN_REFS="$(cat)"   # first line: remote-name + url; then <local-ref> <local-sha> <remote-ref> <remote-sha> per line
-# Extract the LOCAL sha (2nd field) from each refspec line that has 4 fields.
-SHAS="$(echo "$STDIN_REFS" | awk 'NF>=4 {print $2}')"
-(
-  "$HUGIT_BIN" capture --kind push-attempt --top-level "$ROOT" --log "$LOG" --hook-log "$HL"     --refspecs "$STDIN_REFS" --shas "$SHAS"
-) >/dev/null 2>&1 &
+# Read at most 8193 bytes before parsing. Sentinel preserves trailing newlines
+# lost by command substitution; byte 8193 makes Rust persist incomplete/oversize.
+if [ "${HUGIT_PRE_PUSH_TUPLES+x}" = x ]; then
+  TUPLES=$HUGIT_PRE_PUSH_TUPLES
+else
+  TUPLES=$(dd bs=1 count=8193 2>/dev/null; printf .)
+  TUPLES=${TUPLES%.}
+fi
+( "$HUGIT_BIN" capture --kind push-attempt --top-level "$ROOT" --log "$LOG" --hook-log "$HL" --push-tuples "$TUPLES" </dev/null ) >/dev/null 2>&1 &
 exit 0
 "#.to_string(),
     "post-merge" => r#"#!/bin/sh
 # hugit-hook (managed by hugit init)
+# hugit-hook-version: 1
 # Silent capture: a local merge landed; records ref.update {merged_from}.
 HUGIT_BIN="${HUGIT_BIN:-hugit}"
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
@@ -423,9 +741,36 @@ COMMON=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || e
 RUNTIME="$COMMON/hugit"
 LOG="$RUNTIME/event-log.json"
 HL="$RUNTIME/hooks.log"
-(
-  "$HUGIT_BIN" capture --kind merge --top-level "$ROOT" --log "$LOG" --hook-log "$HL"     --from "$(git rev-parse HEAD~1 2>/dev/null)"     --oid "$(git rev-parse HEAD 2>/dev/null)"     --recorded-at "$(git log -1 --format=%ct 2>/dev/null)"
-) >/dev/null 2>&1 &
+OID=$(git rev-parse HEAD 2>/dev/null) || exit 0
+# ORIG_HEAD is only fast-forward fact candidate. Rust verifies it against
+# captured commit parent set; it is never represented as merge source.
+ORIG=$(git rev-parse ORIG_HEAD 2>/dev/null || true)
+RECORDED_AT=$(git show -s --format=%ct "$OID" 2>/dev/null) || exit 0
+( "$HUGIT_BIN" capture --kind merge --top-level "$ROOT" --log "$LOG" --hook-log "$HL" --from "$ORIG" --oid "$OID" --recorded-at "$RECORDED_AT" </dev/null ) >/dev/null 2>&1 &
+exit 0
+"#.to_string(),
+    "post-rewrite" => r#"#!/bin/sh
+# hugit-hook (managed by hugit init)
+# hugit-hook-version: 1
+HUGIT_BIN="${HUGIT_BIN:-hugit}"
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+COMMON=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
+RUNTIME="$COMMON/hugit"; LOG="$RUNTIME/event-log.json"; HL="$RUNTIME/hooks.log"
+TUPLES=$(dd bs=1 count=8193 2>/dev/null; printf .); TUPLES=${TUPLES%.}
+case "$1" in amend|rebase) ;; *) exit 0 ;; esac
+( "$HUGIT_BIN" capture --kind rewrite --top-level "$ROOT" --log "$LOG" --hook-log "$HL" --rewrite-type "$1" --rewrite-tuples "$TUPLES" </dev/null ) >/dev/null 2>&1 &
+exit 0
+"#.to_string(),
+    "reference-transaction" => r#"#!/bin/sh
+# hugit-hook (managed by hugit init)
+# hugit-hook-version: 1
+HUGIT_BIN="${HUGIT_BIN:-hugit}"
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+COMMON=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
+RUNTIME="$COMMON/hugit"; LOG="$RUNTIME/event-log.json"; HL="$RUNTIME/hooks.log"
+case "$1" in prepared|committed|aborted) ;; *) exit 0 ;; esac
+TUPLES=$(dd bs=1 count=8193 2>/dev/null; printf .); TUPLES=${TUPLES%.}
+( "$HUGIT_BIN" capture --kind reference-transaction --top-level "$ROOT" --log "$LOG" --hook-log "$HL" --transaction-phase "$1" --reference-tuples "$TUPLES" </dev/null ) >/dev/null 2>&1 &
 exit 0
 "#.to_string(),
     _ => unreachable!("known hook kind"),
@@ -635,5 +980,45 @@ mod tests {
             seeded,
             "existing log left untouched"
         );
+    }
+
+    #[test]
+    fn rendered_hooks_pass_only_snapshots_to_detached_children() {
+        for kind in HOOK_KINDS {
+            let script = hook_script(kind);
+            assert!(
+                script.contains("</dev/null"),
+                "{kind} detaches with stdin closed"
+            );
+            assert!(
+                !script.contains("nohup"),
+                "{kind} does not retain inherited input"
+            );
+            assert!(!script.contains("cat)"), "{kind} never captures raw stdin");
+            let path = scratch(&format!("hook-syntax-{kind}")).join(kind);
+            std::fs::write(&path, script).unwrap();
+            assert!(
+                std::process::Command::new("sh")
+                    .args(["-n", path.to_str().unwrap()])
+                    .status()
+                    .is_ok_and(|status| status.success()),
+                "{kind} is valid POSIX shell"
+            );
+        }
+        let push = hook_script("pre-push");
+        assert!(
+            !push.contains("--remote") && !push.contains("--url") && !push.contains("--userinfo"),
+            "remote URL/userinfo never enters capture args"
+        );
+        assert!(push.contains("--push-tuples \"$TUPLES\""));
+        assert!(push.contains("dd bs=1 count=8193"));
+        assert!(
+            !push.contains("read -r"),
+            "pre-push never permits shell read to buffer unbounded input"
+        );
+        let dispatcher = dispatcher_script("pre-push", std::path::Path::new("/tmp/foreign-hook"));
+        assert!(dispatcher.contains("dd if=\"$TMP\" bs=1"));
+        assert!(dispatcher.contains("[ \"$STATUS\" -eq 0 ] || exit \"$STATUS\""));
+        assert!(dispatcher.contains("HUGIT_PRE_PUSH_TUPLES"));
     }
 }

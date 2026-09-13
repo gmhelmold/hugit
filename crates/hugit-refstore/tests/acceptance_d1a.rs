@@ -183,11 +183,12 @@ fn checkout_ref_update_is_inert_not_malformed() {
             .to_string(),
         1,
     );
-    // A CHECKOUT capture — has `checkout:true`, from/to/branch, NO ref/target.
+    // Current checkout schema keeps old/new alongside legacy from/to. It remains
+    // an inert observation, so undo/replay ref projection cannot reinterpret it.
     log.append_for_test(
         "ref.update",
         vec!["orchestrator:hugit-hook".to_string()],
-        r#"{"checkout":true,"from":"1111111111111111111111111111111111111111","to":"2222222222222222222222222222222222222222","branch":"feat/x"}"#.to_string(),
+        r#"{"checkout":{"fact":"nonzero_old_oid","truth":"branch_checkout_observed"},"from":"1111111111111111111111111111111111111111","to":"2222222222222222222222222222222222222222","old":"1111111111111111111111111111111111111111","new":"2222222222222222222222222222222222222222","branch":"feat/x"}"#.to_string(),
         2,
     );
     // Another commit on the other branch — still inert skip of the checkout.

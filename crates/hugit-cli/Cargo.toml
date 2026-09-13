@@ -34,6 +34,8 @@ serde_json = { workspace = true }
 # supply-chain invariant (X4) holds — no floating version drift on the CLI
 # entrypoint.
 clap = { version = "=4.6.1", features = ["derive"] }
+getrandom = { workspace = true }
+libc = { workspace = true }
 
 # The real `hugit` binary (remediation R-cli defect #1). Library + bin in one
 # crate: the bin is a thin dispatch shell over the existing library verbs.

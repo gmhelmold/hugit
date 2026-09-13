@@ -82,7 +82,8 @@ enum Command {
     Tournament(TournamentArgs),
     /// Dump a git artifact + JSON envelope (anti-lock-in exit proof).
     Export(ExportArgs),
-    /// Install hooks globally, or into an existing repository with `--repo`.
+    /// One-time install: configure git's global init.templateDir so every future
+    /// `git init` auto-ships the hugit hooks (the boot ceremony, no per-repo init).
     Setup(setup::SetupArgs),
     /// Attach hugit hooks to an existing Git repository.
     Attach(AttachArgs),
@@ -92,7 +93,7 @@ enum Command {
     Health(HealthArgs),
     /// Campaign lifecycle: open / close (seal) / show.
     Campaign(CampaignArgs),
-    /// Silent capture (git hooks call this) — never blocks git, exit 0 always.
+    /// Internal hook-only capture. Normal workflows use Git, never this command.
     Capture(CaptureArgs),
     /// Intent ceremony: new / show / list.
     Intent(IntentArgs),
@@ -263,6 +264,13 @@ fn run_why(args: WhyArgs) -> Result<String, PorcelainError> {
         line: args.line,
         symbol: args.symbol,
     };
+    let projection = hugit_cli::projection::views::load(&args.log).map_err(|error| {
+        PorcelainError::new(
+            "projection_invalid",
+            error,
+            "repair projection status or re-run capture; why never invents derived state",
+        )
+    })?;
     if let Some(line) = query.line {
         let repo = repo.as_deref().ok_or_else(|| {
             PorcelainError::new(
@@ -351,6 +359,7 @@ fn run_why(args: WhyArgs) -> Result<String, PorcelainError> {
     // The walk (--walk) projects the FULL chain, most recent first; the origin
     // answer is the head of that chain for the "single attribution" read.
     if args.walk {
+        let _ = projection;
         return serde_json::to_string(&resolve_why_chain(&query, &entries))
             .map_err(|e| PorcelainError::internal(format!("serialise why chain: {e}")));
     }
@@ -362,6 +371,10 @@ fn run_why(args: WhyArgs) -> Result<String, PorcelainError> {
              why never widens or fabricates an answer",
         )
     })?;
+    let mut answer = serde_json::to_value(answer)
+        .map_err(|e| PorcelainError::internal(format!("serialise why answer: {e}")))?;
+    answer["projection"] = serde_json::to_value(projection)
+        .map_err(|e| PorcelainError::internal(format!("serialise projection view: {e}")))?;
     serde_json::to_string(&answer)
         .map_err(|e| PorcelainError::internal(format!("serialise why answer: {e}")))
 }

@@ -153,6 +153,14 @@ forge thesis is re-examined before another dollar of effort.
 the three namespace laws: git never shadowed; refs auto-managed; degradation
 invariant (worst case = a healthy git repo).
 
+### Hook-first local onboarding
+
+Normal local workflow is `hugit setup` (or `hugit attach` for existing repos),
+normal Git `commit`/`checkout`/`push`, then `hugit health`. `hugit capture` is
+internal/hook-only, not user onboarding. Health distinguishes **observed
+locally**, **attempted push**, **explicit declaration**, and **unsupported**;
+it never turns a push attempt into remote success.
+
 ---
 
 ## What changed from v1 of this catalog (the honest diff)

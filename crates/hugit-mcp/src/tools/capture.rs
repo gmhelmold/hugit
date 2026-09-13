@@ -34,20 +34,6 @@ fn resolve_bin(args: &Value) -> String {
     std::env::var("HUGIT_BIN").unwrap_or_else(|_| DEFAULT_BIN.to_string())
 }
 
-/// Read a repeatable `files` array from the tool arguments.
-fn opt_files(args: &Value) -> Vec<String> {
-    args.get("files")
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(Value::as_str)
-                .filter(|file| !file.trim().is_empty())
-                .map(String::from)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 /// Args:
 /// ```json
 /// {
@@ -59,9 +45,7 @@ fn opt_files(args: &Value) -> Vec<String> {
 ///   "branch": "<branch name>",
 ///   "from": "<checkout/merge from>",
 ///   "recorded_at": "<unix seconds>",
-///   "refspecs": "<push stdin refspecs>",
-///   "shas": "<local shas being pushed>",
-///   "files": ["<touched file>", ...],
+///   "push_tuples": "<bounded typed push tuples>",
 ///   "hugit_bin": "<path>"
 /// }
 /// ```
@@ -110,14 +94,8 @@ pub fn run(args: &Value) -> ToolOutcome {
     if let Some(v) = opt_str(args, "recorded_at") {
         cmd.arg("--recorded-at").arg(v);
     }
-    if let Some(v) = opt_str(args, "refspecs") {
-        cmd.arg("--refspecs").arg(v);
-    }
-    if let Some(v) = opt_str(args, "shas") {
-        cmd.arg("--shas").arg(v);
-    }
-    for f in opt_files(args) {
-        cmd.arg("--files").arg(f);
+    if let Some(v) = opt_str(args, "push_tuples") {
+        cmd.arg("--push-tuples").arg(v);
     }
 
     let output = match cmd.output() {
@@ -431,7 +409,7 @@ mod tests {
         let bin = write_fake_hugit(&dir, 0);
         let args = json!({
             "kind": "push-attempt", "top_level": dir, "log": log,
-            "shas": "aaaa", "hugit_bin": bin,
+            "push_tuples": "refs/heads/main\taaaa\trefs/heads/main\t0000", "hugit_bin": bin,
         });
         match run(&args) {
             ToolOutcome::Ok(v) => assert_eq!(v["status"], json!("dispatched")),

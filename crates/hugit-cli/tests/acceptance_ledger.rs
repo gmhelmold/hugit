@@ -164,6 +164,29 @@ fn ledger_scopes_to_one_campaign() {
 }
 
 #[test]
+fn ledger_projection_redacts_secret_shaped_fields() {
+    let dir = scratch("redaction");
+    let log = dir.join("log.json");
+    let secret = "SECRET:ledger-projection";
+    write_log(
+        &log,
+        &[(
+            "intent.landed",
+            json!({"intent_id":"i1","campaign":"safe","charter":secret}),
+        )],
+    );
+
+    let (code, v) = run(&["ledger", "--log", log.to_str().unwrap()]);
+    assert_eq!(code, 0, "ledger exits 0: {v}");
+    let rendered = v.to_string();
+    assert!(
+        !rendered.contains(secret),
+        "projection must not leak secret: {v}"
+    );
+    assert_eq!(v["entries"][0]["charter"], "[REDACTED]");
+}
+
+#[test]
 fn ledger_is_honest_null_on_log_without_intents() {
     let dir = scratch("empty");
     let log = dir.join("log.json");

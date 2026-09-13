@@ -98,6 +98,16 @@ fn health(root: &Path) -> Value {
         }
     };
     let runtime_log = runtime.canonical_log();
+    let receipt_filesystem_failure = crate::capture::receipt::receipt_filesystem_failure();
+    // Read path is recovery path: bounded drain may make prior hook receipts
+    // visible, but never makes health hang on an unbounded spool.
+    let receipt_status = if receipt_filesystem_failure.is_none() && runtime_log.exists() {
+        crate::capture::drain::drain(&runtime_log, 32)
+            .ok()
+            .or_else(|| crate::capture::drain::read_status(&runtime.root))
+    } else {
+        None
+    };
     let legacy = crate::runtime_store::legacy_path(&root);
     let (log, log_state) = if runtime_log.exists() {
         let state = if crate::checks::load_event_log(&runtime_log).is_ok() {
@@ -118,6 +128,8 @@ fn health(root: &Path) -> Value {
     };
     let mode = if log_state == "blocked" {
         "blocked"
+    } else if receipt_filesystem_failure.is_some() {
+        "partial"
     } else if managed == HOOK_KINDS.len() && log_state == "valid" {
         "active"
     } else if managed == 0 && log_state == "missing" {
@@ -125,14 +137,36 @@ fn health(root: &Path) -> Value {
     } else {
         "partial"
     };
+    let transaction_pairing = crate::checks::load_event_log(&log)
+        .ok()
+        .map(|event_log| {
+            crate::capture::drain::reference_transaction_projections(event_log.records())
+        })
+        .unwrap_or_default();
 
+    let capture = match receipt_filesystem_failure {
+        Some(failure) => json!({
+            "state": "unsupported",
+            "receipts": Value::Null,
+            "dead_letters": Value::Null,
+            "failure": failure,
+        }),
+        None => json!({
+            "state": "best_effort",
+            "receipts": receipt_status.as_ref().map(|s| s.pending),
+            "dead_letters": receipt_status.as_ref().map(|s| s.dead_letters),
+            "failure": receipt_status.and_then(|s| s.last_error),
+        }),
+    };
     json!({
         "mode": mode,
         "repo": root.display().to_string(),
         "hooks": hooks,
         "log": {"path": log.display().to_string(), "state": log_state, "runtime_dir": runtime.root.display().to_string()},
-        "capture": {"state": "best_effort", "receipts": "not_available_yet", "dead_letters": "not_available_yet"},
-        "next": if mode == "active" { "hooks are installed; capture failures remain observable only in hooks.log until receipt spool ships" } else { "run `hugit attach` to install missing hooks; foreign hooks are preserved" },
+        "capture": capture,
+        "reference_transaction_pairing": transaction_pairing,
+        "coverage": crate::capture::capability::coverage(&root),
+        "next": if mode == "active" { "hooks are installed; pending receipts are drained opportunistically" } else { "run `hugit attach` to install missing hooks; foreign hooks are preserved" },
     })
 }
 
@@ -196,8 +230,27 @@ mod tests {
         std::fs::create_dir(&nested).expect("create nested directory");
 
         let value = health(&nested);
+        #[cfg(unix)]
         assert_eq!(value["mode"], "active");
+        #[cfg(not(unix))]
+        {
+            assert_eq!(value["mode"], "partial");
+            assert_eq!(value["capture"]["state"], "unsupported");
+            assert_eq!(
+                value["capture"]["failure"]["code"],
+                "receipt_filesystem_unsupported"
+            );
+        }
         assert_eq!(value["log"]["state"], "valid");
         std::fs::remove_dir_all(repo).expect("remove temp repo");
+    }
+
+    #[test]
+    fn receipt_filesystem_capability_is_typed() {
+        let failure = crate::capture::receipt::receipt_filesystem_failure();
+        #[cfg(unix)]
+        assert_eq!(failure, None);
+        #[cfg(not(unix))]
+        assert_eq!(failure.unwrap().code, "receipt_filesystem_unsupported",);
     }
 }

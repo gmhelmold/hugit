@@ -45,6 +45,7 @@ pub mod note;
 pub mod policy;
 pub mod porcelain;
 pub mod pr;
+pub mod projection;
 pub mod queue;
 pub mod redaction;
 pub mod review;

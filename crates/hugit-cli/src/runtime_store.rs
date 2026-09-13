@@ -13,6 +13,14 @@ pub const RUNTIME_DIR: &str = "hugit";
 pub const CANONICAL_LOG: &str = "event-log.json";
 pub const LEGACY_LOG: &str = "legacy-log.json";
 pub const RUNTIME_METADATA: &str = "runtime.json";
+pub const RECEIPTS_DIR: &str = "receipts";
+pub const COMPLETED_RECEIPTS_DIR: &str = "completed-receipts";
+pub const DEAD_LETTER_DIR: &str = "dead-letter";
+pub const STATUS: &str = "status.json";
+/// Versioned ownership evidence for explicitly adopted hook dispatchers.
+pub const HOOK_MANIFEST: &str = "hook-manifest.json";
+/// Immutable copies of foreign hooks retained only after explicit adoption.
+pub const HOOK_BACKUPS_DIR: &str = "hook-backups";
 pub const LEGACY_PREFIX_KIND: &str = "runtime.legacy_prefix";
 
 #[derive(Clone, Debug)]
@@ -32,6 +40,73 @@ impl RuntimeStore {
     pub fn metadata(&self) -> PathBuf {
         self.root.join(RUNTIME_METADATA)
     }
+
+    pub fn receipts(&self) -> PathBuf {
+        self.root.join(RECEIPTS_DIR)
+    }
+    pub fn dead_letters(&self) -> PathBuf {
+        self.root.join(DEAD_LETTER_DIR)
+    }
+    pub fn status(&self) -> PathBuf {
+        self.root.join(STATUS)
+    }
+    pub fn hook_manifest(&self) -> PathBuf {
+        self.root.join(HOOK_MANIFEST)
+    }
+    pub fn hook_backups(&self) -> PathBuf {
+        self.root.join(HOOK_BACKUPS_DIR)
+    }
+}
+
+/// Stable local repository identity for receipt IDs. This is runtime metadata,
+/// never working-tree state, and is created once under an exclusive lock.
+pub fn repository_id(log_path: &Path) -> Result<String, String> {
+    prepare_runtime_log(log_path).map_err(|e| e.to_json())?;
+    let root = log_path.parent().ok_or("runtime log has no parent")?;
+    let metadata = root.join(RUNTIME_METADATA);
+    // Concurrent detached hooks may initialize/read receipt identity together.
+    // Wait through bounded metadata handoff so neither drops a durable receipt.
+    let mut last = String::new();
+    let mut lock = None;
+    for _ in 0..500 {
+        match FileLock::acquire_unprepared(&metadata) {
+            Ok(acquired) => {
+                lock = Some(acquired);
+                break;
+            }
+            Err(crate::pr::filelock::LockError::Busy { .. }) => {
+                last = "runtime metadata is locked by another hugit verb".into();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => {
+                last = error.to_string();
+                break;
+            }
+        }
+    }
+    let _lock = lock.ok_or_else(|| format!("runtime metadata busy: {last}"))?;
+    let mut value: Value = if metadata.exists() {
+        serde_json::from_slice(
+            &std::fs::read(&metadata).map_err(|e| format!("read runtime metadata: {e}"))?,
+        )
+        .map_err(|e| format!("runtime metadata is invalid: {e}"))?
+    } else {
+        json!({"version": 1, "migration": {"legacy_source": Value::Null, "legacy_prefix_sha256": Value::Null}})
+    };
+    if let Some(id) = value.get("repository_id").and_then(Value::as_str) {
+        if crate::capture::receipt::valid_repo_id(id) {
+            return Ok(id.to_string());
+        }
+        return Err("runtime repository id has invalid format".into());
+    }
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes)
+        .map_err(|e| format!("generate cryptographic repository id: {e}"))?;
+    let id = hex::encode(bytes);
+    value["repository_id"] = Value::String(id.clone());
+    let encoded = serde_json::to_vec_pretty(&value).map_err(|e| e.to_string())?;
+    atomic_write_unprepared(&metadata, &encoded).map_err(|e| e.to_string())?;
+    Ok(id)
 }
 
 /// Runtime state belongs to Git's common directory, shared by all worktrees and
@@ -376,13 +451,41 @@ pub fn migrate(store: &RuntimeStore, legacy: &Path) -> Result<Value, PorcelainEr
     } else {
         Value::Null
     };
-    let metadata = json!({
+    let mut metadata = json!({
         "version": 1,
         "migration": {
             "legacy_source": legacy_source,
             "legacy_prefix_sha256": digest,
         }
     });
+    // Receipt identity is runtime metadata, not migration evidence. Preserve an
+    // already-durable repository UUID when migration recovery replays.
+    if metadata_path.exists() {
+        let existing: Value = serde_json::from_slice(
+            &std::fs::read(&metadata_path)
+                .map_err(|e| PorcelainError::io("read runtime metadata", &metadata_path, &e))?,
+        )
+        .map_err(|e| {
+            PorcelainError::new(
+                "runtime_metadata_invalid",
+                e.to_string(),
+                "repair runtime.json before retrying",
+            )
+        })?;
+        if let Some(repository_id) = existing.get("repository_id") {
+            if !repository_id
+                .as_str()
+                .is_some_and(crate::capture::receipt::valid_repo_id)
+            {
+                return Err(PorcelainError::new(
+                    "runtime_metadata_invalid",
+                    "runtime repository_id has invalid format",
+                    "repair runtime.json before retrying",
+                ));
+            }
+            metadata["repository_id"] = repository_id.clone();
+        }
+    }
     let metadata_bytes = serde_json::to_vec_pretty(&metadata).map_err(|e| {
         PorcelainError::new(
             "runtime_metadata_invalid",
