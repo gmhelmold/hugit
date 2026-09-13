@@ -1,277 +1,133 @@
-# Feature Ledger — hugit (o gestor de agentes que anda em cima do git)
+# Feature Ledger: hugit CLI-local v1
 
-> O equivalente a um "menu" do produto: TUDO que o hugit faz, cada linha
-> explica o que FAZ em uma frase curta. Serve de checklist de validação
-> manual — se você consegue executar a linha, a feature funciona.
+This ledger describes shipped local behavior only. hugit is a free, open-source
+Git plugin: a repository, Git, and the `hugit` binary are enough. Remote hosting,
+identity, tenancy, and runner execution are outside this plugin scope.
 
-## Como ler / validar
-- Cada linha = uma feature + o comando/rótulo que a dispara.
-- Validação: rode o comando num repo de teste encenado (`docs/manual-validation.md`).
+## Status And Evidence
 
----
+| Mark | Meaning |
+|---|---|
+| **LIVE** | Dispatched in `crates/hugit-cli/src/main.rs`, registered in `HUGIT_VERBS`, and backed by implementation. |
+| **T** | Covered by unit or acceptance tests. |
+| **U** | The command or command family appears in the real-binary walkthrough in `docs/manual-validation.md`; this does not claim every option or subcommand path was manually exercised. |
+| **HISTORICAL** | Optional `hugit-serve` material, not CLI-v1 product status. Hermetic tests do not prove deployment. |
+| **RESERVED** | Kept out of CLI v1; not a hidden implementation backlog. |
 
-## Evidência — onde cada feature é PROVADA
+Unless shown otherwise, `--log` means explicit path, then `$HUGIT_LOG`, then
+`.hugit/log.json`. Commands emit stable JSON. User/domain errors exit 2;
+internal faults exit 1. `hugit capture` is the exception: hook-only, silent,
+best-effort, always exit 0 so Git is never blocked.
 
-O que segue é a **coluna de evidência** de cada feature: o teste hermético /
-acceptance que a prova (red→green), e se a feature foi **usada de verdade**
-por um humano na walkthrough manual deste repo (validada com o binário real,
-não só nos testes).
+Evidence anchors: `scripts/validate-go-live.sh` and
+`docs/manual-validation.md` cover the real-binary path; `crates/hugit-cli/tests/`
+contains the acceptance suite; `acceptance_rcli.rs` checks binary/registry
+equality; `acceptance_w0.rs` checks live/reserved separation.
 
-Legenda da última coluna: **T** = provada por teste · **U** = usada de verdade
-numa walkthrough manual (binário real, repo real) · **—** = provada só por
-teste/invariante, não exercitável por uso manual simples (requer infra/servidor).
+## Live Top-Level Surface
 
-| Grupo | Teste que prova (red→green) | Usada de verdade |
+Every row below is dispatched. Subcommands are exact current names.
+
+| Command | Behavior | Evidence |
 |---|---|---|
-| hooks + capture (seção 0) | `acceptance_dock_coinage` (e2e worktree) · `crates/hugit-cli/src/capture/mod.rs` (unit) | U (repo real, commit/checkout capturados) |
-| campanhas (1) | `crates/hugit-cli/src/campaign/*` (unit) + `acceptance_*_cli` | U (open/close/selo/abandon + guarda sealed testada com `intent new` fix) |
-| intents (2) | `crates/hugit-cli/src/intent/new.rs` (8 unit) + `acceptance_wave_m_intent_atomicity` | U (new/show/list + fix de selo) |
-| issues (3) | `crates/hugit-cli/src/issue/transition.rs` | U (transition real) |
-| PRs (4) | `crates/hugit-cli/src/pr/cli.rs` unit + acceptance pr | U (open/queue/show/list/abandon, D14, commits-only) |
-| landing (5) | `crates/hugit-cli/src/land/mod.rs` unit | U (land queue real: landed PR-1) |
-| checks/verdict (6) | `crates/hugit-cli/src/checks/mod.rs` + `verdict/mod.rs` unit | U (check run miss→HIT real, verdict approve, policy test) |
-| provenance (7) | `why` unit (`main.rs`) + `acceptance_*` | U (why/export/impact/undo/diag/watch/fleet/symbol/ctx/review) |
-| custo (8) | `crates/hugit-cli/src/ctx/usage.rs` | U (ctx usage verbatim) |
-| dock (9) | `acceptance_dock_{coinage,resolver,reconcile,insights,land}` + dock lib unit | U (coin/ls/land/insight/reconcile num ghost real) |
-| serve rotas (10) | `crates/hugit-serve/src/...` unit + e2e | — (exigem servidor/CAS/deploy: bindings R2/D1/PAT) |
-| contratos (11) | conformance vectors + x4 validator | T (CI) |
-| integridade (12) | `crates/hugit-refstore/src/tamper.rs` + authz unit | U (D14 na prática: `pr open` human exige principal) |
-| extras (13) | `hugit-mirror`/`hugit-policy`/`hugit-fence` unit | — (mirror: smoke live; policy: U via `policy test`) |
+| `hugit setup` | Installs hugit Git hooks in global `init.templateDir`; `--repo <path>` installs into existing repo; `--status` inspects; `--dir <path>` selects template; `--replace-global-template` replaces another global template only when requested. | T `acceptance_setup`; U |
+| `hugit attach` | Safely adopts hugit-owned hooks in existing repo, preserving foreign hooks. `--repo <path>` selects repo; `--preview` is read-only; `--adopt-managed-dispatcher <preview-token>` adopts exact preview bytes; `--detach` restores only byte-matching managed hooks. | T `acceptance_attach`, `acceptance_capture`; U |
+| `hugit detach` | Removes hugit-owned hooks from an existing repo while retaining captured evidence. `--dir <path>` selects repo; default is current directory. | T `acceptance_capture`; U via attach/detach walkthrough |
+| `hugit health` | Reports hook, log, capture, coverage, and local fact state; distinguishes observed locally, attempted push, explicit declaration, and unsupported. Never claims remote push success. | T `acceptance_gitlocal_journey`, `acceptance_setup`; U |
+| `hugit capture` | Internal hook/worker input for `commit`, `checkout`, `push-attempt`, and `merge`; optional bounded rewrite/reference-transaction receipt fields preserve raw Git facts. Never onboarding; never blocks Git. | T `acceptance_capture`, `acceptance_capture_jj_checkout_merge`; U indirectly through Git |
+| `hugit campaign open` | Appends campaign charter and human owner. | T `acceptance_pc1`, `acceptance_wbcamp`; U |
+| `hugit campaign close` | Seals campaign with proof and rollup; `--allow-rejected` explicitly permits rejected intents; repeat close is idempotent. | T `acceptance_wj_close`, `acceptance_wbcamp`; U |
+| `hugit campaign show` | Projects landed, in-flight, blocked, verdict, and cost state for `--campaign`. | T `acceptance_pc1`; U |
+| `hugit campaign list` | Lists campaigns from canonical log. | T `acceptance_pc1`; U |
+| `hugit campaign abandon` | Appends idempotent abandonment with required `--reason`; closed campaigns cannot be abandoned. | T `acceptance_wbcamp`; U |
+| `hugit intent new` | Records charter, repeatable `--acceptance`, campaign, optional `--id`, `--agent`, `--context-ref`, `--store`, and shared `--log`; sealed campaigns reject new intents. | T `acceptance_pc2`, `acceptance_wave_m_intent_atomicity`; U |
+| `hugit intent show` | Projects intent, sidecar, context ref, and verdicts from `--store`. | T `acceptance_pc2`; U |
+| `hugit intent list` | Lists intent store globally or filtered by `--log` and `--campaign`; resolves each intent's owning log. | T `acceptance_pc2`; U |
+| `hugit issue transition` | Appends issue state transition to `backlog`, `open`, `closed`, or `dispatch`, with issue number and optional priority. | T `acceptance_pc3`; U |
+| `hugit pr open` | Opens PR from repeatable `--intent`, captured `--commit`, or captured `--commit-ref`; requires `--author-kind orchestrator|human`; rejects subagent authors; supports `--run-id`, `--principal`, and `--recorded-at`. | T `acceptance_pc3`, `acceptance_pr_commit`; U |
+| `hugit pr queue` | Appends PR to union landing queue. | T `acceptance_pc3`, `acceptance_wbpr`; U |
+| `hugit pr land` | Settles queued PR as landed and captures metrics/envelopes. Supports `--dispatch` as an explicit external-runner seam that fails closed when unwired; manual metrics use `--tokens`, `--cost-usd-micros`, `--tool-calls`, `--active-ms`, `--model-turns`, `--model`, `--context-cas`, transcript refs, and `--verdicts-ref`. | T `acceptance_wprlanded`, `acceptance_pc3`; U |
+| `hugit pr show` | Shows PR, bundled intents, queue state, and cost rollup. | T `acceptance_pc3`; U |
+| `hugit pr list` | Lists PRs, optionally filtered by `--campaign` and `--state` (`proposed`, `queued`, `abandoned`, `landed`). | T `acceptance_pc3`; U |
+| `hugit pr abandon` | Idempotently abandons PR with required `--reason`; removes it from queue projection. | T `acceptance_pc3`; U |
+| `hugit land queue` | Runs local union test over queued PRs; memoizes checks, lands green set, and bisects a red batch to minimal failing pair. Optional `--campaign`, `--ac`, `--recorded-at`. | T `acceptance_land_queue`, `acceptance_wb2`; U |
+| `hugit queue show` | Shows queued entries, batch composition, campaign scope, and recorded union failure. | T `acceptance_wb2`; U |
+| `hugit check run` | Runs local memoized check. Built-ins: `fmt`, `clippy`, `test`; custom definitions require `--cmd`. Supports `--store`, `--root`, `--toolchain`, `--pr`, `--principal`, `--ac`, `--timeout-secs`, repeatable `--env-axis`. | T `acceptance_wcheck`, `acceptance_q_ancestor_manifest`, `acceptance_n1_modebit`; U MISS→HIT |
+| `hugit check show` | Projects recorded checks and hit rate; optional `--pr`. | T `acceptance_wcheck`; U |
+| `hugit check key` | Computes memo key from `--tree`, `--def`, and `--toolchain` without execution. | T `acceptance_wcheck`; U |
+| `hugit verdict record` | Records or dry-runs multi-lens panel: repeatable paired `--lens` and `--result` (`approve`, `fix_first`, `reject`), optional `--store`, `--tree-hash`, `--recorded-at`; approves only when every lens approves. | T `acceptance_wverdict`, `acceptance_d7`; U dry-run + stored verdict |
+| `hugit verdict approve` | Records single-lens human approval for `--intent`. | T `acceptance_k_verdict`, `acceptance_wverdict`; U |
+| `hugit verdict reject` | Records single-lens human rejection for `--intent`. | T `acceptance_k_verdict`, `acceptance_wverdict`; U |
+| `hugit why` | Resolves path provenance from `--log`; `--walk` returns full chain; `--line` and `--symbol` require `--repo` and optional `--commit`, using committed-tree blame. Fails closed when evidence is absent. | T `acceptance_d10`, `acceptance_round8_readpath`; U |
+| `hugit impact` | Computes build-graph blast radius from `--graph` and repeatable `--path`; accepts Cargo, pnpm, turbo, or unknown ecosystem labels. | T `acceptance_d10`; U |
+| `hugit tournament` | Generates policy-capped candidate fan-out with `-n|--candidates`, `--intent`, optional `--log`; checks intent existence when log supplied. | T `acceptance_d13`; U |
+| `hugit export` | Exports chain-verified canonical log into synthetic Git artifact, envelope JSON, and redaction manifest. Requires `--log <path> --out <dir>`; no source-history/topology guarantee. | T `acceptance_e5`, `acceptance_wkchain`; U |
+| `hugit undo` | Appends human-only compensating event for `--seq`; never rewrites history; honest `nothing_to_compensate` when no inverse exists. | T `acceptance_d13`; U |
+| `hugit policy test` | Evaluates house gates against required `--context <path>` locally; fail-closed on missing or malformed context. | T `acceptance_pc4_cycle`; U |
+| `hugit policy edit` | Appends human-only policy change over house baseline; supports gate `--enable` or `--disable` and optional `--reason`. | T `acceptance_pc4_cycle`; U through policy walkthrough |
+| `hugit note` | Appends scrubbed `journal.note`; supports `--note`, optional `--workspace`, `--intent`, and `--principal`. | T `acceptance_ctx`, `acceptance_wi_scrub`; U |
+| `hugit diag` | Bisects log-backed red check history by `--def-digest`, optional `--toolchain`, and reports structured diagnosis. Read-only. | T `acceptance_d10`, `acceptance_fleet_journey`; U |
+| `hugit ledger` | Projects asked → done → proven history from `--log`, optionally `--campaign`. | T `acceptance_ledger`; U |
+| `hugit fleet` | Projects versioned machine-readable workspace/agent state from `--log`. | T `acceptance_fleet`; U |
+| `hugit watch` | Replays classified, redacted event stream from `--log`; optional `--class`. | T `acceptance_watch`; U |
+| `hugit symbol` | Emits tree-sitter symbol outline for local `--file`; supports Rust, TypeScript, TSX, JavaScript, Python, Go, Java, C, C++, and Ruby. | T `acceptance_symbol`; U |
+| `hugit ctx resume` | Reconstructs short-horizon session from matching `journal.note` records using `--workspace`, `--intent`, optional `--tenant`, `--now-ms`. Refuses when evidence/horizon is insufficient. | T `acceptance_ctx`, `acceptance_review`; U |
+| `hugit ctx usage` | Appends provider `/usage` token counts verbatim to `ctx.usage`; exactly one of `--intent` or `--pr`; requires `--model`, `--input`, `--output`, `--cache-read`, `--cache-write`; optional `--model-digest`, `--recorded-at`. Computes only checked token total, never prices or calls network. | T `acceptance_ctx`, unit tests in `ctx/usage.rs`; U |
+| `hugit review` | Answers questions only from logged check/verdict evidence; refuses unsupported claims. Requires `--question`, optional `--intent` and `--log`. | T `acceptance_review`; U |
+| `hugit dock coin` | Coins physical worktree/repo binding; hook-born, idempotent, non-blocking. | T `acceptance_dock_coinage`, `acceptance_dock_resolver`; U |
+| `hugit dock ls` | Lists dock ids, branches, origin, and `open`/`ghost` state. | T `acceptance_dock_resolver`; U |
+| `hugit dock show <id>` | Shows one dock record. | T `acceptance_dock_resolver`; U |
+| `hugit dock close` | Finalizes and reconciles one dock; idempotent. | T `acceptance_dock_reconcile`; U |
+| `hugit dock reconcile` | Closes ghost docks whose Git directory disappeared. | T `acceptance_dock_reconcile`; U |
+| `hugit dock insight` | Projects per-branch cost and residual buckets; absent cost stays honest zero. | T `acceptance_dock_insights`; U |
+| `hugit dock land` | Requires worktree SHA byte identity and green acceptance before landing; fail-closed otherwise. | T `acceptance_dock_land`; U |
+| `hugit meta set` | Appends local `repo.meta` visibility/owner metadata with `--visibility public|private`, optional `--owner-tenant`, `--by`, `--recorded-at`. This records policy; it is not a hosting service. | T `acceptance_wj_matrix`; U |
 
-**Débitos fechados durante esta walkthrough** (vistos no uso real):
-- `intent new` ignorava campanha selada no modo `--store` → **FIXADO** + teste que morde (`intent_new_refuses_campaign_sealed_on_default_log`, mutation-probed RED).
-- Falso alarme "watch inconsistente" → comportamento correto do detector de bare-hex no sha do commit (40-hex redacta por design).
-- Falso alarme "exit 0 em erro de CLI" → era o pipe; sem pipe o exit é 2 (correto).
+## Capture And Cost Rules
 
-**O que NÃO é provado por esta walkthrough** (honesto — está marcado `—`):
-- Rotas do servidor (`/v1/*`, git wire) — exigem `hugit-serve` com CoreLink CAS/R2/D1/PAT provisionado; o código+unit green, mas não há instância live acessível daqui.
-- O lado Omnirouter (irmão) do `CostSampleV1` — só o conformance vector da nossa banda prova a paridade.
-- Redação, mirror, fence, MCP — cobertos por unit/hermético, não por uso manual (precisam de infra ou de ambiente específico).
+- Runtime state lives at `<git-common-dir>/hugit/event-log.json` (legacy
+  `.hugit/log.json` is migrated/used by the local resolver); it is outside the
+  worktree and shared by linked worktrees.
+- Events are append-only and hash-chained. Reads verify the chain; tampering,
+  malformed payloads, and missing evidence fail closed.
+- Hooks observe local commit, checkout, push attempt, merge, rewrite, and
+  reference-transaction facts. A push attempt is not remote confirmation.
+- `ctx usage` records provider token counts; `hugit` does not infer tokens from
+  Git activity and does not call a provider.
+- `hugit pr land` prices matching `ctx.usage` records only when every record has
+  a known exact model price. Current frozen card: `pc-2026-07`, exact Anthropic
+  ids `claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5-20251001`,
+  `claude-haiku-4-5`, and `claude-fable-5`. Unknown model, malformed record, or
+  overflow yields honest zero, never fallback pricing.
+- Manual land metrics are explicit operator input. Omitted metrics stay zero;
+  transcript blobs are not created by local land. `--dispatch` is not local
+  execution and fails closed without external runner wiring.
+- `hugit export` is a portable proof/snapshot, not a promise to preserve source
+  Git commit topology, refs, or hosting-provider state.
 
----
+## Reserved Or Out Of Scope
 
-## Separar serve do núcleo — decisão de arquitetura (plugin open-source)
+| Surface | Status | Boundary |
+|---|---|---|
+| `hugit ws` | **RESERVED** | No CLI v1 workspace lifecycle; workspace execution belongs elsewhere. |
+| `hugit dispatch` | **RESERVED** | No CLI v1 off-box agent execution; remote runner execution is deferred. |
+| `hugit ctx snap` | **ABSENT** | No second context store in CLI v1; use canonical log, `hugit note`, `hugit ctx usage`, and `hugit export`. |
+| `hugit init` | **NOT A CLI VERB** | Library-only bootstrap helper. It is not dispatched because `init` would shadow `git init`; use `hugit setup` for global templates or `hugit attach` for an existing repository. Evidence: T `acceptance_gitlocal_journey` library path; no binary evidence. |
+| `hugit serve` / `/v1` / Git smart HTTP | **HISTORICAL/OPTIONAL** | Separate backend product surface. Not required by local CLI and not evidence of CLI behavior. |
+| Remote hosting, identity, and tenancy | **DEFERRED** | Git remote remains hosting boundary; local plugin requires none. |
+| GitHub App activation and live mirror deployment | **EXTERNAL** | Code may exist in optional crates, but activation/deployment is not CLI-v1 delivery. |
+| Runner execution and remote AC | **EXTERNAL** | Local file-backed memoization is shipped; external fabric is not local CLI behavior. |
+| Automatic jj observation after `jj git export` | **NOT IMPLEMENTED** | jj capture requires explicit MCP `capture`; no automatic v1 hook claim. |
 
-O hugit **não precisa de `hugit-serve`** para funcionar. O produto é git-native:
+## Validation
 
+```sh
+cargo test -p hugit-cli --locked
+cargo test -p hugit-contracts --locked
+cargo fmt --check
+HUGIT_BIN=target/release/hugit ./scripts/validate-go-live.sh
 ```
-repo git (git clone/push/pull normais — qualquer remote)
-  └─ <git-common-dir>/hugit/event-log.json  ← estado local, fora do worktree
-hugit CLI (local, sem serviço)   ← lê o log, roda todos os verbos
-```
 
-- **O CLI e os crates de núcleo não usam `hugit-serve`.** Sentido das dependências: `hugit-serve` → `use hugit-cli` (o serve importa o CLI); nenhum crate de núcleo importa o serve. `hugit-serve` é `publish = false`.
-- **`hugit-serve` é a janela web opcional** (o que a UI githugr lê), e o CAS CoreLink é só o deploy DESTA janela. Nada disso entra no plugin open-source: um repo git + o CLI bastam.
-- **Fluxo sem serve:** `hugit setup` ou `hugit attach` → Git normal → `hugit health`.
-  Push é tentativa observada localmente, não confirmação remota.
-- Publicação open-source = CLI + crates de núcleo; serve fica de fora (quem quiser a janela sobe o githugr, opcional).
-
----
-
-## 0. Instalação do "sensor" (hooks do git)
-
-| Feature | O que faz | Como validar |
-|---|---|---|
-| `hugit setup` / `hugit attach` | `setup` configura hooks para futuros `git init`; `attach` instala hooks hugit-owned em repo existente e preserva hooks estrangeiros. | Setup/attach, Git normal, `hugit health` |
-| Capture silencioso | Hooks observam commit, checkout, push e merge sem travar Git. `hugit capture` é interno/hook-only, nunca onboarding manual. | `git commit`; confira **observed locally** no health |
-| Capture por tipo | Registra o quê aconteceu: commit (arquivos novos), checkout (branch nova), push (hashes enviados), merge (origem+dst). | Commitar, ramificar, push, merge; conferir cada payload no log |
-
-## 1. Campanhas (agrupamento de trabalho)
-
-| Feature | O que faz | Como validar |
-|---|---|---|
-| `hugit campaign open` | Cria uma campanha (ex: "release v2") com dono e missão. | `hugit campaign open --campaign v2 --charter "..." --owner voce` |
-| `hugit campaign close` | SELAR a campanha: gera a prova completa (tudo pousou, custo, envelope) e congela. | Abrir intents, pousar; `hugit campaign close` |
-| `hugit campaign show` | Mostra o que está pousado, em voo, bloqueado. | `hugit campaign show --campaign v2` |
-| `hugit campaign list` | Lista campanhas. | `hugit campaign list` |
-| `hugit campaign abandon` | Descarta campanha com motivo (idempotente). | `hugit campaign abandon --campaign v2 --reason "preciso"` |
-
-## 2. Intents (pedidos de trabalho)
-
-| Feature | O que faz | Como validar |
-|---|---|---|
-| `hugit intent new` | Declara uma tarefa: missão + critérios de aceite + campanha. Devolve um ID. | `hugit intent new --charter "rate limit" --acceptance "testes verdes"` |
-| `hugit intent show` | Mostra a tarefa + proofs (verdicts, custo). | `hugit intent show --id <id>` |
-| `hugit intent list` | Acha pedidos perdidos (por armazenamento/campanha). | `hugit intent list` |
-
-## 3. Issues (rastreamento, paridade com o servidor)
-
-| Feature | O que faz | Como validar |
-|---|---|---|
-| `hugit issue transition` | Move issue entre estados (backlog/open/closed/dispatch). | `hugit issue transition --n 3 --to open` |
-
-## 4. PRs (Pull Requests do time de agentes)
-
-| Feature | O que faz | Como validar |
-|---|---|---|
-| `hugit pr open` | Junta intents numa PR — prova-se que um commit específico pertence à PR. O subagente/autor humano é o escritor (agentes não são autor). | `hugit pr open --campaign v2 --intent <id>` |
-| `hugit pr open --commit <sha>` | Aceita um commit capturado como conteúdo (para PRs sem intents, commits-only). | commit; `hugit pr open --commit $(git rev-parse HEAD)` |
-| `hugit pr open --commit-ref <branch>` | Resolve a cabeça capturada da branch. | `hugit pr open --commit-ref main` |
-| `hugit pr queue` | Coloca a PR na fila de pouso (union queue). | `hugit pr queue --pr <pr>` |
-| `hugit pr land` | Marca a PR como pousada (terminal). Flags de custo real + dispatch opcional. | `hugit pr land --pr <pr>` |
-| `hugit pr show` | Detalhe da PR + rollup de custo. | `hugit pr show --pr <pr>` |
-| `hugit pr list` | Todas as PRs com estado/filtro. | `hugit pr list --campaign v2` |
-| `hugit pr abandon` | Descarta PR com motivo (idempotente). | `hugit pr abandon --pr <pr> --reason "nao"` |
-| Guarda de campanha selada | Nada mais muda em campanha selada. | Tentar PR numa campanha fechada |
-
-## 5. Landing (o pouso automático do que está pronto)
-
-| Feature | O que faz | Como validar |
-|---|---|---|
-| `hugit land queue` | Roda o motor de união REAL: testa os PRs da fila juntos, isola o par culpado no vermelho (bisect) e pousa os verdes. | `hugit land queue` (com PRs na fila) |
-| `hugit queue show` | A fila de pouso, pares em conflito, veredito retido. | `hugit queue show` |
-| `queue.union_fail` | União vermelha registra o par mínimo de conflito (bisect). | Causar 2 PRs em conflito; dar land queue |
-
-## 6. Verificação / Checks (o teste memoizado)
-
-| Feature | O que faz | Como validar |
-|---|---|---|
-| `hugit check run` | Roda um check REAL memoizado: árvore+definição+ferramenta = chave; o mesmo conteúdo = HIT da cache, ZERO execução. | `hugit check run --def fmt --store` 2x; 2ª = HIT |
-| `hugit check run --env-axi VAR` | Declara variável extra na chave do memo — sem "verde velho" indetectado. | `... --env-axi FOO` trocando FOO |
-| `hugit check show` | Mostra checks + taxa de acerto da cache (hit-rate). | `hugit check show` |
-| `hugit check key` | Prevê o memo-key de uma check sem rodar. | `hugit check key --tree root --def fmt` |
-| `hugit verdict record` | Painel adversarial multi-lente (≥2 modelos distintos); aprova só se TODOS aprovarem. | `hugit verdict record --intent ... --lens 2 --result approve` |
-| `hugit verdict approve|reject` | Decisão de stakeholder humano (uma lente, fixed lens). | `hugit verdict approve --intent <id>` |
-| `hugit verdict` Q&A | Pergunta com base em evidência real — recusa sem ela. | Consultar algo fora do registro |
-
-## 7. Entendimento / Provença (auditoria)
-
-| Feature | O que faz | Como validar |
-|---|---|---|
-| `hugit why` | Responde: "de onde veio esta linha/arquivo?" → intent de origem. | `hugit why --path src/x.rs` |
-| `hugit why --walk` | Projeta a cadeia COMPLETA de provenance (mais recente primeiro). | `hugit why --walk --path src/x.rs` |
-| `hugit why --line/--symbol` | Atribui linha específica ou função. | `hugit why --path x.rs --line 42` |
-| `hugit impact` | Raio de explosão em grafo de build (Cargo/pnpm/Turbo). | `hugit impact --graph build.json --path x.rs` |
-| `hugit tournament` | Expande um intent em N candidatos (orçamento limitado). | `hugit tournament -n 3 --intent <id>` |
-| `hugit export` | Prova de saída anti-lock-in: dump do git + envelope JSON + prova redatada. | `hugit export --out pasta/` |
-| `hugit undo` | Desfaz um evento (compensatório, humano). Nunca reescreve histórico. | `hugit undo --seq <n>` |
-| `hugit ledger` | Visão: pedido → feito → provado, por campanha. | `hugit ledger --campaign v2` |
-| `hugit note` | Grava nota de sessão no log (scrub). | `hugit note --note "hoje..."` |
-| `hugit diag` | Diagnostica check vermelha: acha o commit/região que quebrou (bisect no log). | `hugit diag --def-digest <hex>` |
-| `hugit watch` | Refaz o stream de eventos classificado (landing/verdict/policy/ws/git). | `hugit watch --class landing` |
-| `hugit fleet` | Estado das workpaces + agentes (schema versionado). | `hugit fleet` |
-| `hugit ctx resume` | Reconstrua uma sessão caída (horizonte de notas; honesto: recusa sem evidência). | Cair de uma sessão; `hugit ctx resume` |
-| `hugit review` | Q&A com evidência: responde citando check/verdict ou recusa. | `hugit review --question "..."` |
-| `hugit symbol` | Outline de símbolos (tree-sitter) do arquivo local. | `hugit symbol --file src/x.rs` |
-| `hugit export` | Prova de saída (ver acima). | (listado) |
-
-## 8. Costos (o cost killer)
-
-| Feature | O que faz | Como validar |
-|---|---|---|
-| `hugit ctx usage` | Grava custo do provedor VERBATIM (tokens reais, nunca preço). | `hugit ctx usage --intent <id> --model ... --input ... --output ...` |
-| `hugit dock` (série completa) | O custo por-unidade — ver seção 9. | — |
-
-## 9. Séria dock (o custo por-unidade)
-
-**Série dock = 6 WPs** (construídos + cold-verificados). Resumo: um repo tem uma ou mais "docks" (worktrees/repo); o custo pousa na dock; a reconciliação decide o balde certo; os insights mostram por-branch; o land verifica o conteúdo.
-
-| Feature | O que faz | Como validar |
-|---|---|---|
-| `hugit dock coin` | Cria uma dock no checkout (worktree/repo) — o binding físico para custo. Auto-disparado pelo hook. | `git worktree add` num repo init → `dock ls` mostra |
-| `hugit dock ls` | Lista docks (com fantasma detectado). | `hugit dock ls` |
-| `hugit dock show <id>` | Detalhe da dock. | `hugit dock show <id>` |
-| `hugit dock close` | Finaliza + reconcilia (baldes), idempotente. | `hugit dock close --id <id>` |
-| `hugit dock reconcile` | Fecha docks-fantasma (worktree apagada) automaticamente. | Apagar worktree; `hugit dock reconcile` |
-| `hugit dock insight` | Custo por branch (nunca duplicado) + baldes: investigado / não-rótulo / falsificado. | Com costos → `hugit dock insight` |
-| `hugit dock land` | Verifica: SHA da worktree == SHA registrado + aceite verde via executor memoizado. Só pousa se TUDO bater. | `hugit dock land --id <id>` |
-| Filhote de custo (spool) | Samples de custo spoolados em NDJSON local; offline NUNCA perdem. | `dock/spool.rs` (testes) |
-| Atestação de custo (attest) | Flush spool→log como `cost.sample`, idempotente por run_id, com content_hash verificado (M3) — falsificado é contado mas NUNCA atribuído. | Injetar sample falso; `dock insight` mostra `tampered` |
-| F2 honesto | Custo ausente = zero honesto; presente = real. Nunca inventa. | `dock land` sem cost.sample reporta 0 |
-
-## 10. Serve (o backend HTTP que o front lê)
-
-### Git wire (clone/fetch/push via git REAL)
-| Feature | O que faz | Como validar |
-|---|---|---|
-| Git clone/fetch | Git padrão (smart-HTTP upload-pack); a engine serve do CAS (lazy). | `git clone http://engine/.../repo.git` |
-| Git push | Push padrão com `unpack ok` + `ok refs` (write path fail-closed: durable só após CAS+D1+refs). | `git push origin main` |
-| Delete ref | `git push --delete` (capabilidade advertised). | `git push --delete branch` |
-| Live hot-swap | Um push imediato aparece no advertise sem reboot. | Push → `git ls-remote` |
-| Thin-pack / incremental | Push incremental sobre histórico CAS-base — resolve base omitida. | Commit novo → push incremental |
-
-### Leitura (GET /v1)
-| Feature | O que faz | Validação |
-|---|---|---|
-| `/readyz` | Healthcheck público (git_serving, git_repo, version, cold-start). | `curl /readyz` |
-| `/metrics` | Contadores agregados públicos (zero dados de tenant). | `curl /metrics` |
-| `/v1/me/login` | Cartão de auth pública (Clerk→engine token). | curl |
-| `/me/dashboard`, `/me/attention`, `/me/account`, `/orgs/{name}` | Painéis do próprio usuário | authed curl |
-| `/v1/admin/tokens` | Sessões ativas (tenant-scoped). | authed |
-| `/v1/repos/{r}/home` | Árvore raiz + README, cache content-addressed. | authed |
-| `/v1/repos/{r}/blob|edit/{*path}` | Bytes reais do arquivo, scrub, 404-no-oracle, history walk | authed |
-| `/v1/repos/{r}/commits|compare|branches|chrome` | Commits/diff/branches from CAS | authed |
-| `/v1/repos/{r}/insights` | Vista cost/per-branch + ledger + x-ray (owner-gated até custo non-zero) | authed |
-| `/v1/repos/{r}/prs`, `prs/{n}`, `intents/{id}`, `campaigns/{name}` | Detalhes | authed |
-| `/v1/repos/{r}/events?since=` | SSE replay-then-close, authed+tenant, sempre privado | authed |
-| `/v1/repos/{r}/search?q=` | Busca de código servida só de index pré-computado; q capped | authed |
-| `/v1/repos/{r}/viewer-can` | Espelho real do gate de escrita por chamador | authed |
-| `/v1/repos/{r}/audit?since` | Linha do tempo de authz/denial (operador) | operador |
-| `/v1/repos/{r}/erasure` `admin/overview` | Governance de apagamento + visão operador | operador |
-
-### Escrita (POST)
-| Feature | O que faz | Validação |
-|---|---|---|
-| `POST /v1/token` | Clerk JWT → engine token opaco | curl |
-| `POST /v1/github/webhook` | GitHub App webhook ingress, HMAC authed, durável (nunca inline) | env |
-| `POST /v1/repos` | Cria repo vazio self-service | authed |
-| `POST /v1/me/tokens` + `DELETE /v1/me/tokens/{id}` | Mint PAT (secret once) + revoga; PAT não pode criar outro PAT | authed |
-| `POST /v1/repos/{r}/prs` | Abre PR de branch pushead vs base (resolve vs LIVE ref snapshot) | authed |
-|POST /prs/{n}/land/verdict/comments | Land/verdict/comentrios no PR | authed |
-|POST /intents/{id}/usage | Cost-killer seam sobre o wire | authed |
-| `POST /v1/repos/{r}/dispatch` | Dispara exec agent (P2/transferred) | authed |
-| `POST /v1/repos/{r}/issues/{n}/transition` | Movimento issue | authed |
-| `POST /v1/repos/{r}/policy` | Policy write | authed |
-| `POST /v1/repos/{r}/erase/{id}/decide` | Decisão de apagamento (operador) | operador |
-| `POST /v1/repos/{r}/edit/{*path}/propose` | Propor edição | authed |
-| `POST /v1/repos/{r}/undo` | Undo no server | authed |
-| `POST /v1/repos/{r}/meta` | Visibility/tenancy write (cache-refresh) | authed |
-| `POST /v1/account/erase` `.../execute` `.../cancel` | GDPR1: apagar conta, 2-mãos+grace+situa gauge, cancelar na cooldown | authed/operador |
-| D14 write door | Scope-gated: `repo:read` PAT → 403; idempotency-key cap; step-up dev | authed |
-| Rate limiting + panic isolation | `shed` 503 por principal + handler panic NÃO derruba engine | load/atack test |
-
-## 11. Contratos congelados (a cola entre hugit e CoreLink/Omnirouter)
-
-| Feature | O que faz | Como validar |
-|---|---|---|
-| `CostSampleV1` + conformance | DTO de custo byte-idêntico entre hugit e irmão, pined por vector + tripwire | CI x4 |
-| Runner lease DTOs (4) | Contrato de lease do runner congelado, byte-idêntico | conformance |
-| `ContextEnvelope`/`IntentMetrics` | Envelope de contexto (ADR-0001) | conformance |
-| Attestation keyset | Seleção/verificação de chave de atestação, anti-downgrade | conformance |
-| `CheckerResult`/`CheckDef` | Definição/resultado de check | — |
-| EventRecord chain | Registro hash-encadeado (tamper detectável) | tamper test |
-
-## 12. Integridade / garan hias
-
-| Feature | O que faz | Como validar |
-|---|---|---|
-| Hash-chain log | Cada evento referencia o hash do anterior; qualquer tamper quebra a cadeia | `hugit log` falha em arquivo alterado |
-| D14 authz | Matriz Principal×Endpoint; undo é humano-only; PR author é human/orch, nunca subagente | tentar o subagente |
-| Redação | Segredos scrubbed antes de gravar/servir | PAT em charter vira `[REDACTED]` no log/export |
-| Repo.meta visibility | `public|private`; leitura de privado = 404 uniforme (no oracle) | anon → 404; public → lê |
-| Leitura-authz≠escrita-authz | Ler púbico NÃO permite escrever (push sempre precisa credencial) | anon clone + push → 401 |
-
-## 13. Extras
-
-| Feature | O que faz | Como validar |
-|---|---|---|
-| Mirror GitHub (outbound) | Espelho one-way hugit→GitHub com per-push. hash verify + fila durável | Teste live (há smoke) |
-| Import git history | Importa histórico git com byte-identity + LFS + resumable | integração |
-| Bidir sync forge-arbitrated | Sync bidirecional arbitrado pelo forge | — |
-| Policy `Engine::house` | Gate-set dco/changelog/secrets; local≡forge byte-idêntico | `policy test --context` |
-| Fence broker | Credenciais nunca chegam ao runner | — |
-| MCP server | 4 tools p/agent: claim-disjointness, land-status, cost-attest, live-ness | — |
-| Fice-manifest | Fence do irmão NV? | — |
-
----
-
-## Nota honesta (o quer NÃO é feature ainda)
-- `ws`/`dispatch` — verbos reservados (P2/transferred para runner).
-- `/insights` janela cost — BUILT mas owner-gated até custo non-zero.
-- Multi-tenant real — downstream (githugr infra).
-- O gateway irmão (Omnirouter) emite o `CostSampleV1` — só o nosso lado está comprovado.
-
----
-
-## Próximo passo
-Eu te guio na **validação manual grupo a grupo** — o roteiro `docs/manual-validation.md` (user-real simulation, já executada: 37-assert go-live script + walkthrough do binário real; evidência + bugs encontrados documentados lá).
+Manual runbook: `docs/manual-validation.md`. Full source of truth for top-level
+dispatch/reserved status: `crates/hugit-cli/src/lib.rs` (`HUGIT_VERBS` and
+`HUGIT_RESERVED_VERBS`) plus `crates/hugit-cli/src/main.rs`.
