@@ -16,7 +16,7 @@ permanently discontinued for hugit.
 | Need | Run |
 |---|---|
 | Validate release baseline | `cargo build --release`, then the go-live script |
-| Onboard a new repository | `hugit setup` or `hugit attach` |
+| Onboard a new repository | `hugit setup` or `hugit attach --repo <repo>` |
 | Inspect hook state | `hugit health --dir <repo>` |
 | Verify silent capture | Git commit/checkout/merge/push attempt, then inspect the local log |
 | Verify landing wedge | `hugit check`, `hugit verdict`, `hugit pr`, `hugit land queue` |
@@ -45,8 +45,14 @@ do not infer success from partial output.
 4. Preserve foreign hooks. A conflict is a reported state, not permission to overwrite.
 5. Use `hugit detach --dir <path>` only when removing managed hooks is intended.
 
-`setup --repo` installs into an existing repository without changing global
-`init.templateDir`. `setup --status` inspects global setup without mutation.
+`setup --repo <path>` installs into an existing repository without changing
+global `init.templateDir`. `setup --status` inspects global setup without
+mutation. To adopt a managed dispatcher, first run `hugit attach --repo <path>
+--preview`, then pass the returned token directly to:
+
+```sh
+hugit attach --repo <path> --adopt-managed-dispatcher <token>
+```
 
 ## Evidence Rules
 
@@ -57,12 +63,14 @@ do not infer success from partial output.
 - `check` HIT means declared key inputs matched; it does not prove undeclared
   environment, network, clock, or filesystem dependencies matched.
 - `pr land` records local landing state; it does not update a Git destination ref.
-- A cost is `null` or measured from explicit provider usage; never estimate or
-  copy a number from another intent.
+- A cost is `null`, explicitly supplied operator metrics, or measured from
+  provider usage priced by the frozen card; never estimate or copy a number
+  from another intent. Manual metrics are not provider measurements.
 
 ## Output Contract
 
-Every normal command emits JSON on stdout:
+Every normal data command emits JSON on stdout. `-V` and `--help` emit human
+text. `capture` is hook-only, silent, best-effort, and always exits `0`.
 
 | Exit | Meaning | Action |
 |---|---|---|
