@@ -32,7 +32,7 @@ hand back a terse card. It ships **vendored with hugit** (free, open).
 | The verb returned a non-zero exit | Section 3 (the exit/kind decision table) |
 | The verb returned a cost / a `401`/`404` / a refusal | Section 4 (the honesty firewall) — report it truthfully, do not smooth it |
 | The task is ambiguous (which verb? which log?) | **STOP** — bounce to the orchestrator (Section 5); the worker never decides |
-| The task names `ws` / `dispatch` | **STOP** — reserved, not dispatched; bounce to the orchestrator |
+| The task names `ws` / `dispatch` | **STOP** — permanently discontinued, not dispatched; do not bounce as future work |
 
 **Do not invoke** for: choosing WHICH verb to run (that is `/hugit` orchestrator judgment);
 chaining a multi-verb flow (the orchestrator sequences); claiming a feature is "live" (the
@@ -53,7 +53,7 @@ WORKER TASK
   honesty-bar : <what a truthful card must NOT smooth over, e.g. "cost may be null">
 ```
 
-If any field is missing or the verb is ambiguous/reserved → **STOP and bounce** (Section 5). The
+If any field is missing or the verb is ambiguous/discontinued → **STOP and reject** (Section 5). The
 worker fills no blanks — a filled blank is a hallucinated decision (AP-1).
 
 ---
@@ -132,7 +132,7 @@ required:
 | Situation | Why bounce |
 |---|---|
 | The verb is ambiguous, or two verbs could satisfy the task | Choosing the verb is orchestrator judgment (AP-1) |
-| The task names a reserved verb (`ws`/`dispatch`) | Not dispatched; the orchestrator must escalate (runner fabric is P2) |
+| The task names a discontinued verb (`ws`/`dispatch`) | Not dispatched; reject as permanently out of scope |
 | The `--log`/repo is unspecified or doesn't exist and no `fix` resolves it | Picking the log is a decision, not an execution |
 | The fix would change the INTENT of the task (not just a path/flag) | The orchestrator owns intent; the worker transcribes |
 | The result needs a liveness/honesty CLAIM beyond the observed envelope | The orchestrator owns the honesty claim (Section 4) |
@@ -182,10 +182,10 @@ never `ok`. (Section 2 step 3.)
 **Pattern:** cost is `null`, the worker reports a remembered/estimated number to look complete.
 **Refusal:** Section 4.2 — a `null` cost stays `null`. A substituted figure is a fabrication.
 
-### AP-5: Invoking a reserved verb
-**Pattern:** the task says `dispatch`/`ws`; the worker tries to run it anyway.
-**Refusal:** reserved verbs are not dispatched (rejected by clap). Bounce (Section 5); never
-present a reserved verb as runnable.
+### AP-5: Invoking a discontinued verb
+**Pattern:** historical task says `dispatch`/`ws`; the worker treats it as future work.
+**Refusal:** discontinued verbs are not dispatched (rejected by clap). Reject; never
+present them as runnable or future work.
 
 ### AP-6: Retry-looping a non-input error
 **Pattern:** the worker re-runs on `parse_log`/`internal`/`refusal` hoping it passes.

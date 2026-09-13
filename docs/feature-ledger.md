@@ -12,7 +12,8 @@ identity, tenancy, and runner execution are outside this plugin scope.
 | **T** | Covered by unit or acceptance tests. |
 | **U** | The command or command family appears in the real-binary walkthrough in `docs/manual-validation.md`; this does not claim every option or subcommand path was manually exercised. |
 | **HISTORICAL** | Optional `hugit-serve` material, not CLI-v1 product status. Hermetic tests do not prove deployment. |
-| **RESERVED** | Kept out of CLI v1; not a hidden implementation backlog. |
+| **RESERVED** | Namespace token retained only to prevent accidental CLI reuse; not a product feature or backlog. |
+| **DISCONTINUED** | Permanently outside hugit product scope; no implementation, integration, or roadmap commitment. |
 
 Unless shown otherwise, `--log` means explicit path, then `$HUGIT_LOG`, then
 `.hugit/log.json`. Commands emit stable JSON. User/domain errors exit 2;
@@ -109,14 +110,14 @@ Every row below is dispatched. Subcommands are exact current names.
 
 | Surface | Status | Boundary |
 |---|---|---|
-| `hugit ws` | **RESERVED** | No CLI v1 workspace lifecycle; workspace execution belongs elsewhere. |
-| `hugit dispatch` | **RESERVED** | No CLI v1 off-box agent execution; remote runner execution is deferred. |
+| `hugit ws` | **DISCONTINUED** | Workspace lifecycle and execution will never become hugit CLI features. Token remains namespace-reserved only. |
+| `hugit dispatch` | **DISCONTINUED** | Off-box agent execution will never become a hugit CLI feature. Token remains namespace-reserved only. |
 | `hugit ctx snap` | **ABSENT** | No second context store in CLI v1; use canonical log, `hugit note`, `hugit ctx usage`, and `hugit export`. |
 | `hugit init` | **NOT A CLI VERB** | Library-only bootstrap helper. It is not dispatched because `init` would shadow `git init`; use `hugit setup` for global templates or `hugit attach` for an existing repository. Evidence: T `acceptance_gitlocal_journey` library path; no binary evidence. |
 | `hugit serve` / `/v1` / Git smart HTTP | **HISTORICAL/OPTIONAL** | Separate backend product surface. Not required by local CLI and not evidence of CLI behavior. |
-| Remote hosting, identity, and tenancy | **DEFERRED** | Git remote remains hosting boundary; local plugin requires none. |
-| GitHub App activation and live mirror deployment | **EXTERNAL** | Code may exist in optional crates, but activation/deployment is not CLI-v1 delivery. |
-| Runner execution and remote AC | **EXTERNAL** | Local file-backed memoization is shipped; external fabric is not local CLI behavior. |
+| Remote hosting, identity, and tenancy | **DISCONTINUED** | Git remote remains hosting boundary; hugit will not grow hosting, account, or tenancy features. |
+| GitHub App activation and live mirror deployment | **DISCONTINUED** | Mirror/forge activation and deployment are permanently outside hugit. |
+| Runner execution and remote AC | **DISCONTINUED** | Local file-backed memoization is shipped; remote execution and remote AC will not be added. |
 | Automatic jj observation after `jj git export` | **NOT IMPLEMENTED** | jj capture requires explicit MCP `capture`; no automatic v1 hook claim. |
 
 ## Validation

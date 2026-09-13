@@ -29,8 +29,8 @@ Three laws run through both skills (they are the product's trust spine):
 2. **The honesty law.** "Built" ≠ "delivered" (hermetic-green is not live); a cost is `null` or
    measured, **never** hand-stamped/estimated/misattributed; a `401`/`404` from the engine is an
    auth/visibility signal, **not** route-existence. The skills refuse every fabrication.
-3. **Honest reserved/non-goal state.** The skills describe ONLY the live binary surface
-   (`HUGIT_VERBS`). Reserved verbs (`ws`, `dispatch` — in `HUGIT_RESERVED_VERBS`, not dispatched)
+3. **Honest discontinued/non-goal state.** The skills describe ONLY the live binary surface
+   (`HUGIT_VERBS`). Discontinued verbs (`ws`, `dispatch` — in `HUGIT_RESERVED_VERBS` only for namespace protection)
    are marked **do-not-invoke**; remote runner execution, `ctx snap`, and automatic jj export
    capture are outside CLI v1 — never implied to be live or unfinished local work.
 
@@ -38,7 +38,7 @@ Three laws run through both skills (they are the product's trust spine):
 
 - [`hugit/docs/MCP-CATALOG.md`](hugit/docs/MCP-CATALOG.md) — the MCP servers a hugit agent may
   wire (the engine `/v1` API, git over the wire, the log/CAS read surface) with their auth and
-  honesty caveats, plus the deferred ones.
+   honesty caveats, plus permanently discontinued surfaces.
 
 ## Grounding (single source of truth)
 
@@ -46,11 +46,11 @@ The skills are **ground-truth-anchored**, not free prose:
 
 | Claim in the skills | Anchored to |
 |---|---|
-| The live verb table + the reserved-do-not-invoke set | `crates/hugit-cli/src/lib.rs` (`HUGIT_VERBS` / `HUGIT_RESERVED_VERBS`) |
+| The live verb table + the discontinued namespace-reservation set | `crates/hugit-cli/src/lib.rs` (`HUGIT_VERBS` / `HUGIT_RESERVED_VERBS`) |
 | The one error/exit law (`0`/`2`/`1`, `error.fix`, the canonical kinds) | `crates/hugit-cli/src/porcelain.rs` |
 | The honesty law (built≠delivered · cost null-or-measured · 401/404≠route) | `docs/review/2026-06-17-honest-delivery-audit-double-checked.md` + `CLAUDE.md` |
 
-When the CLI surface changes (a reserved verb graduates, an error `kind` is added), update the
+When the CLI surface changes (a verb is added or an error `kind` is added), update the
 skill tables in the SAME change — the skills must never drift from `HUGIT_VERBS`.
 
 ## License

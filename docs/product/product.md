@@ -1,5 +1,13 @@
 # hugit — Product Design
 
+## Permanent Scope Closure
+
+The CLI product is local-only. Workspace/runner execution (`ws`/`dispatch`),
+remote AC, Clerk identity, tenancy, forge/hosting, mirror deployment, and
+external runner attestation are permanently discontinued, not deferred roadmap
+items. Historical platform references below are context only and must not be
+read as hugit commitments.
+
 > Status: product brief, 2026-06-09. The canonical product design is
 > `docs/whitepaper/hugit-v1.md` (it wins on vision/principle); this brief is
 > the family-format ICP/positioning/pricing view (mirrors
