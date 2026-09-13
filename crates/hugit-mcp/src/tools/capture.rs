@@ -98,13 +98,27 @@ pub fn run(args: &Value) -> ToolOutcome {
         cmd.arg("--push-tuples").arg(v);
     }
 
-    let output = match cmd.output() {
-        Ok(o) => o,
-        Err(e) => {
-            return ToolOutcome::err(format!(
-                "failed to invoke `{bin} capture` (is the hugit binary on PATH, or set HUGIT_BIN \
-                 / the `hugit_bin` argument?): {e}"
-            ));
+    let mut etxtbsy_retries = 0;
+    let output = loop {
+        match cmd.output() {
+            Ok(output) => break output,
+            Err(error) if error.raw_os_error() == Some(26) => {
+                // Linux can briefly reject execution while a freshly-created test
+                // or wrapper script is still being finalized.
+                etxtbsy_retries += 1;
+                if etxtbsy_retries == 10 {
+                    return ToolOutcome::err(format!(
+                        "failed to invoke `{bin} capture` after {etxtbsy_retries} retries: {error}"
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(e) => {
+                return ToolOutcome::err(format!(
+                    "failed to invoke `{bin} capture` (is the hugit binary on PATH, or set HUGIT_BIN \
+                     / the `hugit_bin` argument?): {e}"
+                ));
+            }
         }
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
