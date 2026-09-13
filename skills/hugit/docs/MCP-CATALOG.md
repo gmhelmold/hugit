@@ -23,7 +23,7 @@ and the honesty caveat that governs what a response *means*.
 | 3 | The `/v1` engine write API | HTTPS POST (`/v1/...`) | Bearer (`authz`-gated) | **LIVE (single-tenant)** | the 9 POST verbs (intent/pr/verdict/… persisted to R2-CAS) |
 | 4 | git over the wire (upload-pack) | git smart-HTTP | Bearer (owner) / anon (public) | **LIVE (owner-clone)** | `git clone`/`fetch` — owner-authed clone of a private repo; anon = public-only |
 | 5 | git over the wire (receive-pack) | git smart-HTTP | `cas:rw` Bearer | **LIVE (push)** | `git push` — create/update/incremental/delete a ref (single-tenant) |
-| 6 | The runner fabric (off-box exec) | corelink-fabricd | runner PAT | **EXTERNAL / OUTSIDE CLI V1** | live agent dispatch + real per-PR cost — NOT served from hugit |
+| 6 | The runner fabric (off-box exec) | — | — | **PERMANENTLY DISCONTINUED** | live agent dispatch and external runner cost are not hugit features |
 
 ---
 
@@ -88,10 +88,10 @@ The engine serves the git smart-HTTP wire over the same CAS.
 
 ---
 
-## Section 4 — The runner fabric (DEFERRED — P2)
+## Section 4 — The runner fabric (DISCONTINUED)
 
 Off-box agent execution (the compute that runs a check/merge-as-re-execution and produces a real
-per-PR cost) lives in **`corelink-runners`** (campaign #1), reached via `corelink-fabricd`. hugit
+per-PR cost) lived in **`corelink-runners`** (campaign #1), reached via `corelink-fabricd`. hugit
 consumes it across the frozen lease-DTO contract; it does NOT fork or serve it.
 
 - **State:** the cost WIRE is proven live (acquire→§13 ingest→close, attestation signed), and the
@@ -112,7 +112,7 @@ consumes it across the frozen lease-DTO contract; it does NOT fork or serve it.
 | Prefer surface #1 (local CLI) for the flow verbs | no auth, no network, deterministic; the worker's default |
 | Use #2/#3 only with a real session token | an unauthed call returns `401` (the gate) — meaningless as a liveness probe |
 | Treat every `401`/`404` as auth/visibility, never route-absence | the honesty law (Section 4 of `hugit/SKILL.md`) |
-| Never wire #4 (runner fabric) as a live cost source | cost is `null` until a real provider-`/usage` source exists (P2) |
+| Never wire #4 (runner fabric) as a live cost source | runner fabric is permanently outside hugit scope |
 | Probe the engine with a `git/`/browser UA | Cloudflare bot-protection returns `403 1010` to other UAs |
 
 ---

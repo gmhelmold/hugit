@@ -80,9 +80,9 @@ no server, no account. The runtime is local-only:
   same tree+def+toolchain is a cache HIT with zero re-execution.
 - **CI / compute execution is not rebuilt here** — hugit records the *demand*
   and leaves execution to whatever runs your checks.
-- `ws`, `dispatch`, and `ctx snap` are deliberately outside CLI v1. hugit keeps
-  the tokens reserved or the surface absent rather than pretending remote
-  execution or a second context store is local.
+- `ws` and `dispatch` are permanently discontinued. Their tokens remain reserved
+  only to prevent accidental CLI reuse. `ctx snap` is absent; use the canonical
+  log, `hugit note`, `hugit ctx usage`, and `hugit export` instead.
 
 ---
 
@@ -93,7 +93,7 @@ Honest status — everything here is the CLI, local, testable now:
 | Capability | Status | What you get today |
 |---|---|---|
 | `hugit setup` — boot ceremony | **LIVE** | `git init` in any fresh repo auto-ships the hooks; first git op lazy-boots the log |
-| `hugit symbol` — symbol outline | **LIVE** | `hugit symbol --file <path>` against any TS/JS/Python/Go/Java/C/C++/Ruby file |
+| `hugit symbol` — symbol outline | **LIVE** | `hugit symbol --file <path>` against any Rust/TypeScript/TSX/JavaScript/Python/Go/Java/C/C++/Ruby file |
 | `hugit export` — exit guarantee | **LIVE** | full git + JSON snapshot; requires `--log <path> --out <dir>`; zero dependencies |
 | `hugit check` / `hugit verdict` | **LIVE** | real policy-engine EXECUTE paths, memoized; `hugit policy test` runs the house gate set |
 | `hugit campaign / intent / pr / land` | **LIVE** | the agent-fleet loop: milestones → tasks → PRs → union landing |

@@ -1,5 +1,14 @@
 # CLAUDE.md
 
+## Permanent Scope Closure
+
+The following are permanently discontinued, not deferred roadmap items:
+`ws`/`dispatch` workspace or runner execution, remote AC, Clerk identity,
+tenancy, forge/hosting, mirror deployment, and external runner attestation.
+Their historical docs may mention them, but current hugit work must not reopen
+or count them as pending. `ws`/`dispatch` tokens remain in the reserved registry
+only for namespace protection.
+
 Context for AI agents working in this repo. Keep it lean + high-signal.
 
 ## What hugit is
@@ -85,9 +94,9 @@ adversarial round (1–13) + a SOTA sweep. The integrity spine is genuinely soli
   + a stale deployed image + `hugit-prod-d1`.
 - **Symbol outline IS wired** (W6, #161 + follow-up): `hugit_symbols::outline_blob`
   is called from `handlers/blob.rs:181` (`compute_outline`) and the `hugit symbol --file` CLI
-  verb is real. The `hugit-symbols` tree-sitter crate supports TS/JS/Python/Go/Java/C/C++/Ruby.
-- **Still reserved-unimplemented CLI verbs:** `ws`/`dispatch` only — P2/transferred
-  (workspace exec core → `corelink-runners`; need the runner fabric). `ctx resume` +
+  verb is real. The `hugit-symbols` tree-sitter crate supports Rust/TS/TSX/JS/Python/Go/Java/C/C++/Ruby.
+- **Permanently discontinued CLI verbs:** `ws`/`dispatch` only — tokens remain reserved
+  for namespace protection, never implementation. `ctx resume` +
   `review` (grounded Q&A) graduated to REAL (PR-D) and `land queue` is REAL (batch land
   via the union engine, #181).
   (`fleet`/`ledger`/`watch` graduated to REAL — #157/#158; `diag` graduated —

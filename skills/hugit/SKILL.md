@@ -23,7 +23,7 @@ verb table, the one error/exit law, and the honesty law, then routes execution-g
 **`/hugit-worker`** (the agent that runs a single verb to a verified machine result).
 
 This skill ships **vendored with hugit** (free, open). It describes ONLY the live binary
-surface plus the honest state of every reserved/deferred verb — it never claims a verb is live
+surface plus the honest state of every discontinued verb — it never claims a verb is live
 that `HUGIT_VERBS` does not dispatch.
 
 ---
@@ -39,7 +39,7 @@ that `HUGIT_VERBS` does not dispatch.
 | Read the forge's history / fleet / event stream | `ledger` · `fleet` · `watch` (Section 2, read-only) |
 | Parse a verb's output / handle a failure | Section 3 (the one error/exit law) |
 | About to claim a verb/feature is "done"/"live", or quote a cost | Section 4 (the honesty law) — **mandatory before the claim** |
-| Need `ws` / `dispatch` (workspace exec / dispatch packet) | **STOP** — reserved, do-not-invoke (Section 2); they are NOT dispatched |
+| Need `ws` / `dispatch` (workspace exec / dispatch packet) | **STOP** — permanently discontinued, do-not-invoke (Section 2); tokens are namespace-reserved only |
 | Run one verb to a verified machine result | → **`/hugit-worker`** |
 
 **Do not invoke** for: a plain `git` operation (use `git`; hugit yields every git verb name —
@@ -102,19 +102,21 @@ window and remote agents read it. Auth-gated, 404-no-oracle. See Section 4 on wh
 ### Reserved — DO NOT INVOKE
 
 These are in `HUGIT_RESERVED_VERBS`, **not** dispatched by `main.rs`, absent from `--help`.
+`ws` and `dispatch` are permanently discontinued; registry reservation exists only
+to prevent accidental namespace reuse.
 Invoking them is an error (clap will reject; treat as not-implemented). Never present them as
 available.
 
-| Verb | Intended shape | Why reserved |
+| Verb | Intended shape | Why discontinued |
 |---|---|---|
-| `ws` | `ws spawn\|attach\|snap\|gc` | Claim-fenced workspaces — external runner product, outside CLI v1 |
-| `dispatch` | `dispatch <intent>` | Workspace + context packet — external orchestration product, outside CLI v1 |
+| `ws` | `ws spawn\|attach\|snap\|gc` | Workspace execution permanently outside hugit |
+| `dispatch` | `dispatch <intent>` | Off-box orchestration permanently outside hugit |
 
 > **Honesty caveat (state it when relevant):** `ctx snap` (the JournalStore writer) is outside
-> CLI v1; `policy edit` is REAL and Human-only. The distributed runner fabric (live exec for
-> `land queue`/`pr land --dispatch`) is an external product, not unfinished local CLI work. The
-> union engine runs **single-tenant local** today; a per-PR cost from real off-box exec is
-> honest-zero (`null`) when that external path is unavailable (Section 4).
+> CLI v1; `policy edit` is REAL and Human-only. Runner execution, remote AC, and external
+> attestation are permanently outside hugit, not unfinished local CLI work. The union engine
+> runs **single-tenant local**; local cost remains honest-zero (`null`) when no explicit usage
+> record exists (Section 4).
 
 ---
 
@@ -176,7 +178,7 @@ is rejected, never read as empty), `io` (a `--log`/`--store` read/write fault).
    NEITHER proves the route/feature is absent. To prove a route is live: a PAT-authed `200`-vs-`405`,
    or a real-consumer probe (the public www that decodes the engine), NEVER an engine-direct
    privileged proxy and NEVER an unauthed status code.
-4. **Mark reserved/non-goal honestly.** `ws`/`dispatch` are reserved (Section 2). The runner
+4. **Mark discontinued/non-goal honestly.** `ws`/`dispatch` are permanently discontinued (Section 2). Runner
    fabric, anonymous clone (public-flag), multi-tenant identity, and live runner exec are
    external or out of CLI v1. Say so — never imply a single-tenant-local capability is a
    multi-tenant live one.
@@ -214,7 +216,7 @@ hugit (verify the card against the demand + the honesty law; chain the next verb
 |---|---|
 | Which verb + which `--log`/repo + the expected output shape | Running the verb, capturing stdout, the exit code |
 | Whether a result/claim passes the honesty law (Section 4) | Parsing the envelope, reading `error.fix`, retrying on a fixable exit-2 |
-| Refusing a reserved verb (Section 2) before dispatch | Returning the compact card (never dumping the transcript back) |
+| Refusing a discontinued verb (Section 2) before dispatch | Returning the compact card (never dumping the transcript back) |
 | Chaining verbs (campaign → intent → pr → land) | One verb to a verified machine result |
 
 **Never let the worker decide the verb** (AP-3 below). Ambiguity → the orchestrator fixes the
@@ -242,10 +244,11 @@ NOT a fake success — surface it. Never report done without parsing the `0`/res
 **Refusal:** the orchestrator pre-decides the verb + args + log (Section 5). The worker transcribes
 and verifies; it never designs the call.
 
-### AP-4: Invoking a reserved verb
-**Pattern:** invoke `ws spawn` / `dispatch <intent>` because the roadmap mentions them.
+### AP-4: Invoking a discontinued verb
+**Pattern:** invoke `ws spawn` / `dispatch <intent>` because historical docs mention them.
 **Refusal:** `HUGIT_RESERVED_VERBS` are NOT dispatched (Section 2). They will be rejected. Never
-present them as available; if the demand needs them, escalate (the runner fabric is P2).
+present them as available; no escalation or runner handoff exists because these surfaces are
+permanently discontinued.
 
 ### AP-5: Quoting a cost that isn't measured
 **Pattern:** report a per-PR cost from a derived/estimate/demo figure to make `/insights` non-empty.
