@@ -7,13 +7,12 @@
 //! (post-commit / post-checkout / pre-push / post-merge) — so from then on,
 //! EVERY `git init` on this machine ships the hugit hooks automatically.
 //!
-//! The hooks themselves LAZY-BOOT: on the first git op in a fresh repo they
-//! create `.hugit/log.json` if it is absent (see the `[ -f "$LOG" ]` block in
-//! `init::hook_script`), so a repo that never ran `hugit init` still becomes
-//! active the moment someone commits/checks out.
+//! Hooks require `hugit attach` or `hugit init` to provision verified runtime
+//! state. They never create tracked working-tree state.
 //!
-//! With `--repo`, `setup` installs those same hooks into an existing repository
-//! without running `git init` or changing any non-hugit hook.
+//! `setup --repo` installs into an existing repository without changing Git
+//! global configuration. Otherwise it writes ONE global config key + a template
+//! directory the user owns. Idempotent: re-running rewrites same target.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -33,13 +32,24 @@ pub struct SetupArgs {
     #[arg(long, conflicts_with = "repo")]
     pub dir: Option<PathBuf>,
     /// Install hooks into this existing Git repository. Does not run `git init`.
-    #[arg(long, conflicts_with = "dir")]
+    #[arg(long, conflicts_with_all = ["dir", "status", "replace_global_template"])]
     pub repo: Option<PathBuf>,
+    /// Inspect global setup without changing Git configuration.
+    #[arg(long, conflicts_with = "repo")]
+    pub status: bool,
+    /// Replace an existing global init.templateDir owned by another tool.
+    #[arg(long, conflicts_with = "repo")]
+    pub replace_global_template: bool,
 }
 
 /// Run `hugit setup`.
 pub fn run(args: SetupArgs) -> ExitCode {
-    match do_setup(&args) {
+    let result = if args.status {
+        do_status(&args)
+    } else {
+        do_setup(&args)
+    };
+    match result {
         Ok(v) => {
             println!("{v}");
             ExitCode::SUCCESS
@@ -49,6 +59,37 @@ pub fn run(args: SetupArgs) -> ExitCode {
             e.exit_code()
         }
     }
+}
+
+fn do_status(args: &SetupArgs) -> Result<Value, crate::porcelain::PorcelainError> {
+    let template_dir = args.dir.clone().unwrap_or_else(default_template_dir);
+    let configured = std::process::Command::new("git")
+        .args(["config", "--global", "--get", "init.templateDir"])
+        .output()
+        .map_err(|e| crate::porcelain::PorcelainError::io("read git config", &template_dir, &e))?;
+    let configured_path = if configured.status.success() {
+        String::from_utf8_lossy(&configured.stdout)
+            .trim()
+            .to_string()
+    } else {
+        String::new()
+    };
+    let mut hooks = serde_json::Map::new();
+    for kind in HOOK_KINDS {
+        let path = template_dir.join("hooks").join(kind);
+        hooks.insert(
+            kind.replace('-', "_"),
+            json!({"path": path.display().to_string(), "exists": path.exists(), "executable": hook_is_executable(&path)}),
+        );
+    }
+    Ok(json!({
+        "template_dir": template_dir.display().to_string(),
+        "owned": template_dir.join("OWNED-BY-HUGIT").is_file(),
+        "global_init_template_dir": configured_path,
+        "active": configured_path == template_dir.display().to_string()
+            && HOOK_KINDS.iter().all(|kind| hook_is_executable(&template_dir.join("hooks").join(kind))),
+        "hooks": hooks,
+    }))
 }
 
 fn do_setup(args: &SetupArgs) -> Result<Value, crate::porcelain::PorcelainError> {
@@ -64,6 +105,30 @@ fn do_setup(args: &SetupArgs) -> Result<Value, crate::porcelain::PorcelainError>
         }));
     }
     let template_dir = args.dir.clone().unwrap_or_else(default_template_dir);
+    let previous_template = global_template_dir(&template_dir)?;
+    let owns_template = owns_template(&template_dir);
+    if template_dir.exists() && !owns_template {
+        return Err(crate::porcelain::PorcelainError::new(
+            "template_dir_conflict",
+            format!(
+                "template directory {} is not hugit-owned",
+                template_dir.display()
+            ),
+            "choose an empty template directory; hugit never overwrites another tool's hooks",
+        ));
+    }
+    let needs_replace = previous_template
+        .as_deref()
+        .is_some_and(|previous| previous != template_dir.display().to_string());
+    if needs_replace && !args.replace_global_template {
+        return Err(crate::porcelain::PorcelainError::new(
+            "global_template_conflict",
+            format!(
+                "template directory is not hugit-owned or global init.templateDir points elsewhere: {previous_template:?}"
+            ),
+            "re-run with --replace-global-template only after reviewing that template",
+        ));
+    }
     let hooks_dir = template_dir.join("hooks");
     std::fs::create_dir_all(&hooks_dir)
         .map_err(|e| crate::porcelain::PorcelainError::io("create template dir", &hooks_dir, &e))?;
@@ -77,7 +142,9 @@ fn do_setup(args: &SetupArgs) -> Result<Value, crate::porcelain::PorcelainError>
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755));
+            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755)).map_err(
+                |e| crate::porcelain::PorcelainError::io("chmod template hook", &dest, &e),
+            )?;
         }
     }
     // Mark ownership so an operator can tell the template apart and, if ever
@@ -112,8 +179,48 @@ fn do_setup(args: &SetupArgs) -> Result<Value, crate::porcelain::PorcelainError>
         "template_dir": template_dir.display().to_string(),
         "hooks": HOOK_KINDS,
         "global_init_template_dir": true,
-        "next": "any future `git init` in this machine already ships the hugit hooks; existing repos use `hugit setup --repo <path>`.",
+        "previous_global_init_template_dir": previous_template,
+        "next": "any future `git init` in this machine already ships the hugit hooks; existing repos use `hugit init <dir>` or a first git op lazy-boots them.",
     }))
+}
+
+fn global_template_dir(
+    template_dir: &std::path::Path,
+) -> Result<Option<String>, crate::porcelain::PorcelainError> {
+    let configured = std::process::Command::new("git")
+        .args(["config", "--global", "--get", "init.templateDir"])
+        .output()
+        .map_err(|e| crate::porcelain::PorcelainError::io("read git config", template_dir, &e))?;
+    if !configured.status.success() {
+        return Ok(None);
+    }
+    let path = String::from_utf8_lossy(&configured.stdout)
+        .trim()
+        .to_string();
+    Ok((!path.is_empty()).then_some(path))
+}
+
+fn owns_template(template_dir: &std::path::Path) -> bool {
+    if !template_dir.join("OWNED-BY-HUGIT").is_file() {
+        return false;
+    }
+    HOOK_KINDS.iter().all(|kind| {
+        std::fs::read_to_string(template_dir.join("hooks").join(kind))
+            .is_ok_and(|contents| init::is_managed_hook(kind, &contents))
+    })
+}
+
+#[cfg(unix)]
+fn hook_is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn hook_is_executable(path: &std::path::Path) -> bool {
+    path.is_file()
 }
 
 /// Default template dir under the user's config root.

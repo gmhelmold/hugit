@@ -118,6 +118,20 @@ impl FileLock {
     /// A **stale** lock (mtime older than [`STALE_LOCK_SECS`] — a dead holder)
     /// is reclaimed transparently: removed, then re-created as ours.
     pub fn acquire(target: &Path) -> Result<Self, LockError> {
+        // Runtime canonical state must be validated before this function's mkdir
+        // can create its parent or sidecar. Non-runtime custom --log paths pass
+        // through unchanged.
+        crate::runtime_store::prepare_runtime_log(target).map_err(|e| LockError::Io {
+            action: "prepare runtime log",
+            path: target.to_path_buf(),
+            source: e.to_json(),
+        })?;
+        Self::acquire_unprepared(target)
+    }
+
+    /// Acquire without runtime preparation. Runtime migration owns this internal
+    /// bootstrap lock, so routing it through [`Self::acquire`] would recurse.
+    pub(crate) fn acquire_unprepared(target: &Path) -> Result<Self, LockError> {
         // PR-4: auto-create parent dirs (git-proximate auto-init doctrine). The
         // first verb on a fresh CWD (e.g. `hugit campaign open`) used to fail
         // with `create lock .hugit/log.json.lock: No such file or directory`
@@ -197,6 +211,21 @@ impl Drop for FileLock {
 /// Same-directory is load-bearing: a cross-device `rename(2)` is not atomic (and
 /// most platforms refuse it), so the temp MUST share the target's filesystem.
 pub fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), LockError> {
+    // Every canonical runtime persist rechecks/recover-binds legacy evidence
+    // while caller still holds FileLock. This catches writer paths that only use
+    // generic lock/write helpers rather than a point-local migration call.
+    let bytes =
+        crate::runtime_store::prepare_runtime_write(target, bytes).map_err(|e| LockError::Io {
+            action: "prepare runtime log write",
+            path: target.to_path_buf(),
+            source: e.to_json(),
+        })?;
+    atomic_write_unprepared(target, &bytes)
+}
+
+/// Atomic write without runtime preparation. Only runtime migration/recovery may
+/// use this after it has acquired the bootstrap lock and verified source state.
+pub(crate) fn atomic_write_unprepared(target: &Path, bytes: &[u8]) -> Result<(), LockError> {
     let dir = target.parent().unwrap_or_else(|| Path::new("."));
     // PR-4: best-effort create the parent (skipped if `dir` is empty —
     // `create_dir_all("")` returns NotFound on POSIX). The downstream

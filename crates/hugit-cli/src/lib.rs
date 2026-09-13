@@ -30,6 +30,7 @@ pub mod diag;
 pub mod dock;
 pub mod export;
 pub mod fleet;
+pub mod health;
 pub mod ident;
 pub mod impact;
 pub mod init;
@@ -47,6 +48,7 @@ pub mod pr;
 pub mod queue;
 pub mod redaction;
 pub mod review;
+pub mod runtime_store;
 pub mod setup;
 pub mod symbol;
 pub mod tournament;
@@ -81,7 +83,6 @@ pub mod attention;
 ///
 /// For planned-but-not-yet-dispatched verbs see [`HUGIT_RESERVED_VERBS`].
 pub const HUGIT_VERBS: &[&str] = &[
-    "setup",      // hugit setup [--repo <path>] — global template or existing-repo hooks
     "why",        // hugit why <line|symbol>  — provenance query
     "impact",     // hugit impact <path|change>   — build-graph blast radius
     "tournament", // hugit tournament -n N    — exploration as a verb
@@ -90,7 +91,11 @@ pub const HUGIT_VERBS: &[&str] = &[
     // at PC0; PC1/PC2/PC3 fill the bodies. The verb is LIVE the moment main.rs
     // routes it (the no-drift oracle asserts dispatched == registry), so these
     // belong here, not in HUGIT_RESERVED_VERBS.
+    "setup",
     "capture",
+    "attach",
+    "detach",
+    "health",
     "campaign", // hugit campaign open/close/show — campaign lifecycle (PC1)
     "intent",   // hugit intent new/show         — intent ceremony (PC2)
     "pr",       // hugit pr open/land/show        — pull-request lifecycle (PC3)

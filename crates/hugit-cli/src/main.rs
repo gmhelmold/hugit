@@ -31,7 +31,9 @@ use hugit_cli::diag::{self, DiagArgs};
 use hugit_cli::dock::{self, DockArgs};
 use hugit_cli::export::{self, AccountState, Corpus};
 use hugit_cli::fleet::{self, FleetArgs};
+use hugit_cli::health::{self, HealthArgs};
 use hugit_cli::impact::{ImpactQuery, compute_impact};
+use hugit_cli::init::{self, AttachArgs, InitArgs};
 use hugit_cli::intent::{self, IntentArgs};
 use hugit_cli::issue::{self, IssueArgs};
 use hugit_cli::land::{self, LandArgs};
@@ -82,6 +84,12 @@ enum Command {
     Export(ExportArgs),
     /// Install hooks globally, or into an existing repository with `--repo`.
     Setup(setup::SetupArgs),
+    /// Attach hugit hooks to an existing Git repository.
+    Attach(AttachArgs),
+    /// Remove only hugit-owned hooks from an existing Git repository.
+    Detach(InitArgs),
+    /// Inspect local hook and event-log health without mutating repository state.
+    Health(HealthArgs),
     /// Campaign lifecycle: open / close (seal) / show.
     Campaign(CampaignArgs),
     /// Silent capture (git hooks call this) — never blocks git, exit 0 always.
@@ -899,6 +907,9 @@ fn main() -> ExitCode {
         Command::Tournament(a) => run_tournament(a),
         Command::Export(a) => run_export(a),
         Command::Setup(a) => return setup::run(a),
+        Command::Attach(a) => return init::attach_run(a),
+        Command::Detach(a) => return init::detach_run(a),
+        Command::Health(a) => return health::run(a),
         Command::Campaign(a) => return campaign::run(a),
         Command::Capture(a) => return capture::run(a),
         Command::Intent(a) => return intent::run(a),
