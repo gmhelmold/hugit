@@ -95,9 +95,7 @@ pub const HUGIT_VERBS: &[&str] = &[
     // at PC0; PC1/PC2/PC3 fill the bodies. The verb is LIVE the moment main.rs
     // routes it (the no-drift oracle asserts dispatched == registry), so these
     // belong here, not in HUGIT_RESERVED_VERBS.
-    "setup",
     "capture",
-    "attach",
     "detach",
     "health",
     "campaign", // hugit campaign open/close/show — campaign lifecycle (PC1)
