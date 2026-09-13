@@ -18,6 +18,7 @@ on:
   pull_request:
     paths:
       - 'crates/hugit-contracts/**'
+      - 'crates/hugit-cli/**'
       - 'crates/hugit-refstore/**'
       - 'crates/hugit-invariants/**'
       - 'conformance/**'
