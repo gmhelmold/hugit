@@ -182,6 +182,7 @@ mod tests {
         let path = dir.join("fake-hugit.sh");
         let mut f = std::fs::File::create(&path).unwrap();
         writeln!(f, "#!/bin/sh\nexit {exit}").unwrap();
+        f.sync_all().unwrap();
         drop(f);
         #[cfg(unix)]
         {
@@ -195,6 +196,7 @@ mod tests {
         let path = dir.join("argv-fake-hugit.sh");
         let mut f = std::fs::File::create(&path).unwrap();
         writeln!(f, "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'", argv.display()).unwrap();
+        f.sync_all().unwrap();
         drop(f);
         #[cfg(unix)]
         {
@@ -230,6 +232,7 @@ mod tests {
             target.display()
         )
         .unwrap();
+        f.sync_all().unwrap();
         drop(f);
         #[cfg(unix)]
         {
