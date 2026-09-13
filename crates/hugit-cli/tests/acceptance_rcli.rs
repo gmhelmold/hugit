@@ -69,7 +69,7 @@ fn item_1_why_runs_end_to_end_exit_zero() {
     let log = dir.join("log.json");
     // K-CHAIN: build a REAL hash chain via the engine's append path so
     // `verify_chain` passes (fake/hand-forged hashes are now rejected).
-    write_why_log(
+    write_canonical_log(
         &log,
         &[(
             "intent.landed",
@@ -297,8 +297,8 @@ fn item_6_canonical_registry_equals_dispatched_surface() {
     //
     // We enumerate the Subcommands by parsing the subcommand lines from
     // `hugit --help` (clap emits one line per subcommand under "Commands:").
-    // Each dispatched verb is a word that also appears in HUGIT_VERBS; any
-    // word in the help block that is NOT in HUGIT_VERBS is a binary-only gap.
+    // `help` is Clap's built-in pseudo-subcommand. Every other command line is
+    // a real dispatched verb and must be present in HUGIT_VERBS.
     //
     // Clap help format: the Commands: block has lines like
     //   "  why       Resolve a line/symbol ..."
@@ -321,13 +321,30 @@ fn item_6_canonical_registry_equals_dispatched_surface() {
         .filter(|tok| *tok != "help")
         .collect();
 
-    let mut dispatched = dispatched_in_help;
-    let mut registry = hugit_cli::HUGIT_VERBS.to_vec();
-    dispatched.sort_unstable();
-    registry.sort_unstable();
+    // Every dispatched verb visible in --help must be in HUGIT_VERBS.
+    for verb in &dispatched_in_help {
+        assert!(
+            hugit_cli::HUGIT_VERBS.contains(verb),
+            "BINARY→REGISTRY gap: '{verb}' appears in `hugit --help` but NOT in HUGIT_VERBS. \
+             Add it to HUGIT_VERBS or stop dispatching it."
+        );
+    }
+
+    // The count of dispatched verbs visible in --help must equal HUGIT_VERBS.
+    // If HUGIT_VERBS has more entries than --help shows, there are phantom
+    // (unwired) verbs in the registry.
     assert_eq!(
-        dispatched, registry,
-        "EQUALITY VIOLATION: HUGIT_VERBS must exactly equal binary dispatched surface"
+        dispatched_in_help.len(),
+        hugit_cli::HUGIT_VERBS.len(),
+        "EQUALITY VIOLATION: HUGIT_VERBS has {} entries but `hugit --help` shows {} \
+         dispatched verbs matching the registry. \
+         Phantom verbs in HUGIT_VERBS (not wired in main.rs) or dispatched verbs \
+         missing from HUGIT_VERBS are both failures. \
+         HUGIT_VERBS = {:?}, dispatched = {:?}",
+        hugit_cli::HUGIT_VERBS.len(),
+        dispatched_in_help.len(),
+        hugit_cli::HUGIT_VERBS,
+        dispatched_in_help,
     );
 
     // hugit_verbs() returns the same canonical list (stable accessor for X5).
