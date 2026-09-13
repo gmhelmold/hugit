@@ -169,7 +169,7 @@ impl ClaimedReceipt {
                 ));
             }
             let stat = unsafe { stat.assume_init() };
-            if stat.st_dev as u64 != self.dev || stat.st_ino != self.ino {
+            if stat.st_dev != self.dev || stat.st_ino != self.ino {
                 return Err("claimed receipt was replaced; retained for recovery".into());
             }
             if unsafe { libc::unlinkat(self.dir.as_raw_fd(), self.name.as_ptr(), 0) } != 0 {
