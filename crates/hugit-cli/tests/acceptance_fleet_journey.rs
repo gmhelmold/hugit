@@ -130,7 +130,7 @@ fn fleet_operator_sees_agent_fleet_activity() {
     let root = scratch("fleet");
     lib_init(&root);
     set_git_identity(&root);
-    let log = root.join(".hugit/log.json");
+    let log = root.join(".git/hugit/event-log.json");
 
     // Seed a base commit so both agents build on a shared start point.
     std::fs::write(root.join("base.txt"), "base").unwrap();
