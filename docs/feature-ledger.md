@@ -1,8 +1,8 @@
 # Feature Ledger: hugit CLI-local v1
 
 This ledger describes shipped local behavior only. hugit is a free, open-source
-Git plugin: a repository, Git, and the `hugit` binary are enough. No server,
-CoreLink account, SaaS, forge tenancy, Clerk, or runner fabric is required.
+Git plugin: a repository, Git, and the `hugit` binary are enough. Remote hosting,
+identity, tenancy, and runner execution are outside this plugin scope.
 
 ## Status And Evidence
 
@@ -110,11 +110,11 @@ Every row below is dispatched. Subcommands are exact current names.
 | Surface | Status | Boundary |
 |---|---|---|
 | `hugit ws` | **RESERVED** | No CLI v1 workspace lifecycle; workspace execution belongs elsewhere. |
-| `hugit dispatch` | **RESERVED** | No CLI v1 off-box agent execution; runner fabric is external/non-scope. |
+| `hugit dispatch` | **RESERVED** | No CLI v1 off-box agent execution; remote runner execution is deferred. |
 | `hugit ctx snap` | **ABSENT** | No second context store in CLI v1; use canonical log, `hugit note`, `hugit ctx usage`, and `hugit export`. |
 | `hugit init` | **NOT A CLI VERB** | Library-only bootstrap helper. It is not dispatched because `init` would shadow `git init`; use `hugit setup` for global templates or `hugit attach` for an existing repository. Evidence: T `acceptance_gitlocal_journey` library path; no binary evidence. |
 | `hugit serve` / `/v1` / Git smart HTTP | **HISTORICAL/OPTIONAL** | Separate backend product surface. Not required by local CLI and not evidence of CLI behavior. |
-| Forge tenancy, Clerk, multi-tenant hosting | **OUT OF SCOPE** | Git remote remains hosting boundary; no SaaS dependency. |
+| Remote hosting, identity, and tenancy | **DEFERRED** | Git remote remains hosting boundary; local plugin requires none. |
 | GitHub App activation and live mirror deployment | **EXTERNAL** | Code may exist in optional crates, but activation/deployment is not CLI-v1 delivery. |
 | Runner execution and remote AC | **EXTERNAL** | Local file-backed memoization is shipped; external fabric is not local CLI behavior. |
 | Automatic jj observation after `jj git export` | **NOT IMPLEMENTED** | jj capture requires explicit MCP `capture`; no automatic v1 hook claim. |
