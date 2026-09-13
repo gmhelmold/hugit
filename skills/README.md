@@ -6,12 +6,13 @@ are the human/LLM-facing complement of the machine contract that already lives i
 verb registry (`crates/hugit-cli/src/lib.rs :: HUGIT_VERBS`) and the one error/exit law
 (`crates/hugit-cli/src/porcelain.rs`).
 
-## The two skills
+## The skills
 
 | Skill | Role | Invoke when… |
 |---|---|---|
 | [`hugit/SKILL.md`](hugit/SKILL.md) | **Orchestrator** — drives the forge | an agent must open/advance the campaign→intent→PR flow, land a batch via the union engine, run a memoized check, record a verdict, or read the chain-verified history — and whenever deciding HOW to talk to a hugit log or `/v1` engine. |
 | [`hugit-worker/SKILL.md`](hugit-worker/SKILL.md) | **Worker (agent)** — runs ONE verb | an agent is the executor of a single, pre-decided verb and must turn it into a verified machine result + a compact card. |
+| [`hugit-local/SKILL.md`](hugit-local/SKILL.md) | **Local validator** — proves the plugin | an agent must onboard a repository, exercise hooks, run the real-binary probe, or validate a local release claim without remote assumptions. |
 
 The split mirrors the orchestration model: the **orchestrator holds judgment** (which verb, on
 which log/repo, whether a result/claim is honest) and the **worker holds execution** (run the
