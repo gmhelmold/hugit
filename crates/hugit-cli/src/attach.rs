@@ -269,17 +269,17 @@ fn dispatcher(kind: &str, backup: Option<&Path>) -> String {
     if kind == "pre-push" && !foreign.is_empty() {
         let body = body.trim_end().strip_suffix("exit 0").unwrap_or(&body);
         format!(
-            "{DISPATCHER_MARKER}\n#!/bin/sh\nRUNTIME=$(dirname {})\nINPUT=$(mktemp \"$RUNTIME/.pre-push.XXXXXX\") || exec {} \"$@\"\ncat >\"$INPUT\"\n{} \"$@\" <\"$INPUT\"\nSTATUS=$?\nHUGIT_PRE_PUSH_FILE=\"$INPUT\"\n{}\nrm -f \"$INPUT\"\nexit $STATUS\n",
+            "#!/bin/sh\n{DISPATCHER_MARKER}\nRUNTIME=$(dirname {})\nINPUT=$(mktemp \"$RUNTIME/.pre-push.XXXXXX\") || exec {} \"$@\"\ncat >\"$INPUT\"\n{} \"$@\" <\"$INPUT\"\nSTATUS=$?\nHUGIT_PRE_PUSH_FILE=\"$INPUT\"\n{}\nrm -f \"$INPUT\"\nexit $STATUS\n",
             foreign, foreign, foreign, body
         )
     } else if !foreign.is_empty() {
         let body = body.trim_end().strip_suffix("exit 0").unwrap_or(&body);
         format!(
-            "{DISPATCHER_MARKER}\n#!/bin/sh\n{} \"$@\"\nSTATUS=$?\n{}\nexit $STATUS\n",
+            "#!/bin/sh\n{DISPATCHER_MARKER}\n{} \"$@\"\nSTATUS=$?\n{}\nexit $STATUS\n",
             foreign, body
         )
     } else {
-        format!("{DISPATCHER_MARKER}\n{body}\n")
+        format!("#!/bin/sh\n{body}\n")
     }
 }
 fn shell_quote(path: &Path) -> String {
