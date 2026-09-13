@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(cli): runtime state now lives in Git common-dir storage with legacy
+  migration, durable receipt capture, source-linked local views, explicit
+  foreign-hook adoption/rollback, and hook-first normal-Git onboarding.
+
 - fix(cli): `hugit why --line` rejects non-UTF-8 Git paths instead of lossy
   decoding them, and `hugit why --symbol` derives symbols only from immutable
   Git blobs. Post-commit hooks snapshot their commit OID before asynchronous
