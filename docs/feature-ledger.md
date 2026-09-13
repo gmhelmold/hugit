@@ -70,7 +70,7 @@ Every row below is dispatched. Subcommands are exact current names.
 | `hugit ledger` | Projects asked → done → proven history from `--log`, optionally `--campaign`. | T `acceptance_ledger`; U |
 | `hugit fleet` | Projects versioned machine-readable workspace/agent state from `--log`. | T `acceptance_fleet`; U |
 | `hugit watch` | Replays classified, redacted event stream from `--log`; optional `--class`. | T `acceptance_watch`; U |
-| `hugit symbol` | Emits tree-sitter symbol outline for local `--file`; supports TypeScript, JavaScript, Python, Go, Java, C, C++, and Ruby. | T `acceptance_symbol`; U |
+| `hugit symbol` | Emits tree-sitter symbol outline for local `--file`; supports Rust, TypeScript, TSX, JavaScript, Python, Go, Java, C, C++, and Ruby. | T `acceptance_symbol`; U |
 | `hugit ctx resume` | Reconstructs short-horizon session from matching `journal.note` records using `--workspace`, `--intent`, optional `--tenant`, `--now-ms`. Refuses when evidence/horizon is insufficient. | T `acceptance_ctx`, `acceptance_review`; U |
 | `hugit ctx usage` | Appends provider `/usage` token counts verbatim to `ctx.usage`; exactly one of `--intent` or `--pr`; requires `--model`, `--input`, `--output`, `--cache-read`, `--cache-write`; optional `--model-digest`, `--recorded-at`. Computes only checked token total, never prices or calls network. | T `acceptance_ctx`, unit tests in `ctx/usage.rs`; U |
 | `hugit review` | Answers questions only from logged check/verdict evidence; refuses unsupported claims. Requires `--question`, optional `--intent` and `--log`. | T `acceptance_review`; U |
