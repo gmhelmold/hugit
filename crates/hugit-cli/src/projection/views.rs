@@ -3,7 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+use serde_json::Value;
 
 use super::{
     DerivedFact, ProjectionApplied, ProjectionOutcome, ProjectionStatus, SourceFact, SourceIdentity,
@@ -11,6 +12,9 @@ use super::{
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectionView {
+    /// `complete` means every required result matches canonical sources.
+    /// `partial` means a retry or unattempted required result remains. Capture
+    /// health is reported separately by `hugit health`.
     pub state: &'static str,
     pub applied: Vec<ProjectionApplied>,
     pub retry: Option<super::ProjectionRetry>,
@@ -23,26 +27,12 @@ pub struct PendingProjection {
     pub projector: String,
 }
 
-#[derive(Deserialize)]
-struct StoredStatus {
-    projection: Option<ProjectionStatus>,
-}
-
 pub fn load(log_path: &Path) -> Result<ProjectionView, String> {
     let root = log_path.parent().ok_or("projection log has no parent")?;
     let status_path = root.join(crate::runtime_store::STATUS);
-    if !status_path.exists() {
-        return Ok(absent());
-    }
-    let bytes = std::fs::read(&status_path)
-        .map_err(|error| format!("read projection status {}: {error}", status_path.display()))?;
-    let status: StoredStatus = serde_json::from_slice(&bytes)
-        .map_err(|_| format!("projection status {} is unreadable", status_path.display()))?;
-    let Some(projection) = status.projection else {
-        return Ok(absent());
-    };
     let log = crate::checks::load_event_log(log_path)
         .map_err(|error| format!("load log: {}", error.to_json()))?;
+    let projection = materialize(&status_path, log.records())?;
     let pending = validate(&projection, log.records())?;
     Ok(ProjectionView {
         state: if projection.retry.is_some() || !pending.is_empty() {
@@ -56,13 +46,45 @@ pub fn load(log_path: &Path) -> Result<ProjectionView, String> {
     })
 }
 
-fn absent() -> ProjectionView {
-    ProjectionView {
-        state: "absent",
-        applied: Vec::new(),
-        retry: None,
-        pending: Vec::new(),
-    }
+/// Derive and atomically persist status from canonical facts. Views never need
+/// a test-only or hook-written status file to report projection truth.
+fn materialize(
+    status_path: &Path,
+    records: &[hugit_contracts::event_record::EventRecord],
+) -> Result<ProjectionStatus, String> {
+    let _lock = crate::pr::filelock::FileLock::acquire_unprepared(status_path)
+        .map_err(|error| format!("lock projection status {}: {error}", status_path.display()))?;
+    let mut stored = if status_path.exists() {
+        serde_json::from_slice::<Value>(&std::fs::read(status_path).map_err(|error| {
+            format!("read projection status {}: {error}", status_path.display())
+        })?)
+        .map_err(|_| format!("projection status {} is unreadable", status_path.display()))?
+    } else {
+        Value::Object(Default::default())
+    };
+    let object = stored.as_object_mut().ok_or_else(|| {
+        format!(
+            "projection status {} is not an object",
+            status_path.display()
+        )
+    })?;
+    let previous = object
+        .get("projection")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| format!("projection status {} is invalid", status_path.display()))?;
+    let projection = super::declare(records, previous, usize::MAX, super::default_projectors());
+    object.insert(
+        "projection".into(),
+        serde_json::to_value(&projection)
+            .map_err(|error| format!("serialize projection status: {error}"))?,
+    );
+    let bytes = serde_json::to_vec_pretty(&stored)
+        .map_err(|error| format!("serialize projection status: {error}"))?;
+    crate::pr::filelock::atomic_write_unprepared(status_path, &bytes)
+        .map_err(|error| format!("write projection status {}: {error}", status_path.display()))?;
+    Ok(projection)
 }
 
 fn validate(

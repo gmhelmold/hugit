@@ -241,6 +241,11 @@ pub fn declare(
             status.completed.push(applied.clone());
             status.applied.push(applied);
             status.summary.completed += 1;
+            if status.retry.as_ref().is_some_and(|retry| {
+                retry.source == source.identity && retry.projector == projector.name
+            }) {
+                status.retry = None;
+            }
         }
         status.cursor = Some(record.seq);
     }
@@ -307,5 +312,29 @@ mod tests {
         assert!(first.completed.iter().all(|applied| {
             applied.source.receipt_id == "r1" && applied.source.event_hash == "a".repeat(64)
         }));
+    }
+
+    #[test]
+    fn successful_redeclaration_clears_matching_retry() {
+        fn fails(_: &SourceFact<'_>) -> Result<ProjectionOutcome, ProjectionFailure> {
+            Err(ProjectionFailure::Failed {
+                code: ProjectionFailureCode::Retryable,
+            })
+        }
+
+        let record = record();
+        let mut projectors = default_projectors().to_vec();
+        projectors[2].declare = fails;
+        let partial = declare(std::slice::from_ref(&record), None, 1, &projectors);
+        assert_eq!(partial.retry.as_ref().unwrap().projector, "context");
+
+        let recovered = declare(
+            std::slice::from_ref(&record),
+            Some(partial),
+            1,
+            default_projectors(),
+        );
+        assert!(recovered.retry.is_none());
+        assert_eq!(recovered.completed.len(), default_projectors().len());
     }
 }

@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use hugit_cli::projection::{declare, default_projectors};
 use hugit_refstore::EventLog;
 use serde_json::{Value, json};
 
@@ -46,13 +45,7 @@ fn run(root: &Path, args: &[&str]) -> (i32, Value) {
 fn fleet_renders_only_source_verified_projection_facts() {
     let root = scratch();
     let log_path = root.join("log.json");
-    let log = log(&log_path);
-    let projection = declare(log.records(), None, 8, default_projectors());
-    std::fs::write(
-        root.join(hugit_cli::runtime_store::STATUS),
-        serde_json::to_vec(&json!({ "projection": projection })).unwrap(),
-    )
-    .unwrap();
+    log(&log_path);
 
     let log_arg = log_path.to_str().unwrap();
     let (code, value) = run(&root, &["fleet", "--log", log_arg]);
@@ -65,6 +58,15 @@ fn fleet_renders_only_source_verified_projection_facts() {
             .unwrap()
             .iter()
             .all(|applied| applied["source"]["receipt_id"] == "receipt-1")
+    );
+    let status: Value = serde_json::from_slice(
+        &std::fs::read(root.join(hugit_cli::runtime_store::STATUS)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(status["projection"]["summary"]["completed"], 3);
+    assert_eq!(
+        status["projection"]["completed"].as_array().unwrap().len(),
+        3
     );
 
     std::fs::write(&log_path, b"[]").unwrap();
