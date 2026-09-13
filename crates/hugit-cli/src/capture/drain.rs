@@ -579,7 +579,9 @@ fn remove_immutable_if_matches(dir: &Path, name: &str, expected: &[u8]) -> Resul
             ));
         }
         let current = unsafe { current.assume_init() };
-        if current.st_dev != opened.dev() || current.st_ino != opened.ino() {
+        if u64::try_from(current.st_dev).ok() != Some(opened.dev())
+            || current.st_ino != opened.ino()
+        {
             return Err("completed receipt marker was replaced; retained for recovery".into());
         }
         if unsafe { libc::unlinkat(dir_file.as_raw_fd(), name_c.as_ptr(), 0) } != 0 {
