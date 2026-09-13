@@ -166,7 +166,8 @@ pub fn run(input: NewIntent, store_path: &Path) -> Result<NewResult, PorcelainEr
     // membership it can never get (pr open would refuse it post-seal). A
     // hermetic repo with no log keeps the current create-anywhere behavior
     // (there is nothing to know the status against).
-    let default_log = crate::log_resolve::resolve_log(None);
+    let default_log = crate::log_resolve::resolve_log(None)
+        .map_err(|error| PorcelainError::new(error.kind(), error.message(), error.fix()))?;
     if default_log.exists()
         && let Ok(log) = crate::checks::load_event_log(&default_log)
     {

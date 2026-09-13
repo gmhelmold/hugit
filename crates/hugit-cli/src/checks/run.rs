@@ -1271,11 +1271,11 @@ fn now_unix_ms() -> u64 {
 /// than a lock-poison hang; the canonical `--log` append still serializes via its
 /// own lock, and `check --store`'s memo_key dedup keeps the log idempotent so a
 /// double-exec records at most ONE `check.recorded`.
-fn select_ac(args: &CheckRunArgs) -> FileAc {
+fn select_ac(args: &CheckRunArgs, log_path: &Path) -> FileAc {
     let store = args
         .ac
         .clone()
-        .unwrap_or_else(|| with_extension(&args.log_path(), "ac"));
+        .unwrap_or_else(|| with_extension(log_path, "ac"));
     FileAc::new(store)
 }
 
@@ -1567,8 +1567,9 @@ pub fn run(args: &CheckRunArgs) -> Result<Value, PorcelainError> {
     // explicit `log_not_found`/exit-2 error REGARDLESS of `--store` — a check
     // against a typo'd log is an error, never a silent dry green. (`--store` later
     // re-loads it under the lock; this is the early, store-independent guard.)
-    if !args.log_path().exists() {
-        return Err(PorcelainError::log_not_found(&args.log_path()));
+    let log_path = args.log_path()?;
+    if !log_path.exists() {
+        return Err(PorcelainError::log_not_found(&log_path));
     }
 
     // Exclude hugit's OWN wedge-state files from the tree axis (WH-CHECK
@@ -1580,10 +1581,10 @@ pub fn run(args: &CheckRunArgs) -> Result<Value, PorcelainError> {
     let ac_path = args
         .ac
         .clone()
-        .unwrap_or_else(|| with_extension(&args.log_path(), "ac"));
-    let excluded = state_file_exclusions(&[&args.log_path(), &ac_path]);
+        .unwrap_or_else(|| with_extension(&log_path, "ac"));
+    let excluded = state_file_exclusions(&[&log_path, &ac_path]);
     let files = snapshot_tree(&root, &def.glob_set, &excluded);
-    let ac = select_ac(args);
+    let ac = select_ac(args, &log_path);
     let runner = ProcessRunner {
         timeout: Duration::from_secs(args.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS)),
         root: Some(canonical_root),
@@ -1691,7 +1692,7 @@ pub fn run(args: &CheckRunArgs) -> Result<Value, PorcelainError> {
         // True when a built-in `--def` ignored a supplied `--cmd` (honest signal).
         "cmd_ignored": cmd_ignored,
         "recorded_kind": CHECK_RECORDED_KIND,
-        "log": args.log_path().display().to_string(),
+        "log": log_path.display().to_string(),
     }))
 }
 
@@ -1711,7 +1712,7 @@ pub fn run(args: &CheckRunArgs) -> Result<Value, PorcelainError> {
 /// idempotency dedup — WH-CHECK). Both are exit-0 successes; the difference is
 /// surfaced as `already_recorded` to the agent.
 fn record_on_log(args: &CheckRunArgs, payload: &serde_json::Value) -> Result<bool, PorcelainError> {
-    let path = args.log_path();
+    let path = args.log_path()?;
     let path = &path;
     // Hold the advisory exclusive lock across the whole read-modify-write so a
     // concurrent verb on the same --log gets `log_busy`, never a clobber. Holding

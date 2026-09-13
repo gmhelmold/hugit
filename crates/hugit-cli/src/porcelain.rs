@@ -174,6 +174,14 @@ impl PorcelainError {
         self.kind
     }
 
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn fix(&self) -> &str {
+        &self.fix
+    }
+
     /// An I/O fault reading/writing a `--log`/`--store` path (user/domain).
     pub fn io(action: &str, path: &std::path::Path, e: &std::io::Error) -> Self {
         PorcelainError::new(

@@ -240,3 +240,33 @@ fn push_attempt_ref_update_is_inert_not_malformed() {
         Some("1111111111111111111111111111111111111111")
     );
 }
+
+#[test]
+fn merge_and_rewrite_capture_ref_updates_are_inert_not_malformed() {
+    let mut log = EventLog::new();
+    log.append_for_test(
+        "ref.update",
+        vec!["orchestrator:hugit-hook".to_string()],
+        r#"{"ref":"refs/heads/main","target":"1111111111111111111111111111111111111111"}"#
+            .to_string(),
+        1,
+    );
+    log.append_for_test(
+        "ref.update",
+        vec!["orchestrator:hugit-hook".to_string()],
+        r#"{"target":"2222222222222222222222222222222222222222","parents":["1111111111111111111111111111111111111111"],"merge_kind":"fast_forward","fast_forward":true}"#.to_string(),
+        2,
+    );
+    log.append_for_test(
+        "ref.update",
+        vec!["orchestrator:hugit-hook".to_string()],
+        r#"{"rewrite":{"type":"amend","mappings":[{"from":"2222222222222222222222222222222222222222","to":"3333333333333333333333333333333333333333"}]}}"#.to_string(),
+        3,
+    );
+
+    let state = replay(&log).expect("capture observations must not make replay fail");
+    assert_eq!(
+        state.get("refs/heads/main"),
+        Some("1111111111111111111111111111111111111111")
+    );
+}

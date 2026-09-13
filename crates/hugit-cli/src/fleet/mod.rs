@@ -57,7 +57,7 @@ pub fn run(args: FleetArgs) -> ExitCode {
 
 /// Project the fleet state from the canonical log.
 fn project(args: &FleetArgs) -> Result<Value, PorcelainError> {
-    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+    let log_path = crate::log_resolve::resolve_log(args.log.clone())?;
     let log = load_event_log(&log_path)?;
     let projection = crate::projection::views::load(&log_path).map_err(|error| {
         PorcelainError::new(

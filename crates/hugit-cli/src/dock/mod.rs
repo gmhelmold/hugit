@@ -503,7 +503,13 @@ fn run_coin(coin: CoinArgs) -> ExitCode {
 }
 
 fn run_ls(ls: LsArgs) -> ExitCode {
-    let log = crate::log_resolve::resolve_log(ls.log);
+    let log = match crate::log_resolve::resolve_log(ls.log) {
+        Ok(log) => log,
+        Err(error) => {
+            println!("{}", error.to_json());
+            return error.exit_code();
+        }
+    };
     // R4 observation (cold-verify F8): `dock ls` is the enumeration horizon —
     // mark every vanished-gitdir dock as ghost ONCE before listing (a closing
     // gitdir never waits for a specific dock's read).
@@ -547,7 +553,13 @@ fn run_ls(ls: LsArgs) -> ExitCode {
 }
 
 fn run_show(show: ShowArgs) -> ExitCode {
-    let log = crate::log_resolve::resolve_log(show.log);
+    let log = match crate::log_resolve::resolve_log(show.log) {
+        Ok(log) => log,
+        Err(error) => {
+            println!("{}", error.to_json());
+            return error.exit_code();
+        }
+    };
     match find_dock_payload(&log, &show.id) {
         Ok(Some(p)) => {
             let gitdir = p

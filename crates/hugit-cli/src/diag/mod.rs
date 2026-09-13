@@ -131,7 +131,7 @@ pub fn run(args: DiagArgs) -> ExitCode {
 
 fn do_run(args: DiagArgs) -> Result<String, PorcelainError> {
     // Load + chain-verify the log (log_not_found / parse_log / chain_broken).
-    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+    let log_path = crate::log_resolve::resolve_log(args.log.clone())?;
     let log = load_event_log(&log_path)?;
 
     // ── Project the check.recorded rows for this def_digest ───────────────────

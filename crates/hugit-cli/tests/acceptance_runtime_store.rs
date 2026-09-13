@@ -198,6 +198,21 @@ fn corrupt_legacy_blocks_before_hook_or_runtime_mutation() {
 }
 
 #[test]
+fn read_paths_report_migration_blocked_instead_of_falling_back() {
+    let repo = scratch("corrupt-read");
+    git(&repo, &["init"]);
+    let legacy = repo.join(".hugit/log.json");
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    std::fs::write(&legacy, b"not json").unwrap();
+
+    for args in [["fleet"].as_slice(), ["campaign", "list"].as_slice()] {
+        let (code, value) = run(&repo, args);
+        assert_eq!(code, 2, "{args:?}: {value}");
+        assert_eq!(value["error"]["kind"], "migration_blocked", "{args:?}");
+    }
+}
+
+#[test]
 fn explicit_runtime_log_rejects_corrupt_legacy_before_generic_writer_lock_mkdir() {
     let repo = scratch("corrupt-explicit");
     git(&repo, &["init"]);

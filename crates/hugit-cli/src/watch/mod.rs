@@ -58,7 +58,7 @@ pub fn run(args: WatchArgs) -> ExitCode {
 
 /// Project the classified, redacted event stream from the canonical log.
 fn project(args: &WatchArgs) -> Result<Value, PorcelainError> {
-    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+    let log_path = crate::log_resolve::resolve_log(args.log.clone())?;
     let log = load_event_log(&log_path)?;
     let projection = crate::projection::views::load(&log_path).map_err(|error| {
         PorcelainError::new(

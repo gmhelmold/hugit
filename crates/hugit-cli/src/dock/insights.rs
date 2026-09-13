@@ -165,7 +165,13 @@ impl InsightDocument {
 
 /// Run `hugit dock insight` (F5) — the per-branch + residual projection.
 pub fn run_insight(args: InsightArgs) -> std::process::ExitCode {
-    let log = crate::log_resolve::resolve_log(args.log.clone());
+    let log = match crate::log_resolve::resolve_log(args.log.clone()) {
+        Ok(log) => log,
+        Err(error) => {
+            println!("{}", error.to_json());
+            return error.exit_code();
+        }
+    };
     match compute_insights(&log, args.branch.as_deref()) {
         Ok(doc) => {
             println!("{}", doc.to_json());
@@ -180,6 +186,6 @@ pub fn run_insight(args: InsightArgs) -> std::process::ExitCode {
 }
 
 /// The log path helper (used by the CLI wiring; mirrors `ls`).
-pub fn resolve_log(path: Option<PathBuf>) -> PathBuf {
+pub fn resolve_log(path: Option<PathBuf>) -> Result<PathBuf, crate::porcelain::PorcelainError> {
     crate::log_resolve::resolve_log(path)
 }

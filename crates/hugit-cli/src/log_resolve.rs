@@ -35,8 +35,8 @@ pub const LOG_FLAG_HELP: &str = "Path to the canonical JSON event log. Defaults 
 /// The single source of truth for the default: explicit flag → `$HUGIT_LOG` →
 /// runtime state. Every verb funnels its `Option<PathBuf>` through this so
 /// the default can never drift between verbs.
-pub fn resolve_log(explicit: Option<PathBuf>) -> PathBuf {
-    resolve_log_checked(explicit).unwrap_or_else(|_| PathBuf::from(DEFAULT_LOG_PATH))
+pub fn resolve_log(explicit: Option<PathBuf>) -> Result<PathBuf, PorcelainError> {
+    resolve_log_checked(explicit)
 }
 
 /// Checked resolver for mutation paths. It never returns legacy storage: valid
@@ -86,7 +86,7 @@ mod tests {
 
     #[test]
     fn explicit_flag_wins() {
-        let p = resolve_log(Some(PathBuf::from("/tmp/explicit.json")));
+        let p = resolve_log(Some(PathBuf::from("/tmp/explicit.json"))).unwrap();
         assert_eq!(p, PathBuf::from("/tmp/explicit.json"));
     }
 

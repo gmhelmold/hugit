@@ -795,8 +795,9 @@ pub(crate) fn do_run(args: &InitArgs) -> Result<serde_json::Value, PorcelainErro
     let runtime = crate::runtime_store::for_repo(&root)?;
     let log_path = runtime.canonical_log();
     let created = !log_path.exists();
+    let legacy_root = legacy_log_root(&root)?;
     let migration =
-        crate::runtime_store::migrate(&runtime, &crate::runtime_store::legacy_path(&root))?;
+        crate::runtime_store::migrate(&runtime, &crate::runtime_store::legacy_path(&legacy_root))?;
 
     // Install the silent git hooks (post-commit/checkout/push/merge) so the
     // LLM using git normally is captured into the log asynchronously. A
@@ -934,6 +935,50 @@ mod tests {
             value["migration"]["migration"]["legacy_prefix_sha256"],
             crate::runtime_store::sha256_hex(legacy_bytes)
         );
+    }
+
+    #[test]
+    fn init_from_linked_worktree_migrates_main_worktree_legacy_log() {
+        let root = scratch("linked-legacy");
+        git_init(&root).expect("git init");
+        for args in [
+            ["config", "user.name", "test"].as_slice(),
+            ["config", "user.email", "test@example.com"].as_slice(),
+            ["commit", "--allow-empty", "-m", "seed"].as_slice(),
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&root)
+                    .status()
+                    .expect("run git")
+                    .success()
+            );
+        }
+        let main_legacy = crate::runtime_store::legacy_path(&root);
+        std::fs::create_dir_all(main_legacy.parent().expect("legacy parent")).unwrap();
+        std::fs::write(&main_legacy, b"[]\n").unwrap();
+        let linked = root.with_file_name("hugit-init-linked-legacy");
+        let _ = std::fs::remove_dir_all(&linked);
+        assert!(
+            std::process::Command::new("git")
+                .args(["worktree", "add", "-b", "linked-legacy"])
+                .arg(&linked)
+                .current_dir(&root)
+                .status()
+                .expect("create linked worktree")
+                .success()
+        );
+        let linked_legacy = crate::runtime_store::legacy_path(&linked);
+        std::fs::create_dir_all(linked_legacy.parent().expect("linked legacy parent")).unwrap();
+        std::fs::write(&linked_legacy, b"not json").unwrap();
+
+        do_run(&InitArgs { dir: Some(linked) }).expect("linked init must use main legacy source");
+        assert_eq!(std::fs::read(&main_legacy).unwrap(), b"[]\n");
+        let runtime = crate::runtime_store::for_repo(&root).unwrap();
+        let records: Vec<serde_json::Value> =
+            serde_json::from_slice(&std::fs::read(runtime.canonical_log()).unwrap()).unwrap();
+        assert_eq!(records[0]["kind"], crate::runtime_store::LEGACY_PREFIX_KIND);
     }
 
     #[test]

@@ -70,7 +70,7 @@ pub fn run(args: ReviewArgs) -> ExitCode {
 
 /// Build the evidence store from the log and answer the question.
 fn project(args: &ReviewArgs) -> Result<Value, PorcelainError> {
-    let log_path = crate::log_resolve::resolve_log(args.log.clone());
+    let log_path = crate::log_resolve::resolve_log(args.log.clone())?;
     let log = load_event_log(&log_path)?;
     let want_intent = args.intent.as_deref().map(scrub);
 

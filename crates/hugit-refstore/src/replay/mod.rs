@@ -153,6 +153,8 @@ pub fn replay_unchecked(records: &[EventRecord]) -> Result<RefState, ReplayError
                 // object with additive old/new aliases. Both forms stay inert.
                 let inert_capture = v.get("checkout").is_some()
                     || v.get("attempt").and_then(serde_json::Value::as_bool) == Some(true)
+                    || v.get("merge_kind").is_some()
+                    || v.get("rewrite").is_some()
                     || v.get("reference_transaction").is_some()
                     || v.get("reference_transaction_pairing").is_some();
                 if inert_capture {
