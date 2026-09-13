@@ -579,9 +579,7 @@ fn remove_immutable_if_matches(dir: &Path, name: &str, expected: &[u8]) -> Resul
             ));
         }
         let current = unsafe { current.assume_init() };
-        if u64::try_from(current.st_dev).ok() != Some(opened.dev())
-            || current.st_ino != opened.ino()
-        {
+        if device_id(current.st_dev) != opened.dev() || current.st_ino != opened.ino() {
             return Err("completed receipt marker was replaced; retained for recovery".into());
         }
         if unsafe { libc::unlinkat(dir_file.as_raw_fd(), name_c.as_ptr(), 0) } != 0 {
@@ -599,6 +597,16 @@ fn remove_immutable_if_matches(dir: &Path, name: &str, expected: &[u8]) -> Resul
         let _ = (dir, name, expected);
         Err("safe completion marker removal is unavailable on this platform".into())
     }
+}
+
+#[cfg(target_os = "macos")]
+fn device_id(device: libc::dev_t) -> u64 {
+    device as u64
+}
+
+#[cfg(not(target_os = "macos"))]
+fn device_id(device: libc::dev_t) -> u64 {
+    device
 }
 
 fn write_immutable(dir: &Path, target: &Path, bytes: &[u8]) -> Result<(), String> {

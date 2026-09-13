@@ -169,7 +169,7 @@ impl ClaimedReceipt {
                 ));
             }
             let stat = unsafe { stat.assume_init() };
-            if u64::try_from(stat.st_dev).ok() != Some(self.dev) || stat.st_ino != self.ino {
+            if device_id(stat.st_dev) != self.dev || stat.st_ino != self.ino {
                 return Err("claimed receipt was replaced; retained for recovery".into());
             }
             if unsafe { libc::unlinkat(self.dir.as_raw_fd(), self.name.as_ptr(), 0) } != 0 {
@@ -188,6 +188,16 @@ impl ClaimedReceipt {
             Err("safe claimed receipt removal is unavailable on this platform".into())
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn device_id(device: libc::dev_t) -> u64 {
+    device as u64
+}
+
+#[cfg(not(target_os = "macos"))]
+fn device_id(device: libc::dev_t) -> u64 {
+    device
 }
 
 pub fn claim_receipt(path: &Path) -> Result<ClaimedReceipt, String> {
