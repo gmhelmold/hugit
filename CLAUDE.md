@@ -18,7 +18,9 @@ Intent capture, provenance, memoized local checks, review, and union landing
 inside an existing Git repository. No server, account, or CoreLink dependency
 in default path. Founded 2026-06-05.
 
-> **Current release mode (2026-09-14):** CLI-local v0.1.5 ships from `main`.
+> **Current release mode (2026-09-14):** CLI-local v0.1.5 is tagged, but its
+> cross-platform release is blocked by a Windows compile failure; no v0.1.5
+> GitHub release was published.
 > `hugit-serve`/remote forge, multi-tenant hosting, and runner execution are
 > separate or external products, not current CLI blockers. The older delivery
 > audit below preserves historical forge/serve context; do not treat it as the

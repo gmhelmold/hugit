@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(cli): correct Windows compilation for hook receipt device identifiers and
+  executable-bit setup.
+
 ## [0.1.5] - 2026-09-14
 
 - feat(evidence): add reproducible Linux CLI evidence packages with a frozen

@@ -656,6 +656,8 @@ fn set_hook_executable(path: &std::path::Path) -> Result<(), PorcelainError> {
         std::fs::set_permissions(path, permissions)
             .map_err(|e| PorcelainError::io("chmod hook", path, &e))?;
     }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
