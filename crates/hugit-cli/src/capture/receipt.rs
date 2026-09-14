@@ -190,14 +190,11 @@ impl ClaimedReceipt {
     }
 }
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(unix)]
+#[allow(clippy::unnecessary_cast)]
 fn device_id(device: libc::dev_t) -> u64 {
+    // dev_t width/sign varies across Unix targets.
     device as u64
-}
-
-#[cfg(not(any(target_os = "macos", windows)))]
-fn device_id(device: libc::dev_t) -> u64 {
-    device
 }
 
 pub fn claim_receipt(path: &Path) -> Result<ClaimedReceipt, String> {

@@ -599,14 +599,11 @@ fn remove_immutable_if_matches(dir: &Path, name: &str, expected: &[u8]) -> Resul
     }
 }
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(unix)]
+#[allow(clippy::unnecessary_cast)]
 fn device_id(device: libc::dev_t) -> u64 {
+    // dev_t width/sign varies across Unix targets.
     device as u64
-}
-
-#[cfg(not(any(target_os = "macos", windows)))]
-fn device_id(device: libc::dev_t) -> u64 {
-    device
 }
 
 fn write_immutable(dir: &Path, target: &Path, bytes: &[u8]) -> Result<(), String> {
