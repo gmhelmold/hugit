@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(evidence): reproducible reports now wait for exact asynchronous
+  post-commit capture, retry only structured canonical-log contention, and
+  retain every retry stream for independent verification.
+
+- fix(deps): update `rustls` to 0.23.45 and `rustls-webpki` to 0.103.15,
+  resolving RUSTSEC-2026-0285.
+
 - feat(cli): runtime state now lives in Git common-dir storage with legacy
   migration, durable receipt capture, source-linked local views, explicit
   foreign-hook adoption/rollback, and hook-first normal-Git onboarding.
