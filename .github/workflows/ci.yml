@@ -173,3 +173,5 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
       - name: check workspace on Windows
         run: cargo check --workspace --locked
+      - name: test atomic writes on Windows
+        run: cargo test -p hugit-cli pr::filelock::tests --locked

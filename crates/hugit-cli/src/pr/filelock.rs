@@ -44,7 +44,9 @@
 //!   hermetic file seam is local-disk by mandate (P2 is the live-infra seam), so
 //!   this is in scope.
 
-use std::fs::{File, OpenOptions};
+#[cfg(unix)]
+use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
