@@ -132,7 +132,7 @@ def add_command(bag, ident, stdout, exit_code=0, state=None, argv=None):
     meta = {
         "schema_version": "1.0", "id": ident, "argv": argv or list(command_prefixes[ident]), "cwd": ".",
         "env": {"GIT_AUTHOR_DATE": "2026-09-13T00:00:00Z", "LC_ALL": "C", "TZ": "UTC"}, "started_at": "2026-09-13T00:00:00Z",
-        "duration_ns": 1, "exit_code": exit_code,
+        "duration_ns": 1, "attempt_count": 1, "exit_code": exit_code,
         "stdout_path": f"data/commands/{ident}.stdout", "stderr_path": f"data/commands/{ident}.stderr",
     }
     if state:
@@ -375,6 +375,8 @@ def mutate_fixture(bag, mutation):
         path = bag / "data/commands/check-cold.json"; value = json.loads(path.read_text()); value["stdout_path"] = "data/commands/check-warm.stdout"; write_json(path, value)
     elif mutation == "command_argv":
         path = bag / "data/commands/setup.json"; value = json.loads(path.read_text()); value["argv"] = ["/usr/bin/false"]; write_json(path, value)
+    elif mutation == "command_attempt_count":
+        path = bag / "data/commands/setup.json"; value = json.loads(path.read_text()); value["attempt_count"] = 0; write_json(path, value)
     elif mutation == "claim_contract":
         path = bag / "data/claims.json"; value = json.loads(path.read_text()); value["claims"]["C-SETUP-REPO"]["oracle"] = "invented"; write_json(path, value)
     elif mutation == "repo_corruption":
@@ -551,6 +553,7 @@ with tempfile.TemporaryDirectory(prefix="hugit-evidence-suite-") as raw:
         ("command_env_secret", "command_env", "schemas"),
         ("command_basename_mismatch", "command_basename", "schemas"),
         ("command_argv_forgery", "command_argv", "schemas"),
+        ("command_attempt_count", "command_attempt_count", "schemas"),
         ("claim_contract_relabel", "claim_contract", "schemas"),
         ("git_object_corruption", "repo_corruption", "git_fsck"),
         ("unsafe_tar_traversal", "unsafe_tar", "repository_archive"),

@@ -118,14 +118,28 @@ if (root/"repacked-a.tar").read_bytes() != (root/"repacked-b.tar").read_bytes():
 PY
 
 python3 - "$ROOT/scripts/evidence_report.py" "$TMP" <<'PY'
-import importlib.util, json, pathlib, sys, threading, time
+import importlib.util, json, pathlib, subprocess, sys, threading, time
 spec=importlib.util.spec_from_file_location("evidence_report",sys.argv[1]); module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
 root=pathlib.Path(sys.argv[2]); runtime=root/"quiescence"; receipts=runtime/"receipts"; receipts.mkdir(parents=True)
-log=runtime/"event-log.json"; oid="a"*40; log.write_text(json.dumps([{"kind":"ref.update","payload":{"target":oid}}]))
+log=runtime/"event-log.json"; oid="a"*40; log.write_text(json.dumps([{"kind":"ref.update","payload":{"target":oid}}])); marker=receipts/"published"; marker.write_text("pending")
 def late_worker():
-    time.sleep(0.2); marker=receipts/"late"; marker.write_text("pending"); time.sleep(0.3); marker.unlink()
+    time.sleep(1.2); marker.unlink()
 threading.Thread(target=late_worker).start(); started=time.monotonic(); module.wait_capture(log,oid,timeout=3.0); elapsed=time.monotonic()-started
-if elapsed < 1.4: raise SystemExit(f"quiescence window returned too early: {elapsed}")
+if elapsed < 1.1: raise SystemExit(f"capture returned before published receipt drained: {elapsed}")
+
+calls=[]
+def fake_run(*args,**kwargs):
+    calls.append(args); busy=json.dumps({"error":{"kind":"log_busy"}}).encode()
+    return subprocess.CompletedProcess(args[0],2,busy,b"") if len(calls)==1 else subprocess.CompletedProcess(args[0],0,b"{}",b"")
+original=module.subprocess.run; module.subprocess.run=fake_run
+try:
+    bag=root/"retry-bag"; (bag/"data/commands").mkdir(parents=True); driver=module.Driver(bag,root,pathlib.Path("hugit"),{})
+    result=driver.hugit("retry", "intent", "new")
+finally:
+    module.subprocess.run=original
+if result.returncode != 0 or len(calls) != 2: raise SystemExit("structured log_busy was not retried exactly once")
+meta=json.loads((bag/"data/commands/retry.json").read_text())
+if meta.get("attempt_count") != 2: raise SystemExit("retry attempt count missing from command evidence")
 PY
 
 # Mutation probe: break one semantic oracle result, refresh BagIt manifests,

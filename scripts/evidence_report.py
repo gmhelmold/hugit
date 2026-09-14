@@ -148,7 +148,13 @@ class Driver:
         self.commands: dict[str, dict] = {}
         self.order = 0
 
-    def run(self, ident: str, argv: list[str], cwd: pathlib.Path | None = None) -> subprocess.CompletedProcess[bytes]:
+    def run(
+        self,
+        ident: str,
+        argv: list[str],
+        cwd: pathlib.Path | None = None,
+        retry_log_busy: bool = False,
+    ) -> subprocess.CompletedProcess[bytes]:
         if ident in self.commands:
             raise RuntimeError(f"duplicate command id: {ident}")
         cwd = cwd or self.repo
@@ -156,7 +162,17 @@ class Driver:
         base = self.bag / "data" / "commands" / ident
         started = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
         before = time.monotonic_ns()
-        result = subprocess.run(argv, cwd=cwd, env=self.env, capture_output=True, check=False)
+        attempt_count = 0
+        while True:
+            attempt_count += 1
+            result = subprocess.run(argv, cwd=cwd, env=self.env, capture_output=True, check=False)
+            try:
+                error_kind = json.loads(result.stdout).get("error", {}).get("kind")
+            except (AttributeError, json.JSONDecodeError, UnicodeDecodeError):
+                error_kind = None
+            if not retry_log_busy or result.returncode != 2 or error_kind != "log_busy" or attempt_count >= 20:
+                break
+            time.sleep(0.1)
         duration = time.monotonic_ns() - before
         stdout_path = base.with_suffix(".stdout")
         stderr_path = base.with_suffix(".stderr")
@@ -174,6 +190,7 @@ class Driver:
             "env": {key: self.env[key] for key in ENV_KEYS if key in self.env},
             "started_at": started,
             "duration_ns": duration,
+            "attempt_count": attempt_count,
             "exit_code": result.returncode,
             "stdout_path": f"data/commands/{ident}.stdout",
             "stderr_path": f"data/commands/{ident}.stderr",
@@ -183,7 +200,7 @@ class Driver:
         return result
 
     def hugit(self, ident: str, *args: str) -> subprocess.CompletedProcess[bytes]:
-        return self.run(ident, [str(self.binary), *args])
+        return self.run(ident, [str(self.binary), *args], retry_log_busy=True)
 
     def git(self, ident: str, *args: str, cwd: pathlib.Path | None = None) -> subprocess.CompletedProcess[bytes]:
         return self.run(ident, ["git", *args], cwd=cwd)
@@ -208,8 +225,9 @@ def load_log(log: pathlib.Path) -> list[dict]:
 
 
 def wait_capture(log: pathlib.Path, oid: str, timeout: float = 20.0) -> list[dict]:
+    # Git waits for hooks to publish receipts before returning. Only their
+    # detached drain workers remain; later mutations retry exact `log_busy`.
     deadline = time.monotonic() + timeout
-    stable_since: float | None = None
     while time.monotonic() < deadline:
         try:
             records = load_log(log)
@@ -218,14 +236,9 @@ def wait_capture(log: pathlib.Path, oid: str, timeout: float = 20.0) -> list[dic
             receipts = log.parent / "receipts"
             pending = receipts.exists() and any(receipts.iterdir())
             if found and not lock.exists() and not pending:
-                if stable_since is None:
-                    stable_since = time.monotonic()
-                elif time.monotonic() - stable_since >= 1.0:
-                    return records
-            else:
-                stable_since = None
+                return records
         except (OSError, ValueError, json.JSONDecodeError):
-            stable_since = None
+            pass
         time.sleep(0.05)
     raise RuntimeError(f"capture did not quiesce for {oid}")
 

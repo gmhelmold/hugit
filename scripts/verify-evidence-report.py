@@ -312,6 +312,9 @@ def validate_command(command, label, payload_names):
     require(not secret_env, f"{label}.env has secret-bearing keys: {sorted(secret_env)}")
     require_type(command.get("duration_ns"), int, f"{label}.duration_ns")
     require(command["duration_ns"] >= 0, f"{label}.duration_ns must be nonnegative")
+    if "attempt_count" in command:
+        require_type(command["attempt_count"], int, f"{label}.attempt_count")
+        require(command["attempt_count"] >= 1, f"{label}.attempt_count must be positive")
     require_type(command.get("exit_code"), int, f"{label}.exit_code")
     if command["cwd"] != ".":
         safe_path(command["cwd"])
