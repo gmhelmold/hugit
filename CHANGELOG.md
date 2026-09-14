@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-09-14
+
 - fix(evidence): reproducible reports now wait for exact asynchronous
   post-commit capture, retry only structured canonical-log contention, and
   retain every retry stream for independent verification.
