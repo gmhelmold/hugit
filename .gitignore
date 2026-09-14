@@ -21,6 +21,8 @@ ingest.env
 .DS_Store
 .idea/
 .vscode/
+__pycache__/
+*.pyc
 
 # Ephemeral cross-TL courier correspondence (kept on disk, not tracked)
 docs/handoff/

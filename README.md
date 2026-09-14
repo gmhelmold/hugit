@@ -2,260 +2,166 @@
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-> **hug it** — the git-compatible, LLM-native forge.
+> Git-local provenance and landing records for humans and LLM agents.
 
----
+Hugit observes normal Git work through hooks, records intent and review context
+in a local integrity-checked log, memoizes local checks by content, and exports
+portable evidence. No server, account, or CoreLink dependency exists in default
+path.
 
-## The problem it solves
+## Quickstart
 
-**Your agent fleet ships branches that are green alone and red together.**
-hugit lands them on a `main` that is always green and re-runs zero CI it has
-already paid for — on your existing GitHub repos, migrating nothing.
-
----
-
-## First: try it now (no server needed)
-
-Download the **hugit** binary for your platform from
-[GitHub Releases](https://github.com/gmhelmold/hugit/releases) (see
-[docs/installation.md](docs/installation.md) for the exact commands per OS),
-or build it:
+Download release from [GitHub Releases](https://github.com/gmhelmold/hugit/releases)
+or build locally:
 
 ```sh
 git clone https://github.com/gmhelmold/hugit.git
 cd hugit
 cargo build --release
-./target/release/hugit symbol --file crates/hugit-symbols/src/lib.rs
 ```
 
-`hugit symbol` works standalone against any source file. You get a structured
-symbol outline — functions, types, impls — extracted by tree-sitter. Supported
-languages: TypeScript, JavaScript, Python, Go, Java, C, C++, Ruby.
-
-**Quickstart, new repositories:** run `hugit setup` once, then use normal Git:
+Configure future repositories once:
 
 ```sh
 hugit setup
 git init my-project
 cd my-project
-git add . && git commit -m "initial commit"
-git checkout -b feature/example
-git push -u origin feature/example
+git add .
+git commit -m "initial commit"
 hugit health
 ```
 
-`setup` installs a Git template for future repositories. `commit`, `checkout`,
-and `push` remain Git commands; hugit observes locally available facts without
-changing their outcome. `health` labels facts as **observed locally**, **attempted push**, **explicit declaration**, or **unsupported**; it reports partial coverage instead of inventing remote confirmation.
-
-**Existing repository:** run `hugit attach`, then normal Git (`commit`,
-`checkout`, `push`), then `hugit health`. Foreign hooks stay preserved; health
-reports partial coverage rather than replacing or guessing about them.
-
-Before attaching a repository with existing tooling, inspect exact hook
-ownership without writes:
+Attach existing repository without replacing foreign hooks:
 
 ```sh
+cd /path/to/repository
 hugit attach --preview
-```
-
----
-
-## hugit is a git-local CLI
-
-`hugit` is designed to work **where git works** — in a repository, on a laptop,
-no server, no account. The runtime is local-only:
-
-- **`hugit setup`** (one-time) configures Git's global `init.templateDir` so every
-  future `git init` ships hugit hooks. Runtime state lives at
-  `<git-common-dir>/hugit/event-log.json`, outside tracked worktree state and
-  shared by linked worktrees. For an existing repo, run `hugit attach`; it
-  installs only missing hugit-owned hooks.
-- Every verb reads/writes the **canonical local log**
-  (`<git-common-dir>/hugit/event-log.json`) with a
-  verifiable hash chain — `why`, `impact`, `intent`, `pr`, `verdict`, `undo`,
-  `policy`, `ledger`, `watch`, `symbol`, `ctx`, `review`, `export`, and more all
-  work with no service and no account.
-- **`hugit check`** memoizes locally (file-backed cache): the same check on the
-  same tree+def+toolchain is a cache HIT with zero re-execution.
-- **CI / compute execution is not rebuilt here** — hugit records the *demand*
-  and leaves execution to whatever runs your checks.
-- `ws` and `dispatch` are permanently discontinued. Their tokens remain reserved
-  only to prevent accidental CLI reuse. `ctx snap` is absent; use the canonical
-  log, `hugit note`, `hugit ctx usage`, and `hugit export` instead.
-
----
-
-## Where hugit is today
-
-Honest status — everything here is the CLI, local, testable now:
-
-| Capability | Status | What you get today |
-|---|---|---|
-| `hugit setup` — boot ceremony | **LIVE** | `git init` in any fresh repo auto-ships the hooks; first git op lazy-boots the log |
-| `hugit symbol` — symbol outline | **LIVE** | `hugit symbol --file <path>` against any Rust/TypeScript/TSX/JavaScript/Python/Go/Java/C/C++/Ruby file |
-| `hugit export` — exit guarantee | **LIVE** | full git + JSON snapshot; requires `--log <path> --out <dir>`; zero dependencies |
-| `hugit check` / `hugit verdict` | **LIVE** | real policy-engine EXECUTE paths, memoized; `hugit policy test` runs the house gate set |
-| `hugit campaign / intent / pr / land` | **LIVE** | the agent-fleet loop: milestones → tasks → PRs → union landing |
-| `hugit dock` (worktree binding) | **LIVE** | cost per worktree; byte-identity + acceptance verified landing |
-| `hugit verdict approve` / `reject` | **LIVE** | single-lens human decision over the canonical verdict record |
-| `hugit undo` | **LIVE** | event-sourced compensating undo; never rewrites history |
-| `hugit note` | **LIVE** | appends a record to the canonical log |
-| Existing repo attachment | **LIVE** | run `hugit attach`; missing hooks install, foreign hooks stay untouched |
-| `hugit fleet` / `hugit ledger` / `hugit watch` | **LIVE** | real log-backed commands |
-| `hugit diag` | **LIVE** | log-backed bisect |
-| `hugit policy edit` | **LIVE** | append-only policy changes over the house baseline |
-| Union-tested landing queue | **LIVE (local)** | the union engine runs locally over the queue — green set lands, red pair bisects |
-| Memoized checks (CI dedup) | **LIVE (local)** | file-backed memo cache: same tree+def+toolchain = HIT, zero re-execution |
-| GitHub App mirror | **CODE DONE / EXTERNAL** | real push+verify lane exists; App registration and test-repo activation are outside the local CLI |
-| Multi-tenant hosting | **OUT OF SCOPE** | hugit is a CLI in your repo; hosting is your git remote |
-
----
-
-## What hugit does (once fully live)
-
-For the **fleet operator** — an engineer or orchestrator running 10–50 agents
-in parallel — today's pain is: every agent ships a branch that passes its own
-CI, and they collide on merge. You spend evenings reconciling work that
-machines produced in minutes.
-
-hugit's answer is three properties working together:
-
-1. **Union-tested landing queue.** Branches enter a queue and are tested as a
-   batch *before* touching `main`. If the batch is green, they all land
-   atomically. If it's red, a log₂-depth bisect over memoized checks finds the
-   minimal failing pair in seconds; the rest of the batch lands anyway.
-   `main` is always green — by construction, not by convention.
-
-2. **Memoized checks.** A CI check is a pure function of
-   `(tree-hash, check-def, toolchain)`. The second time that exact tree is
-   checked — regardless of which branch or which agent produced it — the result
-   is a cache lookup. Zero re-execution. The structural economics: GitHub bills
-   the waste; hugit deletes it.
-
-3. **Intent + context versioning.** Every commit carries the charter that
-    produced it, the model and cost that executed it, and the claims that
-    bounded its blast radius. `git log` shows you the diff; `hugit ledger` shows
-    you the intent. Same store, two altitudes, always consistent.
-
----
-
-## Safety and provenance (built, under-sold)
-
-These are real today, not roadmap:
-
-- **Event-sourced refs** — every ref mutation is an append-only log event.
-  `hugit undo --seq <N>` walks it backwards with a compensating event. Refs
-  cannot be force-pushed to oblivion. Data loss is structurally unexpressible.
-- **Claim fences** — a workspace materializes only the paths the intent
-  declared. Writing outside the claim is physically impossible (the file is not
-  present), not merely forbidden by policy.
-- **Model-level attestation** — every commit records which model authored it,
-  under whose instruction, at what cost. SLSA-class provenance including the
-  model layer; no forge today can express this.
-- **Policy as code** — `hugit policy edit` (append-only) + `hugit policy test`
-  (local = forge). The event log is the gate-set store; no external DB.
-- **Adversarial hardened** — 13 rounds of adversarial security review on the
-  integrity spine (Ed25519/SHA-256 crypto). Redaction at the read boundary.
-  Fail-closed boot.
-- jj capture is explicit through the MCP `capture` tool. Automatic observation
-  after `jj git export` is not a v1 feature. `hugit capture` is internal,
-  hook-only; normal onboarding never invokes it. Intent is one explicit
-  declaration or a separately contracted trusted adapter.
-
----
-
-## The exit guarantee
-
-```sh
-hugit export --log <git-common-dir>/hugit/event-log.json --out <dir>
-```
-
-Produces a full git bundle + JSON proof of every intent, verdict, and claim.
-Restore to a bare git repo on any hosting provider. No proprietary lock-in —
-the exit proof is also the disaster-recovery plan.
-
----
-
-## Bring your existing repo
-
-```sh
-# hugit attaches to an existing local repo; Git remains the remote/host
-cd /path/to/your/repo
 hugit attach
 hugit health
 ```
 
-Your GitHub repo stays where it is. hugit attaches without migration. The
-compat ladder: git wire protocol → landing layer riding on GitHub → bounded
-bidirectional mirror → authoritative forge. You climb it at your pace; a
-broken bridge kills trust, so every rung is reversible.
+Normal `git commit`, checkout, merge, rewrite, ref transaction, and push attempt
+invoke installed hooks. Hugit writes receipts under
+`<git-common-dir>/hugit/receipts/`, drains them into
+`<git-common-dir>/hugit/event-log.json`, then exposes same state through read
+commands.
 
----
+## Observed Journey
 
-## How it works / Why it's cheap
+Hugit Reproducible Evidence Report exercises selected executable against synthetic
+local Git repository:
 
-hugit is git + a small local log. The claimed economics come from structure,
-not a paid substrate:
-
-- The **canonical log** (`<git-common-dir>/hugit/event-log.json`) is a
-  hash-chained, append-only local record, outside tracked worktree state and
-  shared by linked worktrees. A push attempt is not remote confirmation.
-- The **memo cache** (file-backed) makes a repeated check a lookup: the same
-  tree+def+toolchain is never executed twice.
-- The **union landing engine** tests queued PRs as a batch locally; a red pair
-  is bisected in log-depth over cached results.
-
-hugit never charges for your compute. It runs where git runs, on your machine
-or your CI, and deletes the waste git alone cannot see — the second run of the
-same work.
-
----
-
-## Quick CLI reference
-
-```sh
-# Inspect any file's symbol structure (works right now, no server)
-hugit symbol --file src/main.rs
-
-# Export the repo as a portable proof bundle. Get canonical log path from health.
-hugit health
-hugit export --log <git-common-dir>/hugit/event-log.json --out <dir>
-
-# Show the local intent log (`hugit log` is not a verb)
-hugit ledger --log <git-common-dir>/hugit/event-log.json
-
-# Run local policy check (forge-identical)
-hugit policy test
-
-# Undo the last event-sourced operation (requires --seq <N>)
-hugit undo --seq <N>
+```text
+git commit
+    |
+post-commit hook
+    |
+receipt -> hash-chained ref.update
+    |
+intent + explicit PR binding
+    |
+memoized check + supplied verdict/usage
+    |
+local PR envelope + ledger/watch/export
 ```
 
-See `hugit --help` and [`docs/product/command-catalog.md`](docs/product/command-catalog.md)
-for the full verb surface.
+Independent verifier reopens retained repository, runs stock `git fsck`, checks
+event chain, recomputes 14 selected semantic oracles, validates two refusal
+records and one declared not-applicable boundary, validates export, and checks
+BagIt SHA-256 inventory. Exit code alone cannot pass semantic claim. Package
+retains exact executable bytes/hash but does not prove source-to-binary build
+provenance or cryptographic execution causality.
 
----
+```sh
+./scripts/benchmark-feature-ledger.sh --run-id local-example
+python3 scripts/verify-evidence-report.py /path/printed/by/runner
+```
 
-## Founding documents
+Current journey-v1 report selects 17 claims: 14 semantic observations, 2
+expected command refusals, and 1 discontinued runner boundary marked
+`not_applicable`. This is not “17/17 product completeness” and not performance
+benchmark. Method and reference run:
+[docs/benchmark-feature-ledger.md](docs/benchmark-feature-ledger.md).
 
-- [`docs/whitepaper/hugit-v1.md`](docs/whitepaper/hugit-v1.md) — full design:
-  thesis, object model, algorithms, architecture, economics, risks, phased route.
-- [`docs/product/product.md`](docs/product/product.md) — ICP, positioning,
-  pricing posture.
-- [`docs/adr/`](docs/adr/) — architecture decision records (context envelope,
-  identity model).
+## Capabilities
 
----
+| Surface | Current local behavior |
+|---|---|
+| `setup`, `attach`, `detach`, `health` | install/adopt hooks and inspect local capture state |
+| `capture` | internal hook receipt producer/drainer; direct CLI input remains caller supplied |
+| `campaign`, `intent`, `pr`, `queue` | record and project local lifecycle |
+| `check` | execute local subprocess on memo miss; reuse file AC result on exact key hit |
+| `verdict` | record caller-supplied lens decision; no model call |
+| `ctx usage` | record caller-supplied counters; no provider authentication |
+| `land queue` | exercise local union/bisect simulator; no repository-tree integration |
+| `why`, `ledger`, `fleet`, `watch`, `review` | integrity-check and project local records |
+| `symbol` | tree-sitter outline for local or committed source |
+| `dock` | bind and reconcile local worktree records |
+| `export` | write Git plus JSON exit artifact from exportable canonical corpus |
 
-## Gate
+Full source-derived register, per-mode status, implementation paths, and required
+evidence live in [docs/feature-ledger.md](docs/feature-ledger.md).
 
-`main` is gated by `cargo fmt --check` + `cargo clippy --workspace
---all-targets --locked -D warnings` + `cargo test --workspace --locked` +
-`cargo deny`. CI runs on GitHub-hosted ubuntu. Docs-only pushes skip CI.
+## Provenance Boundaries
 
----
+- Hook-created commit target comes from Git. Direct CLI/MCP `capture` accepts
+  caller text and does not prove object reachability.
+- Commit gains intent/model/usage/verdict context only through explicit PR
+  binding. Unbound commit stays unlabelled.
+- Usage counters and verdicts are submitted assertions. Hugit preserves and may
+  price them against frozen local card; it does not authenticate provider source
+  or call review model.
+- Canonical log uses unkeyed hash chain. It detects partial edits, insertion,
+  deletion, and reorder; writer with full file access can rewrite whole chain.
+- Pre-push hook records attempt, not remote acceptance.
+- `land queue` runner currently always succeeds; red pairs come from
+  `conflicts-with:` fixture strings. It proves simulator mechanics only.
+- `ws`, top-level `dispatch`, remote AC, identity, tenancy, forge/hosting,
+  mirror deployment, runner execution, and external runner attestation are
+  discontinued current-product scope.
+
+## Local Storage
+
+- Canonical log: `<git-common-dir>/hugit/event-log.json`
+- Capture recovery: `<git-common-dir>/hugit/receipts/`
+- File AC: explicit `--ac` path or adjacent local store
+- Intent sidecar: explicit `--store` path
+
+Linked worktrees share Git common-dir runtime. Tracked worktree does not contain
+canonical log by default.
+
+## Symbol Outline
+
+```sh
+hugit symbol --file src/main.rs
+hugit symbol --ref HEAD --path src/main.rs --git-dir .
+```
+
+Supported languages: Rust, TypeScript, TSX, JavaScript, Python, Go, Java, C,
+C++, and Ruby.
+
+## Export
+
+```sh
+hugit export \
+  --log .git/hugit/event-log.json \
+  --out /tmp/hugit-export
+```
+
+Export verifies local chain first and writes Git/JSON artifact plus redaction
+manifest. Some canonical events containing sensitive receipt/fingerprint fields
+are intentionally refused; evidence report therefore tests export using separate
+clean CLI-created corpus and states that limitation.
+
+## Documentation
+
+- [Installation](docs/installation.md)
+- [Feature ledger](docs/feature-ledger.md)
+- [Evidence report method](docs/benchmark-feature-ledger.md)
+- [Evidence research](docs/research/2026-09-13-professional-evidence-report.md)
+- [Product brief](docs/product/product.md)
+- [Whitepaper](docs/whitepaper/hugit-v1.md)
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE).
+[Apache-2.0](LICENSE)
