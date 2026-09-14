@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-09-14
+
+- feat(evidence): add reproducible Linux CLI evidence packages with a frozen
+  17-claim taxonomy, BagIt manifests, semantic verification, mutation controls,
+  and independent fresh-host verification. Reports explicitly leave
+  source-to-binary binding and cryptographic execution causality unestablished.
+
 - fix(evidence): reproducible reports now wait for exact asynchronous
   post-commit capture, retry only structured canonical-log contention, and
   retain every retry stream for independent verification.
