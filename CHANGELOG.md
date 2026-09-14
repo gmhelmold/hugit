@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-09-14
+
 - fix(cli): skip unsupported Windows parent-directory fsync after atomic writes;
   retain temp-file sync and same-directory atomic rename. Windows CI now runs
   atomic-write regression tests.
