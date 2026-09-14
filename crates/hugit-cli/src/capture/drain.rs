@@ -599,12 +599,12 @@ fn remove_immutable_if_matches(dir: &Path, name: &str, expected: &[u8]) -> Resul
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn device_id(device: libc::dev_t) -> u64 {
     device as u64
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn device_id(device: libc::dev_t) -> u64 {
     device
 }
