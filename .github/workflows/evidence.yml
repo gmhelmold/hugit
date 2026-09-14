@@ -1,0 +1,133 @@
+name: Reproducible Evidence
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: evidence-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  produce:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: "1.96.0"
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          prefix-key: "v1-evidence"
+
+      - name: Build selected executable
+        run: cargo build -p hugit-cli --release --locked
+
+      - name: Prove runner and verifier teeth
+        run: |
+          scripts/test-evidence-report.sh
+          scripts/test-verify-evidence-report.sh
+
+      - name: Produce evidence package
+        run: |
+          HUGIT_BIN="$GITHUB_WORKSPACE/target/release/hugit" \
+          HUGIT_EVIDENCE_DIR="$RUNNER_TEMP/hugit-evidence" \
+            scripts/benchmark-feature-ledger.sh --run-id "github-${GITHUB_SHA}"
+          scripts/verify-evidence-report.py "$RUNNER_TEMP/hugit-evidence" \
+            | tee "$RUNNER_TEMP/producer-verification.json"
+          (cd "$RUNNER_TEMP" && sha256sum hugit-evidence.tar \
+            > hugit-evidence.tar.sha256)
+
+      - name: Assert producer outputs exist
+        run: |
+          require_nonempty() {
+            if ! test -s "$1"; then
+              printf 'missing or empty required evidence artifact: %s\n' "$1" >&2
+              exit 1
+            fi
+          }
+          require_nonempty "$RUNNER_TEMP/hugit-evidence/data/report.json"
+          require_nonempty "$RUNNER_TEMP/hugit-evidence/data/repository.tar"
+          require_nonempty "$RUNNER_TEMP/hugit-evidence/data/export.tar"
+          require_nonempty "$RUNNER_TEMP/hugit-evidence/data/hugit"
+          require_nonempty "$RUNNER_TEMP/hugit-evidence.tar"
+          require_nonempty "$RUNNER_TEMP/hugit-evidence.tar.sha256"
+          if ! test -x "$RUNNER_TEMP/hugit-evidence/data/hugit"; then
+            printf 'retained evidence executable is not executable: %s\n' \
+              "$RUNNER_TEMP/hugit-evidence/data/hugit" >&2
+            exit 1
+          fi
+          python3 - "$RUNNER_TEMP/producer-verification.json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          result = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          if result.get("overall_status") != "valid":
+              raise SystemExit("producer verification did not report valid")
+          PY
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: hugit-evidence-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/hugit-evidence
+            ${{ runner.temp }}/hugit-evidence.tar
+            ${{ runner.temp }}/hugit-evidence.tar.sha256
+            ${{ runner.temp }}/producer-verification.json
+          if-no-files-found: error
+          retention-days: 90
+
+  verify-on-fresh-host:
+    needs: produce
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: hugit-evidence-${{ github.sha }}
+          path: ${{ runner.temp }}/download
+
+      - name: Verify downloaded package
+        run: |
+          (cd "$RUNNER_TEMP/download" && sha256sum -c hugit-evidence.tar.sha256)
+          scripts/verify-evidence-report.py "$RUNNER_TEMP/download/hugit-evidence.tar" \
+            | tee "$RUNNER_TEMP/independent-verification.json"
+          python3 - "$RUNNER_TEMP/independent-verification.json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          result = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          if result.get("overall_status") != "valid":
+              raise SystemExit("fresh-host verification did not report valid")
+          expected = {
+              "conformant": 14,
+              "expected_refusal": 2,
+              "not_applicable": 1,
+              "nonconformant": 0,
+              "incomplete": 0,
+              "simulator": 0,
+              "unsupported": 0,
+          }
+          if result.get("taxonomy_counts") != expected:
+              raise SystemExit("fresh-host taxonomy differs from journey-v1 contract")
+          PY
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: hugit-evidence-verification-${{ github.sha }}
+          path: ${{ runner.temp }}/independent-verification.json
+          if-no-files-found: error
+          retention-days: 90
