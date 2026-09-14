@@ -44,7 +44,9 @@
 //!   hermetic file seam is local-disk by mandate (P2 is the live-infra seam), so
 //!   this is in scope.
 
-use std::fs::{File, OpenOptions};
+#[cfg(unix)]
+use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -283,15 +285,26 @@ pub(crate) fn atomic_write_unprepared(target: &Path, bytes: &[u8]) -> Result<(),
             source: e.to_string(),
         }
     })?;
-    // Directory fsync makes rename durable across power loss, not merely atomic
-    // while this process remains alive.
+    sync_parent_dir(dir)?;
+    Ok(())
+}
+
+/// Persist rename metadata where platform permits opening and syncing directories.
+/// Windows rejects `sync_all` on directory handles; file fsync plus atomic rename
+/// still provides the strongest portable write guarantee there.
+#[cfg(unix)]
+fn sync_parent_dir(dir: &Path) -> Result<(), LockError> {
     File::open(dir)
         .and_then(|dir| dir.sync_all())
         .map_err(|e| LockError::Io {
             action: "fsync parent directory",
             path: dir.to_path_buf(),
             source: e.to_string(),
-        })?;
+        })
+}
+
+#[cfg(not(unix))]
+fn sync_parent_dir(_dir: &Path) -> Result<(), LockError> {
     Ok(())
 }
 

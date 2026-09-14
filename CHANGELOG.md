@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(cli): skip unsupported Windows parent-directory fsync after atomic writes;
+  retain temp-file sync and same-directory atomic rename. Windows CI now runs
+  atomic-write regression tests.
+
 ## [0.1.6] - 2026-09-14
 
 - fix(cli): correct Windows compilation for hook receipt device identifiers and
