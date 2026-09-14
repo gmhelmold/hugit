@@ -117,6 +117,17 @@ module.safe_repository_tar(extracted,root/"repacked-b.tar")
 if (root/"repacked-a.tar").read_bytes() != (root/"repacked-b.tar").read_bytes(): raise SystemExit("deterministic packaging failed")
 PY
 
+python3 - "$ROOT/scripts/evidence_report.py" "$TMP" <<'PY'
+import importlib.util, json, pathlib, sys, threading, time
+spec=importlib.util.spec_from_file_location("evidence_report",sys.argv[1]); module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+root=pathlib.Path(sys.argv[2]); runtime=root/"quiescence"; receipts=runtime/"receipts"; receipts.mkdir(parents=True)
+log=runtime/"event-log.json"; oid="a"*40; log.write_text(json.dumps([{"kind":"ref.update","payload":{"target":oid}}]))
+def late_worker():
+    time.sleep(0.2); marker=receipts/"late"; marker.write_text("pending"); time.sleep(0.3); marker.unlink()
+threading.Thread(target=late_worker).start(); started=time.monotonic(); module.wait_capture(log,oid,timeout=3.0); elapsed=time.monotonic()-started
+if elapsed < 1.4: raise SystemExit(f"quiescence window returned too early: {elapsed}")
+PY
+
 # Mutation probe: break one semantic oracle result, refresh BagIt manifests,
 # prove verifier rejects semantic closure, restore, then prove green again.
 cp "$BAG1/data/report.json" "$TMP/report.json"

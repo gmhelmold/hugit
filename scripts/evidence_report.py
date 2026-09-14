@@ -195,7 +195,9 @@ class Driver:
 
 def require_ok(result: subprocess.CompletedProcess[bytes], name: str) -> None:
     if result.returncode != 0:
-        raise RuntimeError(f"fixture command {name} failed ({result.returncode})")
+        stdout = result.stdout.decode("utf-8", "replace").strip()
+        stderr = result.stderr.decode("utf-8", "replace").strip()
+        raise RuntimeError(f"fixture command {name} failed ({result.returncode}); stdout={stdout!r}; stderr={stderr!r}")
 
 
 def load_log(log: pathlib.Path) -> list[dict]:
@@ -207,6 +209,7 @@ def load_log(log: pathlib.Path) -> list[dict]:
 
 def wait_capture(log: pathlib.Path, oid: str, timeout: float = 20.0) -> list[dict]:
     deadline = time.monotonic() + timeout
+    stable_since: float | None = None
     while time.monotonic() < deadline:
         try:
             records = load_log(log)
@@ -215,9 +218,14 @@ def wait_capture(log: pathlib.Path, oid: str, timeout: float = 20.0) -> list[dic
             receipts = log.parent / "receipts"
             pending = receipts.exists() and any(receipts.iterdir())
             if found and not lock.exists() and not pending:
-                return records
+                if stable_since is None:
+                    stable_since = time.monotonic()
+                elif time.monotonic() - stable_since >= 1.0:
+                    return records
+            else:
+                stable_since = None
         except (OSError, ValueError, json.JSONDecodeError):
-            pass
+            stable_since = None
         time.sleep(0.05)
     raise RuntimeError(f"capture did not quiesce for {oid}")
 
