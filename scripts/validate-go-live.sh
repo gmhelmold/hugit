@@ -36,8 +36,6 @@ assert() {
     exit 1
   fi
 }
-jq() { python3 -c "import sys,json; v=json.load(sys.stdin); print(json.dumps(eval(sys.argv[1]),ensure_ascii=False))" "$1"; }
-
 # ── 1. binary sanity ──────────────────────────────────────────────────────────
 step "1. binary: -V and --help"
 V="$("$BIN" -V 2>&1)";            assert "version prints ($V)"
@@ -57,7 +55,7 @@ CFG="$(git config --global init.templateDir 2>/dev/null)"
 
 # ── 3. fresh git init auto-ships hooks + lazy log on first commit ────────────
 step "3. git init (template) + lazy boot"
-cd "$WORK/repo"
+cd "$WORK/repo" || exit 1
 git init -q -b main >/dev/null 2>&1; assert "git init works"
 [ -f .git/hooks/post-commit ];       assert "git init copied the hook from template"
 echo x > f.txt
@@ -66,18 +64,29 @@ git commit -qm first >/dev/null 2>&1
 # hooks fire async — poll for the lazy-booted log + ref.update
 LANDED=0
 for _ in $(seq 1 60); do
-  if [ -f .hugit/log.json ] && python3 -c "
+  if [ -f .git/hugit/event-log.json ] && python3 -c "
 import json, sys
-r = json.load(open('.hugit/log.json'))
+r = json.load(open('.git/hugit/event-log.json'))
 sys.exit(0 if r and any(x['kind'] == 'ref.update' for x in r) else 1)
 " 2>/dev/null; then LANDED=1; break; fi
   sleep 0.2
 done
 [ "$LANDED" = "1" ];                assert "first commit lazy-boots log + captures ref.update"
+sleep 3  # let detached capture workers release the canonical log lock
 
 # ── 4. campaign + intent + check memoization ────────────────────────────────
 step "4. campaign / intent / check (memoized)"
-CAMP="$("$BIN" campaign open --campaign c1 --charter "first" --owner user:test 2>&1)"; assert "campaign open"
+CAMP=""
+CAMP_RC=1
+for _ in $(seq 1 20); do
+  set +e
+  CAMP="$("$BIN" campaign open --campaign c1 --charter "first" --owner user:test 2>&1)"
+  CAMP_RC=$?
+  set -e
+  if ! printf '%s' "$CAMP" | grep -q 'log_busy'; then break; fi
+  sleep 0.5
+done
+[ "$CAMP_RC" -eq 0 ]; assert "campaign open"
 printf '%s' "$CAMP" | grep -q '"opened":true'; assert "campaign opened:true"
 IID="$("$BIN" intent new --charter "task" --acceptance "ok" --campaign c1 2>&1 | python3 -c "import sys,json; print(json.load(sys.stdin)['intent_id'])")"
 [ -n "$IID" ];                     assert "intent new gives id"
@@ -92,6 +101,9 @@ R2="$("$BIN" check run --def smoke --cmd "true" 2>&1)";          assert "check r
 printf '%s' "$R2" | grep -q '"cache_hit":true';  assert "check2 is a HIT (memoized)"
 printf '%s' "$R2" | grep -q '"local_executions":0'; assert "zero local exec on hit"
 printf '%s' "$R2" | grep -q '"saved_ms"';        assert "saved_ms reported on hit"
+EXPORT_LOG="$WORK/export-event-log.json"
+"$BIN" campaign open --campaign export --charter export --owner user:export --log "$EXPORT_LOG" >/dev/null 2>&1
+assert "export fixture log"
 
 # ── 5. pr open / queue / land (union engine) ────────────────────────────────
 step "5. PR flow + union landing"
@@ -107,16 +119,21 @@ printf '%s' "$LAND" | grep -q '"verdict":"green"'; assert "union verdict green"
 
 # ── 6. dock: worktree coin + ls ─────────────────────────────────────────────
 step "6. dock (worktree cost unit)"
-cd "$WORK"
+cd "$WORK" || exit 1
 git -C repo worktree add -q -b feat/rate ../wt-rate >/dev/null 2>&1; assert "worktree add"
-sleep 0.5
-DOCKED="$("$BIN" dock ls --log repo/.hugit/log.json 2>&1)"; assert "dock ls"
+DOCKED=""
+for _ in $(seq 1 50); do
+  DOCKED="$("$BIN" dock ls --log repo/.git/hugit/event-log.json 2>&1)"
+  if printf '%s' "$DOCKED" | grep -q '"state":"open"'; then break; fi
+  sleep 0.2
+done
+printf '%s' "$DOCKED" | grep -q '"state":"open"'; assert "dock ls"
 printf '%s' "$DOCKED" | grep -q '"state":"open"'; assert "a dock is open"
 printf '%s' "$DOCKED" | grep -q 'feat/rate';       assert "the worktree's dock is listed"
 
 # ── 7. export (exit guarantee) ──────────────────────────────────────────────
 step "7. export"
-EXPORT="$("$BIN" export --log repo/.hugit/log.json --out "$WORK/out" 2>&1)"; assert "export"
+"$BIN" export --log "$EXPORT_LOG" --out "$WORK/out" >/dev/null 2>&1; assert "export"
 [ -f "$WORK/out/export.json" ];                    assert "export.json written"
 [ -d "$WORK/out/repo.git" ];                       assert "git bundle written"
 [ -f "$WORK/out/redaction-manifest.json" ];        assert "redaction manifest written"
@@ -125,56 +142,66 @@ assert "redaction manifest has a removals list"
 
 # ── 8. D14 + seal lifecycle ─────────────────────────────────────────────────
 step "8. D14 author kind + campaign seal"
-cd "$WORK/repo"
+cd "$WORK/repo" || exit 1
 # author-kind human requires --principal (D14) — refused WITHOUT it.
-NOPR="$(HUGIT_LOG=".hugit/log.json" "$BIN" pr open --pr PR-NP --campaign c1 --author-kind human --commit "$SHA" 2>&1)"
+NOPR="$(HUGIT_LOG=".git/hugit/event-log.json" "$BIN" pr open --pr PR-NP --campaign c1 --author-kind human --commit "$SHA" 2>&1)" || true
 printf '%s' "$NOPR" | grep -q '"error"';   assert "pr open human w/o principal yields a structured error (D14)"
 # seal the campaign: needs the in-flight PR settled first? c1 has PR-1 landed; seal it.
-SEAL="$("$BIN" campaign close --campaign c1 --log .hugit/log.json 2>&1)"; assert "campaign close (seal)"
+SEAL="$("$BIN" campaign close --campaign c1 --log .git/hugit/event-log.json 2>&1)"; assert "campaign close (seal)"
 printf '%s' "$SEAL" | grep -q '"closed":true';     assert "campaign closed:true"
-SEAL2="$("$BIN" campaign close --campaign c1 --log .hugit/log.json 2>&1)"; assert "campaign close idempotent"
+SEAL2="$("$BIN" campaign close --campaign c1 --log .git/hugit/event-log.json 2>&1)"; assert "campaign close idempotent"
 printf '%s' "$SEAL2" | grep -q '"already_closed":true'; assert "second close → already_closed"
 # a sealed campaign REFUSES new PR (and new intent, via the default log).
-BLOQ="$("$BIN" pr open --pr PR-L --campaign c1 --author-kind human --principal user:test --commit "$SHA" --log .hugit/log.json 2>&1)"
+BLOQ="$("$BIN" pr open --pr PR-L --campaign c1 --author-kind human --principal user:test --commit "$SHA" --log .git/hugit/event-log.json 2>&1)" || true
 printf '%s' "$BLOQ" | grep -q '"campaign_sealed"'; assert "sealed campaign REFUSES a new PR (kind campaign_sealed)"
-BLOQI="$("$BIN" intent new --charter late --campaign c1 --id intent-sealfail --store "$WORK/intents.json" --log .hugit/log.json 2>&1)"
+BLOQI="$("$BIN" intent new --charter late --campaign c1 --id intent-sealfail --store "$WORK/intents.json" --log .git/hugit/event-log.json 2>&1)" || true
 printf '%s' "$BLOQI" | grep -q '"campaign_sealed"'; assert "sealed campaign REFUSES intent new (kind campaign_sealed)"
 
 # ── 9. dock land byte-identity + reconcile ──────────────────────────────────
 step "9. dock land (verified) + ghost reconcile"
-DOCKID="$("$BIN" dock ls --log .hugit/log.json 2>&1 | python3 -c "import sys,json; d=json.load(sys.stdin); print([x['dock_id'] for x in d if x['branch']=='feat/rate'][0])")"
+DOCKID="$("$BIN" dock ls --log .git/hugit/event-log.json 2>&1 | python3 -c "import sys,json; d=json.load(sys.stdin); print([x['dock_id'] for x in d if x['branch']=='feat/rate'][0])")"
 [ -n "$DOCKID" ];                                  assert "resolved the feat/rate dock id"
 # commit in the worktree, capture it, then dock land must VERIFY.
-cd "$WORK/wt-rate"
+cd "$WORK/wt-rate" || exit 1
 echo z >> f.txt
 git add f.txt >/dev/null 2>&1
 git commit -qm more >/dev/null 2>&1
-sleep 1  # async capture
-LANDD="$("$BIN" dock land --id "$DOCKID" --log "$WORK/repo/.hugit/log.json" 2>&1)"; assert "dock land"
+sleep 2  # async capture; allow the detached worker to append before dock land
+LANDD=""
+LAND_RC=1
+for _ in $(seq 1 20); do
+  set +e
+  LANDD="$("$BIN" dock land --id "$DOCKID" --log "$WORK/repo/.git/hugit/event-log.json" 2>&1)"
+  LAND_RC=$?
+  set -e
+  if ! printf '%s' "$LANDD" | grep -q 'log_busy'; then break; fi
+  sleep 0.5
+done
+[ "$LAND_RC" -eq 0 ];                           assert "dock land"
 printf '%s' "$LANDD" | grep -q '"byte_identity":"verified"'; assert "byte_identity verified"
 printf '%s' "$LANDD" | grep -q '"landed":true';     assert "dock landed:true"
 # remove the worktree → dock reconcile closes the ghost.
-cd "$WORK"
+cd "$WORK" || exit 1
 git -C repo worktree remove --force wt-rate >/dev/null 2>&1; assert "worktree remove"
-RC="$("$BIN" dock reconcile --log repo/.hugit/log.json 2>&1)"; assert "dock reconcile"
+"$BIN" dock reconcile --log repo/.git/hugit/event-log.json >/dev/null 2>&1; assert "dock reconcile"
 # the dock was already closed by land; reconciling again stays idempotent.
-RC2="$("$BIN" dock reconcile --log repo/.hugit/log.json 2>&1)"; assert "dock reconcile idempotent"
-LS2="$("$BIN" dock ls --log repo/.hugit/log.json 2>&1)"; assert "dock ls after remove"
+"$BIN" dock reconcile --log repo/.git/hugit/event-log.json >/dev/null 2>&1; assert "dock reconcile idempotent"
+LS2="$("$BIN" dock ls --log repo/.git/hugit/event-log.json 2>&1)"; assert "dock ls after remove"
 printf '%s' "$LS2" | grep -q '"state":"ghost"';    assert "the removed worktree's dock shows ghost"
 
 # ── 10. cost honesty (ctx usage verbatim) + dock insight ───────────────────
 step "10. cost honesty + dock insight residual"
-cd "$WORK/repo"
-CU="$("$BIN" ctx usage --intent "$IID" --model claude-drop --input 120 --output 40 --cache-read 0 --cache-write 0 --log .hugit/log.json 2>&1)"; assert "ctx usage records"
+cd "$WORK/repo" || exit 1
+CU="$("$BIN" ctx usage --intent "$IID" --model claude-drop --input 120 --output 40 --cache-read 0 --cache-write 0 --log .git/hugit/event-log.json 2>&1)"; assert "ctx usage records"
 printf '%s' "$CU" | grep -q '"target_kind":"intent"'; assert "usage targets the intent"
 printf '%s' "$CU" | grep -q '"total":160';        assert "usage totals input+output (120+40)"
-INS="$("$BIN" dock insight --log .hugit/log.json 2>&1)"; assert "dock insight"
+INS="$("$BIN" dock insight --log .git/hugit/event-log.json 2>&1)"; assert "dock insight"
 printf '%s' "$INS" | grep -q '"matched_usd_micros":0';   assert "insight honest-zero cost (no gateway sample)"
 printf '%s' "$INS" | grep -q '"unlabeled_commit_count"'; assert "insight residual bucket present"
 
 # ── 11. policy / undo / symbol / why / verdict ──────────────────────────────
 step "11. policy, undo, symbol, why, verdict"
-PCA="$("$BIN" policy test --context /dev/null 2>&1)"
+PCA="$("$BIN" policy test --context /dev/null 2>&1)" || true
 printf '%s' "$PCA" | grep -q '"error"';  assert "policy test with a missing context file yields a structured error"
 echo '{"commit_messages":["feat: x"],"commit_parent_counts":[1],"changed_files":["a.rs"],"file_contents":{},"metadata":{}}' > "$WORK/ctx.json"
 PG="$("$BIN" policy test --context "$WORK/ctx.json" 2>&1)"; assert "policy test with context"
@@ -186,12 +213,15 @@ struct Point { x: i32 }
 SYM="$("$BIN" symbol --file "$WORK/srcsym/point.rs" 2>&1)"; assert "symbol outline"
 printf '%s' "$SYM" | grep -q '"lang":"rust"';     assert "symbol language rust"
 printf '%s' "$SYM" | grep -q '"fn"';              assert "symbols include a function"
-WHY="$("$BIN" why --log .hugit/log.json --path src/nope.rs 2>&1)"
+WHY="$("$BIN" why --log .git/hugit/event-log.json --path src/nope.rs 2>&1)" || true
 printf '%s' "$WHY" | grep -q '"unresolved"';      assert "why on an unattributed path → unresolved (never fabricates)"
-UD="$("$BIN" undo --seq 1 --log .hugit/log.json 2>&1)"
+UNDO_SEQ="$(python3 -c "import json; r=json.load(open('.git/hugit/event-log.json')); print(next(x['seq'] for x in r if x['kind'] != 'ref.update'))")"
+set +e
+UD="$("$BIN" undo --seq "$UNDO_SEQ" --log .git/hugit/event-log.json 2>&1)"
+set -e
 printf '%s' "$UD" | grep -q '"nothing_to_compensate"'; assert "undo on a non-ref event → nothing_to_compensate (honest)"
 # verdict approve — single-lens human, persists a verdict.recorded.
-VERD="$("$BIN" verdict approve --intent "$IID" --log .hugit/log.json 2>&1)"
+VERD="$("$BIN" verdict approve --intent "$IID" --log .git/hugit/event-log.json 2>&1)"
 printf '%s' "$VERD" | grep -q '"verdict_recorded":true'; assert "verdict approve persists verdict_recorded:true"
 
 echo

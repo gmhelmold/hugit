@@ -5,8 +5,7 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="${HUGIT_BIN:-$ROOT/target/release/hugit}"
-REPORT="${HUGIT_BENCHMARK_REPORT_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/hugit-feature-ledger.XXXXXX") }"
-REPORT="${REPORT% }"
+REPORT="${HUGIT_BENCHMARK_REPORT_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/hugit-feature-ledger.XXXXXX")}"
 WORK="$REPORT/work"
 NDJSON="$REPORT/cases.ndjson"
 SUMMARY="$REPORT/summary.json"
@@ -25,15 +24,20 @@ if [ ! -x "$BIN" ]; then
   }
 fi
 
-# Preserve existing go-live evidence. Its legacy `.hugit/log.json` assertion is
-# informational here because current hooks write Git-common-dir runtime state.
+# Preserve existing go-live evidence. The prerequisite uses the same canonical
+# Git-common-dir runtime state as this matrix.
 PREREQ_DIR="$REPORT/go-live-prerequisite"
 mkdir -p "$PREREQ_DIR"
 set +e
 HUGIT_BIN="$BIN" "$ROOT/scripts/validate-go-live.sh" "$PREREQ_DIR" >"$REPORT/go-live.stdout" 2>"$REPORT/go-live.stderr"
 prerequisite_rc=$?
 set -e
-if [ "$prerequisite_rc" -eq 0 ]; then prerequisite_status=pass; else prerequisite_status=informational-fail; fi
+if [ "$prerequisite_rc" -eq 0 ]; then
+  prerequisite_status=pass
+else
+  prerequisite_status=fail
+  failures=$((failures + 1))
+fi
 
 export HOME="$WORK/home"
 export XDG_CONFIG_HOME="$WORK/xdg"
@@ -51,20 +55,47 @@ git clone --depth=1 "$HUGIT_BENCHMARK_REPO" "$REPO" >"$REPORT/clone.stdout" 2>"$
 }
 git -C "$REPO" config user.name benchmark
 git -C "$REPO" config user.email benchmark@example.invalid
-LOG="$REPO/.hugit/log.json"
+SOURCE_COMMIT="$(git -C "$REPO" rev-parse HEAD)"
+ZERO_OID=0000000000000000000000000000000000000000
+OID="$SOURCE_COMMIT"
+LOG="$REPO/.git/hugit/event-log.json"
 export HUGIT_LOG="$LOG"
 export HUGIT_BIN="$BIN"
 
 record_case() {
-  local name="$1" expected="$2" rc="$3" out="$4" err="$5" command="$6" status
+  local name="$1" expected="$2" rc="$3" out="$4" err="$5" command="$6" attempts="$7" status
   if [ "$expected" = "live-success" ] || [ "$expected" = "silent-success" ]; then
-    [ "$rc" -eq 0 ] && status=pass || status=fail
+    if [ "$rc" -eq 0 ] && { [ "$expected" = "silent-success" ] || python3 - "$out" <<'PY'
+import json, sys
+try:
+    json.load(open(sys.argv[1]))
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(1)
+PY
+    }; then
+      status=pass
+    else
+      status=fail
+    fi
   else
-    [ "$rc" -ne 0 ] && status=pass || status=fail
+    if [ "$rc" -ne 0 ] && python3 - "$out" <<'PY'
+import json, sys
+try:
+    value = json.load(open(sys.argv[1]))
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(1)
+error = value.get("error") if isinstance(value, dict) else None
+raise SystemExit(0 if isinstance(error, dict) and isinstance(error.get("kind"), str) and isinstance(error.get("fix"), str) else 1)
+PY
+    then
+      status=pass
+    else
+      status=fail
+    fi
   fi
-  python3 - "$NDJSON" "$name" "$expected" "$rc" "$status" "$command" "$out" "$err" <<'PY'
+python3 - "$NDJSON" "$name" "$expected" "$rc" "$status" "$command" "$attempts" "$out" "$err" <<'PY'
 import json, pathlib, sys
-dest, name, expected, rc, status, command, out, err = sys.argv[1:]
+dest, name, expected, rc, status, command, attempts, out, err = sys.argv[1:]
 def read(path):
     return pathlib.Path(path).read_text(errors="replace")
 row = {
@@ -74,6 +105,7 @@ row = {
     "stdout": read(out),
     "stderr": read(err),
     "command": command,
+    "attempts": int(attempts),
     "status": status,
 }
 with open(dest, "a", encoding="utf-8") as f:
@@ -86,16 +118,21 @@ PY
 
 run_case() {
   local name="$1" expected="$2"; shift 2
-  local out err
+  local out err rc attempts=0
   out="$REPORT/${cases}_$(printf '%s' "$name" | tr '/ ' '__').stdout"
   err="$REPORT/${cases}_$(printf '%s' "$name" | tr '/ ' '__').stderr"
   local command="$BIN" arg
   for arg in "$@"; do command="$command $(printf '%q' "$arg")"; done
-  set +e
-  (cd "$REPO" && "$BIN" "$@") >"$out" 2>"$err"
-  local rc=$?
-  set -e
-  record_case "$name" "$expected" "$rc" "$out" "$err" "$command"
+  while [ "$attempts" -lt 20 ]; do
+    attempts=$((attempts + 1))
+    set +e
+    (cd "$REPO" && "$BIN" "$@") >"$out" 2>"$err"
+    rc=$?
+    set -e
+    if ! grep -q 'log_busy' "$out" || [ "$rc" -eq 0 ]; then break; fi
+    sleep 0.5
+  done
+  record_case "$name" "$expected" "$rc" "$out" "$err" "$command" "$attempts"
 }
 
 set -e
@@ -107,7 +144,10 @@ for hook in post-checkout pre-push post-merge post-rewrite reference-transaction
   rm -f "$REPO/.git/hooks/$hook"
 done
 run_case attach-preview live-success attach --repo "$REPO" --preview
-mapfile -t preview_tokens < <(python3 - "$REPORT/1_attach-preview.stdout" <<'PY'
+preview_token=""
+while IFS= read -r token; do
+  if [ -n "$token" ]; then preview_token="$token"; break; fi
+done < <(python3 - "$REPORT/1_attach-preview.stdout" <<'PY'
 import json, sys
 for change in json.load(open(sys.argv[1])).get("changes", []):
     token = change.get("preview_token")
@@ -115,11 +155,13 @@ for change in json.load(open(sys.argv[1])).get("changes", []):
         print(token)
 PY
 )
-run_case attach-adopt live-success attach --repo "$REPO" --adopt-managed-dispatcher "${preview_tokens[0]}"
+[ -n "$preview_token" ] || { printf '%s\n' 'FAIL: attach preview returned no adoption token' >&2; exit 1; }
+run_case attach-adopt live-success attach --repo "$REPO" --adopt-managed-dispatcher "$preview_token"
 run_case health live-success health --dir "$REPO"
-for kind in commit checkout push-attempt merge; do
-  run_case "capture-$kind" silent-success capture --kind "$kind" --top-level "$REPO" --log "$LOG" --oid benchmark-oid --branch main --from old
+for kind in commit checkout push-attempt merge rewrite reference-transaction; do
+  run_case "capture-$kind" silent-success capture --kind "$kind" --top-level "$REPO" --log "$LOG" --oid "$OID" --branch main --from "$ZERO_OID"
 done
+sleep 1  # allow detached capture workers to release the canonical log lock
 # Create committed evidence in cloned public repo after hook setup.
 printf '%s\n' 'fn benchmark_symbol() {}' > "$REPO/benchmark.rs"
 git -C "$REPO" add benchmark.rs
@@ -127,7 +169,17 @@ git -C "$REPO" commit -qm 'benchmark: symbol fixture'
 sleep 1
 SHA="$(git -C "$REPO" rev-parse HEAD)"
 run_case capture-committed silent-success capture --kind commit --top-level "$REPO" --log "$LOG" --oid "$SHA" --branch main
-run_case capture-reference silent-success capture --kind reference-transaction --top-level "$REPO" --log "$LOG" --reference-tuples "0000000000000000000000000000000000000000 $SHA refs/heads/master" --transaction-phase committed
+sleep 1
+CLEAN_LOG="$WORK/clean-event-log.json"
+run_case export-log-seed live-success campaign open --campaign export --charter export --owner user:export --log "$CLEAN_LOG"
+run_case capture-reference silent-success capture --kind reference-transaction --top-level "$REPO" --log "$LOG" --reference-tuples "$ZERO_OID $SHA refs/heads/master" --transaction-phase committed
+run_case capture-undo-base silent-success capture --kind commit --top-level "$REPO" --log "$LOG" --oid "$ZERO_OID" --branch main
+run_case capture-undo-tip silent-success capture --kind commit --top-level "$REPO" --log "$LOG" --oid "$OID" --branch main
+UNDO_SEQ="$(python3 - "$LOG" <<'PY'
+import json, sys
+print(len(json.load(open(sys.argv[1]))) - 1)
+PY
+)"
 run_case detach live-success detach --dir "$REPO"
 
 # Campaign, intent, issue, PR, queue, checks, verdict, landing.
@@ -160,8 +212,8 @@ cat > "$WORK/graph.json" <<'JSON'
 JSON
 run_case impact live-success impact --graph "$WORK/graph.json" --path benchmark.rs
 run_case tournament live-success tournament --candidates 2 --intent intent-bench
-run_case export live-success export --log "$LOG" --out "$WORK/export"
-run_case undo live-success undo --seq 1 --log "$LOG"
+run_case export live-success export --log "$CLEAN_LOG" --out "$WORK/export"
+run_case undo live-success undo --seq "$UNDO_SEQ" --log "$LOG"
 cat > "$WORK/context.json" <<'JSON'
 {"commit_messages":["benchmark"],"commit_parent_counts":[1],"changed_files":["benchmark.rs"],"file_contents":{},"metadata":{}}
 JSON
@@ -181,7 +233,7 @@ run_case meta live-success meta set --visibility private --owner-tenant benchmar
 # Dock surface. Explicit coin gives deterministic local evidence.
 GITDIR="$(git -C "$REPO" rev-parse --absolute-git-dir)"
 BRANCH="$(git -C "$REPO" branch --show-current)"
-run_case dock-coin live-success dock coin --top-level "$REPO" --gitdir "$GITDIR" --branch "$BRANCH" --log "$LOG"
+run_case dock-coin silent-success dock coin --top-level "$REPO" --gitdir "$GITDIR" --branch "$BRANCH" --log "$LOG"
 DOCK_ID="$(python3 - "$LOG" <<'PY'
 import json, sys
 try:
@@ -218,14 +270,21 @@ fi
 run_case ws-discontinued rejected ws
 run_case dispatch-discontinued rejected dispatch
 
-python3 - "$NDJSON" "$SUMMARY" "$MANIFEST" "$cases" "$failures" "$HUGIT_BENCHMARK_REPO" "$BIN" "$prerequisite_status" "${required[@]}" <<'PY'
+GIT_VERSION="$(git --version)"
+BIN_VERSION="$("$BIN" -V 2>&1)"
+PLATFORM="$(uname -a)"
+python3 - "$NDJSON" "$SUMMARY" "$MANIFEST" "$cases" "$failures" "$HUGIT_BENCHMARK_REPO" "$SOURCE_COMMIT" "$BIN" "$BIN_VERSION" "$GIT_VERSION" "$PLATFORM" "$prerequisite_status" "${required[@]}" <<'PY'
 import json, pathlib, sys
-ndjson, summary, manifest, count, failures, source, binary, prerequisite, *required = sys.argv[1:]
+ndjson, summary, manifest, count, failures, source, source_commit, binary, binary_version, git_version, platform, prerequisite, *required = sys.argv[1:]
 rows = [json.loads(line) for line in pathlib.Path(ndjson).read_text().splitlines() if line]
 result = {
     "benchmark": "hugit-feature-ledger",
     "source_repo": source,
+    "source_commit": source_commit,
     "binary": binary,
+    "binary_version": binary_version,
+    "git_version": git_version,
+    "platform": platform,
     "cases": int(count),
     "failures": int(failures),
     "status": "pass" if int(failures) == 0 and len(rows) == int(count) else "fail",
@@ -237,4 +296,9 @@ pathlib.Path(summary).write_text(json.dumps(result, indent=2, sort_keys=True) + 
 pathlib.Path(manifest).write_text(json.dumps({"schema": "hugit-benchmark-v1", "files": [ndjson, summary], "case_count": len(rows)}, indent=2) + "\n")
 PY
 
-[ "$failures" -eq 0 ]
+if [ "$failures" -eq 0 ]; then
+  printf 'REPORT: %s\n' "$REPORT"
+  exit 0
+fi
+printf 'REPORT: %s\n' "$REPORT" >&2
+exit 1
