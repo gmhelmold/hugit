@@ -148,7 +148,13 @@ class Driver:
         self.commands: dict[str, dict] = {}
         self.order = 0
 
-    def run(self, ident: str, argv: list[str], cwd: pathlib.Path | None = None) -> subprocess.CompletedProcess[bytes]:
+    def run(
+        self,
+        ident: str,
+        argv: list[str],
+        cwd: pathlib.Path | None = None,
+        retry_log_busy: bool = False,
+    ) -> subprocess.CompletedProcess[bytes]:
         if ident in self.commands:
             raise RuntimeError(f"duplicate command id: {ident}")
         cwd = cwd or self.repo
@@ -156,12 +162,41 @@ class Driver:
         base = self.bag / "data" / "commands" / ident
         started = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
         before = time.monotonic_ns()
-        result = subprocess.run(argv, cwd=cwd, env=self.env, capture_output=True, check=False)
+        attempt_count = 0
+        retries = []
+        while True:
+            attempt_count += 1
+            attempt_before = time.monotonic_ns()
+            result = subprocess.run(argv, cwd=cwd, env=self.env, capture_output=True, check=False)
+            attempt_duration = time.monotonic_ns() - attempt_before
+            try:
+                error_kind = json.loads(result.stdout).get("error", {}).get("kind")
+            except (AttributeError, json.JSONDecodeError, UnicodeDecodeError):
+                error_kind = None
+            if not retry_log_busy or result.returncode != 2 or error_kind != "log_busy" or attempt_count >= 20:
+                break
+            retries.append((result, attempt_duration))
+            time.sleep(0.1)
         duration = time.monotonic_ns() - before
         stdout_path = base.with_suffix(".stdout")
         stderr_path = base.with_suffix(".stderr")
         stdout_path.write_bytes(result.stdout)
         stderr_path.write_bytes(result.stderr)
+        retry_meta = []
+        for index, (retry, retry_duration) in enumerate(retries, 1):
+            retry_base = self.bag / "data" / "commands" / "retries" / f"{ident}-{index:02d}"
+            retry_base.parent.mkdir(parents=True, exist_ok=True)
+            retry_stdout = retry_base.with_suffix(".stdout")
+            retry_stderr = retry_base.with_suffix(".stderr")
+            retry_stdout.write_bytes(retry.stdout)
+            retry_stderr.write_bytes(retry.stderr)
+            retry_meta.append({
+                "attempt": index,
+                "duration_ns": retry_duration,
+                "exit_code": retry.returncode,
+                "stdout_path": retry_stdout.relative_to(self.bag).as_posix(),
+                "stderr_path": retry_stderr.relative_to(self.bag).as_posix(),
+            })
         try:
             label = cwd.relative_to(self.repo).as_posix() or "."
         except ValueError:
@@ -174,6 +209,8 @@ class Driver:
             "env": {key: self.env[key] for key in ENV_KEYS if key in self.env},
             "started_at": started,
             "duration_ns": duration,
+            "attempt_count": attempt_count,
+            "retry_attempts": retry_meta,
             "exit_code": result.returncode,
             "stdout_path": f"data/commands/{ident}.stdout",
             "stderr_path": f"data/commands/{ident}.stderr",
@@ -183,7 +220,7 @@ class Driver:
         return result
 
     def hugit(self, ident: str, *args: str) -> subprocess.CompletedProcess[bytes]:
-        return self.run(ident, [str(self.binary), *args])
+        return self.run(ident, [str(self.binary), *args], retry_log_busy=True)
 
     def git(self, ident: str, *args: str, cwd: pathlib.Path | None = None) -> subprocess.CompletedProcess[bytes]:
         return self.run(ident, ["git", *args], cwd=cwd)
@@ -195,7 +232,9 @@ class Driver:
 
 def require_ok(result: subprocess.CompletedProcess[bytes], name: str) -> None:
     if result.returncode != 0:
-        raise RuntimeError(f"fixture command {name} failed ({result.returncode})")
+        stdout = result.stdout.decode("utf-8", "replace").strip()
+        stderr = result.stderr.decode("utf-8", "replace").strip()
+        raise RuntimeError(f"fixture command {name} failed ({result.returncode}); stdout={stdout!r}; stderr={stderr!r}")
 
 
 def load_log(log: pathlib.Path) -> list[dict]:
@@ -205,12 +244,26 @@ def load_log(log: pathlib.Path) -> list[dict]:
     return value
 
 
-def wait_capture(log: pathlib.Path, oid: str, timeout: float = 20.0) -> list[dict]:
+def wait_capture(log: pathlib.Path, oid: str, branch: str, timeout: float = 20.0) -> list[dict]:
+    # Reference-transaction can record this OID before detached post-commit
+    # starts. Wait for exact commit capture; later mutations retry `log_busy`
+    # from any empty drain worker that starts after this observation.
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
             records = load_log(log)
-            found = any(r.get("kind") == "ref.update" and payload(r).get("target") == oid for r in records)
+            found = any(
+                r.get("kind") == "ref.update"
+                and payload(r).get("target") == oid
+                and payload(r).get("ref") == f"refs/heads/{branch}"
+                and payload(r).get("branch") == branch
+                and isinstance(payload(r).get("files"), list)
+                and isinstance(payload(r).get("receipt_id"), str)
+                and bool(payload(r)["receipt_id"])
+                and isinstance(r.get("principal_chain"), list)
+                and "orchestrator:hugit-hook" in r["principal_chain"]
+                for r in records
+            )
             lock = pathlib.Path(str(log) + ".lock")
             receipts = log.parent / "receipts"
             pending = receipts.exists() and any(receipts.iterdir())
@@ -597,7 +650,7 @@ def build(args: argparse.Namespace) -> pathlib.Path:
         oid = driver.git("git-head", "rev-parse", "HEAD").stdout.decode().strip()
         branch = driver.git("git-branch", "branch", "--show-current").stdout.decode().strip()
         log = repo / ".git" / "hugit" / "event-log.json"
-        wait_capture(log, oid)
+        wait_capture(log, oid, branch)
         store = repo / ".hugit" / "intents.json"
         require_ok(driver.hugit("intent-new", "intent", "new", "--id", "intent-evidence", "--campaign", "evidence", "--charter", "prove local journey", "--acceptance", "all semantic oracles pass", "--store", str(store), "--log", str(log)), "intent new")
         require_ok(driver.hugit("pr-open", "pr", "open", "--pr", "PR-EVIDENCE", "--campaign", "evidence", "--author-kind", "orchestrator", "--run-id", "evidence-run", "--intent", "intent-evidence", "--commit", oid, "--log", str(log)), "pr open")

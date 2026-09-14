@@ -117,6 +117,33 @@ module.safe_repository_tar(extracted,root/"repacked-b.tar")
 if (root/"repacked-a.tar").read_bytes() != (root/"repacked-b.tar").read_bytes(): raise SystemExit("deterministic packaging failed")
 PY
 
+python3 - "$ROOT/scripts/evidence_report.py" "$TMP" <<'PY'
+import importlib.util, json, pathlib, subprocess, sys, threading, time
+spec=importlib.util.spec_from_file_location("evidence_report",sys.argv[1]); module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+root=pathlib.Path(sys.argv[2]); runtime=root/"quiescence"; receipts=runtime/"receipts"; receipts.mkdir(parents=True)
+log=runtime/"event-log.json"; oid="a"*40; branch="main"; log.write_text(json.dumps([{"kind":"ref.update","payload":{"target":oid}}]))
+def late_worker():
+    time.sleep(0.3); records=json.loads(log.read_text()); records.append({"kind":"ref.update","principal_chain":["orchestrator:hugit-hook"],"payload":{"target":oid,"ref":"refs/heads/main","branch":"main","files":[],"receipt_id":"receipt-1"}}); log.write_text(json.dumps(records))
+threading.Thread(target=late_worker).start(); started=time.monotonic(); module.wait_capture(log,oid,branch,timeout=3.0); elapsed=time.monotonic()-started
+if elapsed < 0.25: raise SystemExit(f"capture accepted earlier same-OID observation: {elapsed}")
+
+calls=[]
+def fake_run(*args,**kwargs):
+    calls.append(args); busy=json.dumps({"error":{"kind":"log_busy"}}).encode()
+    return subprocess.CompletedProcess(args[0],2,busy,b"") if len(calls)==1 else subprocess.CompletedProcess(args[0],0,b"{}",b"")
+original=module.subprocess.run; module.subprocess.run=fake_run
+try:
+    bag=root/"retry-bag"; (bag/"data/commands").mkdir(parents=True); driver=module.Driver(bag,root,pathlib.Path("hugit"),{})
+    result=driver.hugit("retry", "intent", "new")
+finally:
+    module.subprocess.run=original
+if result.returncode != 0 or len(calls) != 2: raise SystemExit("structured log_busy was not retried exactly once")
+meta=json.loads((bag/"data/commands/retry.json").read_text())
+if meta.get("attempt_count") != 2: raise SystemExit("retry attempt count missing from command evidence")
+retry=meta.get("retry_attempts",[])
+if len(retry) != 1 or json.loads((bag/retry[0]["stdout_path"]).read_text())["error"]["kind"] != "log_busy": raise SystemExit("retry evidence did not retain structured log_busy")
+PY
+
 # Mutation probe: break one semantic oracle result, refresh BagIt manifests,
 # prove verifier rejects semantic closure, restore, then prove green again.
 cp "$BAG1/data/report.json" "$TMP/report.json"

@@ -298,7 +298,7 @@ def require_strings(values, label, nonempty=False):
     require(all(isinstance(value, str) and value for value in values), f"{label} must contain non-empty strings")
 
 
-def validate_command(command, label, payload_names):
+def validate_command(command, label, payload_names, root):
     schema_major(command, label)
     for field in ("id", "cwd", "started_at", "stdout_path", "stderr_path"):
         require_type(command.get(field), str, f"{label}.{field}")
@@ -312,6 +312,26 @@ def validate_command(command, label, payload_names):
     require(not secret_env, f"{label}.env has secret-bearing keys: {sorted(secret_env)}")
     require_type(command.get("duration_ns"), int, f"{label}.duration_ns")
     require(command["duration_ns"] >= 0, f"{label}.duration_ns must be nonnegative")
+    if "attempt_count" in command:
+        require_type(command["attempt_count"], int, f"{label}.attempt_count")
+        require(command["attempt_count"] >= 1, f"{label}.attempt_count must be positive")
+        require_type(command.get("retry_attempts"), list, f"{label}.retry_attempts")
+        require(len(command["retry_attempts"]) == command["attempt_count"] - 1, f"{label}.retry_attempts count mismatch")
+        for index, attempt in enumerate(command["retry_attempts"], 1):
+            require_type(attempt, dict, f"{label}.retry_attempts[{index}]")
+            require(attempt.get("attempt") == index, f"{label}.retry_attempts[{index}].attempt mismatch")
+            require_type(attempt.get("duration_ns"), int, f"{label}.retry_attempts[{index}].duration_ns")
+            require(attempt["duration_ns"] >= 0, f"{label}.retry_attempts[{index}].duration_ns must be nonnegative")
+            require(attempt.get("exit_code") == 2, f"{label}.retry_attempts[{index}].exit_code must be 2")
+            retry_base = f"data/commands/retries/{command['id']}-{index:02d}"
+            for field, suffix in (("stdout_path", ".stdout"), ("stderr_path", ".stderr")):
+                require(attempt.get(field) == retry_base + suffix, f"{label}.retry_attempts[{index}].{field} mismatch")
+                require(attempt[field] in payload_names, f"{label}.retry_attempts[{index}].{field} is not manifested")
+            retry_stdout = load_json(root / attempt["stdout_path"])
+            require_type(retry_stdout, dict, f"{label}.retry_attempts[{index}].stdout")
+            retry_error = retry_stdout.get("error")
+            require_type(retry_error, dict, f"{label}.retry_attempts[{index}].stdout.error")
+            require(retry_error.get("kind") == "log_busy", f"{label}.retry_attempts[{index}] is not log_busy")
     require_type(command.get("exit_code"), int, f"{label}.exit_code")
     if command["cwd"] != ".":
         safe_path(command["cwd"])
@@ -385,7 +405,7 @@ def load_and_validate_schemas(root: Path, payload_names):
     command_files = sorted(name for name in payload_names if re.fullmatch(r"data/commands/[^/]+\.json", name))
     for name in command_files:
         command = load_json(root / name)
-        validate_command(command, name, payload_names)
+        validate_command(command, name, payload_names, root)
         require(command["id"] not in commands, f"duplicate command id: {command['id']}")
         commands[command["id"]] = command
     require(set(commands) == set(COMMAND_PREFIXES), "command inventory differs from journey-v1 contract")

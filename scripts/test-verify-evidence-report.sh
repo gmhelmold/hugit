@@ -132,7 +132,7 @@ def add_command(bag, ident, stdout, exit_code=0, state=None, argv=None):
     meta = {
         "schema_version": "1.0", "id": ident, "argv": argv or list(command_prefixes[ident]), "cwd": ".",
         "env": {"GIT_AUTHOR_DATE": "2026-09-13T00:00:00Z", "LC_ALL": "C", "TZ": "UTC"}, "started_at": "2026-09-13T00:00:00Z",
-        "duration_ns": 1, "exit_code": exit_code,
+        "duration_ns": 1, "attempt_count": 1, "retry_attempts": [], "exit_code": exit_code,
         "stdout_path": f"data/commands/{ident}.stdout", "stderr_path": f"data/commands/{ident}.stderr",
     }
     if state:
@@ -211,6 +211,15 @@ def build_runner_fixture(base):
     add_command(bag, "boundary-ws", refusal, 2, state_meta)
     add_command(bag, "boundary-dispatch", refusal, 2, state_meta)
     add_command(bag, "intent-new", {}, argv=["hugit","intent","new","--id","intent-evidence","--campaign","evidence","--charter","prove local journey","--acceptance","all semantic oracles pass"])
+    retry_base = bag / "data/commands/retries/intent-new-01"
+    retry_base.parent.mkdir(parents=True)
+    retry_base.with_suffix(".stdout").write_text(json.dumps({"error":{"kind":"log_busy"}}) + "\n")
+    retry_base.with_suffix(".stderr").write_bytes(b"")
+    intent_meta_path = bag / "data/commands/intent-new.json"
+    intent_meta = json.loads(intent_meta_path.read_text())
+    intent_meta["attempt_count"] = 2
+    intent_meta["retry_attempts"] = [{"attempt":1,"duration_ns":1,"exit_code":2,"stdout_path":"data/commands/retries/intent-new-01.stdout","stderr_path":"data/commands/retries/intent-new-01.stderr"}]
+    write_json(intent_meta_path, intent_meta)
     add_command(bag, "pr-open", {}, argv=["hugit","pr","open","--pr","PR-EVIDENCE","--intent","intent-evidence","--commit",head])
     add_command(bag, "verdict-record", {}, argv=["hugit","verdict","record","--intent","intent-evidence","--lens","security","--result","approve"])
     add_command(bag, "ctx-usage", {}, argv=["hugit","ctx","usage","--intent","intent-evidence","--model","claude-opus-4-8","--input","1500000","--output","200000","--cache-read","4000000","--cache-write","1000000"])
@@ -375,6 +384,10 @@ def mutate_fixture(bag, mutation):
         path = bag / "data/commands/check-cold.json"; value = json.loads(path.read_text()); value["stdout_path"] = "data/commands/check-warm.stdout"; write_json(path, value)
     elif mutation == "command_argv":
         path = bag / "data/commands/setup.json"; value = json.loads(path.read_text()); value["argv"] = ["/usr/bin/false"]; write_json(path, value)
+    elif mutation == "command_attempt_count":
+        path = bag / "data/commands/setup.json"; value = json.loads(path.read_text()); value["attempt_count"] = 0; write_json(path, value)
+    elif mutation == "command_retry_kind":
+        path = bag / "data/commands/retries/intent-new-01.stdout"; write_json(path, {"error":{"kind":"io"}})
     elif mutation == "claim_contract":
         path = bag / "data/claims.json"; value = json.loads(path.read_text()); value["claims"]["C-SETUP-REPO"]["oracle"] = "invented"; write_json(path, value)
     elif mutation == "repo_corruption":
@@ -551,6 +564,8 @@ with tempfile.TemporaryDirectory(prefix="hugit-evidence-suite-") as raw:
         ("command_env_secret", "command_env", "schemas"),
         ("command_basename_mismatch", "command_basename", "schemas"),
         ("command_argv_forgery", "command_argv", "schemas"),
+        ("command_attempt_count", "command_attempt_count", "schemas"),
+        ("command_retry_kind", "command_retry_kind", "schemas"),
         ("claim_contract_relabel", "claim_contract", "schemas"),
         ("git_object_corruption", "repo_corruption", "git_fsck"),
         ("unsafe_tar_traversal", "unsafe_tar", "repository_archive"),

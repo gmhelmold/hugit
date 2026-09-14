@@ -40,6 +40,21 @@ hugit attach
 hugit health
 ```
 
+With remote configured, normal workflow stays Git-native:
+
+```sh
+git checkout -b feature/example
+git commit -am "describe change"
+git push -u origin feature/example
+hugit health
+```
+
+`health` reports machine-readable hook coverage. Interpret observed hook facts
+as **observed locally** and `pre_push` only as **attempted push**; user claims
+still require **explicit declaration**, while unobservable operations remain
+**unsupported**. Missing/conflicting hooks produce **partial coverage**, never
+invented confirmation.
+
 Normal `git commit`, checkout, merge, rewrite, ref transaction, and push attempt
 invoke installed hooks. Hugit writes receipts under
 `<git-common-dir>/hugit/receipts/`, drains them into
