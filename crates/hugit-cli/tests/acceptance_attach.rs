@@ -35,6 +35,7 @@ fn repo(tag: &str) -> PathBuf {
     root
 }
 
+#[cfg(unix)]
 #[test]
 fn preview_is_read_only_and_adoption_preserves_foreign_exit() {
     let root = repo("adopt");

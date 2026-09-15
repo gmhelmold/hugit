@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(cli): Windows hook capture now refuses unsupported receipt persistence
+  explicitly without blocking Git or appending a canonical event. Windows CI
+  runs the release-equivalent workspace test, release build, and binary smoke.
+
 ## [0.1.7] - 2026-09-14
 
 - fix(cli): skip unsupported Windows parent-directory fsync after atomic writes;
