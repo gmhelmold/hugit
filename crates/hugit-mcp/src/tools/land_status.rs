@@ -123,7 +123,7 @@ pub fn run(args: &Value) -> ToolOutcome {
     }))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::tools::git_runtime_log;
