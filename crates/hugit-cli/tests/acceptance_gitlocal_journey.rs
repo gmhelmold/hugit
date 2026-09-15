@@ -333,6 +333,7 @@ fn journey_pr_cycle_lands_locally() {
 /// a fresh `git init` then ships the hooks automatically, and the FIRST git op
 /// creates runtime log + captures real ref.update. Entirely under
 /// an isolated HOME/XDG so the machine's real gitconfig is never touched.
+#[cfg(unix)]
 #[test]
 fn setup_templates_git_init_and_lazy_boots() {
     // Isolated env: a temp HOME (git global config lands there) + temp XDG

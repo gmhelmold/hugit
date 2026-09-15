@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! Acceptance — WP-W-INT (W-CHECK logic on W0's `check` entry point):
 //! `hugit check` executes + records the memoized-CI wedge, end-to-end, against
 //! the REAL `hugit` binary.

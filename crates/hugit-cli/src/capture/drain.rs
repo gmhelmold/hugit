@@ -673,7 +673,7 @@ pub fn read_status(root: &Path) -> Option<DrainStatus> {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::capture::receipt::{ReceiptV1, receipt_id, write_receipt};

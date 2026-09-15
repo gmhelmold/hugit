@@ -160,8 +160,8 @@ jobs:
         if: github.event_name == 'pull_request'
         run: .github/scripts/changelog-gate.sh "${{ github.event.pull_request.base.sha }}" HEAD
 
-  # Gate extension: compile workspace on same Windows host class used by release.
-  # Compiler is oracle; v0.1.5 release found Unix-only assumptions Linux CI missed.
+  # Gate extension: reproduce Windows release checks before any tag. Compile-only
+  # coverage missed Unix-only receipt tests until v0.1.7 release.
   windows-check:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false
     runs-on: windows-latest
@@ -173,5 +173,11 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
       - name: check workspace on Windows
         run: cargo check --workspace --locked
-      - name: test atomic writes on Windows
-        run: cargo test -p hugit-cli pr::filelock::tests --locked
+      - name: test workspace on Windows
+        run: cargo test --workspace --locked
+      - name: build release CLI on Windows
+        run: cargo build --release --locked -p hugit-cli --target x86_64-pc-windows-msvc
+      - name: smoke release CLI on Windows
+        run: |
+          .\target\x86_64-pc-windows-msvc\release\hugit.exe -V
+          .\target\x86_64-pc-windows-msvc\release\hugit.exe --help

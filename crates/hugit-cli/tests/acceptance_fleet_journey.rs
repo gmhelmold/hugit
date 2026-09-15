@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! `hugit fleet` — the FULL-FLEET journey: the fleet operator sees what N
 //! agents did with zero friction (W4, 2026-09-03).
 //!

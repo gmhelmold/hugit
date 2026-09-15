@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! WP-DOCK-2 — dock resolver (cwd→gitdir→dock; env fast-path, cwd truth;
 //! ghost; self-heal; M5 auto-coin).
 //!

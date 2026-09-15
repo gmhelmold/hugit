@@ -223,6 +223,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn coverage_reports_injected_reference_transaction_support() {
         let matrix = coverage_with(
@@ -233,6 +234,7 @@ mod tests {
         assert_eq!(matrix["reference_transaction"]["state"], "supported");
     }
 
+    #[cfg(unix)]
     #[test]
     fn coverage_reports_injected_reference_transaction_unknown() {
         let matrix = coverage_with(std::path::Path::new("."), &FixedProbe(Capability::Unknown));

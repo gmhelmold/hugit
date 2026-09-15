@@ -201,7 +201,7 @@ fn classify_auth_probe(repo: &str, had_token: bool, class: &http::HttpClass, pat
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

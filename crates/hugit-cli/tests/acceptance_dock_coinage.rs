@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! WP-DOCK-1 — hook-born dock coinage (post-checkout auto-dock).
 //!
 //! Proves, hermetically and end-to-end, that the post-checkout hook coins the

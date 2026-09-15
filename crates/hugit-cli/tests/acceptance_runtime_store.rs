@@ -65,6 +65,7 @@ fn runtime(repo: &Path) -> PathBuf {
     PathBuf::from(String::from_utf8(out.stdout).unwrap().trim()).join("hugit")
 }
 
+#[cfg(unix)]
 #[test]
 fn migrates_exact_legacy_bytes_and_binds_first_canonical_event() {
     let repo = scratch("migration");
@@ -251,6 +252,7 @@ fn explicit_runtime_log_rejects_corrupt_legacy_before_generic_writer_lock_mkdir(
     );
 }
 
+#[cfg(unix)]
 #[test]
 #[ignore = "superseded by current attach API and runtime contract"]
 fn corrupt_legacy_hook_exits_zero_without_runtime_write() {
@@ -288,6 +290,7 @@ fn corrupt_legacy_hook_exits_zero_without_runtime_write() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn canonical_runtime_alias_migrates_legacy_before_append() {
     let repo = scratch("runtime-alias");
@@ -456,6 +459,7 @@ fn strip_comments_and_strings(source: &str) -> String {
     code
 }
 
+#[cfg(unix)]
 #[test]
 #[ignore = "superseded by current attach API and runtime contract"]
 fn incomplete_metadata_recovers_without_an_unbound_append() {
@@ -489,6 +493,7 @@ fn incomplete_metadata_recovers_without_an_unbound_append() {
     assert_eq!(records[1]["kind"], "campaign.opened");
 }
 
+#[cfg(unix)]
 #[test]
 fn snapshot_only_interruption_recovers_before_capture_append() {
     let repo = scratch("snapshot-only");
@@ -522,6 +527,7 @@ fn snapshot_only_interruption_recovers_before_capture_append() {
     assert_eq!(records[1]["kind"], "ref.update");
 }
 
+#[cfg(unix)]
 #[test]
 fn every_first_hook_writer_follows_legacy_prefix() {
     for (tag, args, event_kind) in [
@@ -616,6 +622,7 @@ fn first_dock_event_follows_legacy_prefix() {
     assert_eq!(records[1]["kind"], "dock.record");
 }
 
+#[cfg(unix)]
 #[test]
 #[ignore = "superseded by current attach API and runtime contract"]
 fn nested_and_linked_worktrees_share_runtime_and_keep_worktree_clean() {

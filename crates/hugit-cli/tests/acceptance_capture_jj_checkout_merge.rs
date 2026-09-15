@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! MCP capture tool — checkout + merge captures proven e2e against REAL `jj`.
 //!
 //! `jj` fires no git hooks (`jj new` + `jj describe` + `jj git export` write

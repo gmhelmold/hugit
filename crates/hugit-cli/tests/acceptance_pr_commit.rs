@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! W2 — `hugit pr open --commit <oid>` bundles CAPTURED raw commits (the bundle
 //! from silent-hook captures) as EXTERNAL PR members (2026-09-03).
 //!

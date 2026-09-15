@@ -2,6 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -163,6 +166,22 @@ fn absolute_normalized(path: &Path) -> PathBuf {
     normalized
 }
 
+fn git_dir_arg(path: &Path) -> std::ffi::OsString {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+
+        let wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+        let without_verbatim =
+            wide.strip_prefix(&['\\' as u16, '\\' as u16, '?' as u16, '\\' as u16]);
+        return without_verbatim
+            .map(std::ffi::OsString::from_wide)
+            .unwrap_or_else(|| path.as_os_str().to_os_string());
+    }
+    #[cfg(not(windows))]
+    path.as_os_str().to_os_string()
+}
+
 /// Resolve a canonical runtime log from its owning Git common directory, never
 /// from the caller's CWD. A path shaped like runtime state but not owned by its
 /// claimed common directory is rejected rather than treated as an ordinary log.
@@ -184,7 +203,8 @@ fn store_for_runtime_log(log_path: &Path) -> Result<Option<RuntimeStore>, Porcel
         PorcelainError::io("resolve runtime log common directory", common_candidate, &e)
     })?;
     let output = std::process::Command::new("git")
-        .arg(format!("--git-dir={}", common.display()))
+        .arg("--git-dir")
+        .arg(git_dir_arg(&common))
         .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .output()
         .map_err(|e| PorcelainError::io("verify runtime log common directory", &common, &e))?;
@@ -219,7 +239,8 @@ fn legacy_path_for_store(store: &RuntimeStore) -> Result<PathBuf, PorcelainError
         .parent()
         .expect("runtime root has common-dir parent");
     let output = std::process::Command::new("git")
-        .arg(format!("--git-dir={}", common.display()))
+        .arg("--git-dir")
+        .arg(git_dir_arg(common))
         .args(["worktree", "list", "--porcelain"])
         .output()
         .map_err(|e| PorcelainError::io("resolve runtime legacy worktree", common, &e))?;

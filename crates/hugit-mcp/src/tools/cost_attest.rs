@@ -219,7 +219,7 @@ fn attested_status(cost_micros: u64, spend_proof: Option<&str>) -> (bool, &'stat
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

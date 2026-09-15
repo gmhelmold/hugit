@@ -151,7 +151,7 @@ pub fn run(args: &Value) -> ToolOutcome {
     }))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::io::Write;
