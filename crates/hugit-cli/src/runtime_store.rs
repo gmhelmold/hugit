@@ -2,6 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
