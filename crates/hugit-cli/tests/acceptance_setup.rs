@@ -54,6 +54,7 @@ fn wait_for_capture(log: &Path, timeout_ms: u64) -> bool {
     false
 }
 
+#[cfg(unix)]
 #[test]
 fn setup_repo_installs_hooks_preserves_git_data_and_reports_conflicts() {
     let root = scratch("install");

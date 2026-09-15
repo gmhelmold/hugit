@@ -589,6 +589,18 @@ mod tests {
         );
     }
 
+    #[cfg(not(unix))]
+    #[test]
+    fn unsupported_platform_reports_safe_receipt_refusal() {
+        assert_eq!(
+            receipt_filesystem_failure(),
+            Some(ReceiptFilesystemFailure {
+                code: "receipt_filesystem_unsupported",
+                message: "safe no-follow receipt filesystem is unavailable on this platform",
+            })
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn immutable_publish_never_overwrites_first_complete_bytes() {

@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! `hugit capture` + hook install — the zero-friction journey (2026-09-03).
 //!
 //! Owner direction: the LLM uses `git` normally; hugit records silently in the

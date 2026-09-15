@@ -372,8 +372,11 @@ fn changed_paths(
     if !output.status.success() {
         return Err("changed-path git query failed".to_string());
     }
-    output
-        .stdout
+    parse_changed_paths(&output.stdout)
+}
+
+fn parse_changed_paths(bytes: &[u8]) -> Result<Vec<String>, String> {
+    bytes
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
         .map(|path| {
@@ -614,7 +617,7 @@ fn is_transaction_oid(value: &str) -> bool {
     is_git_oid(value) || matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte == b'0')
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -1039,5 +1042,60 @@ mod tests {
         drain::drain(&log, 32).expect("explicit worker drain");
         let log = load_event_log(&log).expect("log still verifies after 3 appends");
         assert_eq!(log.len(), 3);
+    }
+}
+
+#[cfg(all(test, not(unix)))]
+mod unsupported_platform_tests {
+    use super::*;
+
+    #[test]
+    fn capture_refuses_receipt_storage_without_blocking_or_appending() {
+        let root =
+            std::env::temp_dir().join(format!("hugit-capture-unsupported-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let log = root.join("event-log.json");
+        let hook_log = root.join("hooks.log");
+        std::fs::write(&log, b"[]\n").unwrap();
+
+        assert_eq!(
+            run(CaptureArgs {
+                kind: "commit".into(),
+                top_level: root.clone(),
+                log: Some(log.clone()),
+                hook_log: Some(hook_log.clone()),
+                oid: Some("a".repeat(40)),
+                branch: Some("main".into()),
+                from: None,
+                recorded_at: Some(0),
+                push_tuples: None,
+                rewrite_tuples: None,
+                rewrite_type: None,
+                reference_tuples: None,
+                transaction_phase: None,
+                drain_worker: false,
+            }),
+            ExitCode::SUCCESS,
+            "silent hook contract never blocks Git"
+        );
+        assert_eq!(std::fs::read(&log).unwrap(), b"[]\n");
+        assert!(!root.join(crate::runtime_store::RECEIPTS_DIR).exists());
+        assert_eq!(
+            std::fs::read_to_string(&hook_log).unwrap(),
+            "capture.receipt_directory\n"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn nul_delimited_changed_paths_preserve_hostile_bytes() {
+        let paths =
+            parse_changed_paths(b"space name\0tab\tname\0line\nname\0--flag\0unicod\xc3\xa9\0")
+                .unwrap();
+        assert_eq!(
+            paths,
+            vec!["--flag", "line\nname", "space name", "tab\tname", "unicodé"]
+        );
     }
 }

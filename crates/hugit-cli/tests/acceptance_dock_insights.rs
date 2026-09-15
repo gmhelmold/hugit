@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! WP-DOCK-5 — insights per-branch (F5) + residual buckets (the honest window).
 //!
 //! Proves the acceptance hermetically + e2e (real git + real spool seam):

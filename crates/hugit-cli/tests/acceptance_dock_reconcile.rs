@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! WP-DOCK-3 — dock lifecycle + reconciliation (A4: cost↔commit by branch).
 //!
 //! Proves the acceptance hermetically AND end-to-end:
