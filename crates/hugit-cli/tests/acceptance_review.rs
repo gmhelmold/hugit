@@ -58,6 +58,7 @@ fn record_check(log: &str, dir: &Path, name: &str, cmd: &str) {
     assert_eq!(code, 0, "check --store must succeed: {v}");
 }
 
+#[cfg(unix)]
 #[test]
 fn review_cites_a_grounded_check_question() {
     let dir = scratch("cited");
