@@ -119,6 +119,7 @@ fn exit_of(v: &Value) -> i64 {
 /// the PINNED `--root`, not the ambient cwd. We run from cwd A where `flag.txt`
 /// says pass, then from cwd B where it says FAIL. With cwd pinned to `--root`,
 /// the check NEVER observes cwd B's flag, so it cannot serve a stale green for it.
+#[cfg(unix)]
 #[test]
 fn cwd_change_does_not_stale_green() {
     let dir = scratch("cwd");
@@ -241,6 +242,7 @@ fn unallowlisted_env_var_does_not_stale_green() {
 /// result-affecting. It is captured AND its value is hashed into the env-manifest
 /// axis, so a PATH change BUSTS the memo key → a MISS that re-executes the new
 /// resolution. We shim `mytool` to exit 0 in binok/ and exit 1 in binbad/.
+#[cfg(unix)]
 #[test]
 fn path_change_busts_the_key_and_reexecutes() {
     let dir = scratch("path");
