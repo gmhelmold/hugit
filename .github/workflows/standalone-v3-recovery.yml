@@ -1,0 +1,72 @@
+name: Recover approved standalone v3 import
+on:
+  push:
+    branches: [plan/import-standalone-v3-recovery]
+permissions:
+  contents: write
+concurrency:
+  group: hugit-standalone-v3-import
+  cancel-in-progress: false
+jobs:
+  recover:
+    if: github.repository == 'gmhelmold/hugit'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          fetch-depth: 0
+      - name: Recover exact previously uploaded transport
+        shell: bash
+        run: |
+          cp .plan-bootstrap/install.py "$RUNNER_TEMP/hugit-install.py"
+          python3 - <<'PY'
+          import pathlib, hashlib, itertools, lzma, json, os
+          parts=sorted(pathlib.Path('.plan-bootstrap').glob('fragment-*.bin'))
+          data=[p.read_bytes() for p in parts]
+          report={'fragments':[{'name':p.name,'size':len(b),'prefix':b[:12].hex(),'sha256':hashlib.sha256(b).hexdigest()} for p,b in zip(parts,data)]}
+          dest=pathlib.Path(os.environ['RUNNER_TEMP'])
+          expected='81afb0ff78002edbdda0b86e168bf00b9d85460db928ff5414711a83c553e852'
+          recovered=None
+          for count in range(4):
+            for omitted in itertools.combinations(range(len(data)),count):
+              raw=b''.join(b for n,b in enumerate(data) if n not in omitted)
+              if hashlib.sha256(raw).hexdigest()==expected:
+                recovered=raw; report['omitted']=[parts[n].name for n in omitted]; break
+            if recovered is not None: break
+          report['recovered']=recovered is not None
+          (dest/'recovery-report.json').write_text(json.dumps(report,indent=2))
+          if recovered is None:
+            raise SystemExit('Transport not reconstructed; fragment report retained; no target changes')
+          decoder=lzma.LZMADecompressor()
+          payload=decoder.decompress(recovered,max_length=16*1024*1024)
+          assert decoder.eof and not decoder.unused_data
+          obj=json.loads(payload)
+          (dest/'hugit-plan.json').write_bytes(payload)
+          print('Exact transport recovered:',len(recovered),'bytes; files:',len(obj['files']))
+          PY
+      - name: Install and validate only the planning branch
+        shell: bash
+        run: |
+          git fetch origin plan/standalone-v3
+          git checkout -B plan/standalone-v3 origin/plan/standalone-v3
+          python3 "$RUNNER_TEMP/hugit-install.py" install "$RUNNER_TEMP/hugit-plan.json"
+          python3 scripts/plan/check_import.py
+          python3 scripts/plan/test_sync.py
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/plan/standalone scripts/plan .github/PULL_REQUEST_TEMPLATE/standalone-work-package.md .github/ISSUE_TEMPLATE/standalone-plan-change.yml
+          if ! git diff --cached --quiet; then
+            git commit -s -m 'docs(plan): recover byte-identical standalone v3 planning import'
+            git push origin HEAD:refs/heads/plan/standalone-v3
+          fi
+      - name: Retain diagnostic and imported sources
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: hugit-import-recovery
+          path: |
+            ${{ runner.temp }}/recovery-report.json
+            ${{ runner.temp }}/hugit-plan.json
+            scripts/plan
+          if-no-files-found: warn
