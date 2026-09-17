@@ -79,6 +79,26 @@ jobs:
           cmp "$RUNNER_TEMP/hug001-automation.json" "$TMP/automation-repeated.json"
           python3 scripts/plan/test_automation.py --source "$TMP/source" -v \
             2>&1 | tee "$RUNNER_TEMP/hug001-automation-tests.txt"
+          git for-each-ref --format='%(refname) %(objectname)' > "$TMP/refs-before"
+          git status --porcelain=v1 --untracked-files=all > "$TMP/worktree-before"
+          git show d6f311e2a3521013f0f2cc2477fa716f7ca0f925:docs/audit/reachability.json > "$TMP/curation.json"
+          export PYTHONDONTWRITEBYTECODE=1
+          python3 scripts/plan/recover_inventory.py \
+            --source "$TMP/source" --tree "$TMP/tree.z" --index "$TMP/index.z" \
+            --basis "$TMP/basis.json" --curation "$TMP/curation.json" \
+            --out "$RUNNER_TEMP/hug001-rebuilt" > "$RUNNER_TEMP/hug001-rebuild-command.json"
+          python3 scripts/plan/test_recover_inventory.py --root "$GITHUB_WORKSPACE" \
+            --source "$TMP/source" --tree "$TMP/tree.z" --index "$TMP/index.z" \
+            --basis "$TMP/basis.json" --curation "$TMP/curation.json" \
+            --report "$RUNNER_TEMP/hug001-recovery.json" \
+            2>&1 | tee "$RUNNER_TEMP/hug001-recovery-tests.txt"
+          verify > "$TMP/after-recovery.json"
+          cmp "$RUNNER_TEMP/hug001-acquisition.json" "$TMP/after-recovery.json"
+          git for-each-ref --format='%(refname) %(objectname)' > "$TMP/refs-after"
+          git status --porcelain=v1 --untracked-files=all > "$TMP/worktree-after"
+          cmp "$TMP/refs-before" "$TMP/refs-after"
+          cmp "$TMP/worktree-before" "$TMP/worktree-after"
+          printf '%s\n' '{"source_reverified":true,"refs_unchanged":true,"worktree_status_unchanged":true,"whole_wp_ready":false}' > "$RUNNER_TEMP/hug001-recovery-state.json"
           printf '%s\n' "unexpected file" > "$TMP/source/unclassified-inventory-control"
           if verify > "$TMP/negative.json"; then
             echo "ERROR: unclassified file was accepted" >&2
@@ -97,5 +117,10 @@ jobs:
             ${{ runner.temp }}/hug001-surface-tests.txt
             ${{ runner.temp }}/hug001-automation.json
             ${{ runner.temp }}/hug001-automation-tests.txt
+            ${{ runner.temp }}/hug001-rebuilt/
+            ${{ runner.temp }}/hug001-rebuild-command.json
+            ${{ runner.temp }}/hug001-recovery.json
+            ${{ runner.temp }}/hug001-recovery-tests.txt
+            ${{ runner.temp }}/hug001-recovery-state.json
           if-no-files-found: error
           retention-days: 30
