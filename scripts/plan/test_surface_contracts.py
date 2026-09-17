@@ -43,6 +43,51 @@ class SurfaceContracts(unittest.TestCase):
                 self.mutate(lambda d: select(d).update(destination_wp='HUG-999'),
                             'DESTINATION_WP_UNKNOWN')
 
+    def test_missing_destination_for_all_surface_kinds(self):
+        for group in ('profiles', 'workspace_libraries', 'workspace_binaries'):
+            with self.subTest(group=group):
+                def change(d):
+                    rows = d[group]
+                    row = next(iter(rows.values())) if isinstance(rows, dict) else rows[0]
+                    row.pop('destination_wp')
+                self.mutate(change, 'DESTINATION_WP_FORMAT')
+
+    def test_non_ascii_destination_is_not_a_work_package_id(self):
+        self.mutate(lambda d: d['workspace_binaries'][0].update(destination_wp='HUG-٠٠١'),
+                    'DESTINATION_WP_FORMAT')
+
+    def test_owner_lane_required(self):
+        plan, _ = v.load(ARGS.source, 'docs/plan/standalone/v3/backlog.json')
+        destination = next(iter(self.doc['profiles'].values()))['destination_wp']
+        for bad in (None, '', ' ', [], ' A', 'A' * 65):
+            with self.subTest(owner=repr(bad)):
+                modified = copy.deepcopy(plan)
+                next(t for t in modified['tasks'] if t['id'] == destination)['owner_lane'] = bad
+                with self.assertRaisesRegex(v.Invalid, '^DESTINATION_OWNER_MISSING$'):
+                    v.resolve_destination_owners(self.doc, modified)
+
+    def test_duplicate_destination_task_identity(self):
+        plan, _ = v.load(ARGS.source, 'docs/plan/standalone/v3/backlog.json')
+        plan['tasks'].append(copy.deepcopy(plan['tasks'][0]))
+        with self.assertRaisesRegex(v.Invalid, '^DUPLICATE_ID$'):
+            v.resolve_destination_owners(self.doc, plan)
+
+    def test_plan_digest_must_match_inventory(self):
+        inv = copy.deepcopy(self.inv)
+        inv['plan_file_sha256'] = '0' * 64
+        with self.assertRaisesRegex(v.Invalid, '^PLAN_IDENTITY$'):
+            self.good(inv=inv)
+
+    def test_owner_resolution_is_reported_without_approval(self):
+        plan, raw = v.load(ARGS.source, 'docs/plan/standalone/v3/backlog.json')
+        tasks = {t['id']: t for t in plan['tasks']}
+        rows = list(self.doc['profiles'].values()) + self.doc['workspace_libraries'] + self.doc['workspace_binaries']
+        expected = {r['destination_wp']: tasks[r['destination_wp']]['owner_lane'] for r in rows}
+        result = self.good()
+        self.assertEqual(result['destination_owners'], expected)
+        self.assertEqual(result['plan_sha256'], v.digest(raw))
+        self.assertTrue(all(flag is False for flag in result['authority'].values()))
+
     def test_positive(self):
         r=self.good()
         self.assertEqual(r['routes'],57)
