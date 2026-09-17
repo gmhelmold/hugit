@@ -30,6 +30,37 @@ class AutomationTests(unittest.TestCase):
         with self.assertRaisesRegex(v.Invalid, '^' + code + '$'):
             self.run_map(doc)
 
+    def test_profile_lookup_work_is_bounded_by_entries_not_profiles(self):
+        # Counts dictionary accesses, not wall time or total interpreter work.
+        # This catches re-scanning all entries for every profile.
+        reads = [0]
+
+        class CountedEntry(dict):
+            def __getitem__(self, key):
+                if key == 'profile':
+                    reads[0] += 1
+                return super().__getitem__(key)
+
+        doc = copy.deepcopy(self.doc)
+        doc['entries'] = [CountedEntry(e) for e in doc['entries']]
+        report = self.run_map(doc)
+        self.assertEqual(sum(report['profiles'].values()), len(doc['entries']))
+        self.assertLessEqual(reads[0], 3 * len(doc['entries'])
+                             + len(doc['critical_anchors']) + 6)
+
+    def test_entry_order_does_not_change_source_ordered_report(self):
+        doc = copy.deepcopy(self.doc)
+        doc['entries'].reverse()
+        self.assertEqual(self.run_map(), self.run_map(doc))
+
+    def test_report_paths_need_no_comparison_sort(self):
+        # The pinned source inventory provides a stable order already.
+        with patch.object(v, 'sorted', side_effect=AssertionError('path sort'), create=True):
+            report = self.run_map()
+        external = set(report['external_configuration_wrappers'])
+        expected = [item['path'] for item in self.inv['files'] if item['path'] in external]
+        self.assertEqual(report['external_configuration_wrappers'], expected)
+
     def test_positive(self):
         r = self.run_map()
         self.assertEqual(r['automation_files'], 81)
