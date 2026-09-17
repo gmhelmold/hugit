@@ -1,0 +1,1024 @@
+{
+  "schema_version": 1,
+  "repository": "gmhelmold/hugit",
+  "tracking_issue": 449,
+  "baseline_main": "f32e9b9253a9a98f5d245fd3fca700a956ebf1fe",
+  "cleanup": {
+    "completed_at_utc": "2026-09-17T23:29:20.368577+00:00",
+    "baseline_main": "f32e9b9253a9a98f5d245fd3fca700a956ebf1fe",
+    "main_unchanged": true,
+    "branches_before": 96,
+    "branches_after_cleanup": 2,
+    "branches_deleted": 94,
+    "archive_tags_created_and_verified": 37,
+    "ancestor_refs_retained_in_main": 57,
+    "remaining_branches": {
+      "refs/heads/archive/standalone-v3-import-before-signoff": "4075e91c6cf102356ed7be44794681bd110ec19b",
+      "refs/heads/main": "f32e9b9253a9a98f5d245fd3fca700a956ebf1fe"
+    },
+    "atomic_archive_push": true,
+    "create_only_archive_leases": true,
+    "atomic_delete_with_exact_old_sha_leases": true,
+    "open_prs_before": 0,
+    "open_prs_after_cleanup": 0,
+    "source_or_working_tree_mutation": false
+  },
+  "retention_policy": "Never delete the final durable reference to unique work. main ancestors stay reachable; other retired tips are exact archive tags. Existing documented archive branch stays. No merge of legacy server code is implied.",
+  "branches": [
+    {
+      "branch": "archive/standalone-v3-import-before-signoff",
+      "sha": "4075e91c6cf102356ed7be44794681bd110ec19b",
+      "action": "retain_documented_archive_branch",
+      "retained_ref": "refs/heads/archive/standalone-v3-import-before-signoff",
+      "disposition": "operational_evidence_only",
+      "ancestor_of_main": false,
+      "matched_merged_prs": []
+    },
+    {
+      "branch": "ci/switch-to-self-hosted-runner",
+      "sha": "6beaa3dc6d8bef99ce0de9e1fefcdb3dc79e9e80",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/ci/switch-to-self-hosted-runner",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        219
+      ]
+    },
+    {
+      "branch": "deploy/cost-minus-82",
+      "sha": "a7c69ccd7835a38e08c66b37b75b045b8acbabdb",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/deploy/cost-minus-82",
+      "disposition": "retired_server_scope_not_promoted",
+      "ancestor_of_main": false,
+      "matched_merged_prs": []
+    },
+    {
+      "branch": "diag/batchread-multichunk-probe",
+      "sha": "dabf9a466f5af2278829302b13af1327f8b2fa17",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        240
+      ]
+    },
+    {
+      "branch": "docs/kungfu-contract-docs",
+      "sha": "aa76b37e6a6ba365462dc088b2407e5c56ba4a92",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        225
+      ]
+    },
+    {
+      "branch": "feat/anon-v1-read-public-repos",
+      "sha": "21d4da56ee9e5488514094d9925a9108ba23ae92",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": []
+    },
+    {
+      "branch": "feat/blob-history-vm",
+      "sha": "e97e5eb3c338cdd2bb88a5e9fb5023bdda37a44b",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/feat/blob-history-vm",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        216
+      ]
+    },
+    {
+      "branch": "feat/budget-audit-cas-walk-deadlines",
+      "sha": "0753760b9122ec0a268db91761e2e8aa6c095ce6",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": []
+    },
+    {
+      "branch": "feat/cache-control-and-godpath-gate",
+      "sha": "d4bd5320bc614fffd2877f8e8fffc8ba107c2a11",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": []
+    },
+    {
+      "branch": "feat/cas-batchread-observability",
+      "sha": "d1e919a1b904c5ac168c7ea38efec65c7bc4d6c3",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        239
+      ]
+    },
+    {
+      "branch": "feat/cas-push-finalize-and-s13-metrics",
+      "sha": "0108ecf5d978ea5a78494910bf3589373af29a40",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": []
+    },
+    {
+      "branch": "feat/clone-batch-fetch-perf",
+      "sha": "e7cf779e2c6a3c4649b5b42f2b633bf193118f9d",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": []
+    },
+    {
+      "branch": "feat/clone-pack-storage",
+      "sha": "105caae142ab245afe09af1570e18a1d7f64b704",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        241
+      ]
+    },
+    {
+      "branch": "feat/clone-pack-wire",
+      "sha": "1f381cc30156cfcbe7d4393b01c145b276d1cad5",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        242
+      ]
+    },
+    {
+      "branch": "feat/close-submit-cost-usd-micros",
+      "sha": "b9e288a3f3ca4634293bbb926ff4901a1099a113",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/feat/close-submit-cost-usd-micros",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        215
+      ]
+    },
+    {
+      "branch": "feat/code-search-inmem-index",
+      "sha": "b7815a493f3c50a62857a64d79f7f656182ac464",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/feat/code-search-inmem-index",
+      "disposition": "retired_server_scope_not_promoted",
+      "ancestor_of_main": false,
+      "matched_merged_prs": []
+    },
+    {
+      "branch": "feat/conformance-lease-dto-vectors",
+      "sha": "4d6c6bba61aa2fb045e11c898eb14a3878e2acb4",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/feat/conformance-lease-dto-vectors",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        220
+      ]
+    },
+    {
+      "branch": "feat/cost-land-submit-real",
+      "sha": "c4b6e04fbe29bdfb2587610d10c84ea1580b2e38",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": []
+    },
+    {
+      "branch": "feat/cost-model-price-card",
+      "sha": "287cfbfcda60e3fa16b1e4bd8e92724a69792220",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": []
+    },
+    {
+      "branch": "feat/cost-serve-plus-82",
+      "sha": "a3c519fd6d64c11806051784bbe1ef77ed1726c5",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        245
+      ]
+    },
+    {
+      "branch": "feat/costvm-cost-usd-micros",
+      "sha": "420949c3574ae7bccedc910cf437d89377fb1c95",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/feat/costvm-cost-usd-micros",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        212
+      ]
+    },
+    {
+      "branch": "feat/ctx-usage-capture-verb",
+      "sha": "8d46e4c4ee5b40c0bc300c07384b2d303ed2848f",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": []
+    },
+    {
+      "branch": "feat/dos-fix-prdetail-review-blob-deadline",
+      "sha": "09a4a24eb7912422b876d6458b3f19889042832e",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": []
+    },
+    {
+      "branch": "feat/gdpr1-erasure-execution-cascade",
+      "sha": "51204fd1a55bc257aaa23ca845590633840a7e8f",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        254
+      ]
+    },
+    {
+      "branch": "feat/gdpr-slice2-wiring",
+      "sha": "a7f5d2825c731a1d75cc6b33f0b0565757961d5f",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        269
+      ]
+    },
+    {
+      "branch": "feat/github-app-env-secrets",
+      "sha": "c9ccee3d44199e3e636a50cdaf3e88e450f01f10",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        318
+      ]
+    },
+    {
+      "branch": "feat/home-file-tree",
+      "sha": "ed6325d04997861e5c9747e1ba9d544e776049c1",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        243
+      ]
+    },
+    {
+      "branch": "feat/hugit-skills",
+      "sha": "dec6e2fb98f6f8ac8cff372bd625940f15887787",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        226
+      ]
+    },
+    {
+      "branch": "feat/ifmatch-conditional-manifest-put",
+      "sha": "2c085760017cb2ab2f08aa42b88c1b4cd4447c39",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": []
+    },
+    {
+      "branch": "feat/kungfu-merge-event-webhook",
+      "sha": "b4220c4ab231d1f838966a1304c4014da63a66b4",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": []
+    },
+    {
+      "branch": "feat/metenant-me-principal-scoping",
+      "sha": "1ed0169e2b4056139dc5f41690dd6d7eb52df218",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        230
+      ]
+    },
+    {
+      "branch": "feat/offbox-s13-ingest-killer-a",
+      "sha": "f74d0ca055bbded2a8d4058e0562a38c09e0dfff",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/feat/offbox-s13-ingest-killer-a",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        204
+      ]
+    },
+    {
+      "branch": "feat/pr-create-from-branch-verb",
+      "sha": "271664eaee7eb9a01e2c193790d9bbbd4f4cde14",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        248
+      ]
+    },
+    {
+      "branch": "feat/precise-why",
+      "sha": "1a38e79236d3d0d433ecb424132f2a31f8427e05",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/feat/precise-why",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        360
+      ]
+    },
+    {
+      "branch": "feat/provision-post-repos-v0",
+      "sha": "9333fbd6a421c3eaf04f15f3cb4ceb676030de60",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        233
+      ]
+    },
+    {
+      "branch": "feat/receive-pack-delete-ref",
+      "sha": "8d485ef900c352e3c6933da59b0421abc366da52",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/feat/receive-pack-delete-ref",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        208
+      ]
+    },
+    {
+      "branch": "feat/receive-pack-offloop",
+      "sha": "178139aac21b141db79bf08bd0998c2542f6b487",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": []
+    },
+    {
+      "branch": "feat/serve-etag-304",
+      "sha": "4cf9ccb1d391cd4b5ec62ba88119af1605ea211a",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/feat/serve-etag-304",
+      "disposition": "retired_server_scope_not_promoted",
+      "ancestor_of_main": false,
+      "matched_merged_prs": []
+    },
+    {
+      "branch": "feat/shed-metrics",
+      "sha": "0d5ac158d795914ef0b9e064393447e944b2e00a",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": []
+    },
+    {
+      "branch": "feat/structured-state-vm-fields",
+      "sha": "1c56a4298ce65aa757aec707b082b39b98313207",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/feat/structured-state-vm-fields",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        213
+      ]
+    },
+    {
+      "branch": "feat/thinpack-cas-reachability",
+      "sha": "d4c366666f8783640abf623e58c755fae47d7e2f",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/feat/thinpack-cas-reachability",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        206
+      ]
+    },
+    {
+      "branch": "feat/upload-pack-authed-clone",
+      "sha": "fa96a08ed5d72eb88bb3ae8bf88aa5221b720479",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/feat/upload-pack-authed-clone",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        223
+      ]
+    },
+    {
+      "branch": "feat/wave1-clone-receive-cost",
+      "sha": "71827e5d106ebc9269599a91d1e371270a77d88f",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        237
+      ]
+    },
+    {
+      "branch": "feat/wave2-anon-cost",
+      "sha": "0910d16b723bf6e99a2ede9746e7846fda12c390",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        238
+      ]
+    },
+    {
+      "branch": "feat/wave2a-ifmatch-webhook",
+      "sha": "2078ebf99a757617ab29942341c0fd27fc666a6a",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        229
+      ]
+    },
+    {
+      "branch": "feat/wave2c-budget-cachegodpath",
+      "sha": "f4d6deabbc45d93afbe39601e60a4ebfd4b84aae",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        231
+      ]
+    },
+    {
+      "branch": "feat/wave2d-dosfix-shedmetrics",
+      "sha": "df302f1a8df68daade90c7ad16bb47a252069cec",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        232
+      ]
+    },
+    {
+      "branch": "fix/acquire-request-wire-shape",
+      "sha": "f4e91af15e71bd529d40744a1b5881d164f3e045",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/fix/acquire-request-wire-shape",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        214
+      ]
+    },
+    {
+      "branch": "fix/advertise-delete-refs-capability",
+      "sha": "533db528965f84bd9b4282f3d42f1712289d72de",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/fix/advertise-delete-refs-capability",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        209
+      ]
+    },
+    {
+      "branch": "fix/anyhow-rustsec-downcast-mut",
+      "sha": "3b1775ef2a37fe9335edf57406b67ec654b179a2",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/fix/anyhow-rustsec-downcast-mut",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        218
+      ]
+    },
+    {
+      "branch": "fix/boot-selfprobe-nonblocking-chunk256-readme",
+      "sha": "e3f041a0031ffb303a39c0ad9f81e83184e59bed",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        247
+      ]
+    },
+    {
+      "branch": "fix/clone-fetch-offloop-not-wedge",
+      "sha": "c2be48a3fea8b69481ee904141d462f121b9094f",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        236
+      ]
+    },
+    {
+      "branch": "fix/code-search-latency-budget",
+      "sha": "c809f2eb5a1d6bf16d23855ad1d7bc8b4441add9",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/fix/code-search-latency-budget",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        207
+      ]
+    },
+    {
+      "branch": "fix/convergence-gate-wave",
+      "sha": "827cd2f480b5eefda86dec1ff5c9cf3bc2e9ec57",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        234
+      ]
+    },
+    {
+      "branch": "fix/diff-wall-clock-dos",
+      "sha": "e334e9904899f5b0b43100b8d88b8129f9a8d1a1",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/fix/diff-wall-clock-dos",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        210
+      ]
+    },
+    {
+      "branch": "fix/epoch0-updated-ago-honesty",
+      "sha": "1e4aab586015e692e7ed21712c06c1a749981e58",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        224
+      ]
+    },
+    {
+      "branch": "fix/fresh-push-root-tree-live-head",
+      "sha": "3e5238ed9ca79ee5997c51b7383d3a9572e3333d",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        244
+      ]
+    },
+    {
+      "branch": "fix/git-writepath-audit-loose-ends",
+      "sha": "1a742fdb0450593c6cdfb8f36811b86ac9f189e0",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        235
+      ]
+    },
+    {
+      "branch": "fix/gitdir-dotgit-strip",
+      "sha": "64c7375bb7158dc2848700119838ed1ddc002bc6",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/fix/gitdir-dotgit-strip",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        323
+      ]
+    },
+    {
+      "branch": "fix/hug-001-destination-integrity",
+      "sha": "d1438dd4a2dbf20416faf19149dd0c9e808590d9",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        445
+      ]
+    },
+    {
+      "branch": "fix/ifmatch-remerge-revalidate-expected",
+      "sha": "0d0bbb7ff5cd473c10b3dec4e0b3541824188333",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": []
+    },
+    {
+      "branch": "fix/inbound-socket-timeout",
+      "sha": "1445c1295b3f4e7a71e9d62afe797a233d672841",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": []
+    },
+    {
+      "branch": "fix/lease-close-wire-and-conformance",
+      "sha": "29b6caa477a2d160f5543219546f272320afd90a",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/fix/lease-close-wire-and-conformance",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        205
+      ]
+    },
+    {
+      "branch": "fix/lower-max-cas-lookups",
+      "sha": "56de61b47ced83fc8b98eefeb70b3bec11cb5a7b",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/fix/lower-max-cas-lookups",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        211
+      ]
+    },
+    {
+      "branch": "fix/provision-per-tenant-cap",
+      "sha": "33bcf2cd5bdeb2a181a5c7cd7fb92111779b3742",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": []
+    },
+    {
+      "branch": "fix/read-path-ref-name-redaction-coverage",
+      "sha": "ff56f09991987169f7ee9e99e1c1eb841f309214",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/fix/read-path-ref-name-redaction-coverage",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        222
+      ]
+    },
+    {
+      "branch": "fix/refname-validation-and-ssrf-v6",
+      "sha": "23d75d8f042300a7d9b2a84a2fcbd279bf44cce3",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": []
+    },
+    {
+      "branch": "fix/serve-fetch-deadline-and-wants",
+      "sha": "4306c06dfbb772192cfb67b248106a6bdfa52dd3",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": []
+    },
+    {
+      "branch": "fix/thinpack-tip-resolvability-reassert",
+      "sha": "73bcb01c7e4eac982fc80c5088e166bff55065df",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/fix/thinpack-tip-resolvability-reassert",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        221
+      ]
+    },
+    {
+      "branch": "fix/v11-cold-fixes",
+      "sha": "ad761323b82e64099a0e4070ecd0ce4c51799d1c",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/fix/v11-cold-fixes",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        332
+      ]
+    },
+    {
+      "branch": "fix/v11-pr1b-normalize-slug",
+      "sha": "b41818a9703c61fa7f4e27f179cefc661583c399",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/fix/v11-pr1b-normalize-slug",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        324
+      ]
+    },
+    {
+      "branch": "fix/v11-pr2-lcs-deadline",
+      "sha": "2c87a09288218085b513c0a684a7596195886a54",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/fix/v11-pr2-lcs-deadline",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        325
+      ]
+    },
+    {
+      "branch": "fix/v11-pr3-pkt-line-overflow",
+      "sha": "da2eba16a53902c301f68d4a83ba7c5435fdb3b8",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/fix/v11-pr3-pkt-line-overflow",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        326
+      ]
+    },
+    {
+      "branch": "fix/v11-pr4-file-lock-parent-dirs",
+      "sha": "c11d1d045ed09ad171405ba9624d8b74d0fc5e8d",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/fix/v11-pr4-file-lock-parent-dirs",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        327
+      ]
+    },
+    {
+      "branch": "fix/v11-pr5-exit-law",
+      "sha": "6b2dee4286d2439f5bb6bee758db5017f2da213f",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/fix/v11-pr5-exit-law",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        328
+      ]
+    },
+    {
+      "branch": "fix/v11-pr6-dead-code",
+      "sha": "d24a575cf9ae202737230077b63bae0ba556a69e",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/fix/v11-pr6-dead-code",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        329
+      ]
+    },
+    {
+      "branch": "fix/v11-pr7-doc-drift",
+      "sha": "562e4f76fb2f81cbb7e8b914018177c086b60d3e",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/fix/v11-pr7-doc-drift",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        330
+      ]
+    },
+    {
+      "branch": "fix/v11-pr8-money-gate-hardening",
+      "sha": "090eeacda549d942c86e2abafdb84eb3efae5aa4",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/fix/v11-pr8-money-gate-hardening",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        331
+      ]
+    },
+    {
+      "branch": "fix/write-path-hardening-audit",
+      "sha": "bbb4789cd0c399cb75088dc76ebbd2b6ece674f8",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/fix/write-path-hardening-audit",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        203
+      ]
+    },
+    {
+      "branch": "ops/hug-001-inventory-96ddcda",
+      "sha": "4debb309bbf23639a75c4788308a835619a4a3ce",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/ops/hug-001-inventory-96ddcda",
+      "disposition": "operational_evidence_only",
+      "ancestor_of_main": false,
+      "matched_merged_prs": []
+    },
+    {
+      "branch": "perf/blob-history-carry-forward",
+      "sha": "96416952252959e0705c3bf6f53acec7ce779933",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/perf/blob-history-carry-forward",
+      "disposition": "merged_pr_original_tip_preserved",
+      "ancestor_of_main": false,
+      "matched_merged_prs": [
+        217
+      ]
+    },
+    {
+      "branch": "plan/import-standalone-v3-recovery",
+      "sha": "8b9263cb6fe834172334ac113d7a3022ced86414",
+      "action": "archive_tip_then_delete_branch",
+      "retained_ref": "refs/tags/archive/2026-09-17/plan/import-standalone-v3-recovery",
+      "disposition": "operational_evidence_only",
+      "ancestor_of_main": false,
+      "matched_merged_prs": []
+    },
+    {
+      "branch": "plan/standalone-v3",
+      "sha": "7b09d742f1d372b6a74d25c31a72158e8b929bb4",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        400
+      ]
+    },
+    {
+      "branch": "release/multi-platform-release",
+      "sha": "49dbe4b72017c7416ea42c1b14ee635fea83b479",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        358
+      ]
+    },
+    {
+      "branch": "work/hug-001-acceptance-handoff",
+      "sha": "9444cd8c2cc16f93f1f9b6776d49d3275d436f85",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        447
+      ]
+    },
+    {
+      "branch": "work/hug-001-automation-inventory",
+      "sha": "59462a5f66841576951cfdf15afda07456830660",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        444
+      ]
+    },
+    {
+      "branch": "work/hug-001-inventory-96ddcda",
+      "sha": "d6f311e2a3521013f0f2cc2477fa716f7ca0f925",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        441
+      ]
+    },
+    {
+      "branch": "work/hug-001-qualification-checks",
+      "sha": "3284774ad7ed918f310bc2b8f951829cc55e35a3",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        442
+      ]
+    },
+    {
+      "branch": "work/hug-001-recovery-qualification",
+      "sha": "f95fb9f90534c78c4b73a74286bbf3b54904d7a0",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        446
+      ]
+    },
+    {
+      "branch": "work/hug-001-surface-contracts",
+      "sha": "57b8bb41c5b0aeda207ba7f61e123b0f45c3aaa8",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        443
+      ]
+    },
+    {
+      "branch": "work/hug-001-wrapper-resolution-2064527",
+      "sha": "6fe996bdf2e9460cca350eeaf4279c05a4515ee8",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        448
+      ]
+    },
+    {
+      "branch": "worktree-agent-a4ea1a524982063cf",
+      "sha": "39dc1dd7212a36aee959d461fcda680f5c5086d5",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        275
+      ]
+    },
+    {
+      "branch": "worktree-agent-ac2d9b085d0c16339",
+      "sha": "1870b18f8952e0867311b50ec47bbb2e5cc1885f",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        277
+      ]
+    },
+    {
+      "branch": "worktree-agent-ad7fc0b5566da775b",
+      "sha": "9ced07ec6350a3c58d1dcbe8fcbd306d16189e5c",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": [
+        276
+      ]
+    },
+    {
+      "branch": "wp/dock-3",
+      "sha": "1c5e3118c7381987878046ac339db15dcd6c61ca",
+      "action": "delete_merged_branch",
+      "retained_ref": "refs/heads/main",
+      "disposition": "ancestry_in_main",
+      "ancestor_of_main": true,
+      "matched_merged_prs": []
+    }
+  ]
+}
