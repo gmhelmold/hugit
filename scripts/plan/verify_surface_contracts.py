@@ -96,6 +96,22 @@ def keyed(rows, key):
         result[name] = row
     return result
 
+def resolve_destination_owners(doc, plan):
+    """Resolve declared destinations; do not infer semantic coverage or approval."""
+    tasks = keyed(plan['tasks'], 'id')
+    rows = list(doc['profiles'].values()) + doc['workspace_libraries'] + doc['workspace_binaries']
+    owners = {}
+    for row in rows:
+        destination = row.get('destination_wp')
+        require(isinstance(destination, str)
+                and re.fullmatch(r'HUG-[0-9]{3}', destination), 'DESTINATION_WP_FORMAT')
+        require(destination in tasks, 'DESTINATION_WP_UNKNOWN')
+        lane = tasks[destination].get('owner_lane')
+        require(isinstance(lane, str) and 0 < len(lane) <= 64
+                and lane.strip() == lane and bool(lane), 'DESTINATION_OWNER_MISSING')
+        owners[destination] = lane
+    return owners
+
 def verify(doc, catalog, inventory, basis, source):
     require(doc['schema_version'] == '1.0', 'SCHEMA_VERSION')
     require(all(doc['authority'].get(k) is False for k in FLAGS), 'AUTHORITY_ESCALATION')
@@ -140,19 +156,25 @@ def verify(doc, catalog, inventory, basis, source):
         require(required <= set(profiles[name]['effects']), 'EFFECT_REMOVED')
     anchors = []
     for profile in profiles.values():
-        require(profile['effects'] and profile['condition'] and profile['call_path']
-                and re.fullmatch(r'HUG-\d{3}',profile['destination_wp']), 'PROFILE_FORMAT')
+        require(profile['effects'] and profile['condition'] and profile['call_path'], 'PROFILE_FORMAT')
         require(profile['anchors'], 'ANCHOR_MISSING')
         anchors.extend(profile['anchors'])
     anchors.extend(doc['generator_boundary']['anchors'])
     require(len(anchors) <= MAX_ANCHORS, 'ANCHOR_LIMIT')
-    cache = {}; total = 0
+    plan_path = 'docs/plan/standalone/v3/backlog.json'
+    plan, plan_raw = load(source, plan_path)
+    require(plan_path in files and digest(plan_raw) == inventory['plan_file_sha256']
+            == files[plan_path]['sha256'], 'PLAN_IDENTITY')
+    owners = resolve_destination_owners(doc, plan)
+    cache = {}; total = len(plan_raw)
+    require(total <= MAX_SOURCE, 'SOURCE_BYTE_LIMIT')
     for path, first, last, expected in anchors:
         require(path in files and type(first) is int and type(last) is int
                 and 1 <= first <= last, 'ANCHOR_RANGE')
         if path not in cache:
-            data = read_under(source, path, MAX_BLOB)
-            total += len(data); require(total <= MAX_SOURCE, 'SOURCE_BYTE_LIMIT')
+            data = plan_raw if path == plan_path else read_under(source, path, MAX_BLOB)
+            total += 0 if path == plan_path else len(data)
+            require(total <= MAX_SOURCE, 'SOURCE_BYTE_LIMIT')
             require(digest(data) == files[path]['sha256'], 'SOURCE_DIGEST')
             cache[path] = data.splitlines(keepends=True)
         lines = cache[path]
@@ -173,7 +195,8 @@ def verify(doc, catalog, inventory, basis, source):
     return {'schema_version':'1.0','valid':True,'scope':doc['scope'],
             'source_commit':doc['source_commit'],'source_tree':doc['source_tree'],
             'routes':len(routes),'variants':len(actual_variants),'profiles':len(profiles),
-            'source_files_verified':len(cache),'source_bytes_verified':total,
+            'source_files_verified':len(cache) + (plan_path not in cache),'source_bytes_verified':total,
+            'plan_sha256':digest(plan_raw),'destination_owners':owners,
             'workspace_libraries':len(libs),'workspace_binaries':len(bins),
             'authority':{k:False for k in FLAGS},
             'limits':['Checks identity, association and explicit distinctions; not semantic truth of every annotation.',
