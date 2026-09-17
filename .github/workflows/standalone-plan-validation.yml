@@ -5,12 +5,14 @@ on:
     paths:
       - 'docs/plan/standalone/**'
       - 'scripts/plan/**'
+      - 'docs/audit/**'
       - '.github/workflows/standalone-plan-validation.yml'
   push:
     branches: [main]
     paths:
       - 'docs/plan/standalone/**'
       - 'scripts/plan/**'
+      - 'docs/audit/**'
       - '.github/workflows/standalone-plan-validation.yml'
 
 permissions:
@@ -28,7 +30,49 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Validate canonical plan and generated issue projection
         run: python3 scripts/plan/check_import.py
       - name: Exercise importer controls without GitHub mutations
         run: python3 scripts/plan/test_sync.py
+      - name: Test bounded acquisition verifier with isolated Git fixtures
+        run: python3 scripts/plan/test_inventory.py
+      - name: Verify historical acquisition against pinned Git source
+        shell: bash
+        run: |
+          set -euo pipefail
+          TMP=$(mktemp -d)
+          trap 'rm -rf "$TMP"' EXIT
+          mkdir "$TMP/source"
+          SUBJECT=$(python3 -c 'import json,re; s=json.load(open("docs/audit/source-inventory.json"))["source_commit"]; assert re.fullmatch("[0-9a-f]{40}",s); print(s)')
+          TREE=$(git rev-parse --verify "${SUBJECT}^{tree}")
+          git archive "$SUBJECT" | tar -x -C "$TMP/source"
+          git ls-tree -r -z "$SUBJECT" > "$TMP/tree.z"
+          GIT_INDEX_FILE="$TMP/index" git -c core.hooksPath=/dev/null read-tree "$SUBJECT"
+          GIT_INDEX_FILE="$TMP/index" git ls-files --stage -z > "$TMP/index.z"
+          verify() {
+            python3 scripts/plan/verify_inventory.py \
+              --source "$TMP/source" \
+              --inventory docs/audit/source-inventory.json \
+              --bindings docs/audit/path-bindings.json \
+              --plan "$TMP/source/docs/plan/standalone/v3/backlog.json" \
+              --index "$TMP/index.z" --tree "$TMP/tree.z" --expected-tree "$TREE"
+          }
+          verify > "$RUNNER_TEMP/hug001-acquisition.json"
+          verify > "$TMP/repeated.json"
+          cmp "$RUNNER_TEMP/hug001-acquisition.json" "$TMP/repeated.json"
+          printf '%s\n' "unexpected file" > "$TMP/source/unclassified-inventory-control"
+          if verify > "$TMP/negative.json"; then
+            echo "ERROR: unclassified file was accepted" >&2
+            exit 1
+          fi
+          python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["valid"] is False and r["error"]=="SOURCE_SET_MISMATCH"' "$TMP/negative.json"
+          cat "$RUNNER_TEMP/hug001-acquisition.json"
+      - name: Retain acquisition verification (not work-package approval)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: hug001-acquisition-check-${{ github.sha }}
+          path: ${{ runner.temp }}/hug001-acquisition.json
+          if-no-files-found: error
+          retention-days: 30
