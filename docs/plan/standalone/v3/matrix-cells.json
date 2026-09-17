@@ -1,0 +1,62 @@
+{
+  "schema": "hugit-plan-view/3",
+  "matrix_cells": [
+    {
+      "id": "artifact-review",
+      "target": "artifact-independent",
+      "filesystem": "not_exercised",
+      "adapter": "none",
+      "configuration": "offline-structural-and-reviewed-artifact",
+      "qualification_kind": "artifact_review",
+      "reason": "Afirmações de inventário/protocolo/qualificação não alegam comportamento de filesystem nesta célula."
+    },
+    {
+      "id": "linux-x64-ext4",
+      "target": "x86_64-unknown-linux-gnu",
+      "filesystem": "ext4",
+      "adapter": "core",
+      "configuration": "native-core",
+      "qualification_kind": "native_runtime"
+    },
+    {
+      "id": "macos-arm64-apfs",
+      "target": "aarch64-apple-darwin",
+      "filesystem": "apfs",
+      "adapter": "core",
+      "configuration": "native-core",
+      "qualification_kind": "native_runtime"
+    },
+    {
+      "id": "macos-intel-apfs",
+      "target": "x86_64-apple-darwin",
+      "filesystem": "apfs",
+      "adapter": "core",
+      "configuration": "native-core",
+      "qualification_kind": "native_runtime"
+    },
+    {
+      "id": "windows-x64-ntfs",
+      "target": "x86_64-pc-windows-msvc",
+      "filesystem": "ntfs",
+      "adapter": "core",
+      "configuration": "native-core",
+      "qualification_kind": "native_runtime"
+    },
+    {
+      "id": "docker-linux-ext4",
+      "target": "x86_64-unknown-linux-gnu",
+      "filesystem": "ext4",
+      "adapter": "docker-buildx-buildkit",
+      "configuration": "native-local-builder-finalized-record-and-cache",
+      "qualification_kind": "native_integration"
+    },
+    {
+      "id": "compiler-linux-ext4",
+      "target": "x86_64-unknown-linux-gnu",
+      "filesystem": "ext4",
+      "adapter": "sccache-native",
+      "configuration": "local-compiler-cache-qualified",
+      "qualification_kind": "native_integration"
+    }
+  ]
+}

@@ -1,0 +1,426 @@
+{
+  "schema": "hugit-plan-view/3",
+  "review_resolutions": [
+    {
+      "id": "AR-01",
+      "title": "A migração não pode confiar em um marcador que o binário antigo desconhece",
+      "original_severity": "P0",
+      "original_evidence_class": "reproduzido em v1; não é teste de migrador v2",
+      "plan_status": "addressed_in_plan",
+      "runtime_status": "not_implemented_not_verified",
+      "resolution": "Migração cold-only com backup bootstrap, matriz de writers reais e guardas verificadas; marker/flock isolados explicitamente não bastam.",
+      "protocols": [
+        "P01"
+      ],
+      "packages": [
+        "HUG-008",
+        "HUG-018",
+        "HUG-050",
+        "HUG-058"
+      ],
+      "acceptance_test": "T-AR-01-C",
+      "original_counterexample": "Em repositório temporário, acrescentei version=2, min_writer_version, storage_format e um arquivo marcador ilustrativo. O v1 escreveu um novo evento: 1→2 registros, exit 0. Separadamente, mantive flock exclusivo em um sidecar: fresco, o v1 recusou; com mtime ajustado para 130 segundos atrás, o v1 removeu o pathname e escreveu apesar do lock ainda mantido no descritor original. O ajuste de mtime simula idade; não mede espera real de 130 segundos.",
+      "original_acceptance": "Com um processo antigo pausado antes do corte e outro iniciado depois, nenhum deles modifica o histórico migrado. Repetir com dois recuperadores, caminhos canônicos/aliases e interrupção em cada passo. Recuperar todas as receipts confirmadas. O teste deve usar o v1 real. Uma versão-ponte que não foi instalada em todos os caminhos não fecha o gate.",
+      "no_waiver": true
+    },
+    {
+      "id": "AR-02",
+      "title": "Banco, arquivos e GC não compartilham uma transação",
+      "original_severity": "P0",
+      "original_evidence_class": "lacuna de protocolo; interleaving proposta",
+      "plan_status": "addressed_in_plan",
+      "runtime_status": "not_implemented_not_verified",
+      "resolution": "Reservas, leases e DELETING têm ponto transacional; GC não apaga seleção antiga nem reaproveita posse por TTL.",
+      "protocols": [
+        "P02"
+      ],
+      "packages": [
+        "HUG-016",
+        "HUG-017",
+        "HUG-021",
+        "HUG-039",
+        "HUG-045",
+        "HUG-047"
+      ],
+      "acceptance_test": "T-AR-02-C",
+      "original_counterexample": "GC seleciona um objeto sem referências; um produtor ou exportador adquire uma referência/pin; GC usa a seleção antiga e apaga os bytes. Ou o produtor publica o arquivo, pausa antes do banco e o coletor o considera órfão. A presença de leases na prosa precisa de um ponto de aquisição e uma regra de exclusão que rejeitem essas ordens. Não afirmei que o futuro código já tem essa corrida.",
+      "original_acceptance": "Explorar schedules produtor×GC, dedupe×GC, export×GC e pin×GC. Se o leitor recebe promessa de bytes disponíveis, o objeto permanece legível até terminar ou o contrato de interrupção é explícito. Crash em cada fronteira não cria AVAILABLE sem bytes nem apaga objeto protegido. Leitura lenta não autoriza roubar uma lease viva.",
+      "no_waiver": true
+    },
+    {
+      "id": "AR-03",
+      "title": "Promoção Git e ledger precisam de recuperação conjunta",
+      "original_severity": "P0",
+      "original_evidence_class": "lacuna de protocolo de dois recursos",
+      "plan_status": "addressed_in_plan",
+      "runtime_status": "not_implemented_not_verified",
+      "resolution": "Operation journal + CAS/witness no Git e reconciliação após crash, sem rollback de trabalho posterior.",
+      "protocols": [
+        "P10"
+      ],
+      "packages": [
+        "HUG-043",
+        "HUG-045",
+        "HUG-047"
+      ],
+      "acceptance_test": "T-AR-03-C",
+      "original_counterexample": "Git promove o candidato; o processo morre antes do evento promoted. Na retomada o ledger indica pendente. A ordem oposta é pior: ledger promoted antes de Git confirma uma promoção inexistente. Apenas observar que o ref aponta ao candidato não identifica necessariamente quem o moveu, sobretudo se outra operação ou usuário fez a mesma atualização.",
+      "original_acceptance": "Interromper antes/depois de cada commit, antes/depois do update-ref e durante a confirmação. Recuperação determina promovido/não promovido/ambíguo sem duplicar ação. Incluir alteração concorrente do ref, branch checkout, hooks locais, filtros Git e candidato modificado depois da validação. Witness local não é atestação contra administrador malicioso.",
+      "no_waiver": true
+    },
+    {
+      "id": "AR-04",
+      "title": "A política de privacidade precisa cobrir o material persistido e seus derivados",
+      "original_severity": "P0",
+      "original_evidence_class": "lacuna de política e revogação",
+      "plan_status": "addressed_in_plan",
+      "runtime_status": "not_implemented_not_verified",
+      "resolution": "Classes de conteúdo, age v1 privado, policy epochs e revogação de derivados; backups entregues e erase forense têm limites.",
+      "protocols": [
+        "P06"
+      ],
+      "packages": [
+        "HUG-020",
+        "HUG-021",
+        "HUG-035",
+        "HUG-037",
+        "HUG-039",
+        "HUG-046"
+      ],
+      "acceptance_test": "T-AR-04-C",
+      "original_counterexample": "Um segredo entra no log e no índice FTS; posteriormente o blob é removido ou a política muda. Busca, resumo, versão antiga, WAL ou pacote exportado ainda pode reexibi-lo. O SQLite documenta que secure_delete não garante remover vestígios de FTS. O caso de teste precisa verificar as superfícies lógicas e declarar limites forenses, não prometer apagar bytes de qualquer SSD/backup já entregue.",
+      "original_acceptance": "Plantar segredo em texto, trace, nome de arquivo, ambiente e conteúdo que atravessa chunks. Depois de uma mudança de política, nenhuma interface autorizada apenas à classe tratada recupera raw/derivados antigos. Inspecionar manifestos, índices e temporários. Captura criptografada sem chave deve ser indisponível, nunca recuperada por fallback em claro.",
+      "no_waiver": true
+    },
+    {
+      "id": "AR-05",
+      "title": "Origem tipada não é autorização nem isolamento do agente",
+      "original_severity": "P0",
+      "original_evidence_class": "lacuna de autoridade e limites de ameaça",
+      "plan_status": "addressed_in_plan",
+      "runtime_status": "not_implemented_not_verified",
+      "resolution": "Origem atribuída pelo canal e permissions fora do payload; same-user hostil não ganha garantia fictícia.",
+      "protocols": [
+        "P05"
+      ],
+      "packages": [
+        "HUG-020",
+        "HUG-023",
+        "HUG-024",
+        "HUG-025",
+        "HUG-037",
+        "HUG-046"
+      ],
+      "acceptance_test": "T-AR-05-C",
+      "original_counterexample": "Um import envia source=process_observed ou um goal_id de outro contexto. Um teste com permissões do usuário tenta alterar o store ou chamar a ingestão. Um log contém instruções para exportar outro projeto; a sessão de retomada pede a ação. Mesmo sem execução automática pelo parser, a autorização não pode depender de o modelo reconhecer o ataque.",
+      "original_acceptance": "Import não consegue promover seu nível de evidência por campo JSON. Tentativa de ler outro repo por artifact_id é negada. Logs hostis não habilitam novas tools, comandos, URLs ou exports. Hooks de captura não devolvem inadvertidamente logs via stdout como instruções do harness. Não aceitar o teste impossível de garantir todas as decisões futuras de qualquer LLM.",
+      "no_waiver": true
+    },
+    {
+      "id": "AR-06",
+      "title": "A interface de goal deve ser um pré-requisito observado, não uma suposição tardia",
+      "original_severity": "P1",
+      "original_evidence_class": "dependência de descoberta aberta",
+      "plan_status": "addressed_in_plan",
+      "runtime_status": "not_implemented_not_verified",
+      "resolution": "Descoberta real do hook HUG-057 antecede schema e captura; multigoal/revisão sem heurística de recência.",
+      "protocols": [
+        "P04",
+        "P05"
+      ],
+      "packages": [
+        "HUG-057",
+        "HUG-015",
+        "HUG-022",
+        "HUG-027"
+      ],
+      "acceptance_test": "T-AR-06-C",
+      "original_counterexample": "Uma sessão contém dois pedidos simultâneos; uma mensagem nova é esclarecimento do goal anterior, não um goal novo; outro harness oferece session_id/call_id, mas não relação estável com o objetivo. O evento de prompt documentado no Claude não deve ser tratado como garantia de qualquer identificador extra. É necessário examinar o hook real que o Hugit utiliza.",
+      "original_acceptance": "Fixtures de dois goals numa sessão e em paralelo no mesmo worktree preservam associação correta. Correção de escopo cria revisão quando a fonte assim a identifica. Nas integrações sem essa informação, o sistema não promete compreensão semântica que o evento não fornece.",
+      "no_waiver": true
+    },
+    {
+      "id": "AR-07",
+      "title": "A drenagem precisa de uma garantia de progresso",
+      "original_severity": "P1",
+      "original_evidence_class": "interleaving de desenho; não reprodução no v2",
+      "plan_status": "addressed_in_plan",
+      "runtime_status": "not_implemented_not_verified",
+      "resolution": "Handoff final sob coordenação, três acks e recovery explícito quando o último worker morre.",
+      "protocols": [
+        "P03"
+      ],
+      "packages": [
+        "HUG-019",
+        "HUG-026",
+        "HUG-048"
+      ],
+      "acceptance_test": "T-AR-07-C",
+      "original_counterexample": "Worker observa fila vazia. Novo produtor publica receipt e decide não iniciar outro worker porque há lock. Worker encerra. Nada mais acontece e a receipt permanece indefinidamente. Variante: worker atinge limite do lote e sai com fila pendente sem transferir responsabilidade. Recuperar no próximo hook é insuficiente quando não há próximo hook.",
+      "original_acceptance": "Schedule determinístico força chegada entre checagem de vazio e liberação de posse; sem comandos posteriores, a garantia escolhida deve ser cumprida. Testar lote parcial, worker morto, wakeup duplicado e perda de wakeup. Não usar polling agressivo para esconder falha de handoff.",
+      "no_waiver": true
+    },
+    {
+      "id": "AR-08",
+      "title": "Captura integral pode alterar o processo que pretende observar",
+      "original_severity": "P1",
+      "original_evidence_class": "lacuna de transparência operacional",
+      "plan_status": "addressed_in_plan",
+      "runtime_status": "not_implemented_not_verified",
+      "resolution": "Perfil pipe não interativo, stdin herdado, status separado e backpressure limitado; PTY não é equivalência presumida.",
+      "protocols": [
+        "P07"
+      ],
+      "packages": [
+        "HUG-009",
+        "HUG-010",
+        "HUG-025",
+        "HUG-026",
+        "HUG-048"
+      ],
+      "acceptance_test": "T-AR-08-C",
+      "original_counterexample": "Um teste muda formato por isatty, uma ferramenta pede senha, o shell espera SIGINT, ou a gravação de logs fica lenta. O observador pode mascarar exit, travar o produtor ou perder separação de stdout/stderr. Limite de buffer não define por si só a política quando a fila enche.",
+      "original_acceptance": "Comparar recorder off/on em programas sensíveis a TTY, sinais e stdin; flood, saída binária, fila cheia e disco lento. Preservar exit do trabalho separadamente da falha do recorder. Reportar transformações observáveis e bytes descartados; nenhum segredo do prompt interativo é capturado por padrão.",
+      "no_waiver": true
+    },
+    {
+      "id": "AR-09",
+      "title": "artifact_id mistura conteúdo, codec e ocorrência",
+      "original_severity": "P1",
+      "original_evidence_class": "ambiguidade de schema",
+      "plan_status": "addressed_in_plan",
+      "runtime_status": "not_implemented_not_verified",
+      "resolution": "Blob lógico, representação, ocorrência e derivação separados com encoding canônico e paths seguros.",
+      "protocols": [
+        "P04"
+      ],
+      "packages": [
+        "HUG-015",
+        "HUG-017",
+        "HUG-032"
+      ],
+      "acceptance_test": "T-AR-09-C",
+      "original_counterexample": "O mesmo log chega de duas invocações e é recomprimido em outro nível. Incluir timestamp/nome no ID perde dedupe. Ignorar política/codec na ocorrência perde rastreabilidade da transformação. Uma árvore tem paths com ambiguidade de separador ou nomes que colidem no filesystem de restore.",
+      "original_acceptance": "Bytes iguais em runs distintos compartilham blob sem fundir ocorrências. Recompressão mantém blob_id e troca representation_id. Redaction muda conteúdo e registra derivação. Case collisions, Unicode, links e executáveis têm decisão explícita de restore, não overwrite silencioso.",
+      "no_waiver": true
+    },
+    {
+      "id": "AR-10",
+      "title": "Um relatório válido pode pertencer à execução errada",
+      "original_severity": "P1",
+      "original_evidence_class": "lacuna de associação de report",
+      "plan_status": "addressed_in_plan",
+      "runtime_status": "not_implemented_not_verified",
+      "resolution": "Report vinculado por run-dir/witness, shards/retries próprios e falha de processo não sobrescrita por XML verde.",
+      "protocols": [
+        "P08"
+      ],
+      "packages": [
+        "HUG-027",
+        "HUG-029",
+        "HUG-030",
+        "HUG-031",
+        "HUG-034"
+      ],
+      "acceptance_test": "T-AR-10-C",
+      "original_counterexample": "A execução anterior deixou junit.xml verde. A atual falha na compilação antes de produzir relatório. O importer encontra o arquivo antigo e associa à tentativa nova. Em sharding, chega só uma parte das suítes e os contadores daquela parte são consistentes; o conjunto ainda está incompleto.",
+      "original_acceptance": "Preservar relatório verde de run anterior e executar compile failure: não pode haver suíte aprovada para o run atual. Testar duplicação de caso, parametrização, shard ausente, arquivo parcialmente gravado e retry verde após falha. A primeira falha continua consultável.",
+      "no_waiver": true
+    },
+    {
+      "id": "AR-11",
+      "title": "Reuso seguro exige um perfil executável de suporte, não só uma lista de inputs",
+      "original_severity": "P0",
+      "original_evidence_class": "lacuna do contrato de reuso, reconhecida parcialmente",
+      "plan_status": "addressed_in_plan",
+      "runtime_status": "not_implemented_not_verified",
+      "resolution": "Allowlist concreta outline-v1 com reuso real; shell arbitrary observado sem skip; motores nativos decidem validade de seu cache.",
+      "protocols": [
+        "P09"
+      ],
+      "packages": [
+        "HUG-012",
+        "HUG-013",
+        "HUG-041",
+        "HUG-042",
+        "HUG-043",
+        "HUG-044"
+      ],
+      "acceptance_test": "T-AR-11-C",
+      "original_counterexample": "Um teste lê banco local, serviço, /proc ou arquivo fora do snapshot. Outro depende de lib dinâmica diferente. Substituir os bytes no snapshot não reproduz esses inputs. Um check tem efeito exigido na execução — por exemplo gerar estado em outro destino — e cache hit deixa de realizá-lo. Flakes/retries não podem ser convertidos em sucesso determinístico apenas pelo último resultado.",
+      "original_acceptance": "Pelo menos uma classe de trabalho real demonstra reuso com validade e outputs disponíveis. Casos de rede/tempo/fora-da-raiz/flake são negados ou adequadamente qualificados. Mudança do conjunto de testes, política ou harness/runner relevante altera elegibilidade. Histórico continua útil nos casos negados.",
+      "no_waiver": true
+    },
+    {
+      "id": "AR-12",
+      "title": "Restore precisa distinguir recuperação de cópia e importação",
+      "original_severity": "P1",
+      "original_evidence_class": "lacuna de identidade ao restaurar",
+      "plan_status": "addressed_in_plan",
+      "runtime_status": "not_implemented_not_verified",
+      "resolution": "Recovery, clone e viewer import separados; history preservada, installation/producers novos e import idempotente.",
+      "protocols": [
+        "P08"
+      ],
+      "packages": [
+        "HUG-015",
+        "HUG-018",
+        "HUG-028",
+        "HUG-039"
+      ],
+      "acceptance_test": "T-AR-12-C",
+      "original_counterexample": "O mesmo pacote é restaurado em máquinas A e B mantendo repo_id/session identifiers locais. Ambas continuam trabalhando. Um export de A é importado em B; eventos idênticos devem deduplicar, mas eventos distintos da mesma história não podem conflitar como retransmissão. Paths e marcadores de worktree da máquina original também não são diretamente reutilizáveis.",
+      "original_acceptance": "Restaurar duas vezes, gerar novos eventos em ambas e importar um bundle repetidamente. Sem colisão, duplicação de uso ou falsa atribuição a diretórios antigos. Restore em caminho existente recusa ou requer operação explícita; pacote hostil não instala executável ou hook.",
+      "no_waiver": true
+    },
+    {
+      "id": "AR-13",
+      "title": "O DAG válido não garante cobertura de release",
+      "original_severity": "P1",
+      "original_evidence_class": "confirmado por análise programática",
+      "plan_status": "addressed_in_plan",
+      "runtime_status": "not_implemented_not_verified",
+      "resolution": "Perfis machine-readable exigem explicitamente os 60 WPs; full inclui HUG-041 e mutation tests tentam removê-lo.",
+      "protocols": [
+        "P12"
+      ],
+      "packages": [
+        "HUG-007",
+        "HUG-056"
+      ],
+      "acceptance_test": "T-AR-13-C",
+      "original_counterexample": "Executar todos os 54 ancestrais de HUG-056 e depois HUG-056. O grafo está satisfeito e HUG-041 segue planned. Isso não afirma que a release já foi publicada errada; demonstra divergência entre escopo do plano e orquestração.",
+      "original_acceptance": "Teste automático detecta capacidade anunciada sem pacote/gate concluído. Mutação que remove uma dependência necessária falha. Perfil full inclui todos os 56 pacotes ou explica substituição formal; perfil menor não se apresenta como 100% do escopo completo.",
+      "no_waiver": true
+    },
+    {
+      "id": "AR-14",
+      "title": "O primeiro teste de valor foi colocado tarde demais",
+      "original_severity": "P1",
+      "original_evidence_class": "confirmado no grafo; julgamento de sequência",
+      "plan_status": "addressed_in_plan",
+      "runtime_status": "not_implemented_not_verified",
+      "resolution": "Quatro desdobramentos antecipam fonte, backup, contratos e slice; recuperação genérica não espera integrações extensas.",
+      "protocols": [
+        "P00",
+        "P12"
+      ],
+      "packages": [
+        "HUG-057",
+        "HUG-058",
+        "HUG-059",
+        "HUG-060",
+        "HUG-034",
+        "HUG-038",
+        "HUG-051"
+      ],
+      "acceptance_test": "T-AR-14-C",
+      "original_counterexample": "Uma equipe entrega store, codecs, relatórios, três integrações e parte de landing para descobrir que a retomada ainda exige ler o transcript todo ou que não recebe IDs suficientes do harness. As metas de valor são corretas, mas chegam tarde para orientar o design.",
+      "original_acceptance": "O slice falha se a segunda sessão não responder perguntas predefinidas com refs corretas. Medir sucesso, procura manual, reexecução informacional e bytes consultados, inclusive caso adverso. Integrações futuras só entram no caminho crítico quando uma dependência técnica real existir.",
+      "no_waiver": true
+    },
+    {
+      "id": "AR-15",
+      "title": "Os pacotes ainda são briefs, não contratos suficientes para execução autônoma",
+      "original_severity": "P1",
+      "original_evidence_class": "confirmado por inspeção dos 56 pacotes",
+      "plan_status": "addressed_in_plan",
+      "runtime_status": "not_implemented_not_verified",
+      "resolution": "Cinco axiomas obrigatórios em cada WP, interfaces/owner/write-set, testes e recovery próprios, com validador anti-omissão.",
+      "protocols": [
+        "P00"
+      ],
+      "packages": [
+        "HUG-001",
+        "HUG-002",
+        "HUG-003",
+        "HUG-004",
+        "HUG-005",
+        "HUG-006",
+        "HUG-007",
+        "HUG-008",
+        "HUG-009",
+        "HUG-010",
+        "HUG-011",
+        "HUG-012",
+        "HUG-013",
+        "HUG-014",
+        "HUG-015",
+        "HUG-016",
+        "HUG-017",
+        "HUG-018",
+        "HUG-019",
+        "HUG-020",
+        "HUG-021",
+        "HUG-022",
+        "HUG-023",
+        "HUG-024",
+        "HUG-025",
+        "HUG-026",
+        "HUG-027",
+        "HUG-028",
+        "HUG-029",
+        "HUG-030",
+        "HUG-031",
+        "HUG-032",
+        "HUG-033",
+        "HUG-034",
+        "HUG-035",
+        "HUG-036",
+        "HUG-037",
+        "HUG-038",
+        "HUG-039",
+        "HUG-040",
+        "HUG-041",
+        "HUG-042",
+        "HUG-043",
+        "HUG-044",
+        "HUG-045",
+        "HUG-046",
+        "HUG-047",
+        "HUG-048",
+        "HUG-049",
+        "HUG-050",
+        "HUG-051",
+        "HUG-052",
+        "HUG-053",
+        "HUG-054",
+        "HUG-055",
+        "HUG-056",
+        "HUG-057",
+        "HUG-058",
+        "HUG-059",
+        "HUG-060"
+      ],
+      "acceptance_test": "T-AR-15-C",
+      "original_counterexample": "Dois agentes implementam HUG-017 e HUG-021: ambos passam seus happy paths, mas escolhem semânticas incompatíveis para AVAILABLE/pin. O rollback genérico manda reverter enquanto há eventos v2. Exigir que toda tarefa tenha teste que falha no baseline também não faz sentido literal para inventário, documentação ou descoberta.",
+      "original_acceptance": "Um reviewer consegue decidir sim/não sobre a aceitação sem inventar política durante a revisão. O agente não escolhe um protocolo compartilhado sozinho. Desabilitar feature, reverter código e migrar dados têm procedimentos distintos; pelo menos uma falha ensaiada prova cada rollback aplicável.",
+      "no_waiver": true
+    },
+    {
+      "id": "AR-16",
+      "title": "Os budgets precisam medir pressão total e latência até a evidência ficar disponível",
+      "original_severity": "P1",
+      "original_evidence_class": "lacuna de qualificação e limites agregados",
+      "plan_status": "addressed_in_plan",
+      "runtime_status": "not_implemented_not_verified",
+      "resolution": "Budget installation+repo+WAL/tmp/receipts/collectors, admissão conservadora e métricas de ack/visibilidade/readiness separadas.",
+      "protocols": [
+        "P11"
+      ],
+      "packages": [
+        "HUG-016",
+        "HUG-017",
+        "HUG-019",
+        "HUG-021",
+        "HUG-026",
+        "HUG-040",
+        "HUG-048"
+      ],
+      "acceptance_test": "T-AR-16-C",
+      "original_counterexample": "32 produtores ficam dentro do limite individual e juntos excedem a RAM ou reserva de disco. Objetos fixados ocupam mais que a quota; não há solução que preserve todos os pins e aceite tudo. Um leitor longo impede checkpoint, enquanto novos eventos expandem WAL. Build Docker tem ID exato, mas ainda está recebendo traces e é exportado antes de finalizar.",
+      "original_acceptance": "Carga finita para de produzir e a fila chega a um estado final dentro do contrato escolhido. Flood não impede health/read nem estoura reserva declarada. Quota reduzida abaixo de pins deixa estado over_quota e política de admissão definida. Medições incluem todos os processos e arquivos do recorder, sem descartar runs lentos.",
+      "no_waiver": true
+    }
+  ]
+}
