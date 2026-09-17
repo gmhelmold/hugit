@@ -31,6 +31,18 @@ class SurfaceContracts(unittest.TestCase):
         with self.assertRaisesRegex(v.Invalid, '^'+code+'$'):
             self.good(doc=doc)
 
+    def test_destination_wp_must_exist_for_all_surface_kinds(self):
+        # Every claimant of HUG-001-SC01 must resolve a real work package.
+        selectors = (
+            lambda d: next(iter(d['profiles'].values())),
+            lambda d: d['workspace_libraries'][0],
+            lambda d: d['workspace_binaries'][0],
+        )
+        for index, select in enumerate(selectors):
+            with self.subTest(surface_kind=index):
+                self.mutate(lambda d: select(d).update(destination_wp='HUG-999'),
+                            'DESTINATION_WP_UNKNOWN')
+
     def test_positive(self):
         r=self.good()
         self.assertEqual(r['routes'],57)
