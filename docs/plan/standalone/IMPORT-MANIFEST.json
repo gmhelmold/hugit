@@ -1,0 +1,34 @@
+{
+  "scope": "unchanged_normative_v3_import",
+  "canonical_source_file_sha256": "5234276523649da9b35abe578ed6cbf2ce25c43651bfc0f6ab2d549b37e01409",
+  "original_archive_sha256": "6bf67853ab4337a4b0105db86a22b0ebc74efaabadbb9b2685c6fc608aa53beb",
+  "original_scripts_sha256": {
+    "probe_git_managed.py": "82c933bae735e6e7fb4e6d827e87d682c438b5a837a5177ef9863907ab0c9325",
+    "refresh_contracts.py": "7db614b74ca12eca5ab5e063befaa8decc704be1bf4a4e42a18f8546e363fca6",
+    "verify_manifest.py": "93399a1749c4cfe9a0e450df6dd81a4a1feb355c1356409f2e0d6de35bc22e2d",
+    "check_protocol_models.py": "35f81f52e415e053e840ba0fb212f2dd5b5cd3886448cd29f09d944d1285ecd2",
+    "test_plan_validator.py": "56f68a676e20b797147e8bd5d1324136a223683029fc914dcfd82dd99c0ac2ab",
+    "validate_plan.py": "a88d4a44118f37c4ecdc859a60916de0581c7f6e7766ee0e37040812bf51cfdc",
+    "test_qualification.py": "dcf153a33f074eb575f39759fa498a71c625cc53e522ea374fae7a9fd4ccc13b",
+    "render_plan.py": "a456b36df3c54d4c9efcb5f2bacb10084b7346da316f92c5ee19503285bd3431",
+    "qualification_reference.py": "8d56b21a70f1f63b27498973ed07b11d5e61f91cad341deb3df67f22e9c2e129"
+  },
+  "historical_archives_external": [
+    {
+      "path": "source-inputs/hugit_plano_standalone_v2.zip",
+      "sha256": "491f5007417b58db18f3fb4cc8d6464f91c943ac01d1979b57e7d7404fdd58f9",
+      "role": "historical_non_normative"
+    },
+    {
+      "path": "source-inputs/hugit_review_adversarial_v2.zip",
+      "sha256": "a34bf05149098d137d1d24b74db2e6f183e123733454835bc7af99f15958355c",
+      "role": "historical_non_normative"
+    },
+    {
+      "path": "source-inputs/hugit_review_adversarial_v2.md",
+      "sha256": "c6c620f59df3621ca45adf73221fdc98ddca3822169392f771d218d93d1141e3",
+      "role": "historical_non_normative"
+    }
+  ],
+  "no_product_execution_claim": true
+}

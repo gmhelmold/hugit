@@ -1,0 +1,659 @@
+{
+  "schema": "hugit-plan-view/3",
+  "capabilities": [
+    {
+      "id": "standalone_core",
+      "required_packages": [
+        "HUG-001",
+        "HUG-002",
+        "HUG-004",
+        "HUG-005",
+        "HUG-006",
+        "HUG-007",
+        "HUG-008",
+        "HUG-016",
+        "HUG-017",
+        "HUG-019",
+        "HUG-020",
+        "HUG-021"
+      ],
+      "required_tests": [
+        "T-BR-01-C",
+        "T-BR-02-C",
+        "T-BR-05-C",
+        "T-BR-06-C",
+        "T-BR-07-C",
+        "T-BR-08-C",
+        "T-BR-09-C",
+        "T-HUG-001-N",
+        "T-HUG-001-P",
+        "T-HUG-001-Q",
+        "T-HUG-001-R",
+        "T-HUG-002-N",
+        "T-HUG-002-P",
+        "T-HUG-002-Q",
+        "T-HUG-002-R",
+        "T-HUG-004-N",
+        "T-HUG-004-P",
+        "T-HUG-004-Q",
+        "T-HUG-004-R",
+        "T-HUG-005-N",
+        "T-HUG-005-P",
+        "T-HUG-005-Q",
+        "T-HUG-005-R",
+        "T-HUG-006-N",
+        "T-HUG-006-P",
+        "T-HUG-006-Q",
+        "T-HUG-006-R",
+        "T-HUG-007-N",
+        "T-HUG-007-P",
+        "T-HUG-007-Q",
+        "T-HUG-007-R",
+        "T-HUG-008-N",
+        "T-HUG-008-P",
+        "T-HUG-008-Q",
+        "T-HUG-008-R",
+        "T-HUG-016-N",
+        "T-HUG-016-P",
+        "T-HUG-016-Q",
+        "T-HUG-016-R",
+        "T-HUG-017-N",
+        "T-HUG-017-P",
+        "T-HUG-017-Q",
+        "T-HUG-017-R",
+        "T-HUG-019-N",
+        "T-HUG-019-P",
+        "T-HUG-019-Q",
+        "T-HUG-019-R",
+        "T-HUG-020-N",
+        "T-HUG-020-P",
+        "T-HUG-020-Q",
+        "T-HUG-020-R",
+        "T-HUG-021-N",
+        "T-HUG-021-P",
+        "T-HUG-021-Q",
+        "T-HUG-021-R"
+      ],
+      "external_tool_optional_at_runtime": false,
+      "absence_not_a_core_error": true,
+      "qualification_required_to_advertise": true,
+      "matrix_defined_by": "required_tests.required_cells",
+      "claim_boundary": "Somente capacidades/células demonstradas; sem extrapolar optional runtime para unsupported tested."
+    },
+    {
+      "id": "git_capture",
+      "required_packages": [
+        "HUG-019",
+        "HUG-028"
+      ],
+      "required_tests": [
+        "T-BR-04-C",
+        "T-BR-08-C",
+        "T-HUG-019-N",
+        "T-HUG-019-P",
+        "T-HUG-019-Q",
+        "T-HUG-019-R",
+        "T-HUG-028-N",
+        "T-HUG-028-P",
+        "T-HUG-028-Q",
+        "T-HUG-028-R"
+      ],
+      "external_tool_optional_at_runtime": false,
+      "absence_not_a_core_error": true,
+      "qualification_required_to_advertise": true,
+      "matrix_defined_by": "required_tests.required_cells",
+      "claim_boundary": "Somente capacidades/células demonstradas; sem extrapolar optional runtime para unsupported tested."
+    },
+    {
+      "id": "goal_capture",
+      "required_packages": [
+        "HUG-015",
+        "HUG-022",
+        "HUG-057"
+      ],
+      "required_tests": [
+        "T-HUG-015-N",
+        "T-HUG-015-P",
+        "T-HUG-015-Q",
+        "T-HUG-015-R",
+        "T-HUG-022-N",
+        "T-HUG-022-P",
+        "T-HUG-022-Q",
+        "T-HUG-022-R",
+        "T-HUG-057-N",
+        "T-HUG-057-P",
+        "T-HUG-057-Q",
+        "T-HUG-057-R"
+      ],
+      "external_tool_optional_at_runtime": false,
+      "absence_not_a_core_error": true,
+      "qualification_required_to_advertise": true,
+      "matrix_defined_by": "required_tests.required_cells",
+      "claim_boundary": "Somente capacidades/células demonstradas; sem extrapolar optional runtime para unsupported tested."
+    },
+    {
+      "id": "opencode_adapter",
+      "required_packages": [
+        "HUG-023"
+      ],
+      "required_tests": [
+        "T-BR-08-C",
+        "T-HUG-023-N",
+        "T-HUG-023-P",
+        "T-HUG-023-Q",
+        "T-HUG-023-R"
+      ],
+      "external_tool_optional_at_runtime": true,
+      "absence_not_a_core_error": true,
+      "qualification_required_to_advertise": true,
+      "matrix_defined_by": "required_tests.required_cells",
+      "claim_boundary": "Somente capacidades/células demonstradas; sem extrapolar optional runtime para unsupported tested."
+    },
+    {
+      "id": "claude_adapter",
+      "required_packages": [
+        "HUG-024"
+      ],
+      "required_tests": [
+        "T-BR-08-C",
+        "T-HUG-024-N",
+        "T-HUG-024-P",
+        "T-HUG-024-Q",
+        "T-HUG-024-R"
+      ],
+      "external_tool_optional_at_runtime": true,
+      "absence_not_a_core_error": true,
+      "qualification_required_to_advertise": true,
+      "matrix_defined_by": "required_tests.required_cells",
+      "claim_boundary": "Somente capacidades/células demonstradas; sem extrapolar optional runtime para unsupported tested."
+    },
+    {
+      "id": "noninteractive_run_capture",
+      "required_packages": [
+        "HUG-009",
+        "HUG-010",
+        "HUG-011",
+        "HUG-012",
+        "HUG-025",
+        "HUG-026",
+        "HUG-027"
+      ],
+      "required_tests": [
+        "T-BR-08-C",
+        "T-HUG-009-N",
+        "T-HUG-009-P",
+        "T-HUG-009-Q",
+        "T-HUG-009-R",
+        "T-HUG-010-N",
+        "T-HUG-010-P",
+        "T-HUG-010-Q",
+        "T-HUG-010-R",
+        "T-HUG-011-N",
+        "T-HUG-011-P",
+        "T-HUG-011-Q",
+        "T-HUG-011-R",
+        "T-HUG-012-N",
+        "T-HUG-012-P",
+        "T-HUG-012-Q",
+        "T-HUG-012-R",
+        "T-HUG-025-N",
+        "T-HUG-025-P",
+        "T-HUG-025-Q",
+        "T-HUG-025-R",
+        "T-HUG-026-N",
+        "T-HUG-026-P",
+        "T-HUG-026-Q",
+        "T-HUG-026-R",
+        "T-HUG-027-N",
+        "T-HUG-027-P",
+        "T-HUG-027-Q",
+        "T-HUG-027-R"
+      ],
+      "external_tool_optional_at_runtime": false,
+      "absence_not_a_core_error": true,
+      "qualification_required_to_advertise": true,
+      "matrix_defined_by": "required_tests.required_cells",
+      "claim_boundary": "Somente capacidades/células demonstradas; sem extrapolar optional runtime para unsupported tested."
+    },
+    {
+      "id": "junit_provenance",
+      "required_packages": [
+        "HUG-029"
+      ],
+      "required_tests": [
+        "T-HUG-029-N",
+        "T-HUG-029-P",
+        "T-HUG-029-Q",
+        "T-HUG-029-R"
+      ],
+      "external_tool_optional_at_runtime": false,
+      "absence_not_a_core_error": true,
+      "qualification_required_to_advertise": true,
+      "matrix_defined_by": "required_tests.required_cells",
+      "claim_boundary": "Somente capacidades/células demonstradas; sem extrapolar optional runtime para unsupported tested."
+    },
+    {
+      "id": "rust_pytest_reports",
+      "required_packages": [
+        "HUG-030"
+      ],
+      "required_tests": [
+        "T-HUG-030-N",
+        "T-HUG-030-P",
+        "T-HUG-030-Q",
+        "T-HUG-030-R"
+      ],
+      "external_tool_optional_at_runtime": true,
+      "absence_not_a_core_error": true,
+      "qualification_required_to_advertise": true,
+      "matrix_defined_by": "required_tests.required_cells",
+      "claim_boundary": "Somente capacidades/células demonstradas; sem extrapolar optional runtime para unsupported tested."
+    },
+    {
+      "id": "playwright_artifacts",
+      "required_packages": [
+        "HUG-031",
+        "HUG-032"
+      ],
+      "required_tests": [
+        "T-HUG-031-N",
+        "T-HUG-031-P",
+        "T-HUG-031-Q",
+        "T-HUG-031-R",
+        "T-HUG-032-N",
+        "T-HUG-032-P",
+        "T-HUG-032-Q",
+        "T-HUG-032-R"
+      ],
+      "external_tool_optional_at_runtime": true,
+      "absence_not_a_core_error": true,
+      "qualification_required_to_advertise": true,
+      "matrix_defined_by": "required_tests.required_cells",
+      "claim_boundary": "Somente capacidades/células demonstradas; sem extrapolar optional runtime para unsupported tested."
+    },
+    {
+      "id": "build_reports",
+      "required_packages": [
+        "HUG-033",
+        "HUG-034"
+      ],
+      "required_tests": [
+        "T-BR-07-C",
+        "T-HUG-033-N",
+        "T-HUG-033-P",
+        "T-HUG-033-Q",
+        "T-HUG-033-R",
+        "T-HUG-034-N",
+        "T-HUG-034-P",
+        "T-HUG-034-Q",
+        "T-HUG-034-R"
+      ],
+      "external_tool_optional_at_runtime": false,
+      "absence_not_a_core_error": true,
+      "qualification_required_to_advertise": true,
+      "matrix_defined_by": "required_tests.required_cells",
+      "claim_boundary": "Somente capacidades/células demonstradas; sem extrapolar optional runtime para unsupported tested."
+    },
+    {
+      "id": "evidence_read",
+      "required_packages": [
+        "HUG-035",
+        "HUG-036",
+        "HUG-037"
+      ],
+      "required_tests": [
+        "T-BR-02-C",
+        "T-BR-05-C",
+        "T-BR-07-C",
+        "T-HUG-035-N",
+        "T-HUG-035-P",
+        "T-HUG-035-Q",
+        "T-HUG-035-R",
+        "T-HUG-036-N",
+        "T-HUG-036-P",
+        "T-HUG-036-Q",
+        "T-HUG-036-R",
+        "T-HUG-037-N",
+        "T-HUG-037-P",
+        "T-HUG-037-Q",
+        "T-HUG-037-R"
+      ],
+      "external_tool_optional_at_runtime": false,
+      "absence_not_a_core_error": true,
+      "qualification_required_to_advertise": true,
+      "matrix_defined_by": "required_tests.required_cells",
+      "claim_boundary": "Somente capacidades/células demonstradas; sem extrapolar optional runtime para unsupported tested."
+    },
+    {
+      "id": "resume",
+      "required_packages": [
+        "HUG-034",
+        "HUG-038"
+      ],
+      "required_tests": [
+        "T-BR-07-C",
+        "T-HUG-034-N",
+        "T-HUG-034-P",
+        "T-HUG-034-Q",
+        "T-HUG-034-R",
+        "T-HUG-038-N",
+        "T-HUG-038-P",
+        "T-HUG-038-Q",
+        "T-HUG-038-R"
+      ],
+      "external_tool_optional_at_runtime": false,
+      "absence_not_a_core_error": true,
+      "qualification_required_to_advertise": true,
+      "matrix_defined_by": "required_tests.required_cells",
+      "claim_boundary": "Somente capacidades/células demonstradas; sem extrapolar optional runtime para unsupported tested."
+    },
+    {
+      "id": "privacy_revocation",
+      "required_packages": [
+        "HUG-020",
+        "HUG-021",
+        "HUG-035",
+        "HUG-037",
+        "HUG-039",
+        "HUG-046"
+      ],
+      "required_tests": [
+        "T-BR-05-C",
+        "T-BR-06-C",
+        "T-BR-07-C",
+        "T-HUG-020-N",
+        "T-HUG-020-P",
+        "T-HUG-020-Q",
+        "T-HUG-020-R",
+        "T-HUG-021-N",
+        "T-HUG-021-P",
+        "T-HUG-021-Q",
+        "T-HUG-021-R",
+        "T-HUG-035-N",
+        "T-HUG-035-P",
+        "T-HUG-035-Q",
+        "T-HUG-035-R",
+        "T-HUG-037-N",
+        "T-HUG-037-P",
+        "T-HUG-037-Q",
+        "T-HUG-037-R",
+        "T-HUG-039-N",
+        "T-HUG-039-P",
+        "T-HUG-039-Q",
+        "T-HUG-039-R",
+        "T-HUG-046-N",
+        "T-HUG-046-P",
+        "T-HUG-046-Q",
+        "T-HUG-046-R"
+      ],
+      "external_tool_optional_at_runtime": false,
+      "absence_not_a_core_error": true,
+      "qualification_required_to_advertise": true,
+      "matrix_defined_by": "required_tests.required_cells",
+      "claim_boundary": "Somente capacidades/células demonstradas; sem extrapolar optional runtime para unsupported tested."
+    },
+    {
+      "id": "migration_v1",
+      "required_packages": [
+        "HUG-018",
+        "HUG-050",
+        "HUG-058"
+      ],
+      "required_tests": [
+        "T-BR-06-C",
+        "T-HUG-018-N",
+        "T-HUG-018-P",
+        "T-HUG-018-Q",
+        "T-HUG-018-R",
+        "T-HUG-050-N",
+        "T-HUG-050-P",
+        "T-HUG-050-Q",
+        "T-HUG-050-R",
+        "T-HUG-058-N",
+        "T-HUG-058-P",
+        "T-HUG-058-Q",
+        "T-HUG-058-R"
+      ],
+      "external_tool_optional_at_runtime": false,
+      "absence_not_a_core_error": true,
+      "qualification_required_to_advertise": true,
+      "matrix_defined_by": "required_tests.required_cells",
+      "claim_boundary": "Somente capacidades/células demonstradas; sem extrapolar optional runtime para unsupported tested."
+    },
+    {
+      "id": "private_export_restore",
+      "required_packages": [
+        "HUG-039"
+      ],
+      "required_tests": [
+        "T-BR-05-C",
+        "T-BR-06-C",
+        "T-HUG-039-N",
+        "T-HUG-039-P",
+        "T-HUG-039-Q",
+        "T-HUG-039-R"
+      ],
+      "external_tool_optional_at_runtime": false,
+      "absence_not_a_core_error": true,
+      "qualification_required_to_advertise": true,
+      "matrix_defined_by": "required_tests.required_cells",
+      "claim_boundary": "Somente capacidades/células demonstradas; sem extrapolar optional runtime para unsupported tested."
+    },
+    {
+      "id": "native_buildx_records",
+      "required_packages": [
+        "HUG-040"
+      ],
+      "required_tests": [
+        "T-HUG-040-N",
+        "T-HUG-040-P",
+        "T-HUG-040-Q",
+        "T-HUG-040-R"
+      ],
+      "external_tool_optional_at_runtime": true,
+      "absence_not_a_core_error": true,
+      "qualification_required_to_advertise": true,
+      "matrix_defined_by": "required_tests.required_cells",
+      "claim_boundary": "Somente capacidades/células demonstradas; sem extrapolar optional runtime para unsupported tested."
+    },
+    {
+      "id": "native_buildkit_cache",
+      "required_packages": [
+        "HUG-041"
+      ],
+      "required_tests": [
+        "T-HUG-041-N",
+        "T-HUG-041-P",
+        "T-HUG-041-Q",
+        "T-HUG-041-R"
+      ],
+      "external_tool_optional_at_runtime": true,
+      "absence_not_a_core_error": true,
+      "qualification_required_to_advertise": true,
+      "matrix_defined_by": "required_tests.required_cells",
+      "claim_boundary": "Somente capacidades/células demonstradas; sem extrapolar optional runtime para unsupported tested."
+    },
+    {
+      "id": "native_compiler_cache",
+      "required_packages": [
+        "HUG-042"
+      ],
+      "required_tests": [
+        "T-HUG-042-N",
+        "T-HUG-042-P",
+        "T-HUG-042-Q",
+        "T-HUG-042-R"
+      ],
+      "external_tool_optional_at_runtime": true,
+      "absence_not_a_core_error": true,
+      "qualification_required_to_advertise": true,
+      "matrix_defined_by": "required_tests.required_cells",
+      "claim_boundary": "Somente capacidades/células demonstradas; sem extrapolar optional runtime para unsupported tested."
+    },
+    {
+      "id": "qualified_outline_reuse",
+      "required_packages": [
+        "HUG-013",
+        "HUG-044"
+      ],
+      "required_tests": [
+        "T-HUG-013-N",
+        "T-HUG-013-P",
+        "T-HUG-013-Q",
+        "T-HUG-013-R",
+        "T-HUG-044-N",
+        "T-HUG-044-P",
+        "T-HUG-044-Q",
+        "T-HUG-044-R"
+      ],
+      "external_tool_optional_at_runtime": false,
+      "absence_not_a_core_error": true,
+      "qualification_required_to_advertise": true,
+      "matrix_defined_by": "required_tests.required_cells",
+      "claim_boundary": "Somente capacidades/células demonstradas; sem extrapolar optional runtime para unsupported tested."
+    },
+    {
+      "id": "local_git_promotion",
+      "required_packages": [
+        "HUG-014",
+        "HUG-043",
+        "HUG-045",
+        "HUG-047"
+      ],
+      "required_tests": [
+        "T-BR-03-C",
+        "T-BR-04-C",
+        "T-BR-05-C",
+        "T-HUG-014-N",
+        "T-HUG-014-P",
+        "T-HUG-014-Q",
+        "T-HUG-014-R",
+        "T-HUG-043-N",
+        "T-HUG-043-P",
+        "T-HUG-043-Q",
+        "T-HUG-043-R",
+        "T-HUG-045-N",
+        "T-HUG-045-P",
+        "T-HUG-045-Q",
+        "T-HUG-045-R",
+        "T-HUG-047-N",
+        "T-HUG-047-P",
+        "T-HUG-047-Q",
+        "T-HUG-047-R"
+      ],
+      "external_tool_optional_at_runtime": false,
+      "absence_not_a_core_error": true,
+      "qualification_required_to_advertise": true,
+      "matrix_defined_by": "required_tests.required_cells",
+      "claim_boundary": "Somente capacidades/células demonstradas; sem extrapolar optional runtime para unsupported tested."
+    },
+    {
+      "id": "native_platforms",
+      "required_packages": [
+        "HUG-049",
+        "HUG-050",
+        "HUG-053"
+      ],
+      "required_tests": [
+        "T-BR-09-C",
+        "T-HUG-049-N",
+        "T-HUG-049-P",
+        "T-HUG-049-Q",
+        "T-HUG-049-R",
+        "T-HUG-050-N",
+        "T-HUG-050-P",
+        "T-HUG-050-Q",
+        "T-HUG-050-R",
+        "T-HUG-053-N",
+        "T-HUG-053-P",
+        "T-HUG-053-Q",
+        "T-HUG-053-R"
+      ],
+      "external_tool_optional_at_runtime": false,
+      "absence_not_a_core_error": true,
+      "qualification_required_to_advertise": true,
+      "matrix_defined_by": "required_tests.required_cells",
+      "claim_boundary": "Somente capacidades/células demonstradas; sem extrapolar optional runtime para unsupported tested."
+    },
+    {
+      "id": "verified_distribution",
+      "required_packages": [
+        "HUG-003",
+        "HUG-048",
+        "HUG-051",
+        "HUG-052",
+        "HUG-054",
+        "HUG-055",
+        "HUG-056",
+        "HUG-059",
+        "HUG-060"
+      ],
+      "required_tests": [
+        "T-BR-01-C",
+        "T-BR-02-C",
+        "T-BR-03-C",
+        "T-BR-09-C",
+        "T-BR-10-C",
+        "T-HUG-003-N",
+        "T-HUG-003-P",
+        "T-HUG-003-Q",
+        "T-HUG-003-R",
+        "T-HUG-048-N",
+        "T-HUG-048-P",
+        "T-HUG-048-Q",
+        "T-HUG-048-R",
+        "T-HUG-051-N",
+        "T-HUG-051-P",
+        "T-HUG-051-Q",
+        "T-HUG-051-R",
+        "T-HUG-052-N",
+        "T-HUG-052-P",
+        "T-HUG-052-Q",
+        "T-HUG-052-R",
+        "T-HUG-054-N",
+        "T-HUG-054-P",
+        "T-HUG-054-Q",
+        "T-HUG-054-R",
+        "T-HUG-055-N",
+        "T-HUG-055-P",
+        "T-HUG-055-Q",
+        "T-HUG-055-R",
+        "T-HUG-056-N",
+        "T-HUG-056-P",
+        "T-HUG-056-Q",
+        "T-HUG-056-R",
+        "T-HUG-059-N",
+        "T-HUG-059-P",
+        "T-HUG-059-Q",
+        "T-HUG-059-R",
+        "T-HUG-060-N",
+        "T-HUG-060-P",
+        "T-HUG-060-Q",
+        "T-HUG-060-R"
+      ],
+      "external_tool_optional_at_runtime": false,
+      "absence_not_a_core_error": true,
+      "qualification_required_to_advertise": true,
+      "matrix_defined_by": "required_tests.required_cells",
+      "claim_boundary": "Somente capacidades/células demonstradas; sem extrapolar optional runtime para unsupported tested."
+    },
+    {
+      "id": "basic_evidence_read",
+      "required_packages": [
+        "HUG-035"
+      ],
+      "required_tests": [
+        "T-BR-07-C",
+        "T-HUG-035-N",
+        "T-HUG-035-P",
+        "T-HUG-035-Q",
+        "T-HUG-035-R"
+      ],
+      "external_tool_optional_at_runtime": false,
+      "absence_not_a_core_error": true,
+      "qualification_required_to_advertise": true,
+      "matrix_defined_by": "required_tests.required_cells",
+      "claim_boundary": "Somente capacidades/células demonstradas; sem extrapolar optional runtime para unsupported tested."
+    }
+  ]
+}

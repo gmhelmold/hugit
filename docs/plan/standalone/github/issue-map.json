@@ -1,0 +1,1218 @@
+{
+  "repository": "gmhelmold/hugit",
+  "plan_digest": "ddcc59c538f269881c05b98017c11c79dae67a7339257facc22a2b1d2a9a7889",
+  "spec_commit": "0b7f629dd0259515608517bcd692e5ec4d2b6ee3",
+  "work_packages": 60,
+  "criterion_count": 900,
+  "canonical_edges": 295,
+  "native_edges": 121,
+  "native_edges_are_transitive_reduction": true,
+  "project": {
+    "status": "not_created",
+    "reason": "Current repository-scoped connection does not expose Projects; no account token requested or inferred."
+  },
+  "dry_run": false,
+  "parent": {
+    "id": 5485849792,
+    "number": 379,
+    "url": "https://github.com/gmhelmold/hugit/issues/379"
+  },
+  "issues": {
+    "HUG-001": {
+      "id": 5485850025,
+      "node_id": "I_kwDOSyFz2M8AAAABRvttqQ",
+      "number": 380,
+      "url": "https://github.com/gmhelmold/hugit/issues/380",
+      "phase": "A",
+      "lane": "A",
+      "status": "open",
+      "depends_on": [],
+      "native_blocked_by": []
+    },
+    "HUG-002": {
+      "id": 5485850305,
+      "node_id": "I_kwDOSyFz2M8AAAABRvtuwQ",
+      "number": 381,
+      "url": "https://github.com/gmhelmold/hugit/issues/381",
+      "phase": "A",
+      "lane": "A",
+      "status": "open",
+      "depends_on": [
+        "HUG-001"
+      ],
+      "native_blocked_by": [
+        "HUG-001"
+      ]
+    },
+    "HUG-003": {
+      "id": 5485850532,
+      "node_id": "I_kwDOSyFz2M8AAAABRvtvpA",
+      "number": 382,
+      "url": "https://github.com/gmhelmold/hugit/issues/382",
+      "phase": "A",
+      "lane": "I",
+      "status": "open",
+      "depends_on": [
+        "HUG-001"
+      ],
+      "native_blocked_by": [
+        "HUG-001"
+      ]
+    },
+    "HUG-004": {
+      "id": 5485850790,
+      "node_id": "I_kwDOSyFz2M8AAAABRvtwpg",
+      "number": 383,
+      "url": "https://github.com/gmhelmold/hugit/issues/383",
+      "phase": "A",
+      "lane": "A",
+      "status": "open",
+      "depends_on": [
+        "HUG-002",
+        "HUG-003"
+      ],
+      "native_blocked_by": [
+        "HUG-002",
+        "HUG-003"
+      ]
+    },
+    "HUG-005": {
+      "id": 5485851158,
+      "node_id": "I_kwDOSyFz2M8AAAABRvtyFg",
+      "number": 384,
+      "url": "https://github.com/gmhelmold/hugit/issues/384",
+      "phase": "A",
+      "lane": "H",
+      "status": "open",
+      "depends_on": [
+        "HUG-001"
+      ],
+      "native_blocked_by": [
+        "HUG-001"
+      ]
+    },
+    "HUG-006": {
+      "id": 5485851372,
+      "node_id": "I_kwDOSyFz2M8AAAABRvty7A",
+      "number": 385,
+      "url": "https://github.com/gmhelmold/hugit/issues/385",
+      "phase": "A",
+      "lane": "H",
+      "status": "open",
+      "depends_on": [
+        "HUG-001",
+        "HUG-003"
+      ],
+      "native_blocked_by": [
+        "HUG-003"
+      ]
+    },
+    "HUG-007": {
+      "id": 5485851616,
+      "node_id": "I_kwDOSyFz2M8AAAABRvtz4A",
+      "number": 386,
+      "url": "https://github.com/gmhelmold/hugit/issues/386",
+      "phase": "A",
+      "lane": "A",
+      "status": "open",
+      "depends_on": [
+        "HUG-002",
+        "HUG-005"
+      ],
+      "native_blocked_by": [
+        "HUG-002",
+        "HUG-005"
+      ]
+    },
+    "HUG-008": {
+      "id": 5485851829,
+      "node_id": "I_kwDOSyFz2M8AAAABRvt0tQ",
+      "number": 387,
+      "url": "https://github.com/gmhelmold/hugit/issues/387",
+      "phase": "B",
+      "lane": "B",
+      "status": "open",
+      "depends_on": [
+        "HUG-003"
+      ],
+      "native_blocked_by": [
+        "HUG-003"
+      ]
+    },
+    "HUG-009": {
+      "id": 5485852058,
+      "node_id": "I_kwDOSyFz2M8AAAABRvt1mg",
+      "number": 388,
+      "url": "https://github.com/gmhelmold/hugit/issues/388",
+      "phase": "A",
+      "lane": "C",
+      "status": "open",
+      "depends_on": [
+        "HUG-003"
+      ],
+      "native_blocked_by": [
+        "HUG-003"
+      ]
+    },
+    "HUG-010": {
+      "id": 5485852295,
+      "node_id": "I_kwDOSyFz2M8AAAABRvt2hw",
+      "number": 389,
+      "url": "https://github.com/gmhelmold/hugit/issues/389",
+      "phase": "A",
+      "lane": "C",
+      "status": "open",
+      "depends_on": [
+        "HUG-003"
+      ],
+      "native_blocked_by": [
+        "HUG-003"
+      ]
+    },
+    "HUG-011": {
+      "id": 5485852510,
+      "node_id": "I_kwDOSyFz2M8AAAABRvt3Xg",
+      "number": 390,
+      "url": "https://github.com/gmhelmold/hugit/issues/390",
+      "phase": "B",
+      "lane": "C",
+      "status": "open",
+      "depends_on": [
+        "HUG-003",
+        "HUG-015"
+      ],
+      "native_blocked_by": [
+        "HUG-003",
+        "HUG-015"
+      ]
+    },
+    "HUG-012": {
+      "id": 5485852891,
+      "node_id": "I_kwDOSyFz2M8AAAABRvt42w",
+      "number": 391,
+      "url": "https://github.com/gmhelmold/hugit/issues/391",
+      "phase": "A",
+      "lane": "C",
+      "status": "open",
+      "depends_on": [
+        "HUG-003",
+        "HUG-009",
+        "HUG-010"
+      ],
+      "native_blocked_by": [
+        "HUG-009",
+        "HUG-010"
+      ]
+    },
+    "HUG-013": {
+      "id": 5485853280,
+      "node_id": "I_kwDOSyFz2M8AAAABRvt6YA",
+      "number": 392,
+      "url": "https://github.com/gmhelmold/hugit/issues/392",
+      "phase": "E",
+      "lane": "C",
+      "status": "open",
+      "depends_on": [
+        "HUG-011",
+        "HUG-012",
+        "HUG-017",
+        "HUG-020"
+      ],
+      "native_blocked_by": [
+        "HUG-011",
+        "HUG-012",
+        "HUG-017"
+      ]
+    },
+    "HUG-014": {
+      "id": 5485853533,
+      "node_id": "I_kwDOSyFz2M8AAAABRvt7XQ",
+      "number": 393,
+      "url": "https://github.com/gmhelmold/hugit/issues/393",
+      "phase": "A",
+      "lane": "C",
+      "status": "open",
+      "depends_on": [
+        "HUG-003"
+      ],
+      "native_blocked_by": [
+        "HUG-003"
+      ]
+    },
+    "HUG-015": {
+      "id": 5485853776,
+      "node_id": "I_kwDOSyFz2M8AAAABRvt8UA",
+      "number": 394,
+      "url": "https://github.com/gmhelmold/hugit/issues/394",
+      "phase": "B",
+      "lane": "A",
+      "status": "open",
+      "depends_on": [
+        "HUG-002",
+        "HUG-007",
+        "HUG-057"
+      ],
+      "native_blocked_by": [
+        "HUG-007",
+        "HUG-057"
+      ]
+    },
+    "HUG-016": {
+      "id": 5485854008,
+      "node_id": "I_kwDOSyFz2M8AAAABRvt9OA",
+      "number": 395,
+      "url": "https://github.com/gmhelmold/hugit/issues/395",
+      "phase": "B",
+      "lane": "B",
+      "status": "open",
+      "depends_on": [
+        "HUG-008",
+        "HUG-015",
+        "HUG-059"
+      ],
+      "native_blocked_by": [
+        "HUG-008",
+        "HUG-059"
+      ]
+    },
+    "HUG-017": {
+      "id": 5485854232,
+      "node_id": "I_kwDOSyFz2M8AAAABRvt-GA",
+      "number": 396,
+      "url": "https://github.com/gmhelmold/hugit/issues/396",
+      "phase": "B",
+      "lane": "B",
+      "status": "open",
+      "depends_on": [
+        "HUG-016",
+        "HUG-020"
+      ],
+      "native_blocked_by": [
+        "HUG-016",
+        "HUG-020"
+      ]
+    },
+    "HUG-018": {
+      "id": 5485854447,
+      "node_id": "I_kwDOSyFz2M8AAAABRvt-7w",
+      "number": 397,
+      "url": "https://github.com/gmhelmold/hugit/issues/397",
+      "phase": "D",
+      "lane": "B",
+      "status": "open",
+      "depends_on": [
+        "HUG-016",
+        "HUG-017",
+        "HUG-019",
+        "HUG-020",
+        "HUG-058"
+      ],
+      "native_blocked_by": [
+        "HUG-017",
+        "HUG-019",
+        "HUG-058"
+      ]
+    },
+    "HUG-019": {
+      "id": 5485854699,
+      "node_id": "I_kwDOSyFz2M8AAAABRvt_6w",
+      "number": 398,
+      "url": "https://github.com/gmhelmold/hugit/issues/398",
+      "phase": "B",
+      "lane": "B",
+      "status": "open",
+      "depends_on": [
+        "HUG-016",
+        "HUG-020"
+      ],
+      "native_blocked_by": [
+        "HUG-016",
+        "HUG-020"
+      ]
+    },
+    "HUG-020": {
+      "id": 5485855008,
+      "node_id": "I_kwDOSyFz2M8AAAABRvuBIA",
+      "number": 399,
+      "url": "https://github.com/gmhelmold/hugit/issues/399",
+      "phase": "B",
+      "lane": "D",
+      "status": "open",
+      "depends_on": [
+        "HUG-015",
+        "HUG-059"
+      ],
+      "native_blocked_by": [
+        "HUG-059"
+      ]
+    },
+    "HUG-021": {
+      "id": 5485855528,
+      "node_id": "I_kwDOSyFz2M8AAAABRvuDKA",
+      "number": 401,
+      "url": "https://github.com/gmhelmold/hugit/issues/401",
+      "phase": "D",
+      "lane": "B",
+      "status": "open",
+      "depends_on": [
+        "HUG-016",
+        "HUG-017",
+        "HUG-019",
+        "HUG-020"
+      ],
+      "native_blocked_by": [
+        "HUG-017",
+        "HUG-019"
+      ]
+    },
+    "HUG-022": {
+      "id": 5485855768,
+      "node_id": "I_kwDOSyFz2M8AAAABRvuEGA",
+      "number": 402,
+      "url": "https://github.com/gmhelmold/hugit/issues/402",
+      "phase": "C",
+      "lane": "E",
+      "status": "open",
+      "depends_on": [
+        "HUG-015",
+        "HUG-019",
+        "HUG-020",
+        "HUG-057"
+      ],
+      "native_blocked_by": [
+        "HUG-019"
+      ]
+    },
+    "HUG-023": {
+      "id": 5485855981,
+      "node_id": "I_kwDOSyFz2M8AAAABRvuE7Q",
+      "number": 403,
+      "url": "https://github.com/gmhelmold/hugit/issues/403",
+      "phase": "C",
+      "lane": "E",
+      "status": "open",
+      "depends_on": [
+        "HUG-019",
+        "HUG-020",
+        "HUG-022"
+      ],
+      "native_blocked_by": [
+        "HUG-022"
+      ]
+    },
+    "HUG-024": {
+      "id": 5485856228,
+      "node_id": "I_kwDOSyFz2M8AAAABRvuF5A",
+      "number": 404,
+      "url": "https://github.com/gmhelmold/hugit/issues/404",
+      "phase": "D",
+      "lane": "E",
+      "status": "open",
+      "depends_on": [
+        "HUG-019",
+        "HUG-020",
+        "HUG-022"
+      ],
+      "native_blocked_by": [
+        "HUG-022"
+      ]
+    },
+    "HUG-025": {
+      "id": 5485856469,
+      "node_id": "I_kwDOSyFz2M8AAAABRvuG1Q",
+      "number": 405,
+      "url": "https://github.com/gmhelmold/hugit/issues/405",
+      "phase": "C",
+      "lane": "C",
+      "status": "open",
+      "depends_on": [
+        "HUG-009",
+        "HUG-010",
+        "HUG-019",
+        "HUG-020"
+      ],
+      "native_blocked_by": [
+        "HUG-009",
+        "HUG-010",
+        "HUG-019"
+      ]
+    },
+    "HUG-026": {
+      "id": 5485856709,
+      "node_id": "I_kwDOSyFz2M8AAAABRvuHxQ",
+      "number": 406,
+      "url": "https://github.com/gmhelmold/hugit/issues/406",
+      "phase": "C",
+      "lane": "C",
+      "status": "open",
+      "depends_on": [
+        "HUG-009",
+        "HUG-017",
+        "HUG-019",
+        "HUG-020"
+      ],
+      "native_blocked_by": [
+        "HUG-009",
+        "HUG-017",
+        "HUG-019"
+      ]
+    },
+    "HUG-027": {
+      "id": 5485856945,
+      "node_id": "I_kwDOSyFz2M8AAAABRvuIsQ",
+      "number": 407,
+      "url": "https://github.com/gmhelmold/hugit/issues/407",
+      "phase": "C",
+      "lane": "A",
+      "status": "open",
+      "depends_on": [
+        "HUG-011",
+        "HUG-019",
+        "HUG-022",
+        "HUG-026"
+      ],
+      "native_blocked_by": [
+        "HUG-011",
+        "HUG-022",
+        "HUG-026"
+      ]
+    },
+    "HUG-028": {
+      "id": 5485857340,
+      "node_id": "I_kwDOSyFz2M8AAAABRvuKPA",
+      "number": 408,
+      "url": "https://github.com/gmhelmold/hugit/issues/408",
+      "phase": "C",
+      "lane": "E",
+      "status": "open",
+      "depends_on": [
+        "HUG-019",
+        "HUG-020",
+        "HUG-027"
+      ],
+      "native_blocked_by": [
+        "HUG-027"
+      ]
+    },
+    "HUG-029": {
+      "id": 5485857595,
+      "node_id": "I_kwDOSyFz2M8AAAABRvuLOw",
+      "number": 409,
+      "url": "https://github.com/gmhelmold/hugit/issues/409",
+      "phase": "C",
+      "lane": "F",
+      "status": "open",
+      "depends_on": [
+        "HUG-017",
+        "HUG-020",
+        "HUG-027"
+      ],
+      "native_blocked_by": [
+        "HUG-027"
+      ]
+    },
+    "HUG-030": {
+      "id": 5485857960,
+      "node_id": "I_kwDOSyFz2M8AAAABRvuMqA",
+      "number": 410,
+      "url": "https://github.com/gmhelmold/hugit/issues/410",
+      "phase": "D",
+      "lane": "F",
+      "status": "open",
+      "depends_on": [
+        "HUG-025",
+        "HUG-026",
+        "HUG-029"
+      ],
+      "native_blocked_by": [
+        "HUG-025",
+        "HUG-029"
+      ]
+    },
+    "HUG-031": {
+      "id": 5485858202,
+      "node_id": "I_kwDOSyFz2M8AAAABRvuNmg",
+      "number": 411,
+      "url": "https://github.com/gmhelmold/hugit/issues/411",
+      "phase": "D",
+      "lane": "F",
+      "status": "open",
+      "depends_on": [
+        "HUG-017",
+        "HUG-020",
+        "HUG-027",
+        "HUG-029"
+      ],
+      "native_blocked_by": [
+        "HUG-029"
+      ]
+    },
+    "HUG-032": {
+      "id": 5485858430,
+      "node_id": "I_kwDOSyFz2M8AAAABRvuOfg",
+      "number": 412,
+      "url": "https://github.com/gmhelmold/hugit/issues/412",
+      "phase": "D",
+      "lane": "F",
+      "status": "open",
+      "depends_on": [
+        "HUG-017",
+        "HUG-020",
+        "HUG-027"
+      ],
+      "native_blocked_by": [
+        "HUG-027"
+      ]
+    },
+    "HUG-033": {
+      "id": 5485858666,
+      "node_id": "I_kwDOSyFz2M8AAAABRvuPag",
+      "number": 413,
+      "url": "https://github.com/gmhelmold/hugit/issues/413",
+      "phase": "D",
+      "lane": "F",
+      "status": "open",
+      "depends_on": [
+        "HUG-026",
+        "HUG-027",
+        "HUG-032"
+      ],
+      "native_blocked_by": [
+        "HUG-032"
+      ]
+    },
+    "HUG-034": {
+      "id": 5485858878,
+      "node_id": "I_kwDOSyFz2M8AAAABRvuQPg",
+      "number": 414,
+      "url": "https://github.com/gmhelmold/hugit/issues/414",
+      "phase": "C",
+      "lane": "G",
+      "status": "open",
+      "depends_on": [
+        "HUG-027",
+        "HUG-029"
+      ],
+      "native_blocked_by": [
+        "HUG-029"
+      ]
+    },
+    "HUG-035": {
+      "id": 5485859099,
+      "node_id": "I_kwDOSyFz2M8AAAABRvuRGw",
+      "number": 415,
+      "url": "https://github.com/gmhelmold/hugit/issues/415",
+      "phase": "C",
+      "lane": "G",
+      "status": "open",
+      "depends_on": [
+        "HUG-016",
+        "HUG-017",
+        "HUG-020",
+        "HUG-027"
+      ],
+      "native_blocked_by": [
+        "HUG-027"
+      ]
+    },
+    "HUG-036": {
+      "id": 5485859336,
+      "node_id": "I_kwDOSyFz2M8AAAABRvuSCA",
+      "number": 416,
+      "url": "https://github.com/gmhelmold/hugit/issues/416",
+      "phase": "D",
+      "lane": "G",
+      "status": "open",
+      "depends_on": [
+        "HUG-007",
+        "HUG-022",
+        "HUG-027",
+        "HUG-034",
+        "HUG-035"
+      ],
+      "native_blocked_by": [
+        "HUG-034",
+        "HUG-035"
+      ]
+    },
+    "HUG-037": {
+      "id": 5485859722,
+      "node_id": "I_kwDOSyFz2M8AAAABRvuTig",
+      "number": 417,
+      "url": "https://github.com/gmhelmold/hugit/issues/417",
+      "phase": "D",
+      "lane": "G",
+      "status": "open",
+      "depends_on": [
+        "HUG-004",
+        "HUG-007",
+        "HUG-035",
+        "HUG-036"
+      ],
+      "native_blocked_by": [
+        "HUG-004",
+        "HUG-036"
+      ]
+    },
+    "HUG-038": {
+      "id": 5485859980,
+      "node_id": "I_kwDOSyFz2M8AAAABRvuUjA",
+      "number": 418,
+      "url": "https://github.com/gmhelmold/hugit/issues/418",
+      "phase": "C",
+      "lane": "G",
+      "status": "open",
+      "depends_on": [
+        "HUG-022",
+        "HUG-027",
+        "HUG-034",
+        "HUG-035"
+      ],
+      "native_blocked_by": [
+        "HUG-034",
+        "HUG-035"
+      ]
+    },
+    "HUG-039": {
+      "id": 5485860261,
+      "node_id": "I_kwDOSyFz2M8AAAABRvuVpQ",
+      "number": 419,
+      "url": "https://github.com/gmhelmold/hugit/issues/419",
+      "phase": "C",
+      "lane": "B",
+      "status": "open",
+      "depends_on": [
+        "HUG-017",
+        "HUG-020",
+        "HUG-027",
+        "HUG-035"
+      ],
+      "native_blocked_by": [
+        "HUG-035"
+      ]
+    },
+    "HUG-040": {
+      "id": 5485860501,
+      "node_id": "I_kwDOSyFz2M8AAAABRvuWlQ",
+      "number": 420,
+      "url": "https://github.com/gmhelmold/hugit/issues/420",
+      "phase": "E",
+      "lane": "F",
+      "status": "open",
+      "depends_on": [
+        "HUG-027",
+        "HUG-032",
+        "HUG-033",
+        "HUG-035"
+      ],
+      "native_blocked_by": [
+        "HUG-033",
+        "HUG-035"
+      ]
+    },
+    "HUG-041": {
+      "id": 5485860868,
+      "node_id": "I_kwDOSyFz2M8AAAABRvuYBA",
+      "number": 421,
+      "url": "https://github.com/gmhelmold/hugit/issues/421",
+      "phase": "E",
+      "lane": "F",
+      "status": "open",
+      "depends_on": [
+        "HUG-017",
+        "HUG-020",
+        "HUG-021",
+        "HUG-032",
+        "HUG-040"
+      ],
+      "native_blocked_by": [
+        "HUG-021",
+        "HUG-040"
+      ]
+    },
+    "HUG-042": {
+      "id": 5485861148,
+      "node_id": "I_kwDOSyFz2M8AAAABRvuZHA",
+      "number": 422,
+      "url": "https://github.com/gmhelmold/hugit/issues/422",
+      "phase": "E",
+      "lane": "F",
+      "status": "open",
+      "depends_on": [
+        "HUG-013",
+        "HUG-021",
+        "HUG-027",
+        "HUG-032",
+        "HUG-033"
+      ],
+      "native_blocked_by": [
+        "HUG-013",
+        "HUG-021",
+        "HUG-033"
+      ]
+    },
+    "HUG-043": {
+      "id": 5485861420,
+      "node_id": "I_kwDOSyFz2M8AAAABRvuaLA",
+      "number": 423,
+      "url": "https://github.com/gmhelmold/hugit/issues/423",
+      "phase": "E",
+      "lane": "C",
+      "status": "open",
+      "depends_on": [
+        "HUG-012",
+        "HUG-013",
+        "HUG-014",
+        "HUG-027",
+        "HUG-028",
+        "HUG-036",
+        "HUG-059"
+      ],
+      "native_blocked_by": [
+        "HUG-013",
+        "HUG-014",
+        "HUG-028",
+        "HUG-036"
+      ]
+    },
+    "HUG-044": {
+      "id": 5485861810,
+      "node_id": "I_kwDOSyFz2M8AAAABRvubsg",
+      "number": 424,
+      "url": "https://github.com/gmhelmold/hugit/issues/424",
+      "phase": "E",
+      "lane": "C",
+      "status": "open",
+      "depends_on": [
+        "HUG-013",
+        "HUG-015",
+        "HUG-027",
+        "HUG-034",
+        "HUG-036"
+      ],
+      "native_blocked_by": [
+        "HUG-013",
+        "HUG-036"
+      ]
+    },
+    "HUG-045": {
+      "id": 5485862042,
+      "node_id": "I_kwDOSyFz2M8AAAABRvucmg",
+      "number": 425,
+      "url": "https://github.com/gmhelmold/hugit/issues/425",
+      "phase": "F",
+      "lane": "I",
+      "status": "open",
+      "depends_on": [
+        "HUG-016",
+        "HUG-017",
+        "HUG-018",
+        "HUG-019",
+        "HUG-021",
+        "HUG-039",
+        "HUG-043"
+      ],
+      "native_blocked_by": [
+        "HUG-018",
+        "HUG-021",
+        "HUG-039",
+        "HUG-043"
+      ]
+    },
+    "HUG-046": {
+      "id": 5485862368,
+      "node_id": "I_kwDOSyFz2M8AAAABRvud4A",
+      "number": 426,
+      "url": "https://github.com/gmhelmold/hugit/issues/426",
+      "phase": "F",
+      "lane": "D",
+      "status": "open",
+      "depends_on": [
+        "HUG-017",
+        "HUG-020",
+        "HUG-029",
+        "HUG-031",
+        "HUG-032",
+        "HUG-037",
+        "HUG-039"
+      ],
+      "native_blocked_by": [
+        "HUG-031",
+        "HUG-032",
+        "HUG-037",
+        "HUG-039"
+      ]
+    },
+    "HUG-047": {
+      "id": 5485862619,
+      "node_id": "I_kwDOSyFz2M8AAAABRvue2w",
+      "number": 427,
+      "url": "https://github.com/gmhelmold/hugit/issues/427",
+      "phase": "F",
+      "lane": "I",
+      "status": "open",
+      "depends_on": [
+        "HUG-014",
+        "HUG-015",
+        "HUG-016",
+        "HUG-019",
+        "HUG-021",
+        "HUG-027",
+        "HUG-036",
+        "HUG-043",
+        "HUG-044"
+      ],
+      "native_blocked_by": [
+        "HUG-021",
+        "HUG-043",
+        "HUG-044"
+      ]
+    },
+    "HUG-048": {
+      "id": 5485862861,
+      "node_id": "I_kwDOSyFz2M8AAAABRvufzQ",
+      "number": 428,
+      "url": "https://github.com/gmhelmold/hugit/issues/428",
+      "phase": "F",
+      "lane": "I",
+      "status": "open",
+      "depends_on": [
+        "HUG-016",
+        "HUG-017",
+        "HUG-019",
+        "HUG-021",
+        "HUG-035",
+        "HUG-038",
+        "HUG-040",
+        "HUG-060"
+      ],
+      "native_blocked_by": [
+        "HUG-021",
+        "HUG-040",
+        "HUG-060"
+      ]
+    },
+    "HUG-049": {
+      "id": 5485863114,
+      "node_id": "I_kwDOSyFz2M8AAAABRvugyg",
+      "number": 429,
+      "url": "https://github.com/gmhelmold/hugit/issues/429",
+      "phase": "F",
+      "lane": "H",
+      "status": "open",
+      "depends_on": [
+        "HUG-008",
+        "HUG-009",
+        "HUG-019",
+        "HUG-020",
+        "HUG-028",
+        "HUG-039",
+        "HUG-045",
+        "HUG-046"
+      ],
+      "native_blocked_by": [
+        "HUG-045",
+        "HUG-046"
+      ]
+    },
+    "HUG-050": {
+      "id": 5485863369,
+      "node_id": "I_kwDOSyFz2M8AAAABRvuhyQ",
+      "number": 430,
+      "url": "https://github.com/gmhelmold/hugit/issues/430",
+      "phase": "F",
+      "lane": "H",
+      "status": "open",
+      "depends_on": [
+        "HUG-005",
+        "HUG-007",
+        "HUG-018",
+        "HUG-023",
+        "HUG-024",
+        "HUG-025",
+        "HUG-028",
+        "HUG-037",
+        "HUG-049"
+      ],
+      "native_blocked_by": [
+        "HUG-023",
+        "HUG-024",
+        "HUG-025",
+        "HUG-049"
+      ]
+    },
+    "HUG-051": {
+      "id": 5485863767,
+      "node_id": "I_kwDOSyFz2M8AAAABRvujVw",
+      "number": 431,
+      "url": "https://github.com/gmhelmold/hugit/issues/431",
+      "phase": "F",
+      "lane": "A",
+      "status": "open",
+      "depends_on": [
+        "HUG-030",
+        "HUG-031",
+        "HUG-034",
+        "HUG-038",
+        "HUG-039",
+        "HUG-040",
+        "HUG-041",
+        "HUG-042",
+        "HUG-044",
+        "HUG-048",
+        "HUG-050",
+        "HUG-060"
+      ],
+      "native_blocked_by": [
+        "HUG-030",
+        "HUG-041",
+        "HUG-042",
+        "HUG-044",
+        "HUG-048",
+        "HUG-050"
+      ]
+    },
+    "HUG-052": {
+      "id": 5485864049,
+      "node_id": "I_kwDOSyFz2M8AAAABRvukcQ",
+      "number": 432,
+      "url": "https://github.com/gmhelmold/hugit/issues/432",
+      "phase": "F",
+      "lane": "H",
+      "status": "open",
+      "depends_on": [
+        "HUG-004",
+        "HUG-005",
+        "HUG-006",
+        "HUG-039",
+        "HUG-049"
+      ],
+      "native_blocked_by": [
+        "HUG-006",
+        "HUG-049"
+      ]
+    },
+    "HUG-053": {
+      "id": 5485864332,
+      "node_id": "I_kwDOSyFz2M8AAAABRvuljA",
+      "number": 433,
+      "url": "https://github.com/gmhelmold/hugit/issues/433",
+      "phase": "F",
+      "lane": "H",
+      "status": "open",
+      "depends_on": [
+        "HUG-039",
+        "HUG-049",
+        "HUG-050",
+        "HUG-052"
+      ],
+      "native_blocked_by": [
+        "HUG-050",
+        "HUG-052"
+      ]
+    },
+    "HUG-054": {
+      "id": 5485864607,
+      "node_id": "I_kwDOSyFz2M8AAAABRvumnw",
+      "number": 434,
+      "url": "https://github.com/gmhelmold/hugit/issues/434",
+      "phase": "F",
+      "lane": "A",
+      "status": "open",
+      "depends_on": [
+        "HUG-007",
+        "HUG-038",
+        "HUG-039",
+        "HUG-043",
+        "HUG-044",
+        "HUG-051",
+        "HUG-053"
+      ],
+      "native_blocked_by": [
+        "HUG-051",
+        "HUG-053"
+      ]
+    },
+    "HUG-055": {
+      "id": 5485864848,
+      "node_id": "I_kwDOSyFz2M8AAAABRvunkA",
+      "number": 435,
+      "url": "https://github.com/gmhelmold/hugit/issues/435",
+      "phase": "F",
+      "lane": "I",
+      "status": "open",
+      "depends_on": [
+        "HUG-045",
+        "HUG-046",
+        "HUG-047",
+        "HUG-048",
+        "HUG-051",
+        "HUG-053",
+        "HUG-054"
+      ],
+      "native_blocked_by": [
+        "HUG-047",
+        "HUG-054"
+      ]
+    },
+    "HUG-056": {
+      "id": 5485865082,
+      "node_id": "I_kwDOSyFz2M8AAAABRvuoeg",
+      "number": 436,
+      "url": "https://github.com/gmhelmold/hugit/issues/436",
+      "phase": "G",
+      "lane": "H",
+      "status": "open",
+      "depends_on": [
+        "HUG-001",
+        "HUG-002",
+        "HUG-003",
+        "HUG-004",
+        "HUG-005",
+        "HUG-006",
+        "HUG-007",
+        "HUG-008",
+        "HUG-009",
+        "HUG-010",
+        "HUG-011",
+        "HUG-012",
+        "HUG-013",
+        "HUG-014",
+        "HUG-015",
+        "HUG-016",
+        "HUG-017",
+        "HUG-018",
+        "HUG-019",
+        "HUG-020",
+        "HUG-021",
+        "HUG-022",
+        "HUG-023",
+        "HUG-024",
+        "HUG-025",
+        "HUG-026",
+        "HUG-027",
+        "HUG-028",
+        "HUG-029",
+        "HUG-030",
+        "HUG-031",
+        "HUG-032",
+        "HUG-033",
+        "HUG-034",
+        "HUG-035",
+        "HUG-036",
+        "HUG-037",
+        "HUG-038",
+        "HUG-039",
+        "HUG-040",
+        "HUG-041",
+        "HUG-042",
+        "HUG-043",
+        "HUG-044",
+        "HUG-045",
+        "HUG-046",
+        "HUG-047",
+        "HUG-048",
+        "HUG-049",
+        "HUG-050",
+        "HUG-051",
+        "HUG-052",
+        "HUG-053",
+        "HUG-054",
+        "HUG-055",
+        "HUG-057",
+        "HUG-058",
+        "HUG-059",
+        "HUG-060"
+      ],
+      "native_blocked_by": [
+        "HUG-055"
+      ]
+    },
+    "HUG-057": {
+      "id": 5485865357,
+      "node_id": "I_kwDOSyFz2M8AAAABRvupjQ",
+      "number": 437,
+      "url": "https://github.com/gmhelmold/hugit/issues/437",
+      "phase": "A",
+      "lane": "E",
+      "status": "open",
+      "depends_on": [
+        "HUG-001"
+      ],
+      "native_blocked_by": [
+        "HUG-001"
+      ]
+    },
+    "HUG-058": {
+      "id": 5485865738,
+      "node_id": "I_kwDOSyFz2M8AAAABRvurCg",
+      "number": 438,
+      "url": "https://github.com/gmhelmold/hugit/issues/438",
+      "phase": "B",
+      "lane": "B",
+      "status": "open",
+      "depends_on": [
+        "HUG-003",
+        "HUG-008"
+      ],
+      "native_blocked_by": [
+        "HUG-008"
+      ]
+    },
+    "HUG-059": {
+      "id": 5485865984,
+      "node_id": "I_kwDOSyFz2M8AAAABRvusAA",
+      "number": 439,
+      "url": "https://github.com/gmhelmold/hugit/issues/439",
+      "phase": "B",
+      "lane": "A",
+      "status": "open",
+      "depends_on": [
+        "HUG-015"
+      ],
+      "native_blocked_by": [
+        "HUG-015"
+      ]
+    },
+    "HUG-060": {
+      "id": 5485866239,
+      "node_id": "I_kwDOSyFz2M8AAAABRvus_w",
+      "number": 440,
+      "url": "https://github.com/gmhelmold/hugit/issues/440",
+      "phase": "C",
+      "lane": "I",
+      "status": "open",
+      "depends_on": [
+        "HUG-004",
+        "HUG-006",
+        "HUG-007",
+        "HUG-008",
+        "HUG-009",
+        "HUG-010",
+        "HUG-012",
+        "HUG-014",
+        "HUG-023",
+        "HUG-025",
+        "HUG-028",
+        "HUG-029",
+        "HUG-034",
+        "HUG-035",
+        "HUG-038",
+        "HUG-039"
+      ],
+      "native_blocked_by": [
+        "HUG-004",
+        "HUG-006",
+        "HUG-012",
+        "HUG-014",
+        "HUG-023",
+        "HUG-025",
+        "HUG-028",
+        "HUG-038",
+        "HUG-039"
+      ]
+    }
+  },
+  "relations_verified": true,
+  "import_complete": true
+}

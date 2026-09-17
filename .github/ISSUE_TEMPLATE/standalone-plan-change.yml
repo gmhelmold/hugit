@@ -1,0 +1,25 @@
+name: Alteração do planejamento standalone
+description: Mudança de escopo, protocolo ou assertion do planejamento v3.
+title: '[PLAN-CHANGE] '
+body:
+  - type: textarea
+    id: affected
+    attributes:
+      label: Contratos afetados
+      description: WPs, protocolos, critérios e assertions com IDs.
+    validations:
+      required: true
+  - type: textarea
+    id: counterexample
+    attributes:
+      label: Evidência ou contraexemplo
+      description: Distinga observado de hipótese; não publique segredos.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Mudança e qualificação
+      description: Inclua consumidores, migração, recovery e testes que reabrem.
+    validations:
+      required: true
