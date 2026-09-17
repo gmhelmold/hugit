@@ -83,6 +83,13 @@ jobs:
           git status --porcelain=v1 --untracked-files=all > "$TMP/worktree-before"
           git show d6f311e2a3521013f0f2cc2477fa716f7ca0f925:docs/audit/reachability.json > "$TMP/curation.json"
           export PYTHONDONTWRITEBYTECODE=1
+          python3 scripts/plan/resolve_wrapper_tests.py --source "$TMP/source" \
+            --inventory docs/audit/source-inventory.json --basis "$TMP/basis.json" \
+            --out "$RUNNER_TEMP/hug001-wrapper-bindings.json"
+          python3 scripts/plan/test_wrapper_resolution.py --source "$TMP/source" \
+            --inventory docs/audit/source-inventory.json --basis "$TMP/basis.json" -v \
+            2>&1 | tee "$RUNNER_TEMP/hug001-wrapper-tests.txt"
+          python3 -c 'import hashlib,sys; actual=hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest(); assert actual=="a483bc4e03065900d39926714c37f3b7df7513d9bbd7c2d54403631724ade2eb", "wrapper report drift"' "$RUNNER_TEMP/hug001-wrapper-bindings.json"
           python3 scripts/plan/recover_inventory.py \
             --source "$TMP/source" --tree "$TMP/tree.z" --index "$TMP/index.z" \
             --basis "$TMP/basis.json" --curation "$TMP/curation.json" \
@@ -122,5 +129,7 @@ jobs:
             ${{ runner.temp }}/hug001-recovery.json
             ${{ runner.temp }}/hug001-recovery-tests.txt
             ${{ runner.temp }}/hug001-recovery-state.json
+            ${{ runner.temp }}/hug001-wrapper-bindings.json
+            ${{ runner.temp }}/hug001-wrapper-tests.txt
           if-no-files-found: error
           retention-days: 30
