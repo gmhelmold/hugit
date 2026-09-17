@@ -81,12 +81,18 @@ def verify(doc, inventory, source, plan):
         require(type(first) is int and type(last) is int and 1 <= first <= last, 'ANCHOR_RANGE')
         lines = expected[path].splitlines(keepends=True)
         require(last <= len(lines) and digest(b''.join(lines[first-1:last])) == a['sha256'], 'SPAN_DIGEST')
-    counts = {p: sum(e['profile'] == p for e in entries.values()) for p in profiles}
+    # Single-pass counts and source-inventory order: no profiles x entries scan
+    # and no comparison sort of paths. The input inventory is pinned by its caller.
+    counts = dict.fromkeys(profiles, 0)
+    for entry in entries.values():
+        counts[entry['profile']] += 1
+    external_set = set(external_paths)
+    external_paths = [path for path in expected if path in external_set]
     return {'schema_version': '1.0', 'valid': True, 'source_commit': doc['source_commit'],
             'scope': doc['scope'], 'automation_files': len(entries),
             'automation_bytes': verified, 'all_source_files_verified': len(files),
             'all_source_bytes': total, 'profiles': counts,
-            'external_configuration_wrappers': sorted(external_paths),
+            'external_configuration_wrappers': external_paths,
             'authority': {k: False for k in FLAGS},
             'limits': ['Historical source only; later integrator scripts are not retroactively included.',
                        'Source/configuration and integrity checks only; no scripts, workflows or tests of the product executed.',
