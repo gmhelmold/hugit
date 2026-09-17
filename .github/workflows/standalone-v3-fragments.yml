@@ -1,0 +1,19 @@
+name: Inspect standalone import fragments
+on:
+  push:
+    branches: [plan/import-standalone-v3-recovery]
+    paths: [.github/workflows/standalone-v3-fragments.yml]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - name: Archive exact transferred bytes
+        run: tar -czf "$RUNNER_TEMP/fragments.tar.gz" .plan-bootstrap
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: hugit-transport-fragments
+          path: ${{ runner.temp }}/fragments.tar.gz
