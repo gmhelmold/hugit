@@ -72,6 +72,13 @@ jobs:
           python3 scripts/plan/test_surface_contracts.py \
             --source "$TMP/source" --basis "$TMP/basis.json" -v \
             2>&1 | tee "$RUNNER_TEMP/hug001-surface-tests.txt"
+          python3 scripts/plan/verify_automation.py \
+            --source "$TMP/source" --report "$RUNNER_TEMP/hug001-automation.json"
+          python3 scripts/plan/verify_automation.py \
+            --source "$TMP/source" --report "$TMP/automation-repeated.json"
+          cmp "$RUNNER_TEMP/hug001-automation.json" "$TMP/automation-repeated.json"
+          python3 scripts/plan/test_automation.py --source "$TMP/source" -v \
+            2>&1 | tee "$RUNNER_TEMP/hug001-automation-tests.txt"
           printf '%s\n' "unexpected file" > "$TMP/source/unclassified-inventory-control"
           if verify > "$TMP/negative.json"; then
             echo "ERROR: unclassified file was accepted" >&2
@@ -88,5 +95,7 @@ jobs:
             ${{ runner.temp }}/hug001-acquisition.json
             ${{ runner.temp }}/hug001-surfaces.json
             ${{ runner.temp }}/hug001-surface-tests.txt
+            ${{ runner.temp }}/hug001-automation.json
+            ${{ runner.temp }}/hug001-automation-tests.txt
           if-no-files-found: error
           retention-days: 30
