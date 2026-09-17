@@ -1,0 +1,103 @@
+name: HUG-001 pinned inventory (operational branch only)
+on:
+  push:
+    branches: [ops/hug-001-inventory-96ddcda]
+    paths: ['ops/hug-001/**', '.github/workflows/hug-001-inventory-operation.yml']
+permissions:
+  contents: read
+concurrency:
+  group: hug-001-inventory-96ddcda
+  cancel-in-progress: false
+env:
+  SUBJECT: 96ddcdade3d56d7c2cf4a01c294a56c3aaa4e58c
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          path: automation
+          persist-credentials: false
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          ref: 96ddcdade3d56d7c2cf4a01c294a56c3aaa4e58c
+          path: subject
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: '1.96.0'
+      - name: Collect metadata without building or executing Hugit
+        shell: bash
+        run: |
+          set -euo pipefail
+          E="$RUNNER_TEMP/hug-001-bundle/evidence"
+          mkdir -p "$E" "$RUNNER_TEMP/hug-001-bundle/outputs"
+          cd subject
+          git rev-parse HEAD > "$E/source-commit.txt"
+          git version > "$E/tool-versions.txt"
+          cargo --version >> "$E/tool-versions.txt"
+          rustc --version >> "$E/tool-versions.txt"
+          python3 --version >> "$E/tool-versions.txt"
+          timeout 180s cargo metadata --locked --format-version 1 > "$E/cargo-metadata-default.json" 2> "$E/cargo-default.stderr"
+          timeout 180s cargo metadata --locked --all-features --format-version 1 > "$E/cargo-metadata-all-features.json" 2> "$E/cargo-all-features.stderr"
+          git diff --exit-code
+          git archive --format=tar --prefix=source/ "$SUBJECT" | gzip -n > "$E/source.tar.gz"
+      - name: Enumerate, bind and exercise controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          E="$RUNNER_TEMP/hug-001-bundle/evidence"
+          cp automation/ops/hug-001/inventory.py "$E/inventory.py"
+          python3 automation/ops/hug-001/inventory.py --root "$GITHUB_WORKSPACE/subject" --ref "$SUBJECT" --evidence "$E" --out "$RUNNER_TEMP/hug-001-bundle/outputs" | tee "$E/inventory.stdout"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: hug-001-inventory-${{ github.run_id }}
+          path: ${{ runner.temp }}/hug-001-bundle/
+          retention-days: 90
+          if-no-files-found: error
+  deliver-manifests:
+    needs: inspect
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          ref: 96ddcdade3d56d7c2cf4a01c294a56c3aaa4e58c
+          fetch-depth: 1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: hug-001-inventory-${{ github.run_id }}
+          path: ${{ runner.temp }}/hug-001-bundle
+      - name: Verify and publish only the three derived manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib
+          b=pathlib.Path(os.environ['RUNNER_TEMP'])/'hug-001-bundle'
+          r=json.loads((b/'evidence/verification.json').read_text())
+          assert r['source_commit']==os.environ['SUBJECT']
+          assert r['positive']=='passed' and all(t['passed'] for t in r['negative_controls'])
+          assert not r['work_package_closed']
+          names={'source-inventory.json','reachability.json','path-bindings.json'}
+          assert set(r['outputs_sha256'])==names
+          dest=pathlib.Path('docs/audit');dest.mkdir(parents=True,exist_ok=True)
+          for name in sorted(names):
+              data=(b/'outputs'/name).read_bytes()
+              assert hashlib.sha256(data).hexdigest()==r['outputs_sha256'][name]
+              assert json.loads(data)['source_commit']==os.environ['SUBJECT']
+              assert not (dest/name).exists()
+              (dest/name).write_bytes(data)
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -c work/hug-001-inventory-96ddcda
+          git add -- docs/audit/source-inventory.json docs/audit/reachability.json docs/audit/path-bindings.json
+          test "$(git diff --cached --name-only | wc -l)" -eq 3
+          git -c core.hooksPath=/dev/null commit -s -m 'docs(audit): inventory pinned sources and proposed work-package paths' -m 'Refs #380. Mechanical inventory only; semantic reachability and independent review remain pending. No product/runtime mutation.'
+          git push origin HEAD:refs/heads/work/hug-001-inventory-96ddcda
