@@ -1,0 +1,229 @@
+{
+  "schema": "hugit-plan-view/3",
+  "second_review_resolutions": [
+    {
+      "id": "BR-01",
+      "title": "O validador aceita violações dos contratos que deveria coordenar",
+      "original_section": "## BR-01 — O validador aceita violações dos contratos que deveria coordenar\n\n**Severidade:** P1 — antes de delegação baseada no validador. **Base:** Reprodução contra as funções reais de validação do pacote.\n\n**Localização:** `scripts/validate_plan.py::validate`; `scripts/validate_plan.py::validate_directory`; `protocol-registry.json`; `HUG-007`; `HUG-059`.\n\n**O que a v2 acertou.** Ela confere IDs, presença dos cinco grupos, referências, cobertura full, algumas precedências e correspondência entre partes dos documentos. Reexecutei sua bateria original: 333/333 mutações foram detectadas. Esse resultado é verdadeiro para aquela bateria.\n\n**O ataque novo.** Retirei HUG-059 de `HUG-020.depends_on`. O pacote continuou com `requires_runtime_protocol_freeze=true`, mas perdeu o freeze entre seus ancestrais. O validador devolveu `valid=true`, sem erros. O código exige especificamente HUG-059 antes de HUG-016; não aplica a mesma regra a todo consumidor que declara depender do freeze.\n\nOutras alterações também foram aceitas: atribuir um teste P a outro WP existente; substituir `source_commit` por `not-a-commit`; esvaziar `full.capabilities`; e atribuir a dois testes distintos o mesmo caminho de evidência sem um contrato explícito de agregação. Acrescentar uma versão contraditória à entrada de P02 tampouco produziu erro: o registro original nem possui uma versão ou digest de conteúdo que os consumidores resolvam.\n\nEm cópias temporárias, `validate_directory` também não reclamou quando removi `contratos/P02.md`, quando acrescentei uma norma contraditória permitindo GC de objeto com pin, ou quando alterei a dependência apenas na prosa do WP020. Ele confere a renderização dos axiomas, mas não toda a semântica normativa nem a existência dos arquivos de protocolos.\n\n**Limite importante.** O manifesto original detectaria alterações nos bytes que ele enumera. Estes testes NÃO demonstram violação de assinatura nem modificação furtiva passando por todos os controles. Demonstram que integridade de bytes e consistência de uma nova revisão são propriedades diferentes. Um manifesto recalculado de documentos contraditórios continua apenas um inventário fiel de documentos contraditórios.\n\n**Correção.** Regras gerais derivadas de flags e consumidores, em vez de uma lista parcial de precedências hardcoded; versão/digest por protocolo resolvido; existência e cobertura dos documentos normativos; ownership coerente de testes; conjunto de capacidades full fechado; e identidade de evidência por resultado ou agregador tipado. Gerar as vistas a partir de uma representação normativa única ou verificar os campos que aparecem em mais de uma. Não exigir que Python interprete arbitrariamente toda prosa: a decisão normativa deve estar num contrato estruturado e revisável.\n\n**Critério para fechar este achado:** Cada mutação de `scripts/audit_validator.py` tem resultado esperado explícito. A versão corrigida deve recusar remoção do freeze de qualquer consumidor que o exige; protocolo ausente; consumer ligado à versão errada; owner divergente; baseline inválido; capability obrigatória omitida. Artefato compartilhado só passa com um agregador definido e verificável. Controles positivos continuam passando. A aprovação desse gate não se converte em aprovação de implementação.\n\n**Evidências desta rodada:** `evidence/validator-attacks.json`.\n\n---",
+      "original_section_sha256": "3f016d3d2bf55eba9fa95c1b2907c0902dc28f73e80a03daa69af4bab2c7e073",
+      "original_acceptance": "Cada mutação de `scripts/audit_validator.py` tem resultado esperado explícito. A versão corrigida deve recusar remoção do freeze de qualquer consumidor que o exige; protocolo ausente; consumer ligado à versão errada; owner divergente; baseline inválido; capability obrigatória omitida. Artefato compartilhado só passa com um agregador definido e verificável. Controles positivos continuam passando. A aprovação desse gate não se converte em aprovação de implementação.",
+      "plan_status": "addressed_in_plan",
+      "implementation_status": "not_implemented_not_verified",
+      "independent_review": "pending",
+      "protocols": [
+        "P00"
+      ],
+      "packages": [
+        "HUG-007",
+        "HUG-059",
+        "HUG-006",
+        "HUG-056"
+      ],
+      "resolution": "Fonte normativa única, digest/versão por protocolo, freeze para todos os consumidores e vistas comparadas integralmente.",
+      "acceptance_test": "T-BR-01-C",
+      "no_waiver": true
+    },
+    {
+      "id": "BR-02",
+      "title": "Os cinco axiomas existem, mas a rastreabilidade ainda é por etiqueta de teste",
+      "original_section": "## BR-02 — Os cinco axiomas existem, mas a rastreabilidade ainda é por etiqueta de teste\n\n**Severidade:** P1 — antes de fechar WPs por evidência. **Base:** Inspeção do grafo critério→teste e seus oráculos.\n\n**Localização:** `backlog.json::tasks[].axioms`; `test-catalog.json`; `HUG-017-INV03`; `HUG-036-INV01`; `HUG-007`; `HUG-055`.\n\n**Não há omissão dos cinco axiomas.** Existem 60 pacotes e 900 critérios. O problema é mais específico: os 180 invariantes apontam mecanicamente para o par N/R do respectivo pacote. Esse padrão não comprova inadequação por si só, mas encontrei relações concretamente insuficientes.\n\n`HUG-036-INV01` afirma “Goal criado não é trabalho concluído”. Seus links são N e R. O caso que de fato especifica criar quatro goals e exigir `done=0` é P — justamente o caso fora daquele vínculo. N verifica aprovação por lens/revisão errados ou report órfão; R descreve reconstrução de projeção.\n\n`HUG-017-INV03` afirma que bytes iguais não fundem invocações **ou políticas**. Seus links N/R tratam GC, pins, codec inválido e recuperação. P exercita duas ocorrências, mas não define o caso entre classes de política. O contrato de privacidade em outro lugar ajuda o desenho, mas não substitui uma assertion ligada a essa obrigação.\n\n**Consequência.** Um executor pode anexar resultados válidos dos testes referenciados sem demonstrar a afirmação inteira. Ter quatro famílias de teste por pacote pode ser suficiente; o defeito é não identificar quais assertions dentro delas sustentam cada critério. O próprio catálogo é de testes a implementar, portanto o problema é uma lacuna de especificação de evidência, não a acusação de que 256 testes reais já passaram falsamente.\n\n**Correção.** Introduzir IDs de assertions nos casos que precisam de mais de uma propriedade: preparo, estímulo, estado esperado, origem dos bytes e critério atendido. Uma assertion pode sustentar vários critérios; não se exige criar 900 testes isolados. Remover um passo essencial ou uma assertion deve quebrar a matriz de fechamento. Os cinco grupos continuam obrigatórios, com conteúdo proporcional ao pacote, sem transformá-los em quota fixa de frases.\n\n**Critério para fechar este achado:** Para INV01 do ledger, executar create-goal sem implementação/testes e provar `done=0`. Para INV03 de blobs, usar os mesmos bytes em duas invocações e duas políticas distintas, verificando dedupe físico sem fusão de ocorrências ou permissões. Mutar somente a assertion específica deve invalidar o critério correspondente, mesmo quando N/R e o restante da suíte passam. Demonstrar essas relações em JSON e na vista humana.\n\n**Evidências desta rodada:** `evidence/evidence-contract-audit.json`.\n\n---",
+      "original_section_sha256": "7e6c4be4a37c606104ece3a6eb0d7ee54667bf0231d79a14e14cb64f98d5633f",
+      "original_acceptance": "Para INV01 do ledger, executar create-goal sem implementação/testes e provar `done=0`. Para INV03 de blobs, usar os mesmos bytes em duas invocações e duas políticas distintas, verificando dedupe físico sem fusão de ocorrências ou permissões. Mutar somente a assertion específica deve invalidar o critério correspondente, mesmo quando N/R e o restante da suíte passam. Demonstrar essas relações em JSON e na vista humana.",
+      "plan_status": "addressed_in_plan",
+      "implementation_status": "not_implemented_not_verified",
+      "independent_review": "pending",
+      "protocols": [
+        "P00"
+      ],
+      "packages": [
+        "HUG-007",
+        "HUG-017",
+        "HUG-036",
+        "HUG-055"
+      ],
+      "resolution": "Assertions por critério; ledger create-goal ligado à assertion P correta; dedupe entre duas políticas tem predicado próprio.",
+      "acceptance_test": "T-BR-02-C",
+      "no_waiver": true
+    },
+    {
+      "id": "BR-03",
+      "title": "O witness Git depende de uma fronteira de commit que o modelo abstraiu",
+      "original_section": "## BR-03 — O witness Git depende de uma fronteira de commit que o modelo abstraiu\n\n**Severidade:** P0 condicional — antes de autorizar promoção por witness. **Base:** Git real com falha de processo injetada; restrições de ordem explicitadas.\n\n**Localização:** `contratos/P10.md::Journal e witness`; `contratos/P10.md::Reconciliação`; `scripts/check_protocol_models.py::promote`; `HUG-043`; `HUG-045`; `HUG-047`; `HUG-059`.\n\nP10 propõe atualizar o destino com expected-old e criar um witness na mesma transação `git update-ref --stdin`. Reconhece corretamente que isso não é uma transação com SQLite e prevê AMBIGUOUS. Porém também afirma que um witness válido implica que o commit Git específico ocorreu. Essa implicação depende do que “concluído” significa no backend, da ordem e da durabilidade — não apenas de usar a palavra transaction.\n\n**Experimento executado.** Em repositórios bare temporários, usei Git 2.47.3 no Linux, backend de refs em arquivos. Um pequeno interpositor C encerra o processo com `_exit(86)` imediatamente depois de um `rename` real escolhido. Não altera os OIDs nem fabrica arquivos de refs. Há controles sem falha para as duas ordens.\n\n| Ordem testada | Ponto da falha | Destino atualizado | Witness existe |\n|---|---|---:|---:|\n| Destino → witness | Depois do rename do destino | Sim | Não |\n| Witness → destino | Depois do rename do witness | Não | Sim |\n\nA primeira ordem corresponde à sequência textual proposta e demonstra commit parcial. **Ela não produziu falso witness; o estado AMBIGUOUS já previsto é uma defesa válida para esse caso.** A segunda ordem é uma variante deliberada, não uma execução literal target-first. Ela demonstra por que a inferência genérica “existe witness, logo tudo comitou” não pode ser transplantada para qualquer ordem/backend.\n\nO modelo abstrato atual realiza `(witness,target)=(true,true)` em um único passo e visita três estados no percurso seguro. Ele avisa que omite internals/crashes. Essa honestidade permanece, mas explica por que seu verde não cobre a fronteira realmente problemática.\n\n**Correção.** Fixar backend, versão, ordem, propriedades de persistência e tabela de recuperação por observação parcial. Se a qualificação só admitir target-first, essa restrição precisa ser verificável, e sua sobrevivência a falha de máquina precisa de evidência diferente da queda de processo. Não exigir confirmação automática quando ela não pode ser demonstrada; AMBIGUOUS com preservação de estado é melhor que uma ocorrência inventada. A limpeza de lockfiles restantes também precisa de ownership verificado. O witness deve certificar a propriedade demonstrada, não mais.\n\nNão ensaiei perda de energia, reftable, Windows ou macOS. O resultado é sobre o backend/versão/ambiente registrado, não uma afirmação universal de defeito do Git ou do futuro Hugit. A referência Git distingue atomicidade individual de ref e observação de subconjuntos por leitores [S01]; a evidência de queda é deste ensaio.\n\n**Critério para fechar este achado:** Substituir o passo único do modelo por estados de aquisição, persistência do destino, persistência do witness e confirmação. O modelo deve incluir os estados nativos observados. Rodar fault injection por fronteira no backend admitido; ordem não admitida deve ser rejeitada ou continuar ambígua. Uma observação parcial nunca produz RECORDED com autoridade maior que a sustentada. Preservar avanço posterior de terceiros e distinguir queda de processo de falha de máquina.\n\n**Evidências desta rodada:** `evidence/git-transaction-probe.json`, `evidence/rerun-protocol-models.json`.\n\n---",
+      "original_section_sha256": "65a35e71a14e8673bbcd20c2952839f361dd12268238ce8b87469bf48d6e3123",
+      "original_acceptance": "Substituir o passo único do modelo por estados de aquisição, persistência do destino, persistência do witness e confirmação. O modelo deve incluir os estados nativos observados. Rodar fault injection por fronteira no backend admitido; ordem não admitida deve ser rejeitada ou continuar ambígua. Uma observação parcial nunca produz RECORDED com autoridade maior que a sustentada. Preservar avanço posterior de terceiros e distinguir queda de processo de falha de máquina.",
+      "plan_status": "addressed_in_plan",
+      "implementation_status": "not_implemented_not_verified",
+      "independent_review": "pending",
+      "protocols": [
+        "P10"
+      ],
+      "packages": [
+        "HUG-043",
+        "HUG-045",
+        "HUG-047",
+        "HUG-059"
+      ],
+      "resolution": "Uma ref imutável de manifesto prova publicação de candidato gerenciado, não uma transação em branch humana; manter negativos de states parciais.",
+      "acceptance_test": "T-BR-03-C",
+      "no_waiver": true
+    },
+    {
+      "id": "BR-04",
+      "title": "Verificar branch livre e depois promovê-la admite checkout concorrente",
+      "original_section": "## BR-04 — Verificar branch livre e depois promovê-la admite checkout concorrente\n\n**Severidade:** P0 condicional — antes de atualizar automaticamente refs usadas por pessoas. **Base:** Reprodução de interleaving com Git real, sem Hugit v2.\n\n**Localização:** `contratos/P10.md::Candidato real`; `HUG-028`; `HUG-043`; `HUG-045`; `HUG-047`.\n\nP10 promete recusar atualização automática da branch checkout do usuário e não deixar index/arquivos de outro worktree inconsistentes. A restrição é boa. Falta qualificar como o fato “não está checkout” permanece verdadeiro até a atualização do ref.\n\n**Reprodução.** Criei uma branch `integration` que não estava checkout. Conferi a lista de worktrees. Entre essa checagem e a promoção, outro comando Git criou um worktree nessa branch. Em seguida, `git update-ref` promoveu o candidato com expected-old correto.\n\nO comando teve sucesso. No worktree concorrente, `HEAD` passou a apontar ao commit novo, mas index e arquivo continuaram com `old`; `git status --porcelain` mostrou `M  state.txt`. Não houve adulteração de arquivos, nem processo hostil: somente a ordem permitida de comandos normais do Git.\n\nIsso não prova que uma futura implementação obrigatoriamente fará apenas check-then-update. Prova que esse preenchimento natural da lacuna não sustenta a promessa. O CAS do OID verifica a versão do ref, não o conjunto de worktrees que o usam. Uma segunda leitura posterior também não impede a exposição do estado intermediário e não autoriza resetar o trabalho de alguém.\n\n**Correção.** Definir a superfície automatizável sob uma exclusão que os participantes admitidos efetivamente respeitem. Uma alternativa é promover em refs privados gerenciados e separar a entrega à branch do usuário como operação Git explícita; outra exige um protocolo de exclusividade qualificado para todo o fluxo admitido. A escolha precisa preservar o escopo acordado, sem anunciar proteção universal por um mutex privado que o Git normal ignora. Não editar index/arquivos de terceiros para “reparar” a corrida silenciosamente.\n\n**Critério para fechar este achado:** Forçar checkout/worktree-add entre a checagem e a promoção, também antes/depois de prepare. Ou a operação permanece no namespace gerenciado sem afetar o checkout alheio, ou a concorrência é excluída/recusada pelo contrato demonstrado. Nenhum worktree do usuário recebe HEAD novo com estado físico antigo como efeito oculto da automação. Rodar com comandos Git reais, não um mock que respeita artificialmente o lock do Hugit.\n\n**Evidências desta rodada:** `evidence/git-worktree-probe.json`.\n\n---",
+      "original_section_sha256": "0ed0d9b09566a8765c4e557ea253761b4c87c6fcb762d7c790b4c93c99c428ee",
+      "original_acceptance": "Forçar checkout/worktree-add entre a checagem e a promoção, também antes/depois de prepare. Ou a operação permanece no namespace gerenciado sem afetar o checkout alheio, ou a concorrência é excluída/recusada pelo contrato demonstrado. Nenhum worktree do usuário recebe HEAD novo com estado físico antigo como efeito oculto da automação. Rodar com comandos Git reais, não um mock que respeita artificialmente o lock do Hugit.",
+      "plan_status": "addressed_in_plan",
+      "implementation_status": "not_implemented_not_verified",
+      "independent_review": "pending",
+      "protocols": [
+        "P10"
+      ],
+      "packages": [
+        "HUG-028",
+        "HUG-043",
+        "HUG-045",
+        "HUG-047"
+      ],
+      "resolution": "Automação só publica refs gerenciadas imutáveis; handoff humano explícito via Git, sem update-ref em branch livre presumida.",
+      "acceptance_test": "T-BR-04-C",
+      "no_waiver": true
+    },
+    {
+      "id": "BR-05",
+      "title": "Revalidar policy epoch antes de publicar ainda deixa uma janela de autorização",
+      "original_section": "## BR-05 — Revalidar policy epoch antes de publicar ainda deixa uma janela de autorização\n\n**Severidade:** P0 condicional — no perfil que promete revogação antes de novas entregas. **Base:** Schedule construtivo de especificação; não exploração de Hugit v2.\n\n**Localização:** `contratos/P06.md::Dados derivados e epoch`; `contratos/P08.md::Consulta e bundles`; `HUG-020`; `HUG-037`; `HUG-039`; `HUG-045`.\n\nA v2 exige revalidar policy epoch antes de publicar um bundle e interromper páginas/chunks revogados. Ela já diferencia bytes anteriormente entregues, que não podem ser recolhidos. A lacuna é a fronteira da **nova entrega**, não a existência do epoch.\n\nSchedule mínimo:\n\n```text\nexport confere epoch=1 e recebe autorização\nrevogação comita epoch=2 e responde ao usuário\nexport publica o bundle com a decisão salva do epoch=1\n```\n\n“Checar imediatamente antes” não exclui uma revogação entre a checagem e o efeito. O mesmo problema pode ocorrer entre uma autorização de página e sua liberação. A demonstração anexa executa uma máquina mínima com esse schedule; não representa código existente da v2.\n\n**Correção.** Definir o ponto de linearização da concessão de entrega e o significado do ACK de revogação. Um gate curto compartilhado de publicação e revogação, com journal recuperável, é uma alternativa para bundle local: gravação longa ocorre em staging, a validação final e a concessão/publicação coordenam-se com revoke. Não manter uma transação SQL por toda a cópia para contornar o problema.\n\nÉ necessário escolher também o que acontece com entregas já autorizadas e ainda em voo. Elas podem ser concluídas sob uma semântica explícita ou canceladas antes do ACK, conforme o contrato; não podem aparecer como uma categoria indefinida. Descrever entrega autorizada antes do ACK é diferente de prometer recolher dados já enviados.\n\nA correção é local. Não exige serviço remoto nem uma assinatura que, sozinha, resolveria a concorrência.\n\n**Critério para fechar este achado:** Pausar o exporter depois da decisão de acesso e antes da publicação; confirmar revoke; retomar. Não pode surgir uma entrega nova proibida segundo a semântica do ACK. Testar também queda durante o gate, revogação durante export longo e página parcialmente encaminhada. O evento registra quando autorização/entrega foi concedida, sem afirmar apagamento retroativo de bytes já fornecidos.\n\n**Evidências desta rodada:** `evidence/protocol-counterexamples.json::policy_publication_race`.\n\n---",
+      "original_section_sha256": "977a0c07d7e0b4f8487f197f475b4d1ec0ce853ed0e879fb40440a7cf1411c57",
+      "original_acceptance": "Pausar o exporter depois da decisão de acesso e antes da publicação; confirmar revoke; retomar. Não pode surgir uma entrega nova proibida segundo a semântica do ACK. Testar também queda durante o gate, revogação durante export longo e página parcialmente encaminhada. O evento registra quando autorização/entrega foi concedida, sem afirmar apagamento retroativo de bytes já fornecidos.",
+      "plan_status": "addressed_in_plan",
+      "implementation_status": "not_implemented_not_verified",
+      "independent_review": "pending",
+      "protocols": [
+        "P06"
+      ],
+      "packages": [
+        "HUG-020",
+        "HUG-037",
+        "HUG-039",
+        "HUG-045"
+      ],
+      "resolution": "Gate de entrega compartilhado com revoke; ACK impede novos grants antigos, in-flight já enfileirado identificado.",
+      "acceptance_test": "T-BR-05-C",
+      "no_waiver": true
+    },
+    {
+      "id": "BR-06",
+      "title": "Um restore offline antigo não conhece revogações que não recebeu",
+      "original_section": "## BR-06 — Um restore offline antigo não conhece revogações que não recebeu\n\n**Severidade:** P1 — contrato de recuperação e privacidade. **Base:** Contraexemplo de informação disponível; nenhum algoritmo de restore executado.\n\n**Localização:** `contratos/P06.md::Dados derivados e epoch`; `contratos/P08.md::Restore explícito`; `HUG-018`; `HUG-020`; `HUG-039`; `HUG-058`.\n\nP06 afirma que replay de backup antigo não reseta tombstones de revogação. Isso é implementável ao importar num ambiente que ainda conhece as revogações mais recentes. P08 também fala em recuperação aplicável e interseção com política local. Falta distinguir esse caso de uma máquina nova após perda do estado mais recente.\n\nConsidere dois mundos. Em A, um backup é criado e nada é revogado depois. Em B, o mesmo backup é criado e o acesso é revogado posteriormente, mas o estado novo se perde. Uma restauração offline recebe exatamente os mesmos bytes do backup e a mesma configuração local em ambos os mundos. A serialização da demonstração tem digest idêntico nos dois.\n\n**Não existe informação nesses inputs que permita distinguir A de B.** Isso não significa que o Hugit não possa ser standalone, nem que todo backup antigo vaze conteúdo por padrão. Significa que a garantia de preservar a revogação mais recente precisa de uma âncora sobrevivente ou de uma autorização de recuperação nova.\n\n**Correção.** Separar importação com autoridade atual preservada de cold restore sem essa autoridade. No segundo caso, marcar a atualidade da política como desconhecida e exigir autorização local explícita antes de expor classes privadas; não promover a política antiga a “mais recente”. Um snapshot independente de políticas/tombstones pode compor o kit de recuperação, com seu próprio teste de disponibilidade. Sem esse dado, a degradação é fail-closed e explicável.\n\nA limitação já escrita sobre backups anteriormente compartilhados permanece correta. Ela não substitui a decisão sobre novas consultas geradas pela instalação restaurada.\n\n**Critério para fechar este achado:** Restaurar backup antigo em ambiente que conhece revoke posterior: a revogação prevalece. Repetir numa máquina vazia sem a âncora: estado de freshness desconhecido, nenhum acesso privado implicitamente reautorizado. Com recuperação autorizada, registrar a nova decisão e não afirmar conhecimento retrospectivo da revogação perdida. Nenhuma dependência cloud é introduzida para completar o teste.\n\n**Evidências desta rodada:** `evidence/protocol-counterexamples.json::restore_information_boundary`.\n\n---",
+      "original_section_sha256": "9843a155278e211afe416d31116847dd3bd5dff0e7092c634b6c405c860550d8",
+      "original_acceptance": "Restaurar backup antigo em ambiente que conhece revoke posterior: a revogação prevalece. Repetir numa máquina vazia sem a âncora: estado de freshness desconhecido, nenhum acesso privado implicitamente reautorizado. Com recuperação autorizada, registrar a nova decisão e não afirmar conhecimento retrospectivo da revogação perdida. Nenhuma dependência cloud é introduzida para completar o teste.",
+      "plan_status": "addressed_in_plan",
+      "implementation_status": "not_implemented_not_verified",
+      "independent_review": "pending",
+      "protocols": [
+        "P06"
+      ],
+      "packages": [
+        "HUG-018",
+        "HUG-020",
+        "HUG-039",
+        "HUG-058"
+      ],
+      "resolution": "Cold restore sem âncora é freshness unknown com privado bloqueado até nova autorização local; import preserva autoridade atual conhecida.",
+      "acceptance_test": "T-BR-06-C",
+      "no_waiver": true
+    },
+    {
+      "id": "BR-07",
+      "title": "Watermark no cursor não preserva sozinho uma projeção que foi sobrescrita",
+      "original_section": "## BR-07 — Watermark no cursor não preserva sozinho uma projeção que foi sobrescrita\n\n**Severidade:** P1 — consistência da recuperação e busca. **Base:** Experimento SQL mínimo e análise de contrato; não Hugit v2.\n\n**Localização:** `contratos/P08.md::Consulta e bundles`; `contratos/P11.md::SQL read txn`; `HUG-016`; `HUG-034`; `HUG-035`; `HUG-038`.\n\nO cursor está ligado a watermark/filtro/epoch e não deve mudar de dataset silenciosamente. Ao mesmo tempo, P11 limita transações de leitura por página. Essas escolhas são compatíveis, mas precisam de um mecanismo de snapshot lógico entre páginas.\n\n**Demonstração SQL.** No watermark 10 há dois runs falhos, IDs 1 e 2. A primeira página retorna 1. Antes da segunda, a projeção atual do run 2 é atualizada para passed/seq11. Se a paginação apenas reaplica `seq <= 10` sobre as linhas atuais, a segunda página fica vazia: o registro que fazia parte do dataset desapareceu. Guardar seq antigo e mudar só o estado também não conserva a visão antiga.\n\nExecutei esse cenário numa tabela mínima do SQLite 3.46.1 do ambiente. Não usei schema futuro do Hugit nem estou exigindo essa versão no produto. O problema é o contrato incompleto da projeção, não uma falha de isolamento do SQLite. A documentação oficial delimita o snapshot à transação de leitura; terminar essa transação e iniciar outra permite observar mudanças [S02].\n\n**Correção.** Escolher projeções versionadas consultáveis “as of”, materialização limitada do conjunto de resultados, snapshot apropriado ou invalidação explícita de cursor diante de mudança incompatível. Usar somente eventos imutáveis pode resolver certas consultas, mas precisa incluir estados/joins/FTS que a consulta realmente utiliza. O custo de retenção de versões e sua interação com GC/policy epoch devem entrar no orçamento.\n\nNão proponho segurar um leitor WAL indefinidamente: isso contradiz o objetivo de transações curtas e pode prejudicar checkpoint [S03].\n\n**Critério para fechar este achado:** Página 1, mudança de estado/deleção/novos resultados, página 2: devolver exatamente a visão contratada ou CURSOR_INVALIDATED/erro explícito, sem omissão ou duplicação silenciosa. Repetir com FTS atrasado, empate de ordenação, redaction/policy mudança e compactação de versões. O teste compara IDs e conteúdo esperado, não apenas status HTTP/JSON.\n\n**Evidências desta rodada:** `evidence/protocol-counterexamples.json::pagination`.\n\n---",
+      "original_section_sha256": "831064e7b21d5c86ad9211a17154a4bd07234018172868948e85d2e603a51d40",
+      "original_acceptance": "Página 1, mudança de estado/deleção/novos resultados, página 2: devolver exatamente a visão contratada ou CURSOR_INVALIDATED/erro explícito, sem omissão ou duplicação silenciosa. Repetir com FTS atrasado, empate de ordenação, redaction/policy mudança e compactação de versões. O teste compara IDs e conteúdo esperado, não apenas status HTTP/JSON.",
+      "plan_status": "addressed_in_plan",
+      "implementation_status": "not_implemented_not_verified",
+      "independent_review": "pending",
+      "protocols": [
+        "P08"
+      ],
+      "packages": [
+        "HUG-016",
+        "HUG-034",
+        "HUG-035",
+        "HUG-038"
+      ],
+      "resolution": "Paginação usa generation e invalidação explícita, não falsa reconstrução as-of de projeção sobrescrita.",
+      "acceptance_test": "T-BR-07-C",
+      "no_waiver": true
+    },
+    {
+      "id": "BR-08",
+      "title": "Instância efêmera de coletor não pode ser o namespace de retransmissão histórica",
+      "original_section": "## BR-08 — Instância efêmera de coletor não pode ser o namespace de retransmissão histórica\n\n**Severidade:** P1 — idempotência e métricas. **Base:** Contraexemplo de identidade compatível com a ambiguidade do texto.\n\n**Localização:** `contratos/P04.md::IDs não intercambiáveis`; `contratos/P03.md`; `contratos/P05.md`; `HUG-011`; `HUG-019`; `HUG-023`; `HUG-024`; `HUG-027`; `HUG-028`.\n\nA v2 separa corretamente história, instalação, produtor e invocação. Mas `producer_instance_id` é descrito como instância de produtor/boot/session e deve mudar a cada criação de instância. A composição indicada para dedupe usa `producer_instance_id + source_event_id`.\n\nSe o implementador interpretar produtor como a instância do adapter que lê o transcript, o replay após crash ganha outra chave:\n\n```text\n(instance-A, harness-event-42)\n(instance-B, harness-event-42)\n```\n\nÉ o mesmo evento histórico da origem, mas duas chaves válidas. Isso pode duplicar contagem, associação e eventos start/finish. O inverso — fixar um namespace amplo sem delimitar resets da origem — pode juntar eventos diferentes que reutilizaram o mesmo identificador.\n\nA proposta pode ser implementada corretamente interpretando “produtor” como a identidade original persistida de emissão, não a instância de transporte. Essa distinção precisa estar congelada, e não depender de como cada adapter entende a palavra. A demonstração anexa mostra a composição de chaves, não um replay real do hook do usuário.\n\n**Correção.** Distinguir identidade estável da origem/emissão de identidade do coletor que entregou. Um replay conserva namespace e event_id da emissão original; nova invocação gera novo evento; restart do coletor só altera metadados de entrega. Delimitar origem que reseta contador, rotação de transcript, cópia/import e ausência de ID. Quando a fonte não permite idempotência exata, declarar a limitação ou persistir uma identidade de emissão antes da confirmação, sem dedupe ingênuo pelo payload.\n\nO hook real continua sendo a fonte a qualificar; não se exige que o modelo administre IDs.\n\n**Critério para fechar este achado:** Processar um evento, cair depois do commit e antes de avançar watermark, reiniciar adapter e reler: uma ocorrência lógica, duas entregas rastreáveis. Executar de fato o mesmo comando novamente: duas invocações. Testar rotação/reset de contador, dois produtores concorrentes e import duplicado. Fixtures devem vir do adapter real ou de seu contrato explicitamente congelado.\n\n**Evidências desta rodada:** `evidence/protocol-counterexamples.json::replay_namespace`.\n\n---",
+      "original_section_sha256": "610273388aacf53c258df831ba832f503e907729f07dd87ca4e58a109041cbcd",
+      "original_acceptance": "Processar um evento, cair depois do commit e antes de avançar watermark, reiniciar adapter e reler: uma ocorrência lógica, duas entregas rastreáveis. Executar de fato o mesmo comando novamente: duas invocações. Testar rotação/reset de contador, dois produtores concorrentes e import duplicado. Fixtures devem vir do adapter real ou de seu contrato explicitamente congelado.",
+      "plan_status": "addressed_in_plan",
+      "implementation_status": "not_implemented_not_verified",
+      "independent_review": "pending",
+      "protocols": [
+        "P04"
+      ],
+      "packages": [
+        "HUG-011",
+        "HUG-019",
+        "HUG-023",
+        "HUG-024",
+        "HUG-027",
+        "HUG-028"
+      ],
+      "resolution": "Separar namespace estável da emissão de collector/delivery efêmeros; crash de watermark reentrega, não duplica.",
+      "acceptance_test": "T-BR-08-C",
+      "no_waiver": true
+    },
+    {
+      "id": "BR-09",
+      "title": "A evidência por test_id pode apagar uma falha de plataforma pela ordem de chegada",
+      "original_section": "## BR-09 — A evidência por test_id pode apagar uma falha de plataforma pela ordem de chegada\n\n**Severidade:** P1 — bloqueador do pipeline autoritativo de qualificação. **Base:** Reprodução contra o preflight real; NÃO é bypass de autorização de release.\n\n**Localização:** `scripts/validate_plan.py::readiness`; `execution-evidence-template.json`; `test-catalog.json`; `release-profiles.json`; `HUG-049`; `HUG-052`; `HUG-055`; `HUG-056`.\n\nO perfil full exige Linux, macOS ARM64/Intel e Windows nativos. Isso está explícito e correto. Entretanto o preflight organiza resultados como `{test_id: resultado}`, sem dimensão de plataforma. O último resultado de um ID substitui o anterior.\n\n**Experimento no código fornecido.** Usei o mesmo conjunto sintético de resultados para `T-HUG-049-P`: Windows failed e Linux passed. Mudei apenas a ordem.\n\n| Ordem do mesmo conjunto | pending_test_count | ready |\n|---|---:|---:|\n| Windows failed → Linux passed | 0 | false |\n| Linux passed → Windows failed | 1 | false |\n\nO preflight **não autorizou release**. Esse bloqueio é intencional e funcionou; não o apresento como uma vulnerabilidade de publicação. O defeito reproduzido é a contagem dependente de ordem. A lacuna do contrato futuro é não tornar cada célula obrigatória uma identidade de obrigação, antes de usar resultados para concluir a matriz.\n\nO template admite `environment={}`, mas um campo descritivo não é uma chave de evidência nem um denominador fechado. Os 256 IDs são famílias/obrigações planejadas; não se pode presumir que um passed cubra todas as plataformas, versões e sistemas de arquivos relevantes.\n\n**Correção.** Definir instâncias obrigatórias por teste, candidato, target, filesystem e versão/configuração de adapter quando relevantes. Nem todo teste precisa do produto cartesiano completo: cada capacidade declara sua matriz finita e justificada. Um agregador só passa quando todas as instâncias requeridas passam; duplicatas conflitantes e evidências de candidato distinto são rejeitadas, não last-wins. Ordenar os mesmos registros não altera a decisão.\n\nSeparar check estrutural do plano, preflight informativo e verificador autoritativo continua certo; o terceiro precisa de controle positivo real, além de recusar JSON inventado.\n\n**Critério para fechar este achado:** O fixture Windows failed/Linux passed resulta na mesma pendência nas duas ordens. Remover uma célula requerida, trocar target ou candidate, omitir ambiente ou duplicar resultado conflitante bloqueia qualificação. Com todas as instâncias reais verificadas e aprovadas, o controle positivo produz readiness qualificada no pipeline próprio; o preflight plan-only continua não autorizando por conta própria.\n\n**Evidências desta rodada:** `evidence/evidence-contract-audit.json`, `evidence/matrix-collapse.json`.\n\n---",
+      "original_section_sha256": "562c4a3e54cc8247aba04615c30be9b25927770bd1739b655ad150672ecc3240",
+      "original_acceptance": "O fixture Windows failed/Linux passed resulta na mesma pendência nas duas ordens. Remover uma célula requerida, trocar target ou candidate, omitir ambiente ou duplicar resultado conflitante bloqueia qualificação. Com todas as instâncias reais verificadas e aprovadas, o controle positivo produz readiness qualificada no pipeline próprio; o preflight plan-only continua não autorizando por conta própria.",
+      "plan_status": "addressed_in_plan",
+      "implementation_status": "not_implemented_not_verified",
+      "independent_review": "pending",
+      "protocols": [
+        "P12"
+      ],
+      "packages": [
+        "HUG-005",
+        "HUG-007",
+        "HUG-049",
+        "HUG-052",
+        "HUG-055",
+        "HUG-056"
+      ],
+      "resolution": "Obrigações por sujeito/assertion/célula/lock/attempt; agregação order-independent e conflitos bloqueantes.",
+      "acceptance_test": "T-BR-09-C",
+      "no_waiver": true
+    },
+    {
+      "id": "BR-10",
+      "title": "Candidato imutável, evidência e publicação ainda formam uma referência circular",
+      "original_section": "## BR-10 — Candidato imutável, evidência e publicação ainda formam uma referência circular\n\n**Severidade:** P1 — contrato de fechamento e publicação. **Base:** Análise estática de requisitos; não alegação de pipeline já implementado.\n\n**Localização:** `contratos/P00.md`; `contratos/P12.md`; `HUG-055`; `HUG-056.S1`; `HUG-056-SC01`; `HUG-056-DOD04`; `HUG-056-INV01`.\n\nHUG-056 exige todos os 60 pacotes e todas as obrigações do perfil, incluindo ele próprio, antes de ficar ready. Também precisa produzir `release/full-readiness.json`, integrar seus outputs no candidato identificado e publicar os bytes já qualificados. HUG-055 entrega resultados de revisão em paths do próprio repositório.\n\nUma leitura literal admite dois ciclos. Primeiro: 056 precisa estar fechado para o gate que permite seu próprio fechamento/publicação. Segundo: se toda evidência sobre o candidato A precisa ser commitada no mesmo candidato, esse commit cria B; refazer a evidência e commitá-la cria C. Um documento não deve obrigar um hash de commit a conter a afirmação final sobre seu próprio hash.\n\nNão encontrei um pipeline em produção preso nesse ciclo — ele ainda não foi implementado. A separação pode ser feita sem problema, mas **ela precisa estar no contrato**. Atualmente está a cargo do executor decidir se “mesmo candidato” significa artefato, árvore de código ou commit que inclui relatórios.\n\n**Correção.** Definir três objetos: sujeito imutável de build/código A; pacote de qualificação B que aponta para A; registro de promoção/pós-publicação C que aponta para A e B. Os relatórios não precisam alterar o sujeito qualificado. Quando arquivos de relatório forem versionados, usar um commit de evidência separado, sem recompilar A sob o mesmo nome.\n\nSeparar estados `ready_for_promotion`, `published` e `post_publish_verified/closed`. O gate pré-promoção verifica pré-condições, implementação e ensaio de release; o fechamento integral exige também o resultado pós-publicação. Não dispensar o DoD de 056: aplicá-lo no momento lógico correto. A revisão e o ensaio da automação de publicação podem usar uma release descartável, sem fingir que isso já é a entrega final.\n\nIsso preserva a exigência de não trocar bytes após os testes e os cinco axiomas de todos os WPs.\n\n**Critério para fechar este achado:** Demonstrar um percurso finito com candidate A, evidence B e promotion C; nenhum objeto precisa conter seu próprio hash final. O teste positivo chega a pré-promoção, publica somente A e fecha após pós-verificação. Alterar A invalida B. Alterar apenas anotações de C não muda os bytes A. Falha pós-publicação não produz closed nem autoriza substituição silenciosa de asset sob a mesma identidade.\n\n**Evidências desta rodada:** `evidence/evidence-contract-audit.json::release_candidate_contract`.\n\n---",
+      "original_section_sha256": "5b9eaf48e817e3a4352473d12e28d68dc8c66560cca3e0393d4f905c61f3274a",
+      "original_acceptance": "Demonstrar um percurso finito com candidate A, evidence B e promotion C; nenhum objeto precisa conter seu próprio hash final. O teste positivo chega a pré-promoção, publica somente A e fecha após pós-verificação. Alterar A invalida B. Alterar apenas anotações de C não muda os bytes A. Falha pós-publicação não produz closed nem autoriza substituição silenciosa de asset sob a mesma identidade.",
+      "plan_status": "addressed_in_plan",
+      "implementation_status": "not_implemented_not_verified",
+      "independent_review": "pending",
+      "protocols": [
+        "P12"
+      ],
+      "packages": [
+        "HUG-052",
+        "HUG-054",
+        "HUG-055",
+        "HUG-056"
+      ],
+      "resolution": "A imutável, B evidência destacada, C promoção/post-verificação; 056 fecha depois, não antes, da própria publicação.",
+      "acceptance_test": "T-BR-10-C",
+      "no_waiver": true
+    }
+  ]
+}
