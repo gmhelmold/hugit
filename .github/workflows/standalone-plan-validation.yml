@@ -37,7 +37,7 @@ jobs:
         run: python3 scripts/plan/test_sync.py
       - name: Test bounded acquisition verifier with isolated Git fixtures
         run: python3 scripts/plan/test_inventory.py
-      - name: Verify historical acquisition against pinned Git source
+      - name: Verify historical acquisition and surface contracts against pinned Git source
         shell: bash
         run: |
           set -euo pipefail
@@ -61,6 +61,17 @@ jobs:
           verify > "$RUNNER_TEMP/hug001-acquisition.json"
           verify > "$TMP/repeated.json"
           cmp "$RUNNER_TEMP/hug001-acquisition.json" "$TMP/repeated.json"
+          git show 5dcd4355c8ed896e168f7181e1d5add806ef6aaf:docs/audit/reachability.json > "$TMP/basis.json"
+          python3 scripts/plan/verify_surface_contracts.py \
+            --source "$TMP/source" --basis "$TMP/basis.json" \
+            --report "$RUNNER_TEMP/hug001-surfaces.json"
+          python3 scripts/plan/verify_surface_contracts.py \
+            --source "$TMP/source" --basis "$TMP/basis.json" \
+            --report "$TMP/surfaces-repeated.json"
+          cmp "$RUNNER_TEMP/hug001-surfaces.json" "$TMP/surfaces-repeated.json"
+          python3 scripts/plan/test_surface_contracts.py \
+            --source "$TMP/source" --basis "$TMP/basis.json" -v \
+            2>&1 | tee "$RUNNER_TEMP/hug001-surface-tests.txt"
           printf '%s\n' "unexpected file" > "$TMP/source/unclassified-inventory-control"
           if verify > "$TMP/negative.json"; then
             echo "ERROR: unclassified file was accepted" >&2
@@ -68,11 +79,14 @@ jobs:
           fi
           python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["valid"] is False and r["error"]=="SOURCE_SET_MISMATCH"' "$TMP/negative.json"
           cat "$RUNNER_TEMP/hug001-acquisition.json"
-      - name: Retain acquisition verification (not work-package approval)
+      - name: Retain inventory verification (not work-package approval)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: hug001-acquisition-check-${{ github.sha }}
-          path: ${{ runner.temp }}/hug001-acquisition.json
+          path: |
+            ${{ runner.temp }}/hug001-acquisition.json
+            ${{ runner.temp }}/hug001-surfaces.json
+            ${{ runner.temp }}/hug001-surface-tests.txt
           if-no-files-found: error
           retention-days: 30
