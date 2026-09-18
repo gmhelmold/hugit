@@ -58,6 +58,8 @@ use serde_json::{Value, json};
 use crate::porcelain::PorcelainError;
 use crate::pr::{LANDING_MODE, OpenedPr, QueuedPr, all_pr_queued, find_pr_opened};
 
+mod attempt_journal;
+
 /// Event kind a batch land appends when a union test localises a failure: it
 /// carries the bisected minimal failing pair (or the single culprit) so the
 /// `queue show` projection's `failing_pair` field lights up. Additive over the
@@ -99,7 +101,7 @@ pub enum LandCommand {
 #[derive(clap::Args, Debug)]
 pub struct QueueLandArgs {
     /// Path to the canonical JSON event log. Defaults to $HUGIT_LOG, else
-    /// .hugit/log.json. The batch is read from its `pr.queued` records and the
+    /// .hugit/log.json. Attempt receipts use <log>.queue-attempts/. The batch is read from its `pr.queued` records and the
     /// `pr.landed` / `queue.union_fail` outcomes are appended back.
     #[arg(long, help = crate::log_resolve::LOG_FLAG_HELP)]
     pub log: Option<PathBuf>,
@@ -156,37 +158,70 @@ fn run_queue_land(a: QueueLandArgs) -> ExitCode {
     // The file-backed local AC is the only backend used by this command.
     // `--ac` overrides the default path; no remote service is contacted.
     let ac = FileAc::new(ac_path);
-    let result = batch_land_with_limits(
+    let limits = EvaluationLimits {
+        max_probes: a.max_probes as usize,
+        timeout: Duration::from_millis(a.evaluation_timeout_ms),
+    };
+    let context = match simulation_context(&log, a.campaign.as_deref(), limits) {
+        Ok(context) => context,
+        Err(error) => return emit(Err(error)),
+    };
+    // Receipt persistence precedes evaluation. Old serialized results are never
+    // imported as authority; every retry evaluates the current corpus anew.
+    let journal = match attempt_journal::AttemptJournal::begin(&log_path, &context) {
+        Ok(journal) => journal,
+        Err(error) => return emit(Err(error)),
+    };
+    let result = batch_land_in_context(
         &mut log,
         &ac,
         a.campaign.as_deref(),
         a.recorded_at,
-        EvaluationLimits {
-            max_probes: a.max_probes as usize,
-            timeout: Duration::from_millis(a.evaluation_timeout_ms),
-        },
+        limits,
+        context,
     );
     match result {
         Ok(value) if value.get("stop_reason").is_some_and(|v| !v.is_null()) => {
-            // A held evaluation is visible and nonzero, with NO log rewrite.
+            if let Err(error) = journal.finish(attempt_journal::Outcome::Held) {
+                return emit(Err(error));
+            }
             emit(Err(PorcelainError::new("evaluation_held", "queue evaluation is inconclusive",
                 "inspect evaluation.stop_reason; retry as a new evaluation after resolving the cause")
                 .with_context("evaluation", value)))
         }
-        Ok(value) => match crate::pr::filelock::atomic_write(
-            &log_path,
-            serde_json::to_string_pretty(log.records())
-                .unwrap_or_default()
-                .as_bytes(),
-        ) {
-            Ok(()) => emit(Ok(value)),
-            Err(e) => emit(Err(PorcelainError::new(
-                "io_error",
-                format!("write log {log_path:?}: {e}"),
-                "check the --log path is on a writable filesystem with sufficient space",
-            ))),
-        },
-        Err(e) => emit(Err(e)),
+        Ok(value) => {
+            let bytes = match serde_json::to_vec_pretty(log.records()) {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    return emit(Err(PorcelainError::internal(
+                        "cannot encode evaluated corpus",
+                    )));
+                }
+            };
+            // Do not finalize a receipt if this write is uncertain. In particular,
+            // a rename can succeed before a directory sync error is reported.
+            if let Err(error) = crate::pr::filelock::atomic_write(&log_path, &bytes) {
+                return emit(Err(PorcelainError::new(
+                    "io_error",
+                    format!("write log {log_path:?}: {error}"),
+                    "preserve the current corpus and attempt receipts; retry evaluates current inputs without replaying the old result",
+                )));
+            }
+            if let Err(error) = journal.finish(attempt_journal::Outcome::Applied) {
+                return emit(Err(
+                    error.with_context("corpus_write_returned_success", json!(true))
+                ));
+            }
+            emit(Ok(value))
+        }
+        Err(error) => {
+            if let Err(journal_error) = journal.finish(attempt_journal::Outcome::Failed) {
+                return emit(Err(
+                    journal_error.with_context("evaluation_error", json!(error.to_json()))
+                ));
+            }
+            emit(Err(error))
+        }
     }
 }
 
@@ -269,6 +304,17 @@ pub fn batch_land_with_limits<A: ActionCache>(
     // This identity describes the simulation's actual corpus/configuration, not
     // a validated Git base. Generated here; never selected by report contents.
     let context = simulation_context(log, campaign, limits)?;
+    batch_land_in_context(log, ac, campaign, recorded_at, limits, context)
+}
+
+fn batch_land_in_context<A: ActionCache>(
+    log: &mut EventLog,
+    ac: &A,
+    campaign: Option<&str>,
+    recorded_at: u64,
+    limits: EvaluationLimits,
+    context: EvaluationContext,
+) -> Result<Value, PorcelainError> {
     // The active queue, in queue (order_index) order, scoped to the campaign.
     let mut queued = all_pr_queued(log);
     queued.sort_by_key(|q| q.order_index);
