@@ -35,7 +35,7 @@
       "session"
     ],
     "historical_search": "reachable commit subjects matching goal, user.prompt, prompt.capture, capture.prompt, intent.*hook or hook.*intent; at most 40 matches, not an all-version source audit",
-    "local_configuration": "hook topology and plugin registration only; no env values, credentials, transcripts or conversation stores",
+    "local_configuration": "Configuration JSON was parsed to project only hook/plugin topology. Credential stores and private transcript/session stores were not opened; env/credential values were not printed, extracted into evidence or published.",
     "local_hook_scopes": [
       "$HOME/.claude/hooks/",
       "$HOME/.claude/skills/memory-plumbing/scripts/",

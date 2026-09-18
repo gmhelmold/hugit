@@ -42,8 +42,9 @@
   "preservation": {
     "raw_private_payloads_read": false,
     "private_conversations_published": false,
-    "credentials_read": false,
-    "synthetic_fixture_claimed_real": false
+    "synthetic_fixture_claimed_real": false,
+    "credential_stores_inspected": false,
+    "credential_values_published": false
   },
   "recovery": {
     "incorrect_fixture_action": "Invalidate only the affected fixture and mapping version; retain allowed sanitized observations and withdraw downstream admission based on them.",
