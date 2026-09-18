@@ -256,6 +256,16 @@ pub fn batch_land_with_limits<A: ActionCache>(
     recorded_at: u64,
     limits: EvaluationLimits,
 ) -> Result<Value, PorcelainError> {
+    // The public library API accepts Duration, unlike the bounded CLI flag.
+    // Reject an unrepresentable timeout before json! serializes its u128 millis.
+    // Invalid input is a structured error, never a report-construction panic.
+    u64::try_from(limits.timeout.as_millis()).map_err(|_| {
+        PorcelainError::new(
+            "invalid_argument",
+            "evaluation timeout exceeds the report range",
+            "use a bounded timeout representable as u64 milliseconds",
+        )
+    })?;
     // The active queue, in queue (order_index) order, scoped to the campaign.
     let mut queued = all_pr_queued(log);
     queued.sort_by_key(|q| q.order_index);
@@ -926,5 +936,25 @@ mod remainder_safety_tests {
             oracle.evaluate(&["MISSING"]),
             (UnionVerdict::Unknown, vec![])
         );
+    }
+
+    #[test]
+    fn unrepresentable_library_timeout_is_an_error_without_log_mutation() {
+        let mut log = EventLog::new();
+        seed(&mut log, "A", &["content-a"], 0);
+        let before = log.clone();
+        let error = batch_land_with_limits(
+            &mut log,
+            &BrokenCache,
+            Some("remainder"),
+            100,
+            EvaluationLimits {
+                max_probes: 1,
+                timeout: Duration::MAX,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), "invalid_argument");
+        assert_eq!(log, before);
     }
 }
