@@ -16,6 +16,7 @@ import re
 import sys
 
 FINDINGS = ('F03', 'F04', 'F06', 'F09', 'F10')
+STATIC_FINDINGS = ('F01',)
 MAX_INPUT = 1024 * 1024
 
 class EvidenceError(ValueError):
@@ -148,17 +149,45 @@ def evaluate(w):
                             'resolvable_nonempty_refs': True}, refs, False)
     return result
 
-def verify(report):
+def verify_static(report, root):
+    static = report.get('static_findings')
+    need(isinstance(static, dict) and set(static) == set(STATIC_FINDINGS), 'static_finding_set')
+    row = static['F01']
+    need(row.get('classification') == 'limit_justified'
+         and row.get('outcome') == 'limit_justified', 'static_classification')
+    need(row.get('correction_packages') == ['HUG-012', 'HUG-013'], 'static_owners')
+    need(row.get('observed', {}).get('product_fix_claimed') is False, 'static_false_fix')
+    need(isinstance(row.get('limits'), list) and len(row['limits']) >= 3, 'static_limits')
+    evidence = row.get('evidence')
+    need(isinstance(evidence, list) and len(evidence) == 4, 'static_evidence_set')
+    seen = set()
+    for item in evidence:
+        path = item.get('path')
+        need(isinstance(path, str) and path and '..' not in Path(path).parts
+             and not Path(path).is_absolute() and path not in seen, 'static_path')
+        seen.add(path)
+        raw = (root / path).read_bytes()
+        need(hashlib.sha256(raw).hexdigest() == item.get('sha256'), 'static_digest')
+        text = raw.decode('utf-8')
+        required = item.get('requires')
+        need(isinstance(required, list) and required
+             and all(isinstance(x, str) and x in text for x in required), 'static_anchor')
+    need(report['finding_registry']['F01']['disposition']
+         == 'static_limit_justified_checker_published', 'static_registry')
+    return static
+
+def verify(report, root=Path('.')):
     results = evaluate(reconstruct(report))
+    static = verify_static(report, root)
     need(set(results) == set(FINDINGS)
          and json.dumps(results, sort_keys=True) == json.dumps(report['findings'], sort_keys=True),
          'forged_findings')
     need(set(report['finding_registry']) == {'F%02d' % i for i in range(1, 20)}, 'finding_omitted')
     need(report['origin']['workflow_head_sha'] == report['subject_claim'], 'workflow_subject_mismatch')
     need(report['origin']['binary_metadata']['sha256'] == report['binary_sha256'], 'binary_metadata_mismatch')
-    return results
+    return results, static
 
-def self_test(report):
+def self_test(report, root):
     def command(r, name):
         return next(c for c in r['commands'] if c['label'] == name)
     def false_as_zero(r):
@@ -180,11 +209,16 @@ def self_test(report):
         'wrong_executable': lambda r: r.update(binary_sha256='0'*64),
     }
     outcomes = {}
-    verify(report)
+    verify(report, root)
+    mutations.update({
+        'lost_static_finding': lambda r: r['static_findings'].pop('F01'),
+        'false_static_fix': lambda r: r['static_findings']['F01']['observed'].update(product_fix_claimed=True),
+        'wrong_static_digest': lambda r: r['static_findings']['F01']['evidence'][0].update(sha256='0'*64),
+    })
     for name, mutate in mutations.items():
         altered = copy.deepcopy(report); mutate(altered)
         try:
-            verify(altered)
+            verify(altered, root)
         except (EvidenceError, KeyError, ValueError, TypeError, IndexError, RecursionError):
             outcomes[name] = 'rejected'
         else:
@@ -194,6 +228,7 @@ def self_test(report):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--report', type=Path, required=True)
+    ap.add_argument('--root', type=Path, default=Path('.'))
     ap.add_argument('--self-test', action='store_true')
     ap.add_argument('--product-gate', action='store_true')
     args = ap.parse_args()
@@ -202,13 +237,13 @@ def main():
             raw = stream.read(MAX_INPUT + 1)
         need(len(raw) <= MAX_INPUT, 'input_budget')
         report = parse(raw)
-        results = verify(report)
-        tests = self_test(report) if args.self_test else {}
+        results, static = verify(report, args.root)
+        tests = self_test(report, args.root) if args.self_test else {}
         counts = {k: sum(x['outcome'] == k for x in results.values())
                   for k in ('satisfied', 'regression_reproduced')}
         print(json.dumps(dict(evidence_consistent=True, product_accepted=False,
             whole_wp_ready=False, report_sha256=hashlib.sha256(raw).hexdigest(),
-            findings=results, counts=counts, controls=tests,
+            findings=results, static_findings=static, counts={**counts, 'limit_justified': len(static)}, controls=tests,
             scope='retained_observations_only; no product executed'), sort_keys=True))
         return 1 if args.product_gate and counts['regression_reproduced'] else 0
     except (OSError, EvidenceError, KeyError, ValueError, TypeError, IndexError, RecursionError) as error:
