@@ -20,6 +20,8 @@
 #[path = "../authz/mod.rs"]
 pub mod authz;
 pub mod concurrency;
+/// Experimental only; never substitutes the production v1 writer lock.
+pub mod coordination;
 pub mod intent;
 pub mod log;
 pub mod replay;
