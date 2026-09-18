@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(queue): persist metadata-only attempt starts and outcomes at the CLI
+  boundary. Invalidate interrupted attempts before a new evaluation, preserve
+  uncertain prior effects, and never replay serialized authorization or undo
+  human changes. Receipt corruption fails closed; full power-loss and managed
+  Git publication recovery remain separately qualified capabilities.
+
 - fix(queue): bind contextual evaluations to the full ordered batch snapshot and
   explicit base/configuration/operation identity. Record actual probe sets, reject
   stale or context-free authorization, and label CLI corpus identities as local
