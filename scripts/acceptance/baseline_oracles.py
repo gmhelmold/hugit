@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Read-only HUG-003 oracles over retained CLI observations.
 
-This program never runs a command, reducer, hook, or content from the input.
+Verification never executes commands, hooks, reducers, or text from a report.
+Explicit --exercise mode runs only hard-coded private Linux fixtures using
+the binary selected by the caller; it never runs commands supplied by a report.
 Exit 0 verifies characterization, NOT product acceptance. --product-gate returns
 1 for a reproduced regression; malformed/incomplete evidence returns 2.
 The record is historical evidence for its selected executable, not a new run.
@@ -21,7 +23,7 @@ import re
 import sys
 
 FINDINGS = ('F03', 'F04', 'F06', 'F09', 'F10')
-STATIC_FINDINGS = ('F01', 'F02')
+STATIC_FINDINGS = ('F01', 'F02', 'F05')
 MAX_INPUT = 1024 * 1024
 MAX_SOURCE = 1024 * 1024
 STATIC_SOURCE_COMMIT = "ce2fcf1b8243eea2bd1be5aff25dfb3f6571ead4"
@@ -29,7 +31,7 @@ STATIC_SOURCE_COMMIT = "ce2fcf1b8243eea2bd1be5aff25dfb3f6571ead4"
 STATIC_SOURCES = {'crates/hugit-cli/src/checks/run.rs': {'sha256': '09e444a498b63e80036df960e08b655a8f1c9fd9b755f9ccaad11959d5560979',
                                         'requires': ['captured_hermetic_env',
                                                      'run_memoized',
-                                                     'ad-hoc check']},
+                                                     'ad-hoc check', 'Ok(Some(status)) => break Ok(status.code().unwrap_or(-1))', 'if poll_result.is_ok()', 'let _ = t.join();']},
  'docs/review/round13/wedge-decider.md': {'sha256': 'cf4f525fc3c4855e6b41b8b9fa2945a45b7aa9369555d666f3801086896a3659',
                                           'requires': ['finally DRY', 'OUTSIDE', 'memoized-CI']},
  'docs/plan/standalone/v3/work-packages/HUG-012.md': {'sha256': 'a379962763b1b24e4e8586d11403ad2a48ba28f76e5c8495af278c202350bf9c',
@@ -75,6 +77,22 @@ STATIC_POLICIES = {'F01': {'outcome': 'limit_justified',
                      'docs/plan/standalone/v3/work-packages/HUG-014.md'],
          'disposition': 'static_defect_observed_checker_published',
          'evidence_scope': 'source_inspection_with_analytic_counterexample_not_runtime_execution'}}
+
+
+STATIC_SOURCES.update({'docs/plan/standalone/v3/work-packages/HUG-009.md': {'requires': ['deadline completo',
+                                                                   'Filho encerra antes de neto '
+                                                                   'soltar pipe'],
+                                                      'sha256': 'a8b44310b60741ad630ca43a218066394f8e04e128f23383df53ca08dad482e8'},
+ 'docs/plan/standalone/v3/work-packages/HUG-026.md': {'requires': ['neto com pipe aberto',
+                                                                   'EOF verdadeiro completa'],
+                                                      'sha256': '8a8749f812dfec632b3145ea34f96e73194685969ee8c23b62c292fe6dec52bb'}})
+STATIC_POLICIES['F05'] = {'correction_packages': ['HUG-009', 'HUG-026'],
+ 'disposition': 'static_defect_observed_checker_published',
+ 'evidence_scope': 'source_inspection_deadline_excludes_successful_child_pipe_joins',
+ 'outcome': 'static_defect_observed',
+ 'sources': ['crates/hugit-cli/src/checks/run.rs',
+             'docs/plan/standalone/v3/work-packages/HUG-009.md',
+             'docs/plan/standalone/v3/work-packages/HUG-026.md']}
 
 class EvidenceError(ValueError):
     pass
@@ -334,6 +352,9 @@ def self_test(report, root):
         'F02_false_fix': lambda r: r['static_findings']['F02']['observed'].update(product_fix_claimed=True),
         'F02_false_runtime_claim': lambda r: r['static_findings']['F02'].update(evidence_scope='runtime_reproduced'),
         'F02_unverified_reclassification': lambda r: r['static_findings']['F02'].update(outcome='limit_justified'),
+        'omitted_F05_inspection': lambda r: r['static_findings'].pop('F05'),
+        'F05_false_fix': lambda r: r['static_findings']['F05']['observed'].update(product_fix_claimed=True),
+        'F05_false_runtime_claim': lambda r: r['static_findings']['F05'].update(evidence_scope='runtime_reproduced'),
     })
     for name, mutate in mutations.items():
         altered = copy.deepcopy(report); mutate(altered)
@@ -403,15 +424,344 @@ def source_self_test(report, root):
     outcomes['supplied_snapshot_unchanged'] = 'passed'
     return outcomes
 
+# Explicit execution mode is separate from all read-only verification paths.
+RUNTIME_SCHEMA = 'hugit.baseline-runtime/1'
+RUNTIME_LABELS = ('version', 'git-init', 'git-root', 'health-before', 'attach',
+                  'git-add', 'git-commit', 'git-head', 'health-after',
+                  'read-valid', 'read-tampered', 'git-status', 'deadline')
+HOLDER = '''import os, pathlib, time
+root = pathlib.Path(__file__).parent
+r, w = os.pipe()
+pid = os.fork()
+if pid == 0:
+    os.close(r)
+    (root / 'holder-ready').write_text('ready')
+    os.write(w, b'R'); os.close(w)
+    until = time.monotonic() + 6
+    while not (root / 'release').exists() and time.monotonic() < until:
+        time.sleep(0.01)
+    (root / 'holder-finished').write_text('finished')
+    os._exit(0)
+os.close(w)
+assert os.read(r, 1) == b'R'
+os.close(r)
+(root / 'parent-exiting').write_text('ready')
+os._exit(0)
+'''
+
+def observed_command(argv, cwd, env, label, records, tick=None):
+    """Fixed fixture commands only. Bounded pipes/time; never execute report text."""
+    import selectors
+    import subprocess
+    import time
+    start = time.monotonic()
+    output = [bytearray(), bytearray()]
+    row = dict(label=label, argv=[str(x) for x in argv])
+    records.append(row)
+    with subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE) as child:
+        try:
+            with selectors.DefaultSelector() as sel:
+                for i, stream in enumerate((child.stdout, child.stderr)):
+                    os.set_blocking(stream.fileno(), False)
+                    sel.register(stream, selectors.EVENT_READ, i)
+                while sel.get_map() or child.poll() is None:
+                    elapsed = time.monotonic() - start
+                    need(elapsed < 12, 'fixture_command_timeout:' + label)
+                    if tick:
+                        tick(elapsed, child.poll())
+                    for key, _ in sel.select(0.02):
+                        data = os.read(key.fileobj.fileno(), 65536)
+                        if not data:
+                            sel.unregister(key.fileobj)
+                        else:
+                            need(len(output[key.data]) + len(data) <= 512 * 1024,
+                                 'fixture_output_budget:' + label)
+                            output[key.data].extend(data)
+                row['exit'] = child.wait(timeout=1)
+        finally:
+            if child.poll() is None:
+                child.kill()  # Only the directly owned process, never a group.
+                child.wait(timeout=2)
+            row.update(elapsed_ms=round((time.monotonic() - start) * 1000, 3),
+                       stdout=output[0].decode('utf-8', errors='replace'),
+                       stderr=output[1].decode('utf-8', errors='replace'))
+    return row
+
+def runtime_json(row):
+    data = parse(row['stdout'])
+    need(isinstance(data, dict), 'runtime_json_shape')
+    return data
+
+def verify_runtime(report, subject):
+    """Reconstruct observed assertions, not merely stored outcome flags."""
+    need(isinstance(report, dict) and report.get('schema') == RUNTIME_SCHEMA, 'runtime_schema')
+    need(report.get('status') == 'characterized' and report.get('subject_claim') == subject
+         and re.fullmatch('[0-9a-f]{40,64}', subject) is not None, 'runtime_subject')
+    need(report.get('product_accepted') is False and report.get('whole_wp_ready') is False,
+         'runtime_authority')
+    binary = report['binary']
+    need(re.fullmatch('[0-9a-f]{64}', binary['sha256']) is not None
+         and binary['sha256'] == binary['copy_sha256'] == binary['after_sha256'], 'runtime_binary')
+    need(report['environment']['system'] == 'Linux', 'runtime_cell')
+    rows = report['commands']
+    need(isinstance(rows, list) and len(rows) == len(RUNTIME_LABELS), 'runtime_commands')
+    need([r['label'] for r in rows] == list(RUNTIME_LABELS), 'runtime_command_set')
+    commands = {r['label']: r for r in rows}
+    need(all(type(r['exit']) is int and isinstance(r['stdout'], str)
+             and isinstance(r['stderr'], str) and type(r['elapsed_ms']) in (int, float)
+             and 0 <= r['elapsed_ms'] < 12000 for r in rows), 'runtime_command_shape')
+    need(commands['version']['stdout'].strip() == binary['version']
+         and binary['version'].startswith('hugit '), 'runtime_version')
+    need(all(commands[n]['exit'] == 0 for n in RUNTIME_LABELS if n != 'read-tampered'),
+         'runtime_command_failure')
+    need(runtime_json(commands['health-before'])['mode'] == 'inactive'
+         and runtime_json(commands['attach'])['attached'] is True, 'runtime_setup')
+    after = runtime_json(commands['health-after'])
+    need(after['mode'] == 'active' and after['log']['state'] == 'valid', 'runtime_capture_health')
+    oid = commands['git-head']['stdout'].strip()
+    need(re.fullmatch('[0-9a-f]{40}|[0-9a-f]{64}', oid) is not None, 'runtime_commit_oid')
+    log = parse(report['event_log'])
+    need(isinstance(log, list) and 0 < len(log) < 100, 'runtime_log_shape')
+    matching = [i for i, e in enumerate(log) if e['kind'] == 'ref.update'
+                and parse(e['payload']).get('target') == oid
+                and parse(e['payload']).get('ref') == 'refs/heads/main']
+    need(bool(matching), 'runtime_commit_not_captured')
+    need(not any(e['kind'].startswith(('intent.', 'goal.')) for e in log), 'runtime_invented_goal')
+    tampered = copy.deepcopy(log)
+    payload = parse(tampered[matching[0]]['payload'])
+    payload['target'] = '0' * len(oid)
+    tampered[matching[0]]['payload'] = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+    need(parse(report['tampered_log']) == tampered, 'runtime_tamper_not_partial')
+    error = runtime_json(commands['read-tampered'])
+    need(commands['read-tampered']['exit'] == 2
+         and error.get('error', {}).get('kind') == 'chain_broken', 'runtime_tamper_not_refused')
+    need(commands['git-status']['stdout'] == '', 'runtime_worktree_changed')
+    # Match the fixture specification, not a report-selected deadline or outcome.
+    deadline = commands['deadline']
+    result = runtime_json(deadline)
+    need('--timeout-secs' in deadline['argv']
+         and deadline['argv'][deadline['argv'].index('--timeout-secs') + 1] == '1', 'runtime_deadline_drift')
+    need(result.get('cache_hit') is False and result.get('local_executions') == 1
+         and result.get('ok') is True and type(result.get('exit')) is int
+         and result['exit'] == 0, 'runtime_deadline_behavior_changed_requires_review')
+    need(report['barrier'] == {'parent_exiting': 'ready', 'holder_ready': 'ready',
+                              'holder_finished': 'finished', 'release_after_ms': 3000}, 'runtime_barrier')
+    need(2500 <= deadline['elapsed_ms'] < 10000, 'runtime_deadline_not_reproduced')
+    need(report['owned_fixture_removed'] is True, 'runtime_cleanup')
+    need(report.get('helper_sha256') == hashlib.sha256(HOLDER.encode()).hexdigest(), 'runtime_helper')
+    return {'F05': {'expected': {'timeout_secs': 1, 'end_to_end_ceiling_ms': 1500},
+                    'observed': {'elapsed_ms': deadline['elapsed_ms'], 'process_exit': deadline['exit'],
+                                 'payload_exit': result['exit'], 'payload_ok': result['ok']},
+                    'outcome': 'regression_reproduced'},
+            'automatic_commit_capture': {'oid': oid, 'outcome': 'satisfied'},
+            'partial_tamper_refusal': {'exit': 2, 'error': 'chain_broken', 'outcome': 'satisfied'}}
+
+def _exercise_runtime(binary, subject, git_override, records):
+    """Linux-only finite fixture. Changes exclusively its own TemporaryDirectory."""
+    import platform
+    import shutil
+    import time
+    need(platform.system() == 'Linux', 'runtime_requires_linux')
+    need(isinstance(subject, str) and re.fullmatch('[0-9a-f]{40,64}', subject), 'runtime_subject')
+    binary = binary.resolve(strict=True)
+    binary_bytes = read_bounded_regular(binary, 128 * 1024 * 1024)
+    digest = hashlib.sha256(binary_bytes).hexdigest()
+    git = git_override or shutil.which('git', path=os.defpath)
+    need(git is not None, 'runtime_git_missing')
+    with tempfile.TemporaryDirectory(prefix='hugit-baseline-runtime-') as owned:
+        root = Path(owned)
+        repo = root / 'repo'; repo.mkdir()
+        home = root / 'home'; home.mkdir()
+        template = root / 'empty-template'; template.mkdir()
+        bindir = root / 'bin'; bindir.mkdir()
+        executable = bindir / 'hugit'; executable.write_bytes(binary_bytes); executable.chmod(0o700)
+        env = {'PATH': str(bindir) + os.pathsep + os.defpath, 'HOME': str(home),
+               'XDG_CONFIG_HOME': str(home / 'xdg'), 'GIT_CONFIG_NOSYSTEM': '1',
+               'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_TEMPLATE_DIR': str(template),
+               'GIT_TERMINAL_PROMPT': '0', 'LC_ALL': 'C', 'TZ': 'UTC',
+               'GIT_AUTHOR_NAME': 'Baseline Fixture', 'GIT_AUTHOR_EMAIL': 'fixture@example.invalid',
+               'GIT_COMMITTER_NAME': 'Baseline Fixture', 'GIT_COMMITTER_EMAIL': 'fixture@example.invalid',
+               'GIT_AUTHOR_DATE': '2000-01-01T00:00:00Z', 'GIT_COMMITTER_DATE': '2000-01-01T00:00:00Z'}
+        def run(label, args, tick=None):
+            return observed_command([str(x) for x in args], repo, env, label, records, tick)
+        def ok(label, args):
+            r = run(label, args); need(r['exit'] == 0, 'runtime_setup:' + label); return r
+        version = ok('version', [executable, '--version'])['stdout'].strip()
+        need(version.startswith('hugit '), 'runtime_version_missing')
+        ok('git-init', [git, 'init', '-b', 'main'])
+        located = ok('git-root', [git, 'rev-parse', '--show-toplevel'])['stdout'].strip()
+        need(located == str(repo.resolve()), 'runtime_setup_git_root')
+        need(runtime_json(ok('health-before', [executable, 'health']))['mode'] == 'inactive', 'runtime_setup_health')
+        ok('attach', [executable, 'attach'])
+        manifest = repo / '.git/hugit-runtime/hooks-v1/manifest.json'
+        need(manifest.exists(), 'runtime_missing_hook_manifest')
+        read_bounded_regular(manifest, MAX_INPUT)  # Always-zero/JSON-only substitutes cannot pass.
+        (repo / 'fixture.txt').write_text('controlled baseline commit\n')
+        ok('git-add', [git, 'add', 'fixture.txt'])
+        ok('git-commit', [git, 'commit', '-m', 'baseline automatic capture fixture'])
+        oid = ok('git-head', [git, 'rev-parse', 'HEAD'])['stdout'].strip()
+        logpath = repo / '.git/hugit/event-log.json'
+        until = time.monotonic() + 10
+        while True:
+            raw = read_bounded_regular(logpath, MAX_INPUT) if logpath.exists() else b'[]'
+            events = parse(raw)
+            if any(e['kind'] == 'ref.update' and parse(e['payload']).get('target') == oid for e in events):
+                break
+            need(time.monotonic() < until, 'runtime_capture_not_observed')
+            time.sleep(0.02)  # Predicate polling, not a sleep-only synchronization assumption.
+        ok('health-after', [executable, 'health'])
+        good = root / 'valid.json'; good.write_bytes(raw)
+        tampered = copy.deepcopy(events)
+        index = next(i for i, e in enumerate(events) if e['kind'] == 'ref.update'
+                     and parse(e['payload']).get('target') == oid)
+        payload = parse(tampered[index]['payload']); payload['target'] = '0' * len(oid)
+        tampered[index]['payload'] = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+        badraw = json.dumps(tampered, sort_keys=True).encode()
+        bad = root / 'tampered.json'; bad.write_bytes(badraw)
+        ok('read-valid', [executable, 'check', 'show', '--log', good])
+        run('read-tampered', [executable, 'check', 'show', '--log', bad])
+        need(good.read_bytes() == raw and bad.read_bytes() == badraw, 'runtime_reader_mutated_copy')
+        ok('git-status', [git, 'status', '--porcelain=v1', '--untracked-files=all'])
+        helper = repo / '.git/pipe-fixture'; helper.mkdir()
+        helperfile = helper / 'holder.py'; helperfile.write_text(HOLDER)
+        (root / 'deadline-log.json').write_text('[]\n')
+        ready_at = [None]
+        def release(elapsed, status):
+            if (helper / 'holder-ready').exists() and ready_at[0] is None:
+                ready_at[0] = elapsed
+            if ready_at[0] is not None and elapsed - ready_at[0] >= 3:
+                (helper / 'release').touch(exist_ok=True)
+        import shlex
+        command = 'exec ' + shlex.quote(sys.executable) + ' ' + shlex.quote(str(helperfile))
+        try:
+            run('deadline', [executable, 'check', 'run', '--def', 'deadline-fixture',
+                            '--toolchain', 'baseline-fixture-v1', '--root', repo,
+                            '--log', root / 'deadline-log.json', '--ac', root / 'deadline.ac',
+                            '--timeout-secs', '1', '--cmd', command], release)
+        finally:
+            (helper / 'release').touch(exist_ok=True)
+            # The child is finite (6 s maximum) and always receives release on error.
+            until = time.monotonic() + 7
+            while (helper / 'holder-ready').exists() and not (helper / 'holder-finished').exists():
+                need(time.monotonic() < until, 'runtime_holder_cleanup_unconfirmed')
+                time.sleep(0.02)
+        result = dict(schema=RUNTIME_SCHEMA, status='characterized', subject_claim=subject,
+                      product_accepted=False, whole_wp_ready=False,
+                      binary=dict(sha256=digest, copy_sha256=hashlib.sha256(executable.read_bytes()).hexdigest(),
+                                  version=version, source_to_binary_binding='caller_selected_executable; CI build identity recorded externally'),
+                      environment=dict(system=platform.system(), release=platform.release(),
+                                       machine=platform.machine(), python=platform.python_version(),
+                                       inherited_environment=False, network_prohibition_instrumented=False),
+                      commands=records, event_log=raw.decode(), tampered_log=badraw.decode(),
+                      helper_sha256=hashlib.sha256(HOLDER.encode()).hexdigest(),
+                      barrier={name.replace('-', '_'): (helper / name).read_text()
+                               for name in ('parent-exiting', 'holder-ready', 'holder-finished')})
+        result['barrier']['release_after_ms'] = 3000
+        # Synthetic-only paths are retained: rewriting log bytes would change their hashes.
+        result['fixture_root'] = str(root)
+    result['owned_fixture_removed'] = not root.exists()
+    result['binary']['after_sha256'] = hashlib.sha256(read_bounded_regular(binary, 128 * 1024 * 1024)).hexdigest()
+    result['assertions'] = verify_runtime(result, subject)
+    return result
+
+class RuntimeFixtureError(EvidenceError):
+    def __init__(self, code, records):
+        super().__init__(code)
+        self.records = records
+
+def exercise_runtime(binary, subject, git_override=None):
+    import subprocess
+    records = []
+    try:
+        return _exercise_runtime(binary, subject, git_override, records)
+    except (EvidenceError, OSError, ValueError, KeyError, TypeError, IndexError,
+            subprocess.SubprocessError) as error:
+        code = str(error)[:120] if isinstance(error, EvidenceError) else 'runtime_invalid_or_missing_evidence'
+        raise RuntimeFixtureError(code, records) from error
+
+def check_runtime_document(report, subject):
+    assertions = verify_runtime(report, subject)
+    need(report.get('assertions') == assertions, 'runtime_forged_assertions')
+    return assertions
+
+def runtime_self_test(binary, subject, result):
+    outcomes = {}
+    for name, change in {
+        'runtime_forged_verdict': lambda r: r['assertions']['F05'].update(outcome='satisfied'),
+        'runtime_false_green': lambda r: r.update(product_accepted=True),
+        'runtime_lost_command': lambda r: r['commands'].pop(),
+        'runtime_wrong_oid': lambda r: r['commands'][7].update(stdout='0'*40+'\n'),
+        'runtime_not_partial': lambda r: r.update(tampered_log=r['event_log']),
+        'runtime_omitted_log': lambda r: r.update(event_log='[]'),
+        'runtime_cleanup_missing': lambda r: r.update(owned_fixture_removed=False),
+        'runtime_deadline_weakened': lambda r: r['commands'][-1]['argv'].__setitem__(
+            r['commands'][-1]['argv'].index('--timeout-secs')+1, '300'),
+        'runtime_unobserved_barrier': lambda r: r['barrier'].update(holder_ready=''),
+    }.items():
+        altered = copy.deepcopy(result); change(altered)
+        try:
+            check_runtime_document(altered, subject)
+        except (EvidenceError, KeyError, ValueError, TypeError, IndexError):
+            outcomes[name] = 'rejected'
+        else:
+            raise EvidenceError('runtime_mutation_accepted:' + name)
+    with tempfile.TemporaryDirectory(prefix='hugit-baseline-substitute-') as tmp:
+        path = Path(tmp) / 'fake-hugit'
+        for name, content in {
+            'always_zero_executable': '#!/bin/sh\nexit 0\n',
+            'invented_json_no_effects': '#!/bin/sh\ncase "$1" in\n--version) echo "hugit fake";;\nhealth) echo \'{"mode":"inactive"}\';;\nattach) echo \'{"attached":true}\';;\nesac\n',
+        }.items():
+            path.write_text(content); path.chmod(0o700)
+            try:
+                exercise_runtime(path, subject)
+            except RuntimeFixtureError as error:
+                expected = ('runtime_version_missing' if name == 'always_zero_executable'
+                            else 'runtime_missing_hook_manifest')
+                need(str(error) == expected, 'wrong_substitute_refusal:' + name)
+                outcomes[name] = {'outcome': 'rejected', 'error': str(error), 'commands': error.records}
+            else:
+                raise EvidenceError('runtime_substitute_accepted:' + name)
+        path.write_text('#!/bin/sh\nexit 0\n')
+        try:
+            exercise_runtime(binary, subject, git_override=str(path))
+        except RuntimeFixtureError as error:
+            need(str(error) == 'runtime_setup_git_root', 'wrong_setup_refusal')
+            outcomes['malformed_git_setup'] = {'outcome': 'rejected', 'error': str(error), 'commands': error.records}
+        else:
+            raise EvidenceError('runtime_setup_accepted')
+    need(not Path(tmp).exists(), 'runtime_substitute_cleanup')
+    outcomes['substitute_fixture_cleanup'] = 'passed'
+    return outcomes
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument('--report', type=Path, required=True)
+    modes = ap.add_mutually_exclusive_group(required=True)
+    modes.add_argument('--report', type=Path)
+    modes.add_argument('--exercise', action='store_true')
+    modes.add_argument('--runtime-report', type=Path)
+    ap.add_argument('--hugit-bin', type=Path)
+    ap.add_argument('--subject')
     ap.add_argument('--root', type=Path, default=Path('.'),
                     help='source snapshot at ' + STATIC_SOURCE_COMMIT + '; not the evolving checkout')
     ap.add_argument('--self-test', action='store_true')
     ap.add_argument('--product-gate', action='store_true')
     args = ap.parse_args()
     try:
+        if args.exercise:
+            need(args.hugit_bin is not None and args.subject is not None, 'runtime_arguments')
+            result = exercise_runtime(args.hugit_bin, args.subject)
+            if args.self_test:
+                result['controls'] = runtime_self_test(args.hugit_bin, args.subject, result)
+            print(json.dumps(result, sort_keys=True))
+            return 1 if args.product_gate else 0
+        if args.runtime_report is not None:
+            raw = read_bounded_regular(args.runtime_report, MAX_INPUT)
+            assertions = check_runtime_document(parse(raw), args.subject)
+            print(json.dumps(dict(evidence_consistent=True, product_accepted=False,
+                whole_wp_ready=False, report_sha256=hashlib.sha256(raw).hexdigest(),
+                assertions=assertions, scope='read_only_runtime_report_verification'), sort_keys=True))
+            return 1 if args.product_gate else 0
         raw = read_bounded_regular(args.report, MAX_INPUT)
         report = parse(raw)
         results, static = verify(report, args.root)
@@ -425,6 +775,10 @@ def main():
             controls=tests,
             scope='retained_runtime_observations_and_static_inspection; no product executed'), sort_keys=True))
         return 1 if args.product_gate and counts['regression_reproduced'] else 0
+    except RuntimeFixtureError as error:
+        print(json.dumps(dict(status='setup_or_observation_error', product_accepted=False,
+            whole_wp_ready=False, error=str(error), commands=error.records), sort_keys=True))
+        return 2
     except (OSError, EvidenceError, KeyError, ValueError, TypeError, IndexError, AttributeError, RecursionError) as error:
         code = str(error)[:120] if isinstance(error, EvidenceError) else 'invalid_or_missing_evidence'
         print(json.dumps(dict(evidence_consistent=False, product_accepted=False, error=code)))

@@ -33,6 +33,24 @@ jobs:
       - name: Build selected executable
         run: cargo build -p hugit-cli --release --locked
 
+      - name: Exercise current baseline deadline and automatic capture
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          python3 scripts/acceptance/baseline_oracles.py --exercise --self-test \
+            --hugit-bin "$GITHUB_WORKSPACE/target/release/hugit" \
+            --subject "$(git rev-parse HEAD)" \
+            | tee "$RUNNER_TEMP/hug003-runtime.json"
+
+      - name: Retain current baseline observations even on refusal
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: hug003-runtime-${{ github.sha }}
+          path: ${{ runner.temp }}/hug003-runtime.json
+          if-no-files-found: error
+          retention-days: 90
+
       - name: Prove runner and verifier teeth
         run: |
           scripts/test-evidence-report.sh
@@ -98,6 +116,26 @@ jobs:
         with:
           name: hugit-evidence-${{ github.sha }}
           path: ${{ runner.temp }}/download
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: hug003-runtime-${{ github.sha }}
+          path: ${{ runner.temp }}/runtime
+
+      - name: Verify current baseline without executing its contents
+        run: |
+          set -euo pipefail
+          python3 scripts/acceptance/baseline_oracles.py \
+            --runtime-report "$RUNNER_TEMP/runtime/hug003-runtime.json" \
+            --subject "$(git rev-parse HEAD)" \
+            | tee "$RUNNER_TEMP/runtime-verification.json"
+          python3 - "$RUNNER_TEMP/runtime/hug003-runtime.json" "$RUNNER_TEMP/download/hugit-evidence/data/hugit" <<'PYVERIFY'
+          import hashlib, json, pathlib, sys
+          report = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          binary = pathlib.Path(sys.argv[2]).read_bytes()
+          assert hashlib.sha256(binary).hexdigest() == report["binary"]["sha256"]
+          assert report["product_accepted"] is False
+          PYVERIFY
 
       - name: Verify downloaded package
         run: |

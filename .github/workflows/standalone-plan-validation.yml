@@ -51,6 +51,8 @@ jobs:
             docs/plan/standalone/v3/work-packages/HUG-013.md \
             crates/hugit-queue/src/core/union.rs \
             docs/plan/standalone/v3/work-packages/HUG-014.md \
+            docs/plan/standalone/v3/work-packages/HUG-009.md \
+            docs/plan/standalone/v3/work-packages/HUG-026.md \
             | tar -x -C "$SOURCE"
           python3 scripts/acceptance/baseline_oracles.py \
             --report docs/audit/baseline-results.json --root "$SOURCE" --self-test \
