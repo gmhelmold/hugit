@@ -24,15 +24,12 @@
 //!    `queue.union_fail` record is appended carrying the bisected pair (so
 //!    `queue show`'s `failing_pair` lights up).
 //!
-//! # Honest scope (single-tenant LOCAL operator today)
+//! # Scope: simulation only
 //!
-//! This makes the wedge REAL for a single-tenant local operator: the AC is
-//! file-backed (`<log>.ac` by default, or `--ac`), check execution is the
-//! deterministic local memoized executor over per-PR content derived from the
-//! PR's bundled intents. The distributed runner fabric (F7) swaps in LATER
-//! behind the SAME [`MemoCheck`] trait — `evaluate_union` does not change. No
-//! verdict is fabricated: a check with no result is honest (it executes once,
-//! then HITs), never a faked green.
+//! The local oracle memoizes synthetic per-PR content and a declared conflict
+//! relation. It does NOT build, execute checks on, or promote a real Git union
+//! tree. The JSON result explicitly declares this boundary; real managed-ref
+//! promotion remains HUG-043. A red remainder stays held, not landed.
 //!
 //! # X5 namespace law
 //!
@@ -247,6 +244,10 @@ pub fn batch_land<A: ActionCache>(
             "verdict": "green",
             "landed": [],
             "excluded": [],
+            "held": [],
+            "validation_scope": "simulation_only",
+            "git_tree_verified": false,
+            "remainder_verdict": Value::Null,
             "failing_pair": Value::Null,
             "executed_count": 0,
             "note": "no queued PRs to batch-land (empty queue or campaign scope matched nothing)",
@@ -317,8 +318,11 @@ pub fn batch_land<A: ActionCache>(
 
     // Land the proceeding (green) set: append a terminal `pr.landed` per PR,
     // routed through the SAME D14-guarded append the `pr` porcelain uses.
-    let proceeding: std::collections::BTreeSet<&str> =
-        evaluation.proceeding.iter().map(String::as_str).collect();
+    let proceeding: std::collections::BTreeSet<&str> = evaluation
+        .validated_proceeding()
+        .iter()
+        .map(String::as_str)
+        .collect();
     let mut landed: Vec<String> = Vec::new();
     for (q, o) in &members {
         if proceeding.contains(q.pr_id.as_str()) {
@@ -327,18 +331,26 @@ pub fn batch_land<A: ActionCache>(
         }
     }
 
-    // Excluded = everyone who is not proceeding (the bisected locus, or the whole
-    // batch on an unlocalised red union).
+    // Only the diagnosed locus is excluded. The unvalidated remainder stays
+    // held; absence from proceeding does not accuse it of the diagnosed failure.
     let excluded: Vec<String> = ids
         .iter()
-        .filter(|id| !proceeding.contains(**id))
+        .filter(|id| !proceeding.contains(**id) && !evaluation.held.iter().any(|held| held == *id))
         .map(|s| s.to_string())
         .collect();
 
     // On a RED union, record the bisected failure so `queue show` lights up.
     let failing_pair_json = match (&evaluation.verdict, &evaluation.failure) {
         (UnionVerdict::Red, Some(locus)) => {
-            record_union_fail(log, campaign, locus, &excluded, &landed, recorded_at)?;
+            record_union_fail(
+                log,
+                campaign,
+                locus,
+                &excluded,
+                &landed,
+                &evaluation.held,
+                recorded_at,
+            )?;
             failing_pair_to_json(&evaluation.minimal_failing_pair)
         }
         _ => Value::Null,
@@ -354,6 +366,12 @@ pub fn batch_land<A: ActionCache>(
         },
         "landed": landed,
         "excluded": excluded,
+        "held": evaluation.held,
+        "validation_scope": "simulation_only",
+        "git_tree_verified": false,
+        "remainder_verdict": evaluation.remainder_verdict.map(|v| match v {
+            UnionVerdict::Green => "green", UnionVerdict::Red => "red",
+        }),
         "failing_pair": failing_pair_json,
         "locus": locus_kind(&evaluation),
         "executed_count": evaluation.executed_count,
@@ -395,13 +413,14 @@ fn land_one(log: &mut EventLog, opened: &OpenedPr, recorded_at: u64) -> Result<(
     Ok(())
 }
 
-/// Append the `queue.union_fail` record carrying the bisected failure locus.
+/// Append the diagnosed locus, keeping the held remainder distinct.
 fn record_union_fail(
     log: &mut EventLog,
     campaign: Option<&str>,
     locus: &FailureLocus,
     excluded: &[String],
     proceeding: &[String],
+    held: &[String],
     recorded_at: u64,
 ) -> Result<(), PorcelainError> {
     let (locus_kind, item_a, item_b) = match locus {
@@ -417,6 +436,8 @@ fn record_union_fail(
         "item_b": item_b,
         "excluded": excluded,
         "proceeding": proceeding,
+        "held": held,
+        "validation_scope": "simulation_only",
     }));
     // A union-fail recording is orchestrator/CI provenance — route under
     // Orchestrator/Land (the same matrix cell `pr.landed` uses).
@@ -673,3 +694,61 @@ use crate::checks::run::FileAc;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod remainder_safety_tests {
+    use super::*;
+    use hugit_checks::client::ac::InMemoryAc;
+
+    fn seed(log: &mut EventLog, id: &str, intents: &[&str], order: u64) {
+        log.append_for_test(
+            "pr.opened",
+            vec!["orchestrator:hugit".into()],
+            json!({"pr_id":id,"campaign":"remainder","author_kind":"orchestrator",
+                   "run_id":"fixture","principal":null,"intent_ids":intents})
+            .to_string(),
+            0,
+        );
+        log.append_for_test("pr.queued", vec!["orchestrator:hugit".into()],
+            json!({"pr_id":id,"item_id":format!("{id}#{order}"),"order_index":order,"mode":"union"}).to_string(), 0);
+    }
+
+    #[test]
+    fn independent_conflicts_keep_remainder_queued_without_false_landing() {
+        let mut log = EventLog::new();
+        seed(&mut log, "A", &["conflicts-with:B"], 0);
+        seed(&mut log, "B", &["content-b"], 1);
+        seed(&mut log, "C", &["conflicts-with:D"], 2);
+        seed(&mut log, "D", &["content-d"], 3);
+        let before = serde_json::to_value(log.records()).unwrap();
+        let result = batch_land(&mut log, &InMemoryAc::new(), Some("remainder"), 100).unwrap();
+        assert_eq!(result["landed"], json!([]));
+        assert_eq!(result["excluded"], json!(["A", "B"]));
+        assert_eq!(result["held"], json!(["C", "D"]));
+        assert_eq!(result["remainder_verdict"], "red");
+        assert_eq!(result["validation_scope"], "simulation_only");
+        assert_eq!(result["git_tree_verified"], false);
+        assert!(!log.records().iter().any(|r| r.kind == "pr.landed"));
+        assert_eq!(all_pr_queued(&log).len(), 4);
+        assert_eq!(serde_json::to_value(&log.records()[..8]).unwrap(), before);
+        let event: Value = serde_json::from_str(&log.records().last().unwrap().payload).unwrap();
+        assert_eq!(event["excluded"], json!(["A", "B"]));
+        assert_eq!(event["held"], json!(["C", "D"]));
+        assert_eq!(event["proceeding"], json!([]));
+    }
+
+    #[test]
+    fn validated_remainder_is_reported_separately_from_the_original_red_union() {
+        let mut log = EventLog::new();
+        seed(&mut log, "A", &["conflicts-with:B"], 0);
+        seed(&mut log, "B", &["content-b"], 1);
+        seed(&mut log, "C", &["content-c"], 2);
+        let result = batch_land(&mut log, &InMemoryAc::new(), Some("remainder"), 100).unwrap();
+        assert_eq!(result["verdict"], "red");
+        assert_eq!(result["remainder_verdict"], "green");
+        assert_eq!(result["landed"], json!(["C"]));
+        assert_eq!(result["held"], json!([]));
+        assert_eq!(result["validation_scope"], "simulation_only");
+        assert_eq!(result["git_tree_verified"], false);
+    }
+}
