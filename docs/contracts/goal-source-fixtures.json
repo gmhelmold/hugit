@@ -1,0 +1,53 @@
+{
+  "schema_version": "hugit.goal-source-discovery.v1",
+  "work_package": "HUG-057",
+  "tracking_issue": 437,
+  "subject_commit": "6a04e9a465106ec3f9771512315d2288594b05d3",
+  "inventory_subject_commit": "96ddcdade3d56d7c2cf4a01c294a56c3aaa4e58c",
+  "automatic_capture_required": true,
+  "runtime_modified": false,
+  "review_mode": "executor_adversarial_review_owner_directed",
+  "independent_review_claimed": false,
+  "work_package_complete": false,
+  "source_qualified": false,
+  "fixture_origin": "none_observed",
+  "fixtures": [],
+  "required_cases": [
+    {
+      "case": "simple_request",
+      "status": "not_observed",
+      "fixture_ids": [],
+      "reason": "No qualified automatic goal producer was observed."
+    },
+    {
+      "case": "two_goals_same_session",
+      "status": "not_observed",
+      "fixture_ids": [],
+      "reason": "No qualified automatic goal producer was observed."
+    },
+    {
+      "case": "goal_revision",
+      "status": "not_observed",
+      "fixture_ids": [],
+      "reason": "No qualified automatic goal producer was observed."
+    }
+  ],
+  "rejected_substitutes": [
+    "invented harness envelopes",
+    "Git commit messages relabeled as goals",
+    "a new goal per message without a binding contract",
+    "manual intent creation labeled as automatic capture",
+    "schema examples labeled as live-session observations"
+  ],
+  "preservation": {
+    "raw_private_payloads_read": false,
+    "private_conversations_published": false,
+    "credentials_read": false,
+    "synthetic_fixture_claimed_real": false
+  },
+  "recovery": {
+    "incorrect_fixture_action": "Invalidate only the affected fixture and mapping version; retain allowed sanitized observations and withdraw downstream admission based on them.",
+    "consumer_to_reassess": "HUG-015",
+    "runtime_change_allowed": false
+  }
+}
