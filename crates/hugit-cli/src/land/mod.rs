@@ -36,8 +36,6 @@
 //! `land` is a reserved top-level verb (git has neither `land` nor `queue`), so
 //! it does not shadow a git builtin — the WP-X5 namespace oracle stays green.
 
-#[cfg(test)]
-use hugit_queue::core::union::evaluate_union;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -602,7 +600,6 @@ fn local_check_def() -> CheckDef {
 /// pair-conflict relation is the local stand-in for "the runner reported a red
 /// union on this pair". This is only a simulator; real Git integration is HUG-043.
 /// The cooperative deadline bounds result acceptance, not arbitrary blocking I/O.
-
 struct LogMemoOracle<'a, A: ActionCache> {
     ac: &'a A,
     /// pr_id → its bundled intent ids (the deterministic content source).

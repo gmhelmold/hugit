@@ -499,3 +499,52 @@ fn empty_batch_never_probes_or_grants_a_member() {
     assert!(ev.validated_proceeding().is_empty());
     assert!(ev.outcomes_for_landing(&["UNTESTED"]).is_empty());
 }
+
+#[test]
+fn all_boolean_set_functions_remain_sound_at_every_small_probe_budget() {
+    let ids = ["A", "B", "C"];
+    for truth in 0u8..128 {
+        let green = |set: &[&str]| {
+            let mask = set.iter().fold(0usize, |m, id| {
+                m | (1 << ids.iter().position(|x| x == id).unwrap())
+            });
+            mask == 0 || truth & (1 << (mask - 1)) != 0
+        };
+        for ceiling in 0..=8 {
+            let mut oracle = Oracle {
+                rule: green,
+                calls: vec![],
+            };
+            let ev = evaluate_union_with_limits(&batch(&ids), &mut oracle, limits(ceiling));
+            assert!(oracle.calls.len() <= ceiling);
+            assert_eq!(ev.probe_count, oracle.calls.len());
+            if ev.stop_reason.is_some() {
+                assert_eq!(ev.held, ids);
+                assert!(ev.outcomes_for_landing(&ids).is_empty());
+            } else {
+                let permitted: Vec<&str> = ev
+                    .validated_proceeding()
+                    .iter()
+                    .map(String::as_str)
+                    .collect();
+                if !permitted.is_empty() {
+                    assert!(green(&permitted));
+                    assert_eq!(oracle.calls.last().unwrap(), ev.validated_proceeding());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn caller_modified_queue_order_is_refused_before_any_probe() {
+    let mut b = batch(&["A", "B"]);
+    b.entries_mut()[1].landable.order_index = 0;
+    let mut oracle = Oracle {
+        rule: |_: &[&str]| panic!("ambiguous ordering"),
+        calls: vec![],
+    };
+    let ev = evaluate_union(&b, &mut oracle);
+    assert_eq!(ev.stop_reason, Some(EvaluationStop::InvalidBatch));
+    assert_eq!(ev.probe_count, 0);
+}

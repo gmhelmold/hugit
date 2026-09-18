@@ -312,7 +312,10 @@ fn evaluate_union_with_clock<M: MemoCheck, F: Fn() -> Instant>(
     };
     let result = (|| -> Result<(), EvaluationStop> {
         let unique: std::collections::BTreeSet<&str> = ids.iter().copied().collect();
-        if unique.len() != ids.len() || ids.iter().any(|s| s.is_empty()) {
+        if !batch.is_queue_ordered()
+            || unique.len() != ids.len()
+            || ids.iter().any(|s| s.is_empty())
+        {
             return Err(EvaluationStop::InvalidBatch);
         }
         if ids.is_empty() {
