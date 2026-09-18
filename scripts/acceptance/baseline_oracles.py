@@ -94,6 +94,157 @@ STATIC_POLICIES['F05'] = {'correction_packages': ['HUG-009', 'HUG-026'],
              'docs/plan/standalone/v3/work-packages/HUG-009.md',
              'docs/plan/standalone/v3/work-packages/HUG-026.md']}
 
+# Additional reviewed source dispositions. Sources are trusted code, not report-selected paths.
+STATIC_SOURCES.update({'.github/workflows/ci.yml': {'requires': ['windows-check:',
+                                           'run: cargo test --workspace --locked',
+                                           'build release CLI on Windows',
+                                           'smoke release CLI on Windows'],
+                              'sha256': '5b0e88d3aab082c9017144edcaafce88a20fafb58b096adaeae9d58a05feb793'},
+ '.github/workflows/release.yml': {'requires': ['VERSION="${GITHUB_REF_NAME#v}"',
+                                                'run: cargo build --release --locked -p hugit-cli '
+                                                '--target ${{ matrix.target }}',
+                                                'softprops/action-gh-release@v2',
+                                                "matrix.target == 'aarch64-apple-darwin'"],
+                                   'sha256': '4dace28b39c9ea1db9e05f1a1634ce7551695d77b62634fef73f963f6780ef0b'},
+ 'Cargo.toml': {'requires': ['[workspace.package]', 'version = "0.1.7"'],
+                'sha256': '41b8ed0c1daab261923e7f8c86e8d058490f483293a1d54af1158b29808595fb'},
+ 'crates/hugit-cli/Cargo.toml': {'requires': ['name = "hugit-cli"', 'version.workspace = true'],
+                                 'sha256': 'fb63ef1eeb7081b7304f607787b1d55be4da2a84cd9ee38bb727280cae7cd873'},
+ 'crates/hugit-cli/src/capture/drain.rs': {'requires': ['fn drain_one(',
+                                                        'let mut log = load_event_log(log_path)',
+                                                        'serde_json::to_vec_pretty(log.records())',
+                                                        'pub fn reference_transaction_pairing(',
+                                                        'payload["receipt_id"] = '
+                                                        'json!(receipt.receipt_id);'],
+                                           'sha256': 'afbfcceb02bf0555b7b00d0511b26305650dc7040aa1ebc5652a567f2749fc70'},
+ 'crates/hugit-cli/src/capture/mod.rs': {'requires': ['let fingerprint = '
+                                                      'crate::runtime_store::sha256_hex(',
+                                                      '"reference_transaction": {"phase": phase, '
+                                                      '"updates": updates, "fingerprint": '
+                                                      'fingerprint}',
+                                                      'crate::porcelain::scrub_payload'],
+                                         'sha256': '075d7e1b7c6e914b796b51995d0cbfa99281cd77f07f180107b563af888bbc53'},
+ 'crates/hugit-cli/src/capture/receipt.rs': {'requires': ['pub fn receipt_filesystem_failure()',
+                                                          '#[cfg(not(unix))]',
+                                                          'receipt_filesystem_unsupported',
+                                                          'file.read_to_end(&mut bytes)'],
+                                             'sha256': 'b96a3586029ee71f8c25133dc77b615f16239f267562adc775dcd5d90ce20ec5'},
+ 'crates/hugit-cli/src/export/redaction.rs': {'requires': ['pub fn would_redact(text: &str) -> '
+                                                           'bool',
+                                                           'crate::porcelain::scrub_payload(&mut '
+                                                           'scrubbed);',
+                                                           'canonical(&value) != '
+                                                           'canonical(&scrubbed)'],
+                                              'sha256': '1441983a48c12fca0a9da1dcb0682899e08b9dd49af6b13e7e3853a00d5d4100'},
+ 'crates/hugit-cli/src/init/mod.rs': {'requires': ['pub(crate) fn hook_script',
+                                                   'records ref.update async.',
+                                                   '</dev/null ) >/dev/null 2>&1 &'],
+                                      'sha256': 'fba9abf8d5af7cf947b27a8fcde9d43be31916d52ecbe281f8dc1391409b7887'},
+ 'crates/hugit-cli/src/main.rs': {'requires': ['let event_log = '
+                                               'checks::load_event_log(&args.log)?;',
+                                               'SensitiveCanonicalEventPayload',
+                                               '"sensitive_canonical_event"'],
+                                  'sha256': '6b8d8fda18e3923943e48a929cb3fba5e450e1e8f71ff7b7f8bfa5bb1a1e47b0'},
+ 'crates/hugit-cli/src/porcelain.rs': {'requires': ['pub fn is_digest_key(key: &str) -> bool',
+                                                    'pub fn is_identifier_key(key: &str) -> bool',
+                                                    'pub fn scrub_payload'],
+                                       'sha256': 'a372866ed5237468d795969128839a6ce68868be00fc23dce678fb8f97c84d4e'},
+ 'crates/hugit-cli/src/pr/cli.rs': {'requires': ['if a.dispatch {',
+                                                 'LeaseClient::from_runtime()',
+                                                 'super::dispatch::land_with_dispatch'],
+                                    'sha256': '5f1706d57f9ebc0435e0ea96563661f6f1a511a5a186b56a746dd36c4cb142a8'},
+ 'crates/hugit-cli/src/pr/dispatch.rs': {'requires': ['"set HUGIT_RUNNER_HOST and provision the '
+                                                      'runner PAT',
+                                                      'pub fn land_with_dispatch'],
+                                         'sha256': '3d9fcc49bdd1639bda669351c63ddaa4b2c45927bffcf6e48f2ccd5f7baa938f'},
+ 'crates/hugit-cli/src/pr/filelock.rs': {'requires': ['pub const STALE_LOCK_SECS: u64 = 120;',
+                                                      'if lock_is_stale(&lock_path)',
+                                                      'let _ = '
+                                                      'std::fs::remove_file(&self.lock_path);',
+                                                      'Ok(age) => age.as_secs() >= '
+                                                      'STALE_LOCK_SECS'],
+                                         'sha256': '44a929f5aadc4b9edbb6e71335c023d3078841d4379013ccfc929d954ff78a7f'},
+ 'crates/hugit-mcp/src/lib.rs': {'requires': ['pub fn run_stdio<R: BufRead, W: Write>',
+                                              'for line in reader.lines()',
+                                              'server::handle(req)'],
+                                 'sha256': '78abbfbe9f7f36eacfa71be2a1d837e5b4fe4a8b6b3e937c71e5b6a75cc7a6f3'},
+ 'crates/hugit-mcp/src/server.rs': {'requires': ['const PROTOCOL_VERSION: &str = "2024-11-05";',
+                                                 '"hugit_bin"',
+                                                 '"engine_base"',
+                                                 '"liveness-probe"'],
+                                    'sha256': '246b7428d3921f7d691f5aaf4dd7caaa5358b36f7546a7dc763d48e85a437d78'},
+ 'crates/hugit-refstore/src/tamper/mod.rs': {'requires': ['pub fn verify_chain(records: '
+                                                          '&[EventRecord])',
+                                                          'for (i, record) in '
+                                                          'records.iter().enumerate()',
+                                                          'prev_this = record.this_hash.clone();'],
+                                             'sha256': 'ce6748a408883c670433b3ff7ad0fb45d2b1d5bba4351f7e76a94a3a359c35f4'}})
+STATIC_POLICIES.update({'F07': {'correction_packages': ['HUG-015', 'HUG-020', 'HUG-028'],
+         'disposition': 'static_defect_observed_checker_published',
+         'evidence_scope': 'pinned_source_inspection_not_new_runtime_execution',
+         'outcome': 'static_defect_observed',
+         'sources': ['crates/hugit-cli/src/capture/mod.rs',
+                     'crates/hugit-cli/src/porcelain.rs',
+                     'crates/hugit-cli/src/capture/drain.rs']},
+ 'F08': {'correction_packages': ['HUG-020', 'HUG-039'],
+         'disposition': 'static_defect_observed_checker_published',
+         'evidence_scope': 'pinned_source_inspection_not_new_runtime_execution',
+         'outcome': 'static_defect_observed',
+         'sources': ['crates/hugit-cli/src/capture/drain.rs',
+                     'crates/hugit-cli/src/porcelain.rs',
+                     'crates/hugit-cli/src/export/redaction.rs',
+                     'crates/hugit-cli/src/main.rs']},
+ 'F11': {'correction_packages': ['HUG-008'],
+         'disposition': 'static_defect_observed_checker_published',
+         'evidence_scope': 'pinned_source_inspection_not_new_runtime_execution',
+         'outcome': 'static_defect_observed',
+         'sources': ['crates/hugit-cli/src/pr/filelock.rs']},
+ 'F12': {'correction_packages': ['HUG-016', 'HUG-019', 'HUG-035', 'HUG-048'],
+         'disposition': 'static_defect_observed_checker_published',
+         'evidence_scope': 'pinned_source_inspection_not_new_runtime_execution',
+         'outcome': 'static_defect_observed',
+         'sources': ['crates/hugit-cli/src/capture/drain.rs',
+                     'crates/hugit-cli/src/checks/run.rs']},
+ 'F13': {'correction_packages': ['HUG-004'],
+         'disposition': 'static_defect_observed_checker_published',
+         'evidence_scope': 'pinned_source_inspection_not_new_runtime_execution',
+         'outcome': 'static_defect_observed',
+         'sources': ['crates/hugit-cli/src/pr/cli.rs', 'crates/hugit-cli/src/pr/dispatch.rs']},
+ 'F14': {'correction_packages': ['HUG-005', 'HUG-049'],
+         'disposition': 'static_limit_justified_checker_published',
+         'evidence_scope': 'pinned_source_inspection_not_new_runtime_execution',
+         'outcome': 'limit_justified',
+         'sources': ['crates/hugit-cli/src/capture/receipt.rs', '.github/workflows/ci.yml']},
+ 'F15': {'correction_packages': ['HUG-005', 'HUG-052', 'HUG-053'],
+         'disposition': 'static_defect_observed_checker_published',
+         'evidence_scope': 'pinned_source_inspection_not_new_runtime_execution',
+         'outcome': 'static_defect_observed',
+         'sources': ['.github/workflows/release.yml', 'Cargo.toml', 'crates/hugit-cli/Cargo.toml']},
+ 'F16': {'correction_packages': ['HUG-019', 'HUG-026'],
+         'disposition': 'static_limit_justified_checker_published',
+         'evidence_scope': 'pinned_source_inspection_not_new_runtime_execution',
+         'outcome': 'limit_justified',
+         'sources': ['crates/hugit-cli/src/init/mod.rs',
+                     'crates/hugit-cli/src/capture/receipt.rs']},
+ 'F17': {'correction_packages': ['HUG-007', 'HUG-039', 'HUG-052'],
+         'disposition': 'static_limit_justified_checker_published',
+         'evidence_scope': 'pinned_source_inspection_not_new_runtime_execution',
+         'outcome': 'limit_justified',
+         'sources': ['crates/hugit-refstore/src/tamper/mod.rs']},
+ 'F18': {'correction_packages': ['HUG-004', 'HUG-037', 'HUG-046'],
+         'disposition': 'static_defect_observed_checker_published',
+         'evidence_scope': 'pinned_source_inspection_not_new_runtime_execution',
+         'outcome': 'static_defect_observed',
+         'sources': ['crates/hugit-mcp/src/server.rs', 'crates/hugit-mcp/src/lib.rs']},
+ 'F19': {'correction_packages': ['HUG-006', 'HUG-049', 'HUG-052'],
+         'disposition': 'static_limit_justified_checker_published',
+         'evidence_scope': 'pinned_source_inspection_not_new_runtime_execution',
+         'outcome': 'limit_justified',
+         'sources': ['.github/workflows/ci.yml',
+                     '.github/workflows/release.yml',
+                     'crates/hugit-cli/src/capture/receipt.rs']}})
+STATIC_FINDINGS = tuple(sorted(STATIC_POLICIES))
+
 class EvidenceError(ValueError):
     pass
 
@@ -309,6 +460,11 @@ def verify(report, root=Path('.')):
                     STATIC_POLICIES[fid]['disposition'] if fid in STATIC_FINDINGS else
                     'runtime_observed_locally_checker_published')
         need(isinstance(entry, dict) and entry.get('disposition') == expected, 'registry_disposition')
+        runtime_owners = {'F03': ['HUG-011'], 'F04': ['HUG-011', 'HUG-027'],
+                          'F06': ['HUG-010'], 'F09': ['HUG-015', 'HUG-022', 'HUG-036'],
+                          'F10': ['HUG-017', 'HUG-026', 'HUG-029', 'HUG-032']}
+        owners = STATIC_POLICIES[fid]['correction_packages'] if fid in STATIC_POLICIES else runtime_owners[fid]
+        need(entry.get('correction_packages') == owners, 'registry_owners')
     counts = outcome_counts(results, static)
     need(json.dumps(report['counts'], sort_keys=True) == json.dumps(counts, sort_keys=True),
          'counts_mismatch')
@@ -356,6 +512,10 @@ def self_test(report, root):
         'F05_false_fix': lambda r: r['static_findings']['F05']['observed'].update(product_fix_claimed=True),
         'F05_false_runtime_claim': lambda r: r['static_findings']['F05'].update(evidence_scope='runtime_reproduced'),
     })
+    for fid in STATIC_FINDINGS:
+        mutations['omission_' + fid] = lambda r, fid=fid: r['static_findings'].pop(fid)
+        mutations['false_runtime_' + fid] = lambda r, fid=fid: r['static_findings'][fid].update(evidence_scope='runtime_reproduced')
+        mutations['wrong_owner_' + fid] = lambda r, fid=fid: r['finding_registry'][fid].update(correction_packages=['HUG-999'])
     for name, mutate in mutations.items():
         altered = copy.deepcopy(report); mutate(altered)
         try:
@@ -403,6 +563,28 @@ def source_self_test(report, root):
         (current / 'edited.txt').write_text('new product code, not historical evidence')
         verify(report, base)
         outcomes['separate_snapshot_preserved'] = 'passed'
+        # A broken test/source can be removed and restored without deleting its
+        # F obligation or changing a neighboring file outside the owned snapshot.
+        sentinel = Path(owned) / 'neighbor-do-not-change'
+        sentinel.write_bytes(b'preserve unrelated state')
+        owner = Path(owned) / 'ownership.json'
+        owner.write_text(json.dumps({'root': str(base), 'created_by': 'baseline-source-self-test'}))
+        registry_before = copy.deepcopy(report['finding_registry'])
+        target.unlink()
+        try:
+            verify(report, base)
+        except FileNotFoundError:
+            outcomes['missing_source_refused'] = 'rejected'
+        else:
+            raise EvidenceError('missing_source_accepted')
+        target.write_bytes(originals[relative])
+        verify(report, base)
+        need(report['finding_registry'] == registry_before and len(registry_before) == 19,
+             'recovery_lost_obligation')
+        need(sentinel.read_bytes() == b'preserve unrelated state'
+             and parse(owner.read_bytes())['root'] == str(base), 'recovery_ownership')
+        outcomes['source_recovery_preserves_all_obligations'] = 'passed'
+        outcomes['recovery_neighbor_unchanged'] = 'passed'
         if os.name == 'posix':
             target.unlink()
             target.symlink_to(budget)
@@ -425,10 +607,12 @@ def source_self_test(report, root):
     return outcomes
 
 # Explicit execution mode is separate from all read-only verification paths.
-RUNTIME_SCHEMA = 'hugit.baseline-runtime/1'
+RUNTIME_SCHEMA = 'hugit.baseline-runtime/2'
 RUNTIME_LABELS = ('version', 'git-init', 'git-root', 'health-before', 'attach',
-                  'git-add', 'git-commit', 'git-head', 'health-after',
-                  'read-valid', 'read-tampered', 'git-status', 'deadline')
+                  'git-add', 'git-commit', 'git-head', 'git-version',
+                  'git-add-second', 'git-commit-second', 'git-head-second',
+                  'git-branch-one', 'git-branch-two', 'health-after',
+                  'read-valid', 'read-tampered', 'export-captured', 'git-status', 'deadline')
 HOLDER = '''import os, pathlib, time
 root = pathlib.Path(__file__).parent
 r, w = os.pipe()
@@ -513,7 +697,7 @@ def verify_runtime(report, subject):
              and 0 <= r['elapsed_ms'] < 12000 for r in rows), 'runtime_command_shape')
     need(commands['version']['stdout'].strip() == binary['version']
          and binary['version'].startswith('hugit '), 'runtime_version')
-    need(all(commands[n]['exit'] == 0 for n in RUNTIME_LABELS if n != 'read-tampered'),
+    need(all(commands[n]['exit'] == 0 for n in RUNTIME_LABELS if n not in ('read-tampered', 'export-captured')),
          'runtime_command_failure')
     need(runtime_json(commands['health-before'])['mode'] == 'inactive'
          and runtime_json(commands['attach'])['attached'] is True, 'runtime_setup')
@@ -521,12 +705,17 @@ def verify_runtime(report, subject):
     need(after['mode'] == 'active' and after['log']['state'] == 'valid', 'runtime_capture_health')
     oid = commands['git-head']['stdout'].strip()
     need(re.fullmatch('[0-9a-f]{40}|[0-9a-f]{64}', oid) is not None, 'runtime_commit_oid')
+    need(commands['git-version']['stdout'].startswith('git version '), 'runtime_git_version')
+    oid2 = commands['git-head-second']['stdout'].strip()
+    need(re.fullmatch('[0-9a-f]{40}|[0-9a-f]{64}', oid2) is not None and oid2 != oid, 'runtime_second_oid')
     log = parse(report['event_log'])
     need(isinstance(log, list) and 0 < len(log) < 100, 'runtime_log_shape')
     matching = [i for i, e in enumerate(log) if e['kind'] == 'ref.update'
                 and parse(e['payload']).get('target') == oid
                 and parse(e['payload']).get('ref') == 'refs/heads/main']
-    need(bool(matching), 'runtime_commit_not_captured')
+    need(bool(matching) and any(e['kind'] == 'ref.update' and parse(e['payload']).get('target') == oid2
+                               and parse(e['payload']).get('ref') == 'refs/heads/main' for e in log),
+         'runtime_commit_not_captured')
     need(not any(e['kind'].startswith(('intent.', 'goal.')) for e in log), 'runtime_invented_goal')
     tampered = copy.deepcopy(log)
     payload = parse(tampered[matching[0]]['payload'])
@@ -537,6 +726,23 @@ def verify_runtime(report, subject):
     need(commands['read-tampered']['exit'] == 2
          and error.get('error', {}).get('kind') == 'chain_broken', 'runtime_tamper_not_refused')
     need(commands['git-status']['stdout'] == '', 'runtime_worktree_changed')
+    ownership = report.get('ownership')
+    need(isinstance(ownership, dict) and ownership.get('schema') == 'hugit.baseline-owned-fixture/1'
+         and ownership.get('root') == report.get('fixture_root')
+         and ownership.get('run_id') == Path(report['fixture_root']).name
+         and ownership.get('created_here') is True
+         and re.fullmatch('[0-9a-f]{64}', ownership.get('hook_manifest_sha256', '')),
+         'runtime_ownership_manifest')
+    transactions = transaction_observations(log, (oid, oid2))
+    export = commands['export-captured']
+    export_json = runtime_json(export)
+    # This baseline reproduces a refusal on a clean, automatically captured corpus.
+    # A future success needs a byte-preserving export oracle, not an unchecked green.
+    need(export['exit'] == 2 and export_json.get('error', {}).get('kind') == 'sensitive_canonical_event',
+         'runtime_export_behavior_changed_requires_byte_oracle')
+    need(report.get('export_observation') == {'input_unchanged': True, 'created_files': [],
+                                            'source_sha256': hashlib.sha256(report['event_log'].encode()).hexdigest()},
+         'runtime_export_partial_or_changed_input')
     # Match the fixture specification, not a report-selected deadline or outcome.
     deadline = commands['deadline']
     result = runtime_json(deadline)
@@ -554,8 +760,48 @@ def verify_runtime(report, subject):
                     'observed': {'elapsed_ms': deadline['elapsed_ms'], 'process_exit': deadline['exit'],
                                  'payload_exit': result['exit'], 'payload_ok': result['ok']},
                     'outcome': 'regression_reproduced'},
-            'automatic_commit_capture': {'oid': oid, 'outcome': 'satisfied'},
+            'F07': {'expected': {'distinct_transaction_fingerprints': 2, 'phase_binding_preserved': True},
+                    'observed': transactions, 'outcome': 'regression_reproduced'},
+            'F08': {'expected': {'normal_hook_corpus_exported': True, 'input_unchanged': True},
+                    'observed': {'exit': export['exit'], 'error': 'sensitive_canonical_event',
+                                 'created_files': [], 'input_unchanged': True},
+                    'outcome': 'regression_reproduced'},
+            'automatic_commit_capture': {'oids': [oid, oid2], 'outcome': 'satisfied'},
             'partial_tamper_refusal': {'exit': 2, 'error': 'chain_broken', 'outcome': 'satisfied'}}
+
+def transaction_observations(log, oids):
+    expected = dict(zip(('refs/heads/evidence-one', 'refs/heads/evidence-two'), oids))
+    collected = {}
+    receipts = []
+    for ref, oid in expected.items():
+        phases = {}
+        for event in log:
+            payload = parse(event['payload'])
+            tx = payload.get('reference_transaction')
+            if not isinstance(tx, dict) or not any(u.get('ref') == ref for u in tx.get('updates', [])):
+                continue
+            need(event['kind'] == 'ref.update', 'runtime_transaction_event_kind')
+            need(tx['updates'] == [{'from': '0' * len(oid), 'ref': ref, 'to': oid}],
+                 'runtime_transaction_updates')
+            phase = tx.get('phase')
+            need(phase in ('prepared', 'committed') and phase not in phases, 'runtime_transaction_phases')
+            rid = payload.get('receipt_id')
+            need(isinstance(rid, str) and re.fullmatch('[0-9a-f]{64}', rid), 'runtime_transaction_receipt')
+            receipts.append(rid)
+            phases[phase] = tx.get('fingerprint')
+        need(set(phases) == {'prepared', 'committed'}, 'runtime_transaction_not_observed')
+        collected[ref] = phases
+    need(len(set(receipts)) == 4, 'runtime_duplicate_transaction_receipt')
+    fingerprints = [fp for phases in collected.values() for fp in phases.values()]
+    need(fingerprints == ['[REDACTED]'] * 4, 'runtime_fingerprint_behavior_changed_requires_review')
+    projections = [parse(e['payload']).get('reference_transaction_pairing') for e in log]
+    need(any(isinstance(p, dict) and p.get('fingerprint') == '[REDACTED]'
+             and p.get('state') == 'ambiguous'
+             and set(receipts) <= set(p.get('source_receipt_ids', [])) for p in projections),
+         'runtime_pairing_ambiguity_not_observed')
+    return {'distinct_input_refs': 2, 'observed_phase_count': 4, 'receipt_ids_distinct': 4,
+            'distinct_transaction_fingerprints': len(set(fingerprints)),
+            'fingerprints': collected, 'pairing_state': 'ambiguous'}
 
 def _exercise_runtime(binary, subject, git_override, records):
     """Linux-only finite fixture. Changes exclusively its own TemporaryDirectory."""
@@ -571,6 +817,9 @@ def _exercise_runtime(binary, subject, git_override, records):
     need(git is not None, 'runtime_git_missing')
     with tempfile.TemporaryDirectory(prefix='hugit-baseline-runtime-') as owned:
         root = Path(owned)
+        ownership = {'schema': 'hugit.baseline-owned-fixture/1', 'root': str(root),
+                     'run_id': root.name, 'created_here': True}
+        (root / 'ownership.json').write_text(json.dumps(ownership, sort_keys=True))
         repo = root / 'repo'; repo.mkdir()
         home = root / 'home'; home.mkdir()
         template = root / 'empty-template'; template.mkdir()
@@ -596,18 +845,35 @@ def _exercise_runtime(binary, subject, git_override, records):
         ok('attach', [executable, 'attach'])
         manifest = repo / '.git/hugit-runtime/hooks-v1/manifest.json'
         need(manifest.exists(), 'runtime_missing_hook_manifest')
-        read_bounded_regular(manifest, MAX_INPUT)  # Always-zero/JSON-only substitutes cannot pass.
+        ownership['hook_manifest_sha256'] = hashlib.sha256(read_bounded_regular(manifest, MAX_INPUT)).hexdigest()
+        (root / 'ownership.json').write_text(json.dumps(ownership, sort_keys=True))
         (repo / 'fixture.txt').write_text('controlled baseline commit\n')
         ok('git-add', [git, 'add', 'fixture.txt'])
         ok('git-commit', [git, 'commit', '-m', 'baseline automatic capture fixture'])
         oid = ok('git-head', [git, 'rev-parse', 'HEAD'])['stdout'].strip()
+        ok('git-version', [git, '--version'])
+        (repo / 'fixture.txt').write_text('controlled baseline second commit\n')
+        ok('git-add-second', [git, 'add', 'fixture.txt'])
+        ok('git-commit-second', [git, 'commit', '-m', 'baseline second automatic capture fixture'])
+        oid2 = ok('git-head-second', [git, 'rev-parse', 'HEAD'])['stdout'].strip()
+        # Normal Git operations, not manual capture calls. Explicit refs isolate
+        # transaction identity from version-specific HEAD tuple handling.
+        ok('git-branch-one', [git, 'branch', 'evidence-one', oid])
+        ok('git-branch-two', [git, 'branch', 'evidence-two', oid2])
         logpath = repo / '.git/hugit/event-log.json'
         until = time.monotonic() + 10
         while True:
             raw = read_bounded_regular(logpath, MAX_INPUT) if logpath.exists() else b'[]'
             events = parse(raw)
-            if any(e['kind'] == 'ref.update' and parse(e['payload']).get('target') == oid for e in events):
-                break
+            if all(any(e['kind'] == 'ref.update' and parse(e['payload']).get('target') == target
+                       and parse(e['payload']).get('ref') == 'refs/heads/main' for e in events)
+                   for target in (oid, oid2)):
+                try:
+                    transaction_observations(events, (oid, oid2))
+                except EvidenceError:
+                    pass  # Wait for the specific phases and persisted projection, not a fixed sleep.
+                else:
+                    break
             need(time.monotonic() < until, 'runtime_capture_not_observed')
             time.sleep(0.02)  # Predicate polling, not a sleep-only synchronization assumption.
         ok('health-after', [executable, 'health'])
@@ -622,6 +888,13 @@ def _exercise_runtime(binary, subject, git_override, records):
         ok('read-valid', [executable, 'check', 'show', '--log', good])
         run('read-tampered', [executable, 'check', 'show', '--log', bad])
         need(good.read_bytes() == raw and bad.read_bytes() == badraw, 'runtime_reader_mutated_copy')
+        export_dir = root / 'export'
+        exported = run('export-captured', [executable, 'export', '--log', good, '--out', export_dir])
+        export_files = sorted(str(p.relative_to(export_dir)) for p in export_dir.rglob('*') if p.is_file())
+        export_observation = {'input_unchanged': good.read_bytes() == raw,
+                              'created_files': export_files,
+                              'source_sha256': hashlib.sha256(raw).hexdigest()}
+        need(exported['exit'] == 2, 'runtime_export_behavior_changed_requires_byte_oracle')
         ok('git-status', [git, 'status', '--porcelain=v1', '--untracked-files=all'])
         helper = repo / '.git/pipe-fixture'; helper.mkdir()
         helperfile = helper / 'holder.py'; helperfile.write_text(HOLDER)
@@ -654,12 +927,15 @@ def _exercise_runtime(binary, subject, git_override, records):
                                        machine=platform.machine(), python=platform.python_version(),
                                        inherited_environment=False, network_prohibition_instrumented=False),
                       commands=records, event_log=raw.decode(), tampered_log=badraw.decode(),
+                      ownership=ownership, export_observation=export_observation,
                       helper_sha256=hashlib.sha256(HOLDER.encode()).hexdigest(),
                       barrier={name.replace('-', '_'): (helper / name).read_text()
                                for name in ('parent-exiting', 'holder-ready', 'holder-finished')})
         result['barrier']['release_after_ms'] = 3000
         # Synthetic-only paths are retained: rewriting log bytes would change their hashes.
         result['fixture_root'] = str(root)
+        need(parse(read_bounded_regular(root / 'ownership.json', MAX_INPUT)) == ownership,
+             'runtime_owned_manifest_changed')
     result['owned_fixture_removed'] = not root.exists()
     result['binary']['after_sha256'] = hashlib.sha256(read_bounded_regular(binary, 128 * 1024 * 1024)).hexdigest()
     result['assertions'] = verify_runtime(result, subject)
@@ -687,8 +963,24 @@ def check_runtime_document(report, subject):
 
 def runtime_self_test(binary, subject, result):
     outcomes = {}
+    def change_transaction(r, key, value):
+        log = parse(r['event_log'])
+        for e in log:
+            payload = parse(e['payload'])
+            tx = payload.get('reference_transaction')
+            if isinstance(tx, dict) and any(u.get('ref') == 'refs/heads/evidence-two' for u in tx.get('updates', [])):
+                tx[key] = value
+                e['payload'] = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+        r['event_log'] = json.dumps(log)
     for name, change in {
         'runtime_forged_verdict': lambda r: r['assertions']['F05'].update(outcome='satisfied'),
+        'runtime_forged_F07': lambda r: r['assertions']['F07'].update(outcome='satisfied'),
+        'runtime_forged_F08': lambda r: r['assertions']['F08'].update(outcome='satisfied'),
+        'runtime_partial_export': lambda r: r['export_observation'].update(created_files=['partial']),
+        'runtime_export_changed_input': lambda r: r['export_observation'].update(input_unchanged=False),
+        'runtime_ownership_missing': lambda r: r.pop('ownership'),
+        'runtime_missing_second_phase': lambda r: change_transaction(r, 'phase', 'absent'),
+        'runtime_wrong_transaction_identity': lambda r: change_transaction(r, 'fingerprint', 'invented'),
         'runtime_false_green': lambda r: r.update(product_accepted=True),
         'runtime_lost_command': lambda r: r['commands'].pop(),
         'runtime_wrong_oid': lambda r: r['commands'][7].update(stdout='0'*40+'\n'),
@@ -706,6 +998,31 @@ def runtime_self_test(binary, subject, result):
             outcomes[name] = 'rejected'
         else:
             raise EvidenceError('runtime_mutation_accepted:' + name)
+    # Exercise the transaction oracle directly so a stale tampered-log copy
+    # cannot be the unrelated reason a phase/identity mutation was rejected.
+    original_log = parse(result['event_log'])
+    commands = {row['label']: row for row in result['commands']}
+    oids = tuple(commands[name]['stdout'].strip() for name in ('git-head', 'git-head-second'))
+    transaction_observations(original_log, oids)
+    for name, field, value, error_code in (
+        ('transaction_phase_control', 'phase', 'missing', 'runtime_transaction_phases'),
+        ('transaction_fingerprint_control', 'fingerprint', 'invented', 'runtime_fingerprint_behavior_changed_requires_review'),
+    ):
+        changed = copy.deepcopy(original_log)
+        for event in changed:
+            payload = parse(event['payload'])
+            tx = payload.get('reference_transaction')
+            if isinstance(tx, dict) and any(u.get('ref') == 'refs/heads/evidence-two' for u in tx.get('updates', [])):
+                tx[field] = value
+                event['payload'] = json.dumps(payload)
+                break
+        try:
+            transaction_observations(changed, oids)
+        except EvidenceError as error:
+            need(str(error) == error_code, 'wrong_transaction_control:' + name)
+            outcomes[name] = 'rejected'
+        else:
+            raise EvidenceError('transaction_mutation_accepted:' + name)
     with tempfile.TemporaryDirectory(prefix='hugit-baseline-substitute-') as tmp:
         path = Path(tmp) / 'fake-hugit'
         for name, content in {
