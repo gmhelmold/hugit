@@ -1,0 +1,98 @@
+{
+  "schema_version": "hugit.goal-source-discovery.v1",
+  "work_package": "HUG-057",
+  "tracking_issue": 437,
+  "subject_commit": "6a04e9a465106ec3f9771512315d2288594b05d3",
+  "inventory_subject_commit": "96ddcdade3d56d7c2cf4a01c294a56c3aaa4e58c",
+  "automatic_capture_required": true,
+  "runtime_modified": false,
+  "review_mode": "executor_adversarial_review_owner_directed",
+  "independent_review_claimed": false,
+  "work_package_complete": false,
+  "source_qualified": false,
+  "schema_freeze_authorized": false,
+  "consumer": "HUG-015",
+  "admission": "blocked_pending_source_evidence",
+  "matrix": [
+    {
+      "source": "hugit-git-capture",
+      "basis": "source_only",
+      "declared_fields": [
+        "repo_id",
+        "invocation_id",
+        "receipt_id",
+        "kind",
+        "principal",
+        "payload",
+        "recorded_at"
+      ],
+      "observed_live_payload_fields": [],
+      "goal_binding": "unassigned",
+      "reason": "A Git fact and a receipt delivery identity do not establish goal identity, session identity or a goal revision."
+    },
+    {
+      "source": "hugit-intent-new",
+      "basis": "source_only",
+      "declared_fields": [
+        "charter",
+        "campaign",
+        "acceptance",
+        "id",
+        "agent",
+        "context_ref",
+        "log"
+      ],
+      "observed_live_payload_fields": [],
+      "goal_binding": "declared_only",
+      "reason": "An explicit id/content-derived id is not an observed stable origin event id. context_ref may reference more information, but no live envelope was examined."
+    },
+    {
+      "source": "installed-maestro-user-prompt-submit",
+      "basis": "installed_source_only",
+      "declared_fields": [
+        "cwd",
+        "hookSpecificOutput.hookEventName",
+        "hookSpecificOutput.additionalContext"
+      ],
+      "observed_live_payload_fields": [],
+      "goal_binding": "unassigned",
+      "reason": "Visible code reinjects progress; registration for a prompt event does not demonstrate collection of that prompt or its goal semantics."
+    }
+  ],
+  "unresolved_fields": [
+    "origin_namespace",
+    "source_event_id",
+    "session_id",
+    "source_call_id",
+    "goal_id",
+    "goal_revision",
+    "create_clarify_revise_discriminator",
+    "run_to_goal_binding"
+  ],
+  "schema_constraints": [
+    "Do not equate Git commits, receipt invocations, prompt messages and goals.",
+    "Keep stable source emission identity separate from collector instance and delivery identity (P04).",
+    "Assign authority from an authorized ingestion channel, not self-declared payload labels (P05).",
+    "Admit unassigned or ambiguous binding rather than guessing by time or proximity.",
+    "Creating a goal is not implementation, validation or completion.",
+    "Do not freeze the definitive goal mapping without observed source payloads.",
+    "Keep standalone operation and automatic capture; do not introduce a manual goal-registration requirement."
+  ],
+  "assertion_disposition": {
+    "CC01": "not_satisfied_producer_unresolved",
+    "CC02": "candidate_matrix_delivered_not_live_binding",
+    "CC03": "constraints_delivered_freeze_blocked",
+    "SC01": "not_satisfied_live_cases_missing",
+    "SC02": "rejected_substitutes_explicit_not_fixture_qualification",
+    "QS01": "manual_replacement_not_introduced",
+    "QS02": "no_invented_runtime_bug_or_fixture",
+    "QS03": "versioned_offline_documents_only",
+    "DOD01": "not_complete",
+    "DOD02": "three_outputs_delivered_for_review",
+    "DOD03": "no_fixture_to_revoke_procedure_defined_not_exercised_live",
+    "DOD04": "executor_review_not_independent_approval",
+    "INV01": "not_located_not_nonexistent",
+    "INV02": "no_unobserved_payload_invented",
+    "INV03": "automatic_capture_required"
+  }
+}

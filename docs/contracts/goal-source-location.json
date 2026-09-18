@@ -1,0 +1,233 @@
+{
+  "schema_version": "hugit.goal-source-discovery.v1",
+  "work_package": "HUG-057",
+  "tracking_issue": 437,
+  "subject_commit": "6a04e9a465106ec3f9771512315d2288594b05d3",
+  "inventory_subject_commit": "96ddcdade3d56d7c2cf4a01c294a56c3aaa4e58c",
+  "automatic_capture_required": true,
+  "runtime_modified": false,
+  "review_mode": "executor_adversarial_review_owner_directed",
+  "independent_review_claimed": false,
+  "work_package_complete": false,
+  "status": "not_located_in_examined_scopes",
+  "qualified_producer": null,
+  "source_qualified": false,
+  "scope": {
+    "repository": "gmhelmold/hugit",
+    "repository_paths": [
+      "crates/",
+      ".claude/",
+      "skills/",
+      "docs/contracts/",
+      "docs/design/",
+      "docs/quickstart-hooks.md"
+    ],
+    "repository_search_terms": [
+      "UserPromptSubmit",
+      "user_prompt",
+      "prompt.submitted",
+      "message.updated",
+      "goal_id",
+      "goal_revision",
+      "goal",
+      "intent",
+      "prompt",
+      "session"
+    ],
+    "historical_search": "reachable commit subjects matching goal, user.prompt, prompt.capture, capture.prompt, intent.*hook or hook.*intent; at most 40 matches, not an all-version source audit",
+    "local_configuration": "Configuration JSON was parsed to project only hook/plugin topology. Credential stores and private transcript/session stores were not opened; env/credential values were not printed, extracted into evidence or published.",
+    "local_hook_scopes": [
+      "$HOME/.claude/hooks/",
+      "$HOME/.claude/skills/memory-plumbing/scripts/",
+      "$HOME/.claude/plugins/cache/humanguardrail/maestro/0.1.0/hooks/"
+    ],
+    "not_examined": [
+      "other machines",
+      "other harness installations",
+      "uncommitted work outside this checkout",
+      "private session/transcript stores"
+    ]
+  },
+  "candidates": [
+    {
+      "id": "hugit-git-capture",
+      "classification": "automatic_git_fact_recorder",
+      "goal_producer": "not_demonstrated",
+      "anchors": [
+        {
+          "path": "crates/hugit-cli/src/capture/mod.rs",
+          "commit": "6a04e9a465106ec3f9771512315d2288594b05d3",
+          "git_blob_oid": "92d6e13b8218a12524af748f1d73a6ff2fa7f445",
+          "sha256": "075d7e1b7c6e914b796b51995d0cbfa99281cd77f07f180107b563af888bbc53",
+          "lines": [
+            258,
+            267
+          ],
+          "span_sha256": "b399887ff8d01aecfd58116ce29b43ce3e3b318e7b8a47f81ce80aea6b1c97f7",
+          "observation": "source_inspection_not_runtime_execution"
+        },
+        {
+          "path": "crates/hugit-cli/src/capture/mod.rs",
+          "commit": "6a04e9a465106ec3f9771512315d2288594b05d3",
+          "git_blob_oid": "92d6e13b8218a12524af748f1d73a6ff2fa7f445",
+          "sha256": "075d7e1b7c6e914b796b51995d0cbfa99281cd77f07f180107b563af888bbc53",
+          "lines": [
+            116,
+            160
+          ],
+          "span_sha256": "3476187169d2a7c24ab9e62f69fa7a62d302f5521a4d76d9f03ec5333024019f",
+          "observation": "source_inspection_not_runtime_execution"
+        },
+        {
+          "path": "crates/hugit-cli/src/capture/mod.rs",
+          "commit": "6a04e9a465106ec3f9771512315d2288594b05d3",
+          "git_blob_oid": "92d6e13b8218a12524af748f1d73a6ff2fa7f445",
+          "sha256": "075d7e1b7c6e914b796b51995d0cbfa99281cd77f07f180107b563af888bbc53",
+          "lines": [
+            162,
+            207
+          ],
+          "span_sha256": "807346804ea3f71b3ed47ae24e6261d9a2ed01155a12baefadcb5781d384306e",
+          "observation": "source_inspection_not_runtime_execution"
+        }
+      ],
+      "finding": "Dispatches commit, checkout, push-attempt, merge, rewrite and reference-transaction. The inspected receipt path transports Git facts, not a user-goal lifecycle. This does not rule out a separate adapter."
+    },
+    {
+      "id": "hugit-intent-new",
+      "classification": "declaration_ingress",
+      "goal_producer": "not_demonstrated",
+      "anchors": [
+        {
+          "path": "crates/hugit-cli/src/intent/new.rs",
+          "commit": "6a04e9a465106ec3f9771512315d2288594b05d3",
+          "git_blob_oid": "92b8e942d85d5c7f0b8e5876fa08c798c51f9943",
+          "sha256": "1f77788496928fc3d60e6d3e828f8b9d713880fe23282d2ed9edaa318da33b36",
+          "lines": [
+            48,
+            71
+          ],
+          "span_sha256": "7deeaac84bdcad08decf8b8d9d11bf7dc0ed6cc11807257aea75164019556678",
+          "observation": "source_inspection_not_runtime_execution"
+        },
+        {
+          "path": "crates/hugit-cli/src/intent/new.rs",
+          "commit": "6a04e9a465106ec3f9771512315d2288594b05d3",
+          "git_blob_oid": "92b8e942d85d5c7f0b8e5876fa08c798c51f9943",
+          "sha256": "1f77788496928fc3d60e6d3e828f8b9d713880fe23282d2ed9edaa318da33b36",
+          "lines": [
+            91,
+            114
+          ],
+          "span_sha256": "e999f793a443af04fef86c7b82252d1b34d4f01d9f33f526e552f7d7cbdea023",
+          "observation": "source_inspection_not_runtime_execution"
+        }
+      ],
+      "finding": "Receives a charter, campaign, acceptance list and optional explicit id/context_ref. Its existence does not prove that a hook supplies them. It is not proposed as a manual replacement."
+    },
+    {
+      "id": "installed-maestro-user-prompt-submit",
+      "classification": "progress_context_reinjection",
+      "goal_producer": "not_demonstrated",
+      "installation": {
+        "logical_path": "$HOME/.claude/plugins/cache/humanguardrail/maestro/0.1.0/hooks/user-prompt-submit.js",
+        "installation_version": "0.1.0",
+        "sha256": "126f83380281c9e67a473f1fa2de23b4338e2cecb6fc9d2eb8deddbb83e816c8",
+        "lines": [
+          44,
+          61
+        ],
+        "span_sha256": "d45363cbfc158a6edb3f478a8a91062a826f3b7dc16967416173dc8d9efe35de",
+        "registration_path": "$HOME/.claude/plugins/cache/humanguardrail/maestro/0.1.0/hooks/hooks.json",
+        "registration_sha256": "180004d47aa7fc6e9f79722f5b5a5f24e2c82a92a756d73ba1a4b7db0dea2ade",
+        "registration_event": "UserPromptSubmit",
+        "public_repository_replica": false,
+        "observation": "installed_source_inspection_not_hook_invocation"
+      },
+      "finding": "The inspected handler consumes cwd, folds stored probes and emits hookSpecificOutput.additionalContext. It does not read or forward the prompt to Hugit in its visible implementation. No claim is made about arbitrary behavior of its imported dependencies."
+    }
+  ],
+  "evidence_anchors": {
+    "git_dispatch": {
+      "path": "crates/hugit-cli/src/capture/mod.rs",
+      "commit": "6a04e9a465106ec3f9771512315d2288594b05d3",
+      "git_blob_oid": "92d6e13b8218a12524af748f1d73a6ff2fa7f445",
+      "sha256": "075d7e1b7c6e914b796b51995d0cbfa99281cd77f07f180107b563af888bbc53",
+      "lines": [
+        258,
+        267
+      ],
+      "span_sha256": "b399887ff8d01aecfd58116ce29b43ce3e3b318e7b8a47f81ce80aea6b1c97f7",
+      "observation": "source_inspection_not_runtime_execution"
+    },
+    "receipt_construction": {
+      "path": "crates/hugit-cli/src/capture/mod.rs",
+      "commit": "6a04e9a465106ec3f9771512315d2288594b05d3",
+      "git_blob_oid": "92d6e13b8218a12524af748f1d73a6ff2fa7f445",
+      "sha256": "075d7e1b7c6e914b796b51995d0cbfa99281cd77f07f180107b563af888bbc53",
+      "lines": [
+        116,
+        160
+      ],
+      "span_sha256": "3476187169d2a7c24ab9e62f69fa7a62d302f5521a4d76d9f03ec5333024019f",
+      "observation": "source_inspection_not_runtime_execution"
+    },
+    "capture_arguments": {
+      "path": "crates/hugit-cli/src/capture/mod.rs",
+      "commit": "6a04e9a465106ec3f9771512315d2288594b05d3",
+      "git_blob_oid": "92d6e13b8218a12524af748f1d73a6ff2fa7f445",
+      "sha256": "075d7e1b7c6e914b796b51995d0cbfa99281cd77f07f180107b563af888bbc53",
+      "lines": [
+        162,
+        207
+      ],
+      "span_sha256": "807346804ea3f71b3ed47ae24e6261d9a2ed01155a12baefadcb5781d384306e",
+      "observation": "source_inspection_not_runtime_execution"
+    },
+    "declared_intent": {
+      "path": "crates/hugit-cli/src/intent/new.rs",
+      "commit": "6a04e9a465106ec3f9771512315d2288594b05d3",
+      "git_blob_oid": "92b8e942d85d5c7f0b8e5876fa08c798c51f9943",
+      "sha256": "1f77788496928fc3d60e6d3e828f8b9d713880fe23282d2ed9edaa318da33b36",
+      "lines": [
+        48,
+        71
+      ],
+      "span_sha256": "7deeaac84bdcad08decf8b8d9d11bf7dc0ed6cc11807257aea75164019556678",
+      "observation": "source_inspection_not_runtime_execution"
+    },
+    "content_identity": {
+      "path": "crates/hugit-cli/src/intent/new.rs",
+      "commit": "6a04e9a465106ec3f9771512315d2288594b05d3",
+      "git_blob_oid": "92b8e942d85d5c7f0b8e5876fa08c798c51f9943",
+      "sha256": "1f77788496928fc3d60e6d3e828f8b9d713880fe23282d2ed9edaa318da33b36",
+      "lines": [
+        91,
+        114
+      ],
+      "span_sha256": "e999f793a443af04fef86c7b82252d1b34d4f01d9f33f526e552f7d7cbdea023",
+      "observation": "source_inspection_not_runtime_execution"
+    },
+    "onboarding": {
+      "path": "docs/quickstart-hooks.md",
+      "commit": "6a04e9a465106ec3f9771512315d2288594b05d3",
+      "git_blob_oid": "0342104024e46d96ca630d677dcf89ae3e3de564",
+      "sha256": "187a2fc95d925d90ecc691cb2c3e15211f31899bfa4a77caa8ae5b67faeb54a1",
+      "lines": [
+        36,
+        49
+      ],
+      "span_sha256": "7c0416ea817187f7e1b142e23fe8535296298773bd41502a5d8c1747cd859b16",
+      "observation": "source_inspection_not_runtime_execution"
+    }
+  },
+  "blockers": [
+    {
+      "code": "GOAL_SOURCE_UNRESOLVED",
+      "owner_work_package": "HUG-057",
+      "tracking_issue": 437,
+      "required": "Identify the actual automatic producer/adapter and version, then observe sanitized emitted envelopes in the three required live-session cases."
+    }
+  ],
+  "interpretation": "Not located in these scopes is not a claim of global nonexistence. Git receipts, declarations and hook registration must not be promoted to observed goal capture."
+}
