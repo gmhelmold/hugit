@@ -165,6 +165,8 @@ fn item_2_rebase_textual_fallback_only_regen_path_absent() {
             // Only textual-path outcomes exist in Phase B.
             UnionVerdict::Green => "textual-pass",
             UnionVerdict::Red => "textual-fail",
+            UnionVerdict::Unknown => "textual-unknown",
+            UnionVerdict::InfrastructureFailure => "textual-infrastructure-failure",
             // If a `RegenRebase` or `Regenerative` variant were added, the
             // exhaustive match would fail to compile — catching scope creep
             // at build time.
