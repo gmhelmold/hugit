@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(coordination): add isolated experimental native lock sets with stable files,
+  bounded nonblocking acquisition and enforced global ordering. Keep legacy v1
+  activation gated; no age/PID takeover or lockfile deletion in the native path.
+
 - fix(queue): persist metadata-only attempt starts and outcomes at the CLI
   boundary. Invalidate interrupted attempts before a new evaluation, preserve
   uncertain prior effects, and never replay serialized authorization or undo

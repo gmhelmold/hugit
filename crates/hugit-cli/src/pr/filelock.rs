@@ -1,3 +1,8 @@
+//! HUG-008 rollout boundary: this is the LEGACY v1 protocol. Native coordination
+//! is implemented separately in `hugit_refstore::coordination` and intentionally
+//! not activated here before the HUG-058/HUG-018 writer-coexistence cutover.
+//! A v2 advisory lock cannot contain a v1 writer which never acquires it.
+//!
 //! The porcelain file seam's **lock + atomic-write** discipline (WP-WC1).
 //!
 //! Every porcelain verb that reads-modifies-writes the shared `--log` (or
@@ -37,8 +42,8 @@
 //!   documented **age-based takeover**: a lock file older than
 //!   [`STALE_LOCK_SECS`] is presumed abandoned and reclaimed (logged in the
 //!   lock's own bytes: pid + unix-mtime). The window is deliberately generous —
-//!   a porcelain verb runs in milliseconds, so a lock minutes old is certainly
-//!   dead, while a live verb never ages into takeover.
+//!   age is NOT proof of owner death. A paused/long-running v1 writer can outlive
+//!   this threshold; HUG-008/058/018 must qualify a coordinated replacement.
 //! - **Not NFS-safe.** `create_new` atomicity and same-dir `rename` atomicity
 //!   are POSIX-local-FS guarantees; networked filesystems may weaken them. The
 //!   hermetic file seam is local-disk by mandate (P2 is the live-infra seam), so
@@ -54,9 +59,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// A lock older than this (by its on-disk mtime) is presumed abandoned by a
 /// dead holder and reclaimed (age-based stale-lock takeover — see module doc).
 ///
-/// 120 s is ~5 orders of magnitude above a porcelain verb's real runtime
-/// (single-digit ms): a LIVE verb never ages into takeover, while a crashed
-/// holder's lock is reclaimed promptly. Tunable in one place.
+/// Legacy threshold only: neither 120 s nor a PID establishes that an owner
+/// is dead. Do not reuse this heuristic in experimental native coordination.
 pub const STALE_LOCK_SECS: u64 = 120;
 
 /// Why a lock could not be acquired / a write could not be made atomic.
