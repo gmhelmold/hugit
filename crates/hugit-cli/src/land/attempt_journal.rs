@@ -480,6 +480,86 @@ mod tests {
         assert_eq!(fs::read(f.log()).unwrap(), b"[]");
     }
 
+    fn queued_corpus(f: &Fixture) -> Vec<u8> {
+        let mut log = hugit_refstore::EventLog::new();
+        for (order, id, content) in [(0, "A", "conflicts-with:B"), (1, "B", "b"), (2, "C", "c")] {
+            log.append_for_test("pr.opened", vec!["orchestrator:hugit".into()],
+                serde_json::json!({"pr_id":id,"campaign":"attempt-test","author_kind":"orchestrator",
+                    "run_id":"fixture","principal":null,"intent_ids":[content]}).to_string(), 0);
+            log.append_for_test("pr.queued", vec![],
+                serde_json::json!({"pr_id":id,"item_id":format!("{id}#{order}"),"order_index":order,"mode":"union"}).to_string(), 0);
+        }
+        let bytes = serde_json::to_vec_pretty(log.records()).unwrap();
+        fs::write(f.log(), &bytes).unwrap();
+        bytes
+    }
+
+    fn run_cli(f: &Fixture, probes: u32) -> std::process::ExitCode {
+        super::super::run_queue_land(super::super::QueueLandArgs {
+            log: Some(f.log()),
+            campaign: None,
+            ac: Some(f.0.join("cache.json")),
+            recorded_at: 0,
+            max_probes: probes,
+            evaluation_timeout_ms: 30_000,
+        })
+    }
+
+    #[test]
+    fn cli_boundary_persists_held_and_applied_receipts_without_duplicate_landing() {
+        let f = Fixture::new();
+        let before = queued_corpus(&f);
+        assert_eq!(run_cli(&f, 5), std::process::ExitCode::from(2));
+        assert_eq!(fs::read(f.log()).unwrap(), before);
+        let first: Current = read_record(&f.dir().join("current.json")).unwrap().unwrap();
+        let terminal: Finished =
+            read_record(&record_path(&f.dir(), &first.operation_id, "finished").unwrap())
+                .unwrap()
+                .unwrap();
+        assert_eq!(terminal.outcome, Outcome::Held);
+        assert_eq!(run_cli(&f, 6), std::process::ExitCode::SUCCESS);
+        let second: Current = read_record(&f.dir().join("current.json")).unwrap().unwrap();
+        assert_ne!(first.operation_id, second.operation_id);
+        let terminal: Finished =
+            read_record(&record_path(&f.dir(), &second.operation_id, "finished").unwrap())
+                .unwrap()
+                .unwrap();
+        assert_eq!(terminal.outcome, Outcome::Applied);
+        assert_eq!(run_cli(&f, 64), std::process::ExitCode::SUCCESS);
+        let log = crate::checks::load_event_log(&f.log()).unwrap();
+        let landed: Vec<_> = log
+            .records()
+            .iter()
+            .filter(|r| r.kind == "pr.landed")
+            .map(|r| {
+                serde_json::from_str::<serde_json::Value>(&r.payload).unwrap()["pr_id"].clone()
+            })
+            .collect();
+        assert_eq!(landed, vec![serde_json::json!("C")]);
+    }
+
+    #[test]
+    fn cli_boundary_refuses_corrupt_journal_before_mutating_log_or_cache() {
+        let f = Fixture::new();
+        let before = queued_corpus(&f);
+        assert_eq!(run_cli(&f, 0), std::process::ExitCode::from(2));
+        fs::write(f.dir().join("current.json"), "{").unwrap();
+        assert_eq!(run_cli(&f, 64), std::process::ExitCode::from(2));
+        assert_eq!(fs::read(f.log()).unwrap(), before);
+        assert!(!f.0.join("cache.json").exists());
+    }
+
+    #[test]
+    fn cli_boundary_refuses_journal_path_collision_before_evaluation() {
+        let f = Fixture::new();
+        let before = queued_corpus(&f);
+        fs::write(f.dir(), "unrelated file").unwrap();
+        assert_eq!(run_cli(&f, 64), std::process::ExitCode::from(2));
+        assert_eq!(fs::read(f.log()).unwrap(), before);
+        assert_eq!(fs::read(f.dir()).unwrap(), b"unrelated file");
+        assert!(!f.0.join("cache.json").exists());
+    }
+
     #[cfg(unix)]
     #[test]
     fn receipt_symlink_is_refused_and_private_permissions_are_set() {
