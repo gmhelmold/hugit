@@ -53,6 +53,23 @@ jobs:
             docs/plan/standalone/v3/work-packages/HUG-014.md \
             docs/plan/standalone/v3/work-packages/HUG-009.md \
             docs/plan/standalone/v3/work-packages/HUG-026.md \
+            crates/hugit-cli/src/capture/mod.rs \
+            crates/hugit-cli/src/capture/drain.rs \
+            crates/hugit-cli/src/porcelain.rs \
+            crates/hugit-cli/src/export/redaction.rs \
+            crates/hugit-cli/src/main.rs \
+            crates/hugit-cli/src/pr/filelock.rs \
+            crates/hugit-cli/src/pr/cli.rs \
+            crates/hugit-cli/src/pr/dispatch.rs \
+            crates/hugit-cli/src/capture/receipt.rs \
+            crates/hugit-cli/src/init/mod.rs \
+            crates/hugit-refstore/src/tamper/mod.rs \
+            crates/hugit-mcp/src/server.rs \
+            crates/hugit-mcp/src/lib.rs \
+            .github/workflows/ci.yml \
+            .github/workflows/release.yml \
+            Cargo.toml \
+            crates/hugit-cli/Cargo.toml \
             | tar -x -C "$SOURCE"
           python3 scripts/acceptance/baseline_oracles.py \
             --report docs/audit/baseline-results.json --root "$SOURCE" --self-test \
