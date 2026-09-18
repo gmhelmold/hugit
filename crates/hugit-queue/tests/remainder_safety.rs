@@ -216,3 +216,24 @@ fn changing_a_public_summary_does_not_grant_new_authorization() {
             .all(|(_, o)| *o != UnionOutcome::Green)
     );
 }
+
+
+#[test]
+fn default_budget_bounds_all_hit_diagnostics() {
+    let owned: Vec<String> = (0..12).map(|i| format!("member-{i}")).collect();
+    let ids: Vec<&str> = owned.iter().map(String::as_str).collect();
+    struct AllHits { probes: usize }
+    impl MemoCheck for AllHits {
+        fn evaluate(&mut self, ids: &[&str]) -> (UnionVerdict, Vec<CheckSource>) {
+            self.probes += 1;
+            (if ids.len() >= 3 { UnionVerdict::Red } else { UnionVerdict::Green },
+             vec![CheckSource::Hit])
+        }
+    }
+    let mut oracle = AllHits { probes: 0 };
+    let ev = evaluate_union(&batch(&ids), &mut oracle);
+    assert!(oracle.probes <= 64, "budget bypassed by cache hits: {}", oracle.probes);
+    assert!(ev.validated_proceeding().is_empty());
+    assert!(ev.outcomes_for_landing(&ids).is_empty());
+    assert_eq!(ev.executed_count, 0);
+}
