@@ -548,3 +548,265 @@ fn caller_modified_queue_order_is_refused_before_any_probe() {
     assert_eq!(ev.stop_reason, Some(EvaluationStop::InvalidBatch));
     assert_eq!(ev.probe_count, 0);
 }
+
+// HUG-014: a bound result is not reusable under different contents or context.
+use hugit_queue::core::union::{EvaluationContext, evaluate_union_in_context};
+
+fn context() -> EvaluationContext {
+    EvaluationContext {
+        operation_id: "op-1".into(),
+        base_id: "fixture-base-1".into(),
+        config_id: "fixture-config-1".into(),
+        scope: "simulation_only".into(),
+    }
+}
+
+#[test]
+fn bound_result_records_each_probe_and_authorizes_the_exact_remainder() {
+    let b = batch(&["A", "B", "C"]);
+    let mut oracle = Oracle {
+        rule: |s: &[&str]| !(s.contains(&"A") && s.contains(&"B")),
+        calls: vec![],
+    };
+    let ev = evaluate_union_in_context(&b, &mut oracle, limits(64), context());
+    let auth = ev.authorize_for(&b, &context()).unwrap();
+    assert_eq!(auth.proceeding, ["C"]);
+    assert_eq!(auth.excluded, ["A", "B"]);
+    let binding = ev.binding().unwrap();
+    assert_eq!(binding.context(), &context());
+    assert_eq!(binding.probes().len(), ev.probe_count);
+    assert_eq!(
+        binding
+            .probes()
+            .iter()
+            .map(|p| p.members.clone())
+            .collect::<Vec<_>>(),
+        oracle.calls
+    );
+    assert_eq!(binding.probes().last().unwrap().members, ["C"]);
+    assert_eq!(
+        binding.probes().last().unwrap().returned_verdict,
+        UnionVerdict::Green
+    );
+    // Compatibility entry points cannot strip the context requirement.
+    assert!(ev.validated_proceeding().is_empty());
+    assert!(ev.validated_excluded().is_empty());
+    assert!(ev.outcomes_for_landing(&["A", "B", "C"]).is_empty());
+}
+
+#[test]
+fn same_member_ids_with_changed_content_state_or_affected_set_are_not_authorized() {
+    let b = batch(&["A", "B"]);
+    let mut oracle = Oracle {
+        rule: |_: &[&str]| true,
+        calls: vec![],
+    };
+    let ev = evaluate_union_in_context(&b, &mut oracle, limits(64), context());
+    for dimension in 0..7 {
+        let mut changed = b.clone();
+        match dimension {
+            0 => changed.entries_mut()[0].landable.tree_hash = "new-tree".into(),
+            1 => changed.entries_mut()[0].landable.intent_id = "new-intent".into(),
+            2 => changed.entries_mut()[0].affected = AffectedSet::new(["new-check"]),
+            3 => changed.entries_mut()[0].state = hugit_queue::core::EntryState::Landed,
+            4 => changed.entries_mut()[1].landable.order_index += 10,
+            5 => changed.batch_id = "other-batch".into(),
+            6 => changed.entries_mut().swap(0, 1),
+            _ => unreachable!(),
+        }
+        assert!(
+            ev.authorize_for(&changed, &context()).is_none(),
+            "dimension {dimension}"
+        );
+    }
+    assert_eq!(
+        ev.authorize_for(&b, &context()).unwrap().proceeding,
+        ["A", "B"]
+    );
+    assert_eq!(oracle.calls.len(), 1);
+}
+
+#[test]
+fn changed_base_configuration_operation_or_scope_cannot_reuse_bound_authorization() {
+    let b = batch(&["A", "B"]);
+    let mut oracle = Oracle {
+        rule: |_: &[&str]| true,
+        calls: vec![],
+    };
+    let ev = evaluate_union_in_context(&b, &mut oracle, limits(64), context());
+    for dimension in 0..4 {
+        let mut changed = context();
+        let field = match dimension {
+            0 => &mut changed.base_id,
+            1 => &mut changed.config_id,
+            2 => &mut changed.operation_id,
+            _ => &mut changed.scope,
+        };
+        *field = "different".into();
+        assert!(ev.authorize_for(&b, &changed).is_none());
+    }
+    let mut legacy = Oracle {
+        rule: |_: &[&str]| true,
+        calls: vec![],
+    };
+    assert!(
+        evaluate_union(&b, &mut legacy)
+            .authorize_for(&b, &context())
+            .is_none()
+    );
+}
+
+#[test]
+fn invalid_context_admits_no_probe_and_no_authorization() {
+    for dimension in 0..4 {
+        let mut ctx = context();
+        let field = match dimension {
+            0 => &mut ctx.base_id,
+            1 => &mut ctx.config_id,
+            2 => &mut ctx.operation_id,
+            _ => &mut ctx.scope,
+        };
+        field.clear();
+        let b = batch(&["A"]);
+        let mut oracle = Oracle {
+            rule: |_: &[&str]| panic!("invalid context"),
+            calls: vec![],
+        };
+        let ev = evaluate_union_in_context(&b, &mut oracle, limits(64), ctx.clone());
+        assert_eq!(ev.stop_reason, Some(EvaluationStop::InvalidContext));
+        assert_eq!(ev.probe_count, 0);
+        assert!(ev.binding().unwrap().probes().is_empty());
+        assert!(ev.authorize_for(&b, &ctx).is_none());
+    }
+}
+
+#[test]
+fn bound_invalidation_reaches_clones_and_retry_does_not_revive_old_operation() {
+    let b = batch(&["A"]);
+    let mut oracle = Oracle {
+        rule: |_: &[&str]| true,
+        calls: vec![],
+    };
+    let mut first = evaluate_union_in_context(&b, &mut oracle, limits(64), context());
+    let copy = first.clone();
+    first.invalidate();
+    let mut next = context();
+    next.operation_id = "op-2".into();
+    let retry = evaluate_union_in_context(&b, &mut oracle, limits(64), next.clone());
+    assert!(copy.authorize_for(&b, &context()).is_none());
+    assert!(copy.authorize_for(&b, &next).is_none());
+    assert!(retry.authorize_for(&b, &context()).is_none());
+    assert_eq!(retry.authorize_for(&b, &next).unwrap().proceeding, ["A"]);
+}
+
+#[test]
+fn every_scoped_probe_receives_the_same_context_and_absolute_deadline() {
+    struct Scoped {
+        received: Vec<(Vec<String>, EvaluationContext, std::time::Instant)>,
+    }
+    impl MemoCheck for Scoped {
+        fn evaluate(&mut self, _: &[&str]) -> (UnionVerdict, Vec<CheckSource>) {
+            panic!("unscoped")
+        }
+        fn evaluate_in_context(
+            &mut self,
+            ids: &[&str],
+            deadline: std::time::Instant,
+            ctx: &EvaluationContext,
+        ) -> (UnionVerdict, Vec<CheckSource>) {
+            self.received.push((
+                ids.iter().map(|s| (*s).to_owned()).collect(),
+                ctx.clone(),
+                deadline,
+            ));
+            (
+                if ids.contains(&"A") && ids.contains(&"B") {
+                    UnionVerdict::Red
+                } else {
+                    UnionVerdict::Green
+                },
+                vec![CheckSource::Hit],
+            )
+        }
+    }
+    let b = batch(&["A", "B", "C"]);
+    let mut oracle = Scoped { received: vec![] };
+    let ev = evaluate_union_in_context(&b, &mut oracle, limits(64), context());
+    assert_eq!(ev.probe_count, 6);
+    assert_eq!(ev.binding().unwrap().probes().len(), 6);
+    assert!(
+        oracle
+            .received
+            .iter()
+            .all(|(_, ctx, deadline)| ctx == &context() && *deadline == oracle.received[0].2)
+    );
+    assert_eq!(oracle.received.last().unwrap().0, ["C"]);
+}
+
+#[test]
+fn bound_result_never_authorizes_inconclusive_budget_or_infrastructure() {
+    let b = batch(&["A", "B"]);
+    let mut zero = Oracle {
+        rule: |_: &[&str]| panic!("zero budget"),
+        calls: vec![],
+    };
+    let ev = evaluate_union_in_context(&b, &mut zero, limits(0), context());
+    assert!(ev.authorize_for(&b, &context()).is_none());
+    struct Infra;
+    impl MemoCheck for Infra {
+        fn evaluate(&mut self, _: &[&str]) -> (UnionVerdict, Vec<CheckSource>) {
+            (UnionVerdict::InfrastructureFailure, vec![])
+        }
+    }
+    let ev = evaluate_union_in_context(&b, &mut Infra, limits(64), context());
+    assert!(ev.authorize_for(&b, &context()).is_none());
+    assert_eq!(
+        ev.binding().unwrap().probes()[0].returned_verdict,
+        UnionVerdict::InfrastructureFailure
+    );
+}
+
+#[test]
+fn bound_truth_tables_keep_all_authorization_tied_to_the_last_green_set() {
+    let ids = ["A", "B", "C"];
+    let b = batch(&ids);
+    for truth in 0u8..128 {
+        let green = |set: &[&str]| {
+            let mask = set.iter().fold(0usize, |m, id| {
+                m | (1 << ids.iter().position(|x| x == id).unwrap())
+            });
+            mask == 0 || truth & (1 << (mask - 1)) != 0
+        };
+        for ceiling in 0..=8 {
+            let mut oracle = Oracle {
+                rule: green,
+                calls: vec![],
+            };
+            let ev = evaluate_union_in_context(&b, &mut oracle, limits(ceiling), context());
+            assert_eq!(ev.binding().unwrap().probes().len(), ev.probe_count);
+            assert!(ev.probe_count <= ceiling);
+            if ev.stop_reason.is_some() {
+                assert!(ev.authorize_for(&b, &context()).is_none());
+            } else {
+                let auth = ev.authorize_for(&b, &context()).unwrap();
+                if !auth.proceeding.is_empty() {
+                    let set: Vec<&str> = auth.proceeding.iter().map(String::as_str).collect();
+                    assert!(green(&set), "truth={truth} budget={ceiling}");
+                    assert_eq!(
+                        ev.binding().unwrap().probes().last().unwrap().members,
+                        auth.proceeding
+                    );
+                    assert_eq!(
+                        ev.binding()
+                            .unwrap()
+                            .probes()
+                            .last()
+                            .unwrap()
+                            .returned_verdict,
+                        UnionVerdict::Green
+                    );
+                }
+            }
+        }
+    }
+}

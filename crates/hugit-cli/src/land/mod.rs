@@ -15,7 +15,7 @@
 //! the whole queue), it:
 //!
 //! 1. folds them into a [`hugit_queue::core::Batch`];
-//! 2. runs [`evaluate_union_with_limits`] over their union through a REAL [`MemoCheck`]
+//! 2. runs [`evaluate_union_in_context`] over their union through a REAL [`MemoCheck`]
 //!    oracle ([`LogMemoOracle`]) backed by [`run_memoized`] + a file-backed
 //!    Action Cache (the exact [`FileAc`] seam `hugit check run --store` uses);
 //! 3. on a GREEN union, lands every member (appends `pr.landed` per PR);
@@ -49,8 +49,8 @@ use hugit_contracts::{CheckDef, CheckResult, LandableEntry, MinimalFailingPair};
 use hugit_queue::core::affected::AffectedSet;
 use hugit_queue::core::batch::Batch;
 use hugit_queue::core::union::{
-    CheckSource, EvaluationLimits, EvaluationStop, FailureLocus, MemoCheck, UnionEvaluation,
-    UnionVerdict, evaluate_union_with_limits,
+    CheckSource, EvaluationContext, EvaluationLimits, EvaluationStop, FailureLocus, MemoCheck,
+    UnionEvaluation, UnionVerdict, evaluate_union_in_context,
 };
 use hugit_refstore::{Endpoint, EventLog, PrincipalClass};
 use serde_json::{Value, json};
@@ -230,7 +230,7 @@ fn emit(result: Result<Value, PorcelainError>) -> ExitCode {
 /// the live `log`, an [`ActionCache`] backend, and drives:
 ///
 /// - [`all_pr_queued`] → the ordered active queue (already filters settled PRs);
-/// - a [`Batch`] of [`LandableEntry`]s, fed to [`evaluate_union_with_limits`] over a
+/// - a [`Batch`] of [`LandableEntry`]s, fed to [`evaluate_union_in_context`] over a
 ///   [`LogMemoOracle`] (REAL memoized execution, AC-backed);
 /// - on the resulting [`UnionEvaluation`]: append `pr.landed` for each
 ///   proceeding PR, and on a localised red union append one `queue.union_fail`
@@ -266,6 +266,9 @@ pub fn batch_land_with_limits<A: ActionCache>(
             "use a bounded timeout representable as u64 milliseconds",
         )
     })?;
+    // This identity describes the simulation's actual corpus/configuration, not
+    // a validated Git base. Generated here; never selected by report contents.
+    let context = simulation_context(log, campaign, limits)?;
     // The active queue, in queue (order_index) order, scoped to the campaign.
     let mut queued = all_pr_queued(log);
     queued.sort_by_key(|q| q.order_index);
@@ -297,6 +300,8 @@ pub fn batch_land_with_limits<A: ActionCache>(
             "stop_reason": Value::Null,
             "evaluation_budget": {"max_probes": limits.max_probes,
                 "timeout_ms": limits.timeout.as_millis(), "deadline_enforcement": "cooperative_in_process"},
+            "evaluation_context": context,
+            "evaluation_binding": Value::Null,
             "note": "no queued PRs to batch-land (empty queue or campaign scope matched nothing)",
         }));
     }
@@ -358,7 +363,7 @@ pub fn batch_land_with_limits<A: ActionCache>(
         check_def: &check_def,
     };
 
-    let evaluation = evaluate_union_with_limits(&batch, &mut oracle, limits);
+    let evaluation = evaluate_union_in_context(&batch, &mut oracle, limits, context.clone());
     let ids: Vec<&str> = members.iter().map(|(q, _)| q.pr_id.as_str()).collect();
 
     if let Some(reason) = evaluation.stop_reason {
@@ -375,8 +380,16 @@ pub fn batch_land_with_limits<A: ActionCache>(
     let mut staged = log.clone();
     // Land the proceeding (green) set: append a terminal `pr.landed` per PR,
     // routed through the SAME D14-guarded append the `pr` porcelain uses.
-    let proceeding: std::collections::BTreeSet<&str> = evaluation
-        .validated_proceeding()
+    let Some(authorization) = evaluation.authorize_for(&batch, &context) else {
+        return Ok(held_summary(
+            &evaluation,
+            campaign,
+            &ids,
+            EvaluationStop::Invalidated,
+        ));
+    };
+    let proceeding: std::collections::BTreeSet<&str> = authorization
+        .proceeding
         .iter()
         .map(String::as_str)
         .collect();
@@ -390,7 +403,7 @@ pub fn batch_land_with_limits<A: ActionCache>(
 
     // Only the diagnosed locus is excluded. The unvalidated remainder stays
     // held; absence from proceeding does not accuse it of the diagnosed failure.
-    let excluded = evaluation.validated_excluded().to_vec();
+    let excluded = authorization.excluded.to_vec();
 
     // On a RED union, record the bisected failure so `queue show` lights up.
     let failing_pair_json = match (&evaluation.verdict, &evaluation.failure) {
@@ -417,6 +430,17 @@ pub fn batch_land_with_limits<A: ActionCache>(
             EvaluationStop::DeadlineExceeded,
         ));
     }
+    // Re-check the original live capability, not cached public summary fields.
+    // &mut EventLog prevents an in-process caller from replacing this corpus
+    // during evaluation; external file concurrency remains the lock's contract.
+    if evaluation.authorize_for(&batch, &context).is_none() {
+        return Ok(held_summary(
+            &evaluation,
+            campaign,
+            &ids,
+            EvaluationStop::Invalidated,
+        ));
+    }
     *log = staged;
     Ok(json!({
         "queued": members.len(),
@@ -436,7 +460,48 @@ pub fn batch_land_with_limits<A: ActionCache>(
         "probe_count": evaluation.probe_count,
         "stop_reason": Value::Null,
         "evaluation_budget": evaluation_budget(&evaluation),
+        "evaluation_context": context,
+        "evaluation_binding": evaluation.binding(),
     }))
+}
+
+/// Bind an invocation to the complete input ledger and all simulator knobs.
+/// The random ID distinguishes attempts, including retries on identical inputs.
+/// No journal or Git operation is created here: serializing this context does
+/// not make it a transferable/restartable authorization.
+fn simulation_context(
+    log: &EventLog,
+    campaign: Option<&str>,
+    limits: EvaluationLimits,
+) -> Result<EvaluationContext, PorcelainError> {
+    use sha2::{Digest, Sha256};
+    let digest = |value: &Value| -> Result<String, PorcelainError> {
+        let raw = serde_json::to_vec(value)
+            .map_err(|_| PorcelainError::internal("cannot encode simulation identity"))?;
+        Ok(hex::encode(Sha256::digest(raw)))
+    };
+    let base = serde_json::to_value(log.records())
+        .map_err(|_| PorcelainError::internal("cannot encode simulation corpus"))?;
+    let config = json!({
+        "schema":"hugit.queue-simulation-config/1", "algorithm":"bounded-remainder/2",
+        "check_def_digest":compute_def_digest(&local_check_def()),
+        "toolchain":LOCAL_TOOLCHAIN_DIGEST, "campaign":campaign,
+        "max_probes":limits.max_probes, "timeout_ms":limits.timeout.as_millis(),
+    });
+    let mut entropy = [0u8; 16];
+    getrandom::fill(&mut entropy).map_err(|_| {
+        PorcelainError::new(
+            "entropy_unavailable",
+            "cannot identify a new queue evaluation",
+            "restore OS randomness availability; no evaluation was started",
+        )
+    })?;
+    Ok(EvaluationContext {
+        operation_id: format!("queue-{}", hex::encode(entropy)),
+        base_id: format!("event-log-sha256:{}", digest(&base)?),
+        config_id: format!("simulation-config-sha256:{}", digest(&config)?),
+        scope: "simulation_only".into(),
+    })
 }
 
 fn evaluation_budget(ev: &UnionEvaluation) -> Value {
@@ -956,5 +1021,126 @@ mod remainder_safety_tests {
         .unwrap_err();
         assert_eq!(error.kind(), "invalid_argument");
         assert_eq!(log, before);
+    }
+}
+
+#[cfg(test)]
+mod evaluation_binding_tests {
+    use super::*;
+    use hugit_checks::client::ac::InMemoryAc;
+
+    fn input() -> EventLog {
+        let mut log = EventLog::new();
+        for (order, id, content) in [(0, "A", "conflicts-with:B"), (1, "B", "b"), (2, "C", "c")] {
+            log.append_for_test(
+                "pr.opened",
+                vec!["orchestrator:hugit".into()],
+                json!({"pr_id":id,"campaign":"bound","author_kind":"orchestrator",
+                       "run_id":"fixture","principal":null,"intent_ids":[content]})
+                .to_string(),
+                0,
+            );
+            log.append_for_test("pr.queued", vec!["orchestrator:hugit".into()],
+                json!({"pr_id":id,"item_id":format!("{id}#{order}"),"order_index":order,"mode":"union"}).to_string(), 0);
+        }
+        log
+    }
+
+    #[test]
+    fn simulation_context_identifies_corpus_configuration_and_new_attempts() {
+        let mut log = input();
+        let limits = EvaluationLimits::default();
+        let a = simulation_context(&log, Some("bound"), limits).unwrap();
+        let b = simulation_context(&log, Some("bound"), limits).unwrap();
+        assert_ne!(a.operation_id, b.operation_id);
+        assert_eq!(a.base_id, b.base_id);
+        assert_eq!(a.config_id, b.config_id);
+        assert!(a.base_id.starts_with("event-log-sha256:"));
+        assert_eq!(a.scope, "simulation_only");
+        for (campaign, budget) in [
+            (None, limits),
+            (Some("other"), limits),
+            (
+                Some("bound"),
+                EvaluationLimits {
+                    max_probes: 5,
+                    ..limits
+                },
+            ),
+            (
+                Some("bound"),
+                EvaluationLimits {
+                    timeout: Duration::from_secs(1),
+                    ..limits
+                },
+            ),
+        ] {
+            let other = simulation_context(&log, campaign, budget).unwrap();
+            assert_eq!(a.base_id, other.base_id);
+            assert_ne!(a.config_id, other.config_id);
+        }
+        log.append_for_test("fixture.changed", vec![], "{}".into(), 1);
+        assert_ne!(
+            a.base_id,
+            simulation_context(&log, Some("bound"), limits)
+                .unwrap()
+                .base_id
+        );
+    }
+
+    #[test]
+    fn cli_simulation_reports_actual_probes_bound_to_the_original_corpus() {
+        let mut log = input();
+        let expected =
+            simulation_context(&log, Some("bound"), EvaluationLimits::default()).unwrap();
+        let result = batch_land(&mut log, &InMemoryAc::new(), Some("bound"), 10).unwrap();
+        assert_eq!(result["landed"], json!(["C"]));
+        assert_eq!(result["evaluation_context"]["base_id"], expected.base_id);
+        assert_eq!(
+            result["evaluation_context"]["config_id"],
+            expected.config_id
+        );
+        assert_eq!(
+            result["evaluation_binding"]["context"],
+            result["evaluation_context"]
+        );
+        let probes = result["evaluation_binding"]["probes"].as_array().unwrap();
+        assert_eq!(probes.len() as u64, result["probe_count"].as_u64().unwrap());
+        assert_eq!(probes.last().unwrap()["members"], json!(["C"]));
+        assert_eq!(probes.last().unwrap()["returned_verdict"], "green");
+        assert_eq!(result["validation_scope"], "simulation_only");
+        assert_eq!(result["git_tree_verified"], false);
+    }
+
+    #[test]
+    fn inconclusive_retry_gets_new_identity_without_rewriting_the_corpus() {
+        let mut log = input();
+        let before = serde_json::to_vec(log.records()).unwrap();
+        let budget = EvaluationLimits {
+            max_probes: 5,
+            ..EvaluationLimits::default()
+        };
+        let first = batch_land_with_limits(&mut log, &InMemoryAc::new(), Some("bound"), 10, budget)
+            .unwrap();
+        let next = batch_land_with_limits(&mut log, &InMemoryAc::new(), Some("bound"), 10, budget)
+            .unwrap();
+        assert_eq!(first["stop_reason"], "probe_budget_exhausted");
+        assert_eq!(serde_json::to_vec(log.records()).unwrap(), before);
+        assert_ne!(
+            first["evaluation_context"]["operation_id"],
+            next["evaluation_context"]["operation_id"]
+        );
+        assert_eq!(
+            first["evaluation_context"]["base_id"],
+            next["evaluation_context"]["base_id"]
+        );
+        assert_eq!(
+            first["evaluation_binding"]["probes"]
+                .as_array()
+                .unwrap()
+                .len(),
+            5
+        );
+        assert_eq!(first["landed"], json!([]));
     }
 }

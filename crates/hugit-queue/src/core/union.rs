@@ -7,6 +7,7 @@
 use crate::core::batch::Batch;
 use crate::core::state::UnionOutcome;
 use hugit_contracts::MinimalFailingPair;
+use serde::Serialize;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -14,7 +15,8 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 /// A check result, distinct from whether the diagnostic operation completed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum UnionVerdict {
     Green,
     Red,
@@ -35,7 +37,8 @@ impl UnionVerdict {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CheckSource {
     Hit,
     Executed,
@@ -45,6 +48,18 @@ pub enum CheckSource {
 /// own bounded I/O and cleanup; this trait cannot preempt a blocking callback.
 pub trait MemoCheck {
     fn evaluate(&mut self, item_ids: &[&str]) -> (UnionVerdict, Vec<CheckSource>);
+
+    /// Context comes from the caller's observed inputs, not from a check report.
+    /// The adapter must evaluate those inputs. Passing labels through this trait
+    /// is identity binding, NOT independent attestation of a Git tree or host.
+    fn evaluate_in_context(
+        &mut self,
+        item_ids: &[&str],
+        deadline: Instant,
+        _context: &EvaluationContext,
+    ) -> (UnionVerdict, Vec<CheckSource>) {
+        self.evaluate_before(item_ids, deadline)
+    }
 
     /// The SAME absolute deadline is passed to every probe. Override to propagate
     /// it inside a multi-step oracle. The engine also checks before/after return:
@@ -68,6 +83,7 @@ pub enum EvaluationStop {
     InfrastructureFailure,
     InvalidBatch,
     InvalidLimits,
+    InvalidContext,
     Invalidated,
 }
 impl EvaluationStop {
@@ -79,6 +95,7 @@ impl EvaluationStop {
             Self::InfrastructureFailure => "infrastructure_failure",
             Self::InvalidBatch => "invalid_batch",
             Self::InvalidLimits => "invalid_limits",
+            Self::InvalidContext => "invalid_context",
             Self::Invalidated => "invalidated",
         }
     }
@@ -111,8 +128,98 @@ pub enum FailureLocus {
     Unlocalised,
 }
 
+/// Identity of one evaluation, supplied by its trusted in-process adapter.
+/// Base/config IDs are opaque typed-by-scope references. For example, the CLI
+/// uses an event-log digest, NOT a Git base OID. This is not an authentication
+/// token, crash journal, or transferable authorization after process restart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EvaluationContext {
+    pub operation_id: String,
+    pub base_id: String,
+    pub config_id: String,
+    pub scope: String,
+}
+impl EvaluationContext {
+    fn is_valid(&self) -> bool {
+        [
+            &self.operation_id,
+            &self.base_id,
+            &self.config_id,
+            &self.scope,
+        ]
+        .iter()
+        .all(|s| !s.trim().is_empty() && s.len() <= 512 && !s.chars().any(char::is_control))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct MemberSnapshot {
+    item_id: String,
+    intent_id: String,
+    tree_hash: String,
+    order_index: u64,
+    affected: Vec<String>,
+    state: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct BatchSnapshot {
+    batch_id: String,
+    members: Vec<MemberSnapshot>,
+}
+impl BatchSnapshot {
+    fn capture(batch: &Batch) -> Self {
+        Self {
+            batch_id: batch.batch_id.clone(),
+            members: batch
+                .entries()
+                .iter()
+                .map(|entry| MemberSnapshot {
+                    item_id: entry.item_id().to_owned(),
+                    intent_id: entry.landable.intent_id.clone(),
+                    tree_hash: entry.landable.tree_hash.clone(),
+                    order_index: entry.order_index(),
+                    affected: entry.affected.keys().map(str::to_owned).collect(),
+                    state: format!("{:?}", entry.state),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// One callback response, not necessarily an accepted result (a late green
+/// remains visible here, while stop_reason invalidates all authorization).
+#[derive(Debug, Clone, Serialize)]
+pub struct ProbeObservation {
+    pub members: Vec<String>,
+    pub returned_verdict: UnionVerdict,
+    pub sources: Vec<CheckSource>,
+}
+
+/// Observational data only: intentionally Serialize, never Deserialize into a
+/// live capability. Private result snapshots and deadline grant authorization.
+#[derive(Debug, Clone, Serialize)]
+pub struct EvaluationBinding {
+    context: EvaluationContext,
+    batch: BatchSnapshot,
+    probes: Vec<ProbeObservation>,
+}
+impl EvaluationBinding {
+    pub fn context(&self) -> &EvaluationContext {
+        &self.context
+    }
+    pub fn probes(&self) -> &[ProbeObservation] {
+        &self.probes
+    }
+}
+
+pub struct BoundAuthorization<'a> {
+    pub proceeding: &'a [String],
+    pub excluded: &'a [String],
+}
+
 /// Public fields report observations; private snapshots grant transitions.
-/// Identity here is ordered member IDs, NOT a qualified Git/base/config token.
+/// Legacy evaluation binds ordered IDs only. Context-bound evaluation additionally
+/// checks the full batch snapshot and context at each authorization request.
 #[derive(Debug, Clone)]
 pub struct UnionEvaluation {
     pub verdict: UnionVerdict,
@@ -136,9 +243,39 @@ pub struct UnionEvaluation {
     excluded_members: Vec<String>,
     valid_until: Option<Instant>,
     revoked: Arc<AtomicBool>,
+    binding: Option<EvaluationBinding>,
 }
 
 impl UnionEvaluation {
+    /// Read-only record of actual probes. Mutating a clone of this record cannot
+    /// change the result's private authorization snapshots.
+    pub fn binding(&self) -> Option<&EvaluationBinding> {
+        self.binding.as_ref()
+    }
+
+    /// No implicit subset, reordered batch, new contents or different operation
+    /// can reuse a bound result. Re-check immediately before staging transitions;
+    /// the caller owns atomicity and any external-input freshness check.
+    pub fn authorize_for(
+        &self,
+        batch: &Batch,
+        context: &EvaluationContext,
+    ) -> Option<BoundAuthorization<'_>> {
+        let binding = self.binding.as_ref()?;
+        if !self.authorization_live()
+            || &binding.context != context
+            || binding.batch != BatchSnapshot::capture(batch)
+        {
+            return None;
+        }
+        // Snapshot comparison itself consumes time: do not return a capability
+        // which expired or was revoked while those inputs were being compared.
+        self.authorization_live().then_some(BoundAuthorization {
+            proceeding: &self.validated_members,
+            excluded: &self.excluded_members,
+        })
+    }
+
     fn authorization_live(&self) -> bool {
         !self.revoked.load(Ordering::Acquire)
             && self.valid_until.is_some_and(|until| Instant::now() < until)
@@ -149,7 +286,7 @@ impl UnionEvaluation {
     }
 
     pub fn validated_proceeding(&self) -> &[String] {
-        if self.authorization_live() {
+        if self.binding.is_none() && self.authorization_live() {
             &self.validated_members
         } else {
             &[]
@@ -158,7 +295,7 @@ impl UnionEvaluation {
 
     /// Only the diagnosed exclusion snapshot, never a caller-edited `failure`.
     pub fn validated_excluded(&self) -> &[String] {
-        if self.authorization_live() {
+        if self.binding.is_none() && self.authorization_live() {
             &self.excluded_members
         } else {
             &[]
@@ -177,7 +314,8 @@ impl UnionEvaluation {
 
     /// Reject altered input sets/order and results past their evaluation deadline.
     pub fn outcomes_for_landing<'a>(&self, ids: &[&'a str]) -> Vec<(&'a str, UnionOutcome)> {
-        if !self.authorization_live()
+        if self.binding.is_some()
+            || !self.authorization_live()
             || !ids
                 .iter()
                 .copied()
@@ -266,6 +404,71 @@ pub fn evaluate_union_with_limits<M: MemoCheck>(
     evaluate_union_with_clock(batch, oracle, limits, Instant::now)
 }
 
+/// Evaluate under an explicit base/config/operation identity and capture every
+/// queried ordered set. Legacy ID-only authorization accessors deny this result.
+/// Neither this API nor its report authenticates caller-supplied identities.
+pub fn evaluate_union_in_context<M: MemoCheck>(
+    batch: &Batch,
+    oracle: &mut M,
+    limits: EvaluationLimits,
+    context: EvaluationContext,
+) -> UnionEvaluation {
+    let snapshot = BatchSnapshot::capture(batch);
+    let mut observations = Vec::new();
+    let mut evaluation = if context.is_valid() {
+        struct Scoped<'a, M> {
+            oracle: &'a mut M,
+            context: &'a EvaluationContext,
+            observations: &'a mut Vec<ProbeObservation>,
+        }
+        impl<M: MemoCheck> MemoCheck for Scoped<'_, M> {
+            fn evaluate(&mut self, _: &[&str]) -> (UnionVerdict, Vec<CheckSource>) {
+                unreachable!("bounded engine always forwards the absolute deadline")
+            }
+            fn evaluate_before(
+                &mut self,
+                ids: &[&str],
+                deadline: Instant,
+            ) -> (UnionVerdict, Vec<CheckSource>) {
+                let (verdict, sources) =
+                    self.oracle.evaluate_in_context(ids, deadline, self.context);
+                self.observations.push(ProbeObservation {
+                    members: ids.iter().map(|id| (*id).to_owned()).collect(),
+                    returned_verdict: verdict,
+                    sources: sources.clone(),
+                });
+                (verdict, sources)
+            }
+        }
+        let mut scoped = Scoped {
+            oracle,
+            context: &context,
+            observations: &mut observations,
+        };
+        evaluate_union_with_limits(batch, &mut scoped, limits)
+    } else {
+        // Invalid identity never invokes the adapter, even for an otherwise green batch.
+        let mut result = evaluate_union_with_limits(
+            batch,
+            oracle,
+            EvaluationLimits {
+                max_probes: 0,
+                timeout: Duration::ZERO,
+            },
+        );
+        result.stop_reason = Some(EvaluationStop::InvalidContext);
+        result.verdict = UnionVerdict::Unknown;
+        result.revoked.store(true, Ordering::Release);
+        result
+    };
+    evaluation.binding = Some(EvaluationBinding {
+        context,
+        batch: snapshot,
+        probes: observations,
+    });
+    evaluation
+}
+
 fn evaluate_union_with_clock<M: MemoCheck, F: Fn() -> Instant>(
     batch: &Batch,
     oracle: &mut M,
@@ -295,6 +498,7 @@ fn evaluate_union_with_clock<M: MemoCheck, F: Fn() -> Instant>(
         excluded_members: Vec::new(),
         valid_until: deadline,
         revoked: Arc::new(AtomicBool::new(false)),
+        binding: None,
     };
     let Some(deadline) = deadline else {
         ev.stop_reason = Some(EvaluationStop::InvalidLimits);
