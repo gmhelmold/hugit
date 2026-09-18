@@ -5,12 +5,17 @@ This program never runs a command, reducer, hook, or content from the input.
 Exit 0 verifies characterization, NOT product acceptance. --product-gate returns
 1 for a reproduced regression; malformed/incomplete evidence returns 2.
 The record is historical evidence for its selected executable, not a new run.
+Static sources come from an explicit frozen snapshot, not the live checkout.
+Verification only reads. --self-test creates and removes its own temporary fixtures.
 """
 from __future__ import annotations
 import argparse
 import copy
 import hashlib
 import json
+import os
+import stat
+import tempfile
 from pathlib import Path
 import re
 import sys
@@ -18,6 +23,27 @@ import sys
 FINDINGS = ('F03', 'F04', 'F06', 'F09', 'F10')
 STATIC_FINDINGS = ('F01',)
 MAX_INPUT = 1024 * 1024
+MAX_SOURCE = 1024 * 1024
+STATIC_SOURCE_COMMIT = "ce2fcf1b8243eea2bd1be5aff25dfb3f6571ead4"
+# Trusted historical inputs: never selected or weakened by the report.
+STATIC_SOURCES = {'crates/hugit-cli/src/checks/run.rs': {'sha256': '09e444a498b63e80036df960e08b655a8f1c9fd9b755f9ccaad11959d5560979',
+                                        'requires': ['captured_hermetic_env',
+                                                     'run_memoized',
+                                                     'ad-hoc check']},
+ 'docs/review/round13/wedge-decider.md': {'sha256': 'cf4f525fc3c4855e6b41b8b9fa2945a45b7aa9369555d666f3801086896a3659',
+                                          'requires': ['finally DRY', 'OUTSIDE', 'memoized-CI']},
+ 'docs/plan/standalone/v3/work-packages/HUG-012.md': {'sha256': 'a379962763b1b24e4e8586d11403ad2a48ba28f76e5c8495af278c202350bf9c',
+                                                      'requires': ['falso verde F01',
+                                                                   'Worktree mutável não autoriza '
+                                                                   'skip automático',
+                                                                   'shell é reexecutado ou reuso '
+                                                                   'negado']},
+ 'docs/plan/standalone/v3/work-packages/HUG-013.md': {'sha256': '07c143e579dae2fd77c5d646194e3958af2fc0eb431a7e381b468cd567e2725e',
+                                                      'requires': ['shell tests, rede, relógio, '
+                                                                   'randomness e bancos fora do '
+                                                                   'allowlist',
+                                                                   'Native cache validity pertence '
+                                                                   'ao motor qualificado']}}
 
 class EvidenceError(ValueError):
     pass
@@ -149,34 +175,67 @@ def evaluate(w):
                             'resolvable_nonempty_refs': True}, refs, False)
     return result
 
+def read_bounded_regular(path, limit):
+    """Bounded cooperative-host read; this is not a hostile same-user sandbox."""
+    before = path.lstat()
+    need(stat.S_ISREG(before.st_mode) and not path.is_symlink(), 'source_type')
+    need(before.st_size <= limit, 'source_budget')
+    flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+    flags |= getattr(os, 'O_BINARY', 0)
+    with os.fdopen(os.open(path, flags), 'rb') as stream:
+        opened = os.fstat(stream.fileno())
+        need(stat.S_ISREG(opened.st_mode)
+             and (opened.st_dev, opened.st_ino) == (before.st_dev, before.st_ino), 'source_type')
+        raw = stream.read(limit + 1)
+    need(len(raw) <= limit, 'source_budget')
+    return raw
+
+def read_static_source(root, relative):
+    base = root.resolve(strict=True)
+    need(base.is_dir(), 'source_root')
+    current = base
+    for part in Path(relative).parts[:-1]:
+        current = current / part
+        need(stat.S_ISDIR(current.lstat().st_mode) and not current.is_symlink(), 'source_type')
+    return read_bounded_regular(base / relative, MAX_SOURCE)
+
 def verify_static(report, root):
     static = report.get('static_findings')
     need(isinstance(static, dict) and set(static) == set(STATIC_FINDINGS), 'static_finding_set')
     row = static['F01']
+    need(isinstance(row, dict), 'static_shape')
+    need(row.get('source_commit') == STATIC_SOURCE_COMMIT, 'static_source_commit')
     need(row.get('classification') == 'limit_justified'
          and row.get('outcome') == 'limit_justified', 'static_classification')
     need(row.get('correction_packages') == ['HUG-012', 'HUG-013'], 'static_owners')
-    need(row.get('observed', {}).get('product_fix_claimed') is False, 'static_false_fix')
-    need(isinstance(row.get('limits'), list) and len(row['limits']) >= 3, 'static_limits')
+    observed = row.get('observed')
+    need(isinstance(observed, dict) and observed.get('product_fix_claimed') is False,
+         'static_false_fix')
+    limits = row.get('limits')
+    need(isinstance(limits, list) and len(limits) >= 3
+         and all(isinstance(x, str) and x.strip() for x in limits), 'static_limits')
+    need(isinstance(row.get('expected'), str) and row['expected'].strip(), 'static_expected')
     evidence = row.get('evidence')
-    need(isinstance(evidence, list) and len(evidence) == 4, 'static_evidence_set')
-    seen = set()
+    need(isinstance(evidence, list) and len(evidence) == len(STATIC_SOURCES)
+         and all(isinstance(x, dict) and isinstance(x.get('path'), str) for x in evidence),
+         'static_evidence_set')
+    # Check the entire authorized set before performing any source read.
+    need({x['path'] for x in evidence} == set(STATIC_SOURCES), 'static_source_set')
     for item in evidence:
-        path = item.get('path')
-        need(isinstance(path, str) and path and '..' not in Path(path).parts
-             and not Path(path).is_absolute() and path not in seen, 'static_path')
-        seen.add(path)
-        raw = (root / path).read_bytes()
-        need(hashlib.sha256(raw).hexdigest() == item.get('sha256'), 'static_digest')
+        path = item['path']
+        trusted = STATIC_SOURCES[path]
+        need(item.get('sha256') == trusted['sha256']
+             and item.get('requires') == trusted['requires'], 'static_contract_drift')
+        raw = read_static_source(root, path)
+        need(hashlib.sha256(raw).hexdigest() == trusted['sha256'], 'static_digest')
         text = raw.decode('utf-8')
-        required = item.get('requires')
-        need(isinstance(required, list) and required
-             and all(isinstance(x, str) and x in text for x in required), 'static_anchor')
+        need(all(x in text for x in trusted['requires']), 'static_anchor')
     need(report['finding_registry']['F01']['disposition']
          == 'static_limit_justified_checker_published', 'static_registry')
     return static
 
 def verify(report, root=Path('.')):
+    need(isinstance(report, dict), 'report_shape')
     results = evaluate(reconstruct(report))
     static = verify_static(report, root)
     need(set(results) == set(FINDINGS)
@@ -185,6 +244,17 @@ def verify(report, root=Path('.')):
     need(set(report['finding_registry']) == {'F%02d' % i for i in range(1, 20)}, 'finding_omitted')
     need(report['origin']['workflow_head_sha'] == report['subject_claim'], 'workflow_subject_mismatch')
     need(report['origin']['binary_metadata']['sha256'] == report['binary_sha256'], 'binary_metadata_mismatch')
+    pending = set(report['finding_registry']) - set(FINDINGS) - set(STATIC_FINDINGS)
+    for fid, entry in report['finding_registry'].items():
+        expected = ('pending_followup_in_HUG003' if fid in pending else
+                    'static_limit_justified_checker_published' if fid in STATIC_FINDINGS else
+                    'runtime_observed_locally_checker_published')
+        need(isinstance(entry, dict) and entry.get('disposition') == expected, 'registry_disposition')
+    counts = {k: sum(x['outcome'] == k for x in results.values())
+              for k in ('satisfied', 'regression_reproduced')}
+    counts['limit_justified'] = len(static)
+    need(json.dumps(report['counts'], sort_keys=True) == json.dumps(counts, sort_keys=True),
+         'counts_mismatch')
     return results, static
 
 def self_test(report, root):
@@ -214,6 +284,13 @@ def self_test(report, root):
         'lost_static_finding': lambda r: r['static_findings'].pop('F01'),
         'false_static_fix': lambda r: r['static_findings']['F01']['observed'].update(product_fix_claimed=True),
         'wrong_static_digest': lambda r: r['static_findings']['F01']['evidence'][0].update(sha256='0'*64),
+        'weakened_static_anchor': lambda r: r['static_findings']['F01']['evidence'][0].update(requires=['fn']),
+        'substituted_static_source': lambda r: r['static_findings']['F01']['evidence'][0].update(path='README.md'),
+        'wrong_static_commit': lambda r: r['static_findings']['F01'].update(source_commit='0'*40),
+        'empty_static_limits': lambda r: r['static_findings']['F01'].update(limits=['', '', '']),
+        'malformed_static_row': lambda r: r['static_findings'].update(F01=[]),
+        'promoted_pending_finding': lambda r: r['finding_registry']['F02'].update(disposition='satisfied'),
+        'forged_counts': lambda r: r['counts'].update(satisfied=19),
     })
     for name, mutate in mutations.items():
         altered = copy.deepcopy(report); mutate(altered)
@@ -223,19 +300,76 @@ def self_test(report, root):
             outcomes[name] = 'rejected'
         else:
             raise EvidenceError('mutation_accepted:' + name)
+    outcomes.update(source_self_test(report, root))
+    return outcomes
+
+def source_self_test(report, root):
+    """Only synthetic private fixtures are mutated; the supplied snapshot is untouched."""
+    originals = {path: read_static_source(root, path) for path in STATIC_SOURCES}
+    outcomes = {}
+    def refused(name, action, code):
+        try:
+            action()
+        except EvidenceError as error:
+            need(str(error) == code, 'wrong_refusal:' + name)
+            outcomes[name] = 'rejected'
+        else:
+            raise EvidenceError('mutation_accepted:' + name)
+    with tempfile.TemporaryDirectory(prefix='hugit-baseline-source-test-') as owned:
+        base = Path(owned) / 'snapshot'
+        for path, raw in originals.items():
+            target = base / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(raw)
+        verify(report, base)
+        outcomes['frozen_snapshot_positive'] = 'passed'
+        relative = next(iter(STATIC_SOURCES))
+        target = base / relative
+        target.write_bytes(originals[relative] + b'\nchanged fixture\n')
+        refused('changed_source_bytes', lambda: verify(report, base), 'static_digest')
+        target.write_bytes(originals[relative])
+        # Enforce the budget through the same reader, using a tiny benign file.
+        budget = Path(owned) / 'budget.txt'
+        budget.write_bytes(b'12345')
+        refused('bounded_source_read', lambda: read_bounded_regular(budget, 4), 'source_budget')
+        refused('nonregular_source', lambda: read_bounded_regular(base, MAX_SOURCE), 'source_type')
+        # A separate evolving checkout cannot alter the retained source snapshot.
+        current = Path(owned) / 'current-checkout'
+        current.mkdir()
+        (current / 'edited.txt').write_text('new product code, not historical evidence')
+        verify(report, base)
+        outcomes['separate_snapshot_preserved'] = 'passed'
+        if os.name == 'posix':
+            target.unlink()
+            target.symlink_to(budget)
+            refused('source_symlink', lambda: verify(report, base), 'source_type')
+            target.unlink(); target.write_bytes(originals[relative])
+            parent = target.parent
+            saved = parent.with_name('saved-source-dir')
+            parent.rename(saved); parent.symlink_to(saved, target_is_directory=True)
+            refused('source_parent_symlink', lambda: verify(report, base), 'source_type')
+            parent.unlink(); saved.rename(parent)
+        else:
+            outcomes['source_symlink'] = 'not_run_on_non_posix'
+            outcomes['source_parent_symlink'] = 'not_run_on_non_posix'
+        verify(report, base)
+    need(not Path(owned).exists(), 'owned_fixture_cleanup')
+    need(all(read_static_source(root, path) == raw for path, raw in originals.items()),
+         'supplied_snapshot_changed')
+    outcomes['owned_fixture_cleanup'] = 'passed'
+    outcomes['supplied_snapshot_unchanged'] = 'passed'
     return outcomes
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--report', type=Path, required=True)
-    ap.add_argument('--root', type=Path, default=Path('.'))
+    ap.add_argument('--root', type=Path, default=Path('.'),
+                    help='source snapshot at ' + STATIC_SOURCE_COMMIT + '; not the evolving checkout')
     ap.add_argument('--self-test', action='store_true')
     ap.add_argument('--product-gate', action='store_true')
     args = ap.parse_args()
     try:
-        with args.report.open('rb') as stream:
-            raw = stream.read(MAX_INPUT + 1)
-        need(len(raw) <= MAX_INPUT, 'input_budget')
+        raw = read_bounded_regular(args.report, MAX_INPUT)
         report = parse(raw)
         results, static = verify(report, args.root)
         tests = self_test(report, args.root) if args.self_test else {}
@@ -243,10 +377,13 @@ def main():
                   for k in ('satisfied', 'regression_reproduced')}
         print(json.dumps(dict(evidence_consistent=True, product_accepted=False,
             whole_wp_ready=False, report_sha256=hashlib.sha256(raw).hexdigest(),
-            findings=results, static_findings=static, counts={**counts, 'limit_justified': len(static)}, controls=tests,
+            findings=results, static_source_commit=STATIC_SOURCE_COMMIT,
+            static_findings=static, counts={**counts, 'limit_justified': len(static)},
+            pending_findings=sorted(set(report['finding_registry']) - set(FINDINGS) - set(STATIC_FINDINGS)),
+            controls=tests,
             scope='retained_observations_only; no product executed'), sort_keys=True))
         return 1 if args.product_gate and counts['regression_reproduced'] else 0
-    except (OSError, EvidenceError, KeyError, ValueError, TypeError, IndexError, RecursionError) as error:
+    except (OSError, EvidenceError, KeyError, ValueError, TypeError, IndexError, AttributeError, RecursionError) as error:
         code = str(error)[:120] if isinstance(error, EvidenceError) else 'invalid_or_missing_evidence'
         print(json.dumps(dict(evidence_consistent=False, product_accepted=False, error=code)))
         return 2

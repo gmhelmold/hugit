@@ -41,8 +41,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          SOURCE=$(mktemp -d)
+          trap 'rm -rf "$SOURCE"' EXIT
+          # Historical assertions must not freeze future product edits.
+          git archive ce2fcf1b8243eea2bd1be5aff25dfb3f6571ead4 \
+            crates/hugit-cli/src/checks/run.rs \
+            docs/review/round13/wedge-decider.md \
+            docs/plan/standalone/v3/work-packages/HUG-012.md \
+            docs/plan/standalone/v3/work-packages/HUG-013.md \
+            | tar -x -C "$SOURCE"
           python3 scripts/acceptance/baseline_oracles.py \
-            --report docs/audit/baseline-results.json --self-test \
+            --report docs/audit/baseline-results.json --root "$SOURCE" --self-test \
             | tee "$RUNNER_TEMP/hug003-retained-oracles.json"
       - name: Retain baseline evidence consistency result (not product approval)
         if: always()
