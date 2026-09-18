@@ -522,7 +522,9 @@ fn held_summary(
            "locus":locus_kind(ev), "stop_reason":reason.as_str(),
            "executed_count":ev.executed_count, "execution_count_complete":ev.execution_count_complete,
            "probe_count":ev.probe_count, "evaluation_budget":evaluation_budget(ev),
-           "validation_scope":"simulation_only", "git_tree_verified":false})
+           "validation_scope":"simulation_only", "git_tree_verified":false,
+           "evaluation_context":ev.binding().map(|b| b.context()),
+           "evaluation_binding":ev.binding()})
 }
 
 /// Append one terminal `pr.landed` for a proceeding PR, idempotently (a PR the
@@ -1079,7 +1081,7 @@ mod evaluation_binding_tests {
             assert_eq!(a.base_id, other.base_id);
             assert_ne!(a.config_id, other.config_id);
         }
-        log.append_for_test("fixture.changed", vec![], "{}".into(), 1);
+        log.append_for_test("fixture.changed", vec![], "{}", 1);
         assert_ne!(
             a.base_id,
             simulation_context(&log, Some("bound"), limits)
