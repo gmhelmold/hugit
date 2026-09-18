@@ -5,6 +5,7 @@ on:
     paths:
       - 'docs/plan/standalone/**'
       - 'scripts/plan/**'
+      - 'scripts/acceptance/**'
       - 'docs/audit/**'
       - '.github/workflows/standalone-plan-validation.yml'
   push:
@@ -12,6 +13,7 @@ on:
     paths:
       - 'docs/plan/standalone/**'
       - 'scripts/plan/**'
+      - 'scripts/acceptance/**'
       - 'docs/audit/**'
       - '.github/workflows/standalone-plan-validation.yml'
 
@@ -35,6 +37,21 @@ jobs:
         run: python3 scripts/plan/check_import.py
       - name: Exercise importer controls without GitHub mutations
         run: python3 scripts/plan/test_sync.py
+      - name: Verify retained baseline observations (not a new product run)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/acceptance/baseline_oracles.py \
+            --report docs/audit/baseline-results.json --self-test \
+            | tee "$RUNNER_TEMP/hug003-retained-oracles.json"
+      - name: Retain baseline evidence consistency result (not product approval)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: hug003-retained-oracles-${{ github.sha }}
+          path: ${{ runner.temp }}/hug003-retained-oracles.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Test bounded acquisition verifier with isolated Git fixtures
         run: python3 scripts/plan/test_inventory.py
       - name: Verify historical acquisition and surface contracts against pinned Git source
