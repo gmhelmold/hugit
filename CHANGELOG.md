@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(queue): revalidate the exact remaining union after excluding a diagnosed
+  conflict. Red or unlocalized remainders stay held rather than gaining landing
+  authorization; altered input sets cannot reuse a prior landing projection.
+  Local queue output distinguishes held/excluded members and explicitly labels
+  its conflict oracle as simulation, not verification of a real Git tree.
+
 - fix(cli): Windows hook capture now refuses unsupported receipt persistence
   explicitly without blocking Git or appending a canonical event. Windows CI
   runs the release-equivalent workspace test, release build, and binary smoke.

@@ -3,7 +3,8 @@
 //! Whitepaper §6.4: `U = fold(regen-rebase, head, batch)`, then run the
 //! affected memoised checks on `U`. Most checks are AC hits — only novelty
 //! executes. On a red union, bisect the batch over the (≈ free) memoised
-//! checks to the minimal failing pair, exclude it, and let the rest proceed.
+//! checks to a failing locus, then RE-EVALUATE the exact remainder. Diagnosis
+//! never authorizes an untested set. A red remainder is held for a later attempt.
 //!
 //! B4a is engine-pure: the actual rebase and check execution live behind the
 //! `MemoCheck` trait so the engine is testable in isolation (no GitHub API,
@@ -58,10 +59,10 @@ pub trait MemoCheck {
 pub enum FailureLocus {
     /// A genuine minimal failing pair: the 2-element union `(a, b)` is red, and
     /// EACH member is individually GREEN (so neither is a single-item failure).
-    /// Both members are NAMED (contract ①) and excluded; the rest proceed.
+    /// Both members are named and excluded; the remainder needs its own green.
     Pair(MinimalFailingPair),
     /// A single item is individually red — the failure is that one item, not a
-    /// pair. Excluding it (alone) lets the rest proceed. Naming a second,
+    /// pair. Excluding it requires revalidation of the remainder. Naming a second,
     /// innocent item as a "pair member" would be a false accusation, so the
     /// single-item case is reported explicitly and never disguised as a pair.
     SingleItem(String),
@@ -90,46 +91,63 @@ pub struct UnionEvaluation {
     /// Total number of check evaluations that actually executed (novelty).
     /// Zero when every check was an AC hit (contract ②).
     pub executed_count: usize,
+    /// Members kept in the queue because no green evaluation authorizes them.
+    /// A held member is not accused of belonging to the diagnosed locus.
+    pub held: Vec<String>,
+    /// Result of the exact remainder probe, absent if there was no remainder.
+    pub remainder_verdict: Option<UnionVerdict>,
+    // Bind the landing bridge to the evaluated input and result, not to a
+    // caller-modified public reporting field or a newly supplied ID set.
+    evaluated_members: Vec<String>,
+    validated_members: Vec<String>,
 }
 
 impl UnionEvaluation {
-    /// Bridge the union evaluation into per-entry [`UnionOutcome`]s for the
-    /// ordered landing driver, keyed by item id in `ids` order.
-    ///
-    /// Every entry in the excluded locus (a pair's two members, or the single
-    /// failing item) maps to [`UnionOutcome::FailingPairMember`] (excluded);
-    /// every other entry — the proceeding set — maps to [`UnionOutcome::Green`].
-    /// This is the wire that makes "exclude the failing pair, the rest lands"
-    /// actually land: `land_in_order` treats the excluded entries as transparent
-    /// and lands the greens around them.
-    ///
-    /// On an [`FailureLocus::Unlocalised`] red union nothing can be safely
-    /// excluded, so EVERY entry is reported as a failing member (the batch is
-    /// held, not partially landed against an unknown interaction).
+    /// Exact members authorized by an observed green evaluation.
+    /// This is distinct from diagnosing a failing locus and from the public
+    /// `proceeding` reporting field. No subset is assumed green by monotonicity.
+    pub fn validated_proceeding(&self) -> &[String] {
+        &self.validated_members
+    }
+
+    /// Map the original ordered batch to authorized landing outcomes.
+    /// Held entries deliberately receive NO transition, rather than a fabricated
+    /// green or a false failing-pair accusation. A changed input batch receives
+    /// no authorization; its exact union must be evaluated first.
     pub fn outcomes_for_landing<'a>(&self, ids: &[&'a str]) -> Vec<(&'a str, UnionOutcome)> {
+        if !ids
+            .iter()
+            .copied()
+            .eq(self.evaluated_members.iter().map(String::as_str))
+        {
+            return Vec::new();
+        }
         let excluded: std::collections::BTreeSet<&str> = match &self.failure {
-            None => std::collections::BTreeSet::new(),
             Some(FailureLocus::Pair(p)) => {
                 [p.item_a.as_str(), p.item_b.as_str()].into_iter().collect()
             }
             Some(FailureLocus::SingleItem(id)) => [id.as_str()].into_iter().collect(),
-            Some(FailureLocus::Unlocalised) => ids.iter().copied().collect(),
+            None | Some(FailureLocus::Unlocalised) => std::collections::BTreeSet::new(),
         };
+        let validated: std::collections::BTreeSet<&str> =
+            self.validated_members.iter().map(String::as_str).collect();
         ids.iter()
-            .map(|id| {
-                let outcome = if excluded.contains(id) {
-                    UnionOutcome::FailingPairMember
+            .filter_map(|id| {
+                if validated.contains(id) {
+                    Some((*id, UnionOutcome::Green))
+                } else if excluded.contains(id) {
+                    Some((*id, UnionOutcome::FailingPairMember))
                 } else {
-                    UnionOutcome::Green
-                };
-                (*id, outcome)
+                    None
+                }
             })
             .collect()
     }
 }
 
-/// Fold the batch into its union and evaluate it; on red, bisect to the
-/// minimal failing pair, exclude it, and report who proceeds.
+/// Fold the batch into its union and evaluate it; on red, diagnose a
+/// failing locus, exclude it, and evaluate the entire remaining candidate.
+/// A red or unlocalised remainder is held, never automatically authorized.
 ///
 /// The fold is `U = fold(regen-rebase, head, batch)` — represented here as the
 /// ordered list of item-ids handed to the `MemoCheck` oracle, which owns the
@@ -137,6 +155,7 @@ impl UnionEvaluation {
 /// bisect.
 pub fn evaluate_union<M: MemoCheck>(batch: &Batch, oracle: &mut M) -> UnionEvaluation {
     let ids: Vec<&str> = batch.entries().iter().map(|e| e.item_id()).collect();
+    let evaluated_members: Vec<String> = ids.iter().map(|s| (*s).to_string()).collect();
     let (verdict, sources) = oracle.evaluate(&ids);
     let executed_count = sources
         .iter()
@@ -148,7 +167,11 @@ pub fn evaluate_union<M: MemoCheck>(batch: &Batch, oracle: &mut M) -> UnionEvalu
             verdict,
             minimal_failing_pair: None,
             failure: None,
-            proceeding: ids.iter().map(|s| s.to_string()).collect(),
+            proceeding: evaluated_members.clone(),
+            validated_members: evaluated_members.clone(),
+            evaluated_members,
+            held: Vec::new(),
+            remainder_verdict: None,
             executed_count,
         },
         UnionVerdict::Red => {
@@ -156,13 +179,36 @@ pub fn evaluate_union<M: MemoCheck>(batch: &Batch, oracle: &mut M) -> UnionEvalu
             let excluded: Vec<&str> = match &locus {
                 FailureLocus::Pair(p) => vec![p.item_a.as_str(), p.item_b.as_str()],
                 FailureLocus::SingleItem(id) => vec![id.as_str()],
-                FailureLocus::Unlocalised => ids.clone(),
+                FailureLocus::Unlocalised => Vec::new(),
             };
-            let proceeding: Vec<String> = ids
+            let remainder: Vec<&str> = ids
                 .iter()
-                .filter(|id| !excluded.contains(*id))
-                .map(|s| s.to_string())
+                .copied()
+                .filter(|id| !excluded.contains(id))
                 .collect();
+            let mut proceeding = Vec::new();
+            let mut held = Vec::new();
+            let mut remainder_verdict = None;
+            let mut remainder_exec = 0;
+            if matches!(locus, FailureLocus::Unlocalised) {
+                // No diagnosed locus: hold the batch without blaming each member.
+                held = evaluated_members.clone();
+            } else if !remainder.is_empty() {
+                // Load-bearing F02 rule: excluded != proved remainder.
+                // In particular A+B and C+D may conflict independently, and a
+                // non-monotone oracle can turn red only after a member is removed.
+                let (result, sources) = oracle.evaluate(&remainder);
+                remainder_exec = sources
+                    .iter()
+                    .filter(|s| **s == CheckSource::Executed)
+                    .count();
+                remainder_verdict = Some(result);
+                let members = remainder.iter().map(|s| (*s).to_string()).collect();
+                match result {
+                    UnionVerdict::Green => proceeding = members,
+                    UnionVerdict::Red => held = members,
+                }
+            }
             let minimal_failing_pair = match &locus {
                 FailureLocus::Pair(p) => Some(p.clone()),
                 _ => None,
@@ -171,8 +217,12 @@ pub fn evaluate_union<M: MemoCheck>(batch: &Batch, oracle: &mut M) -> UnionEvalu
                 verdict,
                 minimal_failing_pair,
                 failure: Some(locus),
+                validated_members: proceeding.clone(),
                 proceeding,
-                executed_count: executed_count + extra_exec,
+                held,
+                remainder_verdict,
+                evaluated_members,
+                executed_count: executed_count + extra_exec + remainder_exec,
             }
         }
     }
