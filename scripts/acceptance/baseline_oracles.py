@@ -21,7 +21,7 @@ import re
 import sys
 
 FINDINGS = ('F03', 'F04', 'F06', 'F09', 'F10')
-STATIC_FINDINGS = ('F01',)
+STATIC_FINDINGS = ('F01', 'F02')
 MAX_INPUT = 1024 * 1024
 MAX_SOURCE = 1024 * 1024
 STATIC_SOURCE_COMMIT = "ce2fcf1b8243eea2bd1be5aff25dfb3f6571ead4"
@@ -43,7 +43,38 @@ STATIC_SOURCES = {'crates/hugit-cli/src/checks/run.rs': {'sha256': '09e444a498b6
                                                                    'randomness e bancos fora do '
                                                                    'allowlist',
                                                                    'Native cache validity pertence '
-                                                                   'ao motor qualificado']}}
+                                                                   'ao motor qualificado']},
+ 'crates/hugit-queue/src/core/union.rs': {'sha256': 'b074891b80002c1eeb2ce91e0446e4b92767b40d8c8d09214516a02115ca9e99',
+                                          'requires': ['let (locus, extra_exec) = '
+                                                       'bisect_failure(&ids, oracle);',
+                                                       'let proceeding: Vec<String> = ids',
+                                                       'pub fn outcomes_for_landing',
+                                                       'UnionOutcome::Green',
+                                                       'return '
+                                                       '(FailureLocus::SingleItem(ids[i].to_string()), '
+                                                       'executed);']},
+ 'docs/plan/standalone/v3/work-packages/HUG-014.md': {'sha256': 'dcadd6213e4b4f1ff4a327a30c7681faaf98b90736f1a2dee57e129d6238b4c5',
+                                                      'requires': ['Após exclusão de locus, '
+                                                                   'avaliar candidato restante '
+                                                                   'inteiro',
+                                                                   'A+B e C+D conflitantes não '
+                                                                   'liberam C+D',
+                                                                   'Remover culpado não prova '
+                                                                   'resto verde.']}}
+STATIC_POLICIES = {'F01': {'outcome': 'limit_justified',
+         'correction_packages': ['HUG-012', 'HUG-013'],
+         'sources': ['crates/hugit-cli/src/checks/run.rs',
+                     'docs/review/round13/wedge-decider.md',
+                     'docs/plan/standalone/v3/work-packages/HUG-012.md',
+                     'docs/plan/standalone/v3/work-packages/HUG-013.md'],
+         'disposition': 'static_limit_justified_checker_published',
+         'evidence_scope': 'historical_source_snapshot_not_current_product_acceptance'},
+ 'F02': {'outcome': 'static_defect_observed',
+         'correction_packages': ['HUG-014', 'HUG-043'],
+         'sources': ['crates/hugit-queue/src/core/union.rs',
+                     'docs/plan/standalone/v3/work-packages/HUG-014.md'],
+         'disposition': 'static_defect_observed_checker_published',
+         'evidence_scope': 'source_inspection_with_analytic_counterexample_not_runtime_execution'}}
 
 class EvidenceError(ValueError):
     pass
@@ -202,37 +233,47 @@ def read_static_source(root, relative):
 def verify_static(report, root):
     static = report.get('static_findings')
     need(isinstance(static, dict) and set(static) == set(STATIC_FINDINGS), 'static_finding_set')
-    row = static['F01']
-    need(isinstance(row, dict), 'static_shape')
-    need(row.get('source_commit') == STATIC_SOURCE_COMMIT, 'static_source_commit')
-    need(row.get('classification') == 'limit_justified'
-         and row.get('outcome') == 'limit_justified', 'static_classification')
-    need(row.get('correction_packages') == ['HUG-012', 'HUG-013'], 'static_owners')
-    observed = row.get('observed')
-    need(isinstance(observed, dict) and observed.get('product_fix_claimed') is False,
-         'static_false_fix')
-    limits = row.get('limits')
-    need(isinstance(limits, list) and len(limits) >= 3
-         and all(isinstance(x, str) and x.strip() for x in limits), 'static_limits')
-    need(isinstance(row.get('expected'), str) and row['expected'].strip(), 'static_expected')
-    evidence = row.get('evidence')
-    need(isinstance(evidence, list) and len(evidence) == len(STATIC_SOURCES)
-         and all(isinstance(x, dict) and isinstance(x.get('path'), str) for x in evidence),
-         'static_evidence_set')
-    # Check the entire authorized set before performing any source read.
-    need({x['path'] for x in evidence} == set(STATIC_SOURCES), 'static_source_set')
-    for item in evidence:
-        path = item['path']
-        trusted = STATIC_SOURCES[path]
-        need(item.get('sha256') == trusted['sha256']
-             and item.get('requires') == trusted['requires'], 'static_contract_drift')
-        raw = read_static_source(root, path)
-        need(hashlib.sha256(raw).hexdigest() == trusted['sha256'], 'static_digest')
-        text = raw.decode('utf-8')
-        need(all(x in text for x in trusted['requires']), 'static_anchor')
-    need(report['finding_registry']['F01']['disposition']
-         == 'static_limit_justified_checker_published', 'static_registry')
+    for fid in STATIC_FINDINGS:
+        row = static[fid]
+        policy = STATIC_POLICIES[fid]
+        need(isinstance(row, dict), 'static_shape')
+        need(row.get('source_commit') == STATIC_SOURCE_COMMIT, 'static_source_commit')
+        need(row.get('classification') == policy['outcome']
+             and row.get('outcome') == policy['outcome'], 'static_classification')
+        need(row.get('evidence_scope') == policy['evidence_scope'], 'static_evidence_scope')
+        need(row.get('correction_packages') == policy['correction_packages'], 'static_owners')
+        observed = row.get('observed')
+        need(isinstance(observed, dict) and observed.get('product_fix_claimed') is False,
+             'static_false_fix')
+        limits = row.get('limits')
+        need(isinstance(limits, list) and len(limits) >= 3
+             and all(isinstance(x, str) and x.strip() for x in limits), 'static_limits')
+        need(isinstance(row.get('expected'), str) and row['expected'].strip(), 'static_expected')
+        evidence = row.get('evidence')
+        need(isinstance(evidence, list) and len(evidence) == len(policy['sources'])
+             and all(isinstance(x, dict) and isinstance(x.get('path'), str) for x in evidence),
+             'static_evidence_set')
+        # Check the entire authorized set before performing any source read.
+        need({x['path'] for x in evidence} == set(policy['sources']), 'static_source_set')
+        for item in evidence:
+            path = item['path']
+            trusted = STATIC_SOURCES[path]
+            need(item.get('sha256') == trusted['sha256']
+                 and item.get('requires') == trusted['requires'], 'static_contract_drift')
+            raw = read_static_source(root, path)
+            need(hashlib.sha256(raw).hexdigest() == trusted['sha256'], 'static_digest')
+            text = raw.decode('utf-8')
+            need(all(x in text for x in trusted['requires']), 'static_anchor')
+        need(report['finding_registry'][fid]['disposition'] == policy['disposition'], 'static_registry')
     return static
+
+def outcome_counts(results, static):
+    counts = {k: sum(x['outcome'] == k for x in results.values())
+              for k in ('satisfied', 'regression_reproduced')}
+    for item in static.values():
+        key = item['outcome']
+        counts[key] = counts.get(key, 0) + 1
+    return counts
 
 def verify(report, root=Path('.')):
     need(isinstance(report, dict), 'report_shape')
@@ -247,12 +288,10 @@ def verify(report, root=Path('.')):
     pending = set(report['finding_registry']) - set(FINDINGS) - set(STATIC_FINDINGS)
     for fid, entry in report['finding_registry'].items():
         expected = ('pending_followup_in_HUG003' if fid in pending else
-                    'static_limit_justified_checker_published' if fid in STATIC_FINDINGS else
+                    STATIC_POLICIES[fid]['disposition'] if fid in STATIC_FINDINGS else
                     'runtime_observed_locally_checker_published')
         need(isinstance(entry, dict) and entry.get('disposition') == expected, 'registry_disposition')
-    counts = {k: sum(x['outcome'] == k for x in results.values())
-              for k in ('satisfied', 'regression_reproduced')}
-    counts['limit_justified'] = len(static)
+    counts = outcome_counts(results, static)
     need(json.dumps(report['counts'], sort_keys=True) == json.dumps(counts, sort_keys=True),
          'counts_mismatch')
     return results, static
@@ -289,8 +328,12 @@ def self_test(report, root):
         'wrong_static_commit': lambda r: r['static_findings']['F01'].update(source_commit='0'*40),
         'empty_static_limits': lambda r: r['static_findings']['F01'].update(limits=['', '', '']),
         'malformed_static_row': lambda r: r['static_findings'].update(F01=[]),
-        'promoted_pending_finding': lambda r: r['finding_registry']['F02'].update(disposition='satisfied'),
+        'promoted_pending_finding': lambda r: r['finding_registry']['F05'].update(disposition='satisfied'),
         'forged_counts': lambda r: r['counts'].update(satisfied=19),
+        'omitted_F02_inspection': lambda r: r['static_findings'].pop('F02'),
+        'F02_false_fix': lambda r: r['static_findings']['F02']['observed'].update(product_fix_claimed=True),
+        'F02_false_runtime_claim': lambda r: r['static_findings']['F02'].update(evidence_scope='runtime_reproduced'),
+        'F02_unverified_reclassification': lambda r: r['static_findings']['F02'].update(outcome='limit_justified'),
     })
     for name, mutate in mutations.items():
         altered = copy.deepcopy(report); mutate(altered)
@@ -373,15 +416,14 @@ def main():
         report = parse(raw)
         results, static = verify(report, args.root)
         tests = self_test(report, args.root) if args.self_test else {}
-        counts = {k: sum(x['outcome'] == k for x in results.values())
-                  for k in ('satisfied', 'regression_reproduced')}
+        counts = outcome_counts(results, static)
         print(json.dumps(dict(evidence_consistent=True, product_accepted=False,
             whole_wp_ready=False, report_sha256=hashlib.sha256(raw).hexdigest(),
             findings=results, static_source_commit=STATIC_SOURCE_COMMIT,
-            static_findings=static, counts={**counts, 'limit_justified': len(static)},
+            static_findings=static, counts=counts,
             pending_findings=sorted(set(report['finding_registry']) - set(FINDINGS) - set(STATIC_FINDINGS)),
             controls=tests,
-            scope='retained_observations_only; no product executed'), sort_keys=True))
+            scope='retained_runtime_observations_and_static_inspection; no product executed'), sort_keys=True))
         return 1 if args.product_gate and counts['regression_reproduced'] else 0
     except (OSError, EvidenceError, KeyError, ValueError, TypeError, IndexError, AttributeError, RecursionError) as error:
         code = str(error)[:120] if isinstance(error, EvidenceError) else 'invalid_or_missing_evidence'
