@@ -69,6 +69,12 @@ pub struct WaveReport {
     pub landed: Vec<String>,
     /// PR IDs excluded (failing-pair members or single-item failures).
     pub excluded: Vec<String>,
+    /// Unresolved members: neither landed nor falsely rejected.
+    pub held: Vec<String>,
+    /// Explicit bounded-evaluation stop, when applicable.
+    pub evaluation_stop: Option<hugit_queue::core::union::EvaluationStop>,
+    /// A refused driver attempt is preserved instead of panicking or publishing partial effects.
+    pub landing_error: Option<hugit_queue::core::LandingError>,
     /// Total number of local check executions (0 on a fully-warmed AC).
     pub local_executions: u32,
     /// Measured total execution time (ms): the SUM of `CheckResult.duration_ms`
@@ -153,8 +159,22 @@ pub fn run_wave_with_ac(cfg: &WaveConfig, ac: &InMemoryAc) -> WaveReport {
     let ids: Vec<&str> = cfg.entries.iter().map(|(id, _)| id.as_str()).collect();
     let outcomes = evaluation.outcomes_for_landing(&ids);
 
-    // Land in queue order.
-    land_in_order(&mut batch, &outcomes).expect("landing must not error on a well-formed batch");
+    // A bounded/inconclusive evaluation deliberately omits transitions. Hold
+    // the wave without panic or partial effects; absence is not green.
+    let mut candidate = batch.clone();
+    let landing_error = match land_in_order(&mut candidate, &outcomes) {
+        Ok(_) => {
+            batch = candidate;
+            None
+        }
+        Err(error) => Some(error),
+    };
+    let held = batch
+        .entries()
+        .iter()
+        .filter(|e| e.state == EntryState::Landable)
+        .map(|e| e.item_id().to_string())
+        .collect();
 
     let landed = landed_in_order(&batch);
     let excluded: Vec<String> = batch
@@ -189,6 +209,9 @@ pub fn run_wave_with_ac(cfg: &WaveConfig, ac: &InMemoryAc) -> WaveReport {
     WaveReport {
         landed,
         excluded,
+        held,
+        evaluation_stop: evaluation.stop_reason,
+        landing_error,
         local_executions: oracle.total_local_executions,
         measured_exec_ms: oracle.total_measured_exec_ms,
         event_log,
@@ -331,4 +354,26 @@ fn make_check_def(command: &str, toolchain_ref: &str) -> CheckDef {
     };
     def.def_digest = compute_def_digest(&def);
     def
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    #[test]
+    fn diagnostic_budget_holds_wave_without_panic_or_false_events() {
+        let mut config = WaveConfig::five_pr_with_failing_pair("pr-10", "pr-11");
+        config.entries = (0..12)
+            .map(|i| (format!("pr-{i}"), vec![format!("file-{i}")]))
+            .collect();
+        let report = run_wave(&config);
+        assert_eq!(
+            report.evaluation_stop,
+            Some(hugit_queue::core::union::EvaluationStop::ProbeBudgetExhausted)
+        );
+        assert_eq!(report.held.len(), 12);
+        assert!(report.landed.is_empty());
+        assert!(report.excluded.is_empty());
+        assert!(report.event_log.records().is_empty());
+        assert!(report.landing_error.is_some());
+    }
 }

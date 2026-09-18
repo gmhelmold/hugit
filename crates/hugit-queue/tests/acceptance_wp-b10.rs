@@ -154,7 +154,7 @@ fn item_1_runner_lease_is_contract_type_only_not_acquired_at_dispatch() {
 #[test]
 fn item_2_rebase_textual_fallback_only_regen_path_absent() {
     // Verify that `UnionVerdict` — the rebase outcome type in Phase B — has
-    // only `Green` and `Red` variants.  A `RegenRebase` or re-execution variant
+    // green/red and explicit inconclusive results. A `RegenRebase` or re-execution variant
     // would need to appear here; its absence is the structural proof.
     //
     // This is an exhaustive match: if a new variant is added to `UnionVerdict`,
@@ -165,6 +165,8 @@ fn item_2_rebase_textual_fallback_only_regen_path_absent() {
             // Only textual-path outcomes exist in Phase B.
             UnionVerdict::Green => "textual-pass",
             UnionVerdict::Red => "textual-fail",
+            UnionVerdict::Unknown => "textual-unknown",
+            UnionVerdict::InfrastructureFailure => "textual-infrastructure-failure",
             // If a `RegenRebase` or `Regenerative` variant were added, the
             // exhaustive match would fail to compile — catching scope creep
             // at build time.
@@ -178,6 +180,14 @@ fn item_2_rebase_textual_fallback_only_regen_path_absent() {
     assert_eq!(
         verdict_has_no_regen_variant(UnionVerdict::Red),
         "textual-fail"
+    );
+    assert_eq!(
+        verdict_has_no_regen_variant(UnionVerdict::Unknown),
+        "textual-unknown"
+    );
+    assert_eq!(
+        verdict_has_no_regen_variant(UnionVerdict::InfrastructureFailure),
+        "textual-infrastructure-failure"
     );
 }
 

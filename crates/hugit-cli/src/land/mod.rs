@@ -15,7 +15,7 @@
 //! the whole queue), it:
 //!
 //! 1. folds them into a [`hugit_queue::core::Batch`];
-//! 2. runs [`evaluate_union`] over their union through a REAL [`MemoCheck`]
+//! 2. runs [`evaluate_union_with_limits`] over their union through a REAL [`MemoCheck`]
 //!    oracle ([`LogMemoOracle`]) backed by [`run_memoized`] + a file-backed
 //!    Action Cache (the exact [`FileAc`] seam `hugit check run --store` uses);
 //! 3. on a GREEN union, lands every member (appends `pr.landed` per PR);
@@ -39,6 +39,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::{Duration, Instant};
 
 use clap::Subcommand;
 use hugit_checks::client::ac::ActionCache;
@@ -48,7 +49,8 @@ use hugit_contracts::{CheckDef, CheckResult, LandableEntry, MinimalFailingPair};
 use hugit_queue::core::affected::AffectedSet;
 use hugit_queue::core::batch::Batch;
 use hugit_queue::core::union::{
-    CheckSource, FailureLocus, MemoCheck, UnionEvaluation, UnionVerdict, evaluate_union,
+    CheckSource, EvaluationLimits, EvaluationStop, FailureLocus, MemoCheck, UnionEvaluation,
+    UnionVerdict, evaluate_union_with_limits,
 };
 use hugit_refstore::{Endpoint, EventLog, PrincipalClass};
 use serde_json::{Value, json};
@@ -72,8 +74,7 @@ pub const QUEUE_UNION_FAIL_KIND: &str = "queue.union_fail";
 /// The toolchain digest the local batch-land memoized executor keys checks on.
 ///
 /// A safe-identifier slug (the AC write-boundary guard refuses a secret-shaped
-/// axis). It is the single-tenant local marker — the live CoreLink AC over a
-/// content-addressed toolchain swaps in behind the same `ActionCache` trait.
+/// axis). It identifies this local simulation only, not a qualified native toolchain.
 const LOCAL_TOOLCHAIN_DIGEST: &str = "local-union-test-v1";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -108,13 +109,19 @@ pub struct QueueLandArgs {
     pub campaign: Option<String>,
     /// The file-backed Action Cache path. Defaults to `<log>.ac` (the SAME seam
     /// `hugit check run --store` uses) so a warm re-run is a real cross-process
-    /// HIT. The live CoreLink AC swaps in behind the same `ActionCache` trait.
+    /// HIT. No remote cache is contacted by this command.
     #[arg(long)]
     pub ac: Option<PathBuf>,
     /// Unix-ms timestamp to stamp the appended `pr.landed` / `queue.union_fail`
     /// events with.
     #[arg(long = "recorded-at", default_value_t = 0)]
     pub recorded_at: u64,
+    /// Maximum diagnostic probes, INCLUDING cache hits and remainder validation.
+    #[arg(long, default_value_t = 64, value_parser = clap::value_parser!(u32).range(0..=64))]
+    pub max_probes: u32,
+    /// Cooperative in-process evaluation deadline (ms); not an OS kill timeout.
+    #[arg(long, default_value_t = 30000, value_parser = clap::value_parser!(u64).range(0..=300000))]
+    pub evaluation_timeout_ms: u64,
 }
 
 /// Dispatch a `land` subcommand. Returns the process exit code directly under
@@ -146,13 +153,26 @@ fn run_queue_land(a: QueueLandArgs) -> ExitCode {
         Err(e) => return emit(Err(e)),
     };
 
-    // Deterministic LOCAL-only (owner decision 2026-09-03: hugit is a git-local
-    // CLI; a shared/CI cache belongs to corelink-runners). The file-backed local
-    // AC is the ONLY backend — an explicit `--ac` path overrides the default
-    // `<log>.ac`, never a live remote.
+    // The file-backed local AC is the only backend used by this command.
+    // `--ac` overrides the default path; no remote service is contacted.
     let ac = FileAc::new(ac_path);
-    let result = batch_land(&mut log, &ac, a.campaign.as_deref(), a.recorded_at);
+    let result = batch_land_with_limits(
+        &mut log,
+        &ac,
+        a.campaign.as_deref(),
+        a.recorded_at,
+        EvaluationLimits {
+            max_probes: a.max_probes as usize,
+            timeout: Duration::from_millis(a.evaluation_timeout_ms),
+        },
+    );
     match result {
+        Ok(value) if value.get("stop_reason").is_some_and(|v| !v.is_null()) => {
+            // A held evaluation is visible and nonzero, with NO log rewrite.
+            emit(Err(PorcelainError::new("evaluation_held", "queue evaluation is inconclusive",
+                "inspect evaluation.stop_reason; retry as a new evaluation after resolving the cause")
+                .with_context("evaluation", value)))
+        }
         Ok(value) => match crate::pr::filelock::atomic_write(
             &log_path,
             serde_json::to_string_pretty(log.records())
@@ -210,7 +230,7 @@ fn emit(result: Result<Value, PorcelainError>) -> ExitCode {
 /// the live `log`, an [`ActionCache`] backend, and drives:
 ///
 /// - [`all_pr_queued`] → the ordered active queue (already filters settled PRs);
-/// - a [`Batch`] of [`LandableEntry`]s, fed to [`evaluate_union`] over a
+/// - a [`Batch`] of [`LandableEntry`]s, fed to [`evaluate_union_with_limits`] over a
 ///   [`LogMemoOracle`] (REAL memoized execution, AC-backed);
 /// - on the resulting [`UnionEvaluation`]: append `pr.landed` for each
 ///   proceeding PR, and on a localised red union append one `queue.union_fail`
@@ -224,6 +244,28 @@ pub fn batch_land<A: ActionCache>(
     campaign: Option<&str>,
     recorded_at: u64,
 ) -> Result<Value, PorcelainError> {
+    batch_land_with_limits(log, ac, campaign, recorded_at, EvaluationLimits::default())
+}
+
+/// Bounded simulation. Inconclusive attempts preserve the input log; staged
+/// transitions commit only after the last cooperative deadline check.
+pub fn batch_land_with_limits<A: ActionCache>(
+    log: &mut EventLog,
+    ac: &A,
+    campaign: Option<&str>,
+    recorded_at: u64,
+    limits: EvaluationLimits,
+) -> Result<Value, PorcelainError> {
+    // The public library API accepts Duration, unlike the bounded CLI flag.
+    // Reject an unrepresentable timeout before json! serializes its u128 millis.
+    // Invalid input is a structured error, never a report-construction panic.
+    u64::try_from(limits.timeout.as_millis()).map_err(|_| {
+        PorcelainError::new(
+            "invalid_argument",
+            "evaluation timeout exceeds the report range",
+            "use a bounded timeout representable as u64 milliseconds",
+        )
+    })?;
     // The active queue, in queue (order_index) order, scoped to the campaign.
     let mut queued = all_pr_queued(log);
     queued.sort_by_key(|q| q.order_index);
@@ -250,6 +292,11 @@ pub fn batch_land<A: ActionCache>(
             "remainder_verdict": Value::Null,
             "failing_pair": Value::Null,
             "executed_count": 0,
+            "execution_count_complete": true,
+            "probe_count": 0,
+            "stop_reason": Value::Null,
+            "evaluation_budget": {"max_probes": limits.max_probes,
+                "timeout_ms": limits.timeout.as_millis(), "deadline_enforcement": "cooperative_in_process"},
             "note": "no queued PRs to batch-land (empty queue or campaign scope matched nothing)",
         }));
     }
@@ -300,9 +347,7 @@ pub fn batch_land<A: ActionCache>(
     // The conflict relation, derived HONESTLY from PR content: an intent of the
     // shape `conflicts-with:<pr_id>` declares that this PR's union with that PR
     // is red (a pair interaction neither PR exhibits alone). This is the
-    // single-tenant local stand-in for "the runner reported a red union on this
-    // pair"; the distributed runner fabric (F7) reports the real verdict behind
-    // the same `MemoCheck` trait, and the union/bisect engine does not change.
+    // local simulation of a pair conflict, not a verdict on a Git tree.
     let conflicts = conflict_pairs(&content);
 
     let check_def = local_check_def();
@@ -313,9 +358,21 @@ pub fn batch_land<A: ActionCache>(
         check_def: &check_def,
     };
 
-    let evaluation = evaluate_union(&batch, &mut oracle);
+    let evaluation = evaluate_union_with_limits(&batch, &mut oracle, limits);
     let ids: Vec<&str> = members.iter().map(|(q, _)| q.pr_id.as_str()).collect();
 
+    if let Some(reason) = evaluation.stop_reason {
+        return Ok(held_summary(&evaluation, campaign, &ids, reason));
+    }
+    if evaluation.deadline_exceeded() {
+        return Ok(held_summary(
+            &evaluation,
+            campaign,
+            &ids,
+            EvaluationStop::DeadlineExceeded,
+        ));
+    }
+    let mut staged = log.clone();
     // Land the proceeding (green) set: append a terminal `pr.landed` per PR,
     // routed through the SAME D14-guarded append the `pr` porcelain uses.
     let proceeding: std::collections::BTreeSet<&str> = evaluation
@@ -326,24 +383,20 @@ pub fn batch_land<A: ActionCache>(
     let mut landed: Vec<String> = Vec::new();
     for (q, o) in &members {
         if proceeding.contains(q.pr_id.as_str()) {
-            land_one(log, o, recorded_at)?;
+            land_one(&mut staged, o, recorded_at)?;
             landed.push(q.pr_id.clone());
         }
     }
 
     // Only the diagnosed locus is excluded. The unvalidated remainder stays
     // held; absence from proceeding does not accuse it of the diagnosed failure.
-    let excluded: Vec<String> = ids
-        .iter()
-        .filter(|id| !proceeding.contains(**id) && !evaluation.held.iter().any(|held| held == *id))
-        .map(|s| s.to_string())
-        .collect();
+    let excluded = evaluation.validated_excluded().to_vec();
 
     // On a RED union, record the bisected failure so `queue show` lights up.
     let failing_pair_json = match (&evaluation.verdict, &evaluation.failure) {
         (UnionVerdict::Red, Some(locus)) => {
             record_union_fail(
-                log,
+                &mut staged,
                 campaign,
                 locus,
                 &excluded,
@@ -356,26 +409,55 @@ pub fn batch_land<A: ActionCache>(
         _ => Value::Null,
     };
 
+    if evaluation.deadline_exceeded() {
+        return Ok(held_summary(
+            &evaluation,
+            campaign,
+            &ids,
+            EvaluationStop::DeadlineExceeded,
+        ));
+    }
+    *log = staged;
     Ok(json!({
         "queued": members.len(),
         "campaign": campaign,
         "mode": LANDING_MODE,
-        "verdict": match evaluation.verdict {
-            UnionVerdict::Green => "green",
-            UnionVerdict::Red => "red",
-        },
+        "verdict": evaluation.verdict.as_str(),
         "landed": landed,
         "excluded": excluded,
         "held": evaluation.held,
         "validation_scope": "simulation_only",
         "git_tree_verified": false,
-        "remainder_verdict": evaluation.remainder_verdict.map(|v| match v {
-            UnionVerdict::Green => "green", UnionVerdict::Red => "red",
-        }),
+        "remainder_verdict": evaluation.remainder_verdict.map(UnionVerdict::as_str),
         "failing_pair": failing_pair_json,
         "locus": locus_kind(&evaluation),
         "executed_count": evaluation.executed_count,
+        "execution_count_complete": evaluation.execution_count_complete,
+        "probe_count": evaluation.probe_count,
+        "stop_reason": Value::Null,
+        "evaluation_budget": evaluation_budget(&evaluation),
     }))
+}
+
+fn evaluation_budget(ev: &UnionEvaluation) -> Value {
+    json!({"max_probes": ev.max_probes, "timeout_ms": ev.timeout.as_millis(),
+           "elapsed_ms": ev.elapsed.as_millis(), "deadline_enforcement": "cooperative_in_process"})
+}
+
+fn held_summary(
+    ev: &UnionEvaluation,
+    campaign: Option<&str>,
+    ids: &[&str],
+    reason: EvaluationStop,
+) -> Value {
+    json!({"queued":ids.len(), "campaign":campaign, "mode":LANDING_MODE,
+           "verdict":ev.verdict.as_str(), "landed":[], "excluded":[], "held":ids,
+           "remainder_verdict":ev.remainder_verdict.map(UnionVerdict::as_str),
+           "failing_pair":failing_pair_to_json(&ev.minimal_failing_pair),
+           "locus":locus_kind(ev), "stop_reason":reason.as_str(),
+           "executed_count":ev.executed_count, "execution_count_complete":ev.execution_count_complete,
+           "probe_count":ev.probe_count, "evaluation_budget":evaluation_budget(ev),
+           "validation_scope":"simulation_only", "git_tree_verified":false})
 }
 
 /// Append one terminal `pr.landed` for a proceeding PR, idempotently (a PR the
@@ -526,10 +608,8 @@ fn local_check_def() -> CheckDef {
 /// The per-PR check execution is the deterministic local executor (it passes,
 /// exit 0 — the local stand-in for "this PR's own checks are green"); the
 /// pair-conflict relation is the local stand-in for "the runner reported a red
-/// union on this pair". The DISTRIBUTED runner fabric (F7) swaps in behind the
-/// same [`CheckRunner`] / [`MemoCheck`] traits later, reporting the REAL union
-/// verdict; `evaluate_union` + `bisect_failure` do not change. No verdict is
-/// fabricated — a clean local union is honestly green.
+/// union on this pair". This is only a simulator; real Git integration is HUG-043.
+/// The cooperative deadline bounds result acceptance, not arbitrary blocking I/O.
 struct LogMemoOracle<'a, A: ActionCache> {
     ac: &'a A,
     /// pr_id → its bundled intent ids (the deterministic content source).
@@ -542,11 +622,33 @@ struct LogMemoOracle<'a, A: ActionCache> {
 
 impl<'a, A: ActionCache> MemoCheck for LogMemoOracle<'a, A> {
     fn evaluate(&mut self, item_ids: &[&str]) -> (UnionVerdict, Vec<CheckSource>) {
+        self.evaluate_until(item_ids, None)
+    }
+    fn evaluate_before(
+        &mut self,
+        item_ids: &[&str],
+        deadline: Instant,
+    ) -> (UnionVerdict, Vec<CheckSource>) {
+        self.evaluate_until(item_ids, Some(deadline))
+    }
+}
+
+impl<A: ActionCache> LogMemoOracle<'_, A> {
+    fn evaluate_until(
+        &mut self,
+        item_ids: &[&str],
+        deadline: Option<Instant>,
+    ) -> (UnionVerdict, Vec<CheckSource>) {
         let mut any_red = false;
         let mut sources = Vec::with_capacity(item_ids.len());
 
         for pr_id in item_ids {
-            let intents = self.content.get(*pr_id).cloned().unwrap_or_default();
+            if deadline.is_some_and(|until| Instant::now() >= until) {
+                return (UnionVerdict::Unknown, sources);
+            }
+            let Some(intents) = self.content.get(*pr_id) else {
+                return (UnionVerdict::Unknown, sources);
+            };
             // The PR's content tree: one file per bundled intent (content = the
             // intent id), else a single file named for the PR. Deterministic ⇒
             // stable memo key ⇒ an AC HIT on re-run (the wedge).
@@ -564,32 +666,18 @@ impl<'a, A: ActionCache> MemoCheck for LogMemoOracle<'a, A> {
             let runner = LocalRunner {
                 pr_id: pr_id.to_string(),
             };
-            let outcome = run_memoized(
+            let outcome = match run_memoized(
                 self.ac,
                 &runner,
                 self.check_def,
                 file_iter,
                 LOCAL_TOOLCHAIN_DIGEST,
-            )
-            // The file-backed AC never faults on a well-formed key; surface a
-            // failure as a red, executed source rather than panicking.
-            .unwrap_or_else(|_| hugit_checks::client::executor::CheckOutcome {
-                result: CheckResult {
-                    memo_key: String::new(),
-                    tree_hash: String::new(),
-                    def_digest: String::new(),
-                    toolchain_digest: LOCAL_TOOLCHAIN_DIGEST.to_string(),
-                    exit: 1,
-                    artifacts: vec![],
-                    stdout_ref: String::new(),
-                    stderr_ref: String::new(),
-                    duration_ms: 0,
-                    runner_ref: "local-union-test".to_string(),
-                    produced_at: 0,
-                },
-                from_cache: false,
-                local_executions: 1,
-            });
+            ) {
+                Ok(outcome) => outcome,
+                // A cache/runner failure is NOT a red check and must not blame
+                // an author or fabricate a completed execution count.
+                Err(_) => return (UnionVerdict::InfrastructureFailure, sources),
+            };
 
             if outcome.result.exit != 0 {
                 any_red = true;
@@ -627,8 +715,7 @@ impl<'a, A: ActionCache> MemoCheck for LogMemoOracle<'a, A> {
 /// function of its inputs that always passes (exit 0). The per-PR check is
 /// genuinely memoized through [`run_memoized`] (the wedge); the union's RED
 /// verdict, when any, comes from the oracle's pair-conflict relation, not from a
-/// faked per-PR failure. A real distributed runner (F7) swaps in behind this
-/// same [`CheckRunner`] trait and reports the real exit.
+/// faked per-PR failure. This fixture does not execute a user's build or tests.
 struct LocalRunner {
     pr_id: String,
 }
@@ -750,5 +837,124 @@ mod remainder_safety_tests {
         assert_eq!(result["held"], json!([]));
         assert_eq!(result["validation_scope"], "simulation_only");
         assert_eq!(result["git_tree_verified"], false);
+    }
+
+    struct BrokenCache;
+    impl hugit_checks::client::ac::ActionCache for BrokenCache {
+        fn lookup(
+            &self,
+            _: &str,
+        ) -> Result<Option<CheckResult>, hugit_checks::client::ac::AcError> {
+            Err(hugit_checks::client::ac::AcError::Transport(
+                "controlled local failure".into(),
+            ))
+        }
+        fn store(&self, _: &CheckResult) -> Result<(), hugit_checks::client::ac::AcError> {
+            panic!("lookup failed: no store or runner is authorized")
+        }
+    }
+
+    #[test]
+    fn infrastructure_failure_holds_every_member_without_false_red_or_log_mutation() {
+        let mut log = EventLog::new();
+        seed(&mut log, "A", &["content-a"], 0);
+        seed(&mut log, "B", &["content-b"], 1);
+        let before = log.clone();
+        let value = batch_land(&mut log, &BrokenCache, Some("remainder"), 100).unwrap();
+        assert_eq!(value["verdict"], "infrastructure_failure");
+        assert_eq!(value["stop_reason"], "infrastructure_failure");
+        assert_eq!(value["held"], json!(["A", "B"]));
+        assert_eq!(value["landed"], json!([]));
+        assert_eq!(value["excluded"], json!([]));
+        assert_eq!(value["probe_count"], 1);
+        assert_eq!(value["executed_count"], 0);
+        assert_eq!(value["execution_count_complete"], false);
+        assert_eq!(log, before);
+    }
+
+    #[test]
+    fn exhausted_remainder_budget_preserves_the_entire_log_and_diagnosis() {
+        let mut log = EventLog::new();
+        seed(&mut log, "A", &["conflicts-with:B"], 0);
+        seed(&mut log, "B", &["content-b"], 1);
+        seed(&mut log, "C", &["content-c"], 2);
+        let before = log.clone();
+        let value = batch_land_with_limits(
+            &mut log,
+            &InMemoryAc::new(),
+            Some("remainder"),
+            100,
+            EvaluationLimits {
+                max_probes: 5,
+                timeout: Duration::from_secs(30),
+            },
+        )
+        .unwrap();
+        assert_eq!(value["verdict"], "red");
+        assert_eq!(value["stop_reason"], "probe_budget_exhausted");
+        assert_eq!(value["held"], json!(["A", "B", "C"]));
+        assert_eq!(value["excluded"], json!([]));
+        assert_eq!(value["landed"], json!([]));
+        assert_eq!(value["locus"], "pair");
+        assert_eq!(value["probe_count"], 5);
+        assert_eq!(log, before);
+    }
+
+    #[test]
+    fn zero_deadline_never_calls_cache_or_changes_the_log() {
+        let mut log = EventLog::new();
+        seed(&mut log, "A", &["content-a"], 0);
+        let before = log.clone();
+        let value = batch_land_with_limits(
+            &mut log,
+            &BrokenCache,
+            Some("remainder"),
+            100,
+            EvaluationLimits {
+                max_probes: 64,
+                timeout: Duration::ZERO,
+            },
+        )
+        .unwrap();
+        assert_eq!(value["stop_reason"], "deadline_exceeded");
+        assert_eq!(value["probe_count"], 0);
+        assert_eq!(log, before);
+    }
+
+    #[test]
+    fn missing_oracle_content_is_unknown_not_an_empty_green_check() {
+        let content = BTreeMap::new();
+        let conflicts = std::collections::BTreeSet::new();
+        let def = local_check_def();
+        let mut oracle = LogMemoOracle {
+            ac: &BrokenCache,
+            content: &content,
+            conflicts: &conflicts,
+            check_def: &def,
+        };
+        assert_eq!(
+            oracle.evaluate(&["MISSING"]),
+            (UnionVerdict::Unknown, vec![])
+        );
+    }
+
+    #[test]
+    fn unrepresentable_library_timeout_is_an_error_without_log_mutation() {
+        let mut log = EventLog::new();
+        seed(&mut log, "A", &["content-a"], 0);
+        let before = log.clone();
+        let error = batch_land_with_limits(
+            &mut log,
+            &BrokenCache,
+            Some("remainder"),
+            100,
+            EvaluationLimits {
+                max_probes: 1,
+                timeout: Duration::MAX,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), "invalid_argument");
+        assert_eq!(log, before);
     }
 }

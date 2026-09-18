@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(queue): bound diagnosis to 64 probes by default (including cache hits),
+  propagate one cooperative evaluation deadline, and hold inconclusive or
+  infrastructure-failed batches without fabricating failed authors or landing.
+  Report the stop reason separately and refuse late or invalidated transitions.
+
 - fix(queue): revalidate the exact remaining union after excluding a diagnosed
   conflict. Red or unlocalized remainders stay held rather than gaining landing
   authorization; altered input sets cannot reuse a prior landing projection.

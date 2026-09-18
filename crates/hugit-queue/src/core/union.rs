@@ -1,134 +1,192 @@
-//! Union fold + memoised check evaluation + minimal-failing-pair bisection.
+//! Bounded diagnosis of a union and explicit validation of its exact remainder.
 //!
-//! Whitepaper §6.4: `U = fold(regen-rebase, head, batch)`, then run the
-//! affected memoised checks on `U`. Most checks are AC hits — only novelty
-//! executes. On a red union, bisect the batch over the (≈ free) memoised
-//! checks to a failing locus, then RE-EVALUATE the exact remainder. Diagnosis
-//! never authorizes an untested set. A red remainder is held for a later attempt.
-//!
-//! B4a is engine-pure: the actual rebase and check execution live behind the
-//! `MemoCheck` trait so the engine is testable in isolation (no GitHub API,
-//! no runner). B4b/B2a supply the real implementations.
+//! Diagnosis is not authorization. An interrupted or inconclusive evaluation
+//! holds the whole batch, even if some earlier probes were green. This engine
+//! does not build Git trees or move refs; an oracle owns the evaluated content.
 
 use crate::core::batch::Batch;
 use crate::core::state::UnionOutcome;
 use hugit_contracts::MinimalFailingPair;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::{Duration, Instant};
 
-/// The verdict of evaluating a candidate union of changes.
+/// A check result, distinct from whether the diagnostic operation completed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnionVerdict {
-    /// All affected memoised checks passed on the union tree.
     Green,
-    /// At least one affected memoised check failed on the union tree.
     Red,
+    /// No trustworthy check result is available. Never a failing author.
+    Unknown,
+    /// The evaluation infrastructure failed, not the changes under evaluation.
+    InfrastructureFailure,
 }
 
-/// Whether a memoised-check evaluation was served from the content-addressed
-/// cache (a hit) or actually executed (a miss / novelty).
+impl UnionVerdict {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Green => "green",
+            Self::Red => "red",
+            Self::Unknown => "unknown",
+            Self::InfrastructureFailure => "infrastructure_failure",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckSource {
-    /// Result served from the AC — zero compute (contract ②: "0 re-runs").
     Hit,
-    /// Result computed by executing the check (novelty only).
     Executed,
 }
 
-/// Pure interface to the memoised check oracle for a *set* of changes.
-///
-/// The engine asks "does the union of these item-ids pass its affected
-/// checks?" and the oracle answers with a verdict plus how each evaluation was
-/// served. B4a counts executions to prove the 0-re-run property (②); the real
-/// oracle (B2a client + B3 affected-set + CAS) is wired in B4b.
+/// Cooperative in-process oracle. Remote/process adapters must implement their
+/// own bounded I/O and cleanup; this trait cannot preempt a blocking callback.
 pub trait MemoCheck {
-    /// Evaluate the affected memoised checks for the union of `item_ids`.
-    /// Returns the verdict and the source (hit/executed) of each underlying
-    /// check evaluation, so callers can assert zero re-execution.
     fn evaluate(&mut self, item_ids: &[&str]) -> (UnionVerdict, Vec<CheckSource>);
+
+    /// The SAME absolute deadline is passed to every probe. Override to propagate
+    /// it inside a multi-step oracle. The engine also checks before/after return:
+    /// a late green cannot authorize anything. Legacy callbacks are not killed.
+    fn evaluate_before(
+        &mut self,
+        item_ids: &[&str],
+        _deadline: Instant,
+    ) -> (UnionVerdict, Vec<CheckSource>) {
+        self.evaluate(item_ids)
+    }
 }
 
-/// Where a red union's failure was localised by bisection.
-///
-/// A red union is never silently dropped: bisection always resolves to an
-/// explicit locus. This is the discriminant the landing layer keys off to
-/// decide *which* entries to exclude (the rest proceed).
-///
-/// `Eq` is not derived because the frozen contract type `MinimalFailingPair`
-/// (owned by `hugit-contracts`) is `PartialEq` only; `String`/this enum are
-/// reflexive in practice, so `PartialEq` is sufficient for the engine.
+/// Why diagnosis stopped without granting transitions. An earlier red remains
+/// a diagnostic observation; it does not turn infra/unknown into a failing pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvaluationStop {
+    ProbeBudgetExhausted,
+    DeadlineExceeded,
+    Unknown,
+    InfrastructureFailure,
+    InvalidBatch,
+    InvalidLimits,
+    Invalidated,
+}
+impl EvaluationStop {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ProbeBudgetExhausted => "probe_budget_exhausted",
+            Self::DeadlineExceeded => "deadline_exceeded",
+            Self::Unknown => "unknown",
+            Self::InfrastructureFailure => "infrastructure_failure",
+            Self::InvalidBatch => "invalid_batch",
+            Self::InvalidLimits => "invalid_limits",
+            Self::Invalidated => "invalidated",
+        }
+    }
+}
+
+pub const DEFAULT_MAX_PROBES: usize = 64;
+pub const DEFAULT_EVALUATION_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Limits for one diagnostic operation, not one member or one cache miss.
+/// Zero probes/time intentionally admits no probe. Explicit callers may lower
+/// or select their own limits; the normal entry point always uses these defaults.
+#[derive(Debug, Clone, Copy)]
+pub struct EvaluationLimits {
+    pub max_probes: usize,
+    pub timeout: Duration,
+}
+impl Default for EvaluationLimits {
+    fn default() -> Self {
+        Self {
+            max_probes: DEFAULT_MAX_PROBES,
+            timeout: DEFAULT_EVALUATION_TIMEOUT,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum FailureLocus {
-    /// A genuine minimal failing pair: the 2-element union `(a, b)` is red, and
-    /// EACH member is individually GREEN (so neither is a single-item failure).
-    /// Both members are named and excluded; the remainder needs its own green.
     Pair(MinimalFailingPair),
-    /// A single item is individually red — the failure is that one item, not a
-    /// pair. Excluding it requires revalidation of the remainder. Naming a second,
-    /// innocent item as a "pair member" would be a false accusation, so the
-    /// single-item case is reported explicitly and never disguised as a pair.
     SingleItem(String),
-    /// The union is red but bisection could not isolate it to any single item
-    /// or any 2-element pair (e.g. a ≥3-way interaction). Surfaced explicitly
-    /// so the caller can fall back (e.g. exclude nothing and hold the batch)
-    /// rather than silently dropping every entry.
     Unlocalised,
 }
 
-/// Outcome of folding + evaluating a batch's union.
+/// Public fields report observations; private snapshots grant transitions.
+/// Identity here is ordered member IDs, NOT a qualified Git/base/config token.
 #[derive(Debug, Clone)]
 pub struct UnionEvaluation {
-    /// Overall verdict of the union.
     pub verdict: UnionVerdict,
-    /// The minimal failing pair, present iff the union is red and a genuine
-    /// pair was isolated by bisection (each member individually green). Both
-    /// members are NAMED (contract ①). `None` for a single-item or unlocalised
-    /// failure — see [`UnionEvaluation::failure`].
     pub minimal_failing_pair: Option<MinimalFailingPair>,
-    /// Explicit locus of a red union's failure (`None` on a green union). A red
-    /// union ALWAYS carries a locus — never a silently-empty result.
     pub failure: Option<FailureLocus>,
-    /// The item-ids that may proceed after excluding the failure locus.
     pub proceeding: Vec<String>,
-    /// Total number of check evaluations that actually executed (novelty).
-    /// Zero when every check was an AC hit (contract ②).
+    /// Known completed underlying executions, not the diagnostic probe count.
     pub executed_count: usize,
-    /// Members kept in the queue because no green evaluation authorizes them.
-    /// A held member is not accused of belonging to the diagnosed locus.
+    /// False when an inconclusive/late callback may have unreported work.
+    pub execution_count_complete: bool,
     pub held: Vec<String>,
-    /// Result of the exact remainder probe, absent if there was no remainder.
     pub remainder_verdict: Option<UnionVerdict>,
-    // Bind the landing bridge to the evaluated input and result, not to a
-    // caller-modified public reporting field or a newly supplied ID set.
+    pub stop_reason: Option<EvaluationStop>,
+    /// ALL oracle invocations, including hits and the final remainder probe.
+    pub probe_count: usize,
+    pub max_probes: usize,
+    pub elapsed: Duration,
+    pub timeout: Duration,
     evaluated_members: Vec<String>,
     validated_members: Vec<String>,
+    excluded_members: Vec<String>,
+    valid_until: Option<Instant>,
+    revoked: Arc<AtomicBool>,
 }
 
 impl UnionEvaluation {
-    /// Exact members authorized by an observed green evaluation.
-    /// This is distinct from diagnosing a failing locus and from the public
-    /// `proceeding` reporting field. No subset is assumed green by monotonicity.
-    pub fn validated_proceeding(&self) -> &[String] {
-        &self.validated_members
+    fn authorization_live(&self) -> bool {
+        !self.revoked.load(Ordering::Acquire)
+            && self.valid_until.is_some_and(|until| Instant::now() < until)
     }
 
-    /// Map the original ordered batch to authorized landing outcomes.
-    /// Held entries deliberately receive NO transition, rather than a fabricated
-    /// green or a false failing-pair accusation. A changed input batch receives
-    /// no authorization; its exact union must be evaluated first.
+    pub fn deadline_exceeded(&self) -> bool {
+        self.valid_until.is_none_or(|until| Instant::now() >= until)
+    }
+
+    pub fn validated_proceeding(&self) -> &[String] {
+        if self.authorization_live() {
+            &self.validated_members
+        } else {
+            &[]
+        }
+    }
+
+    /// Only the diagnosed exclusion snapshot, never a caller-edited `failure`.
+    pub fn validated_excluded(&self) -> &[String] {
+        if self.authorization_live() {
+            &self.excluded_members
+        } else {
+            &[]
+        }
+    }
+
+    /// Local revocation shared by clones of this result. No queue/ref is mutated.
+    /// A new attempt must evaluate again; distributed operation recovery is not
+    /// implemented by this in-memory capability.
+    pub fn invalidate(&mut self) {
+        self.revoked.store(true, Ordering::Release);
+        self.stop_reason = Some(EvaluationStop::Invalidated);
+        self.proceeding.clear();
+        self.held = self.evaluated_members.clone();
+    }
+
+    /// Reject altered input sets/order and results past their evaluation deadline.
     pub fn outcomes_for_landing<'a>(&self, ids: &[&'a str]) -> Vec<(&'a str, UnionOutcome)> {
-        if !ids
-            .iter()
-            .copied()
-            .eq(self.evaluated_members.iter().map(String::as_str))
+        if !self.authorization_live()
+            || !ids
+                .iter()
+                .copied()
+                .eq(self.evaluated_members.iter().map(String::as_str))
         {
             return Vec::new();
         }
-        let excluded: std::collections::BTreeSet<&str> = match &self.failure {
-            Some(FailureLocus::Pair(p)) => {
-                [p.item_a.as_str(), p.item_b.as_str()].into_iter().collect()
-            }
-            Some(FailureLocus::SingleItem(id)) => [id.as_str()].into_iter().collect(),
-            None | Some(FailureLocus::Unlocalised) => std::collections::BTreeSet::new(),
-        };
+        let excluded: std::collections::BTreeSet<&str> =
+            self.excluded_members.iter().map(String::as_str).collect();
         let validated: std::collections::BTreeSet<&str> =
             self.validated_members.iter().map(String::as_str).collect();
         ids.iter()
@@ -145,155 +203,215 @@ impl UnionEvaluation {
     }
 }
 
-/// Fold the batch into its union and evaluate it; on red, diagnose a
-/// failing locus, exclude it, and evaluate the entire remaining candidate.
-/// A red or unlocalised remainder is held, never automatically authorized.
-///
-/// The fold is `U = fold(regen-rebase, head, batch)` — represented here as the
-/// ordered list of item-ids handed to the `MemoCheck` oracle, which owns the
-/// rebase/exec. The engine's job is the *control flow*: evaluate, and on red,
-/// bisect.
-pub fn evaluate_union<M: MemoCheck>(batch: &Batch, oracle: &mut M) -> UnionEvaluation {
-    let ids: Vec<&str> = batch.entries().iter().map(|e| e.item_id()).collect();
-    let evaluated_members: Vec<String> = ids.iter().map(|s| (*s).to_string()).collect();
-    let (verdict, sources) = oracle.evaluate(&ids);
-    let executed_count = sources
-        .iter()
-        .filter(|s| **s == CheckSource::Executed)
-        .count();
-
-    match verdict {
-        UnionVerdict::Green => UnionEvaluation {
-            verdict,
-            minimal_failing_pair: None,
-            failure: None,
-            proceeding: evaluated_members.clone(),
-            validated_members: evaluated_members.clone(),
-            evaluated_members,
-            held: Vec::new(),
-            remainder_verdict: None,
-            executed_count,
-        },
-        UnionVerdict::Red => {
-            let (locus, extra_exec) = bisect_failure(&ids, oracle);
-            let excluded: Vec<&str> = match &locus {
-                FailureLocus::Pair(p) => vec![p.item_a.as_str(), p.item_b.as_str()],
-                FailureLocus::SingleItem(id) => vec![id.as_str()],
-                FailureLocus::Unlocalised => Vec::new(),
-            };
-            let remainder: Vec<&str> = ids
+struct ProbeBudget<F> {
+    limits: EvaluationLimits,
+    start: Instant,
+    deadline: Instant,
+    now: F,
+    probes: usize,
+    executed: usize,
+    execution_count_complete: bool,
+}
+impl<F: Fn() -> Instant> ProbeBudget<F> {
+    fn probe<M: MemoCheck>(
+        &mut self,
+        oracle: &mut M,
+        ids: &[&str],
+    ) -> Result<UnionVerdict, EvaluationStop> {
+        if (self.now)() >= self.deadline {
+            return Err(EvaluationStop::DeadlineExceeded);
+        }
+        if self.probes >= self.limits.max_probes {
+            return Err(EvaluationStop::ProbeBudgetExhausted);
+        }
+        self.probes += 1;
+        let (verdict, sources) = oracle.evaluate_before(ids, self.deadline);
+        self.executed = self.executed.saturating_add(
+            sources
                 .iter()
-                .copied()
-                .filter(|id| !excluded.contains(id))
-                .collect();
-            let mut proceeding = Vec::new();
-            let mut held = Vec::new();
-            let mut remainder_verdict = None;
-            let mut remainder_exec = 0;
-            if matches!(locus, FailureLocus::Unlocalised) {
-                // No diagnosed locus: hold the batch without blaming each member.
-                held = evaluated_members.clone();
-            } else if !remainder.is_empty() {
-                // Load-bearing F02 rule: excluded != proved remainder.
-                // In particular A+B and C+D may conflict independently, and a
-                // non-monotone oracle can turn red only after a member is removed.
-                let (result, sources) = oracle.evaluate(&remainder);
-                remainder_exec = sources
-                    .iter()
-                    .filter(|s| **s == CheckSource::Executed)
-                    .count();
-                remainder_verdict = Some(result);
-                let members = remainder.iter().map(|s| (*s).to_string()).collect();
-                match result {
-                    UnionVerdict::Green => proceeding = members,
-                    UnionVerdict::Red => held = members,
-                }
+                .filter(|s| **s == CheckSource::Executed)
+                .count(),
+        );
+        if (self.now)() >= self.deadline {
+            self.execution_count_complete = false;
+            return Err(EvaluationStop::DeadlineExceeded);
+        }
+        match verdict {
+            UnionVerdict::Green | UnionVerdict::Red => Ok(verdict),
+            UnionVerdict::Unknown => {
+                self.execution_count_complete = false;
+                Err(EvaluationStop::Unknown)
             }
-            let minimal_failing_pair = match &locus {
-                FailureLocus::Pair(p) => Some(p.clone()),
-                _ => None,
-            };
-            UnionEvaluation {
-                verdict,
-                minimal_failing_pair,
-                failure: Some(locus),
-                validated_members: proceeding.clone(),
-                proceeding,
-                held,
-                remainder_verdict,
-                evaluated_members,
-                executed_count: executed_count + extra_exec + remainder_exec,
+            UnionVerdict::InfrastructureFailure => {
+                self.execution_count_complete = false;
+                Err(EvaluationStop::InfrastructureFailure)
             }
         }
     }
 }
 
-/// Bisect a red batch over the memoised checks to the explicit failure locus.
-///
-/// The bisection is *minimal* and *honest*:
-/// 1. First probe each item individually. If any single item's 1-element union
-///    is red, the failure is that one item — a [`FailureLocus::SingleItem`].
-///    Pairing it with an innocent neighbour (the old "first red 2-element
-///    probe" bug) would falsely accuse the neighbour, so single items win.
-/// 2. Otherwise probe every ordered pair. The first 2-element red union whose
-///    BOTH members are individually green is a genuine
-///    [`FailureLocus::Pair`] — neither member is itself broken, so it is truly
-///    a *pair* interaction (contract ①, minimality verified).
-/// 3. If neither localises (≥3-way interaction), return
-///    [`FailureLocus::Unlocalised`] — explicit, never a silent empty drop.
-///
-/// Returns the locus and the count of evaluations that actually *executed*
-/// (AC hits are free; only novelty counts toward ②).
-fn bisect_failure<M: MemoCheck>(ids: &[&str], oracle: &mut M) -> (FailureLocus, usize) {
-    let mut executed = 0;
+/// Normal path: bounded even when every check is a cache hit.
+pub fn evaluate_union<M: MemoCheck>(batch: &Batch, oracle: &mut M) -> UnionEvaluation {
+    evaluate_union_with_limits(batch, oracle, EvaluationLimits::default())
+}
 
-    // Phase 1: individual innocence. Record which singletons are individually
-    // red; a red singleton is a single-item failure, not a pair member.
-    let mut individually_red = vec![false; ids.len()];
-    for (i, id) in ids.iter().enumerate() {
-        let probe = [*id];
-        let (verdict, sources) = oracle.evaluate(&probe);
-        executed += sources
+/// Evaluate with a single cooperative deadline. This is NOT an OS supervisor:
+/// elapsed wall time can exceed the limit inside a noncooperative callback, but
+/// its result is discarded and no further probe or transition is authorized.
+pub fn evaluate_union_with_limits<M: MemoCheck>(
+    batch: &Batch,
+    oracle: &mut M,
+    limits: EvaluationLimits,
+) -> UnionEvaluation {
+    evaluate_union_with_clock(batch, oracle, limits, Instant::now)
+}
+
+fn evaluate_union_with_clock<M: MemoCheck, F: Fn() -> Instant>(
+    batch: &Batch,
+    oracle: &mut M,
+    limits: EvaluationLimits,
+    now: F,
+) -> UnionEvaluation {
+    let start = now();
+    let deadline = start.checked_add(limits.timeout);
+    let ids: Vec<&str> = batch.entries().iter().map(|e| e.item_id()).collect();
+    let members: Vec<String> = ids.iter().map(|s| (*s).to_string()).collect();
+    let mut ev = UnionEvaluation {
+        verdict: UnionVerdict::Unknown,
+        minimal_failing_pair: None,
+        failure: None,
+        proceeding: Vec::new(),
+        executed_count: 0,
+        execution_count_complete: true,
+        held: members.clone(),
+        remainder_verdict: None,
+        stop_reason: None,
+        probe_count: 0,
+        max_probes: limits.max_probes,
+        elapsed: Duration::ZERO,
+        timeout: limits.timeout,
+        evaluated_members: members,
+        validated_members: Vec::new(),
+        excluded_members: Vec::new(),
+        valid_until: deadline,
+        revoked: Arc::new(AtomicBool::new(false)),
+    };
+    let Some(deadline) = deadline else {
+        ev.stop_reason = Some(EvaluationStop::InvalidLimits);
+        ev.revoked.store(true, Ordering::Release);
+        return ev;
+    };
+    let mut budget = ProbeBudget {
+        limits,
+        start,
+        deadline,
+        now,
+        probes: 0,
+        executed: 0,
+        execution_count_complete: true,
+    };
+    let result = (|| -> Result<(), EvaluationStop> {
+        let unique: std::collections::BTreeSet<&str> = ids.iter().copied().collect();
+        if !batch.is_queue_ordered()
+            || unique.len() != ids.len()
+            || ids.iter().any(|s| s.is_empty())
+        {
+            return Err(EvaluationStop::InvalidBatch);
+        }
+        if ids.is_empty() {
+            // No changes or authority to grant: do not call the oracle.
+            ev.verdict = UnionVerdict::Green;
+            ev.held.clear();
+            return Ok(());
+        }
+        ev.verdict = budget.probe(oracle, &ids)?;
+        if ev.verdict == UnionVerdict::Green {
+            ev.proceeding = ev.evaluated_members.clone();
+            ev.held.clear();
+            return Ok(());
+        }
+        let locus = bisect_failure(&ids, oracle, &mut budget)?;
+        ev.minimal_failing_pair = match &locus {
+            FailureLocus::Pair(pair) => Some(pair.clone()),
+            _ => None,
+        };
+        ev.failure = Some(locus.clone());
+        let excluded: Vec<&str> = match &locus {
+            FailureLocus::Pair(pair) => vec![pair.item_a.as_str(), pair.item_b.as_str()],
+            FailureLocus::SingleItem(id) => vec![id.as_str()],
+            FailureLocus::Unlocalised => return Ok(()),
+        };
+        let remainder: Vec<&str> = ids
             .iter()
-            .filter(|s| **s == CheckSource::Executed)
-            .count();
-        if verdict == UnionVerdict::Red {
-            individually_red[i] = true;
+            .copied()
+            .filter(|id| !excluded.contains(id))
+            .collect();
+        if !remainder.is_empty() {
+            let verdict = budget.probe(oracle, &remainder)?;
+            ev.remainder_verdict = Some(verdict);
+            if verdict == UnionVerdict::Green {
+                ev.proceeding = remainder.iter().map(|s| (*s).to_string()).collect();
+                ev.held.clear();
+            } else {
+                ev.held = remainder.iter().map(|s| (*s).to_string()).collect();
+            }
+        } else {
+            ev.held.clear();
+        }
+        ev.excluded_members = excluded.iter().map(|s| (*s).to_string()).collect();
+        Ok(())
+    })();
+    if let Err(reason) = result {
+        if ev.verdict == UnionVerdict::Unknown && reason == EvaluationStop::InfrastructureFailure {
+            ev.verdict = UnionVerdict::InfrastructureFailure;
+        }
+        ev.stop_reason = Some(reason);
+        ev.proceeding.clear();
+        ev.excluded_members.clear();
+        ev.held = ev.evaluated_members.clone();
+        ev.revoked.store(true, Ordering::Release);
+    }
+    ev.validated_members = ev.proceeding.clone();
+    ev.probe_count = budget.probes;
+    ev.executed_count = budget.executed;
+    ev.execution_count_complete = budget.execution_count_complete;
+    ev.elapsed = (budget.now)().saturating_duration_since(budget.start);
+    // Include time spent constructing the result, not just oracle callbacks.
+    if ev.stop_reason.is_none() && !ids.is_empty() && (budget.now)() >= deadline {
+        ev.stop_reason = Some(EvaluationStop::DeadlineExceeded);
+        ev.proceeding.clear();
+        ev.validated_members.clear();
+        ev.excluded_members.clear();
+        ev.held = ev.evaluated_members.clone();
+        ev.revoked.store(true, Ordering::Release);
+    }
+    ev
+}
+
+/// At most O(n²) possible pairs, bounded by the SAME operation probe budget.
+/// A verified red singleton ends diagnosis; otherwise only pairs of known-green
+/// singletons are called pairs. Unknown/infra stops, rather than blaming a member.
+fn bisect_failure<M: MemoCheck, F: Fn() -> Instant>(
+    ids: &[&str],
+    oracle: &mut M,
+    budget: &mut ProbeBudget<F>,
+) -> Result<FailureLocus, EvaluationStop> {
+    for id in ids {
+        if budget.probe(oracle, &[*id])? == UnionVerdict::Red {
+            return Ok(FailureLocus::SingleItem((*id).to_string()));
         }
     }
-    if let Some(i) = individually_red.iter().position(|&r| r) {
-        // A single item is the failure locus. Exclude it alone; never drag an
-        // innocent neighbour in as a fake pair member.
-        return (FailureLocus::SingleItem(ids[i].to_string()), executed);
-    }
-
-    // Phase 2: genuine pairs. Every item is individually green here, so any red
-    // 2-element union is a true pair interaction — both members verified
-    // innocent in isolation (defect-3 minimality).
     for i in 0..ids.len() {
-        for j in (i + 1)..ids.len() {
-            let probe = [ids[i], ids[j]];
-            let (verdict, sources) = oracle.evaluate(&probe);
-            executed += sources
-                .iter()
-                .filter(|s| **s == CheckSource::Executed)
-                .count();
-            if verdict == UnionVerdict::Red {
-                return (
-                    FailureLocus::Pair(MinimalFailingPair {
-                        item_a: ids[i].to_string(),
-                        item_b: ids[j].to_string(),
-                    }),
-                    executed,
-                );
+        for j in i + 1..ids.len() {
+            if budget.probe(oracle, &[ids[i], ids[j]])? == UnionVerdict::Red {
+                return Ok(FailureLocus::Pair(MinimalFailingPair {
+                    item_a: ids[i].to_string(),
+                    item_b: ids[j].to_string(),
+                }));
             }
         }
     }
-
-    // Phase 3: the whole union is red but no single item and no pair is — a
-    // ≥3-way interaction. Surface it EXPLICITLY (defect-4): the caller must not
-    // silently drop the batch.
-    (FailureLocus::Unlocalised, executed)
+    Ok(FailureLocus::Unlocalised)
 }
 
 /// Partition the batch entries into maximal groups of pairwise-disjoint
@@ -547,5 +665,102 @@ mod tests {
         assert_eq!(lanes.len(), 2);
         assert_eq!(lanes[0], vec!["a".to_string(), "b".to_string()]);
         assert_eq!(lanes[1], vec!["c".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod budget_clock_tests {
+    use super::*;
+    use crate::core::AffectedSet;
+    use hugit_contracts::LandableEntry;
+    use std::cell::Cell;
+
+    fn sample() -> Batch {
+        Batch::from_entries(
+            "clock",
+            ["A", "B", "C"].iter().enumerate().map(|(i, id)| {
+                (
+                    LandableEntry {
+                        item_id: (*id).into(),
+                        intent_id: (*id).into(),
+                        tree_hash: format!("fixture-{id}"),
+                        order_index: i as u64,
+                    },
+                    AffectedSet::new(["fixture"]),
+                )
+            }),
+        )
+    }
+    struct Timed<'a> {
+        clock: &'a Cell<Instant>,
+        calls: usize,
+        late_at: usize,
+    }
+    impl MemoCheck for Timed<'_> {
+        fn evaluate(&mut self, _: &[&str]) -> (UnionVerdict, Vec<CheckSource>) {
+            panic!("deadline must be forwarded")
+        }
+        fn evaluate_before(
+            &mut self,
+            ids: &[&str],
+            deadline: Instant,
+        ) -> (UnionVerdict, Vec<CheckSource>) {
+            self.calls += 1;
+            if self.calls == self.late_at {
+                self.clock.set(deadline);
+            }
+            (
+                if ids.contains(&"A") && ids.contains(&"B") {
+                    UnionVerdict::Red
+                } else {
+                    UnionVerdict::Green
+                },
+                vec![CheckSource::Executed],
+            )
+        }
+    }
+
+    #[test]
+    fn deadline_at_each_phase_discards_late_results_without_sleep_or_threads() {
+        for late_at in [1, 2, 5, 6] {
+            let now = Cell::new(Instant::now());
+            let mut oracle = Timed {
+                clock: &now,
+                calls: 0,
+                late_at,
+            };
+            let ev = evaluate_union_with_clock(
+                &sample(),
+                &mut oracle,
+                EvaluationLimits::default(),
+                || now.get(),
+            );
+            assert_eq!(ev.stop_reason, Some(EvaluationStop::DeadlineExceeded));
+            assert_eq!(ev.probe_count, late_at);
+            assert_eq!(oracle.calls, late_at);
+            assert_eq!(ev.held, ["A", "B", "C"]);
+            assert!(ev.outcomes_for_landing(&["A", "B", "C"]).is_empty());
+            assert_eq!(ev.executed_count, late_at);
+            assert!(!ev.execution_count_complete);
+        }
+    }
+
+    #[test]
+    fn authorization_checks_its_deadline_after_evaluation() {
+        let now = Cell::new(Instant::now());
+        let mut oracle = Timed {
+            clock: &now,
+            calls: 0,
+            late_at: usize::MAX,
+        };
+        let mut ev =
+            evaluate_union_with_clock(&sample(), &mut oracle, EvaluationLimits::default(), || {
+                now.get()
+            });
+        assert_eq!(ev.validated_proceeding(), ["C"]);
+        ev.valid_until = Some(Instant::now());
+        assert!(ev.validated_proceeding().is_empty());
+        assert!(ev.validated_excluded().is_empty());
+        assert!(ev.outcomes_for_landing(&["A", "B", "C"]).is_empty());
     }
 }
