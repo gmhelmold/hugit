@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(queue): bind contextual evaluations to the full ordered batch snapshot and
+  explicit base/configuration/operation identity. Record actual probe sets, reject
+  stale or context-free authorization, and label CLI corpus identities as local
+  simulation observations rather than Git-tree or crash-recovery certificates.
+
 - fix(queue): bound diagnosis to 64 probes by default (including cache hits),
   propagate one cooperative evaluation deadline, and hold inconclusive or
   infrastructure-failed batches without fabricating failed authors or landing.
