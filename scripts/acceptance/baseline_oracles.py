@@ -37,7 +37,8 @@ def parse(raw):
     return json.loads(raw, object_pairs_hook=unique, parse_constant=nonfinite)
 
 def reconstruct(report):
-    need(report['schema_version'] == 1 and report['status'] == 'characterized', 'not_characterized')
+    need(type(report['schema_version']) is int and report['schema_version'] == 1
+         and report['status'] == 'characterized', 'not_characterized')
     need(re.fullmatch('[0-9a-f]{64}', report['binary_sha256']) is not None, 'binary_identity')
     need(re.fullmatch('[0-9a-f]{40}', report['subject_claim']) is not None, 'subject_identity')
     need(report['product_accepted'] is False and report['whole_wp_ready'] is False, 'authority_escalation')
@@ -59,6 +60,8 @@ def reconstruct(report):
     cache = parse(files['checks.ac'])
     need(isinstance(log, list) and isinstance(goal_log, list) and isinstance(cache, dict), 'state_shape')
     checks = [parse(x['payload']) for x in log if x['kind'] == 'check.recorded']
+    need(all(isinstance(c, dict) and type(c.get('cache_hit')) is bool for c in checks),
+         'persisted_cache_hit_type')
     calls = [payload('cache-' + str(i)) for i in range(4)]
     key = calls[0]['memo_key']
     view = payload('check-show')
@@ -99,7 +102,8 @@ def verdict(expected, observed, satisfied):
 def evaluate(w):
     """Independent assertions over retained witnesses; never import Hugit code."""
     calls = w['cache_calls']
-    need(len(calls) == 4 and [c.get('cache_hit') for c in calls] == [False, True, True, True],
+    need(len(calls) == 4 and all(type(c.get('cache_hit')) is bool for c in calls)
+         and [c['cache_hit'] for c in calls] == [False, True, True, True],
          'cache_sequence_not_demonstrated')
     need(all(c.get('ok') is True and type(c.get('exit')) is int and c['exit'] == 0 for c in calls),
          'positive_check_not_demonstrated')
@@ -146,7 +150,9 @@ def evaluate(w):
 
 def verify(report):
     results = evaluate(reconstruct(report))
-    need(set(results) == set(FINDINGS) and results == report['findings'], 'forged_findings')
+    need(set(results) == set(FINDINGS)
+         and json.dumps(results, sort_keys=True) == json.dumps(report['findings'], sort_keys=True),
+         'forged_findings')
     need(set(report['finding_registry']) == {'F%02d' % i for i in range(1, 20)}, 'finding_omitted')
     need(report['origin']['workflow_head_sha'] == report['subject_claim'], 'workflow_subject_mismatch')
     need(report['origin']['binary_metadata']['sha256'] == report['binary_sha256'], 'binary_metadata_mismatch')
@@ -155,7 +161,13 @@ def verify(report):
 def self_test(report):
     def command(r, name):
         return next(c for c in r['commands'] if c['label'] == name)
+    def false_as_zero(r):
+        row = command(r, 'cache-0')
+        payload = parse(row['stdout']); payload['cache_hit'] = 0
+        row['stdout'] = json.dumps(payload)
     mutations = {
+        'false_as_zero': false_as_zero,
+        'boolean_schema_version': lambda r: r.update(schema_version=True),
         'forged_green': lambda r: r['findings']['F09'].update(outcome='satisfied'),
         'missing_command': lambda r: r['commands'].pop(),
         'duplicate_command': lambda r: r['commands'].append(copy.deepcopy(r['commands'][0])),
