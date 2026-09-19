@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(coordination): explicitly unlock owned native leases before closing handles,
+  so a transient pre-exec descriptor copy cannot retain a released lease.
+
 - feat(coordination): add quiescent, persistent writer disable to the experimental
   native namespace. Active resource leases prevent disable; malformed state
   refuses admission, while read-only inspection remains available. The lifecycle

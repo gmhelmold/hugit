@@ -10,7 +10,8 @@
 //! Resource lockfiles contain no payload, remain on disk after release, and are
 //! NEVER deleted, truncated or reclaimed by age/PID. The stable admission file
 //! contains only its bounded Active/Disabled state.
-//! The private File is not cloned/exported. std opens handles close-on-exec /
+//! Leases explicitly unlock before close, including handles copied transiently
+//! by fork-before-exec. The private File is not cloned/exported. std opens handles close-on-exec /
 //! non-inheritable for Command children; fork-without-exec is not supported.
 //!
 //! Trust: cooperative same-user local filesystem and admitted root. Native locks
@@ -27,6 +28,7 @@
 
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Seek, Write};
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 
 pub const EXPERIMENTAL_DIRECTORY: &str = "coordination-v2-experimental";
@@ -188,8 +190,8 @@ impl ExperimentalCoordinator {
     pub fn try_disable(&self) -> Result<(), CoordinationError> {
         validate_namespace(&self.root)?;
         let path = self.root.join(WRITER_STATE_FILE);
-        let mut state = open_stable_file(&path, false, true)?;
-        lock_handle(&state, false)?;
+        let state = open_stable_file(&path, false, true)?;
+        let mut state = lock_handle(state, false)?;
         validate_opened_file(&path, &state)?;
         match read_writer_state(&state)? {
             WriterState::Active => {
@@ -297,14 +299,38 @@ fn validate_opened_file(path: &Path, file: &File) -> Result<(), CoordinationErro
     Ok(())
 }
 
-fn lock_handle(file: &File, shared: bool) -> Result<(), CoordinationError> {
+/// Private ownership guard. Closing alone can leave the same open-file lock in
+/// a descriptor copied by a concurrently spawning thread before exec. Release
+/// our lease explicitly first; no handle is exported by the public API.
+#[derive(Debug)]
+struct NativeLease(File);
+impl Deref for NativeLease {
+    type Target = File;
+    fn deref(&self) -> &File {
+        &self.0
+    }
+}
+impl DerefMut for NativeLease {
+    fn deref_mut(&mut self) -> &mut File {
+        &mut self.0
+    }
+}
+impl Drop for NativeLease {
+    fn drop(&mut self) {
+        // No destructive recovery on error. Closing the owned File remains the
+        // fallback; a concurrent contender can conservatively report Busy.
+        let _ = self.0.unlock();
+    }
+}
+
+fn lock_handle(file: File, shared: bool) -> Result<NativeLease, CoordinationError> {
     let result = if shared {
         file.try_lock_shared()
     } else {
         file.try_lock()
     };
     match result {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(NativeLease(file)),
         Err(TryLockError::WouldBlock) => Err(CoordinationError::Busy),
         Err(TryLockError::Error(e)) => Err(e.into()),
     }
@@ -324,7 +350,7 @@ fn lock_path(root: &Path, request: &LockRequest) -> PathBuf {
 #[derive(Debug)]
 struct HeldLock {
     request: LockRequest,
-    file: File,
+    file: NativeLease,
 }
 
 /// Owns its handles; cannot be cloned or converted into an inheritable handle.
@@ -334,7 +360,7 @@ pub struct LockSet {
     root: PathBuf,
     held: Vec<HeldLock>,
     // Field drop order matters: resource handles close BEFORE admission.
-    admission: Option<File>,
+    admission: Option<NativeLease>,
 }
 impl LockSet {
     pub fn len(&self) -> usize {
@@ -359,7 +385,7 @@ impl LockSet {
         let pending_admission = if self.admission.is_none() {
             let path = self.root.join(WRITER_STATE_FILE);
             let file = open_stable_file(&path, false, false)?;
-            lock_handle(&file, true)?;
+            let file = lock_handle(file, true)?;
             validate_opened_file(&path, &file)?;
             Some(file)
         } else {
@@ -375,7 +401,7 @@ impl LockSet {
         }
         let path = lock_path(&self.root, &request);
         let file = open_stable_file(&path, true, true)?;
-        lock_handle(&file, false)?;
+        let file = lock_handle(file, false)?;
         validate_opened_file(&path, &file)?;
         if pending_admission.is_some() {
             self.admission = pending_admission;
@@ -392,5 +418,67 @@ impl LockSet {
             drop(self.admission.take());
         }
         Some(request)
+    }
+}
+
+#[cfg(test)]
+mod release_regressions {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "hugit-lock-release-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&p).unwrap();
+            Self(p)
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+    #[test]
+    fn releasing_resource_unlocks_even_while_a_pre_exec_duplicate_exists() {
+        let f = Fixture::new();
+        let c = ExperimentalCoordinator::create(&f.0).unwrap();
+        let request = LockRequest::new(LockClass::Operation, "release").unwrap();
+        let mut held = c.lock_set();
+        held.try_acquire(request.clone()).unwrap();
+        // A private test-only duplicate models the descriptor copy during fork-before-exec.
+        // No API gives callers this handle or grants the duplicate writer authority.
+        let duplicate = held.held[0].file.try_clone().unwrap();
+        held.release_last();
+        let observed = c.lock_set().try_acquire(request);
+        drop(duplicate);
+        assert!(
+            observed.is_ok(),
+            "released resource remains held: {observed:?}"
+        );
+    }
+    #[test]
+    fn releasing_admission_unlocks_even_while_a_pre_exec_duplicate_exists() {
+        let f = Fixture::new();
+        let c = ExperimentalCoordinator::create(&f.0).unwrap();
+        let mut held = c.lock_set();
+        held.try_acquire(LockRequest::new(LockClass::Operation, "release").unwrap())
+            .unwrap();
+        let duplicate = held.admission.as_ref().unwrap().try_clone().unwrap();
+        drop(held);
+        let observed = c.try_disable();
+        drop(duplicate);
+        assert!(
+            observed.is_ok(),
+            "released admission remains held: {observed:?}"
+        );
+        assert_eq!(
+            ExperimentalCoordinator::inspect(&f.0).unwrap(),
+            WriterState::Disabled
+        );
     }
 }
