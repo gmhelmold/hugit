@@ -36,13 +36,14 @@ jobs:
       CARGO_BUILD_JOBS: '2'
       CARGO_INCREMENTAL: '0'
       CARGO_TERM_COLOR: never
-      EVIDENCE_DIR: ${{ runner.temp }}/hugit-native-coordination
-      TMPDIR: ${{ runner.temp }}/hugit-native-fixtures
       SUBJECT_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - name: Prepare isolated directories
         shell: bash
-        run: mkdir -p "$TMPDIR" "$EVIDENCE_DIR"
+        run: |
+          mkdir -p "$RUNNER_TEMP/hugit-native-fixtures" "$RUNNER_TEMP/hugit-native-coordination"
+          printf 'TMPDIR=%s\n' "$RUNNER_TEMP/hugit-native-fixtures" >> "$GITHUB_ENV"
+          printf 'EVIDENCE_DIR=%s\n' "$RUNNER_TEMP/hugit-native-coordination" >> "$GITHUB_ENV"
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
           persist-credentials: false
