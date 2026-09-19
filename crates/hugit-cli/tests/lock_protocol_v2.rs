@@ -8,19 +8,26 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
-struct Fixture(PathBuf);
+// Other tests in this executable spawn processes. On Unix a concurrent spawn
+// can transiently inherit CLOEXEC descriptors between fork and exec, retaining
+// a logically released native lock. Isolate fixtures from unrelated spawns;
+// actual contenders/threads WITHIN each fixture remain concurrent.
+static FIXTURE_PROCESS: Mutex<()> = Mutex::new(());
+struct Fixture(PathBuf, MutexGuard<'static, ()>);
 impl Fixture {
     fn new() -> Self {
+        let guard = FIXTURE_PROCESS.lock().unwrap_or_else(|e| e.into_inner());
         let path = std::env::temp_dir().join(format!(
             "hugit-native-lock-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&path).unwrap();
-        Self(path)
+        Self(path, guard)
     }
     fn coordinator(&self) -> ExperimentalCoordinator {
         ExperimentalCoordinator::create(&self.0).unwrap()
@@ -28,6 +35,7 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        let _guard = &self.1;
         fs::remove_dir_all(&self.0).unwrap();
     }
 }
@@ -630,10 +638,12 @@ fn concurrent_admission_and_disable_have_a_single_safe_winner() {
         worker.join().unwrap();
         assert!(safe, "disable={disabled:?}, admission={admitted:?}");
         c.try_disable().unwrap();
-        assert!(matches!(
-            c.lock_set().try_acquire(global()),
-            Err(CoordinationError::WritersDisabled)
-        ));
+        let after_disable = c.lock_set().try_acquire(global());
+        assert!(
+            matches!(after_disable, Err(CoordinationError::WritersDisabled)),
+            "after disable: {after_disable:?}, state={:?}",
+            fs::read(state_path(&f))
+        );
     }
 }
 
