@@ -1,4 +1,4 @@
-name: Native coordination (macOS ARM64)
+name: Native coordination (platform matrix)
 
 on:
   pull_request:
@@ -9,6 +9,8 @@ on:
       - '.cargo/**'
       - 'rust-toolchain.toml'
       - '.github/workflows/native-coordination.yml'
+      - 'scripts/qualify_native_coordination.py'
+      - 'scripts/test_native_coordination_evidence.py'
   push:
     branches: [main]
     paths:
@@ -18,6 +20,8 @@ on:
       - '.cargo/**'
       - 'rust-toolchain.toml'
       - '.github/workflows/native-coordination.yml'
+      - 'scripts/qualify_native_coordination.py'
+      - 'scripts/test_native_coordination_evidence.py'
   workflow_dispatch:
 
 permissions:
@@ -28,22 +32,60 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  macos-arm64-apfs:
+  native:
+    name: ${{ matrix.cell }}
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false
-    runs-on: macos-15
-    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cell: linux-x64-ext4
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            python: python3
+          - cell: macos-arm64-apfs
+            runner: macos-15
+            target: aarch64-apple-darwin
+            python: python3
+          - cell: macos-intel-apfs
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            python: python3
+          - cell: windows-x64-ntfs
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            python: python
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     env:
       CARGO_BUILD_JOBS: '2'
       CARGO_INCREMENTAL: '0'
       CARGO_TERM_COLOR: never
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHON: ${{ matrix.python }}
+      NATIVE_CELL: ${{ matrix.cell }}
+      NATIVE_TARGET: ${{ matrix.target }}
       SUBJECT_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - name: Prepare isolated directories
         shell: bash
         run: |
-          mkdir -p "$RUNNER_TEMP/hugit-native-fixtures" "$RUNNER_TEMP/hugit-native-coordination"
-          printf 'TMPDIR=%s\n' "$RUNNER_TEMP/hugit-native-fixtures" >> "$GITHUB_ENV"
-          printf 'EVIDENCE_DIR=%s\n' "$RUNNER_TEMP/hugit-native-coordination" >> "$GITHUB_ENV"
+          set -euo pipefail
+          "$PYTHON" - <<'PYPREP'
+          import json, os, pathlib
+          base = pathlib.Path(os.environ['RUNNER_TEMP'])
+          fixtures = base / 'hugit-native-fixtures'
+          evidence = base / 'hugit-native-coordination'
+          fixtures.mkdir()
+          evidence.mkdir()
+          (evidence / 'execution.json').write_text(json.dumps({
+              'cell': os.environ['NATIVE_CELL'], 'run': os.environ['GITHUB_RUN_ID'],
+              'attempt': os.environ['GITHUB_RUN_ATTEMPT'], 'status': 'not_yet_qualified'})+'\n')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as env:
+              for key in ('TMPDIR', 'TEMP', 'TMP', 'NATIVE_FIXTURES'):
+                  env.write(f'{key}={fixtures}\n')
+              env.write(f'EVIDENCE_DIR={evidence}\n')
+          PYPREP
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
           persist-credentials: false
@@ -52,81 +94,31 @@ jobs:
           toolchain: '1.96.0'
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
-          prefix-key: native-coordination-macos-arm64-v1
-      - name: Identify actual native platform and subject
+          prefix-key: native-coordination-${{ matrix.cell }}-v2
+      - name: Check evidence gate controls
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$TMPDIR" "$EVIDENCE_DIR"
-          python3 - <<'PYENV'
-          import hashlib, json, os, pathlib, platform, plistlib, subprocess
-          def output(*args):
-              return subprocess.check_output(args, text=True).strip()
-          assert platform.system() == 'Darwin' and platform.machine() == 'arm64'
-          rust = output('rustc', '--version', '--verbose')
-          assert 'host: aarch64-apple-darwin' in rust
-          device = output('df', '-P', os.environ['TMPDIR']).splitlines()[-1].split()[0]
-          filesystem = plistlib.loads(subprocess.check_output(['diskutil', 'info', '-plist', device]))
-          assert filesystem.get('FilesystemType', '').lower() == 'apfs', filesystem.get('FilesystemType')
-          paths = ['crates/hugit-refstore/src/coordination.rs', 'crates/hugit-cli/tests/lock_protocol_v2.rs']
-          value = {'schema': 'hugit.native-coordination-observation/1',
-                   'checkout': output('git', 'rev-parse', 'HEAD'),
-                   'tree': output('git', 'rev-parse', 'HEAD^{tree}'),
-                   'subject_head': os.environ['SUBJECT_HEAD'],
-                   'run_id': os.environ['GITHUB_RUN_ID'], 'attempt': os.environ['GITHUB_RUN_ATTEMPT'],
-                   'system': platform.system(), 'architecture': platform.machine(),
-                   'filesystem': filesystem['FilesystemType'], 'rustc': rust,
-                   'files': {p: hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest() for p in paths}}
-          pathlib.Path(os.environ['EVIDENCE_DIR'], 'subject.json').write_text(json.dumps(value, indent=2)+'\n')
-          print(json.dumps(value, indent=2))
-          PYENV
+          "$PYTHON" scripts/test_native_coordination_evidence.py 2>&1 | tee "$EVIDENCE_DIR/gate-controls.log"
+      - name: Identify actual native platform and fixture filesystem
+        shell: bash
+        run: '"$PYTHON" scripts/qualify_native_coordination.py identify --cell "$NATIVE_CELL"'
       - name: Execute native lease and process scenarios
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked --target aarch64-apple-darwin -p hugit-refstore --lib coordination::release_regressions -- --list 2>&1 | tee "$EVIDENCE_DIR/unit-list.log"
-          cargo test --locked --target aarch64-apple-darwin -p hugit-refstore --lib coordination::release_regressions -- --nocapture 2>&1 | tee "$EVIDENCE_DIR/unit.log"
-          cargo test --locked --target aarch64-apple-darwin -p hugit-cli --test lock_protocol_v2 -- --list 2>&1 | tee "$EVIDENCE_DIR/integration-list.log"
-          cargo test --locked --target aarch64-apple-darwin -p hugit-cli --test lock_protocol_v2 -- --nocapture 2>&1 | tee "$EVIDENCE_DIR/integration.log"
-      - name: Require actual named tests, pause and fixture cleanup
+          cargo test --locked --target "$NATIVE_TARGET" -p hugit-refstore --lib coordination::release_regressions -- --list 2>&1 | tee "$EVIDENCE_DIR/unit-list.log"
+          cargo test --locked --target "$NATIVE_TARGET" -p hugit-refstore --lib coordination::release_regressions -- --nocapture 2>&1 | tee "$EVIDENCE_DIR/unit.log"
+          cargo test --locked --target "$NATIVE_TARGET" -p hugit-cli --test lock_protocol_v2 -- --list 2>&1 | tee "$EVIDENCE_DIR/integration-list.log"
+          cargo test --locked --target "$NATIVE_TARGET" -p hugit-cli --test lock_protocol_v2 -- --nocapture 2>&1 | tee "$EVIDENCE_DIR/integration.log"
+      - name: Require mandatory names, applicable pause and fixture cleanup
         shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PYRESULT'
-          import hashlib, json, os, pathlib, re, subprocess
-          root = pathlib.Path(os.environ['EVIDENCE_DIR'])
-          result = {}
-          for group in ['unit', 'integration']:
-              listed = (root / (group+'-list.log')).read_text()
-              log = (root / (group+'.log')).read_text()
-              expected = set(re.findall(r'^([A-Za-z0-9_:]+): test$', listed, re.M))
-              if group == 'integration':
-                  assert 'subprocess_fixture' in expected
-                  expected.remove('subprocess_fixture')
-                  assert re.search(r'test subprocess_fixture \.\.\. ignored', log)
-              passed = set(re.findall(r'^test ([A-Za-z0-9_:]+) \.\.\. ok$', log, re.M))
-              assert expected and passed == expected, (group, sorted(expected-passed), sorted(passed-expected))
-              result[group] = {'passed': len(passed), 'names': sorted(passed)}
-          log = (root / 'integration.log').read_text()
-          pauses = [int(n) for n in re.findall(r'owner_paused_ms=(\d+)', log)]
-          assert pauses and min(pauses) >= 130000
-          leftovers = [p.name for p in pathlib.Path(os.environ['TMPDIR']).iterdir()
-                       if p.name.startswith(('hugit-native-lock-', 'hugit-lock-release-'))]
-          assert not leftovers, leftovers
-          subject = json.loads((root / 'subject.json').read_text())
-          assert all(hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest() == digest
-                     for p, digest in subject['files'].items())
-          assert not subprocess.check_output(['git', 'status', '--porcelain=v1', '--untracked-files=all']).strip()
-          result.update({'source_unchanged': True, 'owner_paused_ms': pauses, 'owned_fixture_leftovers': leftovers,
-                         'scope': 'experimental primitive only; no v1 cutover or power-loss qualification'})
-          (root / 'results.json').write_text(json.dumps(result, indent=2)+'\n')
-          print(json.dumps(result, indent=2))
-          PYRESULT
+        run: '"$PYTHON" scripts/qualify_native_coordination.py verify --cell "$NATIVE_CELL"'
       - name: Retain evidence even when qualification fails
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: native-coordination-macos-arm64-${{ github.sha }}-${{ github.run_attempt }}
+          name: native-coordination-${{ matrix.cell }}-${{ github.sha }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/hugit-native-coordination/
           if-no-files-found: error
           retention-days: 90
