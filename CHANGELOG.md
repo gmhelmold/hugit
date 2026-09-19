@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(coordination): preflight bounded ordered lock plans and release only the
+  newly acquired prefix on failure; preserve prior leases, admission and stable
+  files. Experimental only, with no production-v1 activation.
+
 - fix(capture): serialize first-runtime bootstrap under bounded contention without
   age-based lock takeover. Revalidate completed metadata and legacy inputs before
   admitting hook receipts. Report actual migration lock contention as retryable

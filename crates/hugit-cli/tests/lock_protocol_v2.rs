@@ -290,8 +290,11 @@ fn subprocess_fixture() {
         PathBuf::from(std::env::var_os("HUGIT_NATIVE_LOCK_FIXTURE").expect("parent fixture"));
     let coordinator = ExperimentalCoordinator::open(&parent).unwrap();
     let mut held = coordinator.lock_set();
-    if std::env::var("HUGIT_NATIVE_LOCK_ROLE").unwrap() == "holder" {
-        held.try_acquire(global()).unwrap();
+    match std::env::var("HUGIT_NATIVE_LOCK_ROLE").unwrap().as_str() {
+        "holder" => held.try_acquire(global()).unwrap(),
+        "plan-holder" => held.try_acquire_plan(&plan_requests()).unwrap(),
+        "observer" => {}
+        role => panic!("unknown fixture role: {role}"),
     }
     fs::write(parent.join("ready"), b"ready").unwrap();
     if let Err(error) = std::io::stdin().read_exact(&mut [0u8; 1]) {
@@ -692,4 +695,245 @@ fn linked_state_is_refused_and_external_bytes_are_preserved() {
     assert!(c.lock_set().try_acquire(global()).is_err());
     assert!(c.try_disable().is_err());
     assert_eq!(fs::read(target).unwrap(), b"active\n");
+}
+
+// Ordered plans extend the existing primitive; no production-v1 activation.
+fn plan_requests() -> [LockRequest; 3] {
+    [
+        global(),
+        req(LockClass::RepoAdmission, "repo"),
+        req(LockClass::Operation, "op"),
+    ]
+}
+
+#[test]
+fn plan_success_holds_every_resource_and_releases_in_reverse_order() {
+    let f = Fixture::new();
+    let c = f.coordinator();
+    let plan = plan_requests();
+    for request in &plan {
+        fs::write(c.lock_path(request), b"stable diagnostic bytes").unwrap();
+    }
+    #[cfg(unix)]
+    let identities: Vec<_> = plan
+        .iter()
+        .map(|r| {
+            use std::os::unix::fs::MetadataExt;
+            let m = fs::metadata(c.lock_path(r)).unwrap();
+            (m.dev(), m.ino())
+        })
+        .collect();
+    let mut held = c.lock_set();
+    held.try_acquire_plan(&plan).unwrap();
+    assert_eq!(held.len(), plan.len());
+    for request in &plan {
+        assert!(matches!(
+            c.lock_set().try_acquire(request.clone()),
+            Err(CoordinationError::Busy)
+        ));
+    }
+    for request in plan.iter().rev() {
+        assert_eq!(held.release_last(), Some(request.clone()));
+        c.lock_set().try_acquire(request.clone()).unwrap();
+    }
+    assert!(held.is_empty());
+    for request in &plan {
+        assert_eq!(
+            fs::read(c.lock_path(request)).unwrap(),
+            b"stable diagnostic bytes"
+        );
+    }
+    #[cfg(unix)]
+    for (request, identity) in plan.iter().zip(identities) {
+        use std::os::unix::fs::MetadataExt;
+        let m = fs::metadata(c.lock_path(request)).unwrap();
+        assert_eq!((m.dev(), m.ino()), identity);
+    }
+    c.try_disable().unwrap();
+}
+
+#[test]
+fn plan_busy_at_each_position_rolls_back_without_leaking_admission() {
+    for position in 0..3 {
+        let f = Fixture::new();
+        let c = f.coordinator();
+        let plan = plan_requests();
+        let mut owner = c.lock_set();
+        owner.try_acquire(plan[position].clone()).unwrap();
+        let mut contender = c.lock_set();
+        assert!(matches!(
+            contender.try_acquire_plan(&plan),
+            Err(CoordinationError::Busy)
+        ));
+        assert!(contender.is_empty(), "busy at {position}");
+        for request in &plan[..position] {
+            assert!(c.lock_path(request).is_file());
+            c.lock_set().try_acquire(request.clone()).unwrap();
+        }
+        for request in &plan[position + 1..] {
+            assert!(!c.lock_path(request).exists());
+        }
+        assert!(matches!(
+            c.lock_set().try_acquire(plan[position].clone()),
+            Err(CoordinationError::Busy)
+        ));
+        drop(owner);
+        // Keep the failed set alive: leaked admission would make disable Busy.
+        c.try_disable().unwrap();
+        assert!(matches!(
+            contender.try_acquire_plan(&plan),
+            Err(CoordinationError::WritersDisabled)
+        ));
+    }
+}
+
+#[test]
+fn plan_failed_extension_preserves_prior_ownership_and_allows_explicit_retry() {
+    let f = Fixture::new();
+    let c = f.coordinator();
+    let plan = plan_requests();
+    let mut held = c.lock_set();
+    held.try_acquire(global()).unwrap();
+    let mut owner = c.lock_set();
+    owner.try_acquire(plan[2].clone()).unwrap();
+    assert!(matches!(
+        held.try_acquire_plan(&plan[1..]),
+        Err(CoordinationError::Busy)
+    ));
+    assert_eq!(held.len(), 1);
+    assert!(matches!(
+        c.lock_set().try_acquire(global()),
+        Err(CoordinationError::Busy)
+    ));
+    c.lock_set().try_acquire(plan[1].clone()).unwrap();
+    drop(owner);
+    // The pre-existing global lease must retain admission throughout rollback.
+    assert!(matches!(c.try_disable(), Err(CoordinationError::Busy)));
+    held.try_acquire_plan(&plan[1..]).unwrap();
+    assert_eq!(held.len(), 3);
+    drop(held);
+    c.try_disable().unwrap();
+}
+
+#[test]
+fn plan_preflight_refuses_unsorted_duplicate_and_prior_keys_before_any_io() {
+    let f = Fixture::new();
+    let c = f.coordinator();
+    let plan = plan_requests();
+    let mut held = c.lock_set();
+    let before = inventory(&f.0.join(EXPERIMENTAL_DIRECTORY));
+    for invalid in [
+        vec![plan[0].clone(), plan[2].clone(), plan[1].clone()],
+        vec![plan[0].clone(), plan[1].clone(), plan[1].clone()],
+    ] {
+        assert!(matches!(
+            held.try_acquire_plan(&invalid),
+            Err(CoordinationError::OutOfOrder)
+        ));
+        assert!(held.is_empty());
+        assert_eq!(inventory(&f.0.join(EXPERIMENTAL_DIRECTORY)), before);
+    }
+    held.try_acquire(plan[1].clone()).unwrap();
+    let before = inventory(&f.0.join(EXPERIMENTAL_DIRECTORY));
+    for invalid in [&plan[..1], &plan[1..2]] {
+        assert!(matches!(
+            held.try_acquire_plan(invalid),
+            Err(CoordinationError::OutOfOrder)
+        ));
+        assert_eq!(held.len(), 1);
+        assert_eq!(inventory(&f.0.join(EXPERIMENTAL_DIRECTORY)), before);
+    }
+}
+
+#[test]
+fn plan_budget_is_preflighted_against_existing_handles_and_never_partially_opens() {
+    let f = Fixture::new();
+    let c = f.coordinator();
+    let plan: Vec<_> = (0..MAX_HELD_LOCKS + 1)
+        .map(|n| req(LockClass::Operation, &format!("op-{n:03}")))
+        .collect();
+    let mut held = c.lock_set();
+    let before = inventory(&f.0.join(EXPERIMENTAL_DIRECTORY));
+    assert!(matches!(
+        held.try_acquire_plan(&plan),
+        Err(CoordinationError::TooManyLocks)
+    ));
+    assert_eq!(inventory(&f.0.join(EXPERIMENTAL_DIRECTORY)), before);
+    assert!(held.is_empty());
+    held.try_acquire_plan(&plan[..MAX_HELD_LOCKS - 1]).unwrap();
+    let before = inventory(&f.0.join(EXPERIMENTAL_DIRECTORY));
+    assert!(matches!(
+        held.try_acquire_plan(&plan[MAX_HELD_LOCKS - 1..]),
+        Err(CoordinationError::TooManyLocks)
+    ));
+    assert_eq!(held.len(), MAX_HELD_LOCKS - 1);
+    assert_eq!(inventory(&f.0.join(EXPERIMENTAL_DIRECTORY)), before);
+    held.try_acquire_plan(&plan[MAX_HELD_LOCKS - 1..MAX_HELD_LOCKS])
+        .unwrap();
+    held.try_acquire_plan(&[]).unwrap();
+    assert_eq!(held.len(), MAX_HELD_LOCKS);
+    assert!(!c.lock_path(&plan[MAX_HELD_LOCKS]).exists());
+}
+
+#[test]
+fn plan_invalid_resource_preserves_error_and_rolls_back_only_new_locks() {
+    let f = Fixture::new();
+    let c = f.coordinator();
+    let plan = plan_requests();
+    fs::write(c.lock_path(&plan[0]), b"preserve file").unwrap();
+    fs::create_dir(c.lock_path(&plan[2])).unwrap();
+    let mut held = c.lock_set();
+    assert!(matches!(
+        held.try_acquire_plan(&plan),
+        Err(CoordinationError::InvalidLockFile)
+    ));
+    assert!(held.is_empty());
+    for request in &plan[..2] {
+        c.lock_set().try_acquire(request.clone()).unwrap();
+    }
+    assert_eq!(fs::read(c.lock_path(&plan[0])).unwrap(), b"preserve file");
+    assert!(c.lock_path(&plan[2]).is_dir());
+    c.try_disable().unwrap();
+}
+
+#[test]
+fn plan_empty_is_no_admission_and_disabled_nonempty_plan_creates_nothing() {
+    let f = Fixture::new();
+    let c = f.coordinator();
+    let mut held = c.lock_set();
+    let before = inventory(&f.0.join(EXPERIMENTAL_DIRECTORY));
+    held.try_acquire_plan(&[]).unwrap();
+    assert!(held.is_empty());
+    assert_eq!(inventory(&f.0.join(EXPERIMENTAL_DIRECTORY)), before);
+    c.try_disable().unwrap();
+    held.try_acquire_plan(&[]).unwrap();
+    assert!(matches!(
+        held.try_acquire_plan(&plan_requests()),
+        Err(CoordinationError::WritersDisabled)
+    ));
+    assert!(held.is_empty());
+    assert_eq!(inventory(&f.0.join(EXPERIMENTAL_DIRECTORY)), before);
+}
+
+#[test]
+fn plan_process_death_releases_all_resources_and_keeps_stable_files() {
+    let f = Fixture::new();
+    let c = f.coordinator();
+    let plan = plan_requests();
+    let mut child = ChildGuard::start(&f, "plan-holder");
+    let before = inventory(&f.0.join(EXPERIMENTAL_DIRECTORY));
+    let mut held = c.lock_set();
+    for request in &plan {
+        assert!(matches!(
+            held.try_acquire_plan(std::slice::from_ref(request)),
+            Err(CoordinationError::Busy)
+        ));
+        assert!(held.is_empty());
+    }
+    child.kill_and_reap();
+    held.try_acquire_plan(&plan).unwrap();
+    assert_eq!(held.len(), 3);
+    assert_eq!(inventory(&f.0.join(EXPERIMENTAL_DIRECTORY)), before);
+    drop(held);
+    c.try_disable().unwrap();
 }

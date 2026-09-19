@@ -354,7 +354,8 @@ struct HeldLock {
 }
 
 /// Owns its handles; cannot be cloned or converted into an inheritable handle.
-/// A Busy result retains earlier leases. Release the set before retrying a plan.
+/// Single acquisition retains earlier leases on failure. Plan acquisition rolls
+/// back only the leases added by that call; pre-existing ownership is preserved.
 #[derive(Debug)]
 pub struct LockSet {
     root: PathBuf,
@@ -368,6 +369,39 @@ impl LockSet {
     }
     pub fn is_empty(&self) -> bool {
         self.held.is_empty()
+    }
+
+    /// Acquire an ordered extension, or release only this call's new leases.
+    /// The whole slice is checked for order and the 64-handle budget before any
+    /// filesystem access. Requests are never sorted or deduplicated implicitly.
+    ///
+    /// This is NOT an atomic multi-file lock: contenders may observe a temporary
+    /// prefix. Begin operation effects only after the entire call succeeds. On
+    /// error, rollback releases the new prefix in reverse acquisition order,
+    /// retaining earlier leases and their admission; stable files stay on disk.
+    /// An empty plan is a no-op, not writer admission, even after disable.
+    /// No wait, automatic retry, owner signaling, or v1 protocol change.
+    pub fn try_acquire_plan(&mut self, requests: &[LockRequest]) -> Result<(), CoordinationError> {
+        if requests.len() > MAX_HELD_LOCKS - self.held.len() {
+            return Err(CoordinationError::TooManyLocks);
+        }
+        let mut previous = self.held.last().map(|held| &held.request);
+        for request in requests {
+            if previous.is_some_and(|last| request <= last) {
+                return Err(CoordinationError::OutOfOrder);
+            }
+            previous = Some(request);
+        }
+        let original_len = self.held.len();
+        for request in requests {
+            if let Err(error) = self.try_acquire(request.clone()) {
+                while self.held.len() > original_len {
+                    self.release_last();
+                }
+                return Err(error);
+            }
+        }
+        Ok(())
     }
 
     /// Checks ordering and resource budget BEFORE opening/creating another file.
