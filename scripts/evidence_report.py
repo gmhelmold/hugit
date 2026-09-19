@@ -249,6 +249,7 @@ def wait_capture(log: pathlib.Path, oid: str, branch: str, timeout: float = 20.0
     # starts. Wait for exact commit capture; later mutations retry `log_busy`
     # from any empty drain worker that starts after this observation.
     deadline = time.monotonic() + timeout
+    last = {"commit_seen": False, "log_readable": False}
     while time.monotonic() < deadline:
         try:
             records = load_log(log)
@@ -267,12 +268,30 @@ def wait_capture(log: pathlib.Path, oid: str, branch: str, timeout: float = 20.0
             lock = pathlib.Path(str(log) + ".lock")
             receipts = log.parent / "receipts"
             pending = receipts.exists() and any(receipts.iterdir())
-            if found and not lock.exists() and not pending:
+            last = {"commit_seen": found, "log_readable": True,
+                    "lock_present": lock.exists(), "receipts_pending": bool(pending)}
+            if found and not last["lock_present"] and not pending:
                 return records
-        except (OSError, ValueError, json.JSONDecodeError):
-            pass
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            last = {"commit_seen": False, "log_readable": False,
+                    "observation_error": type(error).__name__}
         time.sleep(0.05)
-    raise RuntimeError(f"capture did not quiesce for {oid}")
+    # The owned fixture is removed by build's finally block. Keep a bounded,
+    # payload-free diagnosis in the failed CI log instead of losing all context.
+    # Never print raw receipt contents, paths, or arbitrary hooks.log text.
+    known_codes = {"capture." + name for name in (
+        "log_resolve", "runtime_prepare", "receipt_directory", "receipt_identity",
+        "receipt_publish", "worker_spawn", "worker_drain", "missing_oid", "unknown_kind",
+    )}
+    try:
+        hook_log = log.parent / "hooks.log"
+        if stat.S_ISREG(hook_log.lstat().st_mode):
+            with hook_log.open("rb") as stream:
+                raw = stream.read(4096)
+            last["hook_fault_codes"] = sorted(set(raw.decode("ascii", "ignore").splitlines()) & known_codes)
+    except OSError:
+        pass
+    raise RuntimeError(f"capture did not quiesce for {oid}; observation=" + json.dumps(last, sort_keys=True))
 
 
 def tree_digest(root: pathlib.Path) -> str:
