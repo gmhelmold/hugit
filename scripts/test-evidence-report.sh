@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/test_evidence_ownership.py"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/hugit-evidence-test.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 FAKE="$TMP/fake-hugit.py"
@@ -91,7 +92,9 @@ python3 - "$ROOT/scripts/evidence_report.py" "$BAG1" "$TMP" <<'PY'
 import importlib.util, pathlib, sys
 spec=importlib.util.spec_from_file_location("evidence_report",sys.argv[1]); module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
 bag=pathlib.Path(sys.argv[2]); root=pathlib.Path(sys.argv[3])
-first=module.archive_bag(bag).read_bytes(); second=module.archive_bag(bag).read_bytes()
+# Repacking must use a NEW destination; the first archive is retained unchanged.
+first=pathlib.Path(str(bag)+".tar").read_bytes()
+copy=root/"bag1-copy.tar"; module.safe_directory_tar(bag,copy); second=copy.read_bytes()
 if first != second: raise SystemExit("deterministic evidence archive failed")
 PY
 
@@ -187,4 +190,44 @@ import hashlib, pathlib, sys
 b=pathlib.Path(sys.argv[1]); files=sorted((p for p in (b/"data").rglob("*") if p.is_file()),key=lambda p:p.relative_to(b).as_posix().encode()); (b/"manifest-sha256.txt").write_text("".join(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(b).as_posix()}\n" for p in files)); tags=sorted(["bagit.txt","bag-info.txt","README.md","manifest-sha256.txt"],key=lambda x:x.encode()); (b/"tagmanifest-sha256.txt").write_text("".join(f"{hashlib.sha256((b/n).read_bytes()).hexdigest()}  {n}\n" for n in tags))
 PY
 python3 "$ROOT/scripts/evidence_report.py" --verify "$BAG1"
+# Exercise the public wrapper, not just producer helpers. Default destinations
+# must stay fresh; reruns preserve earlier evidence and invalid binaries allocate none.
+python3 - "$ROOT" "$TMP" "$FAKE" <<'PYWRAPPER'
+import hashlib, os, pathlib, subprocess, sys
+root=pathlib.Path(sys.argv[1]); work=pathlib.Path(sys.argv[2])/"wrapper-cases"
+work.mkdir(); binary=sys.argv[3]
+env=dict(os.environ,HUGIT_BIN=binary,TMPDIR=str(work),PYTHONDONTWRITEBYTECODE="1")
+env.pop("HUGIT_EVIDENCE_DIR",None)
+command=["bash",str(root/"scripts/benchmark-feature-ledger.sh"),"--run-id","wrapper-ownership"]
+def snapshot(path):
+    return {p.relative_to(path).as_posix():(p.stat().st_ino,hashlib.sha256(p.read_bytes()).hexdigest())
+            for p in path.rglob("*") if p.is_file()}
+def run(config):
+    return subprocess.run(command,env=config,capture_output=True,text=True,timeout=90)
+def success(config):
+    result=run(config)
+    assert result.returncode==0,(result.stdout,result.stderr)
+    paths=[line.removeprefix("REPORT: ") for line in result.stdout.splitlines() if line.startswith("REPORT: ")]
+    assert len(paths)==1,result.stdout
+    bag=pathlib.Path(paths[0]); assert bag.is_dir() and pathlib.Path(str(bag)+".tar").is_file()
+    verified=subprocess.run([sys.executable,str(root/"scripts/verify-evidence-report.py"),str(bag)],
+                            capture_output=True,text=True,timeout=30)
+    assert verified.returncode==0,verified.stderr
+    return bag
+first=success(env); assert first.name=="report" and first.parent.parent==work.resolve()
+before=snapshot(first.parent)
+second=success(env); assert second.parent!=first.parent
+assert snapshot(first.parent)==before,"default retry replaced first evidence"
+custom=success(dict(env,HUGIT_EVIDENCE_DIR=str(work/"custom")))
+before=snapshot(work); failed=run(dict(env,HUGIT_EVIDENCE_DIR=str(custom)))
+assert failed.returncode!=0 and "destination already exists" in failed.stderr
+assert snapshot(work)==before,"explicit retry changed existing evidence"
+entries=sorted(p.name for p in work.iterdir())
+failed=run(dict(env,HUGIT_BIN=str(work/"missing-binary")))
+assert failed.returncode==2 and "not executable" in failed.stderr
+assert sorted(p.name for p in work.iterdir())==entries,"invalid binary allocated output"
+assert snapshot(work)==before
+print("PASS: wrapper default twice + custom destination verified; repeat and invalid binary preserve state")
+PYWRAPPER
+
 printf 'PASS: evidence report tests; package-closure mutation red then restored green\n'

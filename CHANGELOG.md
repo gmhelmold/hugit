@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(evidence): refuse pre-existing output, archive and workspace destinations;
+  exclusively create new artifacts and clean up only the workspace owned by
+  this invocation, preserving previous evidence and exposing cleanup failures.
+  Keep the default wrapper compatible by allocating a fresh child destination.
+
 - ci(coordination): qualify the existing native lease and process tests on
   macOS ARM64/APFS, retaining platform identity, named results and failure logs.
 

@@ -12,9 +12,18 @@ state. Research basis and publication rules:
 ```
 
 `HUGIT_BIN=/absolute/path/to/hugit` selects existing binary.
-`HUGIT_EVIDENCE_DIR=/durable/report` selects output directory. Without it,
-runner prints retained temporary path. Runner also creates deterministic
-`<report>.tar` serialization and prints its SHA-256.
+`HUGIT_EVIDENCE_DIR=/durable/report` selects a **new** output directory below
+an existing parent. The output directory and `<report>.tar` must not already
+exist, even as empty directories or dangling links; previous evidence is never
+reset or overwritten. A retry needs a fresh destination.
+
+Without that variable, the wrapper allocates a unique temporary parent and uses
+its new `report` child. It prints that path before the run, so a failure remains
+locatable. Completed or partial evidence is retained in that parent; only the
+producer's own separate workspace is cleaned up after its identity is checked.
+A replaced workspace or failed cleanup is reported, not silently removed.
+The runner also creates deterministic `<report>.tar` serialization exclusively
+and prints its SHA-256. Creation failures never authorize overwriting an artifact.
 
 Verify directory independently:
 
