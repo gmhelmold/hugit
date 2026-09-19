@@ -127,6 +127,28 @@ def late_worker():
 threading.Thread(target=late_worker).start(); started=time.monotonic(); module.wait_capture(log,oid,branch,timeout=3.0); elapsed=time.monotonic()-started
 if elapsed < 0.25: raise SystemExit(f"capture accepted earlier same-OID observation: {elapsed}")
 
+# Missing commit, pending receipt and live lock remain refusal cases; diagnostics
+# disclose only bounded predicates / known fault codes, never arbitrary log data.
+valid={"kind":"ref.update","principal_chain":["orchestrator:hugit-hook"],"payload":{"target":oid,"ref":"refs/heads/main","branch":"main","files":[],"receipt_id":"receipt-1"}}
+(root/"quiescence"/"hooks.log").write_text("capture.log_resolve\nprivate-value-do-not-print\n"+"x"*9000)
+for condition in ("missing_commit", "pending_receipt", "held_lock"):
+    log.write_text(json.dumps([] if condition=="missing_commit" else [valid]))
+    pending=receipts/"pending.json"; lock=pathlib.Path(str(log)+".lock")
+    if condition=="pending_receipt": pending.write_text("private receipt")
+    if condition=="held_lock": lock.write_text("private owner")
+    try:
+        module.wait_capture(log,oid,branch,timeout=0.06)
+    except RuntimeError as error:
+        message=str(error)
+        assert "capture did not quiesce" in message and "capture.log_resolve" in message
+        assert len(message)<1024 and "private" not in message and "x"*20 not in message
+        if condition=="pending_receipt": assert '"receipts_pending": true' in message
+        if condition=="held_lock": assert '"lock_present": true' in message
+    else: raise SystemExit("incomplete capture incorrectly accepted: "+condition)
+    pending.unlink(missing_ok=True); lock.unlink(missing_ok=True)
+log.write_text(json.dumps([valid])); module.wait_capture(log,oid,branch,timeout=1)
+print("PASS: capture timeout diagnosis bounded; three incomplete states rejected and restored")
+
 calls=[]
 def fake_run(*args,**kwargs):
     calls.append(args); busy=json.dumps({"error":{"kind":"log_busy"}}).encode()

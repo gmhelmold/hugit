@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix(capture): serialize first-runtime bootstrap under bounded contention without
+  age-based lock takeover. Revalidate completed metadata and legacy inputs before
+  admitting hook receipts; keep explicit migration and v2 rollout unchanged.
+
 - fix(coordination): explicitly unlock owned native leases before closing handles,
   so a transient pre-exec descriptor copy cannot retain a released lease.
 

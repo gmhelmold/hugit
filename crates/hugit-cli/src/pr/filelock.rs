@@ -138,6 +138,20 @@ impl FileLock {
     /// Acquire without runtime preparation. Runtime migration owns this internal
     /// bootstrap lock, so routing it through [`Self::acquire`] would recurse.
     pub(crate) fn acquire_unprepared(target: &Path) -> Result<Self, LockError> {
+        Self::acquire_unprepared_with_takeover(target, true)
+    }
+
+    /// Bootstrap contention may wait, but must NEVER turn elapsed time into
+    /// permission to remove an existing owner's legacy sidecar. This uses the
+    /// same v1 namespace; it is not activation of the experimental v2 protocol.
+    pub(crate) fn acquire_bootstrap(target: &Path) -> Result<Self, LockError> {
+        Self::acquire_unprepared_with_takeover(target, false)
+    }
+
+    fn acquire_unprepared_with_takeover(
+        target: &Path,
+        allow_legacy_takeover: bool,
+    ) -> Result<Self, LockError> {
         // PR-4: auto-create parent dirs (git-proximate auto-init doctrine). The
         // first verb on a fresh CWD (e.g. `hugit campaign open`) used to fail
         // with `create lock .hugit/log.json.lock: No such file or directory`
@@ -155,7 +169,7 @@ impl FileLock {
             Ok(()) => Ok(FileLock { lock_path }),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 // The lock exists. Is it stale (a dead holder) or live?
-                if lock_is_stale(&lock_path) {
+                if allow_legacy_takeover && lock_is_stale(&lock_path) {
                     // Reclaim: remove the abandoned lock, then re-create ours.
                     // A race between two reclaimers is itself resolved by
                     // create_new — exactly one wins the re-create, the other

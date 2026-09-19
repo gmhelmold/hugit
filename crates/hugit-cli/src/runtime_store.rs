@@ -267,41 +267,89 @@ pub fn prepare_runtime_log(log_path: &Path) -> Result<(), PorcelainError> {
     let Some(store) = store_for_runtime_log(log_path)? else {
         return Ok(());
     };
+    let legacy = legacy_path_for_store(&store)?;
+    if prepared_metadata_matches(&store, &legacy)? {
+        return Ok(());
+    }
+    // Fresh hooks can arrive together BEFORE any runtime metadata exists.
+    // Serialize that bootstrap instead of dropping a hook before its receipt.
+    // Only this automatic path waits; explicit migration keeps its old behavior.
+    migrate_inner(&store, &legacy, true)?;
+    Ok(())
+}
+
+fn prepared_metadata_matches(store: &RuntimeStore, legacy: &Path) -> Result<bool, PorcelainError> {
+    if !store.metadata().exists() {
+        return Ok(false);
+    }
+    let metadata: Value = serde_json::from_slice(
+        &std::fs::read(store.metadata())
+            .map_err(|e| PorcelainError::io("read runtime metadata", &store.metadata(), &e))?,
+    )
+    .map_err(|e| {
+        PorcelainError::new(
+            "migration_blocked",
+            format!("runtime metadata is invalid: {e}"),
+            "repair runtime.json before appending",
+        )
+    })?;
+    if legacy.exists()
+        && metadata
+            .pointer("/migration/legacy_prefix_sha256")
+            .and_then(Value::as_str)
+            != Some(&sha256_hex(&std::fs::read(legacy).map_err(|e| {
+                PorcelainError::io("read legacy log", legacy, &e)
+            })?))
     {
-        let legacy = legacy_path_for_store(&store)?;
-        if store.metadata().exists() {
-            let metadata: Value =
-                serde_json::from_slice(&std::fs::read(store.metadata()).map_err(|e| {
-                    PorcelainError::io("read runtime metadata", &store.metadata(), &e)
-                })?)
-                .map_err(|e| {
-                    PorcelainError::new(
-                        "migration_blocked",
-                        format!("runtime metadata is invalid: {e}"),
-                        "repair runtime.json before appending",
-                    )
-                })?;
-            if legacy.exists()
-                && metadata
-                    .pointer("/migration/legacy_prefix_sha256")
-                    .and_then(Value::as_str)
-                    != Some(&sha256_hex(&std::fs::read(&legacy).map_err(|e| {
-                        PorcelainError::io("read legacy log", &legacy, &e)
-                    })?))
-            {
-                return Err(PorcelainError::new(
-                    "migration_blocked",
-                    "runtime metadata differs from legacy source",
-                    "preserve evidence and repair runtime migration before appending",
-                ));
-            }
-            return Ok(());
-        }
-        // Fresh template-installed hooks have no runtime yet. Bootstrap through
-        // same migration gate so source validation always precedes every write.
-        migrate(&store, &legacy)?;
+        return Err(PorcelainError::new(
+            "migration_blocked",
+            "runtime metadata differs from legacy source",
+            "preserve evidence and repair runtime migration before appending",
+        ));
+    }
+    Ok(true)
+}
+
+fn recheck_bootstrap_source(
+    legacy: &Path,
+    expected: &Option<Vec<u8>>,
+) -> Result<(), PorcelainError> {
+    let current = if legacy.exists() {
+        Some(
+            std::fs::read(legacy)
+                .map_err(|e| PorcelainError::io("recheck legacy bootstrap source", legacy, &e))?,
+        )
+    } else {
+        None
+    };
+    if &current != expected {
+        return Err(PorcelainError::new(
+            "migration_blocked",
+            "legacy source changed during runtime bootstrap handoff",
+            "preserve the source and retry after compatible writers are quiescent",
+        ));
     }
     Ok(())
+}
+
+/// Bound contention, not arbitrary filesystem I/O. Never reclaim by age/PID.
+fn acquire_bootstrap_lock(
+    canonical: &Path,
+    budget: std::time::Duration,
+) -> Result<FileLock, crate::pr::filelock::LockError> {
+    let started = std::time::Instant::now();
+    loop {
+        match FileLock::acquire_bootstrap(canonical) {
+            Err(crate::pr::filelock::LockError::Busy { .. }) if started.elapsed() < budget => {
+                std::thread::sleep(
+                    budget
+                        .saturating_sub(started.elapsed())
+                        .min(std::time::Duration::from_millis(10)),
+                );
+            }
+            result => return result,
+        }
+    }
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -312,6 +360,14 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 /// The prefix record binds every canonical append path, including porcelain
 /// commands that do not pass through hook capture.
 pub fn migrate(store: &RuntimeStore, legacy: &Path) -> Result<Value, PorcelainError> {
+    migrate_inner(store, legacy, false)
+}
+
+fn migrate_inner(
+    store: &RuntimeStore,
+    legacy: &Path,
+    bootstrap_handoff: bool,
+) -> Result<Value, PorcelainError> {
     let source_exists = legacy.exists();
     let source_bytes = if source_exists {
         let bytes =
@@ -367,13 +423,28 @@ pub fn migrate(store: &RuntimeStore, legacy: &Path) -> Result<Value, PorcelainEr
     }
     let digest = snapshot.as_deref().map(sha256_hex);
     let canonical = store.canonical_log();
-    let _lock = FileLock::acquire_unprepared(&canonical).map_err(|e| {
+    let lock_result = if bootstrap_handoff {
+        acquire_bootstrap_lock(&canonical, std::time::Duration::from_secs(5))
+    } else {
+        FileLock::acquire_unprepared(&canonical)
+    };
+    let _lock = lock_result.map_err(|e| {
         PorcelainError::new(
             "migration_blocked",
             e.to_string(),
             "retry after active hugit writer exits",
         )
     })?;
+    if bootstrap_handoff {
+        // Another initializer may have completed while this hook waited. Do
+        // NOT replay migration against metadata its receipt writer now owns.
+        if prepared_metadata_matches(store, legacy)? {
+            return Ok(json!({"bootstrap_already_prepared": true}));
+        }
+        // Input validation preceded creating the lock directory. Waiting cannot
+        // authorize publishing an obsolete snapshot if the legacy source changed.
+        recheck_bootstrap_source(legacy, &source_bytes)?;
+    }
     if !copied.exists()
         && let Some(bytes) = snapshot.as_deref()
     {
@@ -663,4 +734,254 @@ pub fn prepare_runtime_write(log_path: &Path, bytes: &[u8]) -> Result<Vec<u8>, P
             "retry runtime append",
         )
     })
+}
+
+#[cfg(test)]
+mod bootstrap_handoff_tests {
+    use super::*;
+    use crate::pr::filelock::LockError;
+    use std::fs;
+    use std::sync::{
+        Arc, Barrier,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    };
+    use std::time::{Duration, Instant, SystemTime};
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "hugit-bootstrap-handoff-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&root).unwrap();
+            fs::write(root.join("sentinel"), b"unrelated bytes").unwrap();
+            Self(root)
+        }
+        fn store(&self) -> RuntimeStore {
+            RuntimeStore {
+                root: self.0.join("runtime"),
+            }
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            assert_eq!(
+                fs::read(self.0.join("sentinel")).unwrap(),
+                b"unrelated bytes"
+            );
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+    fn sidecar(path: &Path) -> PathBuf {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(".lock");
+        PathBuf::from(name)
+    }
+
+    #[test]
+    fn bootstrap_waits_for_compatible_owner_then_acquires_without_overwrite() {
+        let f = Fixture::new();
+        let path = f.store().canonical_log();
+        let held = FileLock::acquire_bootstrap(&path).unwrap();
+        let before = fs::read(sidecar(&path)).unwrap();
+        let owned_path = path.clone();
+        let (ready, started) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            ready.send(()).unwrap();
+            tx.send(acquire_bootstrap_lock(&owned_path, Duration::from_secs(3)))
+                .unwrap();
+        });
+        started.recv_timeout(Duration::from_secs(3)).unwrap();
+        let still_waiting = matches!(
+            rx.recv_timeout(Duration::from_millis(80)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+        let unchanged = fs::read(sidecar(&path)).unwrap() == before;
+        drop(held);
+        let acquired = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        worker.join().unwrap();
+        assert!(still_waiting && unchanged);
+        let lease = acquired.unwrap();
+        assert!(matches!(
+            FileLock::acquire_bootstrap(&path),
+            Err(LockError::Busy { .. })
+        ));
+        drop(lease);
+        assert!(!sidecar(&path).exists());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn bootstrap_budget_exhaustion_preserves_owner_and_returns_busy() {
+        let f = Fixture::new();
+        let path = f.store().canonical_log();
+        let _held = FileLock::acquire_bootstrap(&path).unwrap();
+        let before = fs::read(sidecar(&path)).unwrap();
+        assert!(matches!(
+            acquire_bootstrap_lock(&path, Duration::ZERO),
+            Err(LockError::Busy { .. })
+        ));
+        let start = Instant::now();
+        assert!(matches!(
+            acquire_bootstrap_lock(&path, Duration::from_millis(30)),
+            Err(LockError::Busy { .. })
+        ));
+        assert!(start.elapsed() >= Duration::from_millis(30));
+        assert_eq!(fs::read(sidecar(&path)).unwrap(), before);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn bootstrap_never_reclaims_an_old_looking_owner() {
+        let f = Fixture::new();
+        let path = f.store().canonical_log();
+        let _held = FileLock::acquire_bootstrap(&path).unwrap();
+        let lock = sidecar(&path);
+        let before = fs::read(&lock).unwrap();
+        let old = SystemTime::now()
+            .checked_sub(Duration::from_secs(600))
+            .unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&lock)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(old))
+            .unwrap();
+        let timestamp = fs::metadata(&lock).unwrap().modified().unwrap();
+        assert!(matches!(
+            acquire_bootstrap_lock(&path, Duration::from_millis(20)),
+            Err(LockError::Busy { .. })
+        ));
+        assert_eq!(fs::read(&lock).unwrap(), before);
+        assert_eq!(fs::metadata(&lock).unwrap().modified().unwrap(), timestamp);
+    }
+
+    #[test]
+    fn bootstrap_io_failure_is_not_converted_into_contention() {
+        let f = Fixture::new();
+        let parent = f.0.join("not-a-directory");
+        fs::write(&parent, b"preserve parent").unwrap();
+        assert!(matches!(
+            acquire_bootstrap_lock(&parent.join("log"), Duration::ZERO),
+            Err(LockError::Io { .. })
+        ));
+        assert_eq!(fs::read(parent).unwrap(), b"preserve parent");
+    }
+
+    #[test]
+    fn bootstrap_rechecks_completed_metadata_and_preserves_repository_identity() {
+        let f = Fixture::new();
+        let store = f.store();
+        let legacy = f.0.join("legacy.json");
+        let held = FileLock::acquire_bootstrap(&store.canonical_log()).unwrap();
+        let other = store.clone();
+        let input = legacy.clone();
+        let (tx, rx) = mpsc::channel();
+        let (ready, started) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            ready.send(()).unwrap();
+            tx.send(migrate_inner(&other, &input, true)).unwrap();
+        });
+        started.recv_timeout(Duration::from_secs(3)).unwrap();
+        let waiting = matches!(
+            rx.recv_timeout(Duration::from_millis(80)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+        let metadata = serde_json::to_vec(&json!({"version":1,"repository_id":"a".repeat(64),
+            "migration":{"legacy_source":null,"legacy_prefix_sha256":null}}))
+        .unwrap();
+        atomic_write_unprepared(&store.canonical_log(), b"[]").unwrap();
+        atomic_write_unprepared(&store.metadata(), &metadata).unwrap();
+        drop(held);
+        let result = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        worker.join().unwrap();
+        assert!(waiting);
+        assert_eq!(result.unwrap()["bootstrap_already_prepared"], true);
+        assert_eq!(fs::read(store.metadata()).unwrap(), metadata);
+        assert_eq!(fs::read(store.canonical_log()).unwrap(), b"[]");
+    }
+
+    #[test]
+    fn bootstrap_source_revalidation_detects_changes_creation_and_removal() {
+        let f = Fixture::new();
+        let legacy = f.0.join("legacy.json");
+        recheck_bootstrap_source(&legacy, &None).unwrap();
+        fs::write(&legacy, b"[]").unwrap();
+        assert!(recheck_bootstrap_source(&legacy, &None).is_err());
+        recheck_bootstrap_source(&legacy, &Some(b"[]".to_vec())).unwrap();
+        fs::write(&legacy, b"[ ]").unwrap();
+        assert!(recheck_bootstrap_source(&legacy, &Some(b"[]".to_vec())).is_err());
+        assert_eq!(fs::read(&legacy).unwrap(), b"[ ]");
+        fs::remove_file(&legacy).unwrap();
+        assert!(recheck_bootstrap_source(&legacy, &Some(b"[]".to_vec())).is_err());
+        assert!(!f.store().root.exists());
+    }
+
+    #[test]
+    fn bootstrap_concurrent_initializers_converge_without_replacing_identity() {
+        let f = Fixture::new();
+        let store = f.store();
+        let legacy = f.0.join("absent.json");
+        let barrier = Arc::new(Barrier::new(8));
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let store = store.clone();
+                let legacy = legacy.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    migrate_inner(&store, &legacy, true).unwrap();
+                    repository_id(&store.canonical_log()).unwrap()
+                })
+            })
+            .collect();
+        let ids: Vec<_> = workers.into_iter().map(|w| w.join().unwrap()).collect();
+        assert!(ids.iter().all(|id| id == &ids[0]));
+        assert!(crate::capture::receipt::valid_repo_id(&ids[0]));
+        assert!(
+            crate::checks::load_event_log(&store.canonical_log())
+                .unwrap()
+                .records()
+                .is_empty()
+        );
+        assert!(!sidecar(&store.canonical_log()).exists());
+        assert!(!sidecar(&store.metadata()).exists());
+    }
+
+    #[test]
+    fn bootstrap_corruption_stays_fail_closed_without_runtime_creation() {
+        let f = Fixture::new();
+        let store = f.store();
+        let legacy = f.0.join("legacy.json");
+        fs::write(&legacy, b"not JSON").unwrap();
+        assert!(migrate_inner(&store, &legacy, true).is_err());
+        assert!(!store.root.exists());
+        assert_eq!(fs::read(&legacy).unwrap(), b"not JSON");
+        fs::remove_file(&legacy).unwrap();
+        fs::create_dir(&store.root).unwrap();
+        fs::write(store.metadata(), b"not JSON").unwrap();
+        assert!(migrate_inner(&store, &legacy, true).is_err());
+        assert_eq!(fs::read(store.metadata()).unwrap(), b"not JSON");
+        assert!(!store.canonical_log().exists());
+        assert!(!sidecar(&store.canonical_log()).exists());
+    }
+
+    #[test]
+    fn explicit_migration_still_refuses_a_busy_owner_without_bootstrap_wait() {
+        let f = Fixture::new();
+        let store = f.store();
+        let legacy = f.0.join("absent.json");
+        let _held = FileLock::acquire_bootstrap(&store.canonical_log()).unwrap();
+        let before = fs::read(sidecar(&store.canonical_log())).unwrap();
+        let error = migrate(&store, &legacy).unwrap_err();
+        assert!(error.to_json().contains("migration_blocked"));
+        assert!(!store.metadata().exists());
+        assert!(!store.canonical_log().exists());
+        assert_eq!(fs::read(sidecar(&store.canonical_log())).unwrap(), before);
+    }
 }
