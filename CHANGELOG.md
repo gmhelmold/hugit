@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- ci(coordination): qualify the existing native suite on observed Linux/ext4,
+  macOS ARM64 and Intel/APFS, and Windows/NTFS cells; require fixed test names,
+  native Rust fixture paths, applicable pause evidence and retained source identity.
+
 - fix(evidence): refuse pre-existing output, archive and workspace destinations;
   exclusively create new artifacts and clean up only the workspace owned by
   this invocation, preserving previous evidence and exposing cleanup failures.
