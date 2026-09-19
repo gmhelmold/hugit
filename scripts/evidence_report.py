@@ -329,7 +329,7 @@ def safe_directory_tar(root: pathlib.Path, destination: pathlib.Path, check_git_
         names.add(name)
         normalized.add(nfc)
         folded.add(nfc.casefold())
-    with tarfile.open(destination, "w", format=tarfile.PAX_FORMAT) as archive:
+    with tarfile.open(destination, "x", format=tarfile.PAX_FORMAT) as archive:
         for path in sorted(paths, key=lambda p: os.fsencode(p.relative_to(root).as_posix())):
             name = path.relative_to(root).as_posix()
             info = archive.gettarinfo(str(path), arcname=name)
@@ -618,6 +618,37 @@ def verify_bag(bag: pathlib.Path) -> None:
         shutil.rmtree(extract, ignore_errors=True)
 
 
+def new_evidence_path(value: str) -> pathlib.Path:
+    """Require a fresh leaf below an existing parent; never adopt an old output.
+
+    Resolve parent aliases, not the final component: even a dangling symlink is
+    an existing object to preserve. This is a cooperative local-file policy,
+    not protection against a hostile process replacing ancestor directories.
+    """
+    requested = pathlib.Path(value)
+    if not requested.is_absolute():
+        requested = pathlib.Path.cwd() / requested
+    path = requested.parent.resolve(strict=True) / requested.name
+    if os.path.lexists(path):
+        raise FileExistsError(f"evidence destination already exists; choose a new path: {path}")
+    return path
+
+
+def directory_identity(path: pathlib.Path) -> tuple[int, int]:
+    metadata = path.lstat()
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise RuntimeError("evidence work directory no longer has its original identity")
+    return metadata.st_dev, metadata.st_ino
+
+
+def remove_owned_work(path: pathlib.Path, identity: tuple[int, int]) -> None:
+    # Only a directory created in this invocation may be removed. Do not hide a
+    # failed cleanup, follow a replaced final symlink, or remove a new occupant.
+    if directory_identity(path) != identity:
+        raise RuntimeError("evidence work directory was replaced; refusing cleanup")
+    shutil.rmtree(path)
+
+
 def build(args: argparse.Namespace) -> pathlib.Path:
     binary = pathlib.Path(args.hugit_bin).resolve()
     if not binary.is_file() or not os.access(binary, os.X_OK):
@@ -625,18 +656,25 @@ def build(args: argparse.Namespace) -> pathlib.Path:
     selected = [] if args.empty_selected else list(CLAIMS)
     if not selected:
         raise RuntimeError("selected claim set must not be empty")
-    output = pathlib.Path(args.output).resolve()
-    if output.exists():
-        shutil.rmtree(output)
-    (output / "data/commands").mkdir(parents=True)
-    (output / "data/assertions").mkdir(parents=True)
-    if args.work_dir:
-        work = pathlib.Path(args.work_dir).resolve()
-        shutil.rmtree(work, ignore_errors=True)
-        work.mkdir(parents=True)
+    # Validate every caller-selected destination before creating anything. Old
+    # evidence and work directories are never implicitly reset, even if empty.
+    output = new_evidence_path(args.output)
+    archive = new_evidence_path(str(output) + ".tar")
+    work = new_evidence_path(args.work_dir) if args.work_dir else None
+    if work is not None:
+        for destination in (output, archive):
+            if work == destination or work in destination.parents or destination in work.parents:
+                raise ValueError("evidence output/archive and work directory must be separate")
+        work.mkdir(mode=0o700)
     else:
         work = pathlib.Path(tempfile.mkdtemp(prefix="hugit-evidence-work-"))
+    identity = directory_identity(work)
     try:
+        # Exclusive mkdir closes the preflight race. Failed runs retain their
+        # partial output for diagnosis; they do not create a successful archive.
+        output.mkdir(mode=0o700)
+        (output / "data/commands").mkdir(parents=True)
+        (output / "data/assertions").mkdir(parents=True)
         repo = work / "repository"
         home = work / "home"
         repo.mkdir()
@@ -751,12 +789,11 @@ def build(args: argparse.Namespace) -> pathlib.Path:
             raise RuntimeError("one or more semantic assertions failed")
         return output
     finally:
-        shutil.rmtree(work, ignore_errors=True)
+        remove_owned_work(work, identity)
 
 
 def archive_bag(bag: pathlib.Path) -> pathlib.Path:
     archive = pathlib.Path(str(bag) + ".tar")
-    archive.unlink(missing_ok=True)
     safe_directory_tar(bag, archive)
     return archive
 
@@ -764,7 +801,7 @@ def archive_bag(bag: pathlib.Path) -> pathlib.Path:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--hugit-bin")
-    parser.add_argument("--output")
+    parser.add_argument("--output", help="new output directory; parent must exist; existing paths are never replaced")
     parser.add_argument("--run-id", default="local-20260913")
     parser.add_argument("--verify", type=pathlib.Path)
     parser.add_argument("--work-dir", help=argparse.SUPPRESS)
