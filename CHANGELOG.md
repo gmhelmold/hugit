@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- ci(coordination): qualify the existing native lease and process tests on
+  macOS ARM64/APFS, retaining platform identity, named results and failure logs.
+
 - fix(capture): serialize first-runtime bootstrap under bounded contention without
   age-based lock takeover. Revalidate completed metadata and legacy inputs before
   admitting hook receipts. Report actual migration lock contention as retryable
