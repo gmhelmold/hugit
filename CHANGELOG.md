@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat(coordination): add quiescent, persistent writer disable to the experimental
+  native namespace. Active resource leases prevent disable; malformed state
+  refuses admission, while read-only inspection remains available. The lifecycle
+  marker rejects the preceding experiment; no legacy writer protocol is changed.
+
 - feat(coordination): add isolated experimental native lock sets with stable files,
   bounded nonblocking acquisition and enforced global ordering. Keep legacy v1
   activation gated; no age/PID takeover or lockfile deletion in the native path.
