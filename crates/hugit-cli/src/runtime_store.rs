@@ -429,11 +429,15 @@ fn migrate_inner(
         FileLock::acquire_unprepared(&canonical)
     };
     let _lock = lock_result.map_err(|e| {
-        PorcelainError::new(
-            "migration_blocked",
-            e.to_string(),
-            "retry after active hugit writer exits",
-        )
+        // Contention is retryable, not evidence of invalid migration input.
+        // Preserve the full migration validation path instead of skipping it
+        // merely because metadata already exists (callers rely on that gate).
+        let kind = if matches!(e, crate::pr::filelock::LockError::Busy { .. }) {
+            "log_busy"
+        } else {
+            "migration_blocked"
+        };
+        PorcelainError::new(kind, e.to_string(), "retry after active hugit writer exits")
     })?;
     if bootstrap_handoff {
         // Another initializer may have completed while this hook waited. Do
@@ -972,14 +976,14 @@ mod bootstrap_handoff_tests {
     }
 
     #[test]
-    fn explicit_migration_still_refuses_a_busy_owner_without_bootstrap_wait() {
+    fn explicit_migration_reports_retryable_busy_without_bootstrap_wait() {
         let f = Fixture::new();
         let store = f.store();
         let legacy = f.0.join("absent.json");
         let _held = FileLock::acquire_bootstrap(&store.canonical_log()).unwrap();
         let before = fs::read(sidecar(&store.canonical_log())).unwrap();
         let error = migrate(&store, &legacy).unwrap_err();
-        assert!(error.to_json().contains("migration_blocked"));
+        assert_eq!(error.kind(), "log_busy");
         assert!(!store.metadata().exists());
         assert!(!store.canonical_log().exists());
         assert_eq!(fs::read(sidecar(&store.canonical_log())).unwrap(), before);
